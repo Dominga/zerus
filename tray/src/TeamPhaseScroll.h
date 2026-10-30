@@ -34,6 +34,7 @@ inline QString phaseStateBadge(const QString &state)
     if (state == "running") return QCoreApplication::translate("TeamPanel", "Running");
     if (state == "done") return QCoreApplication::translate("TeamPanel", "Done");
     if (state == "paused") return QCoreApplication::translate("TeamPanel", "Paused");
+    if (state == "cancelled") return QCoreApplication::translate("TeamPanel", "Cancelled");
     return state;
 }
 

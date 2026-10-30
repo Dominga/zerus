@@ -26,14 +26,14 @@ enum class TeamTaskStatus(val wire: String, val label: String) {
     }
 }
 
-/** A stage run's outcome, as the host writes it. */
+/** A stage run's outcome, as the host writes it; a state this client does not know is Unknown and closed, like the desktop's. */
 enum class TeamStageState(val wire: String) {
-    Waiting("waiting"), Delivered("delivered"), Passed("passed"), Returned("returned"), Skipped("skipped"), Revoked("revoked");
+    Waiting("waiting"), Delivered("delivered"), Passed("passed"), Returned("returned"), Skipped("skipped"), Revoked("revoked"), Unknown("");
 
     val open: Boolean get() = this == Waiting || this == Delivered
 
     companion object {
-        fun of(wire: String): TeamStageState = entries.firstOrNull { it.wire == wire } ?: Waiting
+        fun of(wire: String): TeamStageState = entries.firstOrNull { it != Unknown && it.wire == wire } ?: Unknown
     }
 }
 
@@ -75,6 +75,10 @@ data class TeamPipelineRun(
     val openRun: TeamStageRun? get() = runs.lastOrNull { it.state.open }
     /** The rounds stage members returned; the round limit counts these. */
     val returned: Int get() = runs.count { it.state == TeamStageState.Returned }
+    /** Every returned round's findings, which the lead decides with after the last round. */
+    val findings: Int get() = runs.filter { it.state == TeamStageState.Returned }.sumOf { it.findings.size }
+    /** Who accepts once the stages pass: auto, sub_lead or lead. */
+    val acceptKind: String get() = if (accept == "auto" || accept == "sub_lead") accept else "lead"
 }
 
 /** Line 3 of a task card: the stage, its round and who works on it. */
@@ -128,10 +132,16 @@ object TeamPipeline {
         by = raw.string("by"),
     )
 
-    /** "Review", "Test", or the kind as the host wrote it. */
+    /** The desktop's stage name: "Review", "Test", "Sub-lead"..., or the kind as the host wrote it. */
     fun kindLabel(kind: String): String = when (kind) {
         "review" -> "Review"
         "test" -> "Test"
+        "command" -> "Command"
+        "land" -> "Land"
+        "implement" -> "Implement"
+        "auto" -> "Auto"
+        "sub_lead" -> "Sub-lead"
+        "lead" -> "Lead"
         else -> kind.replaceFirstChar { it.uppercase() }
     }
 
@@ -145,8 +155,8 @@ object TeamPipeline {
      * The card's stage chip, or null when the task has no pipeline or no stage to name:
      * - in a stage: "Review r1/3" with its member, or "Review waits" until a member takes it;
      * - back with the implementer after a return: "Review returned r1";
-     * - reported with the stages done or the rounds used up: "Lead decides" (after N rounds in the
-     *   warning color), or "Auto" for a pipeline that accepts by itself.
+     * - reported after the last round returned it: "Lead decides · N findings" in the warning color;
+     * - reported with the stages done: who accepts, "Lead", "Sub-lead" or "Auto".
      */
     fun chip(task: JSONObject): TeamStageChip? {
         val status = status(task) ?: return null
@@ -159,24 +169,26 @@ object TeamPipeline {
         }
         val last = run.runs.lastOrNull() ?: return null
         return when {
-            status == TeamTaskStatus.Submitted && run.returned >= run.maxRounds ->
-                TeamStageChip("accept", "Lead decides · ${run.returned} rounds", "", TeamStageTone.Warn, outlined = false)
+            // #538 N10: only while the last round returned it; a later round that passed goes to the acceptance.
+            status == TeamTaskStatus.Submitted && last.state == TeamStageState.Returned && run.returned >= run.maxRounds ->
+                TeamStageChip("accept", if (run.findings == 1) "Lead decides · 1 finding" else "Lead decides · ${run.findings} findings", "", TeamStageTone.Warn, outlined = false)
             status == TeamTaskStatus.Submitted ->
-                TeamStageChip("accept", if (run.accept == "auto") "Auto" else "Lead decides", "", TeamStageTone.Accept, outlined = false)
+                TeamStageChip("accept", kindLabel(run.acceptKind), "", TeamStageTone.Accept, outlined = false)
             last.state == TeamStageState.Returned && status in setOf(TeamTaskStatus.Pending, TeamTaskStatus.Assigned, TeamTaskStatus.InProgress) ->
                 TeamStageChip(last.kind, "${kindLabel(last.kind)} returned r${last.round}", "", TeamStageTone.Warn, outlined = true)
             else -> null
         }
     }
 
-    /** The verdict word of the inspector's round rows. */
+    /** The verdict word of the inspector's round rows; none for an unknown state, as on the desktop. */
     fun verdict(state: TeamStageState): String = when (state) {
         TeamStageState.Waiting -> "WAITING"
         TeamStageState.Delivered -> "RUNNING"
         TeamStageState.Passed -> "PASS"
         TeamStageState.Returned -> "RETURN"
         TeamStageState.Skipped -> "SKIPPED"
-        TeamStageState.Revoked -> "ENDED"
+        TeamStageState.Revoked -> "REVOKED"
+        TeamStageState.Unknown -> ""
     }
 
     fun verdictTone(run: TeamStageRun): TeamStageTone = when (run.state) {

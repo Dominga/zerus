@@ -768,6 +768,9 @@ private slots:
     void boardPhaseHeaderKeepsItsActionsInView();
     void workAheadSwitchAndBadge();
     void graphNodesCarryTheActivityLabel();
+    void cancelledWorkIsHiddenUntilShown();
+    void thePlanHidesCancelledTasksAndNeverSendsTheCopy();
+    void aTaskThatHasNotStartedMovesToAnotherPhase();
     void workingTimeFollowsTheActivityLabel();
     void subLeadsAreATreeInMembersAndTheInspector();
     void aPollUnderTheMemberMenuKeepsItsButtonAndTheSwapDialog();
@@ -5264,6 +5267,11 @@ void TestTeamsUi::graphNodesCarryTheActivityLabel()
     workspace.showTeam("team-1");
     TeamUi::TaskView *graph = nullptr;
     QTRY_VERIFY(([&] { graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamPhaseGraph")); return graph && graph->nodeRect(1).width() > 0; })());
+    // U58: cancelled #12 is hidden until Show cancelled brings it back.
+    QVERIFY(std::none_of(graph->nodes.cbegin(), graph->nodes.cend(), [](const TeamUi::TaskView::Node &n) { return n.id == 12; }));
+    controller.setShowCancelled(true);
+    QTRY_VERIFY(([&] { graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamPhaseGraph"));
+                       return graph && std::any_of(graph->nodes.cbegin(), graph->nodes.cend(), [](const TeamUi::TaskView::Node &n) { return n.id == 12; }); })());
     const auto node = [&](int id) { for (const auto &n : graph->nodes) if (n.id == id) return n; return TeamUi::TaskView::Node{}; };
     // Each rule of the owner's addition: Submitted, attempt 2, Held, a
     // sub-team, and (below) words for Pending, Draft, Accepted. Owner, 2026-10-28:
@@ -5358,6 +5366,212 @@ static QJsonObject timingTeam()
     }
     t["tasks"] = tasks;
     return t;
+}
+
+// U58: the phased team with a cancelled task in phase 2 and an approved phase 4
+// whose two tasks were cancelled (copies the lead made under new ids).
+static QJsonObject cancelledTeam()
+{
+    auto t = phasedTeam();
+    auto phases = t["phases"].toArray();
+    auto two = phases[0].toObject(); two["tasks"] = QJsonArray{3, 4, 6}; phases[0] = two;
+    phases.append(QJsonObject{{"n", 4}, {"title", "Dropped copies"}, {"barrier", false}, {"approval", "review"}, {"state", "approved"},
+                              {"tasks", QJsonArray{7, 8}}, {"added_by", "Lead"}, {"added_at", 1800.0}, {"decided_by", "You"}, {"decided_at", 1900.0}});
+    t["phases"] = phases;
+    auto tasks = t["tasks"].toArray();
+    tasks.append(QJsonObject{{"id", 6}, {"phase", 2}, {"title", "Old fix"}, {"assignee", "backend"}, {"status", "cancelled"}});
+    tasks.append(QJsonObject{{"id", 7}, {"phase", 4}, {"title", "Copy of the review"}, {"assignee", "backend"}, {"status", "cancelled"}});
+    tasks.append(QJsonObject{{"id", 8}, {"phase", 4}, {"title", "Copy of the tests"}, {"assignee", "tester"}, {"status", "cancelled"}});
+    t["tasks"] = tasks;
+    auto layers = t["layers"].toObject(); layers["6"] = 1; layers["7"] = 0; layers["8"] = 0; t["layers"] = layers;
+    return t;
+}
+
+void TestTeamsUi::cancelledWorkIsHiddenUntilShown()
+{
+    setTeam(cancelledTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    panel.setLive(live); workspace.setLive(live);
+    darkPalette(); workspace.setTheme(true);
+    workspace.resize(1300, 820); workspace.show();
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    // The reads ask hgs for the cancelled work; the desktop hides it itself.
+    QTRY_VERIFY(!calls(script(), "status").isEmpty());
+    QVERIFY(calls(script(), "status").last()["include_cancelled"].toBool());
+    QVERIFY(calls(script(), "list").last()["include_cancelled"].toBool());
+    QVERIFY(!controller.showCancelled());
+    // Graph: #6 is gone from phase 2, phase 4 is not shown at all.
+    QTRY_VERIFY(phaseNodeIds(&workspace).contains(4));
+    QVERIFY(!phaseNodeIds(&workspace).contains(6));
+    QVERIFY(phaseScrollOf(&workspace, 2) && phaseScrollOf(&workspace, 3));
+    QVERIFY(!phaseScrollOf(&workspace, 4));
+    auto *show = workspace.findChild<QPushButton *>("teamWorkspaceShowCancelled");
+    QVERIFY(show && show->isCheckable() && !show->isChecked());
+    QCOMPARE(show->text(), QStringLiteral("Show cancelled (3)"));
+    shot(&workspace, "u58-cancelled-hidden-dark");
+    const auto view = [&](const QString &value) {
+        for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>())
+            if (b->property("segment") == value) { b->click(); break; }
+    };
+    const auto ids = [&](const char *name) {
+        QList<int> found;
+        for (auto *frame : workspace.findChildren<QFrame *>(name)) found << frame->property("task").toInt();
+        std::sort(found.begin(), found.end());
+        return found;
+    };
+    // Board and Layers leave them out too, and so does a fully cancelled phase.
+    view("board");
+    QTRY_VERIFY(ids("teamBoardCard").contains(4));
+    QVERIFY(!ids("teamBoardCard").contains(6) && !ids("teamBoardCard").contains(7) && !ids("teamBoardCard").contains(8));
+    QVERIFY(!phaseScrollOf(&workspace, 4));
+    QVERIFY(workspace.findChild<QPushButton *>("teamWorkspaceShowCancelled"));
+    view("layers");
+    QTRY_VERIFY(ids("teamLayerRow").contains(4));
+    QVERIFY(!ids("teamLayerRow").contains(6) && !phaseScrollOf(&workspace, 4));
+    // Show cancelled brings back the task and the phase, which reads cancelled.
+    workspace.findChild<QPushButton *>("teamWorkspaceShowCancelled")->click();
+    QVERIFY(controller.showCancelled());
+    QTRY_VERIFY(ids("teamLayerRow").contains(6));
+    QVERIFY(phaseScrollOf(&workspace, 4));
+    QCOMPARE(phaseScrollOf(&workspace, 4)->property("state").toString(), QStringLiteral("cancelled"));
+    view("board");
+    QTRY_VERIFY(ids("teamBoardCard").contains(6));
+    view("graph");
+    QTRY_VERIFY(phaseNodeIds(&workspace).contains(6));
+    QCOMPARE(phaseScrollOf(&workspace, 4)->property("state").toString(), QStringLiteral("cancelled"));
+    show = workspace.findChild<QPushButton *>("teamWorkspaceShowCancelled");
+    QVERIFY(show->isChecked());
+    QCOMPARE(show->text(), QStringLiteral("Hide cancelled (3)"));
+    shot(&workspace, "u58-cancelled-shown-dark");
+    workspace.setTheme(false);
+    lightShot(&workspace, "u58-cancelled-shown-light");
+    darkPalette(); workspace.setTheme(true);
+    // And hides them again (the theme change rebuilt the toolbar).
+    workspace.findChild<QPushButton *>("teamWorkspaceShowCancelled")->click();
+    QTRY_VERIFY(!phaseScrollOf(&workspace, 4));
+    QVERIFY(!phaseNodeIds(&workspace).contains(6));
+    workspace.setTheme(false);
+    lightShot(&workspace, "u58-cancelled-hidden-light");
+    darkPalette(); workspace.setTheme(true);
+    // A team without cancelled work has no toggle and shows every task, as before.
+    setTeam(phasedTeam());
+    QTRY_VERIFY(([&] { controller.refresh(); return !workspace.findChild<QPushButton *>("teamWorkspaceShowCancelled") && phaseNodeIds(&workspace).contains(4); })());
+}
+
+void TestTeamsUi::thePlanHidesCancelledTasksAndNeverSendsTheCopy()
+{
+    // A roadmap phase 2 whose only task was cancelled: the copy on screen has
+    // neither, and a plan sent from it would wipe the phase.
+    auto planned = team("planning");
+    auto tasks = planned["tasks"].toArray();
+    tasks.append(QJsonObject{{"id", 7}, {"phase", 2}, {"title", "Dropped idea"}, {"assignee", "backend"}, {"status", "cancelled"}});
+    planned["tasks"] = tasks;
+    planned["phases"] = QJsonArray{QJsonObject{{"n", 2}, {"title", "Later"}, {"barrier", false}, {"tasks", QJsonArray{7}}}};
+    auto layers = planned["layers"].toObject(); layers["7"] = 0; planned["layers"] = layers;
+    setTeam(planned);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    panel.setLive(live);
+    panel.resize(620, 1400); panel.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    QTRY_VERIFY(controller.watched() && controller.watched()->full);
+    const auto nodes = [&] {
+        QList<int> found;
+        if (auto *graph = dynamic_cast<TeamUi::TaskView *>(panel.findChild<QWidget *>("teamTaskGraph"))) for (const auto &node : graph->nodes) found << node.id;
+        return found;
+    };
+    QTRY_VERIFY(nodes().contains(6));
+    QVERIFY(!nodes().contains(7));
+    auto *show = panel.findChild<QPushButton *>("teamShowCancelled");
+    QVERIFY(show && !show->isChecked());
+    QCOMPARE(show->text(), QStringLiteral("Show cancelled (1)"));
+    show->click();
+    QTRY_VERIFY(nodes().contains(7));
+    QVERIFY(panel.findChild<QPushButton *>("teamShowCancelled")->isChecked());
+    controller.setShowCancelled(false);
+    QTRY_VERIFY(!nodes().contains(7) && nodes().contains(6));
+    // An edit from the plan sends the whole plan, the hidden phase included.
+    auto *graph = dynamic_cast<TeamUi::TaskView *>(panel.findChild<QWidget *>("teamTaskGraph"));
+    QVERIFY(graph && graph->linked);
+    const int before = int(calls(script(), "plan").size());
+    graph->linked(3, 5);
+    QTRY_COMPARE(int(calls(script(), "plan").size()), before + 1);
+    QCOMPARE(calls(script(), "plan").last()["phases"].toArray(), (QJsonArray{QJsonObject{{"n", 2}, {"title", "Later"}, {"barrier", false}}}));
+    // The display copy is never sent: it would drop phase 2 from the plan.
+    panel.savePlan(withoutCancelled(*controller.watched()));
+    QTest::qWait(80);
+    QCOMPARE(int(calls(script(), "plan").size()), before + 1);
+    QTRY_VERIFY(panel.findChild<QLabel *>("teamNotice"));
+}
+
+void TestTeamsUi::aTaskThatHasNotStartedMovesToAnotherPhase()
+{
+    // #5 waits in draft phase 3 with no attempt; #4 (phase 2) has one that
+    // reached its member; #9 was refused once and never reached it.
+    auto json = phasedTeam();
+    auto phases = json["phases"].toArray();
+    auto two = phases[0].toObject(); two["tasks"] = QJsonArray{3, 4, 9}; phases[0] = two;
+    json["phases"] = phases;
+    auto tasks = json["tasks"].toArray();
+    tasks.append(QJsonObject{{"id", 9}, {"phase", 2}, {"title", "Refused once"}, {"assignee", "backend"}, {"status", "pending"},
+                             {"attempts", QJsonArray{QJsonObject{{"n", 1}, {"id", "r9"}, {"member", "backend"}, {"state", "refused"}}}}});
+    json["tasks"] = tasks;
+    const auto t = parse(json);
+    TeamTaskCard card;
+    card.resize(420, 900); card.show();
+    QList<std::pair<QString, QJsonObject>> acted;
+    card.act = [&](const QString &op, const QJsonObject &input) { acted.append({op, input}); };
+    card.confirm = [](const QString &, const QString &, const QString &, const QString &) { return true; };
+    const auto moves = [&] {
+        QList<QAction *> found;
+        for (auto *action : card.findChild<QMenu *>("teamTaskMoreMenu")->actions()) if (action->objectName().startsWith("teamTaskMoveToPhase")) found << action;
+        return found;
+    };
+    // #5 depends on #4 in phase 2: phase 1 refuses it with the reason, phase 2 takes it.
+    card.setTask(t, 5, live, true);
+    auto five = moves();
+    QCOMPARE(five.size(), 2);
+    QCOMPARE(five[0]->text(), QStringLiteral("Move to phase 1"));
+    QVERIFY(!five[0]->isEnabled());
+    QCOMPARE(five[0]->toolTip(), QStringLiteral("Depends on #4 in phase 2; move it first"));
+    QCOMPARE(five[1]->text(), QStringLiteral("Move to phase 2 · QA fixes"));
+    QVERIFY(five[1]->isEnabled());
+    five[1]->trigger();
+    QCOMPARE(acted.size(), 1);
+    QCOMPARE(acted[0].first, QStringLiteral("move-task"));
+    // It keeps its number: the same task id, the target phase and the revision read.
+    QCOMPARE(acted[0].second, (QJsonObject{{"task", 5}, {"phase", 2}, {"revision", 12}}));
+    // A refused attempt never reached the member: #9 still moves.
+    card.setTask(t, 9, live, true);
+    QList<int> nine; for (auto *action : moves()) nine << action->property("phase").toInt();
+    QCOMPARE(nine, (QList<int>{1, 3}));
+    QVERIFY(moves()[0]->isEnabled() && moves()[1]->isEnabled());
+    card.findChild<QMenu *>("teamTaskMoreMenu")->popup(card.mapToGlobal(QPoint(40, 40)));
+    TestWait::settle();
+    shot(card.findChild<QMenu *>("teamTaskMoreMenu"), "u58-move-to-phase-dark");
+    card.findChild<QMenu *>("teamTaskMoreMenu")->hide();
+    card.setTask(t, 9, live, false);
+    card.findChild<QMenu *>("teamTaskMoreMenu")->popup(card.mapToGlobal(QPoint(40, 40)));
+    TestWait::settle();
+    lightShot(card.findChild<QMenu *>("teamTaskMoreMenu"), "u58-move-to-phase-light");
+    card.findChild<QMenu *>("teamTaskMoreMenu")->hide();
+    darkPalette();
+    // A task whose attempt reached its member, a decided task: no move.
+    card.setTask(t, 4, live, true);
+    QVERIFY(moves().isEmpty());
+    card.setTask(t, 3, live, true);
+    QVERIFY(moves().isEmpty());
+    // A team without later phases offers none either, as before.
+    card.setTask(parse(team()), 5, live, true);
+    QVERIFY(moves().isEmpty());
 }
 
 void TestTeamsUi::workingTimeFollowsTheActivityLabel()

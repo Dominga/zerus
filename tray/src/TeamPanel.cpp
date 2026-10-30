@@ -76,6 +76,7 @@ TeamPanel::TeamPanel(TeamController *controller, QWidget *parent) : QWidget(pare
     };
     QObject::connect(m_controller, &TeamController::teamsChanged, this, [this] { scheduleRender(); });
     QObject::connect(m_controller, &TeamController::watchedChanged, this, [this] { scheduleRender(); });
+    QObject::connect(m_controller, &TeamController::showCancelledChanged, this, [this] { scheduleRender(); });
     QObject::connect(m_controller, &TeamController::feedChanged, this, [this] { scheduleRender(); });
     render();
 }
@@ -377,7 +378,8 @@ void TeamPanel::render()
         const int waiting = Teams::answers(*team, live);
         if (waiting) layout->addWidget(answers(*team));
         layout->addWidget(planMembers(*team, narrow));
-        layout->addWidget(tasks(*team, narrow));
+        // U58: the plan leaves out cancelled tasks unless Show cancelled is on.
+        layout->addWidget(tasks(m_controller->showCancelled() ? *team : withoutCancelled(*team), narrow));
         if (team->full) layout->addWidget(feed(*team));
         if (answersChanged) answersChanged(waiting);
     }
@@ -1071,10 +1073,23 @@ QWidget *TeamPanel::tasks(const Team &team, bool narrow)
     title->addWidget(label(tr("Tasks"), c.fg, 12, true));
     title->addWidget(label(QString::number(team.tasks.size()), c.muted, 12));
     title->addStretch();
+    // U58: `team` may be a copy without its cancelled tasks; every edit reads
+    // the whole team again by id.
+    const auto whole = [this, id = team.id]() -> const Team * {
+        const auto *current = m_controller->watched();
+        return current && current->id == id ? current : m_controller->team(id);
+    };
+    const int cancelled = [&] { const auto *all = whole(); return all ? cancelledTasks(*all) : 0; }();
+    if (cancelled) {
+        auto *show = button(m_controller->showCancelled() ? tr("Hide cancelled (%1)").arg(cancelled) : tr("Show cancelled (%1)").arg(cancelled), "teamShowCancelled");
+        show->setCheckable(true); show->setChecked(m_controller->showCancelled());
+        QObject::connect(show, &QPushButton::clicked, this, [this](bool on) { m_controller->setShowCancelled(on); });
+        title->addWidget(show);
+    }
     const bool planningNow = team.status == "planning";
     if (planningNow) {
         auto *add = button(tr("+ Task"), "teamAddTask");
-        QObject::connect(add, &QPushButton::clicked, this, [this, team] { editTask(team, 0); });
+        QObject::connect(add, &QPushButton::clicked, this, [this, whole] { if (const auto *t = whole()) editTask(*t, 0); });
         title->addWidget(add);
     }
     for (const auto &[key, text] : QList<std::pair<QString, QString>>{{"all", tr("All")}, {"active", tr("Active")}, {"problems", tr("Problems")}}) {
@@ -1149,9 +1164,9 @@ QWidget *TeamPanel::tasks(const Team &team, bool narrow)
     if (m_showBlockers) for (int id : problemTasks) view->emphasis += Teams::chain(team, id);
     if (planningNow) {
         view->editable = !narrow;
-        view->clicked = [this, team](int id, const QPoint &) { editTask(team, id); };
-        view->linked = [this, team](int dependency, int task) { link(team, dependency, task, true); };
-        view->unlinked = [this, team](int dependency, int task) { link(team, dependency, task, false); };
+        view->clicked = [this, whole](int id, const QPoint &) { if (const auto *t = whole()) editTask(*t, id); };
+        view->linked = [this, whole](int dependency, int task) { if (const auto *t = whole()) link(*t, dependency, task, true); };
+        view->unlinked = [this, whole](int dependency, int task) { if (const auto *t = whole()) link(*t, dependency, task, false); };
     } else view->clicked = [this](int id, const QPoint &) { openTask(id); };
     view->layout();
     if (narrow) v->addWidget(view);

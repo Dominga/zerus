@@ -147,6 +147,7 @@ private slots:
     void stageQueuesStatesAndFeedLines();
     void modelReadsTheTeamAndDerivesMemberStates();
     void modelReadsPhasesPinnedAndTheWaitingState();
+    void cancelledWorkAndMoveTargets();
     void leftRunningMembersOfAFinishedTeam();
     void draftPhasesApproveInOrder();
     void phaseProgressShowsThePhaseInWorkAndThePhases();
@@ -239,6 +240,59 @@ void TestTeams::modelReadsTheTeamAndDerivesMemberStates()
     auto planning = checkout(); planning["status"] = "planning";
     auto planned = parse(planning); planned.members[2].session.clear();
     QCOMPARE(memberStatus(planned, planned.members[2], {}).text, QStringLiteral("Created on approval"));
+}
+
+// U58: a phase whose tasks are all cancelled reads cancelled and leaves the
+// display copy with its tasks; a task that has not started may move to phase 1
+// or any phase record that is not discarded, except its own.
+void TestTeams::cancelledWorkAndMoveTargets()
+{
+    auto json = phasedTeam();
+    auto phases = json["phases"].toArray();
+    phases.append(QJsonObject{{"n", 3}, {"title", "Dropped"}, {"state", "approved"}, {"tasks", QJsonArray{13, 14}}});
+    phases.append(QJsonObject{{"n", 4}, {"title", "Gone"}, {"state", "discarded"}, {"tasks", QJsonArray{15}}});
+    phases.append(QJsonObject{{"n", 5}, {"title", "Later"}, {"state", "approved"}, {"tasks", QJsonArray{16}}});
+    json["phases"] = phases;
+    auto tasks = json["tasks"].toArray();
+    auto ten = tasks[9].toObject(); ten["status"] = "cancelled"; tasks[9] = ten;
+    tasks.append(QJsonObject{{"id", 13}, {"phase", 3}, {"title", "Copy"}, {"assignee", "backend"}, {"status", "cancelled"}});
+    tasks.append(QJsonObject{{"id", 14}, {"phase", 3}, {"title", "Copy again"}, {"assignee", "backend"}, {"status", "cancelled"}});
+    tasks.append(QJsonObject{{"id", 15}, {"phase", 4}, {"title", "Discarded"}, {"assignee", "backend"}, {"status", "cancelled"}});
+    tasks.append(QJsonObject{{"id", 16}, {"phase", 5}, {"title", "Refused once"}, {"assignee", "backend"}, {"status", "pending"},
+                             {"attempts", QJsonArray{QJsonObject{{"n", 1}, {"id", "r1"}, {"member", "backend"}, {"state", "refused"}}}}});
+    json["tasks"] = tasks;
+    json["layers"] = QJsonObject{{"1", 0}, {"10", 5}, {"13", 0}, {"14", 0}};
+    const auto team = parse(json);
+    // Cancelled: every task of phase 3; not a discarded phase, nor one with an open task.
+    QVERIFY(phaseCancelled(team, 3));
+    QVERIFY(!phaseCancelled(team, 4) && !phaseCancelled(team, 1) && !phaseCancelled(team, 2) && !phaseCancelled(team, 9));
+    QCOMPARE(cancelledTasks(team), 4);
+    for (const auto &group : phaseGroups(team)) if (group.n == 3) QCOMPARE(ownerPhaseState(team, group), QStringLiteral("cancelled"));
+    // The display copy: no cancelled task, no cancelled phase, marked as a copy.
+    const auto shown = withoutCancelled(team);
+    QVERIFY(shown.cancelledHidden && !team.cancelledHidden);
+    QVERIFY(!shown.task(10) && !shown.task(13) && !shown.task(15) && shown.task(16));
+    QVERIFY(!shown.phase(3) && shown.phase(4) && shown.phase(5));
+    QVERIFY(!shown.phase(4)->tasks.contains(15));
+    QVERIFY(!shown.layers.contains(10) && !shown.layers.contains(13) && shown.layers.contains(1));
+    QList<int> groups; for (const auto &group : phaseGroups(shown)) groups << group.n;
+    QCOMPARE(groups, (QList<int>{1, 2, 5}));
+    // A team with no cancelled task is shown as it is.
+    QVERIFY(!withoutCancelled(parse(phasedTeam())).cancelledHidden);
+    // Move targets: phase 1 and the phases that are not discarded, not its own.
+    const auto targets = [&](int id) { QList<int> n; for (const auto &target : moveTargets(team, id)) n << target.phase; return n; };
+    QCOMPARE(targets(16), (QList<int>{1, 2, 3}));   // a refused attempt never reached the member
+    QCOMPARE(targets(12), (QList<int>{1, 3, 5}));
+    QVERIFY(targets(3).isEmpty());                    // started: an attempt reached the member
+    QVERIFY(targets(1).isEmpty() && targets(10).isEmpty());   // decided
+    // #12 depends on #11 in phase 2: phase 1 refuses it and says why.
+    const auto twelve = moveTargets(team, 12);
+    QCOMPARE(twelve[0].blocked, QStringLiteral("Depends on #11 in phase 2; move it first"));
+    QVERIFY(twelve[1].blocked.isEmpty() && twelve[2].blocked.isEmpty());
+    QCOMPARE(twelve[1].title, QStringLiteral("Dropped"));
+    // A finished team moves nothing.
+    auto done = team; done.status = "done";
+    QVERIFY(moveTargets(done, 16).isEmpty());
 }
 
 void TestTeams::modelReadsPhasesPinnedAndTheWaitingState()

@@ -1,0 +1,667 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Plan modes · U59 mock-up</title>
+<style>
+/* U59 plan modes. Everything up to the U59 block is the U36 page's (design/agent-teams/pipelines),
+   which takes its tokens, buttons, chips, cards and the catalog editor from the Zerus UI
+   prototype (Zerus-UI-handoff/Zerus-prototype.html); new here are the stage
+   chip, the stage track, the stage editor and the rounds timeline. */
+html,body{margin:0}
+body{background:#0e1115;font:13px/1.45 "Segoe UI",system-ui,sans-serif;color:#e6e8eb}
+body.lightpage{background:#e4e9ee;color:#1a2733}
+.app{--bg:#14181d;--surface:#1b1f26;--card:#181c22;--cardBorder:#232932;--cardHover:#1e232b;--cardSel:#1b2621;--cardSelBorder:#2f5a4a;--field:#11151a;--border:#2c323b;--segOn:#26443a;--hover:#222830;--accent:#7dd3b0;--accentText:#0f1a16;--accentHover:#a8e6cc;--accentMuted:#5c9e86;--warn:#e8a75a;--danger:#ef7d6d;--folder:#7fb6e0;--violet:#b79cff;--fg:#e6e8eb;--text2:#c4cad1;--text3:#aab1ba;--muted:#9aa3ad;--label:#8f97a2;--dim:#7b8590;--tile:#0f1318;--warnBg:rgba(232,167,90,.11);--dangerBg:rgba(239,125,109,.11);--accentBg:rgba(125,211,176,.10);--page:#0e1115;--shadow:0 12px 40px rgba(0,0,0,.45);--r-lead:#b79cff;--r-backend:#6fa8ff;--r-frontend:#f08bb4;--r-tester:#56c8e0;--r-reviewer:#d9b38c;--r-secretary:#7fcf9a;--r-researcher:#b9d36b;
+  --s-review:#b79cff;--s-test:#7fb6e0;--s-accept:#7dd3b0;
+  position:relative;display:flex;flex-direction:column;background:var(--page);color:var(--fg);font:12px/1.38 "Segoe UI",-apple-system,system-ui,sans-serif;overflow:hidden;color-scheme:dark}
+.app.light{--bg:#f5f7f9;--surface:#ffffff;--card:#ffffff;--cardBorder:#e1e6eb;--cardHover:#eef2f5;--cardSel:#e7f3ee;--cardSelBorder:#9fd3bd;--field:#ffffff;--border:#d6dde4;--segOn:#e0f0e9;--hover:#edf1f4;--accent:#167357;--accentText:#ffffff;--accentHover:#115d46;--accentMuted:#4f8f78;--warn:#9a5a0c;--danger:#c4402f;--folder:#2f6ea3;--violet:#6f4fd8;--fg:#1a2733;--text2:#2c3a47;--text3:#415060;--muted:#5d6b7c;--label:#647181;--dim:#6f7b88;--tile:#eef2f5;--warnBg:rgba(168,98,15,.09);--dangerBg:rgba(196,64,47,.08);--accentBg:rgba(22,115,87,.08);--page:#e4e9ee;--shadow:0 12px 36px rgba(20,30,40,.18);--r-lead:#6f4fd8;--r-backend:#2f66c9;--r-frontend:#b83a72;--r-tester:#137f95;--r-reviewer:#8a5a2b;--r-secretary:#2f7d4a;--r-researcher:#5f7a12;
+  --s-review:#6f4fd8;--s-test:#2f6ea3;--s-accept:#167357;color-scheme:light}
+.app *{box-sizing:border-box}
+.app button,.app input,.app select,.app textarea{font:inherit;color:inherit}
+.mono{font-family:"Cascadia Mono",Consolas,ui-monospace,monospace}
+.i{width:14px;height:14px;flex:none;vertical-align:middle;overflow:visible}
+.i path{fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.i path.f{fill:currentColor;stroke:none}
+.i path.k{stroke:var(--card);stroke-width:2.2}
+.i.s10{width:10px;height:10px}.i.s12{width:12px;height:12px}.i.s16{width:16px;height:16px}
+.lg{width:14px;height:14px;flex:none}
+.lg path{stroke:none}
+.ell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.grow{flex:1;min-width:0}
+.muted{color:var(--muted)}.dim{color:var(--dim)}.lbl{color:var(--label)}.warn{color:var(--warn)}.danger{color:var(--danger)}.acc{color:var(--accent)}.okc{color:var(--accentMuted)}
+.row{display:flex;align-items:center;gap:6px;min-width:0}
+.col{display:flex;flex-direction:column;gap:6px;min-width:0}
+.wrap{flex-wrap:wrap}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:26px;padding:3px 11px;border-radius:7px;border:1px solid var(--border);background:var(--surface);color:var(--text2);white-space:nowrap}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:var(--accentText);font-weight:600}
+.btn.dng{color:var(--danger)}
+.btn.ghost{border-color:transparent;background:transparent}
+.btn.sm{min-height:23px;padding:2px 9px;font-size:11px}
+.btn.icon{padding:0;width:26px}
+.btn.sm.icon{width:23px}
+.btn.dis{opacity:.42}
+.field{min-width:0;white-space:nowrap;overflow:hidden;background:var(--field);border:1px solid var(--border);border-radius:7px;padding:4px 8px;min-height:27px;color:var(--fg);width:100%;display:flex;align-items:center;gap:6px}
+.field.sel::after{content:"";margin-left:auto;width:7px;height:7px;border-right:1.6px solid var(--muted);border-bottom:1.6px solid var(--muted);transform:translateY(-2px) rotate(45deg);flex:none}
+.field.focus{border-color:var(--cardSelBorder);box-shadow:0 0 0 3px var(--accentBg)}
+.field.ta{white-space:normal;align-items:flex-start;min-height:46px;line-height:1.45}
+.seg{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;background:var(--surface);flex:none}
+.seg span{color:var(--muted);padding:4px 10px;min-height:25px;display:inline-flex;align-items:center;gap:5px;font-size:11.5px}
+.seg span+span{border-left:1px solid var(--border)}
+.seg span.on{background:var(--segOn);color:var(--accent);font-weight:600}
+.seg.sm span{padding:2px 8px;min-height:21px;font-size:11px}
+.pill{display:inline-flex;align-items:center;gap:4px;height:19px;padding:0 7px;border-radius:6px;background:var(--hover);color:var(--text3);font-size:11px;white-space:nowrap;flex:none}
+.pill.acc{background:var(--accentBg);color:var(--accent)}
+.pill.warnp{background:var(--warnBg);color:var(--warn)}
+.pill.dngp{background:var(--dangerBg);color:var(--danger)}
+.pill.out{background:transparent;border:1px solid var(--border)}
+.role{--rc:var(--muted);display:inline-flex;align-items:center;gap:3px;height:18px;padding:0 7px 0 5px;border-radius:9px;font-size:11px;font-weight:600;color:var(--rc);border:1px solid color-mix(in srgb,var(--rc) 45%,transparent);background:color-mix(in srgb,var(--rc) 12%,transparent);white-space:nowrap;flex:none}
+.role .i{width:11px;height:11px}
+.role.mini{height:16px;padding:0 5px 0 4px;font-size:10px}
+.rc-lead{--rc:var(--r-lead)}.rc-backend{--rc:var(--r-backend)}.rc-frontend{--rc:var(--r-frontend)}.rc-tester{--rc:var(--r-tester)}.rc-reviewer{--rc:var(--r-reviewer)}.rc-secretary{--rc:var(--r-secretary)}.rc-researcher{--rc:var(--r-researcher)}
+.tile{width:22px;height:22px;border-radius:6px;background:var(--tile);border:1px solid var(--cardBorder);display:inline-grid;place-items:center;flex:none}
+.tile .lg{width:13px;height:13px}
+.tile.t16{width:17px;height:17px;border-radius:5px}.tile.t16 .lg{width:11px;height:11px}
+.ih{font-size:10.5px;letter-spacing:.4px;text-transform:uppercase;color:var(--dim);font-weight:600;display:flex;align-items:center;gap:6px}
+.dmark{display:inline-flex;align-items:center;height:17px;padding:0 6px;border-radius:5px;font-size:9.5px;font-weight:700;letter-spacing:.3px;flex:none}
+.dm-new{background:var(--accentBg);color:var(--accent);border:1px solid var(--cardSelBorder)}
+.dm-changed{background:color-mix(in srgb,var(--folder) 14%,transparent);color:var(--folder);border:1px solid color-mix(in srgb,var(--folder) 45%,transparent)}
+.dm-removed{background:var(--dangerBg);color:var(--danger);border:1px solid color-mix(in srgb,var(--danger) 45%,transparent)}
+.old{text-decoration:line-through;color:var(--danger);background:var(--dangerBg);border-radius:3px;padding:0 4px;margin-right:4px}
+.nw{background:var(--accentBg);color:var(--accent);border-radius:3px;padding:0 4px}
+.app,.app *{scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--text3) 28%,transparent) transparent}
+.app ::-webkit-scrollbar{width:8px;height:8px}
+.app ::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--text3) 24%,transparent);border-radius:8px;border:2px solid transparent;background-clip:padding-box}
+.app ::-webkit-scrollbar-track,.app ::-webkit-scrollbar-corner{background:transparent}
+
+/* ===== new: stage chip and track ===== */
+.stg{--sc:var(--muted);display:inline-flex;align-items:center;gap:4px;height:19px;padding:0 6px 0 5px;border-radius:6px;font-size:11px;font-weight:600;white-space:nowrap;flex:none;color:var(--sc);background:color-mix(in srgb,var(--sc) 13%,transparent)}
+.stg .i{width:12px;height:12px}
+.stg .r{font-weight:400;opacity:.85}
+.sk-review{--sc:var(--s-review)}.sk-test{--sc:var(--s-test)}.sk-accept{--sc:var(--s-accept)}.sk-warn{--sc:var(--warn)}.sk-danger{--sc:var(--danger)}.sk-wait{--sc:var(--muted)}
+.stg.out{background:transparent;box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--sc) 50%,transparent)}
+.stg.skip{text-decoration:line-through;opacity:.8}
+.trk{display:inline-flex;gap:2px;align-items:center;flex:none}
+.trk i{width:9px;height:4px;border-radius:2px;background:var(--border)}
+.trk i.d{background:var(--accentMuted)}
+.trk i.c{background:var(--sc,var(--accent))}
+.trk i.x{background:transparent;box-shadow:inset 0 0 0 1px var(--dim)}
+.hold{display:flex;align-items:center;gap:5px;color:var(--warn);font-size:11px;min-width:0}
+.hold .i{width:12px;height:12px}
+
+/* ===== workspace and board (U33 widths) ===== */
+.twbar{flex:none;display:flex;align-items:center;gap:9px;min-height:40px;padding:4px 14px;border-bottom:1px solid var(--cardBorder);background:var(--bg)}
+.twbar .tn{font-weight:600;font-size:14px}
+.tbadge{display:inline-flex;align-items:center;gap:4px;height:19px;padding:0 8px;border-radius:10px;font-size:11px;font-weight:600;white-space:nowrap;border:1px solid currentColor;flex:none}
+.tb-running{color:var(--accent)}.tb-draft{color:var(--folder);border-style:dashed}
+.twbody{flex:1;min-height:0;display:flex}
+.twmain{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0;background:var(--bg)}
+.twtool{flex:none;display:flex;align-items:center;gap:8px;padding:8px 12px}
+.bscroll{flex:1;min-height:0;overflow-x:auto;overflow-y:auto;padding:0 12px 10px}
+.bpage{display:flex;flex-direction:column;gap:8px;width:max-content}
+.phase{border:1px solid var(--cardBorder);border-radius:11px;background:var(--card)}
+.phase.run{border-color:color-mix(in srgb,var(--accent) 45%,var(--cardBorder))}
+.phase.draft{border-style:dashed;border-color:color-mix(in srgb,var(--folder) 55%,var(--cardBorder))}
+.ph{display:flex;align-items:center;gap:9px;height:38px;padding:0 12px;position:sticky;left:0;width:fit-content}
+.ph .pn{width:18px;height:18px;border-radius:9px;background:var(--hover);display:grid;place-items:center;font-size:10.5px;color:var(--muted)}
+.ph b{font-size:13px}
+.pbar{display:flex;gap:2px;height:5px;width:120px}
+.pbar i{flex:1;border-radius:2px;background:var(--border)}.pbar i.on{background:var(--accentMuted)}
+.board7{display:grid;grid-template-columns:repeat(7,240px);gap:8px;padding:0 8px 8px;align-items:start}
+.bcol{background:var(--bg);border:1px solid var(--cardBorder);border-radius:10px;padding:7px;display:flex;flex-direction:column;gap:6px;min-height:70px}
+.bcol.prob{border-color:color-mix(in srgb,var(--danger) 55%,var(--cardBorder))}
+.bcol.rev{border-color:color-mix(in srgb,var(--s-review) 40%,var(--cardBorder))}
+.bcol.tst{border-color:color-mix(in srgb,var(--s-test) 40%,var(--cardBorder))}
+.bh{display:flex;align-items:center;gap:5px;font-weight:600;color:var(--text3);padding:2px 4px;font-size:10.5px;letter-spacing:.4px;text-transform:uppercase}
+.bh .n{margin-left:auto}
+.bh .q{font-weight:400;text-transform:none;letter-spacing:0;color:var(--dim)}
+.bcard{border:1px solid var(--border);border-radius:8px;background:var(--surface);padding:7px 9px;display:flex;flex-direction:column;gap:5px;width:100%;position:relative}
+.bcard.pw{border-color:var(--warn)}.bcard.pd{border-color:var(--danger)}.bcard.on{box-shadow:0 0 0 2px var(--accent)}
+.bcard .l1{display:flex;align-items:flex-start;gap:6px;font-size:12px;min-width:0}
+.bcard .l1 .id{font-weight:600;flex:none}
+.bcard .l1 .dep{color:var(--folder);font-size:11px;flex:none;padding-top:1px}
+.bcard .l1 .tt{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bcard .l2{display:flex;align-items:center;gap:6px;min-width:0;font-size:11px}
+.bcard .l3{display:flex;align-items:center;gap:5px;min-width:0;font-size:11px}
+.bcard .l3 .who{display:inline-flex;align-items:center;gap:4px;color:var(--muted);min-width:0}
+.bempty{color:var(--dim);border:1px dashed var(--border);border-radius:8px;text-align:center;padding:10px 6px;font-size:11px}
+.feedbar{flex:none;height:34px;border-top:1px solid var(--cardBorder);display:flex;align-items:center;gap:8px;padding:0 14px;font-size:11.5px;background:var(--bg)}
+.side{width:400px;flex:none;border-left:1px solid var(--cardBorder);display:flex;flex-direction:column;min-height:0;background:var(--bg);padding:10px;gap:8px;overflow:hidden}
+.sech{display:flex;align-items:center;gap:6px;min-height:26px}
+.sech h3{margin:0;font-size:12.5px;font-weight:600}
+.mcard{display:grid;grid-template-columns:22px 1fr auto;gap:4px 9px;padding:8px 9px;border-radius:10px;border:1px solid var(--cardBorder);background:var(--card)}
+.mcard.probw{border-color:color-mix(in srgb,var(--warn) 60%,var(--cardBorder))}
+.mcard .mr{display:flex;align-items:center;gap:6px;min-width:0}
+.mcard .rt{display:flex;flex-direction:column;align-items:flex-end;gap:4px;font-size:11px;color:var(--dim)}
+.sq{grid-column:2/4;display:flex;flex-direction:column;gap:3px;margin-top:2px;padding:5px 7px;border-radius:7px;background:var(--hover);font-size:11px}
+.sq .sqh{display:flex;align-items:center;gap:5px;color:var(--label)}
+.sq .sqr{display:flex;align-items:center;gap:6px;color:var(--text2);min-width:0}
+.tip{position:absolute;z-index:5;width:300px;background:var(--surface);border:1px solid var(--border);border-radius:9px;box-shadow:var(--shadow);padding:8px 10px;font-size:11.5px;display:flex;flex-direction:column;gap:4px;color:var(--text2)}
+.tip b{color:var(--fg)}
+
+/* ===== catalog editor ===== */
+.cat{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0;background:var(--bg)}
+.cath{flex:none;display:flex;align-items:center;gap:9px;min-height:48px;padding:0 16px;border-bottom:1px solid var(--cardBorder)}
+.cath .tn{font-size:15px;font-weight:600}
+.catbody{flex:1;overflow:hidden;padding:12px 16px 20px;display:flex;flex-direction:column;gap:12px}
+.ctabs{display:flex;align-items:center;gap:10px}
+.ctabs .seg span{font-size:12.5px;padding:5px 12px}
+.ctabs .cnt{display:inline-grid;place-items:center;min-width:18px;height:17px;padding:0 5px;border-radius:9px;background:var(--hover);color:var(--text3);font-size:10.5px;font-weight:600}
+.roles2{display:flex;gap:14px;align-items:flex-start;min-height:0}
+.rlist{width:250px;flex:none;display:flex;flex-direction:column;gap:3px}
+.pitem{padding:7px 10px;border-radius:9px;border:1px solid transparent;display:flex;flex-direction:column;gap:2px}
+.pitem.on{background:var(--cardSel);border-color:var(--cardSelBorder)}
+.pitem .pn{font-weight:600;font-size:12.5px;display:flex;align-items:center;gap:6px}
+.pitem .ps{font-size:11px;color:var(--muted)}
+.pitem .flow{display:flex;align-items:center;gap:3px;margin-top:3px;flex-wrap:wrap}
+.redit{flex:1;min-width:0;border:1px solid var(--cardBorder);border-radius:11px;background:var(--card);padding:12px 14px;display:flex;flex-direction:column;gap:11px}
+.kv{display:grid;grid-template-columns:130px 1fr;gap:9px 14px;align-items:center}
+.kv>.k{color:var(--label);text-align:right;font-size:12px}
+.kv>.k.top{align-self:start;padding-top:5px}
+.note{font-size:11px;color:var(--dim);line-height:1.45}
+.stab{display:grid;grid-template-columns:16px 22px 132px 1fr 210px 92px 24px;gap:8px;align-items:center}
+.stab .th{font-size:11px;color:var(--label)}
+.stab .fixed{opacity:.7}
+.grip{color:var(--dim)}
+.stepper{display:inline-flex;align-items:center;border:1px solid var(--border);border-radius:7px;overflow:hidden;height:26px}
+.stepper span{width:24px;text-align:center;color:var(--muted)}
+.stepper b{min-width:24px;text-align:center;font-weight:600;border-left:1px solid var(--border);border-right:1px solid var(--border);line-height:24px}
+.sdetail{grid-column:3/7;border:1px solid var(--cardBorder);border-radius:9px;background:var(--bg);padding:9px 11px;display:flex;flex-direction:column;gap:7px}
+.opt{display:grid;grid-template-columns:16px 1fr;gap:3px 7px;align-items:start}
+.radio{width:13px;height:13px;border-radius:7px;border:1.5px solid var(--border);margin-top:2px}
+.radio.on{border-color:var(--accent);box-shadow:inset 0 0 0 2.5px var(--card),inset 0 0 0 7px var(--accent)}
+.cbx{width:13px;height:13px;border-radius:3px;border:1.5px solid var(--border);flex:none;display:inline-grid;place-items:center}
+.cbx.on{background:var(--accent);border-color:var(--accent)}
+.cbx.on::after{content:"";width:6px;height:3px;border-left:1.6px solid var(--accentText);border-bottom:1.6px solid var(--accentText);transform:translateY(-1px) rotate(-45deg)}
+.dtab{width:100%;border-collapse:collapse;font-size:12px}
+.dtab td,.dtab th{padding:5px 8px;border-bottom:1px solid var(--cardBorder);text-align:left}
+.dtab th{color:var(--label);font-weight:400;font-size:11px}
+.try{border:1px dashed var(--border);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:9px;background:var(--bg)}
+.steps{display:flex;flex-direction:column}
+.step{display:grid;grid-template-columns:22px 1fr;gap:2px 9px;position:relative;padding-bottom:9px}
+.step:not(:last-child)::before{content:"";position:absolute;left:10px;top:22px;bottom:0;width:1.5px;background:var(--border)}
+.step .dot{width:22px;height:22px;border-radius:11px;display:grid;place-items:center;background:color-mix(in srgb,var(--sc,var(--muted)) 15%,transparent);color:var(--sc,var(--muted))}
+.step .dot .i{width:12px;height:12px}
+.step .sh{display:flex;align-items:center;gap:6px;min-height:22px;font-weight:600;flex-wrap:wrap}
+.step .sb{grid-column:2;font-size:11.5px;color:var(--muted);display:flex;flex-direction:column;gap:2px}
+.prop{border:1px solid var(--cardBorder);border-radius:10px;background:var(--card);padding:8px 10px;display:flex;flex-direction:column;gap:4px}
+.prop.kept{border-color:var(--cardSelBorder)}.prop.rej{opacity:.55}.prop.rej .pt{text-decoration:line-through}
+.plate{border:1px dashed color-mix(in srgb,var(--folder) 55%,var(--cardBorder));border-radius:9px;padding:7px 10px;display:flex;flex-direction:column;gap:3px;background:color-mix(in srgb,var(--folder) 5%,transparent)}
+.dchat{width:470px;flex:none;display:flex;flex-direction:column;border-right:1px solid var(--cardBorder);min-height:0;background:var(--bg)}
+.dhd{flex:none;padding:10px 14px;border-bottom:1px solid var(--cardBorder);display:flex;flex-direction:column;gap:7px}
+.dfeed{flex:1;overflow:hidden;padding:12px 14px;display:flex;flex-direction:column;gap:9px}
+.bubble{align-self:flex-end;max-width:88%;background:var(--segOn);border:1px solid var(--cardSelBorder);border-radius:12px 12px 4px 12px;padding:8px 11px;color:var(--fg);line-height:1.45}
+.tool{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:11.5px;padding-left:4px;border-left:2px solid var(--border)}
+.tool b{color:var(--text2);font-weight:600}
+
+/* ===== inspector and plan ===== */
+.insp{background:var(--bg);display:flex;flex-direction:column;min-height:0;border:1px solid var(--cardBorder)}
+.ihd{padding:12px 14px 10px;border-bottom:1px solid var(--cardBorder);display:flex;flex-direction:column;gap:7px}
+.ibody{flex:1;overflow:hidden;padding:12px 14px;display:flex;flex-direction:column;gap:12px}
+.ifoot{flex:none;border-top:1px solid var(--cardBorder);padding:9px 12px;display:flex;gap:6px;align-items:center;background:var(--bg)}
+.box{border:1px solid var(--cardBorder);border-radius:10px;background:var(--card);padding:9px 11px;display:flex;flex-direction:column;gap:7px}
+.kv2{display:grid;grid-template-columns:86px 1fr;gap:5px 10px;font-size:11.5px;align-items:baseline}
+.kv2 .k{color:var(--label)}
+.kv2 .v{color:var(--text2);min-width:0}
+.pipe{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+.pipe .arr{color:var(--dim);font-size:11px}
+.rnd{display:grid;grid-template-columns:22px 1fr;gap:3px 8px;position:relative;padding-bottom:10px}
+.rnd:not(:last-child)::before{content:"";position:absolute;left:10px;top:23px;bottom:1px;width:1.5px;background:var(--border)}
+.rnd .dot{width:22px;height:22px;border-radius:11px;display:grid;place-items:center;color:var(--sc,var(--muted));background:color-mix(in srgb,var(--sc,var(--muted)) 15%,transparent)}
+.rnd .dot .i{width:12px;height:12px}
+.rnd .rh{display:flex;align-items:center;gap:6px;min-height:22px;flex-wrap:wrap}
+.rnd .rh b{font-size:12px}
+.rnd .rb{grid-column:2;display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:var(--muted)}
+.verdict{display:inline-flex;align-items:center;gap:3px;height:18px;padding:0 7px;border-radius:9px;font-size:10.5px;font-weight:700;letter-spacing:.2px}
+.v-pass{background:var(--accentBg);color:var(--accent)}
+.v-return{background:var(--warnBg);color:var(--warn)}
+.v-run{background:color-mix(in srgb,var(--s-test) 14%,transparent);color:var(--s-test)}
+.v-wait{background:var(--hover);color:var(--muted)}
+.find{display:grid;grid-template-columns:auto 1fr;gap:2px 7px;padding:5px 8px;border:1px solid var(--cardBorder);border-radius:7px;background:var(--card);color:var(--text2);font-size:11.5px}
+.sev{font-size:9.5px;font-weight:700;letter-spacing:.3px;padding:0 5px;border-radius:4px;height:16px;display:inline-flex;align-items:center;text-transform:uppercase}
+.sev-major{background:var(--dangerBg);color:var(--danger)}.sev-minor{background:var(--warnBg);color:var(--warn)}.sev-nit{background:var(--hover);color:var(--muted)}
+.find .loc{grid-column:2;color:var(--dim);font-size:11px}
+.find.fixed{opacity:.65}
+.menu{position:absolute;z-index:6;min-width:250px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:4px;box-shadow:var(--shadow)}
+.menu .mi{display:grid;grid-template-columns:16px 1fr;gap:1px 9px;align-items:center;padding:6px 9px;border-radius:6px;color:var(--text2)}
+.menu .mi.on{background:var(--hover);color:var(--fg)}
+.menu .mi .md{grid-column:2;font-size:11px;color:var(--dim)}
+.menu .msep{height:1px;background:var(--cardBorder);margin:4px 2px}
+.menu .mh{font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.4px;font-weight:600;padding:6px 9px 3px}
+.frow{display:grid;grid-template-columns:38px 16px 1fr;gap:6px;align-items:start;padding:5px 2px;border-bottom:1px solid var(--cardBorder);font-size:11.5px}
+.frow .ft{color:var(--dim);font-size:10.5px;padding-top:1px}
+.frow .fx{color:var(--text2)}
+
+/* ===== gallery chrome (not part of the design) ===== */
+.gal{max-width:2300px;margin:0 auto;padding:24px 28px 60px}
+.gal header{display:flex;align-items:center;gap:16px;margin-bottom:6px}
+.gal h1{font-size:20px;margin:0}
+.gal .lead{max-width:980px;opacity:.8;margin:4px 0 18px}
+.gal .tgl{display:inline-flex;border:1px solid #445;border-radius:8px;overflow:hidden}
+.gal .tgl a{padding:4px 12px;color:inherit;text-decoration:none;font-size:12px}
+.gal .tgl a.on{background:#2a4a3e;color:#bdf0da}
+.lightpage .gal .tgl a.on{background:#cfe8dc;color:#115d46}
+.gal nav{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:22px}
+.gal nav a{font-size:12px;color:inherit;opacity:.85;border:1px solid #445;border-radius:12px;padding:2px 10px;text-decoration:none}
+.gal section{margin:0 0 40px}
+.gal h2{font-size:15px;margin:0 0 4px}
+.gal .cap{max-width:1100px;opacity:.8;margin:0 0 10px;font-size:12.5px}
+.gal .frame{box-shadow:0 0 0 1px rgba(128,140,155,.35);border-radius:6px;overflow:hidden;width:max-content;max-width:100%;overflow-x:auto}
+body.shot{overflow:hidden}
+
+/* ===== U59: plan modes ===== */
+.app{--free:#9db4ff;--freeText:#10162b;--scrim:rgba(5,8,12,.58)}
+.app.light{--free:#3f5bc4;--freeText:#ffffff;--scrim:rgba(30,42,54,.30)}
+.mode{--mc:var(--muted);display:inline-flex;align-items:center;gap:4px;height:19px;padding:0 7px 0 5px;border-radius:6px;font-size:11px;font-weight:600;white-space:nowrap;flex:none;color:var(--mc);border:1px solid color-mix(in srgb,var(--mc) 42%,transparent)}
+.mode .i{width:12px;height:12px}
+.mode .r{font-weight:400;opacity:.85}
+.mode.std{background:transparent;font-weight:500}
+.mode.free{--mc:var(--free);background:color-mix(in srgb,var(--free) 13%,transparent)}
+.pill.freep{background:color-mix(in srgb,var(--free) 13%,transparent);color:var(--free)}
+.twbar{gap:10px}
+.hphase{display:inline-flex;align-items:center;gap:6px;padding-left:4px}
+.hstat{display:inline-flex;align-items:center;gap:6px;font-size:11px;padding-left:8px;border-left:1px solid var(--cardBorder)}
+.tb-open{color:var(--free)}
+.tb-idle{color:var(--muted)}
+.phase.free{border-color:color-mix(in srgb,var(--free) 50%,var(--cardBorder))}
+.phase.free.idle{border-style:dashed}
+.psub{display:flex;align-items:center;gap:7px;padding:0 14px 8px 40px;font-size:11.5px}
+.gph{position:relative;margin:0 8px 8px;border-radius:9px}
+.gedges{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.gedges path{fill:none;stroke:var(--dim);stroke-width:1.3;opacity:.7}
+.gnode{position:absolute;width:232px;height:60px;border:1px solid var(--border);border-radius:9px;background:var(--surface);padding:7px 9px 6px 12px;display:flex;flex-direction:column;gap:6px;overflow:hidden;font-size:12px}
+.gnode::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--nb)}
+.gnode .dep{color:var(--folder);font-size:11px;flex:none}
+.mcard2{border:1px solid color-mix(in srgb,var(--free) 40%,var(--cardBorder));border-radius:11px;background:var(--card);padding:12px 14px;display:flex;flex-direction:column;gap:10px;max-width:980px}
+.proposal{display:flex;align-items:flex-start;gap:8px;padding:7px 10px;border-radius:8px;background:color-mix(in srgb,var(--r-lead) 10%,transparent);border:1px solid color-mix(in srgb,var(--r-lead) 30%,transparent);color:var(--text2);line-height:1.45}
+.proposal .i{margin-top:2px;color:var(--r-lead)}
+.mopts{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.mopt{border:1px solid var(--cardBorder);border-radius:10px;padding:10px 12px;background:var(--bg);display:grid;grid-template-columns:16px 1fr;gap:4px 9px;line-height:1.45}
+.mopt.on{border-color:color-mix(in srgb,var(--free) 60%,var(--cardBorder));background:color-mix(in srgb,var(--free) 6%,var(--card))}
+.mopt b{display:inline-flex;align-items:center;gap:5px;font-size:13px}
+.mopt .radio.on{border-color:var(--free);box-shadow:inset 0 0 0 2.5px var(--card),inset 0 0 0 7px var(--free)}
+.scrim{position:absolute;inset:0;background:var(--scrim);z-index:8}
+.dlg{position:absolute;left:50%;transform:translateX(-50%);z-index:9;background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);padding:16px 18px;display:flex;flex-direction:column;gap:12px;line-height:1.45}
+.mtile{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;flex:none;color:var(--free);background:color-mix(in srgb,var(--free) 13%,transparent)}
+.chg{display:grid;grid-template-columns:16px 1fr;gap:8px;align-items:start;color:var(--text2)}
+.chg .i{margin-top:2px;color:var(--free)}
+.idlebox{display:flex;gap:12px;align-items:flex-start;margin:0 14px 14px 40px;padding:14px 16px;border:1px dashed color-mix(in srgb,var(--free) 45%,var(--border));border-radius:10px;max-width:720px}
+.frame2{border:1px solid var(--cardBorder);border-radius:9px;overflow:hidden}
+.strip{display:flex;align-items:center;gap:7px;width:380px;padding:6px 10px;border:1px solid var(--cardBorder);border-radius:9px;background:var(--card);margin-bottom:6px;font-size:11.5px}
+.code{padding:8px 10px;border:1px solid var(--cardBorder);border-radius:8px;background:var(--field);font-size:11.5px;color:var(--text2);line-height:1.6}
+.code b{color:var(--free)}
+.twbar .tn,.hphase,.hstat,.twbar .btn{white-space:nowrap;flex:none}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const LOGO_D = {
+  ollama: "M7.905 1.09c.216.085.411.225.588.41.295.306.544.744.734 1.263.191.522.315 1.1.362 1.68a5.054 5.054 0 012.049-.636l.051-.004c.87-.07 1.73.087 2.48.474.101.053.2.11.297.17.05-.569.172-1.134.36-1.644.19-.52.439-.957.733-1.264a1.67 1.67 0 01.589-.41c.257-.1.53-.118.796-.042.401.114.745.368 1.016.737.248.337.434.769.561 1.287.23.934.27 2.163.115 3.645l.053.04.026.019c.757.576 1.284 1.397 1.563 2.35.435 1.487.216 3.155-.534 4.088l-.018.021.002.003c.417.762.67 1.567.724 2.4l.002.03c.064 1.065-.2 2.137-.814 3.19l-.007.01.01.024c.472 1.157.62 2.322.438 3.486l-.006.039a.651.651 0 01-.747.536.648.648 0 01-.54-.742c.167-1.033.01-2.069-.48-3.123a.643.643 0 01.04-.617l.004-.006c.604-.924.854-1.83.8-2.72-.046-.779-.325-1.544-.8-2.273a.644.644 0 01.18-.886l.009-.006c.243-.159.467-.565.58-1.12a4.229 4.229 0 00-.095-1.974c-.205-.7-.58-1.284-1.105-1.683-.595-.454-1.383-.673-2.38-.61a.653.653 0 01-.632-.371c-.314-.665-.772-1.141-1.343-1.436a3.288 3.288 0 00-1.772-.332c-1.245.099-2.343.801-2.67 1.686a.652.652 0 01-.61.425c-1.067.002-1.893.252-2.497.703-.522.39-.878.935-1.066 1.588a4.07 4.07 0 00-.068 1.886c.112.558.331 1.02.582 1.269l.008.007c.212.207.257.53.109.785-.36.622-.629 1.549-.673 2.44-.05 1.018.186 1.902.719 2.536l.016.019a.643.643 0 01.095.69c-.576 1.236-.753 2.252-.562 3.052a.652.652 0 01-1.269.298c-.243-1.018-.078-2.184.473-3.498l.014-.035-.008-.012a4.339 4.339 0 01-.598-1.309l-.005-.019a5.764 5.764 0 01-.177-1.785c.044-.91.278-1.842.622-2.59l.012-.026-.002-.002c-.293-.418-.51-.953-.63-1.545l-.005-.024a5.352 5.352 0 01.093-2.49c.262-.915.777-1.701 1.536-2.269.06-.045.123-.09.186-.132-.159-1.493-.119-2.73.112-3.67.127-.518.314-.95.562-1.287.27-.368.614-.622 1.015-.737.266-.076.54-.059.797.042zm4.116 9.09c.936 0 1.8.313 2.446.855.63.527 1.005 1.235 1.005 1.94 0 .888-.406 1.58-1.133 2.022-.62.375-1.451.557-2.403.557-1.009 0-1.871-.259-2.493-.734-.617-.47-.963-1.13-.963-1.845 0-.707.398-1.417 1.056-1.946.668-.537 1.55-.849 2.485-.849zm0 .896a3.07 3.07 0 00-1.916.65c-.461.37-.722.835-.722 1.25 0 .428.21.829.61 1.134.455.347 1.124.548 1.943.548.799 0 1.473-.147 1.932-.426.463-.28.7-.686.7-1.257 0-.423-.246-.89-.683-1.256-.484-.405-1.14-.643-1.864-.643zm.662 1.21l.004.004c.12.151.095.37-.056.49l-.292.23v.446a.375.375 0 01-.376.373.375.375 0 01-.376-.373v-.46l-.271-.218a.347.347 0 01-.052-.49.353.353 0 01.494-.051l.215.172.22-.174a.353.353 0 01.49.051zm-5.04-1.919c.478 0 .867.39.867.871a.87.87 0 01-.868.871.87.87 0 01-.867-.87.87.87 0 01.867-.872zm8.706 0c.48 0 .868.39.868.871a.87.87 0 01-.868.871.87.87 0 01-.867-.87.87.87 0 01.867-.872zM7.44 2.3l-.003.002a.659.659 0 00-.285.238l-.005.006c-.138.189-.258.467-.348.832-.17.692-.216 1.631-.124 2.782.43-.128.899-.208 1.404-.237l.01-.001.019-.034c.046-.082.095-.161.148-.239.123-.771.022-1.692-.253-2.444-.134-.364-.297-.65-.453-.813a.628.628 0 00-.107-.09L7.44 2.3zm9.174.04l-.002.001a.628.628 0 00-.107.09c-.156.163-.32.45-.453.814-.29.794-.387 1.776-.23 2.572l.058.097.008.014h.03a5.184 5.184 0 011.466.212c.086-1.124.038-2.043-.128-2.722-.09-.365-.21-.643-.349-.832l-.004-.006a.659.659 0 00-.285-.239h-.004z",
+  claude: "M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.970 2.970 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.030.456.898.243.832.091.255h.158V9.010l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.020.225.79.522.474.638-.079.485-1.215.62-1.640-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.810 2.509 2.330.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.620h-.128v.17l.444.649 2.345 3.521.122 1.080-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.530.286-1.900.17-.632-.012-.042-.14.018-1.434 1.967-2.180 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.440-1.882.93-1.086-.006-.158h-.055L4.132 18.560l-1.130.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z",
+  codexBg: "M19.503 0H4.496A4.496 4.496 0 000 4.496v15.007A4.496 4.496 0 004.496 24h15.007A4.496 4.496 0 0024 19.503V4.496A4.496 4.496 0 0019.503 0z",
+  codex: "M9.064 3.344a4.578 4.578 0 012.285-.312c1 .115 1.891.54 2.673 1.275.01.01.024.017.037.021a.09.09 0 00.043 0 4.55 4.55 0 013.046.275l.047.022.116.057a4.581 4.581 0 012.188 2.399c.209.51.313 1.041.315 1.595a4.24 4.24 0 01-.134 1.223.123.123 0 00.03.115c.594.607.988 1.33 1.183 2.17.289 1.425-.007 2.71-.887 3.854l-.136.166a4.548 4.548 0 01-2.201 1.388.123.123 0 00-.081.076c-.191.551-.383 1.023-.74 1.494-.9 1.187-2.222 1.846-3.711 1.838-1.187-.006-2.239-.44-3.157-1.302a.107.107 0 00-.105-.024c-.388.125-.78.143-1.204.138a4.441 4.441 0 01-1.945-.466 4.544 4.544 0 01-1.61-1.335c-.152-.202-.303-.392-.414-.617a5.81 5.81 0 01-.37-.961 4.582 4.582 0 01-.014-2.298.124.124 0 00.006-.056.085.085 0 00-.027-.048 4.467 4.467 0 01-1.034-1.651 3.896 3.896 0 01-.251-1.192 5.189 5.189 0 01.141-1.6c.337-1.112.982-1.985 1.933-2.618.212-.141.413-.251.601-.33.215-.089.43-.164.646-.227a.098.098 0 00.065-.066 4.51 4.51 0 01.829-1.615 4.535 4.535 0 011.837-1.388zm3.482 10.565a.637.637 0 000 1.272h3.636a.637.637 0 100-1.272h-3.636zM8.462 9.23a.637.637 0 00-1.106.631l1.272 2.224-1.266 2.136a.636.636 0 101.095.649l1.454-2.455a.636.636 0 00.005-.64L8.462 9.23z",
+  deepseek: "M23.748 4.482c-.254-.124-.364.113-.512.234-.051.039-.094.09-.137.136-.372.397-.806.657-1.373.626-.829-.046-1.537.214-2.163.848-.133-.782-.575-1.248-1.247-1.548-.352-.156-.708-.311-.955-.65-.172-.241-.219-.51-.305-.774-.055-.16-.11-.323-.293-.35-.2-.031-.278.136-.356.276-.313.572-.434 1.202-.422 1.84.027 1.436.633 2.58 1.838 3.393.137.093.172.187.129.323-.082.28-.18.552-.266.833-.055.179-.137.217-.329.14a5.526 5.526 0 01-1.736-1.18c-.857-.828-1.631-1.742-2.597-2.458a11.365 11.365 0 00-.689-.471c-.985-.957.13-1.743.388-1.836.27-.098.093-.432-.779-.428-.872.004-1.67.295-2.687.684a3.055 3.055 0 01-.465.137 9.597 9.597 0 00-2.883-.102c-1.885.21-3.39 1.102-4.497 2.623C.082 8.606-.231 10.684.152 12.85c.403 2.284 1.569 4.175 3.36 5.653 1.858 1.533 3.997 2.284 6.438 2.14 1.482-.085 3.133-.284 4.994-1.86.47.234.962.327 1.78.397.63.059 1.236-.03 1.705-.128.735-.156.684-.837.419-.961-2.155-1.004-1.682-.595-2.113-.926 1.096-1.296 2.746-2.642 3.392-7.003.05-.347.007-.565 0-.845-.004-.17.035-.237.23-.256a4.173 4.173 0 001.545-.475c1.396-.763 1.96-2.015 2.093-3.517.02-.23-.004-.467-.247-.588zM11.581 18c-2.089-1.642-3.102-2.183-3.52-2.16-.392.024-.321.471-.235.763.09.288.207.486.371.739.114.167.192.416-.113.603-.673.416-1.842-.14-1.897-.167-1.361-.802-2.5-1.86-3.301-3.307-.774-1.393-1.224-2.887-1.298-4.482-.02-.386.093-.522.477-.592a4.696 4.696 0 011.529-.039c2.132.312 3.946 1.265 5.468 2.774.868.86 1.525 1.887 2.202 2.891.72 1.066 1.494 2.082 2.48 2.914.348.292.625.514.891.677-.802.09-2.140.11-3.054-.614zm1-6.44a.306.306 0 01.415-.287.302.302 0 01.2.288.306.306 0 01-.31.307.303.303 0 01-.304-.308zm3.11 1.596c-.2.081-.399.151-.59.16a1.245 1.245 0 01-.798-.254c-.274-.23-.47-.358-.552-.758a1.730 1.730 0 01.016-.588c.07-.327-.008-.537-.239-.727-.187-.156-.426-.199-.688-.199a.559.559 0 01-.254-.078c-.11-.054-.2-.19-.114-.358.028-.054.16-.186.192-.21.356-.202.767-.136 1.146.016.352.144.618.408 1.001.782.391.451.462.576.685.914.176.265.336.537.445.848.067.195-.019.354-.25.452z",
+  kimiDot: "M21.846 0a1.923 1.923 0 110 3.846H20.15a.226.226 0 01-.227-.226V1.923C19.923.861 20.784 0 21.846 0z",
+  kimi: "M11.065 11.199l7.257-7.2c.137-.136.06-.41-.116-.41H14.3a.164.164 0 00-.117.051l-7.82 7.756c-.122.12-.302.013-.302-.179V3.820c0-.127-.083-.23-.185-.23H3.186c-.103 0-.186.103-.186.23V19.770c0 .128.083.23.186.23h2.690c.103 0 .186-.102.186-.23v-3.250c0-.069.025-.135.069-.178l2.424-2.406a.158.158 0 01.205-.023l6.484 4.772a7.677 7.677 0 003.453 1.283c.108.012.2-.095.2-.23v-3.060c0-.117-.07-.212-.164-.227a5.028 5.028 0 01-2.027-.807l-5.613-4.064c-.117-.078-.132-.279-.028-.381z",
+};
+const IC = {
+  play: "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0ZM10 8.5l5 3.5-5 3.5z",
+  check: "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0ZM8 12.5l2.8 2.8L16.5 9",
+  checkf: ["M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0Z", "M8 12.5l2.8 2.8L16.5 9"],
+  tick: "M5 12.5l4.5 4.5L19 7.5",
+  clock: "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0ZM12 7v5l3 2",
+  circle: "M4 12a8 8 0 1 0 16 0a8 8 0 1 0 -16 0Z",
+  arrowc: "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0ZM8 12h8M13 9l3 3-3 3",
+  x: "M6 6l12 12M18 6L6 18",
+  chevd: "M6 9l6 6 6-6", chevr: "M9 6l6 6-6 6", chevl: "M15 6l-6 6 6 6",
+  dots: "M4.7 12a1.3 1.3 0 1 0 2.6 0a1.3 1.3 0 1 0 -2.6 0ZM10.7 12a1.3 1.3 0 1 0 2.6 0a1.3 1.3 0 1 0 -2.6 0ZM16.7 12a1.3 1.3 0 1 0 2.6 0a1.3 1.3 0 1 0 -2.6 0Z",
+  plus: "M12 5v14M5 12h14",
+  copy: "M10 8h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2v-8a2 2 0 0 1 2 -2ZM16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3",
+  trash: "M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13",
+  send: "M4 12l16-8-6 16-2.5-6.5zM11.5 13.5L20 4",
+  folder: "M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z",
+  branch: "M4 5a2 2 0 1 0 4 0a2 2 0 1 0 -4 0ZM4 19a2 2 0 1 0 4 0a2 2 0 1 0 -4 0ZM16 7a2 2 0 1 0 4 0a2 2 0 1 0 -4 0ZM6 7v10M18 9c0 5-6 4-11.5 8.5",
+  eye: "M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12zM9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0Z",
+  back: "M10 6l-6 6 6 6M4 12h16",
+  lock: "M6.5 11h11a1.5 1.5 0 0 1 1.5 1.5v6a1.5 1.5 0 0 1 -1.5 1.5h-11a1.5 1.5 0 0 1 -1.5 -1.5v-6a1.5 1.5 0 0 1 1.5 -1.5ZM8 11V8a4 4 0 0 1 8 0v3",
+  q: "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0ZM9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 .8-1 1.5v.4M11.65 16.8a0.35 0.35 0 1 0 0.7 0a0.35 0.35 0 1 0 -0.7 0Z",
+  alert: "M12 3.5l9.5 16.5h-19zM12 10v4.5M11.65 17.2a0.35 0.35 0 1 0 0.7 0a0.35 0.35 0 1 0 -0.7 0Z",
+  refresh: "M20 11a8 8 0 0 0-14.5-4.5M4 13a8 8 0 0 0 14.5 4.5M5 3v4h4M19 21v-4h-4",
+  ret: "M9 14l-5-5 5-5M4 9h10a6 6 0 0 1 0 12h-3",
+  skip: "M5 6l7 6-7 6zM13 6l7 6-7 6z",
+  grip: "M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01",
+  graph: "M10 3h4a1 1 0 0 1 1 1v2a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1v-2a1 1 0 0 1 1 -1ZM4 17h4a1 1 0 0 1 1 1v2a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1v-2a1 1 0 0 1 1 -1ZM16 17h4a1 1 0 0 1 1 1v2a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1v-2a1 1 0 0 1 1 -1ZM12 7v4M6 17v-3h12v3",
+  board: "M4 4h4v16H4zM10 4h4v10h-4zM16 4h4v7h-4z",
+  layers: "M12 3l9 5-9 5-9-5zM3 12l9 5 9-5M3 16l9 5 9-5",
+  users: "M5.5 8a3.5 3.5 0 1 0 7 0a3.5 3.5 0 1 0 -7 0ZM2.5 20c.6-3.5 3.2-5.5 6.5-5.5s5.9 2 6.5 5.5M16 4.6a3.5 3.5 0 0 1 0 6.8M18 14.8c2 .7 3.2 2.5 3.5 5.2",
+  user: "M8 8a4 4 0 1 0 8 0a4 4 0 1 0 -8 0ZM4 21c1-4 4-6 8-6s7 2 8 6",
+  bolt: "M13 3L5 14h6l-1 7 8-11h-6z",
+  pipe: "M5 6a2 2 0 1 0 4 0a2 2 0 1 0 -4 0ZM15 18a2 2 0 1 0 4 0a2 2 0 1 0 -4 0ZM9 6h6a3 3 0 0 1 0 6H9a3 3 0 0 0 0 6h6",
+  sparkle: "M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM18.5 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z",
+  imp: "M4 20h4L19 9l-4-4L4 16zM14 6l4 4",
+  dl: "M12 4v11M7 10l5 5 5-5M5 20h14", ul: "M12 20V9M7 14l5-5 5 5M5 4h14",
+  r_lead: "M4 8l4 4 4-6 4 6 4-4-2 10H6zM6 21h12",
+  r_backend: "M5.5 4h13a1.5 1.5 0 0 1 1.5 1.5v3a1.5 1.5 0 0 1 -1.5 1.5h-13a1.5 1.5 0 0 1 -1.5 -1.5v-3a1.5 1.5 0 0 1 1.5 -1.5ZM5.5 14h13a1.5 1.5 0 0 1 1.5 1.5v3a1.5 1.5 0 0 1 -1.5 1.5h-13a1.5 1.5 0 0 1 -1.5 -1.5v-3a1.5 1.5 0 0 1 1.5 -1.5ZM8 7h.01M8 17h.01",
+  r_frontend: "M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2ZM3 9h18M9 9v11",
+  r_tester: "M9 3h6M10 3v6l-5 9.5A1.5 1.5 0 0 0 6.3 21h11.4a1.5 1.5 0 0 0 1.3-2.5L14 9V3M7.5 15h9",
+  r_reviewer: "M4.5 10.5a6 6 0 1 0 12 0a6 6 0 1 0 -12 0ZM20 20l-5-5M8 10.5l2 2 3.5-3.5",
+  r_secretary: "M4 20h4L19 9l-4-4L4 16z",
+  r_researcher: "M4 5h6a2 2 0 0 1 2 2v13a2 2 0 0 0-2-2H4zM20 5h-6a2 2 0 0 0-2 2v13a2 2 0 0 1 2-2h6z",
+};
+const ic = (n, c = '') => {
+  const v = IC[n] || IC.circle;
+  const p = Array.isArray(v) ? `<path class="f" d="${v[0]}"/><path class="k" d="${v[1]}"/>` : `<path d="${v}"/>`;
+  return `<svg class="i ${c}" viewBox="0 0 24 24">${p}</svg>`;
+};
+const lg = (a) => {
+  const L = LOGO_D;
+  if (a === 'claude') return `<svg class="lg" viewBox="0 0 24 24"><path fill="#D97757" d="${L.claude}"/></svg>`;
+  if (a === 'codex') return `<svg class="lg" viewBox="0 0 24 24"><path fill="#f4f6ff" d="${L.codexBg}"/><path fill="#5b78ff" d="${L.codex}"/></svg>`;
+  if (a === 'deepseek') return `<svg class="lg" viewBox="0 0 24 24"><path fill="#4D6BFE" d="${L.deepseek}"/></svg>`;
+  if (a === 'kimi') return `<svg class="lg" viewBox="0 0 24 24"><path fill="#1783FF" d="${L.kimiDot}"/><path fill="currentColor" d="${L.kimi}"/></svg>`;
+  return '';
+};
+const tile = (a, c = '') => `<span class="tile ${c}">${lg(a)}</span>`;
+const RN = { lead: 'Lead', backend: 'Backend', frontend: 'Frontend', tester: 'Tester', reviewer: 'Reviewer', secretary: 'Secretary', researcher: 'Researcher' };
+const role = (k, mini = false, name) => `<span class="role rc-${k}${mini ? ' mini' : ''}">${ic('r_' + k)}${name || RN[k]}</span>`;
+const KIND = { review: ['r_reviewer', 'Review', 'sk-review'], test: ['r_tester', 'Test', 'sk-test'], accept: ['r_lead', 'Lead', 'sk-accept'], auto: ['bolt', 'Auto', 'sk-accept'], impl: ['imp', 'Implement', 'sk-wait'] };
+const stg = (k, extra = '', cls = '') => { const [i, n, c] = KIND[k]; return `<span class="stg ${c} ${cls}">${ic(i)}${n}${extra ? ` <span class="r">${extra}</span>` : ''}</span>`; };
+// stage track: d = done, c = current, x = skipped, '' = to come
+const trk = (cells, sc) => `<span class="trk" style="${sc ? `--sc:var(${sc})` : ''}">${cells.map(c => `<i class="${c}"></i>`).join('')}</span>`;
+const seg = (opts, on, cls = '') => `<span class="seg ${cls}">${opts.map((o, n) => `<span class="${n === on ? 'on' : ''}">${o}</span>`).join('')}</span>`;
+const ST = {
+  pending: ['circle', 'var(--muted)'], active: ['play', 'var(--accent)'], problem: ['q', 'var(--warn)'], submitted: ['arrowc', 'var(--accentMuted)'],
+  review: ['r_reviewer', 'var(--s-review)'], test: ['r_tester', 'var(--s-test)'], accepted: ['checkf', 'var(--accentMuted)'], rework: ['refresh', 'var(--warn)'], accept: ['r_lead', 'var(--s-accept)'],
+};
+const sti = (s) => `<span style="color:${ST[s][1]};display:inline-flex;padding-top:1px">${ic(ST[s][0], 's12')}</span>`;
+
+// A Board card: line 1 status, id, deps and title; line 2 the implementer;
+// line 3 (new) the stage chip, its member and the stage track, or a hold.
+function card(t) {
+  const deps = t.deps ? `<span class="dep">↤${t.deps}</span>` : '';
+  const l2 = `<div class="l2">${role(t.role)}${tile(t.agent, 't16')}<span class="ell ${t.l2c || 'muted'}">${t.l2 || ''}</span></div>`;
+  const l3 = t.l3 ? `<div class="l3">${t.l3}</div>` : '';
+  return `<div class="bcard ${t.cls || ''}" ${t.style ? `style="${t.style}"` : ''}><div class="l1">${sti(t.st)}<span class="id">#${t.id}</span>${deps}<span class="tt">${t.title}</span></div>${l2}${l3}${t.tip || ''}</div>`;
+}
+// The stage member: its agent, and a number when the role has several members.
+const who = (k, a, name) => `<span class="who" title="${RN[k]}">${tile(a, 't16')}${name ? `<span class="ell">${name}</span>` : ''}</span>`;
+
+/* ---------------------------------------------------------------- views */
+const V = {};
+/* ===== U59: plan modes ===== */
+Object.assign(IC, {
+  inf: "M12 12c-1.6-1.9-3-3.2-5-3.2a3.2 3.2 0 1 0 0 6.4c2 0 3.4-1.3 5-3.2s3-3.2 5-3.2a3.2 3.2 0 1 1 0 6.4c-2 0-3.4-1.3-5-3.2z",
+  stairs: "M4 19h5v-5h5V9h6M17 6l3 3-3 3",
+  merge: "M7 4a2 2 0 1 0 0 4a2 2 0 1 0 0-4ZM7 16a2 2 0 1 0 0 4a2 2 0 1 0 0-4ZM17 10a2 2 0 1 0 0 4a2 2 0 1 0 0-4ZM7 8v8M7 8c0 3 4 4 8 4",
+  build: "M5 7l5 5-5 5M12 18h7",
+  stopsq: "M7 7h10v10H7z",
+  pause: "M8 5v14M16 5v14",
+  inbox: "M4 13l2.5-7h11L20 13v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1zM4 13h5l1 2h4l1-2h5",
+});
+
+// The mode chip beside a phase: Standard quiet, Free in its own color.
+const mode = (m, extra = '') => m === 'free'
+  ? `<span class="mode free">${ic('inf', 's12')}Free${extra ? ` <span class="r">${extra}</span>` : ''}</span>`
+  : `<span class="mode std">${ic('stairs', 's12')}Standard${extra ? ` <span class="r">${extra}</span>` : ''}</span>`;
+const bars = (on, all, w = 90) => `<span class="pbar" style="width:${w}px">${'<i class="on"></i>'.repeat(on)}${'<i></i>'.repeat(all - on)}</span>`;
+const stat = (label, v, on, all) => `<span class="hstat"><span class="lbl">${label}</span>${bars(on, all, 64)}<span class="mono">${v}</span></span>`;
+
+// The team header: name, status, the mode beside the phase, progress, actions.
+const bar = (o) => `<div class="twbar">
+  <span class="tn">${o.team || 'Orbit platform / support'}</span>${o.badge}
+  <span class="hphase">${o.mode ? mode(o.mode) : ''}<span class="muted">${o.phase}</span></span>
+  ${o.stats || ''}<span class="grow"></span>${o.btns || ''}</div>`;
+const B = {
+  running: `<span class="tbadge tb-running">${ic('play', 's12')}Running</span>`,
+  planning: `<span class="tbadge tb-draft" style="border-style:solid">${ic('imp', 's12')}Planning</span>`,
+  idle: `<span class="tbadge tb-idle">${ic('inbox', 's12')}Idle</span>`,
+  open: `<span class="tbadge tb-open">${ic('play', 's12')}Open · running</span>`,
+  openIdle: `<span class="tbadge tb-idle">${ic('inbox', 's12')}Open · idle</span>`,
+  done: `<span class="tbadge" style="color:var(--accentMuted)">${ic('check', 's12')}Done</span>`,
+  plan: `<span class="tbadge tb-draft">${ic('imp', 's12')}In the plan</span>`,
+};
+
+// A Graph node (the prototype's 232 px card with a status bar on its left).
+const GW = 232, GH = 60;
+const gn = (t) => `<div class="gnode ${t.cls || ''}" style="left:${t.x}px;top:${t.y}px;--nb:${t.bar || 'transparent'}">
+  <div class="row" style="gap:5px">${sti(t.st)}<b>#${t.id}</b>${t.deps ? `<span class="dep">↤${t.deps}</span>` : ''}<span class="ell" style="font-weight:600">${t.title}</span>${t.mark || ''}</div>
+  <div class="row">${role(t.role, true)}${tile(t.agent, 't16')}<span class="ell ${t.l2c || 'muted'}" style="font-size:11px">${t.l2 || ''}</span></div></div>`;
+const edge = (a, b) => { const x1 = a.x + GW, y1 = a.y + GH / 2, x2 = b.x, y2 = b.y + GH / 2, m = (x1 + x2) / 2;
+  return `<path d="M${x1} ${y1}C${m} ${y1} ${m} ${y2} ${x2 - 3} ${y2}"/>`; };
+const graph = (nodes, edges, h) => `<div class="gph" style="height:${h}px"><svg class="gedges">${edges.map(([a, b]) => edge(nodes[a], nodes[b])).join('')}</svg>${Object.values(nodes).map(gn).join('')}</div>`;
+
+const phase = (o) => `<div class="phase ${o.cls || ''}"><div class="ph"><span class="dim">${ic(o.body ? 'chevd' : 'chevr', 's12')}</span><span class="pn">${o.n}</span><b>${o.name}</b>${o.badge}${o.mode ? mode(o.mode, o.modeExtra) : ''}${o.extra || ''}</div>${o.sub ? `<div class="psub">${o.sub}</div>` : ''}${o.body || ''}</div>`;
+const doneStd = (n, name, k) => phase({ n, name, badge: B.done, mode: 'std', extra: `${bars(k, k)}<span class="muted mono">${k}/${k}</span><span class="dim">integrated · build 2.4.0</span>` });
+
+// Members on the right, as on the U36 Board.
+const member = (agent, r, model, line, rt = '', cls = '') => `<div class="mcard ${cls}"><span>${tile(agent)}</span><div class="mr">${role(r)}<span class="muted ell">${model}</span></div><div class="rt">${rt}</div><div class="mr" style="grid-column:2/4">${line}</div></div>`;
+const membersFree = (idle) => `<div class="side" style="width:340px">
+  <div class="sech"><span class="dim">${ic('chevd', 's12')}</span><h3>Members</h3><span class="dim">4</span><span class="grow"></span><span class="btn sm">${ic('plus', 's12')}Member</span></div>
+  ${member('claude', 'lead', 'claude-opus-4-6', idle ? `<span class="muted">${ic('inbox', 's12')} Idle · adds incoming work to Phase 4</span>` : `${sti('pending')}<span class="ell">Next: #24 Integrate and build</span>`, idle ? '' : '1')}
+  ${member('deepseek', 'backend', 'deepseek-v4-pro', idle ? `<span class="muted">Idle · waits for a task</span>` : `${sti('active')}<span class="ell acc">Fixing #21 Refund webhook retries</span>`, idle ? '' : '1/1')}
+  ${member('codex', 'frontend', 'gpt-6.1-sol', idle ? `<span class="muted">Idle · waits for a task</span>` : `<span class="muted ell">Next: #23 Empty cart crash · added 2m ago</span>`, idle ? '' : '0/1')}
+  ${member('claude', 'reviewer', 'claude-sonnet-4-6', idle ? `<span class="muted">Idle · stage queue empty</span>` : `${sti('review')}<span class="ell">Reviewing #22 Coupon rounding · round 1</span>`, idle ? '' : 'stage')}
+</div>`;
+
+const freeBtns = (idle) => `<span class="btn sm">${ic('plus', 's12')}Task</span><span class="btn sm">${ic('build', 's12')}Integrate &amp; build</span><span class="btn sm">${ic('stopsq', 's12')}Close phase…</span>${idle ? '' : `<span class="btn sm">${ic('pause', 's12')}Pause</span>`}`;
+const freeStats = (acc, all, at = '23:10', since = 2) => `${stat('Tasks', `${acc}/${all}`, Math.round(acc / all * 8), 8)}<span class="hstat"><span class="lbl">Last build</span><span class="mono">${at}</span><span class="warn">${since} accepted since</span></span>`;
+
+/* 1. Start planning: the lead proposes a mode, the owner chooses */
+V.start = { w: 1440, h: 660, title: 'Start planning · the plan mode',
+  cap: 'When planning begins (Start planning, a new goal, a next phase) the lead reads the goal and proposes one mode with a one-line reason; the proposal is marked on its option. The owner picks one. Approve &amp; Run starts the plan in the chosen mode; with no choice it stays Standard, the default. Choosing here is the owner’s own act, so no further dialog follows.',
+  html: () => `
+${bar({ badge: B.planning, phase: 'New goal · Support after 2.4', stats: stat('Tasks', '0/3', 0, 8),
+  btns: `<span class="danger" style="margin-right:6px">Discard plan…</span><span class="btn sm">${ic('back', 's12')}Send back</span><span class="btn sm pri">${ic('play', 's12')}Approve &amp; Run · Free</span>` })}
+<div class="twbody">
+  <div class="twmain">
+    <div class="twtool"><span class="seg"><span class="on">${ic('graph', 's12')}Graph</span><span>${ic('board', 's12')}Board</span><span>${ic('layers', 's12')}Layers</span></span><span class="btn sm">${ic('plus', 's12')}Task</span><span class="grow"></span></div>
+    <div class="bscroll"><div class="bpage" style="width:auto">
+      <div class="mcard2">
+        <div class="row"><span class="ih">${ic('stairs', 's12')}Plan mode</span><span class="note">How this goal’s work is phased. Chosen once at the start; with no choice, Standard.</span></div>
+        <div class="proposal">${ic('r_lead', 's12')}<span><b>Lead proposes Free:</b> “Support after 2.4 is a stream of small independent fixes from the QA bot, with no release date.”</span></div>
+        <div class="mopts">
+          <div class="mopt"><span class="radio"></span><div class="col" style="gap:4px"><div class="row"><b>${ic('stairs', 's12')} Standard</b><span class="pill">default</span></div>
+            <span class="muted">Phases are planned, approved and run. A phase closes when its tasks are accepted, with its integration and a build; the next phase is planned and approved again.</span>
+            <span class="dim">Fits a known scope with a release.</span></div></div>
+          <div class="mopt on"><span class="radio on"></span><div class="col" style="gap:4px"><div class="row"><b style="color:var(--free)">${ic('inf', 's12')} Free</b><span class="pill freep">${ic('r_lead', 's10')}Lead proposes</span></div>
+            <span class="muted">One open phase. Tasks are added at any time and run as they are added, with the same pipelines and acceptance. Integration and a build run only when you or the lead ask. It never closes by itself; you close it.</span>
+            <span class="dim">Fits a stream of small requests, support or polishing.</span></div></div>
+        </div>
+      </div>
+      ${phase({ n: 4, name: 'Phase 4 · Support stream', badge: B.plan, cls: 'draft', mode: 'free', extra: `${bars(0, 3)}<span class="muted mono">0/3</span><span class="dim">more tasks join it after Run</span>`,
+        body: graph({ a: { x: 16, y: 14, id: 19, title: 'Coupon field loses focus', st: 'pending', role: 'frontend', agent: 'codex' },
+          b: { x: 268, y: 14, id: 20, title: 'Refund webhook retries', st: 'pending', role: 'backend', agent: 'deepseek' },
+          c: { x: 520, y: 14, id: 21, title: 'Currency in receipts', st: 'pending', role: 'backend', agent: 'deepseek' } }, [], 92) })}
+      <div class="note" style="max-width:760px">A Standard choice shows Phase 4 as today’s draft phase with its barrier; nothing else on this page changes.</div>
+    </div></div>
+    <div class="feedbar"><span class="dim">${ic('chevr', 's12')}</span><b>Feed</b><span class="muted">23:02 Lead proposed the plan: 3 tasks · plan mode Free</span></div>
+  </div>
+  <div class="side" style="width:390px">
+    <div class="sech"><span>${tile('claude')}</span><h3>Coordinator</h3><span class="muted">${ic('imp', 's12')} Plan ready for review</span></div>
+    <div class="dfeed" style="padding:4px 2px;gap:10px">
+      <div class="bubble">New goal: support after the 2.4 release. The QA bot keeps filing small bugs; take them as they come.</div>
+      <div class="tool">${ic('users', 's12')}<b>hgs team status</b> — 4 members idle · last build 2.4.0</div>
+      <div style="color:var(--text2);line-height:1.5">Three fixes are filed now and more will come daily. None of them depends on another and there is no release date, so I propose <b>free planning</b>: one open phase that takes each fix as it arrives, with a build when you ask for one.</div>
+      <div class="proposal" style="margin:0">${ic('inf', 's12')}<span><b>Plan mode: Free proposed</b> · choose it in the plan</span></div>
+    </div>
+    <div class="field" style="min-height:58px;align-items:flex-start;color:var(--dim)">Message the coordinator…</div>
+  </div>
+</div>` };
+
+/* The standard workspace that the switch dialog covers. */
+const stdGraph = () => phase({ n: 2, name: 'Phase 2 · Build', badge: B.running, cls: 'run', mode: 'std', extra: `${bars(3, 6)}<span class="muted mono">3/6</span>`,
+  body: graph({ a: { x: 16, y: 14, id: 2, deps: '#1', title: 'Saved cards API', st: 'accepted', role: 'backend', agent: 'deepseek', l2: 'Accepted', l2c: 'okc', bar: 'var(--accentMuted)' },
+    b: { x: 16, y: 88, id: 3, deps: '#1', title: 'Card form UI', st: 'accepted', role: 'frontend', agent: 'codex', l2: 'Accepted', l2c: 'okc', bar: 'var(--accentMuted)' },
+    c: { x: 300, y: 50, id: 5, deps: '#2 #3', title: 'Contract tests', st: 'active', role: 'tester', agent: 'kimi', l2: 'Running suites', l2c: 'acc', bar: 'var(--accent)' },
+    d: { x: 584, y: 50, id: 6, deps: '#5', title: 'E2E checkout flow', st: 'pending', role: 'tester', agent: 'kimi' } }, [['a', 'c'], ['b', 'c'], ['c', 'd']], 164) });
+
+/* 2. The switch-to-free dialog */
+V.switch = { w: 1440, h: 640, title: 'Switch to free · the confirmation dialog',
+  cap: 'Only the owner switches a running team to free. The lead asks (or the owner asks through the lead’s chat), and Zerus opens this dialog for that request: the lead’s reason, what changes, and Switch to free / Keep standard. The answer is bound to the request id; a stale or repeated request is refused. Keep standard sends the optional reason to the lead. U57 (phase 45) later moves the same content onto the shared confirmation card.',
+  html: () => `
+${bar({ team: 'Orbit platform / checkout', badge: B.running, mode: 'std', phase: 'Phase 2 · Build', stats: stat('Tasks', '3/6', 4, 8), btns: `<span class="btn sm">${ic('pause', 's12')}Pause</span><span class="btn sm dng">Stop…</span>` })}
+<div class="twbody">
+  <div class="twmain"><div class="twtool"><span class="seg"><span class="on">${ic('graph', 's12')}Graph</span><span>${ic('board', 's12')}Board</span><span>${ic('layers', 's12')}Layers</span></span></div>
+    <div class="bscroll"><div class="bpage" style="width:auto">${doneStd(1, 'Phase 1 · Analysis', 1)}${stdGraph()}${phase({ n: 3, name: 'Phase 3 · Verify &amp; ship', badge: `<span class="tbadge tb-draft">Queued</span>`, mode: 'std', extra: `<span class="muted mono">0/3</span>` })}</div></div></div>
+  <div class="side" style="width:340px"><div class="sech"><span>${tile('claude')}</span><h3>Coordinator</h3><span class="warn">${ic('q', 's12')} Waiting for your answer</span></div>
+    <div style="color:var(--text2);line-height:1.5">The QA bot files 3–5 small fixes a day. Planning a phase for each costs more than the fixes; I asked to switch to free.</div>
+    <div class="tool">${ic('inf', 's12')}<b>hgs team propose</b> — switch to free · request 7f3a2c19</div></div>
+</div>
+<div class="scrim"></div>
+<div class="dlg" style="top:150px;width:540px">
+  <div class="row" style="gap:10px"><span class="mtile">${ic('inf', 's16')}</span><div class="col" style="gap:1px"><b style="font-size:15px">Switch to free planning?</b><span class="muted">Orbit platform / checkout · Phase 2 · Build</span></div></div>
+  <div class="proposal" style="margin:0">${ic('r_lead', 's12')}<span><b>Lead asks, 23:41:</b> “The QA bot files 3–5 small fixes a day. Planning a phase for each costs more than the fixes. Keep Phase 2 open and add them as they come.”</span></div>
+  <div class="col" style="gap:5px"><span class="ih">What changes</span>
+    <div class="chg">${ic('inf', 's12')}<span><b>Phase 2 · Build</b> stays open when its tasks are accepted: idle, not done.</span></div>
+    <div class="chg">${ic('plus', 's12')}<span>New tasks join it and run as they are added, with the same pipelines, reports and acceptance.</span></div>
+    <div class="chg">${ic('build', 's12')}<span>Integration and a build run only when you or the lead ask, never as a phase barrier.</span></div>
+    <div class="chg">${ic('stopsq', 's12')}<span>You close the phase to return to standard.</span></div>
+    <div class="note">Unchanged: running tasks and their attempts, members, pipelines, the queued Phase 3 (the lead may fold it into the open phase with your approval).</div></div>
+  <div class="field" style="color:var(--dim)">Why keep standard? The lead receives this (optional)</div>
+  <div class="row"><span class="dim mono" style="font-size:10.5px" title="The answer applies to this request only">request 7f3a2c19 · this request only</span><span class="grow"></span><span class="btn">Keep standard</span><span class="btn pri" style="background:var(--free);border-color:var(--free);color:var(--freeText)">${ic('inf', 's12')}Switch to free</span></div>
+</div>` };
+
+/* 3. Graph of a free phase */
+const freeNodes = {
+  a: { x: 16, y: 14, id: 21, title: 'Refund webhook retries', st: 'active', role: 'backend', agent: 'deepseek', l2: 'Edit: webhooks/refund.rs', l2c: 'acc', bar: 'var(--accent)' },
+  b: { x: 16, y: 88, id: 22, title: 'Coupon rounding', st: 'review', role: 'frontend', agent: 'codex', l2: 'Review r1/3', bar: 'var(--s-review)' },
+  c: { x: 300, y: 14, id: 23, deps: '#21', title: 'Empty cart crash', st: 'pending', role: 'frontend', agent: 'codex', l2: 'waits for #21', mark: '<span class="dmark dm-new">NEW</span>' },
+  d: { x: 300, y: 88, id: 24, title: 'Integrate and build', st: 'pending', role: 'lead', agent: 'claude', l2: 'asked by you · 23:44', l2c: 'acc' },
+};
+V.graph = { w: 1440, h: 660, title: 'Graph · a free phase with the plan header',
+  cap: 'The header names the mode beside the phase: Free, Phase 4 · Support stream, its progress and the last build. A free phase’s tasks run as they are added (the NEW mark fades after a few minutes); accepted tasks fold into a summary row so the graph shows live work. Integrate &amp; build adds a lead task to the phase instead of a barrier. The finished standard phases keep their Standard chip.',
+  html: () => `
+${bar({ badge: B.running, mode: 'free', phase: 'Phase 4 · Support stream', stats: freeStats(9, 13), btns: freeBtns(false) })}
+<div class="twbody">
+  <div class="twmain">
+    <div class="twtool"><span class="seg"><span class="on">${ic('graph', 's12')}Graph</span><span>${ic('board', 's12')}Board</span><span>${ic('layers', 's12')}Layers</span></span><span class="btn sm">${ic('plus', 's12')}Task</span><span class="muted">New tasks join Phase 4 and start when their member is free</span><span class="grow"></span><span class="btn ghost sm">${ic('chevd', 's12')}Collapse all</span></div>
+    <div class="bscroll"><div class="bpage" style="width:auto">
+      ${doneStd(1, 'Phase 1 · Analysis', 1)}${doneStd(2, 'Phase 2 · Build', 6)}${doneStd(3, 'Phase 3 · Verify &amp; ship', 3)}
+      ${phase({ n: 4, name: 'Phase 4 · Support stream', badge: B.open, cls: 'free', mode: 'free', extra: `${bars(9, 13)}<span class="muted mono">9/13</span><span class="dim">open since 26 Oct · last build 23:10 · 2 accepted since</span>`,
+        sub: `<span class="okc">${ic('checkf', 's12')}</span><span>9 accepted</span><span class="dim">#10 #11 #12 #14 #15 #16 #17 #19 #20</span><span class="acc">Show</span>`,
+        body: graph(freeNodes, [['a', 'c']], 164) })}
+    </div></div>
+    <div class="feedbar"><span class="dim">${ic('chevr', 's12')}</span><b>Feed</b><span class="muted">23:44 You asked for integration and a build · #24 added to Phase 4 · 23:42 Lead added #23 Empty cart crash</span></div>
+  </div>
+  ${membersFree(false)}
+</div>` };
+
+/* 4. Board of a free phase */
+V.board = { w: 1760, h: 600, title: 'Board · a free phase',
+  cap: 'The same phase on the Board: the columns as today (U36’s In review and In test included). The phase header carries the Free chip, its open state and the build counter; the lead’s Integrate and build task sits in Pending like any task. Accepted keeps the newest cards and folds the rest.',
+  html: () => {
+    const c = (t) => card(t);
+    const cols = [
+      ['Pending', [c({ id: 23, deps: '#21', title: 'Empty cart crash', st: 'pending', role: 'frontend', agent: 'codex', l2: 'added 2m ago', l3: '<span class="dmark dm-new">NEW</span>' }),
+        c({ id: 24, title: 'Integrate and build', st: 'pending', role: 'lead', agent: 'claude', l2: 'asked by you · 23:44', l2c: 'acc', l3: `<span class="pill">${ic('build', 's10')}2 accepted since the 23:10 build</span>` })]],
+      ['Active', [c({ id: 21, title: 'Refund webhook retries', st: 'active', role: 'backend', agent: 'deepseek', l2: 'Edit: webhooks/refund.rs', l2c: 'acc' })]],
+      ['Problems', []],
+      ['Submitted', []],
+      ['In review', [c({ id: 22, title: 'Coupon rounding', st: 'review', role: 'frontend', agent: 'codex', l2: 'Frontend · attempt 1', l3: `${stg('review', 'r1/3')}${who('reviewer', 'claude')}<span class="grow"></span>${trk(['d', 'c', ''], '--s-review')}` })], 'rev'],
+      ['In test', [], 'tst'],
+      ['Accepted', [c({ id: 20, title: 'Refund email copy', st: 'accepted', role: 'frontend', agent: 'codex', l2: 'Accepted · 23:31', l2c: 'okc' }),
+        c({ id: 19, title: 'Coupon field loses focus', st: 'accepted', role: 'frontend', agent: 'codex', l2: 'Accepted · 23:22', l2c: 'okc' }),
+        '<div class="bempty">7 more accepted · Show</div>']],
+    ];
+    const board = cols.map(([n, cards, cls]) => `<div class="bcol ${cls || ''}"><div class="bh">${n}<span class="n">${n === 'Accepted' ? 9 : cards.length}</span></div>${cards.join('') || '<div class="bempty">—</div>'}</div>`).join('');
+    return `
+${bar({ badge: B.running, mode: 'free', phase: 'Phase 4 · Support stream', stats: freeStats(9, 13), btns: freeBtns(false) })}
+<div class="twbody">
+  <div class="twmain">
+    <div class="twtool"><span class="seg"><span>${ic('graph', 's12')}Graph</span><span class="on">${ic('board', 's12')}Board</span><span>${ic('layers', 's12')}Layers</span></span><span class="btn sm">${ic('plus', 's12')}Task</span><span class="grow"></span><span class="btn ghost sm">${ic('chevd', 's12')}Collapse all</span></div>
+    <div class="bscroll" style="overflow:hidden"><div class="bpage">
+      ${doneStd(3, 'Phase 3 · Verify &amp; ship', 3)}
+      ${phase({ n: 4, name: 'Phase 4 · Support stream', badge: B.open, cls: 'free', mode: 'free', extra: `${bars(9, 13)}<span class="muted mono">9/13</span><span class="dim">last build 23:10 · 2 accepted since</span>`,
+        body: `<div class="board7" style="grid-template-columns:repeat(7,232px)">${board}</div>` })}
+    </div></div>
+    <div class="feedbar"><span class="dim">${ic('chevr', 's12')}</span><b>Feed</b><span class="muted">23:44 You asked for integration and a build · #24 added to Phase 4</span></div>
+  </div>
+</div>`;
+  } };
+
+/* 5. An idle open phase */
+V.idle = { w: 1440, h: 600, title: 'An idle open phase',
+  cap: 'Every task of the free phase is accepted and nothing waits: the phase is idle, not done. The header says Idle beside the Free chip, the empty phase says why it stays open and offers the three next steps, and the members wait for a task. No Done state, no celebration, no next-phase draft.',
+  html: () => `
+${bar({ badge: B.idle, mode: 'free', phase: 'Phase 4 · Support stream', stats: freeStats(13, 13, '23:50', 1), btns: freeBtns(true) })}
+<div class="twbody">
+  <div class="twmain">
+    <div class="twtool"><span class="seg"><span class="on">${ic('graph', 's12')}Graph</span><span>${ic('board', 's12')}Board</span><span>${ic('layers', 's12')}Layers</span></span><span class="btn sm">${ic('plus', 's12')}Task</span><span class="grow"></span></div>
+    <div class="bscroll"><div class="bpage" style="width:auto">
+      ${doneStd(3, 'Phase 3 · Verify &amp; ship', 3)}
+      ${phase({ n: 4, name: 'Phase 4 · Support stream', badge: B.openIdle, cls: 'free idle', mode: 'free', extra: `${bars(13, 13)}<span class="muted mono">13/13</span><span class="dim">idle 41m · last build 23:50 · 1 accepted since</span>`,
+        sub: `<span class="okc">${ic('checkf', 's12')}</span><span>13 accepted</span><span class="dim">#10 – #24</span><span class="acc">Show</span>`,
+        body: `<div class="idlebox"><span class="mtile">${ic('inbox', 's16')}</span>
+          <div class="col" style="gap:4px"><b style="font-size:13px">Phase 4 is open and idle</b>
+            <span class="muted">A free phase does not close by itself. New work joins it as a task; the lead adds what the QA bot files.</span>
+            <div class="row" style="margin-top:6px"><span class="btn sm pri">${ic('plus', 's12')}Add task</span><span class="btn sm">${ic('build', 's12')}Integrate &amp; build</span><span class="btn sm">${ic('stopsq', 's12')}Close phase…</span></div></div></div>` })}
+    </div></div>
+    <div class="feedbar"><span class="dim">${ic('chevr', 's12')}</span><b>Feed</b><span class="muted">23:52 Lead accepted #23 Empty cart crash · Phase 4 is idle</span></div>
+  </div>
+  ${membersFree(true)}
+</div>` };
+
+/* 6. Close phase */
+V.close = { w: 1440, h: 600, title: 'Close phase · the owner ends the free phase',
+  cap: 'Only the owner closes a free phase; the team then plans in standard mode again. The dialog sums up the phase and offers the integration and build the phase has not had since its last build (on by default when tasks were accepted since). With tasks still running, Close phase is disabled and names them.',
+  html: () => V.idle.html() + `
+<div class="scrim"></div>
+<div class="dlg" style="top:140px;width:520px">
+  <div class="row" style="gap:10px"><span class="mtile">${ic('stopsq', 's16')}</span><div class="col" style="gap:1px"><b style="font-size:15px">Close Phase 4 · Support stream?</b><span class="muted">Free since 26 Oct · 13 tasks</span></div></div>
+  <div class="box"><div class="kv2">
+    <span class="k">Tasks</span><span class="v">13 accepted · none running or pending</span>
+    <span class="k">Last build</span><span class="v">23:50, from #24 · <span class="warn">1 accepted since: #23</span></span>
+    <span class="k">Then</span><span class="v">Standard planning. The lead plans the next phase for your approval; Phase 4 keeps its history.</span>
+  </div></div>
+  <label class="row" style="gap:8px;align-items:flex-start"><span class="cbx on" style="margin-top:2px"></span><span><b>Integrate and build first</b><br><span class="muted">The phase closes when the build passes; a failed build keeps it open and reaches the lead.</span></span></label>
+  <div class="row"><span class="grow"></span><span class="btn">Cancel</span><span class="btn pri">${ic('build', 's12')}Build and close</span></div>
+</div>` };
+
+/* 7. Where the mode shows */
+V.marks = { w: 1480, h: 560, title: 'The mode beside the phase · every place',
+  cap: 'Standard is quiet (outlined, muted); Free has its own color and the open-loop glyph. The chip sits beside the phase in the team header, in each phase header on Graph, Board and Layers, and on the session card’s team strip. hgs team status carries plan_mode.',
+  html: () => `<div style="padding:16px 18px;background:var(--bg);height:100%;display:flex;flex-direction:column;gap:14px">
+  <span class="ih">Team header</span>
+  <div class="frame2">${bar({ team: 'Orbit platform / checkout', badge: B.running, mode: 'std', phase: 'Phase 2 · Build', stats: stat('Tasks', '3/6', 4, 8), btns: `<span class="btn sm">${ic('pause', 's12')}Pause</span>` })}</div>
+  <div class="frame2">${bar({ badge: B.running, mode: 'free', phase: 'Phase 4 · Support stream', stats: freeStats(9, 13), btns: freeBtns(false) })}</div>
+  <span class="ih">Phase headers</span>
+  <div class="col" style="gap:6px">
+    ${phase({ n: 2, name: 'Phase 2 · Build', badge: B.running, cls: 'run', mode: 'std', extra: `${bars(3, 6)}<span class="muted mono">3/6</span>` })}
+    ${phase({ n: 4, name: 'Phase 4 · Support stream', badge: B.open, cls: 'free', mode: 'free', extra: `${bars(9, 13)}<span class="muted mono">9/13</span><span class="dim">last build 23:10 · 2 accepted since</span>` })}
+    ${phase({ n: 4, name: 'Phase 4 · Support stream', badge: B.openIdle, cls: 'free idle', mode: 'free', extra: `${bars(13, 13)}<span class="muted mono">13/13</span><span class="dim">idle 41m</span>` })}
+    ${phase({ n: 4, name: 'Phase 4 · Support stream', badge: B.done, mode: 'free', modeExtra: '· closed by you', extra: `${bars(13, 13)}<span class="muted mono">13/13</span><span class="dim">closed 00:12 · build 2.4.3</span>` })}
+  </div>
+  <div class="row" style="gap:22px;align-items:flex-start">
+    <div class="col"><span class="ih">Session card · team strip</span>
+      <div class="strip">${ic('graph', 's12')}<span class="mono muted">9/13</span><span class="tbadge tb-running" style="height:18px">${ic('play', 's10')}Running</span>${mode('free')}<span class="grow"></span><span class="muted">${ic('user', 's12')} 4</span></div>
+      <div class="strip">${ic('graph', 's12')}<span class="mono muted">13/13</span><span class="tbadge tb-idle" style="height:18px">${ic('inbox', 's10')}Idle</span>${mode('free')}<span class="grow"></span><span class="muted">${ic('user', 's12')} 4</span></div></div>
+    <div class="col"><span class="ih">hgs team status --json</span>
+      <div class="code mono">{ "team": "…", "status": "running",<br>&nbsp;&nbsp;<b>"plan_mode": "free"</b>, "phases": [ … ] }</div>
+      <span class="note">standard or free; an older host sends none: standard.</span></div>
+  </div>
+</div>` };
+
+/* ---------------------------------------------------------------- render */
+const params = new URLSearchParams(location.search);
+const theme = params.get('theme') || 'dark';
+const one = params.get('view');
+const root = document.getElementById('root');
+const frame = (k) => `<div class="app ${theme === 'light' ? 'light' : ''}" style="width:${V[k].w}px;height:${V[k].h}px">${V[k].html()}</div>`;
+if (one && V[one]) {
+  document.body.classList.add('shot');
+  if (theme === 'light') document.body.classList.add('lightpage');
+  root.innerHTML = frame(one);
+} else {
+  if (theme === 'light') document.body.classList.add('lightpage');
+  const other = theme === 'light' ? 'dark' : 'light';
+  root.innerHTML = `<div class="gal"><header><h1>U59 · Plan modes — mock-up</h1>
+    <span class="tgl"><a href="?theme=dark" class="${theme === 'dark' ? 'on' : ''}">Dark</a><a href="?theme=light" class="${theme === 'light' ? 'on' : ''}">Light</a></span></header>
+    <p class="lead">Free planning beside the standard mode: the lead proposes a mode when planning starts and the owner chooses; switching a running team to free needs the owner’s confirmation of that request; a free phase takes tasks as they come, is idle (not done) when they are accepted, builds when asked and closes only when the owner closes it. Every view has a PNG beside this file in both themes (<code>shots/&lt;view&gt;-dark.png</code>, <code>-light.png</code>). Sample data: the Orbit team from the UI prototype, after its 2.4 release.</p>
+    <nav>${Object.keys(V).map(k => `<a href="#${k}">${V[k].title}</a>`).join('')}</nav>
+    ${Object.keys(V).map(k => `<section id="${k}"><h2>${V[k].title}</h2><p class="cap">${V[k].cap}</p><div class="frame">${frame(k)}</div></section>`).join('')}</div>`;
+}
+document.querySelectorAll('[data-scroll]').forEach(e => { e.scrollLeft = +e.dataset.scroll; });
+</script>
+</body>
+</html>

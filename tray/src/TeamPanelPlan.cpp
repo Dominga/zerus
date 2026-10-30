@@ -42,6 +42,13 @@ void TeamPanel::savePlan(const Team &edited)
         scheduleRender();
         return;
     }
+    // U58: nor from a display copy without its cancelled tasks, which would
+    // drop them from the plan.
+    if (edited.cancelledHidden) {
+        m_notice = tr("The plan on screen hides cancelled tasks; your change was not sent. Try again in a moment.");
+        scheduleRender();
+        return;
+    }
     QJsonObject input = planInput(edited);
     input.insert("revision", edited.revision);
     act("plan", input);

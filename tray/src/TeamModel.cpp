@@ -1472,8 +1472,75 @@ QList<PhaseGroup> phaseGroups(const Team &team)
     return groups;
 }
 
+bool phaseCancelled(const Team &team, int phase)
+{
+    if (const auto *record = team.phase(phase); record && record->state == QLatin1String("discarded")) return false;
+    bool any = false;
+    for (const auto &task : team.tasks) {
+        if (task.phase != phase) continue;
+        if (task.status != QLatin1String("cancelled")) return false;
+        any = true;
+    }
+    return any;
+}
+
+int cancelledTasks(const Team &team)
+{
+    return int(std::count_if(team.tasks.cbegin(), team.tasks.cend(), [](const Task &task) { return task.status == QLatin1String("cancelled"); }));
+}
+
+Team withoutCancelled(const Team &team)
+{
+    if (!cancelledTasks(team)) return team;
+    Team shown = team;
+    shown.cancelledHidden = true;
+    QSet<int> gone, phases;
+    for (const auto &task : team.tasks) if (task.status == QLatin1String("cancelled")) gone.insert(task.id);
+    for (const auto &task : team.tasks) if (phaseCancelled(team, task.phase)) phases.insert(task.phase);
+    shown.tasks.erase(std::remove_if(shown.tasks.begin(), shown.tasks.end(), [&gone](const Task &task) { return gone.contains(task.id); }), shown.tasks.end());
+    shown.phases.erase(std::remove_if(shown.phases.begin(), shown.phases.end(), [&phases](const Phase &phase) { return phases.contains(phase.n); }), shown.phases.end());
+    for (auto &phase : shown.phases) phase.tasks.erase(std::remove_if(phase.tasks.begin(), phase.tasks.end(), [&gone](int id) { return gone.contains(id); }), phase.tasks.end());
+    shown.phaseSummary.erase(std::remove_if(shown.phaseSummary.begin(), shown.phaseSummary.end(), [&phases](const Team::PhaseSummary &summary) { return phases.contains(summary.n); }),
+                             shown.phaseSummary.end());
+    for (int id : gone) { shown.layers.remove(id); shown.cycle.remove(id); shown.ready.removeAll(id); }
+    return shown;
+}
+
+bool taskStarted(const Task &task)
+{
+    return std::any_of(task.attempts.cbegin(), task.attempts.cend(), [](const Attempt &attempt) { return attempt.state != QLatin1String("refused"); });
+}
+
+QList<MoveTarget> moveTargets(const Team &team, int id)
+{
+    QList<MoveTarget> targets;
+    const auto *task = team.task(id);
+    if (!task || task->finished() || taskStarted(*task)) return targets;
+    if (team.status != QLatin1String("planning") && team.status != QLatin1String("running") && team.status != QLatin1String("paused")) return targets;
+    QList<int> phases{1};
+    for (const auto &phase : team.phases) if (phase.n > 1 && phase.state != QLatin1String("discarded")) phases.append(phase.n);
+    std::sort(phases.begin(), phases.end());
+    phases.erase(std::unique(phases.begin(), phases.end()), phases.end());
+    for (int n : phases) {
+        if (n == task->phase) continue;
+        MoveTarget target;
+        target.phase = n;
+        if (const auto *record = team.phase(n)) target.title = record->title;
+        for (const auto &dep : task->deps)
+            if (const auto *found = team.task(dep.task); found && found->phase > n) {
+                target.blocked = tr("Depends on #%1 in phase %2; move it first").arg(found->id).arg(found->phase);
+                break;
+            }
+        targets.append(target);
+    }
+    return targets;
+}
+
 QString ownerPhaseState(const Team &team, const PhaseGroup &group)
 {
+    // U58: an older hgs sends no cancelled state; read it from the tasks, as
+    // the server does (before every other state).
+    if (phaseCancelled(team, group.n)) return QStringLiteral("cancelled");
     const auto *summary = team.phaseSummaryOf(group.n);
     if (summary && !summary->state.isEmpty()) return summary->state;
     // An hgs before U25 sends only the G9 status: approved and not started waits.

@@ -429,6 +429,10 @@ struct Team {
     // Only from `team status`: layers by task, tasks in a cycle, ready tasks,
     // plan errors and warnings.
     bool full = false;
+    // U58: a copy Graph, Board, Layers and the plan show without its cancelled
+    // work (withoutCancelled). It is for display only: a plan is never sent
+    // from it, or the hidden tasks would leave the plan.
+    bool cancelledHidden = false;
     QMap<int, int> layers;
     QSet<int> cycle;
     QList<int> ready;
@@ -582,6 +586,21 @@ struct PhaseGroup {
 };
 // The phases to show, in phase order; empty while the plan is phase 1 only.
 QList<PhaseGroup> phaseGroups(const Team &team);
+// U58: a phase whose tasks are all cancelled reads cancelled (a discarded or an
+// empty phase does not). Graph, Board, Layers and the plan hide cancelled tasks
+// and those phases unless the owner turns Show cancelled on; a team with no
+// cancelled task is shown as it is.
+bool phaseCancelled(const Team &team, int phase);
+int cancelledTasks(const Team &team);
+Team withoutCancelled(const Team &team);
+// U58: the phases a task that has not started (no attempt that reached its
+// member: a refused one never did) may move to with `move-task`, keeping its
+// number: phase 1 and every phase record that is not discarded, except its own.
+// `blocked` is why a target refuses it - a dependency that stays in a later
+// phase - and empty when it may move there.
+struct MoveTarget { int phase = 0; QString title, blocked; };
+bool taskStarted(const Task &task);
+QList<MoveTarget> moveTargets(const Team &team, int task);
 // G6: the team's progress in two small numbers instead of one over every task.
 // The first bar follows the phase in work — the lowest phase that is not a
 // draft and still has open tasks — or, when none is in work, the next draft

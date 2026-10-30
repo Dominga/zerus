@@ -49,7 +49,7 @@ class TeamPipelineTest {
         assertEquals(TeamStageChip("review", "Review waits", "", TeamStageTone.Review, outlined = true), chips[0])
         assertEquals(TeamStageChip("test", "Test waits", "", TeamStageTone.Test, outlined = true), chips[1])
         assertEquals(TeamStageChip("review", "Review returned r1", "", TeamStageTone.Warn, outlined = true), chips[2])
-        assertEquals(TeamStageChip("accept", "Lead decides · 3 rounds", "", TeamStageTone.Warn, outlined = false), chips[3])
+        assertEquals(TeamStageChip("accept", "Lead decides · 3 findings", "", TeamStageTone.Warn, outlined = false), chips[3])
         // A member that took the stage: its round of the maximum, and who.
         val delivered = JSONObject(tasks[1].toString())
         delivered.getJSONObject("pipeline_run").getJSONArray("runs").getJSONObject(1).put("state", "delivered").put("member", "qa")
@@ -57,9 +57,12 @@ class TeamPipelineTest {
         // Reported with every stage passed: the lead's decision, or Auto.
         val passed = JSONObject(tasks[1].toString()).put("status", "submitted")
         passed.getJSONObject("pipeline_run").getJSONArray("runs").getJSONObject(1).put("state", "passed")
-        assertEquals(TeamStageChip("accept", "Lead decides", "", TeamStageTone.Accept, outlined = false), TeamPipeline.chip(passed))
+        assertEquals(TeamStageChip("accept", "Lead", "", TeamStageTone.Accept, outlined = false), TeamPipeline.chip(passed))
         passed.getJSONObject("pipeline_run").put("accept", "auto")
         assertEquals("Auto", TeamPipeline.chip(passed)!!.caption)
+        // #538 L8: the desktop's acceptance names (TeamStages.cpp:238 with TeamModel.cpp stageName).
+        passed.getJSONObject("pipeline_run").put("accept", "sub_lead")
+        assertEquals(TeamStageChip("accept", "Sub-lead", "", TeamStageTone.Accept, outlined = false), TeamPipeline.chip(passed))
         // No pipeline, or a finished task: no chip.
         assertNull(TeamPipeline.chip(JSONObject().put("status", "in_progress")))
         assertNull(TeamPipeline.chip(JSONObject(tasks[1].toString()).put("status", "accepted")))
@@ -77,6 +80,39 @@ class TeamPipelineTest {
         assertEquals(listOf("Review · round 1", "Review · round 2", "Review · round 3"), limit.map { it.title })
         assertTrue(limit.all { it.verdict == "RETURN" && it.findings == listOf("Page size is unbounded") })
         assertEquals(listOf(1800000800.0, 1800001800.0, 1800002800.0), limit.map { it.endedAt })
-        assertEquals(listOf("WAITING", "RUNNING", "PASS", "RETURN", "SKIPPED", "ENDED"), TeamStageState.entries.map { TeamPipeline.verdict(it) })
+        assertEquals(listOf("WAITING", "RUNNING", "PASS", "RETURN", "SKIPPED", "REVOKED", ""), TeamStageState.entries.map { TeamPipeline.verdict(it) })
+    }
+
+    /** #538 N10: the round-limit chip only while the last round returned the task (desktop TeamStages.cpp:181). */
+    @Test fun aRoundThatPassedAfterTheLimitIsNotOutOfRounds() {
+        val passed = JSONObject(tasks[3].toString())
+        val runs = passed.getJSONObject("pipeline_run").put("round", 4).getJSONArray("runs")
+        runs.put(JSONObject(runs.getJSONObject(2).toString()).put("id", "00000000-0000-4000-9000-000000004004")
+            .put("attempt", 4).put("round", 4).put("state", "passed").put("findings", org.json.JSONArray()))
+        assertEquals(3, TeamPipeline.run(passed)!!.returned)
+        assertEquals(TeamStageChip("accept", "Lead", "", TeamStageTone.Accept, outlined = false), TeamPipeline.chip(passed))
+    }
+
+    /** #538 L8: the limit chip counts the findings, "1 finding" in the singular (TeamStages.cpp:228). */
+    @Test fun theLimitChipCountsFindings() {
+        val one = JSONObject(tasks[3].toString())
+        val runs = one.getJSONObject("pipeline_run").getJSONArray("runs")
+        for (i in 0 until 2) runs.getJSONObject(i).put("findings", org.json.JSONArray())
+        assertEquals("Lead decides · 1 finding", TeamPipeline.chip(one)!!.caption)
+        runs.getJSONObject(0).put("findings", org.json.JSONArray(listOf("a", "b")))
+        assertEquals("Lead decides · 3 findings", TeamPipeline.chip(one)!!.caption)
+    }
+
+    /** #538 L8: a state this client does not know is closed, never a waiting stage (TeamModel.h:228). */
+    @Test fun anUnknownStageStateIsClosed() {
+        assertEquals(TeamStageState.Unknown, TeamStageState.of("paused"))
+        assertEquals(TeamStageState.Unknown, TeamStageState.of(""))
+        assertFalse(TeamStageState.Unknown.open)
+        val unknown = JSONObject(tasks[0].toString())
+        unknown.getJSONObject("pipeline_run").getJSONArray("runs").getJSONObject(0).put("state", "paused")
+        assertNull(TeamPipeline.run(unknown)!!.openRun)
+        assertNull(TeamPipeline.chip(unknown))
+        assertEquals(listOf("Review · round 1" to ""), TeamPipeline.verdicts(unknown).map { it.title to it.verdict })
+        assertEquals(TeamStageTone.Quiet, TeamPipeline.verdicts(unknown).single().tone)
     }
 }

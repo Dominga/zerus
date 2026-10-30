@@ -171,6 +171,7 @@ TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *p
         return team ? m_panel->problemActions(*team, member, status) : nullptr;
     };
     QObject::connect(m_teams, &TeamController::teamsChanged, this, [this] { scheduleRender(); });
+    QObject::connect(m_teams, &TeamController::showCancelledChanged, this, [this] { scheduleRender(); });
     QObject::connect(m_teams, &TeamController::watchedChanged, this, [this] {
         if (const auto *team = m_teams->watched()) Teams::AccountMove::observe(m_move, *team);
         renderAccountMove();
@@ -368,7 +369,9 @@ void TeamWorkspace::render()
             mv->addWidget(planModeCard(*team));
             lv->addWidget(modes);
         }
-        lv->addWidget(canvas(*team), 1);
+        // U58: Graph, Board and Layers leave out cancelled tasks and the phases
+        // they emptied unless Show cancelled is on; edits read the whole team.
+        lv->addWidget(canvas(m_teams->showCancelled() ? *team : withoutCancelled(*team)), 1);
         if (const auto &items = m_teams->inbox(); !items.isEmpty()) lv->addWidget(inboxStrip(*team, items));
         lv->addWidget(feed(*team));
         if (m_left) { m_leftHost->removeWidget(m_left); retire(m_left); }
@@ -1317,6 +1320,15 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
                                                                               b->isChecked() ? c.accent : c.text2)));
         }
         h->addWidget(filter);
+    }
+    // U58: only a team with cancelled work offers to show it.
+    if (const int cancelled = cancelledTasks(team)) {
+        auto *show = button(m_teams->showCancelled() ? tr("Hide cancelled (%1)").arg(cancelled) : tr("Show cancelled (%1)").arg(cancelled), "teamWorkspaceShowCancelled");
+        show->setCheckable(true); show->setChecked(m_teams->showCancelled()); show->setProperty("chip", true);
+        show->setProperty("cancelled", cancelled);
+        show->setToolTip(m_teams->showCancelled() ? tr("Cancelled tasks and the phases they emptied are shown") : tr("Cancelled tasks and the phases they emptied are hidden"));
+        QObject::connect(show, &QPushButton::clicked, this, [this](bool on) { m_teams->setShowCancelled(on); });
+        h->addWidget(show);
     }
     if (!m_focus.isEmpty()) {
         auto *chip = button(tr("Member: %1  ×").arg(team.roleOf(m_focus)), "teamWorkspaceFocus"); chip->setProperty("chip", true);
@@ -2330,7 +2342,11 @@ void TeamWorkspace::sendLaneChanges(const Team &team, int phase, const QList<QPa
     // Planning edits the plan with `plan`; a running team's draft phase edits its
     // tasks with edit-draft (the server takes `plan` only in Planning).
     if (team.status == "planning") {
-        Team edited = team;
+        // U58: the canvas may show a copy without cancelled tasks; the plan is
+        // sent from the whole team.
+        const auto *whole = planTeam(team.id);
+        if (!whole) return;
+        Team edited = *whole;
         for (const auto &[id, lane] : updates) {
             for (auto &candidate : edited.tasks) {
                 if (candidate.id != id) continue;

@@ -730,6 +730,21 @@ void TeamTaskCard::rebuild()
     item(tr("Hold…"), !decided && task->status == "pending" && !task->held,
          task->held ? tr("Already held") : decided ? decidedWhy : tr("Only a pending task can be held"), holdForm);
     item(tr("Release"), task->held, task->held ? QString() : tr("Not held"), releaseNow);
+    // U58: a task that has not started moves to another phase and keeps its
+    // number; a target its dependencies forbid says why.
+    if (const auto targets = moveTargets(m_team, id); !targets.isEmpty()) {
+        menu->addSeparator();
+        for (const auto &target : targets) {
+            QString title = target.title; title.replace(QLatin1Char('&'), QStringLiteral("&&"));
+            item(title.isEmpty() ? tr("Move to phase %1").arg(target.phase) : tr("Move to phase %1 · %2").arg(target.phase).arg(title),
+                 target.blocked.isEmpty(), target.blocked, [this, id, phase = target.phase, revision = m_team.revision] {
+                     if (act) act("move-task", {{"task", id}, {"phase", phase}, {"revision", revision}});
+                 });
+            menu->actions().last()->setObjectName(QStringLiteral("teamTaskMoveToPhase%1").arg(target.phase));
+            menu->actions().last()->setProperty("phase", target.phase);
+        }
+        menu->addSeparator();
+    }
     if (!submitted && !task->inStage()) {
         item(tr("Accept"), false, decided ? decidedWhy : tr("Nothing to accept yet: no report"), accept);
         item(tr("Reject with comment…"), false, decided ? decidedWhy : tr("Nothing to reject yet: no report"), rejectForm);

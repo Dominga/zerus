@@ -881,7 +881,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-pub(crate) const OWNER_SETTINGS: [&str; 17] = [
+pub(crate) const OWNER_SETTINGS: [&str; 18] = [
     "approval",
     "phase_approval",
     "max_members",
@@ -904,6 +904,8 @@ pub(crate) const OWNER_SETTINGS: [&str; 17] = [
     "lead_restarts_stuck",
     // U62: the owner's override of the project's test configuration.
     "tests",
+    // U62: only the owner says who may start a full test run.
+    "full_tests",
 ];
 
 fn ensure_lead_settings(old: &Settings, new: &Settings, actor: &Actor, on_word: bool) -> anyhow::Result<()> {
@@ -4402,6 +4404,21 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         // U59: the owner closes a free phase explicitly; the team continues in
         // standard mode. Integration and a build are ordinary lead tasks, so the
         // close creates none and is never a barrier.
+        "full-tests" => {
+            // U62: the owner's one-time permission for one full run, bound to
+            // the release it is for; the run that uses it clears it.
+            ensure!(matches!(actor, Actor::Human), "Only you grant a full test run");
+            let release = text(input, "release").trim().to_owned();
+            if input["revoke"].as_bool() == Some(true) || release.is_empty() {
+                team.full_tests_grant = None;
+                events.push(Event::new("full_tests_grant_revoked", json!({"by":"You"})));
+                return Ok(json!({"status":"revoked"}));
+            }
+            ensure!(release.chars().count() <= 120, "A release is at most 120 characters");
+            team.full_tests_grant = Some(super::model::FullTestsGrant { release: release.clone(), at: now(), by: "You".into() });
+            events.push(Event::new("full_tests_granted", json!({"release":release})));
+            Ok(json!({"status":"granted","release":release}))
+        }
         "start-ahead" => {
             // U61: the lead lets idle members start an auto-accepted draft now;
             // its first hand-out accepts the phase, so it is undoable only
@@ -6782,6 +6799,25 @@ mod tests {
         assert!(qa.restart_pending);
         assert!(qa.stuck.is_some());
         assert!(events.iter().any(|event| event.kind == "member_restart_requested"));
+    }
+
+    /// U62 (#715): only the owner grants a full test run, one release at a time.
+    #[test]
+    fn only_the_owner_grants_a_full_test_run() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        let error = apply(&mut team, "full-tests", &json!({"release":"v1.57.0"}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Only you"), "{error}");
+        let receipt = apply(&mut team, "full-tests", &json!({"release":"v1.57.0"}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!((receipt["status"].as_str(), receipt["release"].as_str()), (Some("granted"), Some("v1.57.0")));
+        assert_eq!(team.full_tests_grant.as_ref().unwrap().release, "v1.57.0");
+        assert!(events.iter().any(|event| event.kind == "full_tests_granted"));
+        let revoked = apply(&mut team, "full-tests", &json!({"revoke":true}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(revoked["status"], "revoked");
+        assert!(team.full_tests_grant.is_none());
     }
 
     #[test]

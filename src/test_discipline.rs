@@ -93,6 +93,18 @@ pub fn load(root: &Path, team: Option<&str>) -> Result<config::Loaded> {
     config::load(root, overrides.as_ref()).map_err(|error| fail(format!("{error:#}")))
 }
 
+/// U62 (#715): the recorded seconds of a full run (the map's whole set), for a
+/// team's full-run refusal; none when the project has no map.
+pub fn full_seconds(root: &Path, team: Option<&str>) -> Result<Option<f64>> {
+    let loaded = load(root, team)?;
+    let config = &loaded.config;
+    let Some(map) = read_map(root, config)? else { return Ok(None) };
+    let durations = durations::Durations::read(&root.join(&config.map.durations))
+        .map_err(|error| fail(format!("{error:#}")))?;
+    let selection = affected::select(root, config, &map, &durations, &[], &affected::Hunks::new(), true);
+    Ok(Some(selection.seconds))
+}
+
 pub fn dispatch(args: &[String]) -> Result<i32> {
     let Some((action, args)) = args.split_first() else { return Err(usage()) };
     let options = options(args)?;

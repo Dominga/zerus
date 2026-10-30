@@ -26,8 +26,7 @@ Lead, from your own session:
   hgs team answer. Allow only what the task needs; else ask the owner.
   When a member stops: message, retry, reassign or ask the owner.
   Phases, extend, finish: hgs guide team-lead
-  A DeepSeek (dsh) lead acts as Lead, not the owner: owner-only decisions
-  are refused to it.
+  Tests: hgs guide team-tests; a dsh lead is not the owner.
 
 Member: the task message names your task and attempt. Do it, then report once:
   {"request_id":"UUID","team":"ID","task":N,"attempt":"ATTEMPT","text":"..."} |

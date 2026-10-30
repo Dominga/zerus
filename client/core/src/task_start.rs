@@ -54,7 +54,9 @@ fn pending(record: &Value) -> bool {
 fn fingerprint(record: &Value) -> String {
     format!("{:x}", Sha256::digest(record.to_string().as_bytes()))
 }
-fn checked(record: &Value, project: &str, task: &str) -> Result<(), String> {
+/// Pure structural identity check, shared with the read-only migration
+/// adapter. Success carries no delivery, recovery or release authority.
+pub(crate) fn checked(record: &Value, project: &str, task: &str) -> Result<(), String> {
     let plan = &record["intent"]["plan"];
     if record["schema"] != 1
         || !canonical_uuid(record["id"].as_str().unwrap_or(""))

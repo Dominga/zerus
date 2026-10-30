@@ -909,3 +909,9 @@ mod tests {
         );
     }
 }
+
+/// Whether this build includes the native recorder; no device is opened.
+#[tauri::command]
+pub fn voice_support() -> Value {
+    serde_json::json!({"available":cfg!(feature = "media"), "reason":"Voice recording is unavailable in this build."})
+}

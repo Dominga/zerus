@@ -1,4 +1,9 @@
 import { Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
+import { createVoice, voicePort } from "../../store/voice";
+import { VoiceToolbar, VoicePreview } from "./VoiceControls";
+import { pageHidden } from "../../store/visibility";
+import { flag } from "../../store/settings";
+import { subagentOpen } from "../../store/ui";
 import { Icon } from "../lib/icons";
 import { composer } from "../../store/composer";
 import { suggestions, suggestedInput } from "../../store/suggestions";
@@ -149,8 +154,16 @@ function CacheChip(props: { compact: boolean }) {
 export function Composer() {
   const s = () => selected()!;
   const v = () => composer.view();
+  const voice = createVoice(voicePort);
+  onCleanup(() => { void voice.close(); });
   const online = () => !computerOffline(s().computer);
   const details = createMemo(() => detailsFor(s(), online(), followedFor(s().key)));
+  createEffect(() => {
+    const view = v(), row = s(), d = details();
+    voice.follow(view ? { handle: view.handle, key: view.key, visible: !pageHidden() && !subagentOpen() && view.input_visible,
+      revision: JSON.stringify([view.loaded, view.sending, view.waiting, view.attaching, view.available, view.block_reason, view.inspect_error, row.runId, row.conversationId, d?.run_id, d?.conversation_id,
+        flag("speech/video_mode"), flag("speech/preview_before_send")]) } : undefined);
+  });
   const act = createMemo(() => actionEntries(s(), details()));
   const mark = createMemo(() => markReadChip(s(), computerFresh(s().computer)));
   // Qt's compaction indicator (ActivityView.cpp 1899-1901) over the details it is given (3974-3975: an
@@ -218,6 +231,15 @@ export function Composer() {
   };
 
   onMount(() => {
+    const stopVoice = (event: KeyboardEvent) => {
+      if (!voice.shown()?.recording || event.isComposing || document.querySelector("dialog[open]")) return;
+      if (event.code !== "Space" && event.key !== "Escape") return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      void voice.input({ kind: "stop", forget_send: false });
+    };
+    const blurVoice = () => { if (voice.shown()?.recording) void voice.input({ kind: "stop", forget_send: true }); };
+    addEventListener("keydown", stopVoice, true); addEventListener("blur", blurVoice);
+    onCleanup(() => { removeEventListener("keydown", stopVoice, true); removeEventListener("blur", blurVoice); });
     // Composer chords go through the window router (store/shortcuts.ts) while the focus is in the field.
     const stops = [onCommand("message.send", () => { void composer.send(); }, editor)];
     const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(() => setCompact(root.clientWidth < COMPACT_WIDTH * contentScale()));
@@ -246,7 +268,7 @@ export function Composer() {
       <ResizeHandle edge hidden={!input()} />
       <div class="cmp-toolbar">
         <AttachmentsChip compact={compact()} />
-        {/* The voice slot: Task 13. */}
+        <VoiceToolbar voice={voice} compact={compact()} />
         <Show when={mark().active}>
           <button type="button" class="tchip accent" classList={{ icon: compact() }} title={mark().detail} aria-label="Mark as read"
             onClick={(e) => {
@@ -276,6 +298,7 @@ export function Composer() {
         <Show when={v()}><CacheChip compact={compact()} /></Show>
         <SessionUsageChip />
       </div>
+      <VoicePreview voice={voice} />
       <textarea ref={editor} class="cmp-editor" hidden={!input()} style={{ height: `${editorHeight() * contentScale()}px` }} aria-label="Message to selected agent"
         placeholder={suggestion() || "Message this agent…"} readOnly={composer.locked()} disabled={!v()} value={composer.text()} title={editorTip()}
         onInput={(e) => { const c = caret(); composer.input(e.currentTarget.value, c.anchor, c.position); }}

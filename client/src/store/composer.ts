@@ -191,7 +191,7 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
     const v = view();
     const h = v?.handle;
     return closing() || opening() > 0 || (h !== undefined && (pending.has(h) || calling.has(h))) || handBack() !== undefined || starting() || question()
-      || !v?.loaded || v.attaching || v.sending || !!v.waiting;
+      || !v?.loaded || v.attaching || v.sending || !!v.recording || !!v.waiting;
   };
   const locked = () => operationLocked() || !!view()?.session_blocks_input;
   const ordered = () => { const s = selection(); return { start: Math.min(s.start, s.end), end: Math.max(s.start, s.end) }; };

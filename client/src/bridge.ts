@@ -846,3 +846,24 @@ export const terminationCleanupKeep = (revision: number) => desktop<import("./st
 export const terminationCleanupInspect = (id: string, file = "", offset = 0) => desktop<import("./store/terminationCleanup").Inspection>("termination_cleanup_inspect", { id, file, offset });
 export const onTerminationCleanupChanged = (changed: () => void) => inTauri() ? listen("termination-cleanup-changed", changed) : Promise.resolve(() => {});
 export const onTerminationFolderRemoved = (changed: (label: string) => void) => inTauri() ? listen<string>("termination-folder-removed", (e) => changed(e.payload)) : Promise.resolve(() => {});
+
+/** Voice owns one native driver per mounted main composer; only Play reads a raw preview copy. */
+export async function voiceOpen(key: string, out: (event: import("./store/voice").VoiceOut) => void, frame: (bytes: Uint8Array) => void): Promise<void> {
+  if (!inTauri()) throw "Voice recording needs the desktop app.";
+  const support = await invoke<{ available: boolean; reason: string }>("voice_support");
+  if (!support.available) throw support.reason;
+  const events = new Channel<import("./store/voice").VoiceOut>();
+  events.onmessage = out;
+  const frames = new Channel<ArrayBuffer | number[]>();
+  frames.onmessage = (bytes) => frame(bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : Uint8Array.from(bytes));
+  await invoke("voice_open", { key, events, frames });
+}
+export const voiceInput = (key: string, handle: number, input: import("./store/voice").VoiceInput) => desktop<void>("voice_input", { key, handle, input });
+export const voiceClose = (key: string) => desktop<void>("voice_close", { key });
+export async function voicePreview(key: string, id: string): Promise<ArrayBuffer> {
+  const reply = await desktop<ArrayBuffer | number[]>("voice_preview", { key, id });
+  return reply instanceof ArrayBuffer ? reply : Uint8Array.from(reply).buffer;
+}
+export const voiceVideo = () => desktop<{ available: boolean; reason: string | null }>("voice_video", {});
+export const voicePermission = () => desktop<{ text: string; can_open: boolean }>("voice_permission", {});
+export const voiceOpenSettings = () => desktop<void>("voice_open_settings", {});

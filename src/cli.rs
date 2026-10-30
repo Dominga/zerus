@@ -48,9 +48,11 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs mobile-peers --json        guarded direct-peer discovery (mobile-peer ABI 1)
        hgs approval-log begin|finish|list|detail  local automatic-approval journal (JSON stdin)
        hgs desktop serve|status [--json]   per-user background desktop service
+       hgs desktop revoke --json          revoke desktop writers before Qt rollback
        hgs desktop watch|request --json    private local desktop-v1 IPC
        hgs desktop registration --json    preview this user's passive service definition
        Desktop service ABI: desktop-v1
+        Desktop revoke ABI: desktop-revoke-v1
        hgs mobile-peer --json         guarded direct-peer native request from JSON stdin
        hgs [@host] voice <session> --json  send and inspect persistent voice messages (JSON stdin; voice-video-v1)
        hgs [@host] speech --json      host speech providers and durable jobs (JSON stdin)

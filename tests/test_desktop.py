@@ -394,15 +394,200 @@ class Desktop(unittest.TestCase):
             db.execute('PRAGMA user_version=1')
         database.chmod(0o600)
         process, status = self.serve()
-        self.assertEqual(status['schema'], 2)
+        self.assertEqual(status['schema'], 3)
         self.assertEqual(status['generation'], 8)
         self.assertEqual(status['configuration'], configuration)
         self.assertTrue(status['effect_journal']['revoked'])
         self.assertEqual(status['effect_journal']['attempts']['reserved'], 0)
         self.stop(process)
         with closing(sqlite3.connect(database)) as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 2)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 3)
             self.assertEqual(db.execute('SELECT configuration FROM service').fetchone()[0], configuration)
+
+    def test_revoke_without_handoff_or_service_writes_nothing(self):
+        help_result = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True, timeout=5)
+        self.assertEqual(help_result.returncode, 0, help_result.stderr)
+        self.assertIn('Desktop revoke ABI: desktop-revoke-v1', help_result.stdout)
+        self.assertFalse(self.state.exists())
+        request_id = str(uuid.uuid4())
+        result = self.cli('desktop', 'revoke', '--json', '--request-id', request_id, '--reason', 'rollback')
+        self.assertEqual(result['handoff'], 'none')
+        self.assertFalse(result['applicable'])
+        self.assertTrue(result['nothing_written'])
+        self.assertTrue(result['revoked'])
+        self.assertEqual(result['request_id'], request_id)
+        self.assertFalse(self.state.exists())
+        self.assertFalse((self.root / 'unexpected-tool').exists())
+        # Pre-existing native state or an unused desktop folder stays unchanged.
+        self.state.mkdir(mode=0o700)
+        preserved = self.state / 'foreign-state'
+        preserved.write_text('preserved')
+        for desktop in (False, True):
+            if desktop:
+                self.desktop.mkdir(mode=0o700)
+            self.assertEqual(self.cli('desktop', 'revoke', '--json', '--request-id', request_id, '--reason', 'rollback'), result)
+            self.assertEqual(preserved.read_text(), 'preserved')
+            if desktop:
+                self.assertEqual(list(self.desktop.iterdir()), [])
+        orphan = self.desktop / 'state.sqlite3-wal'
+        orphan.write_bytes(b'preserved orphan')
+        self.cli('desktop', 'revoke', '--json', ok=False)
+        self.assertEqual(orphan.read_bytes(), b'preserved orphan')
+        self.assertFalse((self.desktop / 'owner.lock').exists())
+
+    def test_absent_service_with_existing_state_revokes_without_starting_anything(self):
+        process, _ = self.serve()
+        self.stop(process)
+        request_id = str(uuid.uuid4())
+        result = self.cli('desktop', 'revoke', '--json', '--request-id', request_id, '--reason', 'rollback')
+        self.assertTrue(result['revoked'])
+        self.assertTrue(result['checkpointed'])
+        self.assertTrue(result['durable'])
+        self.assertEqual(result['request_id'], request_id)
+        self.assertIsNone(result['writer_epoch'])
+        self.assertFalse((self.desktop / 'handoff-v1.json').exists())
+        self.assertFalse((self.desktop / 'service.sock').exists())
+        self.assertFalse(self.cli('desktop', 'status', '--json')['running'])
+        self.assertEqual(self.cli('desktop', 'revoke', '--json', '--request-id', request_id, '--reason', 'rollback'), result)
+        self.assertFalse((self.root / 'unexpected-tool').exists())
+
+    def test_live_revoke_preserves_import_identity_and_has_an_exact_receipt(self):
+        path, record, marker = self.import_evidence()
+        before_record = record.read_bytes()
+        service, status = self.serve()
+        request_id = str(uuid.uuid4())
+        result = self.cli('desktop', 'revoke', '--json', '--request-id', request_id, '--reason', 'rollback')
+        self.assertTrue(result['revoked'])
+        self.assertTrue(result['checkpointed'])
+        self.assertEqual(result['writer_epoch'], marker['writer_epoch'])
+        marker['phase'] = 'revoked'
+        self.assertEqual(json.loads(path.read_text()), marker)
+        self.assertEqual(record.read_bytes(), before_record)
+        query = dict(op='revoke_status', request_id=request_id)
+        self.assertEqual(self.cli('desktop', 'request', '--json', data=query), result)
+        current = self.cli('desktop', 'status', '--json')
+        self.assertEqual(current['epoch'], status['epoch'])
+        self.assertEqual(current['migration']['reason'], 'revoked')
+        self.assertEqual(current['effect_journal']['reason'], 'manual_rollback')
+        self.assertFalse(current['writers_enabled'])
+        self.stop(service)
+        self.serve()
+        self.assertEqual(self.cli('desktop', 'request', '--json', data=query), result)
+        self.assertFalse((self.root / 'unexpected-tool').exists())
+
+    def test_revoke_replay_conflict_and_later_epoch_refuse_success(self):
+        path, _, marker = self.import_evidence()
+        self.serve()
+        request_id = str(uuid.uuid4())
+        args = ['desktop', 'revoke', '--json', '--request-id', request_id]
+        self.assertTrue(self.cli(*args)['revoked'])
+        refused = self.cli(*args, '--reason', 'rollback', ok=False)
+        self.assertEqual(json.loads(refused.stdout)['code'], 'request_conflict')
+        marker['writer_epoch'] = str(uuid.uuid4())
+        path.write_text(json.dumps(marker))
+        before = path.read_bytes()
+        refused = self.cli(*args, ok=False)
+        self.assertEqual(json.loads(refused.stdout)['code'], 'writer_epoch_changed')
+        self.assertEqual(path.read_bytes(), before)
+        self.assertTrue(self.cli('desktop', 'revoke', '--json')['revoked'])
+
+    @unittest.skipIf(os.name == 'nt', 'Unix raw-client disconnect fixture')
+    def test_revoke_disconnect_reconciles_only_the_original_request(self):
+        self.import_evidence()
+        _, status = self.serve()
+        request_id = str(uuid.uuid4())
+        command = dict(op='revoke', request_id=request_id, reason='rollback')
+        hello = dict(abi='desktop-v1', configuration=status['configuration'], op='request', request=command)
+        database = self.desktop / 'state.sqlite3'
+        with closing(sqlite3.connect(database)) as reader, closing(sqlite3.connect(database)) as observer:
+            reader.execute('BEGIN')
+            reader.execute('SELECT generation FROM service').fetchone()
+            with socket.socket(socket.AF_UNIX) as client:
+                client.connect(str(self.desktop / 'service.sock'))
+                client.sendall(json.dumps(hello).encode() + b'\n')
+                # Pin actual durable admission, keeping checkpoint blocked so
+                # closing the socket loses the result after acceptance. Closing
+                # before hello was read need not admit anything on macOS.
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    row = observer.execute('SELECT state FROM desktop_commands WHERE request_id=?', (request_id,)).fetchone()
+                    if row == ('prepared',):
+                        break
+                    time.sleep(0.01)
+                else:
+                    self.fail('revoke was not durably admitted')
+            reader.execute('ROLLBACK')
+        # Losing the response is not permission to invent a new request. The
+        # actor finishes independently, and an exact read finds that receipt.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            result = self.cli('desktop', 'request', '--json', data=dict(op='revoke_status', request_id=request_id))
+            if result.get('checkpointed'):
+                break
+            time.sleep(0.02)
+        else:
+            self.fail('disconnected revoke did not settle')
+        self.assertEqual(self.cli('desktop', 'revoke', '--json', '--request-id', request_id, '--reason', 'rollback'), result)
+        with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_commands').fetchone()[0], 1)
+
+    def test_revoke_refuses_newer_marker_and_newer_database_without_repair(self):
+        path, _, marker = self.import_evidence()
+        marker['version'] = 2
+        path.write_text(json.dumps(marker))
+        before = path.read_bytes()
+        refused = self.cli('desktop', 'revoke', '--json', ok=False)
+        self.assertEqual(json.loads(refused.stdout)['code'], 'unsupported_handoff')
+        self.assertEqual(path.read_bytes(), before)
+        database = self.desktop / 'state.sqlite3'
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute('PRAGMA user_version=999')
+        before = database.read_bytes()
+        self.cli('desktop', 'revoke', '--json', ok=False)
+        self.assertEqual(database.read_bytes(), before)
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX owner-lock contention fixture')
+    def test_offline_revoke_cannot_bypass_a_live_or_unreachable_owner(self):
+        import fcntl
+        self.desktop.mkdir(parents=True, mode=0o700)
+        self.state.chmod(0o700)
+        lock = self.desktop / 'owner.lock'
+        with lock.open('w') as owner:
+            lock.chmod(0o600)
+            fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            refused = self.cli('desktop', 'revoke', '--json', ok=False)
+            self.assertIn('another desktop service', refused.stderr)
+            self.assertFalse((self.desktop / 'state.sqlite3').exists())
+        self.assertTrue(self.cli('desktop', 'revoke', '--json')['revoked'])
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX handoff-lock contention fixture')
+    def test_live_revoke_refuses_a_busy_handoff_without_acceptance(self):
+        import fcntl
+        self.import_evidence()
+        self.serve()
+        path = self.desktop / 'handoff.lock'
+        with path.open('r+') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            refused = self.cli('desktop', 'revoke', '--json', ok=False)
+            response = json.loads(refused.stdout)
+            self.assertFalse(response['accepted'])
+            self.assertFalse(response['revoked'])
+            self.assertEqual(response['code'], 'handoff_unavailable')
+        self.assertTrue(self.cli('desktop', 'revoke', '--json')['revoked'])
+
+    def test_revoke_strict_validation_and_status_never_admit_an_effect(self):
+        self.serve()
+        for args in [[], ['--json', '--json'], ['--json', '--request-id', 'bad'],
+                     ['--json', '--reason', 'automatic'], ['--json', '--enabled']]:
+            self.cli('desktop', 'revoke', *args, ok=False)
+        for op in ('revoke', 'revoke_status'):
+            value = dict(op=op, request_id=str(uuid.uuid4()), enabled=True)
+            result = self.cli('desktop', 'request', '--json', data=value)
+            self.assertFalse(result['accepted'])
+            self.assertEqual(result['code'], 'invalid_revoke_request')
+        result = self.cli('desktop', 'request', '--json', data=dict(op='revoke_status', request_id=str(uuid.uuid4())))
+        self.assertEqual(result['code'], 'request_not_found')
+        self.assertFalse(self.cli('desktop', 'status', '--json')['writers_enabled'])
 
     def test_service_restart_fences_prior_effects_and_keeps_manual_revocation(self):
         process, _ = self.serve()

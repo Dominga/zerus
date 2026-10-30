@@ -4122,7 +4122,57 @@ heartbeat. Neither reserved nor unknown work becomes a fresh delivery after a
 restart. Recovery failure reports a component error and pauses admissions while
 the passive service keeps serving IPC. The ledger library has no native I/O,
 automatic-approval consent or read-mark authority. The current service exposes
-no reservation, native adapter, revoke or writer-takeover command yet.
+no reservation, native adapter or writer-takeover command yet.
+
+Schema 3 adds the indexed revocation command journal. Before a maintained Qt
+rollback or Qt installation starts its GUI, the installer must obtain a settled
+receipt from this exact configuration:
+
+```sh
+hgs desktop revoke --json --request-id UUID --reason rollback
+```
+
+Before invoking it, probe `hgs --help` for the exact capability marker
+`Desktop revoke ABI: desktop-revoke-v1`; a desktop-v1 kernel alone need not
+support revoke. An older selected CLI must never be called speculatively.
+The installer generates and retains a canonical UUID for this attempt. A
+settled receipt requires exit zero and `accepted`, `durable`, `revoked` and
+`checkpointed` all true, with the same `request_id` and configuration. When
+there is no desktop database and no handoff marker, exit zero instead returns
+`applicable:false`, `handoff:"none"`, `revoked:true`, `nothing_written:true`
+and the exact request/configuration identity. This explicit no-op preserves
+plain rollback without creating directories, locks or a database; an existing
+live owner is still refused. It claims no durable command reservation. Failure, timeout or missing
+receipt keeps Qt stopped. The command contacts the existing actor; when no
+service endpoint exists it instead takes the real exclusive service and handoff
+locks and opens only the desktop journal. It starts no service manager, listener,
+agent or GUI. An unreachable owner holding its lock cannot be bypassed.
+This CLI primitive does not yet wire the maintained installer rollback hook.
+If `owner.lock` is held but IPC does not answer, keep Qt stopped. Stop only
+`hgs-desktop` through its owning service manager (Linux `hgs-desktop.service`,
+macOS `com.hgdev.hgs-desktop`, Windows task `hgs-desktop`), then retry the same
+request in the same configuration. Never stop native agents, tmux servers,
+process groups, recovery, voice or mobile connector services. An unmanaged or
+uncertain owner requires operator inspection; its lock is never bypassed.
+
+Revocation commits its private audit reservation and revoked writer policy
+before draining owned work, atomically changes only a supported marker's phase
+to `revoked`, syncs it and verifies SQLite checkpoint completion. No marker is
+created when none exists. Unknown/newer/malformed or mismatched markers are
+preserved and refused. A busy checkpoint or failed drain leaves a durable
+pending command, never a successful receipt. The current passive kernel has no
+effect workers to drain; later native dispatchers must provide lease cancellation
+and owned-worker drain before takeover is enabled.
+
+A repeated command must keep the exact UUID and reason. Its reservation pins
+the original writer epoch; it cannot revoke a different later handoff or return
+an old success for newly authorized writers. A running service can inspect a
+result with `hgs desktop request --json` and stdin
+`{"op":"revoke_status","request_id":"UUID"}`. The query never resumes a
+pending transition. Explicitly repeating the same revoke may reconcile that
+same pending authority reduction; it cannot deliver native effects. An unknown
+result never permits the installer to start Qt or invent a fresh request ID.
+The journal keeps reason/history privately; the marker payload stays unchanged.
 
 Every IPC connection begins with one bounded JSON line containing `abi`,
 `configuration`, `op` (`status`, `watch` or `request`) and optional `request`.
@@ -4134,10 +4184,12 @@ subscriptions; it never authorizes replay. EOF on a watch's stdin detaches that
 client. Control requests use a separate connection, not the display stream.
 
 `hgs desktop request --json` reads a JSON object from stdin with `op` and a
-canonical UUID `request_id`. Only `ping` is admitted now, returning an exact-ID,
-read-only `pong` with `durable:false`. Effect requests return `accepted:false`
-and `handoff_required` before acceptance; no command is queued for later replay.
-No durable request journal or delegation handshake is claimed in this slice.
+canonical UUID `request_id`. `ping` returns an exact-ID, read-only `pong` with
+`durable:false`.
+`revoke` reduces authority through the durable command journal described below;
+`revoke_status` reads its exact request ID without resuming it. Positive effect
+requests return `accepted:false` and `handoff_required` before acceptance.
+No positive command is queued for later replay or delegation implied.
 
 Control lines including framing are capped at 64 KiB. Output frames allow
 watch-v1's 1 MiB plus 4 KiB envelope metadata. Eight subscribers each have at most

@@ -1,3 +1,4 @@
+#include "Settings.h"
 #include "TeamAttentionWatch.h"
 #include "TeamAttentionNotices.h"
 #include "TeamWaitingNotices.h"
@@ -30,7 +31,7 @@ void TeamAttentionWatch::observe()
     if (!m_notices) return;
     auto changes = m_notices->observe(m_teams->teams());
     if (changes.raised.isEmpty() && changes.cleared.isEmpty()) return;
-    QSettings().setValue("teams/attentionNotified", m_notices->known());
+    Settings::set("teams/attentionNotified", m_notices->known());
     // U55: a thing the waiting banner announced already is not announced twice.
     TeamWaitingNotices::dropAnnounced(changes, m_teams->teams());
     for (const auto &token : changes.cleared) emit cleared(token);

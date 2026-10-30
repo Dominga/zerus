@@ -2,6 +2,8 @@
 #include "TeamAccountMove.h"
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QJsonValue>
 #include <QRegularExpression>
 #include <QSet>
@@ -195,7 +197,7 @@ const StageRun *PipelineRun::openRun() const
 
 int PipelineRun::returned() const
 {
-    return int(std::count_if(runs.cbegin(), runs.cend(), [](const StageRun &run) { return run.state == QLatin1String("returned"); }));
+    return trimmedReturns + int(std::count_if(runs.cbegin(), runs.cend(), [](const StageRun &run) { return run.state == QLatin1String("returned"); }));
 }
 
 bool stageWithoutCandidate(const Task &task)
@@ -218,19 +220,46 @@ int scaleRoom(const Team &team)
     return team.maxMembers - int(seats);
 }
 
-int folderHeldBy(const Team &team, const QString &member)
+Member::Hold folderHold(const Team &team, const QString &member)
 {
-    // As hgs's stages::held: a test waiting for its member holds the folder
-    // under the hold rule; a delivered one when its hand-off said so (#532),
-    // or under the hold rule when hgs sent no folder for it yet.
+    // #635 N4: hgs's status names each member's hold (stages::held_by): a
+    // review, test, command or land stage, or a closed stage whose run still
+    // goes. A status that names one names them all.
+    if (const auto *m = team.member(member); m && m->heldBy.task) return m->heldBy;
+    if (std::any_of(team.members.cbegin(), team.members.cend(), [](const Member &m) { return m.heldBy.task > 0; })) return {};
+    // An older hgs: the member's waiting task says it ("folder held by the
+    // stage of #N" since #680, "the test of #N" before).
+    static const QRegularExpression said(QStringLiteral("folder held by the (test|stage) of #(\\d+)"));
+    for (const auto &task : team.tasks) {
+        if (task.assignee != member || task.status != "pending") continue;
+        if (const auto match = said.match(task.wait.unblock); match.hasMatch()) {
+            const int holder = match.captured(2).toInt();
+            const auto *held = team.task(holder);
+            const auto *run = held ? held->pipelineRun.openRun() : nullptr;
+            return {holder, match.captured(1) == "test" ? QStringLiteral("test") : run ? run->kind : QString()};
+        }
+    }
+    // Older still: as hgs's stages::held was then, a test waiting for its
+    // member holds the folder under the hold rule; a delivered one when its
+    // hand-off said so (#532), or under the hold rule when hgs sent no folder.
     for (const auto &task : team.tasks) {
         const auto *run = task.pipelineRun.openRun();
         if (!run || run->kind != "test") continue;
         const bool hold = task.pipelineRun.folder != "checkout";
         const bool holds = run->state == "waiting" ? hold : (run->holds || (hold && run->folder.isEmpty()));
-        if (holds && implementerOf(task, *run) == member) return task.id;
+        if (holds && implementerOf(task, *run) == member) return {task.id, QStringLiteral("test")};
     }
-    return 0;
+    return {};
+}
+
+int folderHeldBy(const Team &team, const QString &member)
+{
+    return folderHold(team, member).task;
+}
+
+QString holderText(const Member::Hold &hold)
+{
+    return hold.stage.isEmpty() ? tr("the stage of #%1").arg(hold.task) : tr("the %1 stage of #%2").arg(hold.stage).arg(hold.task);
 }
 
 QList<Member::StageEntry> stageQueue(const Team &team, const QString &member)
@@ -430,6 +459,9 @@ Team parse(const QJsonObject &v)
                 member.stageQueue.append({e.value("task").toInt(), e.value("round").toInt(), str(e, "stage"), str(e, "state"), e.value("since").toDouble()});
             }
         }
+        // #635 N4: the stage whose hold keeps its folder.
+        if (const auto held = m.value("held_by").toObject(); held.value("task").toInt() > 0)
+            member.heldBy = {held.value("task").toInt(), str(held, "stage")};
         // G7: the services the member's session runs (MCP servers and the like).
         for (const auto &value : m.value("services").toArray()) {
             const auto service = value.toObject();
@@ -567,6 +599,7 @@ Team parse(const QJsonObject &v)
             run.known = true;
             run.id = str(o, "id"); run.name = str(o, "name"); run.folder = str(o, "folder"); run.accept = str(o, "accept");
             run.maxRounds = o.value("max_rounds").toInt(); run.round = o.value("round").toInt();
+            run.trimmedReturns = qMax(0, o.value("trimmed_returns").toInt());
             for (const auto &v : o.value("stages").toArray()) {
                 const auto st = v.toObject();
                 StageSpec spec{str(st, "kind"), str(st, "role"), str(st, "member")};
@@ -742,6 +775,7 @@ Team parse(const QJsonObject &v)
         phase.n = p.value("n").toInt(); phase.title = str(p, "title"); phase.barrier = p.value("barrier").toBool();
         phase.approval = str(p, "approval"); phase.state = str(p, "state");
         phase.addedBy = str(p, "added_by"); phase.decidedBy = str(p, "decided_by");
+        phase.startAhead = p.value("start_ahead").toBool();
         phase.addedAt = p.value("added_at").toDouble(); phase.decidedAt = p.value("decided_at").toDouble();
         for (const auto &id : p.value("tasks").toArray()) phase.tasks.append(id.toInt());
         // F10: the lead's diff for this draft, when the store reports one.
@@ -1119,11 +1153,11 @@ Status memberStatus(const Team &team, const Member &member, const Live &live)
         return make(run->kind == "test" ? "stage_test" : "stage_review", what.arg(task.id).arg(task.title).arg(run->round),
                     QStringLiteral("#%1").arg(task.id), Tone::Active, task.id);
     }
-    // U36: its folder is held by the test of one of its tasks; its next task waits.
-    if (const int held = folderHeldBy(team, member.id); held && (team.status == "running" || team.status == "paused"))
+    // U36: its folder is held by a stage of one of its tasks; its next task waits.
+    if (const auto hold = folderHold(team, member.id); hold.task && (team.status == "running" || team.status == "paused"))
         for (const auto &task : team.tasks)
-            if (task.assignee == member.id && task.status == "pending" && !task.held && task.id != held)
-                return make("folder_held", tr("Waits: its folder is held by the test of #%1").arg(held), tr("Folder held"), Tone::Warn, task.id);
+            if (task.assignee == member.id && task.status == "pending" && !task.held && task.id != hold.task)
+                return make("folder_held", tr("Waits: its folder is held by %1").arg(holderText(hold)), tr("Folder held"), Tone::Warn, task.id);
     // Spec 5.6: a sub-lead reviews its reports' work, or coordinates them.
     if (member.sub && (team.status == "running" || team.status == "paused")) {
         for (const auto &task : team.tasks)
@@ -1602,7 +1636,9 @@ QString PhaseProgress::tooltip() const
     // G8/spec 11: the tooltip names the phase the tasks bar counts.
     const QString name = title.isEmpty() ? tr("Phase %1").arg(phase) : tr("Phase %1 %2").arg(phase).arg(title);
     QString line = QStringLiteral("%1: %2/%3").arg(name).arg(done).arg(total);
-    if (draft) line += QStringLiteral(" · ") + tr("waiting for your approval");
+    if (draft && autoDraft) line += QLatin1Char('\n') + autoDraftBadge() + QStringLiteral(": ") + autoDraftTip(startAhead);
+    else if (draft) line += QStringLiteral(" · ") + tr("waiting for your approval");
+    else if (byAuto) line += QLatin1Char('\n') + tr("Accepted by Auto when its first task started");
     return line + QLatin1Char('\n')
         + tr("%1 of %2 phases finished; discarded drafts do not count").arg(phasesDone).arg(phasesTotal);
 }
@@ -1647,7 +1683,24 @@ PhaseProgress phaseProgress(const Team &team)
         progress.phase = 1; progress.done = done; progress.total = team.tasks.size();
         progress.phasesTotal = 1; progress.phasesDone = done == team.tasks.size();
     }
+    if (const auto *record = team.phase(progress.phase)) {
+        progress.autoDraft = record->autoDraft(); progress.startAhead = record->startAhead; progress.byAuto = record->acceptedByAuto();
+    }
     return progress;
+}
+
+QString autoDraftBadge() { return tr("Draft (auto)"); }
+
+QString autoDraftTip(bool startAhead)
+{
+    return startAhead ? tr("The lead started it ahead: idle members take its tasks now, and Auto accepts it when the first one starts. Its reports need no approval from you.")
+                      : tr("Auto accepts it when its first task starts, once the phases ahead are done. Until then the lead edits it freely.");
+}
+
+QString autoAcceptSwitchTip(bool on)
+{
+    return on ? tr("On: a phase draft without errors stays a draft the lead edits, and Auto accepts it when its first task starts")
+              : tr("Off: every phase draft waits for you");
 }
 
 QString phaseHeading(const PhaseGroup &group)
@@ -1663,6 +1716,59 @@ bool leftMember(const Team &team, const QString &member)
 }
 
 // C2: one thing on the lead's desk, as `hgs team inbox` lists it.
+namespace {
+// A task's timing without what grows while it runs or waits: the worked
+// seconds of a running attempt, and the waits of a task not decided yet.
+QJsonObject steadyTiming(QJsonObject timing, bool decided)
+{
+    if (!timing.value("running_since").isNull() && timing.contains("running_since")) {
+        timing.remove("worked_s");
+        QJsonArray attempts;
+        for (const auto &value : timing.value("attempts").toArray()) {
+            auto attempt = value.toObject();
+            if (attempt.value("to").isNull()) { attempt.remove("worked_s"); attempt.remove("member_s"); attempt.remove("lead_s"); }
+            attempts.append(attempt);
+        }
+        timing["attempts"] = attempts;
+    }
+    if (!decided) timing.remove("waits");
+    return timing;
+}
+
+// Health and its warnings anywhere: "idle 44 min" reads as "idle N min".
+QJsonValue steadyHealth(const QJsonValue &value)
+{
+    static const QRegularExpression minutes(QStringLiteral("\\b\\d+ (min|h|s)\\b"));
+    if (value.isArray()) {
+        QJsonArray out;
+        for (const auto &item : value.toArray()) out.append(item.isString() ? QJsonValue(item.toString().replace(minutes, QStringLiteral("N \\1"))) : steadyHealth(item));
+        return out;
+    }
+    if (!value.isObject()) return value;
+    auto object = value.toObject();
+    object.remove("minutes");
+    for (auto it = object.begin(); it != object.end(); ++it) it.value() = steadyHealth(it.value());
+    return object;
+}
+}
+
+QByteArray visibleShape(QJsonObject status)
+{
+    status.remove("revision"); status.remove("updated");
+    QJsonArray tasks;
+    for (const auto &value : status.value("tasks").toArray()) {
+        auto task = value.toObject();
+        const QString state = task.value("status").toString();
+        const bool decided = state == "accepted" || state == "rejected" || state == "cancelled";
+        if (task.value("timing").isObject()) task["timing"] = steadyTiming(task.value("timing").toObject(), decided);
+        tasks.append(task);
+    }
+    if (status.contains("tasks")) status["tasks"] = tasks;
+    for (const char *key : {"health", "validation", "phases_health", "phase_summary"})
+        if (status.contains(key)) status[key] = steadyHealth(status.value(key));
+    return QJsonDocument(status).toJson(QJsonDocument::Compact);
+}
+
 QList<InboxItem> parseInbox(const QJsonObject &value)
 {
     QList<InboxItem> items;

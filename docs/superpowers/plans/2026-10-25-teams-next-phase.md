@@ -1452,6 +1452,84 @@ phase 37. Lanes are balanced by volume and cost (U28 rule 9), not by count.
   retries on its own. A computer without a server shows no tab. Image
   generation is a later phase.
 
+## Auto-accepted drafts stay drafts until work starts (owner, 2026-10-30)
+
+- U61: with Auto-accept drafts on, the next phase is not accepted when it is
+  drafted. While the members work in the current phase and nobody has taken a
+  task of the next auto-accepted phase, it stays a draft: the lead adds,
+  edits, moves and removes its tasks freely.
+- The draft is fixed (accepted by Auto) at the moment the first member is
+  handed one of its tasks: when the current phase is done, or earlier when
+  the lead lets idle members start it.
+- Whether a member may take work from an auto-accepted draft early is the
+  lead's decision, per phase; its reports need no owner approval, as the
+  phase is auto-accepted.
+
+## Test discipline (owner, 2026-10-30)
+
+- U62: the big suites are cut into small pieces by area, so a task runs only
+  the tests of what it touches. A member runs the tests its task touches;
+  a phase's integration runs the tests of everything the phase touched.
+- The full run is the owner's call: only before a release (the owner said to
+  publish or release a version), and only after the lead asks the owner to
+  confirm it with how long it takes, unless the owner gave an explicit
+  standing permission. Nobody runs the full suites otherwise.
+- Zerus carries the rule: a test map from source areas to test targets and
+  filters, a command that names the affected tests of a change with their
+  time, a testing policy in every hand-off and the lead's guide, and full-run
+  templates that need the owner's grant.
+- Test requests go to a queue: Zerus runs them as a milestone when the
+  machine has room (suites declare CPU, GPU and RAM needs), returns each
+  result to whoever submitted it, and anyone may force one test to run now.
+- Every result goes to a local database with its time, commit and a short
+  log excerpt; the lead gets a card linking to it and reads it only when
+  needed. A suite whose inputs did not change reuses its last result, marked
+  as reused and due for a new measurement; when enough reused results pile
+  up, Zerus proposes a full run.
+- A suite that fails and then passes on one retry is marked flaky with its
+  history; three flaky episodes become a lead item. A suite that grows more
+  than half over its recorded time is flagged.
+- The team gets a Tests view (queue, running, history, flaky, reused), and
+  the profiler and a task's drawer show its test runs.
+- A test that touches the user's own paths (settings, zerus.log, the temp or
+  crash dump folders outside its own) fails a check.
+- Strengthened (owner, 2026-10-30, "take all"):
+  - The map comes from the build itself (CMake: which objects each test
+    binary links; Rust: the module graph, widened for shared modules) and is
+    checked against coverage weekly; an unmapped file widens to its area.
+  - Zerus, not the author, computes a task's affected set from its diff;
+    only the runner writes results, bound to the exact commit that merges.
+  - A crash (abnormal exit, a dump, a sanitizer report, heap corruption) is
+    never retried to green; a flaky quarantine is visible and expires.
+  - Qt results are reused by the test binary's hash and its data; Rust is not
+    cached (it runs in seconds when filtered).
+  - One shared build cache (sccache for Rust, ccache for MSVC) for every
+    worktree of the team: builds, not tests, cost the most today.
+  - A merge queue: each accepted report merges into the lead branch at once
+    and runs its affected tests there, so a phase integration is a formality.
+  - The release full run is the fork CI's run of the candidate, after the
+    owner confirms it; a nightly full run in the fork CI catches map gaps.
+  - Bloat guard: each report counts the test lines and functions it adds and
+    removes; suites have a time and size budget; a monthly coverage report
+    names tests without unique coverage.
+  - Isolation by construction: the runner gives every suite its own HOME,
+    APPDATA, LOCALAPPDATA, TEMP and XDG folders and keeps test crash dumps in
+    the run's folder; a fingerprint check of the user's paths is the second line.
+  - The scheduler reads the machine's real load and puts forced and short
+    suites first; long ones go to the night run or the CI.
+  - Later (phase 57): remote runners on the owner's other computers over
+    hgs's SSH for Linux, macOS and Android suites.
+- Every project configures it (owner, 2026-10-30: another user may want the
+  tests set up differently): the mechanism is Zerus's, this repository's
+  values are one configuration. A project file (.zerus/tests.toml) names its
+  test providers (cargo, ctest, pytest, gradle, npm or any command), how the
+  affected set is found (from the build, from a path map, or everything), the
+  resource and platform classes, where the full run happens (here, a CI, a
+  runner), the full-run policy, retries, budgets, the isolated environment
+  and whether the build cache and the merge queue are on; the owner may
+  override it in the team's settings. Without the file Zerus detects common
+  stacks and proposes defaults, and a team without any keeps today's flow.
+
 ## Order of work (proposal)
 
 1. Delivery and reports: A1-A6, H5.

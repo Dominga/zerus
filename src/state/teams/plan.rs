@@ -1,7 +1,7 @@
 //! WhiteWh fork: pure rules of a team's task graph, as the prototype
 //! (design/agent-teams/index.html: cycleNodes, layersOf, chainOf, readyTasks,
 //! planErrors) defines them. Edges run from a dependency to its dependent.
-use super::model::{DependencyKind, MemberState, PhaseState, Task, TaskStatus, Team};
+use super::model::{Approval, DependencyKind, MemberState, PhaseState, Task, TaskStatus, Team};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -242,6 +242,45 @@ pub(crate) fn ready(team: &Team) -> Vec<u32> {
         .collect();
     // D2: an urgent phase's tasks go before every other pending one.
     out.sort_by_key(|id| (!urgent(team, *id), *id));
+    out
+}
+
+/// U61: the independent tasks of a draft the lead started ahead: ready by
+/// their dependencies, not held by the draft's barrier.
+pub(crate) fn ready_ahead(team: &Team, phase: u32) -> Vec<u32> {
+    let cycles = cycle_tasks(&team.tasks);
+    team.tasks
+        .iter()
+        .filter(|task| task.phase == phase && matches!(task.status, TaskStatus::Pending | TaskStatus::Draft) && !cycles.contains(&task.id))
+        .filter(|task| task.hold.is_none() && task.waits.is_none())
+        .filter(|task| task.deps.iter().all(|dep| satisfied(team, dep.task, dep.kind)))
+        .map(|task| task.id)
+        .collect()
+}
+
+/// U61: the independent tasks of an auto-accepted draft that may start now: the
+/// lead started it ahead, or every phase ahead of it is done. Their first
+/// hand-out accepts the phase.
+pub(crate) fn auto_draft_tasks(team: &Team) -> Vec<u32> {
+    if !team.settings.auto_accept {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for phase in team
+        .phases
+        .iter()
+        .filter(|phase| phase.state == PhaseState::Draft && phase.approval == Approval::Auto)
+    {
+        let ahead_done = team
+            .tasks
+            .iter()
+            .filter(|task| task.phase == phase.n)
+            .all(|task| barrier_blockers(team, task).is_empty());
+        if !phase.start_ahead && !ahead_done {
+            continue;
+        }
+        out.extend(ready_ahead(team, phase.n));
+    }
     out
 }
 
@@ -646,6 +685,10 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
                 "done": done,
                 "total": tasks.len(),
                 "barrier": record.is_some_and(|phase| phase.barrier),
+                // U61: a draft that Auto will accept at its first hand-out, and
+                // whether the lead started it ahead.
+                "auto": record.is_some_and(|phase| phase.approval == super::model::Approval::Auto),
+                "start_ahead": record.is_some_and(|phase| phase.start_ahead),
                 "health_line": line,
             })
         })

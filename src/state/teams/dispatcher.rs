@@ -706,7 +706,14 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     // changes, so status derives `stopped` without a listing of its own (L3).
     for member in &team.members {
         let Some(session) = member.session.as_ref() else { continue };
-        let Some(found) = seen.iter().find(|seen| seen.host == session.host && seen.name == session.name) else { continue };
+        // L4: a member its computer does not list is offline, not stuck: clear a
+        // mark instead of letting it grow.
+        let Some(found) = seen.iter().find(|seen| seen.host == session.host && seen.name == session.name) else {
+            if member.stuck.is_some() {
+                steps.push(Step::Unstuck { member: member.id.clone() });
+            }
+            continue;
+        };
         if member.seen.is_none_or(|recorded| recorded.live != found.live) {
             steps.push(Step::Liveness { member: member.id.clone(), live: found.live });
         }
@@ -722,9 +729,16 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         }
         // U56: the member's phase and activity feed status; a busy member with
         // no session event for stuck_minutes is marked stuck, once per episode.
-        // A question, a Zerus build or Background work is never stuck.
+        // A question, a Zerus build or Background work is never stuck; the lead
+        // is never stuck either (L1).
         if found.live {
-            if member.seen_phase != found.phase || member.seen_activity != found.activity || member.seen_event_at != found.last_event_at {
+            // L3: phase and activity on change, the event time at most once a
+            // minute (status rounds to minutes anyway).
+            let moved = match (member.seen_event_at, found.last_event_at) {
+                (None, None) => false,
+                (old, new) => new.is_none_or(|at| old.is_none_or(|old| (at - old).abs() >= 60.0)),
+            };
+            if member.seen_phase != found.phase || member.seen_activity != found.activity || moved {
                 steps.push(Step::Watch {
                     member: member.id.clone(),
                     phase: found.phase.clone(),
@@ -732,13 +746,39 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                     last_event_at: found.last_event_at,
                 });
             }
+            if member.id == team.lead {
+                continue;
+            }
+            // N1: a dsh listing's last_event_at does not advance with its native
+            // tool events; the open attempt's activity_at counts too (as the
+            // silent check does), and a dsh member is read once before it is
+            // called stuck.
+            let open = team
+                .tasks
+                .iter()
+                .find_map(|task| task.open_attempt().filter(|attempt| attempt.member == member.id).map(|attempt| (task.id, attempt)));
+            let listed = found.last_event_at;
+            let read = open.as_ref().and_then(|(_, attempt)| attempt.activity_at);
+            let last = match (listed, read) {
+                (Some(listed), Some(read)) => Some(listed.max(read)),
+                (listed, read) => listed.or(read),
+            };
             let busy = found.activity == "busy" || matches!(found.phase.as_str(), "working" | "tool" | "compacting");
-            let quiet = found.last_event_at.map(|at| now - at).unwrap_or(0.0);
+            let quiet = last.map(|at| now - at).unwrap_or(0.0);
             let limit = super::ops::stuck_minutes(team) * 60.0;
             let stuck = busy && !found.asking && !found.background && !found.building && quiet >= limit;
             if stuck && member.stuck.is_none() {
                 let reason = if found.phase == "compacting" { "compaction_timeout" } else { "no_progress" };
-                steps.push(Step::MarkStuck { member: member.id.clone(), reason: reason.into(), phase: found.phase.clone() });
+                let checked = open.as_ref().is_some_and(|(_, attempt)| attempt.told_lead.iter().any(|kind| kind == "silent"));
+                if member.agent == "dsh" && !checked {
+                    if let Some((task_id, _)) = open.as_ref() {
+                        steps.push(Step::CheckSilent { task: *task_id, last: listed.unwrap_or(0.0) });
+                    } else {
+                        steps.push(Step::MarkStuck { member: member.id.clone(), reason: reason.into(), phase: found.phase.clone() });
+                    }
+                } else {
+                    steps.push(Step::MarkStuck { member: member.id.clone(), reason: reason.into(), phase: found.phase.clone() });
+                }
             } else if !stuck && member.stuck.is_some() {
                 steps.push(Step::Unstuck { member: member.id.clone() });
             }
@@ -746,10 +786,11 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             steps.push(Step::Unstuck { member: member.id.clone() });
         }
     }
-    // U56: a pending task pinned to a stuck, stopped or offline member says so
-    // in its waits, so the lead sees why it never starts.
+    // U56: a pending task whose member is kept for it (pinned, or every planned
+    // assignee with keep_assignees) and who is stuck, stopped or offline says so
+    // in its waits, so the lead sees why it never starts (N4).
     for task in &team.tasks {
-        if !task.pinned || task.status != TaskStatus::Pending || task.assignee.is_empty() {
+        if task.status != TaskStatus::Pending || task.assignee.is_empty() || !team.keeps_assignee(task) {
             continue;
         }
         if task.waits.as_ref().is_some_and(|wait| wait.waits_for != "member") {
@@ -1349,9 +1390,19 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         steps.push(if member.needs_settings() { Step::Settings { member: member.id.clone() } } else { Step::HandOut { task: id, member: member.id.clone() } });
     }
     // U31: work ahead. An idle member may take an independent task of the next
-    // draft phase (#511 N2: every dependency accepted).
-    if team.settings.work_ahead {
-        let ahead = work_ahead_tasks(team);
+    // draft phase (#511 N2: every dependency accepted). U61: the same path takes
+    // the tasks of an auto-accepted draft whose phases ahead are done, or that
+    // the lead started ahead; that hand-out accepts the phase by Auto.
+    let ahead: Vec<u32> = {
+        let mut ids = work_ahead_tasks(team);
+        for id in plan::auto_draft_tasks(team) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        ids
+    };
+    if !ahead.is_empty() {
         for member in &team.members {
             if !available(member, &busy) || busy.contains(member.id.as_str()) {
                 continue;
@@ -1457,7 +1508,16 @@ pub(crate) fn work_ahead_tasks(team: &Team) -> Vec<u32> {
 /// or (U31) a task of the next draft phase an idle member works ahead on. A
 /// draft phase's tasks are Draft, which `plan::ready` never lists.
 fn can_hand_out(team: &Team, task_id: u32) -> bool {
-    team.status == TeamStatus::Running && (plan::ready(team).contains(&task_id) || work_ahead_tasks(team).contains(&task_id))
+    if team.status != TeamStatus::Running {
+        return false;
+    }
+    if plan::ready(team).contains(&task_id) || work_ahead_tasks(team).contains(&task_id) {
+        return true;
+    }
+    // U61: an auto-accepted draft whose phases ahead are done, or that the lead
+    // started ahead, hands out its independent draft tasks; the first hand-out
+    // accepts the phase.
+    plan::auto_draft_tasks(team).contains(&task_id)
 }
 
 /// At most one message reaches the free lead per tick; the others wait for the
@@ -1930,9 +1990,12 @@ pub(crate) fn brief_text(team: &Team) -> String {
             "[Zerus team \u{b7} from: Zerus \u{b7} brief]\nYou are now the lead of the team {} ({}). \
              Its reports, questions, permission requests and your own tasks wait in one inbox: \
              {{\"team\":\"{}\"}} | hgs team inbox --json. The team state is in hgs team status --json; \
-             hgs guide team-lead has the rest.\n",
+             hgs guide team-lead has the rest. Before you report or finish a phase, \
+             {{\"team\":\"{}\",\"phase\":N}} | hgs team profile --json ranks its losses: name the phase's top three \
+             by time in the phase report.\n",
             team.name,
             if team.status == TeamStatus::Running { "running" } else { "paused" },
+            team.id,
             team.id
         );
         // U54: a lead swapped to another conversation gets the previous lead's
@@ -2003,7 +2066,8 @@ pub(crate) fn brief_text(team: &Team) -> String {
          Keep these members unless the goal needs others; nothing runs until the owner approves. \
          Once it runs, answer a member's question with hgs team reply --json, keep a returned task back with \
          hgs team hold --json and give it out again with hgs team release --json; new work goes in a new phase and \
-         you finish the team (hgs guide team-lead). \
+         you finish the team (hgs guide team-lead). Weigh lanes with hgs team profile's roles[] (utilization and \
+         tokens per accepted task) from the last finished phase. \
          Reports, questions, permission requests and your own tasks wait in one inbox \
          ({{\"team\":\"{}\"}} | hgs team inbox --json): decide a report with hgs team accept --json, and report \
          and accept your own task in one step with \"accept\":true in hgs team report --json.\n\
@@ -3693,6 +3757,9 @@ fn hand_out_now(
             }
         }
         anyhow::ensure!(can_hand_out(team, task_id), "no longer ready");
+        // U61: the first hand-out of an auto-accepted draft fixes it by Auto in
+        // this same change, so its reports need no owner approval.
+        super::ops::accept_phase_on_hand_out(team, task_id, events);
         // U45: a task for a role becomes its chosen member's before its
         // pipeline is taken from that member's role.
         if from == Some("") {
@@ -7322,7 +7389,14 @@ mod tests {
             let real = dir.path().display().to_string();
             let mut shared = json!({
                 "members": view["members"].as_array().unwrap().iter()
-                    .map(|member| json!({"id":member["id"],"role":member["role"],"stage_queue":member["stage_queue"]}))
+                    .map(|member| {
+                        let mut kept = json!({"id":member["id"],"role":member["role"],"stage_queue":member["stage_queue"]});
+                        // #635 N4: the stage that holds the member's folder.
+                        if let Some(held) = member.get("held_by") {
+                            kept["held_by"] = held.clone();
+                        }
+                        kept
+                    })
                     .collect::<Vec<_>>(),
                 "tasks": view["tasks"].as_array().unwrap().iter().filter(|task| task["id"] == 1)
                     .map(|task| json!({"id":task["id"],"title":task["title"],"status":task["status"],"assignee":task["assignee"],
@@ -7719,6 +7793,8 @@ mod tests {
         assert!(brief.contains("Ship it") && brief.contains("Your role: Plan well") && brief.contains("\"assignee\":\"dev\""));
         assert!(brief.contains("Team protocol:\nRun the waves in order"));
         assert!(brief.contains("(hgs guide team-lead)"));
+        // U38: the planning brief weighs lanes with the profile's per-role numbers.
+        assert!(brief.contains("hgs team profile") && brief.contains("roles[]"), "{brief}");
         // The brief names the reply, hold and release routes (H5), and the
         // inbox with the lead's own report-and-accept route (C1, C2).
         assert!(brief.contains("hgs team reply --json"), "{brief}");
@@ -10276,12 +10352,201 @@ mod tests {
         assert_eq!((wait.waits_for.as_str(), wait.on.clone()), ("member", vec!["dev".to_owned()]));
         let items = super::inbox::items(&saved);
         let item = items.iter().find(|item| item.kind == "task_waits").expect("a waits item");
-        assert!(item.detail.contains("reassign") || item.detail.contains("resume"), "{}", item.detail);
-        assert!(item.command.contains("reassign") || item.command.contains("resume-member"), "{}", item.command);
+        // N3: the stopped session's command is its relaunch, in a whole sentence.
+        assert!(item.detail.contains("Relaunch"), "{}", item.detail);
+        assert!(item.command.contains("relaunch"), "{}", item.command);
         // A task pin to an available member frees the wait.
         run_step(&mut store, &saved, &Step::ReleaseWait { task: task_id }, "").unwrap();
         assert!(store.load(&t.id).unwrap().unwrap().task(task_id).unwrap().waits.is_none());
         assert!(!steps(&t, &[lead, session("codex/x/dev", "r1", true)], at).iter().any(|step| matches!(step, Step::WaitOnMember { .. })));
+        // N4: with keep_assignees a planned (not pinned) assignee is kept too.
+        let mut kept = team();
+        kept.settings.keep_assignees = true;
+        kept.members.iter_mut().find(|member| member.id == "dev").unwrap().stuck =
+            Some(MemberStuck { at: at - 15.0 * 60.0, reason: "no_progress".into(), phase: "tool".into() });
+        {
+            let task = kept.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap();
+            task.status = TaskStatus::Pending;
+            task.pinned = false;
+        }
+        assert!(steps(&kept, &[session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)], at)
+            .iter()
+            .any(|step| matches!(step, Step::WaitOnMember { .. })));
+    }
+
+    /// N1: a dsh member's stale listing with a fresh native event in its open
+    /// attempt is not stuck; a stale attempt is read once, then marked.
+    #[test]
+    fn a_dsh_member_with_fresh_native_activity_is_not_stuck() {
+        let at = 10_000.0;
+        let mut t = team();
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().agent = "dsh".into();
+        let task = t.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap();
+        task.status = TaskStatus::InProgress;
+        task.attempts.push(Attempt {
+            n: 1,
+            id: "a1".into(),
+            member: "dev".into(),
+            state: AttemptState::Delivered,
+            sent_at: 1.0,
+            delivered_at: Some(1.0),
+            activity_at: Some(at - 30.0),
+            ..Default::default()
+        });
+        let mut dev = session("codex/x/dev", "r1", true);
+        dev.agent = "dsh".into();
+        dev.activity = "busy".into();
+        dev.phase = "tool".into();
+        dev.last_event_at = Some(at - 20.0 * 60.0);
+        let lead = session("claude/x/lead", "r0", true);
+        let found = steps(&t, &[lead.clone(), dev.clone()], at);
+        assert!(!found.iter().any(|step| matches!(step, Step::MarkStuck { .. })), "a fresh native event is progress: {found:?}");
+        // The native event is stale too: the member is read once before the mark.
+        t.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap().attempts[0].activity_at = Some(at - 20.0 * 60.0);
+        let found = steps(&t, &[lead.clone(), dev.clone()], at);
+        assert!(found.iter().any(|step| matches!(step, Step::CheckSilent { .. })), "one read first: {found:?}");
+        assert!(!found.iter().any(|step| matches!(step, Step::MarkStuck { .. })), "not before the read: {found:?}");
+        // After the read found nothing new, the mark is made.
+        t.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap().attempts[0].told_lead.push("silent".into());
+        let found = steps(&t, &[lead, dev], at);
+        assert!(found.iter().any(|step| matches!(step, Step::MarkStuck { .. })), "{found:?}");
+    }
+
+    /// U61: with the phases ahead done, the first tick hands out a draft's task
+    /// through the work-ahead path and accepts the phase by Auto in the same
+    /// store change; a second hand-out does not accept it again.
+    #[test]
+    fn the_first_hand_out_of_an_auto_draft_accepts_it_in_the_same_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.settings.auto_accept = true;
+        let mut events = Vec::new();
+        for id in [1u32, 2, 3] {
+            ops::apply(&mut t, "cancel", &json!({"task":id}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        }
+        t.phases.push(Phase {
+            n: 2,
+            order: 2,
+            title: "Next".into(),
+            barrier: true,
+            approval: Approval::Auto,
+            state: PhaseState::Draft,
+            tasks: vec![4, 5],
+            ..Default::default()
+        });
+        t.tasks.push(Task { id: 4, title: "First".into(), phase: 2, status: TaskStatus::Draft, assignee: "dev".into(), ..Default::default() });
+        t.tasks.push(Task { id: 5, title: "Second".into(), phase: 2, status: TaskStatus::Draft, assignee: "dev".into(), ..Default::default() });
+        t.status = TeamStatus::Running;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
+        let found = steps(&t, &seen, 100.0);
+        assert!(found.contains(&Step::WorkAhead { task: 4, member: "dev".into() }), "{found:?}");
+        run_step(&mut store, &t, &Step::WorkAhead { task: 4, member: "dev".into() }, "").unwrap();
+        let saved = store.load(&t.id).unwrap().unwrap();
+        assert!(saved.phases[0].state.is_accepted(), "{:?}", saved.phases[0].state);
+        assert_eq!(saved.phases[0].decided_by, "Auto");
+        assert_ne!(saved.task(4).unwrap().status, TaskStatus::Draft, "the accepted phase's task is live");
+        let feed = store.events(&t.id, None, 50).unwrap().to_string();
+        assert_eq!(feed.matches("phase_auto_accepted").count(), 1, "{feed}");
+        // A second hand-out (or a second tick) does not accept the phase again.
+        let mut again = saved.clone();
+        let mut more = Vec::new();
+        super::ops::accept_phase_on_hand_out(&mut again, 5, &mut more);
+        assert!(!more.iter().any(|event| event.kind == "phase_auto_accepted"), "{more:?}");
+    }
+
+    /// U61: started ahead, an idle member takes an independent task of the draft
+    /// while the current phase runs; the hand-out accepts the draft, and a task
+    /// that depends on it is not handed out.
+    #[test]
+    fn a_started_ahead_draft_hands_out_its_independent_task_and_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.settings.auto_accept = true;
+        t.phases.push(Phase {
+            n: 2,
+            order: 2,
+            title: "Ahead".into(),
+            barrier: true,
+            approval: Approval::Auto,
+            state: PhaseState::Draft,
+            tasks: vec![4, 5],
+            start_ahead: true,
+            ..Default::default()
+        });
+        t.tasks.push(Task { id: 4, title: "Ahead one".into(), phase: 2, status: TaskStatus::Draft, assignee: "dev".into(), ..Default::default() });
+        t.tasks.push(Task {
+            id: 5,
+            title: "Ahead two".into(),
+            phase: 2,
+            status: TaskStatus::Draft,
+            assignee: "dev".into(),
+            deps: vec![Dependency { task: 4, kind: DependencyKind::Hard }],
+            ..Default::default()
+        });
+        // Phase 1's open task goes to qa, so dev is free for the draft's task.
+        t.task_mut(1).unwrap().assignee = "qa".into();
+        let mut events = Vec::new();
+        for id in [2u32, 3] {
+            ops::apply(&mut t, "cancel", &json!({"task":id}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        }
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
+        let found = steps(&t, &seen, 100.0);
+        assert!(found.contains(&Step::WorkAhead { task: 4, member: "dev".into() }), "the independent task: {found:?}");
+        assert!(!found.iter().any(|step| matches!(step, Step::WorkAhead { task: 5, .. })), "the dependent task waits: {found:?}");
+        run_step(&mut store, &t, &Step::WorkAhead { task: 4, member: "dev".into() }, "").unwrap();
+        let saved = store.load(&t.id).unwrap().unwrap();
+        assert!(saved.phases[0].state.is_accepted(), "{:?}", saved.phases[0].state);
+        // #5 depends on #4, which is now open: it is not handed out.
+        assert!(!steps(&saved, &seen, 101.0).iter().any(|step| matches!(step, Step::WorkAhead { task: 5, .. })));
+    }
+
+    /// U61: the lead's edit and the first hand-out racing in one tick: before the
+    /// hand-out the draft is still editable, after it the phase is accepted and
+    /// the edit is refused.
+    #[test]
+    fn an_edit_racing_the_first_hand_out_is_either_early_or_refused() {
+        let mut t = team();
+        t.settings.auto_accept = true;
+        let mut events = Vec::new();
+        // Phase 1 is done, so the accepted draft runs rather than queues.
+        for id in [1u32, 2, 3] {
+            ops::apply(&mut t, "cancel", &json!({"task":id}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        }
+        t.phases.push(Phase {
+            n: 2,
+            order: 2,
+            title: "Race".into(),
+            approval: Approval::Auto,
+            state: PhaseState::Draft,
+            tasks: vec![4],
+            start_ahead: true,
+            ..Default::default()
+        });
+        t.tasks.push(Task { id: 4, title: "Racy".into(), phase: 2, status: TaskStatus::Draft, assignee: "dev".into(), ..Default::default() });
+        let mut events = Vec::new();
+        let lead = Actor::Member("lead".into());
+        // Before the hand-out: the edit lands and the draft is still editable.
+        ops::apply(&mut t, "edit-draft", &json!({"phase":2,"tasks_update":[{"id":4,"title":"Racy edited"}]}), &lead, &BTreeSet::new(), &mut events).unwrap();
+        assert_eq!(t.phases[0].state, PhaseState::Draft);
+        assert_eq!(t.task(4).unwrap().title, "Racy edited");
+        // The hand-out runs (a task is really handed out), then the edit is refused
+        // because the accepted phase has started work.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        t.status = TeamStatus::Running;
+        run_step(&mut store, &t, &Step::WorkAhead { task: 4, member: "dev".into() }, "").unwrap();
+        let saved = store.load(&t.id).unwrap().unwrap();
+        assert!(saved.phases[0].state.is_accepted());
+        let mut later = Vec::new();
+        let error = ops::apply(&mut saved.clone(), "edit-draft", &json!({"phase":2,"tasks_update":[{"id":4,"title":"Too late"}]}), &lead, &BTreeSet::new(), &mut later)
+            .unwrap_err()
+            .to_string();
+        assert!(!error.is_empty(), "the edit after the fix is refused");
     }
 
     /// U56: marking a member stuck records it, the feed says so, and the lead's
@@ -10304,7 +10569,7 @@ mod tests {
         let items = super::inbox::items(&saved);
         let item = items.iter().find(|item| item.kind == "member_stuck").expect("a member_stuck item");
         assert!(item.summary.contains("dev (Backend)") && item.summary.contains("phase tool"), "{}", item.summary);
-        assert!(item.command.contains("pause-member"), "{}", item.command);
+        assert!(item.command.contains("settings"), "{}", item.command);
         let feed = store.events(&t.id, None, 20).unwrap().to_string();
         assert!(feed.contains("member_stuck"), "{feed}");
     }
@@ -12685,6 +12950,8 @@ mod tests {
         running.brief = Notice::Pending;
         let brief = brief_text(&running);
         assert!(brief.contains("hgs team inbox --json") && brief.contains(&running.id), "{brief}");
+        // U38: the running brief points at the profile for the phase report.
+        assert!(brief.contains("hgs team profile --json") && brief.contains("top three"), "{brief}");
     }
 
     /// U47/U48: one git command in a test repository, which must succeed.

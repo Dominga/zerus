@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 use std::{
     io::{Read, Write},
     net::{TcpStream, ToSocketAddrs},
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Duration,
 };
@@ -135,8 +136,8 @@ fn safe_word(value: &str, max: usize) -> bool {
 /// shell syntax), bounded.
 pub(crate) fn checked_model(value: &str) -> Result<String> {
     let value = value.trim();
-    if !safe_name(value, MAX_MODEL_CHARS) {
-        return Err(Error::new(1, "A model name uses letters, digits and -_.:/@+ only"));
+    if !safe_name(value, MAX_MODEL_CHARS) || value.starts_with('-') {
+        return Err(Error::new(1, "A model name uses letters, digits and -_.:/@+ only, without a leading -"));
     }
     Ok(value.to_owned())
 }
@@ -159,8 +160,36 @@ fn checked_base_url(value: &str) -> bool {
     !host.is_empty() && !host.starts_with(':')
 }
 
+/// The server root: the configured base without its trailing `/v1` or slash, so
+/// both spellings (with and without `/v1`) name the same server and every
+/// consumer derives its own URL from it.
+pub(crate) fn root(server: &Server) -> String {
+    let base = server.base_url.trim_end_matches('/');
+    match base.strip_suffix("/v1") {
+        Some(root) => root.trim_end_matches('/').to_owned(),
+        None => base.to_owned(),
+    }
+}
+
+/// The API's model list: `root/v1/models`.
+pub(crate) fn models_url(server: &Server) -> String {
+    format!("{}/v1/models", root(server))
+}
+
+/// The base an OpenAI-compatible client needs: `root/v1`.
+pub(crate) fn openai_base(server: &Server) -> String {
+    format!("{}/v1", root(server))
+}
+
+/// The base an Anthropic client needs: the root (Claude Code appends
+/// `/v1/messages` itself).
+pub(crate) fn anthropic_base(server: &Server) -> String {
+    root(server)
+}
+
 /// Validates one server: its name, API, SSH alias, key, model names and argv
-/// templates (argv lists, never shell lines; `{model}`/`{server}` only).
+/// templates (argv lists, never shell lines; `{model}`/`{server}` only). The
+/// API URL is stored as its root, so a later edit cannot pair `/v1` twice.
 pub(crate) fn checked(server: Server) -> Result<Server> {
     if !safe_word(&server.name, 64) || server.name.starts_with(['-', '.']) {
         return Err(Error::new(1, "A server name uses letters, digits and -_. only"));
@@ -202,7 +231,8 @@ pub(crate) fn checked(server: Server) -> Result<Server> {
     if !(1..=240).contains(&minutes) {
         return Err(Error::new(1, "The up time limit is 1 to 240 minutes"));
     }
-    Ok(Server { up_minutes: minutes, ..server })
+    let base_url = root(&server);
+    Ok(Server { up_minutes: minutes, base_url, ..server })
 }
 
 /// The public row: the key is never included, only whether one is set.
@@ -270,11 +300,26 @@ pub(crate) fn save_request(config: &Config, input: &Value) -> Result<Value> {
 }
 
 /// U60 (#656): `hgs model-server test --json` - status once for one server as
-/// Settings shows it, saved or not; nothing is written.
+/// Settings shows it, saved or not; nothing is written. A changed base URL
+/// never reuses the stored key: a test can only send it to the same root.
 pub(crate) fn test_request(config: &Config, input: &Value) -> Result<std::result::Result<Value, Failure>> {
     let stored = load(config)?;
-    let (server, _) = requested(input.clone(), &stored)?;
+    let server = test_server(input, &stored)?;
     Ok(status(config, &server))
+}
+
+/// The server a `test` request names: without an explicit key, the stored key
+/// is kept only while the root is unchanged (L2).
+fn test_server(input: &Value, stored: &[Server]) -> Result<Server> {
+    let explicit_key = input.get("key").is_some();
+    let (mut server, was) = requested(input.clone(), stored)?;
+    if !explicit_key && !was.is_empty() {
+        let same = stored.iter().find(|old| old.name == was).is_some_and(|old| root(old) == root(&server));
+        if !same {
+            server.key.clear();
+        }
+    }
+    Ok(server)
 }
 
 /// Substitutes `{model}` and `{server}` in every argument; the values are
@@ -359,14 +404,29 @@ fn execute(mut command: Command, timeout: Duration, ssh: bool) -> std::result::R
 }
 
 /// The ssh command that runs one argv on the server, with BatchMode and the
-/// peer's login-shell quoting. No argument passes through a local shell.
+/// peer's login-shell quoting. No argument passes through a local shell, and
+/// `-n` keeps the client from reading this process's stdin (Windows OpenSSH
+/// never sends its end of NUL, so a remote command that reads stdin would wait
+/// for the time limit).
 fn ssh_argv(config: &Config, server: &Server, argv: &[String]) -> Vec<String> {
     let mut ssh = vec![platform::ssh_program().to_string_lossy().into_owned()];
     ssh.extend(crate::machines::ssh_options(config, &server.ssh));
-    ssh.extend(["-o".to_owned(), "BatchMode=yes".to_owned(), "-o".to_owned(), "ConnectTimeout=3".to_owned()]);
+    ssh.extend([
+        "-n".to_owned(),
+        "-o".to_owned(),
+        "BatchMode=yes".to_owned(),
+        "-o".to_owned(),
+        "ConnectTimeout=3".to_owned(),
+    ]);
     ssh.push(server.ssh.clone());
     ssh.push(platform::remote_join(argv));
     ssh
+}
+
+/// A configured Windows Machine has no POSIX login shell for the remote argv:
+/// its control commands are refused rather than quoted for the wrong shell.
+fn windows_machine(config: &Config, server: &Server) -> bool {
+    !server.ssh.is_empty() && crate::windows_peer::is_windows(config, &server.ssh)
 }
 
 /// Runs one control template: an argv locally, or the same argv over hgs's own
@@ -375,6 +435,12 @@ fn ssh_argv(config: &Config, server: &Server, argv: &[String]) -> Vec<String> {
 fn run_template(config: &Config, server: &Server, argv: &[String], timeout: Duration) -> std::result::Result<Run, Failure> {
     if argv.is_empty() {
         return Err(Failure::Refused("The command is empty".into()));
+    }
+    if windows_machine(config, server) {
+        return Err(Failure::Refused(format!(
+            "{} is a Windows Machine: its control command needs a POSIX login shell; run it there by hand",
+            server.ssh
+        )));
     }
     #[cfg(test)]
     if let Some(fake) = FAKE.with(|slot| slot.borrow().as_ref().map(|fake| fake(server, argv, timeout))) {
@@ -434,6 +500,26 @@ fn number(text: &str) -> Option<f64> {
     text.trim().trim_end_matches(|ch: char| ch.is_ascii_alphabetic()).parse::<f64>().ok()
 }
 
+/// `NAME: STATE` splits at the last `": "` (or, without one, the last `':'`),
+/// so a model name carrying a tag (`coder-a:q4: running`) stays whole and Down
+/// targets exactly that model.
+fn split_state(line: &str) -> Option<(&str, &str)> {
+    match line.rsplit_once(": ") {
+        Some(pair) => Some(pair),
+        None => line.rsplit_once(':'),
+    }
+}
+
+/// A model's optional `since`: seconds since the epoch, or an RFC 3339 time;
+/// anything else is left out.
+fn since(value: &Value) -> Option<Value> {
+    match value {
+        Value::Number(number) => number.as_f64().filter(|seconds| *seconds > 0.0 && seconds.is_finite()).map(|seconds| json!(seconds)),
+        Value::String(text) => chrono::DateTime::parse_from_rfc3339(text.trim()).ok().map(|time| json!(time.timestamp() as f64)),
+        _ => None,
+    }
+}
+
 fn parse_status(text: &str) -> Parsed {
     let mut parsed = Parsed::default();
     let trimmed = text.trim();
@@ -441,9 +527,14 @@ fn parse_status(text: &str) -> Parsed {
         if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
             if let Some(models) = value["models"].as_array() {
                 for model in models.iter().take(MAX_MODELS) {
-                    let Some(name) = model["name"].as_str().filter(|name| !name.is_empty()) else { continue };
+                    let Some(name) = model["name"].as_str().filter(|name| !name.is_empty() && !name.starts_with('-')) else { continue };
                     let state = model["state"].as_str().unwrap_or("unknown").to_ascii_lowercase();
-                    parsed.models.push(json!({"name": name, "state": state}));
+                    let mut row = json!({"name": name, "state": state});
+                    // #703: when the state began, if the command says so.
+                    if let Some(since) = since(&model["since"]) {
+                        row["since"] = since;
+                    }
+                    parsed.models.push(row);
                 }
                 if let Some(memory) = value["memory"].as_object() {
                     if let (Some(free), Some(total)) = (memory["free"].as_f64(), memory["total"].as_f64()) {
@@ -471,9 +562,9 @@ fn parse_status(text: &str) -> Parsed {
                 continue;
             }
         }
-        if let Some((name, state)) = trimmed.split_once(':') {
+        if let Some((name, state)) = split_state(trimmed) {
             let (name, state) = (name.trim(), state.trim());
-            if !name.is_empty() && !name.contains(char::is_whitespace) && !state.is_empty() && state.split_whitespace().count() <= 3 {
+            if !name.is_empty() && !name.starts_with('-') && !name.contains(char::is_whitespace) && !state.is_empty() && state.split_whitespace().count() <= 3 {
                 parsed.models.push(json!({"name": name, "state": state.to_ascii_lowercase()}));
                 continue;
             }
@@ -487,7 +578,7 @@ fn parse_status(text: &str) -> Parsed {
 /// small client below; https runs the system curl, whose TLS is the system's,
 /// so hgs needs no TLS crate and the agents speak TLS themselves anyway.
 fn api_models(config: &Config, server: &Server) -> std::result::Result<Vec<Value>, Failure> {
-    let url = format!("{}/v1/models", server.base_url.trim_end_matches('/'));
+    let url = models_url(server);
     let (code, body) = if url.starts_with("https://") {
         curl_get(config, server, &url)?
     } else {
@@ -500,7 +591,7 @@ fn api_models(config: &Config, server: &Server) -> std::result::Result<Vec<Value
     let data = value["data"].as_array().or_else(|| value["models"].as_array()).ok_or_else(|| Failure::Refused("The model list has no data array".into()))?;
     let mut models = Vec::new();
     for model in data.iter().take(MAX_MODELS) {
-        let Some(name) = model["id"].as_str().or_else(|| model["name"].as_str()).filter(|name| !name.is_empty()) else { continue };
+        let Some(name) = model["id"].as_str().or_else(|| model["name"].as_str()).filter(|name| !name.is_empty() && !name.starts_with('-')) else { continue };
         models.push(json!({"name": name, "state": "available"}));
     }
     Ok(models)
@@ -807,12 +898,18 @@ pub(crate) fn up(config: &Config, server: &Server, model: &str, detach: bool) ->
     if server.up.is_empty() {
         return Err(Failure::Refused(format!("{} has no up command; it is read only", server.name)));
     }
+    if windows_machine(config, server) {
+        return Err(Failure::Refused(format!(
+            "{} is a Windows Machine: its up command needs a POSIX login shell; run it there by hand",
+            server.ssh
+        )));
+    }
     let argv = filled(&server.up, &model, &server.name);
     if detach {
         let request = uuid::Uuid::new_v4().to_string();
         let label = format!("up {} {model}", server.name);
-        let command = detached_command(config, server, &argv);
-        crate::state::builds::start_for(&request, &label, &command, &std::env::current_dir().map_err(|error| Failure::Refused(error.to_string()))?, json!({"name":"","run_id":"","conversation_id":""}), server.up_minutes, &[])
+        let argv = detached_argv(config, server, &argv);
+        crate::state::builds::start_argv_for(&request, &label, &argv, &std::env::current_dir().map_err(|error| Failure::Refused(error.to_string()))?, json!({"name":"","run_id":"","conversation_id":""}), server.up_minutes, &[])
             .map_err(Failure::Refused)?;
         return Ok(json!({"status":"started","server":server.name,"model":model,"request_id":request,
             "run":"hgs run","timeout_minutes":server.up_minutes}));
@@ -821,15 +918,61 @@ pub(crate) fn up(config: &Config, server: &Server, model: &str, detach: bool) ->
     Ok(json!({"status":"ran","server":server.name,"model":model,"exit":run.code}))
 }
 
-/// The shell line of a detached up, quoted with hgs's own quoting; for an SSH
-/// server the line is the ssh command itself, with the argv quoted for the
-/// peer's login shell.
-fn detached_command(config: &Config, server: &Server, argv: &[String]) -> String {
+/// The argv of a detached up: the template itself locally, or hgs's ssh command
+/// with the argv quoted for the peer. The runner starts it as an argv, so
+/// Windows never sees a POSIX-quoted shell line (N5).
+fn detached_argv(config: &Config, server: &Server, argv: &[String]) -> Vec<String> {
     if server.ssh.is_empty() {
-        return platform::join(argv);
+        argv.to_vec()
+    } else {
+        ssh_argv(config, server, argv)
     }
-    platform::join(&ssh_argv(config, server, argv))
 }
+
+/// #703: a detached up's outcome, read by its receipt's `request_id`: the run's
+/// record while it runs and once it ended (exit, time limit, the last lines of
+/// its output). Only a detached up's own run is read, never another run.
+pub(crate) fn up_result(id: &str) -> std::result::Result<Value, Failure> {
+    let unknown = || Failure::Refused(format!("No detached up with request_id {id}"));
+    if uuid::Uuid::parse_str(id).map(|parsed| parsed.hyphenated().to_string() != id).unwrap_or(true) {
+        return Err(unknown());
+    }
+    let record = crate::state::builds::record(id, crate::state::now()).ok_or_else(unknown)?;
+    let label = record["label"].as_str().unwrap_or_default();
+    if !label.starts_with("up ") || !record["argv"].is_array() {
+        return Err(unknown());
+    }
+    let mut words = label.splitn(3, ' ').skip(1);
+    let (server, model) = (words.next().unwrap_or_default(), words.next().unwrap_or_default());
+    let tail = record["tail"].as_str().unwrap_or_default();
+    let tail: String = tail.chars().rev().take(UP_TAIL_CHARS).collect::<Vec<_>>().into_iter().rev().collect();
+    Ok(json!({"request_id":id,"server":server,"model":model,"status":record["status"],"exit":record["exit"],
+        "timed_out":record["timed_out"].as_bool().unwrap_or(false),"error":record["error"],"tail":tail,
+        "started":record["started"],"ended":record["ended"],"timeout_secs":record["timeout_secs"]}))
+}
+
+/// The last characters of a detached up's output that `up-result` returns.
+const UP_TAIL_CHARS: usize = 1000;
+
+/// #703: this computer's live sessions that run on a server, with their model,
+/// so Down can say whose sessions stop getting answers. Only live sessions are
+/// read: their bindings, one each.
+pub(crate) fn server_sessions(server: &str) -> std::result::Result<Value, Failure> {
+    let live = super::storage::live().map_err(Failure::Refused)?;
+    let records = live.keys().take(MAX_LIVE_SESSIONS).filter_map(|name| super::storage::read(name).ok().map(|record| (name.clone(), record)));
+    Ok(json!({"server":server,"sessions":sessions_using(server, records)}))
+}
+
+/// The sessions among `records` (name, binding) whose binding names `server`.
+fn sessions_using(server: &str, records: impl Iterator<Item = (String, Value)>) -> Vec<Value> {
+    records
+        .filter(|(_, record)| record["model_server"]["server"].as_str() == Some(server))
+        .map(|(name, record)| json!({"name":name,"model":record["model_server"]["model"].as_str().unwrap_or_default()}))
+        .collect()
+}
+
+/// The live sessions `sessions` reads at most.
+const MAX_LIVE_SESSIONS: usize = 2000;
 
 /// `down` asks first: a server may be shared, so it runs only with `--yes`
 /// (the receipt says what it would do).
@@ -866,58 +1009,130 @@ pub(crate) fn logs(config: &Config, server: &Server, model: Option<&str>, lines:
 }
 
 /// The session-scoped provider settings of an agent on a server's model: the
-/// environment and extra launch arguments, never a global agent configuration.
-pub(crate) fn session_settings(config: &Config, server_name: &str, agent: &str, model: &str) -> Result<(Vec<String>, Vec<String>)> {
+/// non-secret environment, the secret environment (which only `hgs --run`
+/// reads, from a private file) and extra launch arguments. Never a global
+/// agent configuration. OpenCode has no per-session provider contract yet, so a
+/// model server does not offer it; a global provider entry would break the
+/// session scope.
+#[derive(Debug)]
+pub(crate) struct SessionSettings {
+    pub env: Vec<String>,
+    pub secrets: Vec<String>,
+    pub args: Vec<String>,
+}
+
+/// The provider id a session uses for its server, safe for an agent's config
+/// key: `hgs-<server>`, lowercased, letters/digits/- only.
+fn provider_id(server: &Server) -> String {
+    format!(
+        "hgs-{}",
+        server
+            .name
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { '-' })
+            .collect::<String>()
+    )
+}
+
+/// A Codex `-c` inline table value: quoted strings with `"` and `\` escaped.
+fn toml_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+pub(crate) fn session_settings(config: &Config, server_name: &str, agent: &str, model: &str) -> Result<SessionSettings> {
     let server = load(config)?.into_iter().find(|server| server.name == server_name)
         .ok_or_else(|| Error::new(1, format!("Unknown model server {server_name}")))?;
     let model = checked_model(model)?;
-    let base = server.base_url.trim_end_matches('/').to_owned();
     let key = if server.key.is_empty() { "local".to_owned() } else { server.key.clone() };
-    let mut env = Vec::new();
-    let mut args = Vec::new();
+    let mut settings = SessionSettings { env: Vec::new(), secrets: Vec::new(), args: Vec::new() };
     match agent {
         "claude" => {
             if server.kind != "anthropic" {
                 return Err(Error::new(1, "Claude Code needs an Anthropic-compatible server"));
             }
-            env.push(format!("ANTHROPIC_BASE_URL={base}"));
-            env.push(format!("ANTHROPIC_AUTH_TOKEN={key}"));
+            settings.env.push(format!("ANTHROPIC_BASE_URL={}", anthropic_base(&server)));
             for slot in ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL"] {
-                env.push(format!("{slot}={model}"));
+                settings.env.push(format!("{slot}={model}"));
             }
-            env.push("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1".into());
-            env.push("API_TIMEOUT_MS=1800000".into());
+            settings.env.push("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1".into());
+            settings.env.push("API_TIMEOUT_MS=1800000".into());
+            settings.secrets.push(format!("ANTHROPIC_AUTH_TOKEN={key}"));
         }
         "codex" => {
             if server.kind != "openai" {
                 return Err(Error::new(1, "Codex needs an OpenAI-compatible server"));
             }
-            env.push(format!("OPENAI_BASE_URL={base}"));
-            env.push(format!("OPENAI_API_KEY={key}"));
-            args.extend(["--model".to_owned(), model.clone()]);
+            // A session-scoped provider: the built-in openai provider speaks the
+            // Responses API and may use the ChatGPT login, so a local
+            // chat-completions server gets its own provider with its own key
+            // variable. The global Codex configuration is not touched.
+            let provider = provider_id(&server);
+            let table = format!(
+                "{{name={},base_url={},env_key=\"HGS_MODEL_SERVER_KEY\",wire_api=\"chat\"}}",
+                toml_string(&server.name),
+                toml_string(&openai_base(&server)),
+            );
+            settings.args.extend([
+                "-c".to_owned(),
+                format!("model_providers.{provider}={table}"),
+                "-c".to_owned(),
+                format!("model_provider={provider}"),
+                "--model".to_owned(),
+                model.clone(),
+            ]);
+            settings.secrets.push(format!("HGS_MODEL_SERVER_KEY={key}"));
         }
         "opencode" => {
-            let provider: String = format!("hgs-{}", server.name)
-                .chars()
-                .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' { ch } else { '-' })
-                .collect::<String>()
-                .to_lowercase();
-            let npm = if server.kind == "anthropic" { "@ai-sdk/anthropic" } else { "@ai-sdk/openai-compatible" };
-            let content = json!({"provider": {provider.clone(): {
-                "npm": npm,
-                "name": server.name,
-                "options": {"baseURL": base, "apiKey": key},
-                "models": {model.clone(): {}},
-            }}});
-            env.push(format!("OPENCODE_CONFIG_CONTENT={content}"));
-            args.extend(["--model".to_owned(), format!("{provider}/{model}")]);
+            return Err(Error::new(1, "OpenCode is not offered for a model server; start Codex or Claude Code"));
         }
-        other => return Err(Error::new(1, format!("A model server session starts claude, codex or opencode, not {other}"))),
+        other => return Err(Error::new(1, format!("A model server session starts claude or codex, not {other}"))),
     }
-    Ok((env, args))
+    Ok(settings)
 }
 
-/// `hgs model-server list|status|up|down|logs`.
+/// The settings a resume needs for a saved session: its non-secret environment
+/// and, when it has a key, the private file `hgs --run` reads and removes. A
+/// server that is no longer configured is an error that names it (#658 N4).
+pub(crate) fn resume_settings(config: &Config, server: &str, agent: &str, model: &str) -> Result<(Vec<String>, Option<PathBuf>)> {
+    let settings = session_settings(config, server, agent, model)?;
+    let path = if settings.secrets.is_empty() {
+        None
+    } else {
+        Some(write_secret_file(&config.state, &settings.secrets)?)
+    };
+    Ok((settings.env, path))
+}
+
+/// Writes the session's secret environment to a private file and returns its
+/// path: `hgs --run` reads it there, applies it to the agent and removes it, so
+/// the key never appears on a command line, in the tmux start command or in
+/// `--dry-run`.
+pub(crate) fn write_secret_file(state_dir: &Path, secrets: &[String]) -> Result<PathBuf> {
+    let dir = state_dir.join("model-servers");
+    platform::private_dir(&dir).map_err(|error| Error::new(1, error.to_string()))?;
+    let path = dir.join(format!("session-{}.env", uuid::Uuid::new_v4()));
+    storage::atomic_private(&path, &secrets.join("\n")).map_err(|error| Error::new(1, error.to_string()))?;
+    Ok(path)
+}
+
+/// `hgs --run`: takes the private secret file the launch left, applies it to
+/// this process (the agent inherits it), and removes the file. No file means a
+/// session without a model server.
+pub(crate) fn apply_session_secrets() -> Result<()> {
+    let Some(path) = std::env::var_os("HGS_MODEL_SERVER_ENV").filter(|value| !value.is_empty()) else { return Ok(()) };
+    std::env::remove_var("HGS_MODEL_SERVER_ENV");
+    let path = PathBuf::from(path);
+    let text = std::fs::read_to_string(&path).map_err(|error| Error::new(1, format!("Cannot read the session's model server settings: {error}")))?;
+    let _ = std::fs::remove_file(&path);
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        if let Some((key, value)) = line.split_once('=') {
+            std::env::set_var(key, value);
+        }
+    }
+    Ok(())
+}
+
+/// `hgs model-server list|status|up|up-result|sessions|down|logs|save|test`.
 pub(crate) fn dispatch(config: &Config, args: &[String]) -> Result<i32> {
     let command = args.first().map(String::as_str).unwrap_or("list");
     let servers = load(config)?;
@@ -938,12 +1153,23 @@ pub(crate) fn dispatch(config: &Config, args: &[String]) -> Result<i32> {
             }
             Ok(0)
         }
-        "status" | "up" | "down" | "logs" => {
+        "up-result" => {
+            let id = args.get(1).filter(|arg| !arg.starts_with('-')).ok_or_else(|| Error::new(2, "hgs model-server up-result REQUEST_ID --json"))?;
+            match up_result(id) {
+                Ok(value) => { println!("{value}"); Ok(0) }
+                Err(failure) => fail(&failure),
+            }
+        }
+        "status" | "up" | "down" | "logs" | "sessions" => {
             let name = args.get(1).filter(|arg| !arg.starts_with('-')).ok_or_else(|| Error::new(2, format!("hgs model-server {command} SERVER {}", if command == "status" { "" } else { "MODEL" })))?;
             let server = servers.iter().find(|server| &server.name == name).ok_or_else(|| Error::new(1, format!("Unknown model server {name}")))?;
             let json_out = args.iter().any(|arg| arg == "--json");
             let flag = |name: &str| args.iter().position(|arg| arg == name).and_then(|at| args.get(at + 1)).map(String::as_str);
             match command {
+                "sessions" => match server_sessions(&server.name) {
+                    Ok(value) => { println!("{value}"); Ok(0) }
+                    Err(failure) => fail(&failure),
+                },
                 "status" => match status(config, server) {
                     Ok(value) => {
                         if json_out { println!("{value}"); } else { print_status(&value); }
@@ -994,7 +1220,7 @@ pub(crate) fn dispatch(config: &Config, args: &[String]) -> Result<i32> {
             let _ = servers;
             Err(Error::new(1, "The model servers are configured in Settings > Model servers; the file is model-servers.json in the private config folder"))
         }
-        other => Err(Error::new(2, format!("Unknown model-server command {other}; use list, status, up, down, logs, save or test"))),
+        other => Err(Error::new(2, format!("Unknown model-server command {other}; use list, status, up, up-result, sessions, down, logs, save or test"))),
     }
 }
 
@@ -1038,7 +1264,7 @@ mod tests {
     fn server() -> Server {
         checked(Server {
             name: "lab".into(),
-            base_url: "http://127.0.0.1:11434".into(),
+            base_url: "http://127.0.0.1:8080".into(),
             kind: "openai".into(),
             key: "sk-test".into(),
             ssh: String::new(),
@@ -1054,71 +1280,96 @@ mod tests {
     #[test]
     fn settings_save_keeps_or_removes_the_key_and_never_returns_it() {
         let dir = tempfile::tempdir().unwrap();
-        let config = config(dir.path());
-        save(&config, &[server()]).unwrap();
-        let human = |servers: Value| json!({"by": "human", "servers": servers});
-        // Renamed, its key kept through `was`; a second one added without a key.
-        let saved = save_request(&config, &human(json!([
-            {"was": "lab", "name": "lab-a", "base_url": "http://127.0.0.1:11434", "kind": "openai",
-             "status": ["serve", "status"], "down": ["serve", "down", "{model}"]},
-            {"name": "gate", "base_url": "https://gate.example/v1", "kind": "anthropic"}
-        ]))).unwrap();
-        assert_eq!(saved["status"], "saved");
-        assert!(!saved.to_string().contains("sk-test"), "{saved}");
-        assert_eq!(saved["servers"][0]["key"], true);
-        assert_eq!(saved["servers"][0]["argv"]["down"], json!(["serve", "down", "{model}"]));
-        let found = load(&config).unwrap();
-        assert_eq!((found[0].name.as_str(), found[0].key.as_str()), ("lab-a", "sk-test"));
-        assert_eq!((found[1].name.as_str(), found[1].key.as_str()), ("gate", ""));
-        // A new key replaces it; null removes it.
-        save_request(&config, &human(json!([{"was": "lab-a", "name": "lab-a", "base_url": "http://127.0.0.1:11434", "kind": "openai", "key": "sk-new"}]))).unwrap();
-        assert_eq!(load(&config).unwrap()[0].key, "sk-new");
-        save_request(&config, &human(json!([{"was": "lab-a", "name": "lab-a", "base_url": "http://127.0.0.1:11434", "kind": "openai", "key": null}]))).unwrap();
-        assert_eq!(load(&config).unwrap()[0].key, "");
-        // Errors name the server and the field; nothing is written.
-        let refused = |servers: Value| save_request(&config, &human(servers)).unwrap_err().message;
-        let error = refused(json!([{"name": "bad", "base_url": "ftp://x", "kind": "openai"}]));
-        assert!(error.starts_with("Server bad: The API URL"), "{error}");
-        let error = refused(json!([{"name": "bad", "base_url": "http://x", "kind": "openai", "colour": "red"}]));
-        assert!(error.starts_with("Server bad: unknown field `colour`"), "{error}");
-        let error = refused(json!([{"name": "x", "base_url": "http://x", "kind": "openai"}, {"name": "x", "base_url": "http://y", "kind": "openai"}]));
-        assert!(error.contains("Server x: name is already used"), "{error}");
-        let error = refused(json!([{"name": "x", "base_url": "http://x", "kind": "openai", "up": ["serve", "up"]}]));
-        assert!(error.starts_with("Server x: The up command"), "{error}");
-        assert_eq!(load(&config).unwrap().len(), 1);
-        // Only you: no "by":"human", nothing saved.
-        let error = save_request(&config, &json!({"servers": []})).unwrap_err().message;
-        assert!(error.contains("by"), "{error}");
-        assert_eq!(load(&config).unwrap().len(), 1);
+        // The test process may run inside an agent session; save is the owner's.
+        crate::state::with_test_state_root(dir.path(), || {
+            let config = config(dir.path());
+            save(&config, &[server()]).unwrap();
+            let human = |servers: Value| json!({"by": "human", "servers": servers});
+            // Renamed, its key kept through `was`; a second one added without a key.
+            let saved = save_request(&config, &human(json!([
+                {"was": "lab", "name": "lab-a", "base_url": "http://127.0.0.1:8080", "kind": "openai",
+                 "status": ["serve", "status"], "down": ["serve", "down", "{model}"]},
+                {"name": "gate", "base_url": "https://gate.example/v1", "kind": "anthropic"}
+            ]))).unwrap();
+            assert_eq!(saved["status"], "saved");
+            assert!(!saved.to_string().contains("sk-test"), "{saved}");
+            assert_eq!(saved["servers"][0]["key"], true);
+            assert_eq!(saved["servers"][0]["argv"]["down"], json!(["serve", "down", "{model}"]));
+            let found = load(&config).unwrap();
+            assert_eq!((found[0].name.as_str(), found[0].key.as_str()), ("lab-a", "sk-test"));
+            assert_eq!((found[1].name.as_str(), found[1].key.as_str()), ("gate", ""));
+            // A new key replaces it; null removes it.
+            save_request(&config, &human(json!([{"was": "lab-a", "name": "lab-a", "base_url": "http://127.0.0.1:8080", "kind": "openai", "key": "sk-new"}]))).unwrap();
+            assert_eq!(load(&config).unwrap()[0].key, "sk-new");
+            save_request(&config, &human(json!([{"was": "lab-a", "name": "lab-a", "base_url": "http://127.0.0.1:8080", "kind": "openai", "key": null}]))).unwrap();
+            assert_eq!(load(&config).unwrap()[0].key, "");
+            // Errors name the server and the field; nothing is written.
+            let refused = |servers: Value| save_request(&config, &human(servers)).unwrap_err().message;
+            let error = refused(json!([{"name": "bad", "base_url": "ftp://x", "kind": "openai"}]));
+            assert!(error.starts_with("Server bad: The API URL"), "{error}");
+            let error = refused(json!([{"name": "bad", "base_url": "http://x", "kind": "openai", "colour": "red"}]));
+            assert!(error.starts_with("Server bad: unknown field `colour`"), "{error}");
+            let error = refused(json!([{"name": "x", "base_url": "http://x", "kind": "openai"}, {"name": "x", "base_url": "http://y", "kind": "openai"}]));
+            assert!(error.contains("Server x: name is already used"), "{error}");
+            let error = refused(json!([{"name": "x", "base_url": "http://x", "kind": "openai", "up": ["serve", "up"]}]));
+            assert!(error.starts_with("Server x: The up command"), "{error}");
+            assert_eq!(load(&config).unwrap().len(), 1);
+            // Only you: no "by":"human", nothing saved.
+            let error = save_request(&config, &json!({"servers": []})).unwrap_err().message;
+            assert!(error.contains("by"), "{error}");
+            assert_eq!(load(&config).unwrap().len(), 1);
+        });
     }
 
-    /// U60 (#656): `test --json` reads status once for an unsaved server,
-    /// with the stored key of `was` when it sends none, and writes nothing.
+    /// U60 (#658 L2): `test --json` reads status once for an unsaved server;
+    /// the stored key of `was` is used only while the root stays the same, so a
+    /// test can never send it to another listener, and nothing is written.
     #[test]
-    fn settings_test_reads_status_for_an_unsaved_server_and_saves_nothing() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-        let heard = seen.clone();
-        let answer = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buffer = [0u8; 4096];
-            let read = stream.read(&mut buffer).unwrap();
-            *heard.lock().unwrap() = String::from_utf8_lossy(&buffer[..read]).into_owned();
-            let body = r#"{"data":[{"id":"small"},{"id":"large"}]}"#;
-            write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
-        });
+    fn settings_test_never_reuses_the_key_for_another_root() {
+        fn answer(port: u16) -> (std::sync::Arc<std::sync::Mutex<String>>, std::thread::JoinHandle<()>) {
+            let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+            let heard = seen.clone();
+            let handle = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0u8; 4096];
+                let read = stream.read(&mut buffer).unwrap();
+                *heard.lock().unwrap() = String::from_utf8_lossy(&buffer[..read]).into_owned();
+                let body = r#"{"data":[{"id":"small"},{"id":"large"}]}"#;
+                write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
+            });
+            (seen, handle)
+        }
         let dir = tempfile::tempdir().unwrap();
         let config = config(dir.path());
-        save(&config, &[server()]).unwrap();
+        // A stored server on a root of its own, with its key.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let root = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut stored = server();
+        stored.base_url = format!("http://127.0.0.1:{root}");
+        save(&config, &[stored.clone()]).unwrap();
         let before = std::fs::read(path(&config)).unwrap();
-        let value = test_request(&config, &json!({"was": "lab", "name": "lab-edit", "base_url": format!("http://127.0.0.1:{port}"), "kind": "openai"}))
+        // The same root keeps the stored key.
+        let (seen, handle) = answer(root);
+        let value = test_request(&config, &json!({"was": "lab", "name": "lab-edit", "base_url": format!("http://127.0.0.1:{root}"), "kind": "openai"}))
             .unwrap()
             .unwrap();
-        answer.join().unwrap();
+        handle.join().unwrap();
         assert_eq!(value["source"], "api");
         assert_eq!(value["models"].as_array().unwrap().len(), 2);
-        assert!(seen.lock().unwrap().contains("Bearer sk-test"), "the stored key of `was` is used");
+        assert!(seen.lock().unwrap().contains("Bearer sk-test"), "the stored key of `was` is used for the same root");
+        // Another root gets no key at all.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let other_root = listener.local_addr().unwrap().port();
+        drop(listener);
+        let (seen, handle) = answer(other_root);
+        let value = test_request(&config, &json!({"was": "lab", "name": "lab-edit", "base_url": format!("http://127.0.0.1:{other_root}"), "kind": "openai"}))
+            .unwrap()
+            .unwrap();
+        handle.join().unwrap();
+        assert_eq!(value["source"], "api");
+        assert!(!seen.lock().unwrap().to_ascii_lowercase().contains("authorization"), "another root never sees the stored key");
         assert_eq!(std::fs::read(path(&config)).unwrap(), before, "a test writes nothing");
         // A refused field is an error, not a status.
         assert!(test_request(&config, &json!({"name": "x", "base_url": "nope", "kind": "openai"})).unwrap_err().message.starts_with("Server x:"));
@@ -1239,14 +1490,16 @@ mod tests {
         // the host, and the argv as one quoted remote command.
         let ssh = ssh_argv(&config, &server, &["serve".to_owned(), "status".to_owned()]);
         assert!(ssh.iter().any(|arg| arg == "BatchMode=yes"), "{ssh:?}");
+        assert!(ssh.iter().any(|arg| arg == "-n"), "the client reads no stdin: {ssh:?}");
         assert!(ssh.contains(&"labhost".to_owned()), "{ssh:?}");
         assert_eq!(ssh.last().unwrap(), "serve status", "{ssh:?}");
-        // The line format, an unknown line kept raw, and a memory line.
+        // The line format, an unknown line kept raw, a memory line, and a model
+        // name with tags (N7: split at the last ": ").
         set_fake_command(Some(Box::new(|_: &Server, _: &[String], _| {
-            Ok(Run { code: Some(0), stdout: "small: ready\nbig: STOPPED\nqueue depth 3\nmemory: 8/32 GB\n".into(), stderr: String::new() })
+            Ok(Run { code: Some(0), stdout: "small: ready\ncoder-a:q4: running\nqueue depth 3\nmemory: 8/32 GB\n".into(), stderr: String::new() })
         })));
         let value = status(&config, &server).unwrap();
-        assert_eq!(value["models"], json!([{"name":"small","state":"ready"},{"name":"big","state":"stopped"}]));
+        assert_eq!(value["models"], json!([{"name":"small","state":"ready"},{"name":"coder-a:q4","state":"running"}]));
         assert_eq!(value["memory"], json!({"free":8.0,"total":32.0}));
         assert_eq!(value["raw"], json!(["queue depth 3"]));
         // A refusal and an unreachable host are distinct.
@@ -1383,6 +1636,204 @@ mod tests {
     }
 
     #[test]
+    fn a_detached_ups_outcome_is_read_by_its_request_id_and_only_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let config = config(&dir.path().join("config"));
+            std::fs::create_dir_all(&config.dir).unwrap();
+            let mut server = server();
+            #[cfg(windows)]
+            let failing = vec!["cmd.exe".to_owned(), "/C".to_owned(), "echo loading {model} failed& exit 3".to_owned()];
+            #[cfg(not(windows))]
+            let failing = vec!["sh".to_owned(), "-c".to_owned(), "echo loading {model} failed; exit 3".to_owned()];
+            server.up = failing;
+            crate::state::builds::INLINE_RUNNER.with(|flag| flag.set(true));
+            let started = up(&config, &server, "small", true).unwrap();
+            crate::state::builds::INLINE_RUNNER.with(|flag| flag.set(false));
+            let id = started["request_id"].as_str().unwrap();
+            // The run's real outcome, not only that it started.
+            let done = up_result(id).unwrap();
+            assert_eq!((done["status"].as_str(), done["exit"].as_i64()), (Some("ran"), Some(3)), "{done}");
+            assert_eq!((done["server"].as_str(), done["model"].as_str()), (Some("lab"), Some("small")));
+            assert!(done["tail"].as_str().unwrap().contains("loading small failed"), "{done}");
+            assert_eq!(done["timed_out"], false);
+            // An unknown id, a malformed one and another kind of run are refused alike.
+            for other in ["55555555-5555-4555-8555-555555555555", "../builds", ""] {
+                assert!(matches!(up_result(other), Err(Failure::Refused(_))), "{other}");
+            }
+            let build = "66666666-6666-4666-8666-666666666666";
+            crate::state::builds::INLINE_RUNNER.with(|flag| flag.set(true));
+            crate::state::builds::start_for(build, "cargo test", "exit 0", dir.path(), json!({"name":"","run_id":"","conversation_id":""}), 1, &[]).unwrap();
+            crate::state::builds::INLINE_RUNNER.with(|flag| flag.set(false));
+            assert!(crate::state::builds::record(build, crate::state::now()).is_some());
+            assert!(matches!(up_result(build), Err(Failure::Refused(_))), "another run's output stays its own");
+        });
+    }
+
+    #[test]
+    fn a_status_keeps_a_models_since_when_it_is_a_time() {
+        let parsed = parse_status(r#"{"models":[{"name":"a","state":"running","since":1761800000},
+            {"name":"b","state":"running","since":"2026-10-30T09:12:00+04:00"},
+            {"name":"c","state":"loading","since":"after lunch"},{"name":"d","state":"stopped","since":-5}]}"#);
+        assert_eq!(json!(parsed.models), json!([
+            {"name":"a","state":"running","since":1761800000.0},
+            {"name":"b","state":"running","since":1793337120.0},
+            {"name":"c","state":"loading"},{"name":"d","state":"stopped"}]));
+    }
+
+    #[test]
+    fn sessions_on_a_server_are_named_with_their_model() {
+        let records = vec![
+            ("codex/orbit/a".to_owned(), json!({"agent":"codex","model_server":{"server":"lab","model":"coder-a"}})),
+            ("claude/orbit/b".to_owned(), json!({"agent":"claude"})),
+            ("codex/orbit/c".to_owned(), json!({"agent":"codex","model_server":{"server":"other","model":"coder-a"}})),
+            ("codex/orbit/d".to_owned(), json!({"agent":"codex","model_server":{"server":"lab","model":"chat-general"}})),
+        ];
+        assert_eq!(json!(sessions_using("lab", records.into_iter())), json!([
+            {"name":"codex/orbit/a","model":"coder-a"},{"name":"codex/orbit/d","model":"chat-general"}]));
+    }
+
+    #[test]
+    fn both_base_url_spellings_derive_the_same_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        let mut server = server();
+        server.base_url = "http://127.0.0.1:8080/v1".into();
+        let with_v1 = checked(server.clone()).unwrap();
+        assert_eq!(with_v1.base_url, "http://127.0.0.1:8080", "the root is stored, not /v1");
+        assert_eq!(models_url(&with_v1), "http://127.0.0.1:8080/v1/models");
+        assert_eq!(openai_base(&with_v1), "http://127.0.0.1:8080/v1");
+        assert_eq!(anthropic_base(&with_v1), "http://127.0.0.1:8080", "Claude Code appends /v1/messages");
+        save(&config, &[with_v1]).unwrap();
+        // A root spelling derives the same URLs and the same session settings.
+        let mut root = server;
+        root.base_url = "http://127.0.0.1:8080".into();
+        let root = checked(root).unwrap();
+        assert_eq!(models_url(&root), models_url(&load(&config).unwrap()[0]));
+        let codex = session_settings(&config, "lab", "codex", "small").unwrap();
+        assert!(codex.args[1].contains("base_url=\"http://127.0.0.1:8080/v1\""), "{:?}", codex.args);
+        assert!(!codex.args[1].contains("/v1/v1"), "{:?}", codex.args);
+        let mut anthropic = load(&config).unwrap()[0].clone();
+        anthropic.kind = "anthropic".into();
+        save(&config, &[anthropic]).unwrap();
+        let claude = session_settings(&config, "lab", "claude", "small").unwrap();
+        assert!(claude.env.iter().any(|line| line == "ANTHROPIC_BASE_URL=http://127.0.0.1:8080"), "{:?}", claude.env);
+    }
+
+    #[test]
+    fn model_names_with_colons_are_kept_whole_and_dash_names_are_left_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        // N7: the last ": " separates the state, so a tag stays in the name.
+        let parsed = parse_status("coder-a:q4: running\n-rf: running\ncoder: stopped\n");
+        assert_eq!(json!(parsed.models), json!([{"name":"coder-a:q4","state":"running"},{"name":"coder","state":"stopped"}]));
+        assert_eq!(parsed.raw, vec!["-rf: running".to_owned()], "a leading dash is offered by no model list");
+        // L3: a leading '-' is refused and never offered.
+        assert!(checked_model("-rf").is_err());
+        assert!(checked_model("coder-a:q4").is_ok());
+        let mut server = server();
+        server.down = vec!["serve".into(), "down".into(), "{model}".into()];
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Vec<String>>::new()));
+        let record = seen.clone();
+        set_fake_command(Some(Box::new(move |_: &Server, argv: &[String], _| {
+            record.borrow_mut().push(argv.to_vec());
+            Ok(Run { code: Some(0), stdout: String::new(), stderr: String::new() })
+        })));
+        down(&config, &server, "coder-a:q4", true).unwrap();
+        assert_eq!(seen.borrow()[0], ["serve", "down", "coder-a:q4"], "Down targets the tagged model exactly");
+        assert!(down(&config, &server, "-rf", true).is_err());
+        assert_eq!(seen.borrow().len(), 1, "the leading dash never reaches a template");
+        set_fake_command(None);
+    }
+
+    #[test]
+    fn ssh_commands_use_hgs_transport_and_refuse_a_windows_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        std::fs::create_dir_all(&config.dir).unwrap();
+        let mut server = server();
+        server.ssh = "labhost".into();
+        server.status = vec!["serve".into(), "status".into()];
+        let ssh = ssh_argv(&config, &server, &["serve".to_owned(), "status".to_owned()]);
+        assert!(ssh.iter().any(|arg| arg == "-n"), "no stdin: {ssh:?}");
+        assert!(ssh.iter().any(|arg| arg == "BatchMode=yes"));
+        // L1: a Windows Machine has no POSIX login shell for the remote argv.
+        crate::windows_peer::record(&config, "labhost", true).unwrap();
+        let failure = status(&config, &server).unwrap_err();
+        assert_eq!(failure.kind(), "refused");
+        assert!(failure.detail().contains("Windows Machine"), "{failure:?}");
+    }
+
+    #[test]
+    fn a_detached_up_starts_an_argv_and_an_ssh_argv_without_a_shell_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        let mut server = server();
+        server.up = vec!["serve".into(), "up".into(), "{model}".into()];
+        server.up_minutes = 7;
+        // Local: the template's argv itself.
+        assert_eq!(detached_argv(&config, &server, &["serve".into(), "up".into(), "small".into()]), ["serve", "up", "small"]);
+        // Over SSH: hgs's ssh argv, one argument per element, no shell line.
+        let mut remote = server.clone();
+        remote.ssh = "labhost".into();
+        let argv = detached_argv(&config, &remote, &["serve".into(), "up".into(), "small".into()]);
+        assert!(argv.iter().any(|arg| arg == "-n") && argv.contains(&"labhost".to_owned()), "{argv:?}");
+        assert_eq!(argv.last().unwrap(), "serve up small", "the remote argv is one quoted word");
+        crate::state::with_test_state_root(dir.path(), || {
+            std::fs::create_dir_all(&config.dir).unwrap();
+            crate::state::builds::INLINE_RUNNER.with(|flag| flag.set(true));
+            let started = up(&config, &server, "small", true).unwrap();
+            assert_eq!(started["status"], "started");
+            let id = started["request_id"].as_str().unwrap();
+            let record = crate::state::builds::record(id, crate::state::now()).unwrap();
+            assert_eq!(record["argv"], json!(["serve", "up", "small"]), "the runner takes the argv, not a shell line");
+            assert_eq!(record["timeout_secs"], 7 * 60);
+            crate::state::builds::INLINE_RUNNER.with(|flag| flag.set(false));
+        });
+    }
+
+    #[test]
+    fn a_resume_reapplies_the_server_or_refuses_when_it_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        let mut server = server();
+        server.kind = "anthropic".into();
+        save(&config, &[server]).unwrap();
+        let (env, path) = resume_settings(&config, "lab", "claude", "small").unwrap();
+        assert!(env.iter().any(|line| line == "ANTHROPIC_BASE_URL=http://127.0.0.1:8080"), "{env:?}");
+        let path = path.expect("a key is a private file");
+        assert!(path.starts_with(&config.state), "{path:?}");
+        assert!(std::fs::read_to_string(&path).unwrap().contains("ANTHROPIC_AUTH_TOKEN=sk-test"));
+        // A server that is gone refuses the resume by name.
+        let error = resume_settings(&config, "gone", "claude", "small").unwrap_err().to_string();
+        assert!(error.contains("Unknown model server gone"), "{error}");
+    }
+
+    #[test]
+    fn hgs_run_takes_the_secret_file_and_removes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_secret_file(dir.path(), &["HGS_MODEL_SERVER_KEY=sk-secret".into()]).unwrap();
+        assert!(path.is_file());
+        std::env::set_var("HGS_MODEL_SERVER_ENV", &path);
+        apply_session_secrets().unwrap();
+        assert_eq!(std::env::var("HGS_MODEL_SERVER_KEY").unwrap(), "sk-secret");
+        assert!(!path.exists(), "the private file is removed after the read");
+        assert!(std::env::var_os("HGS_MODEL_SERVER_ENV").is_none());
+        std::env::remove_var("HGS_MODEL_SERVER_KEY");
+    }
+
+    #[test]
+    fn the_codex_flags_are_the_installed_clis() {
+        let Some(codex) = platform::which("codex") else { return };
+        let mut command = Command::new(codex);
+        command.arg("--help");
+        let Ok(out) = platform::output_until(&mut command, Duration::from_secs(20)) else { return };
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(text.contains("-c") || text.contains("--config"), "codex --help names its config override: {text}");
+        assert!(text.contains("--model") || text.contains("-m"), "codex --help names --model: {text}");
+    }
+
+    #[test]
     fn a_session_gets_its_own_provider_settings_and_writes_no_global_file() {
         let dir = tempfile::tempdir().unwrap();
         let config = config(dir.path());
@@ -1390,22 +1841,30 @@ mod tests {
         server.kind = "openai".into();
         save(&config, &[server.clone()]).unwrap();
         let before = std::fs::read_dir(dir.path()).unwrap().map(|entry| entry.unwrap().file_name()).collect::<Vec<_>>();
-        let (env, args) = session_settings(&config, "lab", "codex", "small").unwrap();
-        assert!(env.iter().any(|line| line == "OPENAI_BASE_URL=http://127.0.0.1:11434"), "{env:?}");
-        assert!(env.iter().any(|line| line == "OPENAI_API_KEY=sk-test"), "{env:?}");
-        assert_eq!(args, ["--model", "small"]);
-        let (env, args) = session_settings(&config, "lab", "opencode", "small").unwrap();
-        assert!(env.iter().any(|line| line.starts_with("OPENCODE_CONFIG_CONTENT=") && line.contains("\"baseURL\":\"http://127.0.0.1:11434\"")), "{env:?}");
-        assert_eq!(args, ["--model", "hgs-lab/small"]);
-        // Anthropic-compatible settings for Claude Code.
+        // Codex: a session-scoped custom provider, never its built-in OpenAI
+        // provider or the ChatGPT login (N6). The key travels as the provider's
+        // env_key, kept off every command line (N3).
+        let codex = session_settings(&config, "lab", "codex", "small").unwrap();
+        assert!(codex.env.is_empty(), "no global OpenAI variables: {:?}", codex.env);
+        assert_eq!(codex.secrets, ["HGS_MODEL_SERVER_KEY=sk-test"]);
+        assert_eq!(codex.args[0], "-c");
+        assert!(codex.args[1].starts_with("model_providers.hgs-lab={name=\"lab\",base_url=\"http://127.0.0.1:8080/v1\""), "{:?}", codex.args);
+        assert!(codex.args[1].contains("env_key=\"HGS_MODEL_SERVER_KEY\""));
+        assert!(codex.args[1].contains("wire_api=\"chat\""));
+        assert_eq!(&codex.args[2..], ["-c", "model_provider=hgs-lab", "--model", "small"]);
+        // N1: OpenCode has no per-session provider; it is not offered.
+        let error = session_settings(&config, "lab", "opencode", "small").unwrap_err().to_string();
+        assert!(error.contains("OpenCode is not offered"), "{error}");
+        // Anthropic-compatible settings for Claude Code: the root, and the
+        // token only in the secret set.
         let mut anthropic = server.clone();
         anthropic.kind = "anthropic".into();
         save(&config, &[anthropic]).unwrap();
-        let (env, args) = session_settings(&config, "lab", "claude", "small").unwrap();
-        assert!(env.iter().any(|line| line == "ANTHROPIC_BASE_URL=http://127.0.0.1:11434"), "{env:?}");
-        assert!(env.iter().any(|line| line == "ANTHROPIC_AUTH_TOKEN=sk-test"), "{env:?}");
-        assert!(env.iter().any(|line| line == "ANTHROPIC_MODEL=small"), "{env:?}");
-        assert!(args.is_empty());
+        let claude = session_settings(&config, "lab", "claude", "small").unwrap();
+        assert!(claude.env.iter().any(|line| line == "ANTHROPIC_BASE_URL=http://127.0.0.1:8080"), "{:?}", claude.env);
+        assert!(claude.secrets.iter().any(|line| line == "ANTHROPIC_AUTH_TOKEN=sk-test"), "{:?}", claude.secrets);
+        assert!(claude.env.iter().any(|line| line == "ANTHROPIC_MODEL=small"));
+        assert!(claude.args.is_empty());
         // The agents' kinds must match the server's.
         assert!(session_settings(&config, "lab", "codex", "small").unwrap_err().to_string().contains("OpenAI"));
         let after = std::fs::read_dir(dir.path()).unwrap().map(|entry| entry.unwrap().file_name()).collect::<Vec<_>>();

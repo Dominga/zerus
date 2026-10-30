@@ -7,6 +7,7 @@
 #include <QWidget>
 #include <functional>
 
+#include "Settings.h"
 #include "WorkspaceIcons.h"
 #include "WorkspaceSkin.h"
 
@@ -77,7 +78,7 @@ public:
     {
         if (expanded == m_expanded) return;
         m_expanded = expanded;
-        if (!m_key.isEmpty()) QSettings().setValue(settingsKey(m_key), expanded);
+        if (!m_key.isEmpty()) Settings::set(settingsKey(m_key), expanded);
         refresh();
         if (expandedChanged) expandedChanged(expanded);
     }

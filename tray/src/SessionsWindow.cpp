@@ -1,3 +1,4 @@
+#include "Settings.h"
 #include "ConversationSource.h"
 #include "WslFileOpenDialog.h"
 #include "SettingsJson.h"
@@ -318,10 +319,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     const auto expanded = settings.value("workspace/expandedSessions").toStringList();
     m_expandedSessions = QSet<QString>(expanded.begin(), expanded.end());
     m_sessionRowPreferences = SessionRowPreferences(settings.value("workspace/collapsedSessionRows").toByteArray());
-    m_savedOrganization = settings.value("workspace/organization").toByteArray();
+    m_savedOrganization = SettingsJson::bytes("workspace/organization");
     const auto savedProjects = SettingsJson::object("workspace/organization");
     if (!savedProjects.isEmpty() && !savedProjects.contains("projects") && !settings.contains("workspace/organizationBeforeProjects"))
-        settings.setValue("workspace/organizationBeforeProjects", m_savedOrganization);
+        Settings::set("workspace/organizationBeforeProjects", m_savedOrganization);
     m_organization = SessionOrganization(savedProjects);
     m_pendingLaunches = SettingsJson::object("workspace/pendingLaunches");
     m_creations=new SessionCreationController(m_client.executable(),this);
@@ -601,15 +602,15 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             const bool fold = !m_collapsedTeams.contains(team->id);
             if (fold) { m_collapsedTeams.insert(team->id); m_expandedSessions.remove(key); }
             else m_collapsedTeams.remove(team->id);
-            QSettings().setValue("workspace/collapsedTeams", QStringList(m_collapsedTeams.cbegin(), m_collapsedTeams.cend()));
-            QSettings().setValue("workspace/expandedSessions", QStringList(m_expandedSessions.begin(), m_expandedSessions.end()));
+            Settings::set("workspace/collapsedTeams", QStringList(m_collapsedTeams.cbegin(), m_collapsedTeams.cend()));
+            Settings::set("workspace/expandedSessions", QStringList(m_expandedSessions.begin(), m_expandedSessions.end()));
             rebuild(); return;
         }
         if (m_expandedSessions.contains(key)) {
             m_expandedSessions.remove(key);
             if (m_selectedKey == key && !m_subagentId.isEmpty()) closeSubagent();
         } else m_expandedSessions.insert(key);
-        QSettings().setValue("workspace/expandedSessions", QStringList(m_expandedSessions.begin(), m_expandedSessions.end()));
+        Settings::set("workspace/expandedSessions", QStringList(m_expandedSessions.begin(), m_expandedSessions.end()));
         rebuild();
     });
     connect(m_sessions, &SessionList::rowExpanded, this, [this](const QString &key) {
@@ -1793,7 +1794,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         if(!m_pendingTeamAttention.isEmpty()&&m_teams->team(TeamAttentionNotices::teamOf(m_pendingTeamAttention)))showTeamAttention(m_pendingTeamAttention);
         auto changes=m_teamNotices->observe(m_teams->teams());
         if(changes.raised.isEmpty()&&changes.cleared.isEmpty())return;
-        QSettings().setValue("teams/attentionNotified",m_teamNotices->known());
+        Settings::set("teams/attentionNotified",m_teamNotices->known());
         // U55: a thing the waiting banner announced already is not announced twice.
         TeamWaitingNotices::dropAnnounced(changes,m_teams->teams());
         for(const auto &token:changes.cleared)emit teamAttentionCleared(token);
@@ -1925,7 +1926,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     tabs->setCornerWidget(m_inspectorCorner);
     connect(m_inspectorToggle, &QPushButton::toggled, this, &SessionsWindow::setInspectorVisible);
     connect(m_workSplitter, &QSplitter::splitterMoved, this, [this] {
-        if (!m_inspectorPanel->isHidden()) { m_inspectorWidth = m_inspectorPanel->width(); QSettings().setValue("workspace/inspectorWidth", m_inspectorWidth); }
+        if (!m_inspectorPanel->isHidden()) { m_inspectorWidth = m_inspectorPanel->width(); Settings::set("workspace/inspectorWidth", m_inspectorWidth); }
     });
     bool widthValid = false;
     const int savedWidth = settings.value("workspace/inspectorWidth", DefaultInspectorWidth).toInt(&widthValid);
@@ -2063,7 +2064,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_sessionDock->keepPeek = [this] { return m_search->hasFocus() || !m_search->text().isEmpty(); };
     m_sessionDock->modeChanged = [this] {
         const auto mode = m_sessionDock->mode();
-        if (mode != SessionPanelDock::Peek) QSettings().setValue("workspace/sessionsCollapsed", mode == SessionPanelDock::Collapsed);
+        if (mode != SessionPanelDock::Peek) Settings::set("workspace/sessionsCollapsed", mode == SessionPanelDock::Collapsed);
         if (mode != SessionPanelDock::Docked && m_sessions->bulkSelecting()) m_sessions->clearBulkSelection();
         updateSessionsToggle(); QTimer::singleShot(0, this, &SessionsWindow::updateInspectorMinimum);
     };
@@ -2874,6 +2875,7 @@ void SessionsWindow::applyTheme()
     if (m_teamWaitingPage) m_teamWaitingPage->setDark(m_dark);
     if (m_modelServersPage) m_modelServersPage->setDark(m_dark);
     if (m_modelServerSettings) m_modelServerSettings->setDark(m_dark);
+    if (m_settingsPage) m_settingsPage->setDark(m_dark);   // #650 N1: its Phones panel
     for (auto *banner : {m_waitingBanner, m_teamWaitingBanner}) if (banner) banner->setDark(m_dark);
     if (m_teamNewForm) m_teamNewForm->setDark(m_dark);
     m_processes->setTheme(m_dark);
@@ -3078,8 +3080,8 @@ void SessionsWindow::setInspectorVisible(bool visible)
         applyInspectorWidth();
     }
     updateInspectorMinimum();
-    QSettings settings; settings.setValue("workspace/inspectorVisible", visible);
-    settings.setValue("workspace/inspectorWidth", m_inspectorWidth);
+    Settings::set("workspace/inspectorVisible", visible);
+    Settings::set("workspace/inspectorWidth", m_inspectorWidth);
     updateWorktrees();
 }
 
@@ -3095,7 +3097,7 @@ void SessionsWindow::applyInspectorWidth()
 
 void SessionsWindow::saveSessionRowPreferences()
 {
-    QSettings().setValue("workspace/collapsedSessionRows", m_sessionRowPreferences.save());
+    Settings::set("workspace/collapsedSessionRows", m_sessionRowPreferences.save());
     m_expandAllRowsAction->setEnabled(!m_sessionRowPreferences.empty());
 }
 
@@ -3140,10 +3142,9 @@ void SessionsWindow::saveOrganization()
     if(m_swarm)m_swarm->edit(organization);
     const auto data = QJsonDocument(organization).toJson(QJsonDocument::Compact);
     if (data == m_savedOrganization) { m_savedOrganizationRevision = revision; return; }
-    QSettings settings; settings.setValue("workspace/organization", data); settings.sync();
-    SettingsJson::remember("workspace/organization", data, QJsonDocument(organization));
-    if (settings.status() == QSettings::NoError) { m_savedOrganization = data; m_savedOrganizationRevision = revision; }
-    else showNotice(tr("Could not save the session layout. Check the settings file permissions."), true);
+    // Its own file, written on the files' writer (SettingsJson.h).
+    SettingsJson::store("workspace/organization", data, QJsonDocument(organization));
+    m_savedOrganization = data; m_savedOrganizationRevision = revision;
 }
 
 void SessionsWindow::updateHeaderText()
@@ -3634,10 +3635,10 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
 }
 
 bool SessionsWindow::saveTaskLaunches() {
-    QSettings settings; SettingsJson::store(settings, QStringLiteral("tasks/pendingExecutorLaunches"), QJsonDocument(m_taskLaunches));
-    settings.sync();
+    // A reservation: stored now, or the launch does not start (Settings.h).
+    const bool stored = SettingsJson::storeNow(QStringLiteral("tasks/pendingExecutorLaunches"), QJsonDocument(m_taskLaunches));
     if (m_tasks) m_tasks->setExecutorLaunches(m_taskLaunches);
-    return settings.status() == QSettings::NoError;
+    return stored;
 }
 
 void SessionsWindow::dispatchTaskLaunches() {
@@ -3664,7 +3665,7 @@ void SessionsWindow::savePendingLaunches()
 {
     auto legacy=m_pendingLaunches;
     for(auto it=legacy.begin();it!=legacy.end();)if(it.value().toObject()["creation_schema"]==1)it=legacy.erase(it);else ++it;
-    QSettings settings; SettingsJson::store(settings, QStringLiteral("workspace/pendingLaunches"), QJsonDocument(legacy)); settings.sync();
+    SettingsJson::store(QStringLiteral("workspace/pendingLaunches"), QJsonDocument(legacy));
 }
 
 bool SessionsWindow::takeEndedLaunch(const QString &launchId, QJsonObject *launch)
@@ -5225,10 +5226,9 @@ QString SessionsWindow::foldInspectorSections(const QString &html) const
 
 void SessionsWindow::toggleInspectorSection(const QString &key)
 {
-    QSettings settings;
-    auto folded = settings.value(QStringLiteral("workspace/foldedInspector")).toStringList();
+    auto folded = QSettings().value(QStringLiteral("workspace/foldedInspector")).toStringList();
     if (!folded.removeAll(key)) folded << key;
-    settings.setValue(QStringLiteral("workspace/foldedInspector"), folded);
+    Settings::set(QStringLiteral("workspace/foldedInspector"), folded);
     m_childrenHtml.clear(); m_info->setProperty("inspectorHtml", QString()); renderDetails();
 }
 
@@ -7108,7 +7108,7 @@ void SessionsWindow::terminateSession()
     }
     m_removeTerminatedWorktree=removeWorktree && removeWorktree->isChecked();
     m_archivedWorktreeOwnerId=original.session.worktreeOwnerId;
-    if(removeWorktree)QSettings().setValue("workspace/removeWorktreeAfterTermination",removeWorktree->isChecked());
+    if(removeWorktree)Settings::set("workspace/removeWorktreeAfterTermination",removeWorktree->isChecked());
     m_pending = true; m_restoreKey.clear();
     if(live){
         ++m_worktreeCleanupRevision; m_worktreeCleanupOffered = false; m_worktreeCleanup->hide();
@@ -7347,7 +7347,7 @@ bool SessionsWindow::eventFilter(QObject *watched, QEvent *event)
     if (m_workSplitter && watched == m_workSplitter->handle(1) && event->type() == QEvent::MouseButtonDblClick
         && static_cast<QMouseEvent *>(event)->button() == Qt::LeftButton) {
         m_inspectorWidth = DefaultInspectorWidth;
-        QSettings().setValue("workspace/inspectorWidth", m_inspectorWidth);
+        Settings::set("workspace/inspectorWidth", m_inspectorWidth);
         applyInspectorWidth(); return true;
     }
     if (watched == m_workSplitter && event->type() == QEvent::Resize && !m_inspectorWidthPending) {
@@ -7374,8 +7374,8 @@ bool SessionsWindow::eventFilter(QObject *watched, QEvent *event)
 void SessionsWindow::hideEvent(QHideEvent *event) { m_readTimer.stop(); m_readCandidate.clear(); m_timer.stop(); m_tasks->setPolling(false); m_terminal->disconnectSession(); QWidget::hideEvent(event); }
 void SessionsWindow::closeEvent(QCloseEvent *event)
 {
-    QSettings settings; settings.setValue("sessions/geometry", saveGeometry()); settings.setValue("workspace/splitter", m_splitter->saveState());
-    settings.setValue("workspace/sessionsWidth", m_sessionDock->dockedWidth());
+    Settings::set("sessions/geometry", saveGeometry()); Settings::set("workspace/splitter", m_splitter->saveState());
+    Settings::set("workspace/sessionsWidth", m_sessionDock->dockedWidth());
     QWidget::closeEvent(event);
 }
 void SessionsWindow::changeEvent(QEvent *event)

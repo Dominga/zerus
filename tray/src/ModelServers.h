@@ -29,7 +29,13 @@ struct Server {
     QJsonObject json() const;   // as `save --json` takes it, without a key
 };
 
-struct Model { QString name, state; };
+// #703 (#658 N2): base_url names the server root; each consumer derives its
+// URL from it, as hgs does. A typed trailing /v1 (or /) is not the root.
+QString rootOf(const QString &baseUrl);
+QString modelsUrl(const QString &baseUrl);                       // root/v1/models
+QString agentUrl(const QString &baseUrl, const QString &kind);   // root/v1 (OpenAI), root (Anthropic)
+
+struct Model { QString name, state; qint64 since = 0; };   // since: seconds since the epoch, when the status says
 
 struct Status {
     bool known = false, reading = false;
@@ -79,7 +85,14 @@ public:
     static constexpr int MaxReads = 2;
     // Up detaches (`up --detach`): the receipt names its run; the status is
     // read once when it returns. Down was confirmed by the caller (`--yes`).
-    void up(const QString &server, const QString &model, const Reply &done);
+    // #703 (#658 N5): `started` gets the receipt; `finished` gets the run's own
+    // outcome (`up-result`: its exit, time limit or refusal), read every
+    // `upPoll` ms until it ends, bounded by the receipt's time limit.
+    void up(const QString &server, const QString &model, const Reply &started, const Reply &finished);
+    void setUpPoll(int ms) { m_upPoll = ms; }
+    bool upRunning(const QString &server, const QString &model) const { return m_upping.contains(server + QLatin1Char('\n') + model); }
+    // #703: this computer's live sessions on a server, with their models.
+    void sessions(const QString &server, const Reply &done);
     void down(const QString &server, const QString &model, const Reply &done);
     void logs(const QString &server, const QString &model, const Reply &done);
     // Settings: the whole list (`save --json`, by you) and one server's status
@@ -91,6 +104,7 @@ signals:
 private:
     void call(const QStringList &args, const QByteArray &input, int timeoutMs, const Reply &done);
     void pump();
+    void pollUp(const QString &key, const QString &id, qint64 until, const Reply &finished);
     HgsClient *m_client;
     QList<Server> m_servers;
     QHash<QString, Status> m_status;
@@ -98,6 +112,8 @@ private:
     QSet<QString> m_reading;
     QHash<quint64, Reply> m_calls;
     QTimer m_timer;
+    QSet<QString> m_upping;
+    int m_upPoll = 5000;
     quint64 m_listRequest = 0;
     bool m_listed = false, m_active = false;
 };

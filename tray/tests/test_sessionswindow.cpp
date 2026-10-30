@@ -40,6 +40,7 @@
 #include "WorkingLine.h"
 #include "SessionCardDelegate.h"
 #include "JsonSettings.h"
+#include "SessionLeadPanel.h"
 #include "GoToDialog.h"
 #include "ShortcutsDialog.h"
 #include <QPushButton>
@@ -129,6 +130,7 @@
 #include "MachinesPage.h"
 #include "WorkspaceColorDialog.h"
 #include "PhonePairing.h"
+#include "PageCards.h"
 #include <QTreeWidget>
 #include "PopupMouse.h"
 #include "AccountsPage.h"
@@ -264,6 +266,7 @@ private slots:
     void initTestCase();
     void phonePairingDialogUsesWorkspaceTheme_data();
     void phonePairingDialogUsesWorkspaceTheme();
+    void settingsPhonesPanelFollowsTheTheme();
     void machinesPageMatchesThePrototype_data();
     void machinesPageMatchesThePrototype();
     void nativeSettingsNavigationOnExplicitSpeechHost();
@@ -285,7 +288,7 @@ private slots:
     void localWindowsSessionExplainsDisabledVoice();
     // Shards run functions and data rows in any order, so every test starts without
     // the settings an earlier one saved, window geometry included.
-    void init() { ComposerDraftStore::flushWrites(); QSettings().clear(); QFile::remove(QSettings().fileName()+".creations.json");QSettings().setValue("downloads/folder", m_dir->filePath("download-cache")); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively());
+    void init() { ComposerDraftStore::flushWrites(); clearSettings(); QFile::remove(QSettings().fileName()+".creations.json");QSettings().setValue("downloads/folder", m_dir->filePath("download-cache")); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively());
         m_modals = std::make_unique<TestWait::ModalGuard>(); }
     // Chords a test rebinds end with it.
     void cleanup() {
@@ -309,6 +312,7 @@ private slots:
     void compactSkinStartsWithACollapsedList();
     void socratiCodeIsAnOptionalExtension();
     void subordinateSessionsFollowTheirLead();
+    void leadPanelKeepsItsRowsWhenNothingChanges();
     void agentTeamsGroupTheirSessions();
     void waitingBannersShowInTheChatAndTheTeamView();
     void teamTreeShowsSubteamsAndRollsUp();
@@ -878,6 +882,30 @@ void TestSessionsWindow::subordinateSessionsFollowTheirLead()
     QTRY_VERIFY(panel->findChild<QLabel *>("sessionLeadName"));
 }
 
+// #704: Details sets the lead panel's context on every rebuild of the list. The
+// same context keeps its select (and its popup's style); a changed one builds
+// the rows again; a refused choice shows nobody again.
+void TestSessionsWindow::leadPanelKeepsItsRowsWhenNothingChanges()
+{
+    SessionLeadPanel panel;
+    const QList<SessionLeadPanel::Session> candidates{{"arch\nrun-1", "api"}, {"arch\nrun-2", "web"}};
+    panel.setContext("arch\nrun-3", {}, {}, candidates);
+    auto *choice = panel.findChild<QComboBox *>("sessionLeadChoice");
+    QVERIFY(choice);
+    QCOMPARE(choice->count(), 3);
+    choice->setCurrentIndex(2);
+    panel.setContext("arch\nrun-3", {}, {}, candidates);
+    QCOMPARE(panel.findChild<QComboBox *>("sessionLeadChoice"), choice);
+    QCOMPARE(choice->currentIndex(), 0);
+    // Another candidate, or another session, builds the rows again.
+    panel.setContext("arch\nrun-3", {}, {}, candidates.mid(0, 1));
+    QTRY_VERIFY(!choice || panel.findChildren<QComboBox *>("sessionLeadChoice").size() == 1);
+    auto *rebuilt = panel.findChildren<QComboBox *>("sessionLeadChoice").last();
+    QCOMPARE(rebuilt->count(), 2);
+    panel.setContext("arch\nrun-1", {"arch\nrun-2", "web"}, {}, {});
+    QTRY_VERIFY(panel.findChild<QLabel *>("sessionLeadName"));
+}
+
 // U55: what waits for the owner shows as a banner at the top of the session's
 // chat and Activity and above the lead's conversation in the Team tab; each
 // thing raises one notification, whether the attention list or the waiting
@@ -1131,382 +1159,7 @@ void TestSessionsWindow::whiteWhWorkspaceView()
     QVERIFY(!composer->findChild<QFrame *>("composerCard")->isVisible());
 }
 
-// WhiteWh fork: the synthetic workspace of the README pictures: the Orbit
-// platform project on a Windows workstation, a MacBook and two Linux servers, an
-// agent team, accounts and the conversations that the fake hgs answers.
-namespace ReadmeShots {
-QJsonObject event(int seq, double at, const QString &type, const QString &detail, const QString &tool = {})
-{
-    return {{"seq", seq}, {"at", at}, {"type", type}, {"detail", detail}, {"tool", tool}};
-}
-
-SessionInfo session(const QString &cmd, const QString &project, const QString &tag, const QString &model,
-                    const QString &cwd, const QString &branch, const QString &prompt, double now)
-{
-    SessionInfo s;
-    s.name = cmd + '/' + project + '/' + tag; s.cmd = cmd; s.project = project; s.tag = tag;
-    s.tracked = true; s.resumable = true; s.model = model; s.effort = "high";
-    s.cwd = cwd; s.gitBranch = branch; s.prompt = prompt;
-    s.runId = "run-" + tag; s.conversationId = "conversation-" + tag;
-    s.runtimeState = "live"; s.processState = "running"; s.activity = "idle"; s.phase = "idle";
-    s.created = qint64(now) - 3 * 3600; s.lastEventAt = now - 240;
-    return s;
-}
-
-void working(SessionInfo &s, const QString &tool, const QString &detail, int seconds, double now)
-{
-    s.activity = "busy"; s.phase = "tool"; s.currentTool = tool; s.toolDetail = detail;
-    s.turnStarted = now - seconds; s.lastEventAt = now - 3;
-}
-
-QJsonObject metrics(const QString &platform, double cpu, int cores, double load, double used, double total, double now)
-{
-    const double gib = 1024. * 1024. * 1024.;
-    QJsonObject m{{"platform", platform}, {"cpu_percent", cpu}, {"cpu_count", cores}, {"cpu_interval_seconds", 2.0},
-                  {"memory_used_bytes", used * gib}, {"memory_total_bytes", total * gib}, {"sampled_at", now - 4}};
-    if (load >= 0) m["load_1"] = load;   // Windows reports no load average
-    return m;
-}
-
-// The New team picture needs its coordinator in an existing Git folder; it and
-// the Team designer's session join only then.
-FleetState fleet(double now, const QString &coordinatorFolder = {})
-{
-    BoxState ws; ws.host = "workstation"; ws.ok = true; ws.metrics = metrics("windows", 34, 16, -1, 27.6, 64, now);
-    auto lead = session("claude", "orbit", "checkout", "claude-opus-4-6", "D:\\work\\orbit", "feat/checkout-v2",
-                        "Lead the Checkout v2 team.", now);
-    working(lead, "Bash", "pnpm test checkout/address", 48, now);
-    auto backend = session("dsh", "orbit", "checkout-api", "deepseek-v4-pro", "D:\\work\\orbit-team\\backend", "team/checkout-v2/backend",
-                           "#2 Saved cards API", now);
-    backend.gitWorktree = true; backend.gitCommonDir = "D:\\work\\orbit\\.git";
-    working(backend, "Bash", "cargo test -p payments saved_cards", 263, now);
-    auto release = session("claude", "orbit", "release", "claude-sonnet-4-6", coordinatorFolder.isEmpty() ? "D:\\work\\orbit" : coordinatorFolder,
-                           "main", "Draft the 2.4 release notes from the merged changes.", now);
-    auto search = session("codex", "orbit", "search", "gpt-6.1-sol", "D:\\work\\orbit", "feat/search-index",
-                          "Index product names for checkout search.", now);
-    working(search, "Edit", "web/search/index.ts", 95, now);
-    ws.sessions = {lead, backend, search, release};
-    if (!coordinatorFolder.isEmpty()) {
-        auto designer = session("claude", "team-designer", "team-designer", "claude-opus-4-6", "D:\\work\\team-designer", {},
-                                "Help me write the goal and the team protocol for a new team.", now);
-        ws.sessions.append(designer);
-    }
-
-    BoxState mac; mac.host = "macbook"; mac.ok = true; mac.metrics = metrics("macos", 22, 12, 2.41, 18.2, 36, now);
-    auto frontend = session("codex", "orbit", "checkout-ui", "gpt-6.1-sol", "/Users/alice/work/orbit-team/frontend", "team/checkout-v2/frontend",
-                            "#3 Card form UI", now);
-    frontend.gitWorktree = true; frontend.gitCommonDir = "/Users/alice/work/orbit/.git";
-    working(frontend, "Edit", "web/checkout/CardForm.tsx", 131, now);
-    auto ios = session("claude", "orbit", "ios-shell", "claude-sonnet-4-6", "/Users/alice/work/orbit", "feat/ios-wallet",
-                       "Add Apple Pay to the iOS checkout shell.", now);
-    ios.unreadReply = true; ios.replyId = "reply-ios"; ios.replyAt = now - 540; ios.lastEventAt = now - 540;
-    mac.sessions = {frontend, ios};
-
-    BoxState b1; b1.host = "build-01"; b1.ok = true; b1.metrics = metrics("linux", 58, 32, 9.84, 41.0, 128, now);
-    auto tester = session("kimi", "orbit", "checkout-tests", "kimi-k2.5", "/srv/work/orbit-team/tester", "team/checkout-v2/tester",
-                          "Waiting for #2 Saved cards API", now);
-    tester.gitWorktree = true; tester.gitCommonDir = "/srv/work/orbit/.git";
-    auto docs = session("opencode", "orbit", "api-docs", "qwen3-coder", "/srv/work/orbit", "docs/saved-cards",
-                        "Document the saved cards endpoints.", now);
-    working(docs, "Write", "docs/api/saved-cards.md", 72, now);
-    auto terraform = session("codex", "infra", "staging", "gpt-6.1-sol", "/srv/work/infra", "main",
-                             "Plan the staging database upgrade.", now);
-    b1.sessions = {tester, docs, terraform};
-
-    BoxState b2; b2.host = "build-02"; b2.ok = true; b2.metrics = metrics("linux", 71, 32, 18.6, 77.5, 128, now);
-    auto review = session("dsh", "orbit", "review", "deepseek-v4-pro", "/srv/work/orbit", "release/2.4",
-                          "Review the payments changes before tonight's release.", now);
-    review.activity = "waiting"; review.phase = "input"; review.attentionId = "dsh-review-scope"; review.lastEventAt = now - 35;
-    auto refactor = session("codex", "orbit", "api-refactor", "gpt-6.1-sol", "/srv/work/orbit", "feat/api-v3",
-                            "Move the order handlers to the v3 router.", now);
-    working(refactor, "Bash", "cargo test --workspace", 388, now);
-    auto migrations = session("claude", "orbit", "migrations", "claude-sonnet-4-6", "/srv/work/orbit", "feat/ledger-index",
-                              "Add the ledger index migration.", now);
-    migrations.state = "paused";
-    b2.sessions = {review, refactor, migrations};
-
-    FleetState state; const auto ms = qint64(now * 1000);
-    state.setLocal(ws, ms); state.setPeer(mac, ms); state.setPeer(b1, ms); state.setPeer(b2, ms);
-    return state;
-}
-
-QJsonObject organization()
-{
-    const auto folder = [](const QString &id, const QString &machine, const QString &path, const QString &name) {
-        return QJsonObject{{"id", id}, {"machine", machine}, {"path", path}, {"name", name}};
-    };
-    const QStringList orbit{"workstation\nclaude/orbit/checkout", "workstation\ncodex/orbit/search", "build-02\ndsh/orbit/review",
-        "build-02\ncodex/orbit/api-refactor", "macbook\nclaude/orbit/ios-shell", "build-01\nopencode/orbit/api-docs",
-        "workstation\nclaude/orbit/release", "build-02\nclaude/orbit/migrations", "workstation\ndsh/orbit/checkout-api",
-        "macbook\ncodex/orbit/checkout-ui", "build-01\nkimi/orbit/checkout-tests"};
-    const QJsonArray projects{
-        QJsonObject{{"id", "orbit"}, {"name", "Orbit platform"}, {"color", "#64b5f6"}, {"sessions", QJsonArray::fromStringList(orbit)},
-            {"folders", QJsonArray{folder("orbit-ws", "workstation", "D:/work/orbit", "API and web app"),
-                                   folder("orbit-docs", "workstation", "D:/work/orbit-docs", "Developer docs"),
-                                   folder("orbit-mac", "macbook", "/Users/alice/work/orbit", "macOS and iOS clients"),
-                                   folder("orbit-b1", "build-01", "/srv/work/orbit", "Integration tests"),
-                                   folder("orbit-b2", "build-02", "/srv/work/orbit", "Release builds")}}},
-        QJsonObject{{"id", "infra"}, {"name", "Infrastructure"}, {"color", "#ffb74d"},
-            {"sessions", QJsonArray{"build-01\ncodex/infra/staging"}},
-            {"folders", QJsonArray{folder("infra-b1", "build-01", "/srv/work/infra", "Staging")}}},
-        QJsonObject{{"id", "research"}, {"name", "Docs & research"}, {"color", "#b39ddb"},
-            {"folders", QJsonArray{folder("research-mac", "macbook", "/Users/alice/notes", "Notes")}}},
-        QJsonObject{{"id", "ungrouped"}, {"name", "General"}, {"color", "#8d9baa"},
-            {"sessions", QJsonArray{"workstation\nclaude/team-designer/team-designer"}}}};
-    return {{"version", 2}, {"default_project", "orbit"}, {"projects", projects},
-            {"imported_machines", QJsonArray{"workstation", "macbook", "build-01", "build-02"}}};
-}
-
-QJsonObject team(double now)
-{
-    const auto member = [](const QString &id, const QString &role, const QString &agent, const QString &model, const QString &host, const QString &name) {
-        QJsonObject m{{"id", id}, {"role", role}, {"agent", agent}, {"model", model}, {"state", "active"},
-                      {"session", QJsonObject{{"host", host}, {"name", name}}}};
-        if (!host.isEmpty()) m["computer"] = host;
-        return m;
-    };
-    const auto deps = [](std::initializer_list<int> ids) { QJsonArray a; for (int id : ids) a.append(QJsonObject{{"task", id}}); return a; };
-    const auto attempt = [now](const QString &id, const QString &by, const QString &state, int ago, const QString &report = {}) {
-        QJsonObject a{{"n", 1}, {"id", id}, {"member", by}, {"state", state}, {"sent_at", now - ago}};
-        if (!report.isEmpty()) a["report"] = QJsonObject{{"text", report}, {"at", now - ago + 600}};
-        return a;
-    };
-    const QJsonArray tasks{
-        QJsonObject{{"id", 1}, {"title", "Checkout plan"}, {"assignee", "lead"}, {"status", "accepted"},
-                    {"attempts", QJsonArray{attempt("a1", "lead", "reported", 3300, "Plan approved by the owner")}}},
-        QJsonObject{{"id", 2}, {"title", "Saved cards API"}, {"assignee", "backend"}, {"status", "in_progress"}, {"deps", deps({1})},
-                    {"criteria", QJsonArray{"List, add and remove cards", "Card numbers never stored"}},
-                    {"attempts", QJsonArray{attempt("a2", "backend", "delivered", 2400)}}},
-        QJsonObject{{"id", 3}, {"title", "Card form UI"}, {"assignee", "frontend"}, {"status", "in_progress"}, {"deps", deps({1})},
-                    {"attempts", QJsonArray{attempt("a3", "frontend", "delivered", 1500)}}},
-        QJsonObject{{"id", 4}, {"title", "Address validation"}, {"assignee", "frontend"}, {"status", "submitted"}, {"deps", deps({1})},
-                    {"criteria", QJsonArray{"Postal codes checked per country", "Keyboard order kept"}},
-                    {"attempts", QJsonArray{attempt("a4", "frontend", "reported", 2700, "Validation and messages are in web/checkout/address")}}},
-        QJsonObject{{"id", 5}, {"title", "Contract tests"}, {"assignee", "tester"}, {"status", "pending"}, {"deps", deps({2})}},
-        QJsonObject{{"id", 6}, {"title", "Checkout E2E"}, {"assignee", "tester"}, {"status", "pending"}, {"deps", deps({3, 5})}},
-        QJsonObject{{"id", 7}, {"title", "Release notes"}, {"assignee", "lead"}, {"status", "pending"},
-                    {"deps", QJsonArray{QJsonObject{{"task", 6}}, QJsonObject{{"task", 4}, {"kind", "soft"}}}}}};
-    return {{"id", "team-checkout"}, {"name", "Checkout v2"}, {"status", "running"}, {"project", "Orbit platform"},
-            {"folder", "D:\\work\\orbit"}, {"lead", "lead"}, {"revision", 9}, {"created", now - 3600}, {"updated", now - 60},
-            {"settings", QJsonObject{}},
-            {"members", QJsonArray{member("lead", "Lead", "claude", "claude-opus-4-6", {}, "claude/orbit/checkout"),
-                                   member("backend", "Backend", "dsh", "deepseek-v4-pro", {}, "dsh/orbit/checkout-api"),
-                                   member("frontend", "Frontend", "codex", "gpt-6.1-sol", "macbook", "codex/orbit/checkout-ui"),
-                                   member("tester", "Tester", "kimi", "kimi-k2.5", "build-01", "kimi/orbit/checkout-tests")}},
-            {"tasks", tasks},
-            {"layers", QJsonObject{{"1", 0}, {"2", 1}, {"3", 1}, {"4", 1}, {"5", 2}, {"6", 3}, {"7", 4}}},
-            {"cycle", QJsonArray{}}, {"ready", QJsonArray{}}, {"validation", QJsonObject{{"errors", QJsonArray{}}, {"warnings", QJsonArray{}}}}};
-}
-
-QJsonObject feed(double now)
-{
-    QJsonArray items;
-    const auto add = [&](int seq, int ago, const QString &kind, const QJsonObject &detail) {
-        items.prepend(QJsonObject{{"seq", seq}, {"at", now - ago}, {"kind", kind}, {"detail", detail}});
-    };
-    add(1, 3600, "created", {{"by", "Owner"}});
-    add(2, 3400, "approved", {{"by", "Owner"}});
-    add(3, 3300, "accepted", {{"by", "Lead"}, {"task", 1}});
-    add(4, 2400, "handed_out", {{"to", "Backend"}, {"task", 2}, {"attempt", 1}});
-    add(5, 2700, "handed_out", {{"to", "Frontend"}, {"task", 4}, {"attempt", 1}});
-    add(6, 2100, "reported", {{"by", "Frontend"}, {"task", 4}, {"attempt", 1}});
-    add(7, 1500, "handed_out", {{"to", "Frontend"}, {"task", 3}, {"attempt", 1}});
-    return {{"items", items}, {"next_cursor", QJsonValue()}};
-}
-
-QJsonObject catalog()
-{
-    const auto role = [](const QString &id, const QString &name, const QString &agent, const QString &model, const QString &effort,
-                         const QString &folder, const QString &prompt) {
-        return QJsonObject{{"id", id}, {"name", name}, {"agent", agent}, {"model", model}, {"effort", effort}, {"folder", folder}, {"prompt", prompt}};
-    };
-    const auto seat = [](const QString &id) { return QJsonObject{{"role", id}, {"count", 1}}; };
-    const auto step = [](const QString &title, const QString &id, QJsonArray deps) { return QJsonObject{{"title", title}, {"role", id}, {"deps", deps}}; };
-    const QJsonArray roles{
-        role("lead", "Lead", "claude", "claude-opus-4-6", "high", "shared", "You lead the team: plan, hand out and review."),
-        role("backend", "Backend", "dsh", "deepseek-v4-pro", "high", "worktree", "Build and test the server side."),
-        role("frontend", "Frontend", "codex", "gpt-6.1-sol", "medium", "worktree", "Build the interface."),
-        role("tester", "Tester", "kimi", "kimi-k2.5", "medium", "worktree", "Write and run the tests."),
-        role("reviewer", "Reviewer", "claude", "claude-sonnet-4-6", "high", "read_only", "Review changes; edit nothing.")};
-    const QJsonArray templates{
-        QJsonObject{{"id", "feature"}, {"name", "Feature delivery"}, {"description", "API, interface and tests in two waves"},
-                    {"lead_protocol", "Plan two waves: the API and the form first, the tests after."},
-                    {"roster", QJsonArray{seat("backend"), seat("frontend"), seat("tester")}},
-                    {"tasks", QJsonArray{step("Plan", "lead", {}), step("API", "backend", {0}), step("Interface", "frontend", {0}), step("Tests", "tester", {1, 2})}},
-                    {"planning", "template"}, {"approval", "review"}, {"max_members", 6}},
-        QJsonObject{{"id", "bugfix"}, {"name", "Bug hunt"}, {"description", "Reproduce, fix and prove it with a test"},
-                    {"lead_protocol", "Reproduce first; accept a fix only with a failing test that now passes."},
-                    {"roster", QJsonArray{seat("backend"), seat("tester")}}, {"tasks", QJsonArray{}}, {"planning", "lead"}, {"approval", "review"}, {"max_members", 4}},
-        QJsonObject{{"id", "review"}, {"name", "Review pass"}, {"description", "Two read-only reviewers before a release"},
-                    {"lead_protocol", "Split the diff by area; merge the findings into one list."},
-                    {"roster", QJsonArray{seat("reviewer"), QJsonObject{{"role", "reviewer"}, {"count", 1}}}}, {"tasks", QJsonArray{}},
-                    {"planning", "lead"}, {"approval", "auto"}, {"max_members", 4}}};
-    return {{"builtin", false}, {"catalog", QJsonObject{{"version", 4}, {"roles", roles}, {"templates", templates}, {"routing", QJsonArray{}}}},
-            {"draft", QJsonObject{{"base", 4}, {"proposals", QJsonArray{}}}}};
-}
-
-QJsonObject accounts(double now)
-{
-    const auto profile = [](const QString &id, const QString &provider, const QString &label) {
-        return QJsonObject{{"id", id}, {"provider", provider}, {"label", label}, {"home", "/profiles/" + id}, {"native", false},
-                           {"installed", true}, {"is_default", true}};
-    };
-    const auto claude = profile("orbit-claude", "claude", "Orbit engineering"), codex = profile("orbit-codex", "codex", "Orbit Codex");
-    const auto kimi = profile("orbit-kimi", "kimi", "Kimi research"), dsh = profile("orbit-deepseek", "dsh", "DeepSeek API");
-    const auto local = profile("local-models", "opencode", "Local models");
-    const auto window = [now](int minutes, double used, int resetIn) {
-        return QJsonObject{{"window_minutes", minutes}, {"used_percent", used}, {"resets_at", now + resetIn}};
-    };
-    const auto usage = [now](const QString &email, const QString &account, const QString &plan, const QJsonArray &windows) {
-        return QJsonObject{{"status", "ok"}, {"checked_at", now - 30}, {"windows", windows},
-                           {"identity", QJsonObject{{"email", email}, {"account_id", account}, {"plan", plan}}}};
-    };
-    return {{"profiles", QJsonObject{{"", QJsonArray{claude, codex, dsh}}, {"macbook", QJsonArray{claude, codex}},
-                                     {"build-01", QJsonArray{codex, kimi, local}}, {"build-02", QJsonArray{claude, codex, dsh}}}},
-            {"usage", QJsonObject{
-                {"orbit-claude", usage("eng@example.com", "acct-claude", "Team", {window(300, 34, 6200), window(10080, 18, 302400)})},
-                {"orbit-codex", usage("ci@example.com", "acct-codex", "Pro", {window(300, 62, 4100), window(10080, 41, 190000)})},
-                {"orbit-kimi", usage("research@example.com", "acct-kimi", "Moderato", {window(10080, 27, 400000)})},
-                {"orbit-deepseek", QJsonObject{{"status", "ok"}, {"checked_at", now - 30},
-                    {"balances", QJsonArray{QJsonObject{{"kind", "Topped up"}, {"balance", "18.40"}, {"currency", "USD"}}}},
-                    {"identity", QJsonObject{{"account_id", "acct-deepseek"}, {"plan", "Pay as you go"}}}}},
-                {"local-models", QJsonObject{{"status", "configured"}, {"checked_at", now - 30},
-                    {"identity", QJsonObject{{"auth_method", "Ollama"}, {"plan", "qwen3-coder"}}}}}}}};
-}
-
-QJsonObject details(const SessionInfo &s, const QJsonArray &events)
-{
-    return {{"tracked", true}, {"run_id", s.runId}, {"conversation_id", s.conversationId}, {"runtime_state", "live"},
-            {"process_state", "running"}, {"activity", s.activity}, {"phase", s.phase}, {"current_tool", s.currentTool},
-            {"tool_detail", s.toolDetail}, {"events", events}, {"cursor", events.size()}};
-}
-
-// The new team's goal and protocol, as the Team designer drafts them.
-constexpr char goal[] = "Customers can list, add and remove saved cards at checkout. Card numbers stay with the payment provider.\n"
-                         "Done when the API, the card form and the contract tests pass on staging.";
-constexpr char protocol[] = "Two waves: the saved cards API and the card form first, the tests after.\n"
-                            "Accept a report only against its criteria; send unclear work back with one concrete request.\n"
-                            "Start the second wave when both first-wave tasks are accepted.";
-
-// What `hgs inspect` answers, keyed by "<host>\n<name>" (the local host is empty).
-QJsonObject conversations(const FleetState &state, double now)
-{
-    QJsonObject result;
-    const auto all = [&](const QString &host, const BoxState &box) {
-        for (const auto &s : box.sessions)
-            result[host + '\n' + s.name] = details(s, {event(1, now - 1800, "UserPromptSubmit", s.prompt),
-                                                       event(2, now - 1700, "Stop", "Started on it; I will report back here.")});
-    };
-    all({}, state.local());
-    for (const auto &peer : state.peerNames()) all(peer, *state.peer(peer));
-    const auto find = [&](const QString &host, const QString &name) {
-        const auto &box = host.isEmpty() ? state.local() : *state.peer(host);
-        for (const auto &s : box.sessions) if (s.name == name) return s;
-        return SessionInfo{};
-    };
-    auto lead = details(find({}, "claude/orbit/checkout"), {
-        event(1, now - 3560, "UserPromptSubmit", "Lead the Checkout v2 team: saved cards in the API and the checkout form, covered by "
-                                                "contract tests. Plan the tasks, then hand them out."),
-        event(2, now - 3500, "PostToolUse", "docs/checkout/architecture.md", "Read"),
-        event(3, now - 3420, "Stop", "Plan sent for approval: 7 tasks in 5 layers. #2 and #3 can start together; the tests wait for the API."),
-        event(4, now - 2100, "UserPromptSubmit", "[Zerus team Checkout v2] Report from Frontend · #4 Address validation, attempt 1. "
-                                                "Check it against the criteria."),
-        event(5, now - 2060, "PostToolUse", "web/checkout/address/validate.ts", "Read"),
-        event(6, now - 60, "Stop", "Reviewing **#4 Address validation** from Frontend against its criteria:\n\n"
-                                   "- Postal codes are checked per country, with the message under the field\n"
-                                   "- The form keeps its keyboard order: street, city, postal code, country\n"
-                                   "- The public `/v1/checkout` contract is unchanged\n\n"
-                                   "Running the checks before I accept it:\n\n"
-                                   "```bash\npnpm test checkout/address\ncargo test -p payments contract\n```\n\n"
-                                   "#2 Saved cards API and #3 Card form UI are still in progress."),
-        event(7, now - 48, "PreToolUse", "pnpm test checkout/address", "Bash")});
-    lead["task_lists"] = QJsonObject{{"main", QJsonObject{{"run_id", "run-checkout"}, {"items", QJsonArray{
-        QJsonObject{{"title", "Plan Checkout v2 with the team"}, {"status", "completed"}},
-        QJsonObject{{"title", "Hand out the first wave"}, {"status", "completed"}},
-        QJsonObject{{"title", "Review #4 Address validation"}, {"status", "in_progress"}},
-        QJsonObject{{"title", "Review #2 and #3 reports"}, {"status", "pending"}},
-        QJsonObject{{"title", "Write the release notes"}, {"status", "pending"}}}}}}};
-    result["\nclaude/orbit/checkout"] = lead;
-
-    auto review = details(find("build-02", "dsh/orbit/review"), {
-        event(1, now - 900, "UserPromptSubmit", "Review the payments changes on release/2.4 before tonight's release."),
-        event(2, now - 860, "PostToolUse", "git diff --stat origin/main...release/2.4", "Bash"),
-        event(3, now - 820, "AgentMessage", "14 files changed since main:\n\n"
-                                            "- `services/payments`: 9 files, the saved cards API and two migrations\n"
-                                            "- `web/checkout`: 3 files, the card form\n"
-                                            "- `docs/api`: 2 files\n\n"
-                                            "The migrations touch the `ledger` table, so I would start there.")});
-    review["attention_id"] = "dsh-review-scope";
-    review["pending_questions"] = QJsonArray{QJsonObject{
-        {"source", "dsh_native"}, {"answer_transport", "native_dsh"}, {"question_id", "dsh-review-scope"}, {"question_hash", QString(64, 'c')},
-        {"run_id", "run-review"}, {"conversation_id", "conversation-review"}, {"can_answer", true},
-        {"questions", QJsonArray{QJsonObject{{"id", "scope"}, {"header", "Review scope"}, {"question", "Which changes should I review first?"},
-            {"multi_select", false}, {"allow_other", true}, {"options", QJsonArray{
-                QJsonObject{{"id", "payments"}, {"label", "Payments and migrations (Recommended)"},
-                            {"description", "The saved cards API and the two ledger migrations: 9 files."}},
-                QJsonObject{{"id", "all"}, {"label", "Everything on release/2.4"}, {"description", "All 14 files, with the card form and the API docs."}}}}}}}}};
-    result["build-02\ndsh/orbit/review"] = review;
-
-    const auto designer = find({}, "claude/team-designer/team-designer");
-    if (!designer.name.isEmpty())
-        result["\nclaude/team-designer/team-designer"] = details(designer, {
-            event(1, now - 400, "UserPromptSubmit", "New team for saved payment methods in checkout. Members: Backend (DeepSeek), "
-                                                   "Frontend (Codex), Tester (Kimi). Help me with the goal and the protocol."),
-            event(2, now - 340, "Stop", QStringLiteral("Here is a draft you can use:\n\n**GOAL:**\n%1\n\n**PROTOCOL:**\n%2")
-                                            .arg(QString::fromLatin1(goal), QString::fromLatin1(protocol)))});
-    return result;
-}
-
-// The fake hgs: answers from <script>.json, which the test writes.
-constexpr char program[] = R"PY(#!/usr/bin/env python3
-import json,sys
-d=json.load(open(__file__+'.json',encoding='utf-8'))
-a=sys.argv[1:]
-host=''
-if a and a[0].startswith('@'):host=a[0][1:];a=a[1:]
-c=a[0] if a else ''
-def out(v):sys.stdout.write(json.dumps(v))
-profiles=d['accounts']['profiles'].get(host,[])
-def usage(p):
- u=dict(d['accounts']['usage'].get(p['id'],{'status':'unavailable'}))
- u.update(id=p['id'],provider=p['provider'],home=p['home'])
- return u
-if c=='inspect':
- name=a[1] if len(a)>1 else ''
- out({} if '--agent' in a else d['inspect'].get(host+'\n'+name,{'tracked':True,'events':[],'cursor':0}))
-elif c=='account' and a[1:2]==['ls']:out({'profiles':profiles})
-elif c=='account' and a[1:2]==['inspect']:
- if '--session' in a:
-  provider=a[a.index('--session')+1].split('/')[0]
-  found=[p for p in profiles if p['provider']==provider]
-  u=usage(found[0]) if found else {'status':'unavailable','provider':provider}
-  for k in ('id','home'):u.pop(k,None)
-  out(u)
- else:
-  found=[p for p in profiles if p['id']==a[2]]
-  out(usage(found[0]) if found else {'status':'unavailable','id':a[2]})
-elif c=='team':
- op=a[1] if len(a)>1 else ''
- if op=='list':
-  t=dict(d['team'])
-  for k in ('layers','cycle','ready','validation'):t.pop(k,None)
-  out({'items':[t]})
- elif op=='status':out(d['team'])
- elif op=='events':out(d['feed'])
- elif op=='catalog' and a[2:3]==['get']:out(d['catalog'])
- else:
-  # A change is kept for the test to read (U57: decide-proposal).
-  open(__file__+'.calls','a',encoding='utf-8').write(json.dumps({'args':a,'input':json.loads(sys.stdin.read() or '{}')})+'\n')
-  out({'status':'accepted' if op=='decide-proposal' else 'ok'})
-elif c=='model-server':out(d.get('model_servers',{'servers':[]}) if a[1:2]==['list'] else {'status':'error','error':'refused','detail':'not in this fixture'})
-elif c=='git-status' and 'git' in d:out(d['git'].get(host+'\n'+a[a.index('--path')+1],{'state':'not_repo'}))
-elif c=='ls':out({'host':host or 'workstation','ok':True,'sessions':[]})
-elif c=='swarm':out({'schema':1,'organization':d['organization'],'node_id':'node-workstation','versions':{},'written':{},'conflicts':[],
- 'peers':{'macbook':{},'build-01':{},'build-02':{}}})
-elif c=='project' and a[1:2]==['ls']:out([])
-else:out({})
-)PY";
-}
+#include "ReadmeShots.h"
 
 // G8: the session row reads the team list summary, which now carries each
 // task's phase and the phase records. A team like 528aebfe - phase 1 and 31
@@ -1803,7 +1456,7 @@ void TestSessionsWindow::sessionStatesShowOnCardsAndHeader_data()
 void TestSessionsWindow::sessionStatesShowOnCardsAndHeader()
 {
     QFETCH(QString, theme);
-    const auto restore = qScopeGuard([] { for (const auto *key : {"workspace/skin", "workspace/theme"}) QSettings().remove(key); });
+    const auto restore = qScopeGuard([] { for (const auto *key : {"workspace/skin", "workspace/theme"}) removeSetting(key); });
     QSettings().setValue("workspace/skin", "whitewh"); QSettings().setValue("workspace/theme", theme);
     const double now = QDateTime::currentSecsSinceEpoch();
     const auto make = [now](const QString &tag, const QString &state) {
@@ -1982,7 +1635,7 @@ void TestSessionsWindow::sessionListFollowsThePrototype()
 {
     QFETCH(QString, theme);
     const auto restore = qScopeGuard([] {
-        for (const auto *key : {"workspace/skin", "workspace/theme", "workspace/organization", "workspace/inspectorVisible", "processes/enabled"}) QSettings().remove(key);
+        for (const auto *key : {"workspace/skin", "workspace/theme", "workspace/organization", "workspace/inspectorVisible", "processes/enabled"}) removeSetting(key);
     });
     QSettings().setValue("workspace/skin", "whitewh"); QSettings().setValue("workspace/theme", theme);
     setJsonSetting("workspace/organization", QJsonDocument(ReadmeShots::organization()).toJson(QJsonDocument::Compact));
@@ -2481,7 +2134,7 @@ void TestSessionsWindow::readmeScreenshots()
     const QStringList keys{"workspace/skin", "workspace/theme", "workspace/organization", "workspace/inspectorVisible", "workspace/collapsedTeams",
                            "workspace/sessionsCollapsed", "workspace/splitter", "sessions/geometry", "workspace/organizationBeforeSwarm",
                            "swarm/observedOrganization", "swarm/observedVersions", "swarm/driveFoldersShared"};
-    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) QSettings().remove(key); sessionCardTileInset() = 0; });
+    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) removeSetting(key); sessionCardTileInset() = 0; });
     QSettings().setValue("workspace/skin", "whitewh"); QSettings().setValue("workspace/theme", "dark");
     setJsonSetting("workspace/organization", QJsonDocument(ReadmeShots::organization()).toJson(QJsonDocument::Compact));
     QSettings().setValue("workspace/inspectorVisible", true);
@@ -2625,7 +2278,7 @@ void TestSessionsWindow::readmeScreenshots()
 void TestSessionsWindow::teamAttentionReachesTheNotifications()
 {
     const QStringList keys{"workspace/organization", "workspace/inspectorVisible", "teams/attentionNotified"};
-    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) QSettings().remove(key); });
+    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) removeSetting(key); });
     QSettings().remove("teams/attentionNotified");
     setJsonSetting("workspace/organization", QJsonDocument(ReadmeShots::organization()).toJson(QJsonDocument::Compact));
     const double now = QDateTime::currentSecsSinceEpoch();
@@ -2673,7 +2326,7 @@ void TestSessionsWindow::teamAttentionReachesTheNotifications()
 void TestSessionsWindow::designerSessionDropsTheTeamHeader()
 {
     const QStringList keys{"workspace/skin", "workspace/organization", "workspace/inspectorVisible", "teams/attentionNotified"};
-    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) QSettings().remove(key); sessionCardTileInset() = 0; });
+    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) removeSetting(key); sessionCardTileInset() = 0; });
     QSettings().setValue("workspace/skin", "whitewh");
     setJsonSetting("workspace/organization", QJsonDocument(ReadmeShots::organization()).toJson(QJsonDocument::Compact));
     QSettings().setValue("workspace/inspectorVisible", false);
@@ -2706,7 +2359,7 @@ void TestSessionsWindow::designerSessionDropsTheTeamHeader()
 void TestSessionsWindow::leadSessionAnswersAProposalOnItsCard()
 {
     const QStringList keys{"workspace/skin", "workspace/theme", "workspace/organization", "workspace/inspectorVisible", "workspace/collapsedTeams"};
-    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) QSettings().remove(key); });
+    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) removeSetting(key); });
     QSettings().setValue("workspace/skin", "whitewh");
     setJsonSetting("workspace/organization", QJsonDocument(ReadmeShots::organization()).toJson(QJsonDocument::Compact));
     QSettings().setValue("workspace/inspectorVisible", false);
@@ -2778,7 +2431,7 @@ void TestSessionsWindow::leadSessionAnswersAProposalOnItsCard()
 void TestSessionsWindow::modelServersRailButtonOnlyWithAServer()
 {
     const QStringList keys{"workspace/skin", "workspace/theme", "workspace/organization", "workspace/inspectorVisible"};
-    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) QSettings().remove(key); });
+    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) removeSetting(key); });
     QSettings().setValue("workspace/skin", "whitewh");
     setJsonSetting("workspace/organization", QJsonDocument(ReadmeShots::organization()).toJson(QJsonDocument::Compact));
     const double now = QDateTime::currentSecsSinceEpoch();
@@ -2816,7 +2469,7 @@ void TestSessionsWindow::modelServersRailButtonOnlyWithAServer()
 void TestSessionsWindow::leadSessionHeaderCarriesTheTeam()
 {
     const QStringList keys{"workspace/skin", "workspace/theme", "workspace/organization", "workspace/inspectorVisible", "workspace/collapsedTeams"};
-    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) QSettings().remove(key); sessionCardTileInset() = 0; });
+    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) removeSetting(key); sessionCardTileInset() = 0; });
     QSettings().setValue("workspace/skin", "whitewh");
     setJsonSetting("workspace/organization", QJsonDocument(ReadmeShots::organization()).toJson(QJsonDocument::Compact));
     QSettings().setValue("workspace/inspectorVisible", false);
@@ -3077,6 +2730,61 @@ void TestSessionsWindow::phonePairingDialogUsesWorkspaceTheme()
     QTRY_COMPARE(code->palette().color(QPalette::Base), QColor(theme == "dark" ? "#1c2229" : "#ffffff"));
     QCOMPARE(code->palette().color(QPalette::Text), QColor(theme == "dark" ? "#e8edf4" : "#1a2733"));
 }
+// #650 N1: the Phones panel in Settings > Mobile connection draws its table,
+// intro and group rows in the window's theme, and follows a theme change;
+// it used to keep the light colours it set itself. Shots in both themes.
+void TestSessionsWindow::settingsPhonesPanelFollowsTheTheme()
+{
+    QSettings().setValue("workspace/theme", "dark");
+    const auto restoreTheme = qScopeGuard([] { QSettings().remove("workspace/theme"); });
+    QTemporaryDir fixture; QVERIFY(fixture.isValid()); const auto fake = fixture.filePath("hgs");
+    QVERIFY(FakeCli::install(fake, (QStringLiteral("#!/usr/bin/env python3\nimport json,runpy,sys,time\na=sys.argv[1:]\n"
+        "host=a.pop(0)[1:] if a and a[0].startswith('@') else ''\n"
+        "if a==['--help']:print('usage: hgs [@host] <cmd>\\n       hgs [@host] mobile phones|invite|revoke-phone <id> --json')\n"
+        "elif a[:2]==['machine','ls']:print(json.dumps({'local':'workstation','machines':[{'alias':'studio','enabled':True}]}))\n"
+        "elif a==['mobile','phones','--json']:\n"
+        " now=time.time()\n"
+        " print(json.dumps({'configured':True,'server_url':'https://relay.example.test','workspace_id':'w1' if host=='' else 'w2',"
+        "'workspace_name':'Orbit' if host=='' else 'Lab','devices':[] if host else [{'id':'00000000-0000-4000-8000-0000000000a1','name':'Pixel 9','platform':'android',"
+        "'paired_at':now-86400*40,'last_seen_at':now-600,'added_by':{'name':'workstation'}}]}))\n"
+        "else:\n sys.argv[0]=") + FakeCli::pythonString(script()) + ";runpy.run_path(sys.argv[0],run_name='__main__')\n").toUtf8()));
+    SessionsWindow window(FakeCli::program(fake)); window.setFleet(fleet()); window.resize(1260, 820); window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    window.showUpdates();
+    auto *sections = window.findChild<QListWidget *>("settingsSections"); QVERIFY(sections);
+    for (int i = 0; i < sections->count(); ++i) if (sections->item(i)->text() == "Mobile connection") sections->setCurrentRow(i);
+    auto *panel = dynamic_cast<PhonePairing::Panel *>(window.findChild<QWidget *>("settingsPhonesPanel")); QVERIFY(panel);
+    QTRY_VERIFY(panel->isVisible());
+    auto *tree = panel->findChild<QTreeWidget *>("linkedPhones");
+    QTRY_COMPARE(tree->topLevelItemCount(), 2);
+    const auto fg = [](bool dark) { return PageCards::token(dark, "fg").name(QColor::HexArgb); };
+    const auto muted = [](bool dark) { return PageCards::token(dark, "muted").name(QColor::HexArgb); };
+    const auto check = [&](bool dark) {
+        QTRY_COMPARE(panel->dark(), dark);
+        QVERIFY2(tree->styleSheet().contains("color:" + fg(dark)), qPrintable(tree->styleSheet()));
+        QVERIFY(panel->findChild<QLabel *>("phonesIntro")->styleSheet().contains(muted(dark)));
+        QCOMPARE(tree->topLevelItem(1)->background(0).color(), PageCards::token(dark, "hover"));
+    };
+    check(true);
+    const auto save = [&](const QString &name) {
+        const auto shots = qEnvironmentVariable("ZERUS_TEAM_SHOTS");
+        if (shots.isEmpty()) return;
+        // The page around it too: scrolled to the panel, the whole window.
+        for (auto *parent = panel->parentWidget(); parent; parent = parent->parentWidget())
+            if (auto *scroll = qobject_cast<QScrollArea *>(parent)) { scroll->ensureWidgetVisible(panel, 0, 0); break; }
+        QDir().mkpath(shots); QTest::qWait(80);
+        QVERIFY(window.grab().save(shots + "/" + name + ".png"));
+    };
+    save("u701-settings-phones-dark");
+    // A theme change reaches it at once.
+    auto *theme = window.findChild<QComboBox *>("workspaceTheme"); QVERIFY(theme);
+    theme->setCurrentIndex(theme->findData("light"));
+    check(false);
+    save("u701-settings-phones-light");
+    theme->setCurrentIndex(theme->findData("dark"));
+    check(true);
+}
+
 void TestSessionsWindow::colorPickerUsesWorkspaceThemeAndCancelsOutside()
 {
     QFETCH(QString,theme);QSettings().setValue("workspace/theme",theme);
@@ -4163,7 +3871,7 @@ void TestSessionsWindow::groupsPersistFilterAndRevealAttention()
     auto *results = window.findChild<QListWidget *>("searchResults"); QVERIFY(results->isVisible()); QCOMPARE(results->count(), 1);
     search->clear(); QVERIFY(list->currentItem()->isHidden());
     list->sessionMoved(remote, docs, {}); list->groupMoved(docs, work);
-    auto persisted = SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    auto persisted = SessionOrganization(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QCOMPARE(persisted.groupFor(remote), docs); QCOMPARE(persisted.groups().at(0).id, docs);
     auto offline = fleet(); BoxState unavailable; unavailable.host = "mac"; offline.setPeer(unavailable, QDateTime::currentMSecsSinceEpoch()); window.setFleet(offline);
     QCOMPARE(header(docs)->data(SessionRoles::Attention).toInt(), 0); QCOMPARE(list->currentItem()->data(SessionRoles::Identity).toString(), remote);
@@ -4671,7 +4379,7 @@ void TestSessionsWindow::emptyProjectsSettingPreservesArchiveAndProjects()
     box.sessions.first().activity = "idle"; box.sessions.first().phase = "idle"; box.sessions.first().state = "paused";
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state); QVERIFY(hasHeader(active));
     box.sessions.removeFirst(); state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state); QVERIFY(!hasHeader(active));
-    const SessionOrganization stored(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    const SessionOrganization stored(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QVERIFY(stored.group(empty)); QVERIFY(stored.group(active)); QVERIFY(stored.group(archived));
 }
 
@@ -6758,17 +6466,17 @@ void TestSessionsWindow::refreshedListingsKeepRowsUnlessTimeChangesThem()
 
 void TestSessionsWindow::organizationIsSavedOnlyWhenItChanges()
 {
-    QSettings().remove("workspace/organization");
+    removeSetting("workspace/organization");
     SessionsWindow window(program()); keepDetailsPollsOut(window); window.setFleet(fleet()); window.show();
-    QTRY_VERIFY(QSettings().contains("workspace/organization"));
+    QTRY_VERIFY(SettingsJson::contains("workspace/organization"));
     // Polls with the same rows leave the saved layout alone, whatever else wrote it.
     setJsonSetting("workspace/organization", QByteArray("{}"));
     for (int i = 0; i < 3; ++i) window.setFleet(fleet());
-    QCOMPARE(QSettings().value("workspace/organization").toByteArray(), QByteArray("{}"));
+    QCOMPARE(jsonSetting("workspace/organization"), QByteArray("{}"));
     // A newly observed session changes the layout, which is saved at once.
     auto state = fleet(); auto local = state.local(); auto added = local.sessions[1]; added.name = "kimi/docs/second"; added.tag = "second";
     local.sessions << added; state.setLocal(local, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
-    const auto saved = QSettings().value("workspace/organization").toByteArray();
+    const auto saved = jsonSetting("workspace/organization");
     QVERIFY(saved.contains("kimi/docs/second"));
 }
 
@@ -12130,7 +11838,7 @@ void TestSessionsWindow::forkKeepsSourceAndGroup()
     QTRY_VERIFY(list->currentItem());
     QCOMPARE(list->currentItem()->data(Qt::UserRole).toString(), QString("\ncodex/project/topic-fork"));
     QVERIFY(!list->currentItem()->isHidden());
-    const auto persisted = SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    const auto persisted = SessionOrganization(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     const QString createdIdentity = "arch\ncodex/project/topic-fork";
     QCOMPARE(persisted.groupFor(sourceIdentity), group); QCOMPARE(persisted.groupFor(createdIdentity), group);
     QVERIFY(persisted.group(group));
@@ -12991,7 +12699,7 @@ void TestSessionsWindow::preview()
         QVERIFY(window.grab().save(destination + (dark ? "/projects-dark.png" : "/projects-light.png")));
         // Compare selection, activity, unread and action states at the smallest
         // supported sidebar width, using the real delegate in both densities.
-        QSettings().remove("workspace/organization");
+        removeSetting("workspace/organization");
         BoxState states; states.host = "arch"; states.ok = true;
         const QStringList stateNames{"nebula", "infrastructure-rollout-with-a-long-name", "persistence", "deploy", "research", "tests", "navigation", "content", "legacy"};
         for (int i = 0; i < stateNames.size(); ++i) {
@@ -13300,7 +13008,7 @@ void TestSessionsWindow::launchAddsOnlyFoldersOutsideTheProject()
         SessionInfo created;created.name="codex/infra/"+name;created.cmd="codex";created.project="infra";created.tag=name;
         created.runId="run-"+name;created.state="running";created.launchId=launches.last()[5].toString();
         box.sessions.append(created);state.setPeer(box,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
-        const SessionOrganization stored(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+        const SessionOrganization stored(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
         QCOMPARE(stored.groupFor("mac\ncodex/infra/"+name),group);
         paths.clear();for(const auto &folder:stored.group(group)->folders)paths<<folder.path;
     };
@@ -13549,7 +13257,7 @@ print(json.dumps({'tracked':True,'events':[],'cursor':0}))
     window.findChild<QLineEdit *>("search")->clear();
     QVERIFY(!list->currentItem());QCOMPARE(composer->sessionKey(),QString());
     if(mode=="archive"){
-        SessionOrganization saved(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+        SessionOrganization saved(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
         QCOMPARE(saved.groupFor("arch\narchive\nterminated-archive"),group);
     }
     QListWidgetItem *next=nullptr;
@@ -14831,7 +14539,7 @@ void TestSessionsWindow::pendingImplicitInboxDoesNotOverrideNativeProject()
     created.tag="new-inference";created.state="running";created.runId="new-run";created.launchId=token;local.sessions.append(created);
     state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
     SessionsWindow window(program());window.setFleet(state);window.show();
-    const auto saved=[] {return QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object();};
+    const auto saved=[] {return QJsonDocument::fromJson(jsonSetting("workspace/organization")).object();};
     const bool passive=intent=="implicit";
     const auto expected=passive?(nativeFirst?work:QString("ungrouped")):intent=="concrete"?chosen:QString("ungrouped");
     QCOMPARE(SessionOrganization(saved()).groupFor(identity),expected);
@@ -14906,7 +14614,7 @@ void TestSessionsWindow::newSessionGroupFollowsLaunchIdentity()
     if (mode == "empty" && !preview.isEmpty()) { QDir().mkpath(preview); QVERIFY(window->grab().save(preview + "/starting-session.png")); }
     auto pending = window->findChild<SessionCreationController *>()->operations();
     QCOMPARE(pending.value(token).toObject().value("group").toString(), destination);
-    QCOMPARE(SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object()).group(destination)->folders.size(),1);
+    QCOMPARE(SessionOrganization(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object()).group(destination)->folders.size(),1);
     SessionInfo created; created.name = "codex/infra/grouped"; created.cmd = "codex"; created.project = "infra"; created.tag = "grouped";
     created.runId = "run-created"; created.state = "running"; created.launchId = "different-launch";
     auto box = host.isEmpty() ? state.local() : *state.peer(host);
@@ -14918,7 +14626,7 @@ void TestSessionsWindow::newSessionGroupFollowsLaunchIdentity()
     };
     deliver(); // A matching name from someone else's launch is never moved.
     QVERIFY(placeholder());
-    auto stored = SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    auto stored = SessionOrganization(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QCOMPARE(stored.groupFor(machine + '\n' + created.name), QString("ungrouped"));
     QVERIFY(window->findChild<SessionCreationController *>()->owns(token));
     if (mode == "failed") { window->newSessionLaunchFailed(token); QVERIFY(placeholder());QCOMPARE(placeholder()->data(SessionRoles::Status).toString(),QString("Creation result unknown")); }
@@ -14943,7 +14651,7 @@ void TestSessionsWindow::newSessionGroupFollowsLaunchIdentity()
     }
     created.launchId = token; created.runId = "run-receipt"; deliver();
     QVERIFY(!placeholder());
-    stored = SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    stored = SessionOrganization(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QCOMPARE(stored.groupFor(machine + '\n' + created.name), mode == "deleted" ? QString("ungrouped") : destination);
     QVERIFY(!QJsonDocument::fromJson(QSettings().value("workspace/pendingLaunches").toByteArray()).object().contains(token));
     const auto *resultGroup=stored.group(mode=="deleted"?stored.defaultProject():destination);QVERIFY(resultGroup);
@@ -15211,14 +14919,14 @@ void TestSessionsWindow::legacyProjectsMigrateWithBackupAndLocalFolders()
     client->projectsForHostReady({}, {local,ignored});
     auto remote=local;remote.dir="/Users/test/shared";client->projectsForHostReady("mac",{remote});
     QCOMPARE(QSettings().value("workspace/organizationBeforeProjects").toByteArray(),legacy);
-    SessionOrganization migrated(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    SessionOrganization migrated(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QCOMPARE(migrated.groups().size(),2);QVERIFY(!migrated.group("pinned"));
     QCOMPARE(migrated.groupFor("arch\ncodex/hgs/dashboard"),QString("work"));
     QCOMPARE(migrated.group("work")->folders.size(),2);QVERIFY(migrated.group("work")->collapsed);
     QCOMPARE(migrated.group("work")->folders[0].machine,QString("arch"));
     QCOMPARE(migrated.group("work")->folders[1].machine,QString("mac"));
     local.dir="/unexpected";client->projectsForHostReady({}, {local});
-    SessionOrganization unchanged(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    SessionOrganization unchanged(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QCOMPARE(unchanged.group("work")->folders.size(),2);
     auto offline=fleet();BoxState sleeping;sleeping.host="mac";offline.setPeer(sleeping,QDateTime::currentMSecsSinceEpoch());
     NewSessionDialog launch(program(),offline,"mac");launch.setGroups(migrated,"work");
@@ -15241,7 +14949,7 @@ void TestSessionsWindow::projectOrderAndDefaultBadge()
     QCOMPARE(list->count(),3);QVERIFY(list->item(2)->data(Qt::UserRole+3).toBool());
     QVERIFY(list->item(2)->data(Qt::AccessibleTextRole).toString().contains("default project"));
     list->setCurrentRow(2);QVERIFY(list->model()->moveRow({},2,{},0));
-    const auto stored=[] {return SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());};
+    const auto stored=[] {return SessionOrganization(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());};
     QTRY_COMPARE(stored().groups().first().id,QString("ungrouped"));
     QCOMPARE(list->currentItem()->data(Qt::UserRole).toString(),QString("ungrouped"));
     page->selectProject(first);page->findChild<QCheckBox *>("defaultProject")->click();
@@ -15270,7 +14978,7 @@ void TestSessionsWindow::projectsEmbeddedAndRemote()
     auto *table=page->findChild<QTableWidget *>("projectFolders");QCOMPARE(table->rowCount(),2);
     QCOMPARE(table->item(1,1)->text(),QString("mac"));QCOMPARE(table->item(1,2)->text(),QString("/Users/test/infra"));
     auto *name=page->findChild<QLineEdit *>("projectName");name->setText("Infrastructure / renamed");name->editingFinished();
-    const auto restored=SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    const auto restored=SessionOrganization(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QCOMPARE(restored.group(id)->name,QString("Infrastructure / renamed"));QCOMPARE(restored.group(id)->folders.size(),2);
     QCOMPARE(restored.group(id)->color,QString("#ffcc00"));
     NewSessionDialog launch(program(),fleet(),"mac");launch.setGroups(restored,id);
@@ -15403,7 +15111,7 @@ void TestSessionsWindow::projectFolderActionsKeepTargets()
     });
     menu->findChild<QAction *>("contextRemoveProjectFolder")->trigger();QVERIFY(askedRemove);delete menu.data();
     QSignalSpy launches(page,&ProjectsDialog::newSessionRequested);launch->trigger();QCOMPARE(launches.size(),0);delete launch.data();
-    const SessionOrganization saved(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    const SessionOrganization saved(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QCOMPARE(saved.group(first)->folders.size(),2);QCOMPARE(saved.group(second)->folders.size(),1);QVERIFY(QDir(path).exists());
     table->customContextMenuRequested(QPoint(5,table->viewport()->height()-5));
     menu=page->findChild<QMenu *>("projectFolderMenu");QVERIFY(menu);QCOMPARE(menu->actions().size(),1);
@@ -15415,7 +15123,7 @@ void TestSessionsWindow::projectFolderActionsKeepTargets()
         if(!preview.isEmpty()){QTest::qWait(30);QVERIFY(dialog->grab().save(preview+"/delete-project.png"));}
         QTest::keyClick(dialog,Qt::Key_Return);});
     page->deleteProject(first);
-    const SessionOrganization afterDelete(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    const SessionOrganization afterDelete(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QVERIFY(afterDelete.group(first));
 }
 
@@ -15442,7 +15150,7 @@ void TestSessionsWindow::localWindowsLaunchJoinsTheFolderInAnyCase()
     }
     state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
     SessionsWindow window(program());window.show();window.setFleet(state);
-    const SessionOrganization saved(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    const SessionOrganization saved(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QStringList paths;for(const auto &folder:saved.group(project)->folders)paths<<folder.path;
     // A drive-less rooted path is no folder of a Windows machine: the session still joins.
     QCOMPARE(paths,QStringList({"C:/Work/Repo","D:/New/Folder"}));QCOMPARE(saved.group(project)->folders[0].id,existing);
@@ -15487,7 +15195,7 @@ void TestSessionsWindow::localWindowsFolderFilterIgnoresCase()
 // is done. "Show all in Sessions" opens the list on the project.
 void TestSessionsWindow::projectSessionBadgesFollowTheStatusContract()
 {
-    const auto restore=qScopeGuard([]{QSettings().remove("workspace/organization");});
+    const auto restore=qScopeGuard([]{removeSetting("workspace/organization");});
     SessionOrganization model;const auto id=model.createGroup("Status contract");model.setDefaultProject(id);
     model.markImported("arch");model.markImported("mac");
     setJsonSetting("workspace/organization",QJsonDocument(model.toJson()).toJson(QJsonDocument::Compact));
@@ -15557,9 +15265,9 @@ void TestSessionsWindow::projectColorsApplyOrCancel()
         watchdog.stop();QVERIFY(!expired);QVERIFY(opened);
     };
     edit(false);QVERIFY(opened);
-    auto restored=SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    auto restored=SessionOrganization(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QCOMPARE(restored.group(id)->color,QString("#00aa7f"));
-    edit(true);restored=SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    edit(true);restored=SessionOrganization(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QCOMPARE(restored.group(id)->color,QString("#ffe100"));QVERIFY(!restored.group(id)->vivid);
 }
 
@@ -16368,7 +16076,7 @@ void TestSessionsWindow::projectListKeepsItsReorderKeys()
     SessionOrganization projects; projects.createGroup("infra"); projects.createGroup("sample-app");
     QSettings().setValue("workspace/hideEmptyProjects", false);
     setJsonSetting("workspace/organization", QJsonDocument(projects.toJson()).toJson(QJsonDocument::Compact));
-    const auto stored = [] { return SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object()); };
+    const auto stored = [] { return SessionOrganization(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object()); };
     SessionsWindow window(program()); window.setFleet(fleet()); window.show(); window.activateWindow();
     QVERIFY(QTest::qWaitForWindowActive(&window));
     window.showProjects();
@@ -17659,6 +17367,9 @@ void TestSessionsWindow::machinesPageMatchesThePrototype()
         "{'alias':'studio','connection':{'hostname':'studio.example.test','enabled':True},'enabled':True,'source':'local','inherited':False}]}))\n"
         "elif a[:2]==['machine','resolve']:print(json.dumps({'alias':a[2],'effective':{'hostname':a[2]+'.example','user':'user','port':'22','identity_files':['~/.ssh/id_ed25519']}}))\n"
         "elif a==['mobile','phones','--json']:print(json.dumps(%1 if host=='' else {'configured':False}))\n"
+        "elif a[:2]==['mobile','invite']:print(json.dumps({'workspace_id':'w1','workspace_name':'Orbit','pair_code':'synthetic_pair-code_0123456789','encrypted':False,"
+        "'expires_at':__import__('time').time()+600,'server_url':'https://relay.example.test',"
+        "'pair_url':'zerus://pair?server=https%3A%2F%2Frelay.example.test&code=synthetic_pair-code_0123456789'}))\n"
         "elif 'account' in a[:2]:print(json.dumps({'profiles':[]}))\n"
         "else:\n sys.argv[0]=").arg(phones) + FakeCli::pythonString(script()) + ";runpy.run_path(sys.argv[0],run_name='__main__')\n").toUtf8()));
     // A Windows workstation with six sessions, two connected machines and one that does not answer.
@@ -17717,6 +17428,38 @@ void TestSessionsWindow::machinesPageMatchesThePrototype()
         QVERIFY(window.grab().save(shots + "/" + name + "-" + theme + ".png"));
     };
     save("pm-machines-local");
+    // #651 QA: the pair and revoke dialogs, shot in the page's theme; Revoke
+    // is cancelled, so nothing is revoked.
+    {
+        bool paired = false, asked = false;
+        QTimer closer; closer.setInterval(30);
+        QObject::connect(&closer, &QTimer::timeout, &window, [&] {
+            for (auto *widget : QApplication::topLevelWidgets()) {
+                if (auto *dialog = dynamic_cast<PhonePairing::Dialog *>(widget); dialog && dialog->isVisible()) {
+                    if (dialog->findChild<QLabel *>("phonePairingStatus")->text().startsWith("Requesting")) continue;
+                    if (!shots.isEmpty()) { QDir().mkpath(shots); dialog->grab().save(shots + "/pm-phone-pair-" + theme + ".png"); }
+                    paired = true; dialog->reject();
+                } else if (auto *box = qobject_cast<QMessageBox *>(widget); box && box->isVisible() && box->windowTitle().startsWith("Revoke")) {
+                    if (!shots.isEmpty()) { QDir().mkpath(shots); box->grab().save(shots + "/pm-phone-revoke-" + theme + ".png"); }
+                    asked = true; box->button(QMessageBox::Cancel)->click();
+                }
+            }
+        });
+        closer.start();
+        auto *pair = page->findChild<QPushButton *>("pairPhone");
+        QTRY_VERIFY(pair->isEnabled());
+        QTimer::singleShot(0, pair, [pair] { pair->click(); });
+        QTRY_VERIFY(paired);
+        QTRY_COMPARE(page->findChild<QTreeWidget *>("linkedPhones")->topLevelItemCount(), 1);
+        table = page->findChild<QTreeWidget *>("linkedPhones");
+        table->setCurrentItem(table->topLevelItem(0)->child(1));
+        auto *revoke = page->findChild<QPushButton *>("revokePhone");
+        QTRY_VERIFY(revoke->isEnabled());
+        QTimer::singleShot(0, revoke, [revoke] { revoke->click(); });
+        QTRY_VERIFY(asked);
+        closer.stop();
+        QTRY_COMPARE(table->topLevelItem(0)->childCount(), 2);   // nothing revoked
+    }
     // A remote machine: its system and state, and the prototype's form.
     list->setCurrentRow(1);
     QTRY_COMPARE(page->findChild<QLabel *>("machineTitle")->text(), QStringLiteral("macbook"));
@@ -17727,9 +17470,13 @@ void TestSessionsWindow::machinesPageMatchesThePrototype()
     QTRY_VERIFY(page->findChild<QLabel *>("effectiveMachineConnection")->text().contains("user@macbook.example, port 22"));
     for (const char *name : {"saveMachine", "discardNewMachine", "checkMachine", "sshMachine", "installMachine", "resetMachine", "removeMachine", "browseMachineKey"})
         QVERIFY2(page->findChild<QPushButton *>(name)->isVisible(), name);
+    // #650 N2: a saved SSH machine can change its connection type.
+    QVERIFY(page->findChild<QComboBox *>("machineTransport")->isVisible());
     save("pm-machines-remote");
-    // The machine that does not answer.
+    // The machine that does not answer; #651 QA: the shot waits for its
+    // effective connection in both themes.
     list->setCurrentRow(3);
     QTRY_COMPARE(page->findChild<QLabel *>("machineState")->text(), QStringLiteral("Not connected"));
+    QTRY_VERIFY(page->findChild<QLabel *>("effectiveMachineConnection")->text().contains("user@studio.example, port 22"));
     save("pm-machines-unreachable");
 }

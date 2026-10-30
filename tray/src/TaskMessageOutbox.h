@@ -1,4 +1,5 @@
 #pragma once
+#include "Settings.h"
 #include "JsonParse.h"
 #include "ComposerDraftStore.h"
 #include <QCryptographicHash>
@@ -46,8 +47,8 @@ inline Request reserve(const QString &project, const QString &task, const QJsonO
         if (!output.open(QIODevice::WriteOnly) || !output.setPermissions(QFile::ReadOwner | QFile::WriteOwner)
             || output.write(bytes) != bytes.size() || !output.commit()) return {{}, QObject::tr("Could not save the original message. Nothing was submitted.")};
     }
-    settings.setValue(marker, request.record.value("id").toString()); settings.sync();
-    if (settings.status() != QSettings::NoError) return {{}, QObject::tr("Could not reserve the message identity. Nothing was submitted.")};
+    // A reservation: stored now, or nothing is sent (Settings.h).
+    if (!Settings::setNow(marker, request.record.value("id").toString())) return {{}, QObject::tr("Could not reserve the message identity. Nothing was submitted.")};
     return request;
 }
 inline QString release(const QString &project, const QString &task, const QString &id) {
@@ -59,7 +60,6 @@ inline QString release(const QString &project, const QString &task, const QStrin
         if (request.record.value("id").toString() != id) return QObject::tr("The pending message changed; refresh this task.");
         if (!QFile::remove(file)) return QObject::tr("Could not release the local message recovery record.");
     }
-    QSettings settings; settings.remove(key(project, task)); settings.sync();
-    return settings.status() == QSettings::NoError ? QString() : QObject::tr("Could not update message recovery state.");
+    return Settings::removeNow(key(project, task)) ? QString() : QObject::tr("Could not update message recovery state.");
 }
 }

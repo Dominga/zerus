@@ -65,14 +65,15 @@ pub fn qt_run_groups(
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     let values = store.read()?;
     let organization = values.and_then(|(mut values, _)| values.remove("workspace/organization"));
-    let mut organization: serde_json::Map<String, serde_json::Value> = match organization {
-        Some(value) => {
-            let bytes = match value {
-                crate::settings::qt::QtValue::Bytes(bytes) => bytes,
-                value => value.to_text().into_bytes(),
-            };
-            serde_json::from_slice(&bytes).map_err(|error| error.to_string())?
-        }
+    let bytes = match organization {
+        Some(crate::settings::qt::QtValue::Bytes(bytes)) => Some(bytes),
+        Some(value) => Some(value.to_text().into_bytes()),
+        // Qt moved it out of its store into a file of its own (owner,
+        // 2026-10-30, tray/src/SettingsJson.cpp).
+        None => read_at_most(&store.json_file("organization"), MAX_BYTES).map_err(|error| error.to_string())?,
+    };
+    let mut organization: serde_json::Map<String, serde_json::Value> = match bytes {
+        Some(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string())?,
         None => serde_json::Map::new(),
     };
     let groups = match organization.remove("run_groups") {
@@ -493,6 +494,23 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert_eq!(error.to_string(), "the layout file is larger than 8 bytes");
         assert_eq!(MAX_BYTES, crate::swarm::draft::MAX_BYTES);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Qt keeps its organization in a file of its own beside the INI once it
+    /// moved it out (tray/src/SettingsJson.cpp); the run memory is read there.
+    #[test]
+    fn run_groups_come_from_qts_own_organization_file() {
+        let dir = std::env::temp_dir().join(format!("zerus-layout-qt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = crate::settings::QtStore::Ini(dir.join("hgs-tray.ini"));
+        std::fs::write(store.path(), b"[workspace]\nskin=whitewh\n").unwrap();
+        assert!(qt_run_groups(&store).unwrap().is_empty(), "no organization anywhere");
+        assert_eq!(store.json_file("organization"), dir.join("hgs-tray.ini.organization.json"));
+        std::fs::write(store.json_file("organization"), br#"{"run_groups":{"arch\nr1":"web"}}"#).unwrap();
+        let groups = qt_run_groups(&store).unwrap();
+        assert_eq!(groups.get("arch\nr1").and_then(|project| project.as_str()), Some("web"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

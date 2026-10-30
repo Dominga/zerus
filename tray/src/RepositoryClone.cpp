@@ -1,3 +1,4 @@
+#include "Settings.h"
 #include "SettingsJson.h"
 #include "RepositoryClone.h"
 #include "HgsClient.h"
@@ -64,7 +65,7 @@ void RepositoryClone::checkResult()
 void RepositoryClone::chooseAnotherDestination()
 {
     if(busy()||!m_uncertain)return;
-    QSettings settings;settings.setValue(settingsKey()+"/previous",settings.value(settingsKey()+"/pending"));settings.remove(settingsKey()+"/pending");settings.sync();
+    Settings::set(settingsKey()+"/previous",QSettings().value(settingsKey()+"/pending"));Settings::remove(settingsKey()+"/pending");
     m_uncertain=false;m_token.clear();m_expected.clear();m_created.clear();m_name.clear();
     m_status=tr("The original checkout is kept. Choose a different destination for a new clone.");emit changed();
 }
@@ -79,8 +80,8 @@ void RepositoryClone::finish(quint64 request,bool ok,const QJsonObject &data,con
         }
         m_parent=data["parent"].toString();m_expected=data["path"].toString();m_token=QUuid::createUuid().toString(QUuid::WithoutBraces);
         const QJsonObject pending{{"request_id",m_token},{"url",m_url.trimmed()},{"parent",m_parent},{"name",m_name},{"path",m_expected}};
-        QSettings settings;SettingsJson::store(settings,settingsKey()+"/pending",QJsonDocument(pending));settings.sync();
-        if(settings.status()!=QSettings::NoError){m_status=tr("Could not save clone recovery information.");emit changed();return;}
+        // A reservation: stored now, or the clone does not start (Settings.h).
+        if(!SettingsJson::storeNow(settingsKey()+"/pending",QJsonDocument(pending))){m_status=tr("Could not save clone recovery information.");emit changed();return;}
         m_action="clone";m_uncertain=true;m_status=tr("Cloning repository…");
         m_request=m_client->repositoryOperation(m_host,m_action,m_url.trimmed(),m_parent,m_name,m_token);emit changed();return;
     }
@@ -90,7 +91,7 @@ void RepositoryClone::finish(quint64 request,bool ok,const QJsonObject &data,con
     }
     const auto status=data["status"].toString();
     if(status=="cloned"||status=="failed"){
-        QSettings settings;settings.remove(settingsKey()+"/pending");settings.setValue(settingsKey()+"/parent",m_parent);settings.sync();m_uncertain=false;
+        Settings::remove(settingsKey()+"/pending");Settings::set(settingsKey()+"/parent",m_parent);m_uncertain=false;
         if(status=="cloned"){
             m_created=data["path"].toString();
             if(m_action=="clone"){emit changed();emit prepared(m_created);return;}

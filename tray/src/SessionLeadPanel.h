@@ -4,6 +4,7 @@
 #include <QLabel>
 #include <QList>
 #include <QPair>
+#include <QPointer>
 #include <QPushButton>
 #include <QVBoxLayout>
 #include <functional>
@@ -35,7 +36,17 @@ public:
     // candidates: the project's sessions it may report to.
     void setContext(const QString &identity, const Session &lead, const QList<Session> &subordinates, const QList<Session> &candidates)
     {
-        m_identity = identity;
+        // #704: Details asks again on every rebuild of the list. The same context
+        // keeps its rows: rebuilding them restyled the select and its popup
+        // each time (3 s of GUI time in 15 s with a running team). A refused
+        // choice is undone by showing the current lead, nobody, again.
+        if (m_built && identity == m_identity && lead == m_lead && subordinates == m_subordinates && candidates == m_candidates) {
+            if (m_choice) m_choice->setCurrentIndex(0);
+            return;
+        }
+        m_built = true;
+        m_identity = identity; m_lead = lead; m_subordinates = subordinates; m_candidates = candidates;
+        m_choice = nullptr;
         while (auto *item = m_body->takeAt(0)) {
             if (auto *widget = item->widget()) widget->deleteLater();
             else if (auto *layout = item->layout()) clear(layout);
@@ -98,6 +109,7 @@ public:
         });
         row->addWidget(label); row->addWidget(choice, 1);
         add(rowWidget);
+        m_choice = choice;
     }
 
 private:
@@ -112,5 +124,9 @@ private:
         }
     }
     QString m_identity;
+    Session m_lead;
+    QList<Session> m_subordinates, m_candidates;
+    bool m_built = false;
+    QPointer<QComboBox> m_choice;
     QVBoxLayout *m_layout, *m_body;
 };

@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+pub mod custody;
+
 pub const PRIVATE_BYTES: usize = 1 << 20;
 pub const METADATA_BYTES: usize = 16 << 10;
 pub const UNSETTLED: i64 = 32;
@@ -156,6 +158,10 @@ pub struct Ticket {
     pub lease: String,
 }
 impl Ticket {
+    pub fn fingerprint(&self) -> Result<String> {
+        Ok(hash(self.encoded()?.as_bytes()))
+    }
+
     fn encoded(&self) -> Result<String> {
         for id in [
             &self.attempt_id,
@@ -418,10 +424,16 @@ pub fn admit(db: &mut Connection, request: &Admission<'_>) -> Result<Admitted> {
 /// original, after actor guard validation. Never call this from a retry timer.
 /// fresh=false carries the exact existing ticket and is status-only.
 pub fn reserve(db: &mut Connection, request: &Reserve) -> Result<Reservation> {
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let result = reserve_in(&tx, request)?;
+    tx.commit()?;
+    Ok(result)
+}
+
+fn reserve_in(tx: &Transaction<'_>, request: &Reserve) -> Result<Reservation> {
     digest(&request.operation_id)?;
     uuid(&request.attempt_id)?;
     uuid(&request.lease)?;
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let original = tx.query_row(
         &format!("SELECT {ADMITTED} FROM desktop_operations WHERE operation_id=?1"),
         [&request.operation_id],
@@ -472,7 +484,7 @@ pub fn reserve(db: &mut Connection, request: &Reserve) -> Result<Reservation> {
             attempt,
         });
     }
-    allowed(&tx, &request.writer_epoch, &request.service_epoch)?;
+    allowed(tx, &request.writer_epoch, &request.service_epoch)?;
     ensure!(
         request.revision == original.revision,
         "stale operation revision"
@@ -509,7 +521,6 @@ pub fn reserve(db: &mut Connection, request: &Reserve) -> Result<Reservation> {
         outcome: None,
         drained: false,
     };
-    tx.commit()?;
     Ok(Reservation {
         fresh: true,
         attempt,

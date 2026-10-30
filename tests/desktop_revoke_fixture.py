@@ -51,6 +51,12 @@ if args[:2] == ['desktop', 'revoke']:
         print(json.dumps({{'request_id': request_id, 'configuration': configuration,
                           'accepted': False, 'revoked': False, 'checkpointed': False,
                           'code': 'revocation_pending'}}))
+    elif mode == 'resources':
+        print(json.dumps({{'request_id': request_id, 'configuration': configuration,
+                          'accepted': True, 'durable': True, 'revoked': False, 'checkpointed': False,
+                          'code': 'operation_resources_not_drained',
+                          'resource_custody': {{'attempt_id': '33333333-3333-4333-8333-333333333333',
+                            'helper_pid': 7654321, 'helper_state': 'running', 'revoke_request_id': request_id}}}}))
     else:
         print(json.dumps(settled(request_id)))
     raise SystemExit(0)

@@ -206,8 +206,10 @@ fn isolated_worker() {
         "whitelist" | "reduced" | "stdio" => {
             let sentinel = file(&temp.0.join("unrelated"));
             // Deliberately inheritable and high, inside this isolated process.
-            let fd = unsafe { libc::fcntl(sentinel.as_raw_fd(), libc::F_DUPFD, 256) };
-            assert!(fd >= 256);
+            // macOS's default soft limit is 256; keep the sentinel below it
+            // before lowering only this isolated process's limit to 64.
+            let fd = unsafe { libc::fcntl(sentinel.as_raw_fd(), libc::F_DUPFD, 128) };
+            assert!(fd >= 128);
             let _sentinel_copy = unsafe { File::from_raw_fd(fd) };
             if case == "reduced" {
                 let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();

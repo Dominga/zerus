@@ -71,6 +71,8 @@ mod task_editor;
 #[cfg(feature = "live")]
 mod task_forms;
 #[cfg(feature = "live")]
+mod task_settings;
+#[cfg(feature = "live")]
 mod task_start;
 #[cfg(feature = "live")]
 mod terminal;
@@ -995,6 +997,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         task_start::task_start_open,
         task_start::task_start,
         task_start::task_start_release,
+        task_settings::task_settings,
         task_editor::task_editor_open,
         task_editor::task_editor_edit,
         task_editor::task_editor_files,

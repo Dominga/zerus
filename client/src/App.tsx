@@ -1,4 +1,5 @@
 import { taskStartReview } from "./store/taskStart";
+import { taskSettings } from "./store/taskSettings";
 import { taskCancellation } from "./store/taskCancel";
 import { For, Match, Show, Suspense, Switch, createEffect, createMemo, createSignal, lazy, onCleanup, onMount } from "solid-js";
 import { Rail } from "./ui/components/Rail";
@@ -35,6 +36,7 @@ const SettingsScreen = lazy(() => import("./ui/screens/Settings").then((m) => ({
 // (`newSessionOpened`), and stay mounted from then on.
 const NewSessionDialog = lazy(() => import("./ui/sessions/NewSessionDialog").then((m) => ({ default: m.NewSessionDialog })));
 const TaskStartReview = lazy(() => import("./ui/screens/TaskStartReview"));
+const TaskSettingsDialog = lazy(() => import("./ui/screens/TaskSettingsDialog"));
 const TaskCancelDialog = lazy(() => import("./ui/screens/TaskCancelDialog"));
 const GoToDialog = lazy(() => import("./ui/sessions/GoToDialog").then((m) => ({ default: m.GoToDialog })));
 const ShortcutHelpDialog = lazy(() => import("./ui/sessions/ShortcutHelpDialog").then((m) => ({ default: m.ShortcutHelpDialog })));
@@ -155,6 +157,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
       <Toasts />
       <ActionDialogs />
       <Show when={taskStartReview()}><Suspense><TaskStartReview /></Suspense></Show>
+      <Show when={taskSettings.dialog()}><Suspense><TaskSettingsDialog /></Suspense></Show>
       <Show when={taskCancellation()}><Suspense><TaskCancelDialog /></Suspense></Show>
       <Show when={goToOrigin()}><Suspense><GoToDialog /></Suspense></Show>
       <Show when={shortcutHelpOrigin()}><Suspense><ShortcutHelpDialog /></Suspense></Show>

@@ -1,6 +1,9 @@
 use super::*;
 
 fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, Store) {
+    source_fixture(true)
+}
+fn source_fixture(archive: bool) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, Store) {
     let temp = tempfile::tempdir().unwrap();
     let state = temp.path().join("state");
     fs::create_dir_all(state.join("archives")).unwrap();
@@ -15,8 +18,19 @@ fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, Store) {
         })
         .collect::<String>();
     fs::write(&transcript, rows).unwrap();
-    let archive = uuid::Uuid::new_v4().to_string();
-    let path = state.join("archives").join(format!("{archive}.json"));
+    let archive = if archive {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        String::new()
+    };
+    let path = if archive.is_empty() {
+        state.join(format!(
+            "{:x}.json",
+            Sha256::digest(b"codex/example/archive")
+        ))
+    } else {
+        state.join("archives").join(format!("{archive}.json"))
+    };
     fs::write(
         &path,
         json!({"version":1,"name":"codex/example/archive","agent":"codex",
@@ -189,4 +203,67 @@ fn the_output_budget_preserves_the_first_unreturned_hit() {
     }
     assert!(cursor.is_none());
     assert_eq!(seen.len(), 86);
+}
+
+#[test]
+fn current_live_histories_publish_exact_hits_while_retaining_fresh_fallback_coverage() {
+    let (_temp, state, _path, _transcript, mut store) = source_fixture(false);
+    let reply = page(&mut store, &state, None, &budget());
+    assert_eq!(reply["results"][0]["message_id"], "m6");
+    assert_eq!(reply["results"][0]["run_id"], "fixture-run");
+    assert!(reply["results"][0]["session"].is_null());
+    assert_ne!(reply["index_coverage"]["state"], "ready");
+    assert_eq!(reply["catalog"]["fallback_sources"], 1);
+}
+
+#[test]
+fn an_appended_live_prefix_is_pending_then_resumes_without_permanent_retirement() {
+    use std::io::Write;
+    let (_temp, state, _path, transcript, mut store) = source_fixture(false);
+    let first = page(&mut store, &state, None, &budget());
+    fs::OpenOptions::new().append(true).open(&transcript).unwrap().write_all(
+        (json!({"type":"event_msg","timestamp":7,"payload":{"type":"agent_message","id":"m7","message":"needle appended"}}).to_string()+"\n").as_bytes()).unwrap();
+    let pending = page(&mut store, &state, None, &budget());
+    assert!(pending["results"].as_array().unwrap().is_empty());
+    assert_eq!(pending["unavailable_sessions"], 1);
+    assert_eq!(pending["catalog"]["pending_paths"], 1);
+    assert_eq!(store.index.status().unwrap().sources, 1);
+    store
+        .consume(&state, &budget(), &AtomicBool::new(false))
+        .unwrap();
+    let current = page(&mut store, &state, None, &budget());
+    assert_eq!(current["results"][0]["message_id"], "m7");
+    assert_eq!(current["unavailable_sessions"], 0);
+    // Existing cursors preserve their insertion high-water mark.
+    let continued = page(&mut store, &state, first["next_cursor"].as_str(), &budget());
+    assert_eq!(continued["results"][0]["message_id"], "m4");
+}
+
+#[test]
+fn forgetting_a_live_binding_cannot_leave_an_indexed_hit_visible() {
+    let (_temp, state, path, _transcript, mut store) = source_fixture(false);
+    fs::remove_file(path).unwrap();
+    let reply = page(&mut store, &state, None, &budget());
+    assert!(reply["results"].as_array().unwrap().is_empty());
+    assert_eq!(reply["unavailable_sessions"], 1);
+}
+
+#[test]
+fn unsupported_adapters_are_delegated_without_a_permanent_retirement_fence() {
+    let (_temp, state, _path, _transcript, mut store) = source_fixture(false);
+    let mut target = store
+        .index
+        .query("needle", 100, None)
+        .unwrap()
+        .hits
+        .remove(0)
+        .target;
+    target.agent = "kimi".into();
+    let key = store.index.register(&target).unwrap();
+    store.index.source_progress(&key, false, true).unwrap();
+    let reply = page(&mut store, &state, None, &budget());
+    assert!(reply["results"].as_array().unwrap().is_empty());
+    assert_eq!(reply["proof"]["files"], 0);
+    assert_eq!(store.index.status().unwrap().sources, 1);
+    assert!(store.index.register(&target).is_ok());
 }

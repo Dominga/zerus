@@ -104,6 +104,8 @@ private:
     // Folders of the local machine follow its platform (MachinePlatform::of); peers are POSIX.
     MachinePlatform::Style folderStyle(const QString &machine) const;
     QString folderOpenProblem(const SessionOrganization::Folder &folder) const;
+    // #744: a local folder's problem from PathProbe (checking, not answering, gone).
+    QString localFolderProblem(const QString &path) const;
     void openFolder(const SessionOrganization::Folder &folder);
     QString folderLaunchProblem(const SessionOrganization::Folder &folder) const;
     void newFolderSession(const QString &project, const SessionOrganization::Folder &folder);

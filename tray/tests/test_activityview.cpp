@@ -2273,7 +2273,10 @@ void TestActivityView::agentMediaShowsPreviewsUnderTheMessage()
     QVERIFY(!pictureKey.isEmpty());
     const auto placeholder = browser->document()->resource(QTextDocument::ImageResource, QUrl("hgs-media:" + pictureKey)).value<QImage>();
     view.setMediaPreview(pictureKey, picture);
-    const auto shown = browser->document()->resource(QTextDocument::ImageResource, QUrl("hgs-media:" + pictureKey)).value<QImage>();
+    // #744: the picture is read by PathProbe's worker, not by setMediaPreview.
+    const auto resource = [&] { return browser->document()->resource(QTextDocument::ImageResource, QUrl("hgs-media:" + pictureKey)).value<QImage>(); };
+    QTRY_VERIFY(!resource().isNull() && resource() != placeholder);
+    const auto shown = resource();
     QVERIFY(!shown.isNull()); QVERIFY(shown != placeholder);
     QCOMPARE(QColor(shown.pixel(shown.width() / 2, shown.height() / 3)), QColor(Qt::red));
     if (const auto preview = qEnvironmentVariable("HGS_MEDIA_PREVIEW"); !preview.isEmpty()) { QTest::qWait(100); QVERIFY(view.grab().save(preview)); }

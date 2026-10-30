@@ -1,4 +1,5 @@
 #pragma once
+#include <QHash>
 #include <QJsonObject>
 #include <QWidget>
 #include <functional>
@@ -31,6 +32,11 @@ public:
 private:
     void rebuild();
     Teams::Team m_team;
+    // #744: an evidence file's check and bytes, read by PathProbe's worker,
+    // kept for the task shown.
+    struct EvidenceRead { bool done = false; bool allowed = false; QByteArray bytes; };
+    QHash<QString, EvidenceRead> m_evidence;
+    EvidenceRead evidenceRead(const QString &path, const QStringList &roots, qint64 limit);
     Teams::LiveLookup m_live;
     int m_task = 0;
     bool m_dark = true;

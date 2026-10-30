@@ -170,7 +170,7 @@ endif()
 # link; tests/CMakeLists.txt fails when a suite lists a source that one of them
 # builds. Each layer adds Qt modules, so a suite that links the lowest layer
 # covering its code keeps its QTEST_MAIN application type.
-add_library(hgs-tray-core STATIC src/ProcessRunner.cpp src/JsonParse.cpp src/HangTrace.cpp src/Settings.cpp src/SlowEventLog.cpp src/SettingsJson.cpp src/HgsClient.cpp src/EventStream.cpp src/FleetState.cpp
+add_library(hgs-tray-core STATIC src/ProcessRunner.cpp src/PathProbe.cpp src/JsonParse.cpp src/HangTrace.cpp src/Settings.cpp src/SlowEventLog.cpp src/SettingsJson.cpp src/HgsClient.cpp src/EventStream.cpp src/FleetState.cpp
     src/SessionCreationController.cpp
     src/AnalyticsClient.cpp src/AnalyticsData.cpp
     src/ReadMarkSync.cpp src/AppConfig.cpp src/AccountUsageStore.cpp src/ComposerDraftStore.cpp

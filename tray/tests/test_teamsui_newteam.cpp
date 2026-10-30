@@ -112,7 +112,7 @@ void TestTeamsUiNewteam::newTeamStartsTheLeadWithTheTemplate()
     }
     // Not a Git folder: members share it, no worktrees.
     QTRY_VERIFY(dialog.findChild<QLabel *>("teamNewGitNote")->isVisible());
-    QVERIFY(!dialog.findChild<QCheckBox *>("teamNewWorktrees")->isEnabled());
+    QTRY_VERIFY(!dialog.findChild<QCheckBox *>("teamNewWorktrees")->isEnabled());   // #744: the worker's answer
     // B6: the folder policy combo is the control and falls back to shared here.
     auto *policy = dialog.findChild<QComboBox *>("teamNewFolderPolicy");
     QVERIFY(policy);
@@ -448,16 +448,16 @@ void TestTeamsUiNewteam::folderPolicyKeepsAutoWhileTyping()
     auto *policy = dialog.findChild<QComboBox *>("teamNewFolderPolicy");
     QVERIFY(edit && policy);
     // A finished non-Git folder is shared.
-    QCOMPARE(policy->currentData().toString(), QStringLiteral("shared"));
+    QTRY_COMPARE(policy->currentData().toString(), QStringLiteral("shared"));
     // While the path is typed, auto stays.
     edit->setText(QDir::toNativeSeparators(folder.path()) + QStringLiteral("/sub"));
-    QCOMPARE(policy->currentData().toString(), QStringLiteral("auto"));
+    QTRY_COMPARE(policy->currentData().toString(), QStringLiteral("auto"));
     // Finishing the path forces shared.
     QMetaObject::invokeMethod(edit, "editingFinished");
-    QCOMPARE(policy->currentData().toString(), QStringLiteral("shared"));
+    QTRY_COMPARE(policy->currentData().toString(), QStringLiteral("shared"));
     // Editing again returns to auto.
     edit->setText(QDir::toNativeSeparators(folder.path()) + QStringLiteral("/sub2"));
-    QCOMPARE(policy->currentData().toString(), QStringLiteral("auto"));
+    QTRY_COMPARE(policy->currentData().toString(), QStringLiteral("auto"));
     shot(&dialog, "new-team-folder-policy-typing");
     // The same in the workspace tab.
     const QList<TeamNewTab::Computer> tabComputers{{QString(), "this computer", true}, {"msi-old", "msi-old", false}};
@@ -467,11 +467,11 @@ void TestTeamsUiNewteam::folderPolicyKeepsAutoWhileTyping()
     auto *tabPolicy = tab.findChild<QComboBox *>("teamNewFolderPolicy");
     QVERIFY(tabEdit && tabPolicy);
     tabEdit->setText(QDir::toNativeSeparators(folder.path()) + QStringLiteral("/one"));
-    QCOMPARE(tabPolicy->currentData().toString(), QStringLiteral("auto"));
+    QTRY_COMPARE(tabPolicy->currentData().toString(), QStringLiteral("auto"));
     QMetaObject::invokeMethod(tabEdit, "editingFinished");
-    QCOMPARE(tabPolicy->currentData().toString(), QStringLiteral("shared"));
+    QTRY_COMPARE(tabPolicy->currentData().toString(), QStringLiteral("shared"));
     tabEdit->setText(QDir::toNativeSeparators(folder.path()) + QStringLiteral("/two"));
-    QCOMPARE(tabPolicy->currentData().toString(), QStringLiteral("auto"));
+    QTRY_COMPARE(tabPolicy->currentData().toString(), QStringLiteral("auto"));
     shot(&tab, "new-team-tab-folder-policy-typing");
 }
 
@@ -497,18 +497,18 @@ void TestTeamsUiNewteam::typoThenGitCreatesWorktrees()
     QVERIFY(edit && policy && worktrees);
     // It starts as a Git folder with worktrees; the typo finished forces shared
     // with no worktrees.
-    QCOMPARE(policy->currentData().toString(), QStringLiteral("auto"));
-    QVERIFY(worktrees->isChecked());
+    QTRY_COMPARE(policy->currentData().toString(), QStringLiteral("auto"));
+    QTRY_VERIFY(worktrees->isChecked());
     edit->setText(typo);
     QMetaObject::invokeMethod(edit, "editingFinished");
-    QCOMPARE(policy->currentData().toString(), QStringLiteral("shared"));
-    QVERIFY(!worktrees->isChecked());
+    QTRY_COMPARE(policy->currentData().toString(), QStringLiteral("shared"));
+    QTRY_VERIFY(!worktrees->isChecked());
     // Fixing the path to the repository returns auto and the worktrees.
     edit->setText(gitFolder);
     QMetaObject::invokeMethod(edit, "editingFinished");
-    QCOMPARE(policy->currentData().toString(), QStringLiteral("auto"));
+    QTRY_COMPARE(policy->currentData().toString(), QStringLiteral("auto"));
     QVERIFY(worktrees->isEnabled());
-    QVERIFY(worktrees->isChecked());
+    QTRY_VERIFY(worktrees->isChecked());
     // Create: every member works in its own worktree. The fake catalog really has
     // the "feature" template with its roster, so its rows must exist.
     QVERIFY(chooseTemplate(&dialog, QStringLiteral("feature")));
@@ -590,7 +590,7 @@ void TestTeamsUiNewteam::embeddedNewTeamIsLedByTheSession()
     auto *create = tab.findChild<QPushButton *>("teamNewCreate");
     auto *start = tab.findChild<QPushButton *>("teamNewStartPlanning");
     QVERIFY(!create->isEnabled()); QCOMPARE(create->toolTip(), QStringLiteral("Start planning first"));
-    QVERIFY(start->isEnabled());
+    QTRY_VERIFY(start->isEnabled());   // #744: once the worker has seen the folder
     QVERIFY(!tab.findChild<QPushButton *>("teamNewDiscard")->isVisible());
     // F4: the designer keeps the templates; New team only opens it.
     tab.findChild<QPushButton *>("teamNewAskDesigner")->click(); QCOMPARE(designer, 1);

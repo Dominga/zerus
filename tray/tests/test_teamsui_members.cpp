@@ -1026,8 +1026,9 @@ void TestTeamsUiMembers::reportPreviewsAndFindings()
     card.show();
     QTRY_VERIFY(card.findChild<QLabel *>("teamReportSummary"));
     QVERIFY(card.findChild<QWidget *>("teamReportCriteria"));
-    QVERIFY2(card.findChild<QLabel *>("teamReportEvidenceImage"), "the image evidence previews");
-    QVERIFY2(card.findChild<QTextBrowser *>("teamReportEvidenceHtml"), "the HTML evidence previews");
+    // #744: the evidence files are checked and read by PathProbe's worker.
+    QTRY_VERIFY2(card.findChild<QLabel *>("teamReportEvidenceImage"), "the image evidence previews");
+    QTRY_VERIFY2(card.findChild<QTextBrowser *>("teamReportEvidenceHtml"), "the HTML evidence previews");
     QVERIFY(card.findChild<QLabel *>("teamReportLimits"));
     shot(&card, "report-structured");
 

@@ -1,4 +1,5 @@
 #include "TeamNewDialog.h"
+#include "PathProbe.h"
 #include "HgsClient.h"
 #include "TeamController.h"
 #include "TeamTemplateList.h"
@@ -203,6 +204,12 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
 
     connect(m_name, &QLineEdit::textChanged, this, [this] { validate(); });
     connect(m_folder, &QLineEdit::textChanged, this, [this] { validate(); });
+    // #744: the folder's state comes from PathProbe's worker; its answer runs
+    // validate() again.
+    connect(&PathProbe::instance(), &PathProbe::answered, this, [this](const QString &path) {
+        const QString folder = m_folder ? m_folder->text().trimmed() : QString();
+        if (!folder.isEmpty() && (path == folder || path == PathProbe::gitOf(folder))) validate();
+    });
     connect(m_leadAgent, &QComboBox::currentIndexChanged, this, [this] {
         fillAccounts(m_leadAccount, m_leadAgent->currentData().toString(), {}); refillLeadModels(); validate(); });
     connect(m_leadAccount, &QComboBox::currentIndexChanged, this, [this] { refillLeadModels(); validate(); });
@@ -443,37 +450,42 @@ void TeamNewDialog::validate()
     if (!m_name || !m_folder || !m_folderPolicy || !m_summary || !m_create) return;
     const Colors c = colorsFor(m_dark);
     const QString folder = m_folder->text().trimmed();
-    const bool git = !folder.isEmpty() && QDir(folder).exists(QStringLiteral(".git"));
-    m_worktrees->setEnabled(git);
-    if (!git) m_worktrees->setChecked(false);
-    // N10: a path that is Git again with auto or worktree policy brings the
-    // worktree rows back, so members are created with worktrees.
-    else if (!m_worktrees->isChecked() && m_folderPolicy
-             && m_folderPolicy->currentData().toString() != QStringLiteral("shared"))
-        m_worktrees->setChecked(true);
-    // B6: without a Git folder only a shared folder makes sense; the worktree
-    // entry is greyed out and the note says why. QA #347: a folder that is not
-    // a Git repository shows Shared, fixed, with the reason - also for the
-    // folder the dialog opened with, not only after the field lost focus.
-    if (m_folderPolicy) {
-        if (auto *model = qobject_cast<QStandardItemModel *>(m_folderPolicy->model()))
-            if (auto *item = model->item(m_folderPolicy->findData(QStringLiteral("worktree"))))
-                item->setEnabled(git);
-        if (!git && m_folderCommitted && m_folderPolicy->currentData().toString() != "shared") {
-            // No signals: currentIndexChanged would call validate() again in the
-            // middle of this one (the crash seen in newTeamStartsTheLeadWithTheTemplate).
-            const QSignalBlocker block(m_folderPolicy);
-            m_folderPolicy->setCurrentIndex(m_folderPolicy->findData(QStringLiteral("shared")));
-            m_worktrees->setChecked(false);
-            m_forcedShared = true;
+    // #744: never a stat on this thread. Until the worker answers, what depends
+    // on Git stays as it is and Create waits.
+    const auto probed = PathProbe::instance().folder(folder);
+    const bool git = probed.git;
+    if (!probed.checking && !probed.unresponsive) {
+        m_worktrees->setEnabled(git);
+        if (!git) m_worktrees->setChecked(false);
+        // N10: a path that is Git again with auto or worktree policy brings the
+        // worktree rows back, so members are created with worktrees.
+        else if (!m_worktrees->isChecked() && m_folderPolicy
+                 && m_folderPolicy->currentData().toString() != QStringLiteral("shared"))
+            m_worktrees->setChecked(true);
+        // B6: without a Git folder only a shared folder makes sense; the worktree
+        // entry is greyed out and the note says why. QA #347: a folder that is not
+        // a Git repository shows Shared, fixed, with the reason - also for the
+        // folder the dialog opened with, not only after the field lost focus.
+        if (m_folderPolicy) {
+            if (auto *model = qobject_cast<QStandardItemModel *>(m_folderPolicy->model()))
+                if (auto *item = model->item(m_folderPolicy->findData(QStringLiteral("worktree"))))
+                    item->setEnabled(git);
+            if (!git && m_folderCommitted && m_folderPolicy->currentData().toString() != "shared") {
+                // No signals: currentIndexChanged would call validate() again in the
+                // middle of this one (the crash seen in newTeamStartsTheLeadWithTheTemplate).
+                const QSignalBlocker block(m_folderPolicy);
+                m_folderPolicy->setCurrentIndex(m_folderPolicy->findData(QStringLiteral("shared")));
+                m_worktrees->setChecked(false);
+                m_forcedShared = true;
+            }
+            const bool sharedOnly = !folder.isEmpty() && !git && m_folderCommitted;
+            m_folderPolicy->setEnabled(!sharedOnly);
+            m_folderPolicy->setToolTip(sharedOnly ? tr("Folder is not a Git repository: every member works in this folder, so the policy is shared.")
+                                                  : tr("Auto lets the lead choose the folder each member works in"));
         }
-        const bool sharedOnly = !folder.isEmpty() && !git && m_folderCommitted;
-        m_folderPolicy->setEnabled(!sharedOnly);
-        m_folderPolicy->setToolTip(sharedOnly ? tr("Folder is not a Git repository: every member works in this folder, so the policy is shared.")
-                                              : tr("Auto lets the lead choose the folder each member works in"));
+        m_gitNote->setVisible(!folder.isEmpty() && !git);
+        m_gitNote->setText(tr("Folder is not a Git repository — members will share one folder."));
     }
-    m_gitNote->setVisible(!folder.isEmpty() && !git);
-    m_gitNote->setText(tr("Folder is not a Git repository — members will share one folder."));
     m_gitNote->setStyleSheet(QStringLiteral("color:%1;").arg(c.warn.name()));
     int bad = 0;
     for (auto *r : m_rowList) {
@@ -500,7 +512,10 @@ void TeamNewDialog::validate()
     }
     QStringList problems;
     if (m_name->text().trimmed().isEmpty()) problems << tr("Name the team");
-    if (folder.isEmpty() || !QDir(folder).exists()) problems << tr("Choose an existing folder");
+    if (folder.isEmpty()) problems << tr("Choose an existing folder");
+    else if (probed.checking) problems << tr("Checking the folder…");
+    else if (probed.unresponsive) problems << tr("The folder does not answer: its disk may be busy");
+    else if (!probed.dir) problems << tr("Choose an existing folder");
     if (bad) problems << tr("Fix %n member row(s) to create the team", nullptr, bad);
     if (m_rowList.size() + 1 > m_maxMembers->value()) problems << tr("More members than the limit");
     m_summary->setText(problems.isEmpty() ? tr("Create starts the lead; it plans, and you approve before members start.") : QStringLiteral("⚠ ") + problems.join(QStringLiteral(" · ")));

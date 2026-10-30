@@ -117,6 +117,7 @@
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QFileInfo>
+#include "PathProbe.h"
 #include <QFileDialog>
 #include <QStandardPaths>
 #include <QProgressBar>
@@ -707,6 +708,12 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_shell, &QPushButton::clicked, this, &SessionsWindow::openFolderShell);
     m_fileManager = iconButton("folder", tr("Open session folder in file manager"), "openSessionFolderAction");
     connect(m_fileManager, &QPushButton::clicked, this, &SessionsWindow::openSessionFolder);
+    // #744: the session folder's state comes from PathProbe's worker; its answer
+    // updates the button and an open menu's Open folder.
+    connect(&PathProbe::instance(), &PathProbe::answered, this, [this](const QString &path) {
+        if (!m_folderButtonPath.isEmpty() && path == m_folderButtonPath) showFolderState(m_fileManager, nullptr, true, path);
+        if (m_menuFolderAction && path == m_menuFolderPath) showFolderState(nullptr, m_menuFolderAction, true, path);
+    });
     // The header copies the same identity as Details; connect commands live in the menu.
     m_copyHeaderId = iconButton("copy", tr("Copy session ID"), "headerCopySessionIdAction");
     connect(m_copyHeaderId, &QPushButton::clicked, this, &SessionsWindow::copySessionIdentity);
@@ -868,17 +875,26 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         quint64 pending = 0, cacheRequest = 0; bool openAfterDownload = false;
         if (local && !path.isEmpty()) {
             auto *open = buttons->addButton(tr("Open file"), QDialogButtonBox::ActionRole); open->setObjectName("openSessionFile");
+            // #744: checked by PathProbe's worker; the dialog keeps answering.
             connect(open, &QPushButton::clicked, &dialog, [path, hint, &dialog, &desktopTarget, &desktopFile] {
-                if (!QFileInfo::exists(path)) { hint->setText(tr("This file is no longer available at this path.")); return; }
-                desktopTarget = QUrl::fromLocalFile(path); desktopFile = true;
-                dialog.accept();
+                hint->setText(tr("Checking the file…"));
+                PathProbe::instance().check(path, &dialog, [path, hint, &dialog, &desktopTarget, &desktopFile](const PathProbe::Info &file) {
+                    if (file.state == PathProbe::Info::Unresponsive) { hint->setText(tr("The file does not answer: its disk may be busy.")); return; }
+                    if (!file.exists) { hint->setText(tr("This file is no longer available at this path.")); return; }
+                    desktopTarget = QUrl::fromLocalFile(path); desktopFile = true;
+                    dialog.accept();
+                });
             });
             auto *folder = buttons->addButton(tr("Open folder"), QDialogButtonBox::ActionRole); folder->setObjectName("openSessionFileFolder");
             connect(folder, &QPushButton::clicked, &dialog, [path, hint, &dialog, &desktopTarget] {
                 const auto directory = QFileInfo(path).absolutePath();
-                if (!QFileInfo(directory).isDir()) { hint->setText(tr("This folder is no longer available at this path.")); return; }
-                desktopTarget = QUrl::fromLocalFile(directory);
-                dialog.accept();
+                hint->setText(tr("Checking the folder…"));
+                PathProbe::instance().check(directory, &dialog, [directory, hint, &dialog, &desktopTarget](const PathProbe::Info &folder) {
+                    if (folder.state == PathProbe::Info::Unresponsive) { hint->setText(tr("The folder does not answer: its disk may be busy.")); return; }
+                    if (!folder.dir) { hint->setText(tr("This folder is no longer available at this path.")); return; }
+                    desktopTarget = QUrl::fromLocalFile(directory);
+                    dialog.accept();
+                });
             });
         } else if (!local) {
             auto *progress = new QProgressBar; progress->setObjectName("sessionFileProgress");
@@ -4451,11 +4467,24 @@ void SessionsWindow::loadMedia(ActivityView *view, const QString &key, const QSt
     const auto path = SessionFileReference::resolve(target, m_subagentId.isEmpty() ? selectedDirectory() : m_subagentCwd, local ? QDir::homePath() : QString());
     if (path.isEmpty()) { view->setMediaPreview(key, {}, tr("The session folder is unknown")); return; }
     if (local) {
-        const QFileInfo file(path);
-        if (!file.isFile()) { view->setMediaPreview(key, {}, tr("Not found on this computer")); return; }
-        if (!open && file.size() > MediaFiles::PreviewLimit) { view->setMediaPreview(key, {}, tr("Too large for a preview")); return; }
+        // #744: the file's state from PathProbe's worker; asked again once it answers.
+        const auto file = PathProbe::instance().info(path);
+        if (file.state == PathProbe::Info::Checking) {
+            view->setMediaPreview(key, {}, tr("Checking the file…"));
+            QPointer<ActivityView> target(view);
+            auto *once = new QMetaObject::Connection;
+            *once = connect(&PathProbe::instance(), &PathProbe::answered, this, [this, target, key, href, open, path, once](const QString &answered) {
+                if (answered != path) return;
+                disconnect(*once); delete once;
+                if (target) loadMedia(target, key, href, open);
+            });
+            return;
+        }
+        if (file.state == PathProbe::Info::Unresponsive) { view->setMediaPreview(key, {}, tr("The file does not answer: its disk may be busy")); return; }
+        if (!file.file) { view->setMediaPreview(key, {}, tr("Not found on this computer")); return; }
+        if (!open && file.size > MediaFiles::PreviewLimit) { view->setMediaPreview(key, {}, tr("Too large for a preview")); return; }
         view->setMediaPreview(key, path);
-        if (open) (new MediaViewer(path, file.fileName() + tr(" — Zerus"), this))->show();
+        if (open) (new MediaViewer(path, QFileInfo(path).fileName() + tr(" — Zerus"), this))->show();
         return;
     }
     if (!entry->online) { view->setMediaPreview(key, {}, tr("%1 is offline").arg(entry->machine)); return; }
@@ -4709,10 +4738,10 @@ void SessionsWindow::renderDetails()
     s.cwd = m_details.value("cwd").toString(s.cwd);
     const QString directory = m_subagentId.isEmpty() ? s.cwd : m_subagentCwd;
     m_shell->setEnabled(entry->online && MachinePlatform::absolute(directory, MachinePlatform::of(m_fleet.metricsOf(entry->host), entry->host.isEmpty())));
-    const bool localFolder = entry->host.isEmpty() && QFileInfo(directory).isAbsolute() && QFileInfo(directory).isDir();
-    m_fileManager->setEnabled(localFolder);
-    m_fileManager->setToolTip(!entry->host.isEmpty() ? tr("Available only for sessions on this computer")
-        : localFolder ? tr("Open session folder in file manager\n%1").arg(directory) : tr("Session folder is unavailable"));
+    // #744: never a stat here: the owner's tray waited 39 s in isDir for a
+    // folder on a disk that was deleting large folders.
+    m_folderButtonPath = entry->host.isEmpty() ? directory : QString();
+    showFolderState(m_fileManager, nullptr, entry->host.isEmpty(), directory);
     s.gitRoot = m_details.value("git_root").toString(s.gitRoot);
     s.gitBranch = m_details.value("git_branch").toString(s.gitBranch);
     s.gitWorktree = m_details.value("git_worktree").toBool(s.gitWorktree);
@@ -6513,12 +6542,35 @@ void SessionsWindow::openSessionFolder()
 
 void SessionsWindow::openLocalFolder(const QString &directory)
 {
-    const QFileInfo folder(directory);
-    if (!folder.isAbsolute() || !folder.isDir()) {
-        showNotice(tr("Session folder is unavailable."), true); return;
+    if (!QFileInfo(directory).isAbsolute()) { showNotice(tr("Session folder is unavailable."), true); return; }
+    // #744: checked by PathProbe's worker, bounded; the window keeps answering.
+    PathProbe::instance().check(directory, this, [this, directory](const PathProbe::Info &folder) {
+        if (folder.state == PathProbe::Info::Unresponsive) { showNotice(tr("The session folder does not answer: its disk may be busy."), true); return; }
+        if (!folder.dir) { showNotice(tr("Session folder is unavailable."), true); return; }
+        if (!QDesktopServices::openUrl(QUrl::fromLocalFile(directory)))
+            showNotice(tr("Could not open the session folder in the file manager."), true);
+    });
+}
+
+SessionsWindow::FolderState SessionsWindow::folderState(bool local, const QString &directory) const
+{
+    if (!local) return {false, false, tr("Available only for sessions on this computer")};
+    if (directory.isEmpty() || !QFileInfo(directory).isAbsolute()) return {false, false, tr("Session folder is unavailable")};
+    const auto folder = PathProbe::instance().info(directory);
+    if (folder.state == PathProbe::Info::Checking) return {false, true, tr("Checking the session folder…")};
+    if (folder.state == PathProbe::Info::Unresponsive) return {false, false, tr("The session folder does not answer: its disk may be busy")};
+    if (!folder.dir) return {false, false, tr("Session folder is unavailable")};
+    return {true, false, tr("Open session folder in file manager\n%1").arg(directory)};
+}
+
+void SessionsWindow::showFolderState(QPushButton *button, QAction *action, bool local, const QString &directory)
+{
+    const auto state = folderState(local, directory);
+    if (button) { button->setEnabled(state.open); button->setToolTip(state.hint); button->setProperty("checking", state.checking); }
+    if (action) {
+        action->setEnabled(state.open); action->setToolTip(state.hint);
+        action->setText(state.checking ? tr("Open folder (checking…)") : tr("Open folder"));
     }
-    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(directory)))
-        showNotice(tr("Could not open the session folder in the file manager."), true);
 }
 
 void SessionsWindow::showSessionMenu(const QString &key, const QPoint &position)
@@ -6555,10 +6607,10 @@ void SessionsWindow::showSessionMenu(const QString &key, const QPoint &position)
     if (!archived && SessionPresentation::backgroundIdle(original.session))
         add(tr("Show running commands"), "contextOpenProcesses", SessionMenuAction::OpenProcesses, original.online && ProcessSettings::enabled(),
             ProcessSettings::enabled() ? tr("Follow this session's background work in Processes") : tr("Enable Settings > Processes to inspect running commands"));
-    const bool localFolder = original.host.isEmpty() && QFileInfo(directory).isAbsolute() && QFileInfo(directory).isDir();
-    add(tr("Open folder"), "contextOpenFolder", SessionMenuAction::OpenFolder, localFolder,
-        !original.host.isEmpty() ? tr("Available only for sessions on this computer")
-        : localFolder ? tr("Open session folder in file manager\n%1").arg(directory) : tr("Session folder is unavailable"));
+    // #744: the folder's state from PathProbe; the item says checking until it answers.
+    m_menuFolderAction = add(tr("Open folder"), "contextOpenFolder", SessionMenuAction::OpenFolder, false);
+    m_menuFolderPath = original.host.isEmpty() ? directory : QString();
+    showFolderState(nullptr, m_menuFolderAction, original.host.isEmpty(), directory);
     add(tr("Open shell in session folder"), "contextFolderShell", SessionMenuAction::FolderShell,
         original.online && MachinePlatform::absolute(directory, MachinePlatform::of(m_fleet.metricsOf(original.host), original.host.isEmpty())));
     add(archived ? tr("Copy restore command") : tr("Copy connect command"), "contextCopyCommand", SessionMenuAction::CopyCommand,

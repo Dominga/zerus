@@ -171,7 +171,7 @@ fn projection(
         "configuration":location.configuration,"generation":store.generation,"epoch":epoch,
         "running":true,"ownership":"passive","writers_enabled":false,"handoff":"required",
         "upstreams":[],"complete":false,"subscribers":subscribers,"automatic_approvals":false,
-        "pending":{"reads":0,"posting":0,"approvals":0},"errors":[],"migration":migration,
+        "pending":{"reads":0,"posting":0,"approvals":0},"errors":[],"migration":migration,"effect_journal":store.effect_status(),
         "limits":{"subscribers":protocol::SUBSCRIBERS,"queue_bytes":protocol::QUEUE_BYTES,
             "frame_bytes":protocol::FRAME_BYTES,"control_bytes":protocol::CONTROL_BYTES,"ingress_bytes":16<<20},
         "components":{"fleet":"awaiting_handoff","presence":"awaiting_handoff","reads":"awaiting_handoff","attention":"awaiting_handoff","approvals":"awaiting_handoff"}})
@@ -189,7 +189,7 @@ impl Drop for Permit {
 }
 
 fn serve(location: Location) -> Result<()> {
-    let (_signals, _lock, listener, epoch, store) = (|| -> Result<_> {
+    let (_signals, _lock, listener, epoch, mut store) = (|| -> Result<_> {
         let signals = platform::ShutdownGuard::install()?;
         // This dedicated service process has no workers yet. Make socket creation
         // private too, so a concurrent status probe never sees the pre-chmod mode.
@@ -292,6 +292,7 @@ fn serve(location: Location) -> Result<()> {
             Err(mpsc::RecvTimeoutError::Timeout) => (),
         }
         if Instant::now() >= heartbeat {
+            store.recover_effects(&epoch);
             seq += 1;
             migration = handoff::inspect(&location);
             let value = projection(&location, &store, &epoch, fanout.len(), &migration);

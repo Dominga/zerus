@@ -4101,6 +4101,17 @@ ownership. There is no agent/terminal/process shutdown operation. SIGTERM or
 SIGHUP on Unix stops admissions, detaches clients and checkpoints only desktop
 state. Native Windows graceful shutdown qualification remains separate.
 
+Schema 2 adds the hgs-owned native-effect ledger. Schema 1 migrates
+transactionally after the configuration check. Its writer policy starts revoked
+and every process restart fences it again; manual revocation reasons survive.
+`effect_journal` reports policy, a reason code and four maintained attempt counts.
+Recovery marks at most 256 prior-process reservations unknown at startup and per
+heartbeat. Neither reserved nor unknown work becomes a fresh delivery after a
+restart. Recovery failure reports a component error and pauses admissions while
+the passive service keeps serving IPC. The ledger library has no native I/O,
+automatic-approval consent or read-mark authority. The current service exposes
+no reservation, native adapter, revoke or writer-takeover command yet.
+
 Every IPC connection begins with one bounded JSON line containing `abi`,
 `configuration`, `op` (`status`, `watch` or `request`) and optional `request`.
 The CLI adds this private handshake. Frames contain `abi`, random service

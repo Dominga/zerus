@@ -49,9 +49,10 @@ ModelServerSettings::ModelServerSettings(ModelServers::Controller *servers, QWid
     key(tr("Name"));
     m_name = new QLineEdit; m_name->setObjectName("modelServerName"); m_name->setPlaceholderText(tr("lab"));
     grid->addWidget(m_name, r, 1, 1, 2);
-    ++r; key(tr("API URL"));
+    // #703 (#658 N2): the server's root; hgs derives each consumer's URL from it.
+    ++r; key(tr("Server root"));
     auto *apiRow = row(8);
-    m_url = new QLineEdit; m_url->setObjectName("modelServerUrl"); m_url->setPlaceholderText(QStringLiteral("http://host.example:8000/v1"));
+    m_url = new QLineEdit; m_url->setObjectName("modelServerUrl"); m_url->setPlaceholderText(QStringLiteral("http://host.example:8000"));
     m_url->setFont(NewSessionDense::mono(12));
     auto *kinds = new QWidget; kinds->setProperty("seg", true); auto *kh = new QHBoxLayout(kinds); kh->setContentsMargins(2, 2, 2, 2); kh->setSpacing(0);
     auto *kindGroup = new QButtonGroup(this);
@@ -61,6 +62,25 @@ ModelServerSettings::ModelServerSettings(ModelServers::Controller *servers, QWid
     QObject::connect(testApi, &QPushButton::clicked, this, [this] { test(QStringLiteral("api")); });
     apiRow->addWidget(m_url, 1); apiRow->addWidget(kinds); apiRow->addWidget(testApi);
     grid->addLayout(apiRow, r, 1, 1, 2);
+    m_urlHint = new QLabel; m_urlHint->setObjectName("modelServerSettingsNote"); m_urlHint->setWordWrap(true);
+    m_urlHint->setProperty("urlHint", true); m_urlHint->setTextFormat(Qt::PlainText);
+    grid->addWidget(m_urlHint, ++r, 1, 1, 2);
+    const auto hintUrl = [this] {
+        const QString typed = m_url->text().trimmed();
+        if (typed.isEmpty()) {
+            m_urlHint->setText(tr("The address the server answers at, without /v1: http(s)://HOST[:PORT][/path]. Zerus reads its model list at ROOT/v1/models, gives Codex ROOT/v1 and Claude Code ROOT."));
+            return;
+        }
+        const QString root = ModelServers::rootOf(typed);
+        QString text = tr("Model list: %1\nCodex: %2\nClaude Code: %3").arg(ModelServers::modelsUrl(typed), root + QStringLiteral("/v1"), root);
+        QString bare = typed;
+        while (bare.endsWith(QLatin1Char('/'))) bare.chop(1);
+        if (bare.endsWith(QStringLiteral("/v1")))
+            text += QLatin1Char('\n') + tr("Saved as its root %1: the /v1 you typed is added where it is needed.").arg(root);
+        m_urlHint->setText(text);
+    };
+    QObject::connect(m_url, &QLineEdit::textChanged, this, hintUrl);
+    hintUrl();
     m_apiResult = result("modelServerApiResult");
     ++r; key(tr("API key"));
     auto *keyRow = row(8);
@@ -337,16 +357,19 @@ void ModelServerSettings::showResult(QLabel *target, const QJsonObject &result, 
 {
     QString text, tone = QStringLiteral("ok");
     const bool failed = !error.isEmpty() || result.value("status").toString() == "error";
+    // #703 (#658 N2): Test API reads the root's model list; say which URL.
+    const QString read = target == m_apiResult ? ModelServers::modelsUrl(m_url->text()) : QString();
     if (failed) {
         tone = QStringLiteral("error");
         text = !error.isEmpty() ? error : result.value("detail").toString(result.value("error").toString());
+        if (!read.isEmpty()) text = tr("GET %1: %2").arg(read, text);
     } else if (target == m_logsResult) {
         text = tr("%1: %2 lines read").arg(what).arg(result.value("lines").toArray().size());
     } else {
         const auto status = ModelServers::parseStatus(result);
         const int models = int(status.models.size());
         const QString count = models == 1 ? tr("1 model") : tr("%1 models").arg(models);
-        if (status.source == "api") text = tr("GET /v1/models answered: %1").arg(count);
+        if (status.source == "api") text = tr("GET %1 answered: %2").arg(read.isEmpty() ? QStringLiteral("/v1/models") : read, count);
         else if (!status.raw.isEmpty() && status.models.isEmpty()) {
             tone = QStringLiteral("warn");
             text = tr("Neither the JSON contract nor NAME: STATE lines: shown as raw text; the models come from the API");

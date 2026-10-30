@@ -629,7 +629,7 @@ fn create_line(spec: &LaunchSpec, detached: bool) -> String {
     }
     words.extend(["-s".into(), word(&spec.name), "-c".into(), word(&spec.cwd)]);
     for value in &spec.env {
-        words.extend(["-e".into(), word(value)]);
+        words.extend(["-e".into(), word(&super::masked(value))]);
     }
     let command = spawn::command_line(&spec.command).unwrap_or_else(|_| {
         spec.command
@@ -2207,6 +2207,19 @@ mod tests {
             assert_eq!((error.code, error.message.as_str()), (1, NOT_A_CONSOLE));
         }
         assert!(requests(&backend).is_empty());
+    }
+
+    #[test]
+    fn a_dry_run_masks_a_secret_in_the_launch_environment() {
+        let launch = spec(
+            &["ANTHROPIC_AUTH_TOKEN=sk-secret", "ANTHROPIC_BASE_URL=http://192.0.2.10:8080"],
+            &[r"C:\hgs.exe", "--run", "0", "claude"],
+            false,
+        );
+        let line = describe(&DryRun::Launch(&launch));
+        assert!(line.contains("ANTHROPIC_AUTH_TOKEN=***"), "{line}");
+        assert!(!line.contains("sk-secret"), "the secret never reaches a dry-run: {line}");
+        assert!(line.contains("ANTHROPIC_BASE_URL=http://192.0.2.10:8080"), "{line}");
     }
 
     #[test]

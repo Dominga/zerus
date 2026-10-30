@@ -13,6 +13,8 @@
 #include <QPushButton>
 #include <QRadioButton>
 #include <QTemporaryDir>
+#include <QDateTime>
+#include <QStandardItemModel>
 #include "FakeCli.h"
 #include "HgsClient.h"
 #include "ModelServerSettings.h"
@@ -57,7 +59,9 @@ if a[:1]==['model-server']:
     elif c=='status':
         s=read('.status',{}).get(a[2],{'status':'error','error':'refused','detail':'unknown'})
         print(json.dumps(s));sys.exit(1 if s.get('status')=='error' else 0)
-    elif c=='up':print(json.dumps({'status':'started','server':a[2],'model':a[3],'request_id':'r1'}))
+    elif c=='up':print(json.dumps({'status':'started','server':a[2],'model':a[3],'request_id':'11111111-1111-4111-8111-111111111111','run':'hgs run','timeout_minutes':30}))
+    elif c=='up-result':print(json.dumps(read('.upresult',{'request_id':a[2],'status':'running','exit':None,'timed_out':False,'tail':''})))
+    elif c=='sessions':print(json.dumps(read('.sessions',{'server':a[2],'sessions':[]})))
     elif c=='down':print(json.dumps({'status':'ran','server':a[2],'model':a[3],'exit':0} if '--yes' in a else {'status':'confirm'}))
     elif c=='logs':print(json.dumps({'status':'ran','server':a[2],'model':a[3] if len(a)>3 and not a[3].startswith('-') else '','lines':['line one','line two'],'truncated':False}))
     elif c=='save':
@@ -87,7 +91,7 @@ QJsonObject server(const QString &name, const QString &url, const QString &kind,
 QJsonArray fourServers()
 {
     return {server("lab-gpu", "https://gpu-a.lan.example:8000/v1", "openai", "gpu-a", true, true),
-            server("workstation", "http://127.0.0.1:8080/v1", "openai", "", true),
+            server("workstation", "http://127.0.0.1:8080", "openai", "", true),
             server("shared-gateway", "https://llm.lan.example/", "anthropic", "", false, true),
             server("spare-box", "http://192.0.2.15:8000/v1", "openai", "lab-spare", true)};
 }
@@ -95,9 +99,14 @@ QJsonArray fourServers()
 QJsonObject fourStatuses()
 {
     const auto model = [](const QString &name, const QString &state) { return QJsonObject{{"name", name}, {"state", state}}; };
+    const auto since = [&](const QString &name, const QString &at) {
+        auto row = model(name, "running");
+        row["since"] = double(QDateTime(QDate::currentDate(), QTime::fromString(at, QStringLiteral("HH:mm"))).toSecsSinceEpoch());
+        return row;
+    };
     return {
         {"lab-gpu", QJsonObject{{"server", "lab-gpu"}, {"source", "command"},
-                                {"models", QJsonArray{model("coder-a", "running"), model("chat-general", "running"), model("embed-text", "loading"), model("review-long", "stopped")}},
+                                {"models", QJsonArray{since("coder-a", "09:12"), since("chat-general", "09:40"), model("embed-text", "loading"), model("review-long", "stopped")}},
                                 {"memory", QJsonObject{{"free", 38.2}, {"total", 48.0}}}, {"raw", QJsonArray()}}},
         {"workstation", QJsonObject{{"server", "workstation"}, {"source", "command"},
                                     {"models", QJsonArray{model("chat-local", "running"), model("coder-b", "stopped")}},
@@ -173,7 +182,7 @@ void TestModelServers::initTestCase()
 
 void TestModelServers::init()
 {
-    for (const char *suffix : {".calls", ".servers", ".status", ".test"}) QFile::remove(script() + QLatin1String(suffix));
+    for (const char *suffix : {".calls", ".servers", ".status", ".test", ".upresult", ".sessions"}) QFile::remove(script() + QLatin1String(suffix));
 }
 
 QList<QJsonObject> TestModelServers::calls(const QString &command) const
@@ -232,6 +241,14 @@ void TestModelServers::tabListsServersModelsAndStatesInTheBackground()
     QCOMPARE(lab->findChild<QLabel *>("modelServerMemoryText")->text(), QStringLiteral("38.2 of 48.0 GB free"));
     QCOMPARE(lab->findChild<QWidget *>("modelServerState")->property("state").toString(), QStringLiteral("Online"));
     QCOMPARE(card(&page, "workstation")->findChild<QLabel *>("modelServerHostText")->text(), QStringLiteral("This computer"));
+    // #703 (#658 N2): an entry saved as the root shows the URL its agents get;
+    // an Anthropic root has no /v1.
+    QCOMPARE(card(&page, "workstation")->findChild<QLabel *>("modelServerUrl")->text(), QStringLiteral("http://127.0.0.1:8080/v1"));
+    QCOMPARE(card(&page, "shared-gateway")->findChild<QLabel *>("modelServerUrl")->text(), QStringLiteral("https://llm.lan.example"));
+    // #703 (#659 QA): a model's since-time when its status carries one.
+    QCOMPARE(modelRow(&page, "lab-gpu", "coder-a")->findChild<QLabel *>("modelServerModelSince")->text(), QStringLiteral("since 09:12"));
+    QCOMPARE(modelRow(&page, "lab-gpu", "chat-general")->findChild<QLabel *>("modelServerModelSince")->text(), QStringLiteral("since 09:40"));
+    QVERIFY(!modelRow(&page, "lab-gpu", "embed-text")->findChild<QLabel *>("modelServerModelSince"));
     QVERIFY(card(&page, "workstation")->findChild<QWidget *>("modelServerMemory")->property("low").toBool());
     QCOMPARE(card(&page, "spare-box")->findChild<QLabel *>("modelServerHostText")->text(), QStringLiteral("ssh alias lab-spare"));
     // The models with their states and actions.
@@ -246,11 +263,41 @@ void TestModelServers::tabListsServersModelsAndStatesInTheBackground()
     QVERIFY(lab->findChild<QPushButton *>("modelServerDownAll"));
     QCOMPARE(page.findChild<QLabel *>("modelServersSummary")->text(), QStringLiteral("4 servers, 8 models, 3 running"));
     for (const auto &text : texts(&page)) QVERIFY2(!text.contains(QStringLiteral(" · ")), qPrintable(text));
-    // Up runs once, detached.
+    // Up runs once, detached; #703 (#658 N5): the page then reads the run's
+    // own outcome until it ends and shows it, not only that it started.
+    servers.setUpPoll(60);
     modelRow(&page, "lab-gpu", "review-long")->findChild<QPushButton *>("modelServerUp")->click();
     QTRY_COMPARE(calls("up").size(), 1);
     QCOMPARE(calls("up").first()["args"].toArray(), (QJsonArray{"model-server", "up", "lab-gpu", "review-long", "--detach"}));
-    QTRY_VERIFY(page.findChild<QLabel *>("modelServersNotice")->text().contains("started once"));
+    auto *notice = page.findChild<QLabel *>("modelServersNotice");
+    QTRY_VERIFY2(notice->text().contains("Up review-long on lab-gpu is running once"), qPrintable(notice->text()));
+    QTRY_VERIFY(calls("up-result").size() >= 2);
+    QCOMPARE(calls("up-result").first()["args"].toArray(), (QJsonArray{"model-server", "up-result", "11111111-1111-4111-8111-111111111111", "--json"}));
+    QVERIFY(servers.upRunning("lab-gpu", "review-long"));
+    QTRY_VERIFY(modelRow(&page, "lab-gpu", "review-long") && !modelRow(&page, "lab-gpu", "review-long")->findChild<QPushButton *>("modelServerUp")->isEnabled());
+    QCOMPARE(modelRow(&page, "lab-gpu", "review-long")->findChild<QPushButton *>("modelServerUp")->text(), QStringLiteral("Up running"));
+    QVERIFY(!notice->property("error").toBool());
+    // The run ends with exit 3: the page says it failed and why.
+    QVERIFY(FakeCli::replace(script() + ".upresult", R"({"request_id":"11111111-1111-4111-8111-111111111111","server":"lab-gpu","model":"review-long","status":"ran","exit":3,"timed_out":false,"tail":"loading review-long\nCUDA out of memory\n","timeout_secs":1800})"));
+    QTRY_VERIFY2(notice->text() == QStringLiteral("Up review-long on lab-gpu failed: exit 3: CUDA out of memory"), qPrintable(notice->text()));
+    QVERIFY(notice->property("error").toBool());
+    QVERIFY(!servers.upRunning("lab-gpu", "review-long"));
+    shot(&page, "u60-up-failed-dark");
+    lightPalette(true); page.setDark(false); shot(&page, "u60-up-failed-light"); lightPalette(false); page.setDark(true);
+    const int polls = int(calls("up-result").size());
+    // A run that ends well says so; one past its time limit says that.
+    QVERIFY(FakeCli::replace(script() + ".upresult", R"({"status":"ran","exit":0,"timed_out":false,"tail":"ready\n","timeout_secs":1800})"));
+    QTRY_VERIFY(modelRow(&page, "lab-gpu", "review-long") && modelRow(&page, "lab-gpu", "review-long")->findChild<QPushButton *>("modelServerUp")->isEnabled());
+    modelRow(&page, "lab-gpu", "review-long")->findChild<QPushButton *>("modelServerUp")->click();
+    QTRY_VERIFY2(notice->text() == QStringLiteral("Up review-long on lab-gpu finished: exit 0. Nothing starts it again on its own."), qPrintable(notice->text()));
+    QVERIFY(!notice->property("error").toBool());
+    QVERIFY(FakeCli::replace(script() + ".upresult", R"({"status":"ran","exit":null,"timed_out":true,"tail":"","timeout_secs":1800})"));
+    QTRY_VERIFY(modelRow(&page, "lab-gpu", "review-long") && modelRow(&page, "lab-gpu", "review-long")->findChild<QPushButton *>("modelServerUp")->isEnabled());
+    modelRow(&page, "lab-gpu", "review-long")->findChild<QPushButton *>("modelServerUp")->click();
+    QTRY_VERIFY2(notice->text() == QStringLiteral("Up review-long on lab-gpu failed: stopped at its 30 min limit"), qPrintable(notice->text()));
+    QVERIFY(calls("up-result").size() > polls);
+    QCOMPARE(calls("up").size(), 3);
+    notice->clear(); notice->hide();
     shot(&page, "u60-servers-dark");
     lightPalette(true); page.setDark(false); shot(&page, "u60-servers-light");
     lightPalette(false); page.setDark(true);
@@ -293,11 +340,16 @@ void TestModelServers::downAndDownAllAskFirstAndNameTheSharedServer()
     modelRow(&page, "lab-gpu", "coder-a")->findChild<QPushButton *>("modelServerDown")->click();
     QTRY_COMPARE(calls("down").size(), 1);
     QCOMPARE(calls("down").first()["args"].toArray(), (QJsonArray{"model-server", "down", "lab-gpu", "coder-a", "--yes"}));
-    // Down all lists the running and loading models and downs each once.
-    QStringList listed; QString confirmText;
+    // Down all lists the running and loading models, which of your sessions
+    // use each (#703, #659 QA), and downs each once.
+    QVERIFY(FakeCli::replace(script() + ".sessions", R"({"server":"lab-gpu","sessions":[{"name":"codex/orbit-support/coder-a","model":"coder-a"},{"name":"codex/orbit/review","model":"coder-a"}]})"));
+    QStringList listed; QString confirmText; QHash<QString, QString> uses;
     answerDialog("modelServerDownDialog", [&](QDialog *dialog) {
         for (auto *label : dialog->findChildren<QLabel *>("modelServerDownModel")) listed << label->text();
         confirmText = dialog->findChild<QPushButton *>("modelServerDownConfirm")->text();
+        QTRY_VERIFY(!dialog->findChildren<QLabel *>("modelServerDownUse").isEmpty()
+                    && !dialog->findChildren<QLabel *>("modelServerDownUse").first()->text().startsWith("reading"));
+        for (auto *label : dialog->findChildren<QLabel *>("modelServerDownUse")) uses.insert(label->property("model").toString(), label->text());
         shot(dialog, "u60-down-all-dark");
         dialog->findChild<QPushButton *>("modelServerDownConfirm")->click();
     });
@@ -306,10 +358,29 @@ void TestModelServers::downAndDownAllAskFirstAndNameTheSharedServer()
     QTRY_COMPARE(calls("down").size(), 4);
     QCOMPARE(listed, (QStringList{"coder-a", "chat-general", "embed-text"}));
     QCOMPARE(confirmText, QStringLiteral("Down 3 models"));
+    QCOMPARE(uses.value("coder-a"), QStringLiteral("2 of your sessions use it: codex/orbit-support/coder-a, codex/orbit/review"));
+    QCOMPARE(uses.value("chat-general"), QStringLiteral("none of your sessions"));
+    QCOMPARE(uses.value("embed-text"), QStringLiteral("stops loading"));
+    QVERIFY(!calls("sessions").isEmpty());
+    QCOMPARE(calls("sessions").last()["args"].toArray(), (QJsonArray{"model-server", "sessions", "lab-gpu", "--json"}));
     QStringList downed;
     for (const auto &call : calls("down").mid(1)) { QVERIFY(call["args"].toArray().contains("--yes")); downed << call["args"].toArray()[3].toString(); }
     QCOMPARE(downed, (QStringList{"coder-a", "chat-general", "embed-text"}));
     QTRY_VERIFY(page.findChild<QLabel *>("modelServersNotice")->text().contains("Down ran once for 3 models on lab-gpu"));
+    // The light theme's Down all, opened in that theme and cancelled.
+    lightPalette(true); page.setDark(false);
+    bool lightShown = false;
+    answerDialog("modelServerDownDialog", [&](QDialog *dialog) {
+        QTRY_VERIFY(!dialog->findChildren<QLabel *>("modelServerDownUse").first()->text().startsWith("reading"));
+        shot(dialog, "u60-down-all-light"); lightShown = true;
+        dialog->findChild<QPushButton *>("modelServerDownCancel")->click();
+    });
+    QTRY_VERIFY(card(&page, "lab-gpu") && card(&page, "lab-gpu")->findChild<QPushButton *>("modelServerDownAll"));
+    card(&page, "lab-gpu")->findChild<QPushButton *>("modelServerDownAll")->click();
+    QTRY_VERIFY(lightShown);
+    QTest::qWait(100);
+    QCOMPARE(calls("down").size(), 4);
+    lightPalette(false); page.setDark(true);
     // A read-only server has no Up, Down or Logs.
     auto *gateway = card(&page, "shared-gateway");
     for (const char *name : {"modelServerUp", "modelServerDown", "modelServerDownAll", "modelServerLogs", "modelServerModelLogs"})
@@ -338,14 +409,23 @@ void TestModelServers::apiAddressCopiesAndNewSessionStartsTheChosenAgent()
     card(&page, "lab-gpu")->findChild<QPushButton *>("modelServerCopy")->click();
     QCOMPARE(QGuiApplication::clipboard()->text(), QStringLiteral("https://gpu-a.lan.example:8000/v1"));
     QTRY_COMPARE(card(&page, "lab-gpu")->findChild<QPushButton *>("modelServerCopy")->text(), QStringLiteral("Copied"));
-    // OpenAI: Codex and OpenCode; Claude Code says why not.
-    QString claudeWhy; bool claudeEnabled = true; QString summary;
+    // OpenAI: Codex; Claude Code says why not; OpenCode is not offered (#702 N1).
+    QString claudeWhy; bool claudeEnabled = true; QString summary; QStringList agents, items; QString name; bool stoppedEnabled = true;
     answerDialog("modelServerSessionDialog", [&](QDialog *dialog) {
-        for (auto *radio : dialog->findChildren<QRadioButton *>("modelServerAgentChoice")) if (radio->property("agent") == "claude") claudeEnabled = radio->isEnabled();
+        for (auto *radio : dialog->findChildren<QRadioButton *>("modelServerAgentChoice")) {
+            agents << radio->property("agent").toString();
+            if (radio->property("agent") == "claude") claudeEnabled = radio->isEnabled();
+        }
         for (auto *frame : dialog->findChildren<QFrame *>("modelServerAgent"))
             if (frame->property("agent") == "claude") claudeWhy = frame->findChild<QLabel *>("modelServerAgentHow")->text();
-        QCOMPARE(dialog->findChild<QComboBox *>("modelServerSessionModel")->currentText(), QStringLiteral("coder-a"));
-        QCOMPARE(dialog->findChild<QLineEdit *>("modelServerSessionTag")->text(), QStringLiteral("coder-a"));
+        // #703 (#659 QA): every model with its state; a stopped one cannot be chosen.
+        auto *models = dialog->findChild<QComboBox *>("modelServerSessionModel");
+        for (int i = 0; i < models->count(); ++i) items << models->itemText(i);
+        const int stopped = models->findData("review-long");
+        stoppedEnabled = qobject_cast<QStandardItemModel *>(models->model())->item(stopped)->isEnabled();
+        QCOMPARE(models->currentData().toString(), QStringLiteral("coder-a"));
+        // The name as the mock-up shows it: agent/project/tag.
+        name = dialog->findChild<QLabel *>("modelServerSessionPrefix")->text() + dialog->findChild<QLineEdit *>("modelServerSessionTag")->text();
         summary = dialog->findChild<QLabel *>("modelServerSessionSummary")->text();
         shot(dialog, "u60-session-dark");
         dialog->findChild<QPushButton *>("modelServerStart")->click();
@@ -353,6 +433,21 @@ void TestModelServers::apiAddressCopiesAndNewSessionStartsTheChosenAgent()
     modelRow(&page, "lab-gpu", "coder-a")->findChild<QPushButton *>("modelServerNewSession")->click();
     QTRY_VERIFY(!started.isEmpty());
     QVERIFY(!claudeEnabled);
+    QCOMPARE(agents, (QStringList{"codex", "claude"}));
+    QCOMPARE(items, (QStringList{"coder-a   Running", "chat-general   Running", "embed-text   Loading", "review-long   Stopped"}));
+    QVERIFY(!stoppedEnabled);
+    QCOMPARE(name, QStringLiteral("codex/orbit-support/coder-a"));
+    // The light theme's dialog, opened in that theme and cancelled.
+    lightPalette(true); page.setDark(false);
+    bool lightShown = false;
+    answerDialog("modelServerSessionDialog", [&](QDialog *dialog) {
+        shot(dialog, "u60-session-light"); lightShown = true;
+        dialog->findChild<QPushButton *>("modelServerSessionCancel")->click();
+    });
+    QTRY_VERIFY(modelRow(&page, "lab-gpu", "coder-a"));
+    modelRow(&page, "lab-gpu", "coder-a")->findChild<QPushButton *>("modelServerNewSession")->click();
+    QTRY_VERIFY(lightShown);
+    lightPalette(false); page.setDark(true);
     QVERIFY2(claudeWhy.contains("needs an Anthropic-compatible API; lab-gpu serves OpenAI"), qPrintable(claudeWhy));
     QVERIFY2(summary.contains("provider  lab-gpu  https://gpu-a.lan.example:8000/v1") && summary.contains("key       from the private store"), qPrintable(summary));
     QCOMPARE(started, (QStringList{"codex", "/work/orbit-support", "coder-a", "lab-gpu", "coder-a"}));
@@ -403,17 +498,40 @@ void TestModelServers::settingsAddEditTestAndRemoveWithoutShowingTheKey()
     QVERIFY(settings.findChild<QPushButton *>("modelServerTestStatus"));
     QVERIFY(settings.findChild<QPushButton *>("modelServerTestLogs"));
     QCOMPARE(settings.findChildren<QPushButton *>("modelServerTestStatus").size() + settings.findChildren<QPushButton *>("modelServerTestLogs").size(), 2);
+    // #703 (#658 N2): the field asks for the server root and explains what is
+    // derived from it; an existing entry with /v1 still reads the same server.
+    auto *url = settings.findChild<QLineEdit *>("modelServerUrl");
+    QCOMPARE(url->placeholderText(), QStringLiteral("http://host.example:8000"));
+    QLabel *hint = nullptr;
+    for (auto *label : settings.findChildren<QLabel *>()) if (label->property("urlHint").toBool()) hint = label;
+    QVERIFY(hint);
+    QCOMPARE(hint->text(), QStringLiteral("Model list: https://gpu-a.lan.example:8000/v1/models\nCodex: https://gpu-a.lan.example:8000/v1\n"
+                                          "Claude Code: https://gpu-a.lan.example:8000\n"
+                                          "Saved as its root https://gpu-a.lan.example:8000: the /v1 you typed is added where it is needed."));
+    QVERIFY(texts(&settings).contains("Server root"));
     shot(&settings, "u60-settings-dark");
+    lightPalette(true); settings.setDark(false); shot(&settings, "u60-settings-light"); lightPalette(false); settings.setDark(true);
     // Test API: the form's server without its commands, the stored key by `was`.
     settings.findChild<QPushButton *>("modelServerTestApi")->click();
     QTRY_COMPARE(calls("test").size(), 1);
     auto input = QJsonDocument::fromJson(calls("test").first()["input"].toString().toUtf8()).object();
     QCOMPARE(input["was"].toString(), QStringLiteral("lab-gpu")); QVERIFY(!input.contains("key")); QVERIFY(!input.contains("status"));
-    QTRY_COMPARE(settings.findChild<QLabel *>("modelServerApiResult")->text(), QStringLiteral("GET /v1/models answered: 1 model"));
+    QTRY_COMPARE(settings.findChild<QLabel *>("modelServerApiResult")->text(), QStringLiteral("GET https://gpu-a.lan.example:8000/v1/models answered: 1 model"));
+    QCOMPARE(input["base_url"].toString(), QStringLiteral("https://gpu-a.lan.example:8000/v1"));   // hgs takes either spelling
+    // A root spelling reads the same URL; a refusal names the URL it read.
+    url->setText(QStringLiteral("https://gpu-a.lan.example:8000/"));
+    QCOMPARE(hint->text(), QStringLiteral("Model list: https://gpu-a.lan.example:8000/v1/models\nCodex: https://gpu-a.lan.example:8000/v1\nClaude Code: https://gpu-a.lan.example:8000"));
+    QVERIFY(FakeCli::replace(script() + ".test", R"({"status":"error","error":"refused","detail":"The server answered HTTP 404"})"));
+    settings.findChild<QPushButton *>("modelServerTestApi")->click();
+    QTRY_COMPARE(settings.findChild<QLabel *>("modelServerApiResult")->text(), QStringLiteral("GET https://gpu-a.lan.example:8000/v1/models: The server answered HTTP 404"));
+    QFile::remove(script() + ".test");
+    url->clear();
+    QVERIFY(hint->text().startsWith("The address the server answers at, without /v1"));
+    url->setText(QStringLiteral("https://gpu-a.lan.example:8000/v1"));
     // Test status: raw output is shown as raw text, with the warning.
     QVERIFY(FakeCli::replace(script() + ".test", R"({"server":"lab-gpu","source":"command","models":[],"memory":null,"raw":["PID UPTIME ARGS","4121 02:13 serve chat-local"]})"));
     settings.findChild<QPushButton *>("modelServerTestStatus")->click();
-    QTRY_COMPARE(calls("test").size(), 2);
+    QTRY_COMPARE(calls("test").size(), 3);
     input = QJsonDocument::fromJson(calls("test").last()["input"].toString().toUtf8()).object();
     QCOMPARE(input["status"].toArray(), (QJsonArray{"model-ctl", "status", "--json"}));
     QTRY_VERIFY(settings.findChild<QLabel *>("modelServerStatusResult")->text().startsWith("Neither the JSON contract"));
@@ -500,6 +618,10 @@ void TestModelServers::emptyReadOnlyAndUnreachableStates()
     page.resize(1200, 760); page.show();
     QTRY_VERIFY(page.findChild<QWidget *>("modelServersEmpty"));
     QVERIFY(texts(&page).contains("No model servers on this computer"));
+    // #703 (#659 QA): with no server the page offers only Add server.
+    QVERIFY(page.findChild<QPushButton *>("modelServersAdd")->isVisible());
+    QVERIFY(!page.findChild<QPushButton *>("modelServersRefreshAll")->isVisible());
+    QVERIFY(!page.findChild<QPushButton *>("modelServersEdit")->isVisible());
     page.findChild<QPushButton *>("modelServersAdd")->click();
     QCOMPARE(edited, QString());
     shot(&page, "u60-empty-dark");
@@ -535,6 +657,15 @@ void TestModelServers::emptyReadOnlyAndUnreachableStates()
     QTRY_VERIFY(card(&page, "spare-box") && card(&page, "spare-box")->findChild<QPushButton *>("modelServerEdit"));
     card(&page, "spare-box")->findChild<QPushButton *>("modelServerEdit")->click();
     QCOMPARE(edited, QStringLiteral("spare-box"));
+    QVERIFY(page.findChild<QPushButton *>("modelServersRefreshAll")->isVisible() && page.findChild<QPushButton *>("modelServersEdit")->isVisible());
+    // #703 (#658 N2): a read-only server's failure names the URL it read, from the root.
+    auto statuses = fourStatuses();
+    statuses["shared-gateway"] = QJsonObject{{"status", "error"}, {"error", "refused"}, {"detail", "The server answered HTTP 404"}};
+    setStatus(statuses);
+    card(&page, "shared-gateway")->findChild<QPushButton *>("modelServerRefresh")->click();
+    QTRY_VERIFY(card(&page, "shared-gateway") && card(&page, "shared-gateway")->findChild<QLabel *>("modelServerProblemText"));
+    const auto read = card(&page, "shared-gateway")->findChild<QLabel *>("modelServerProblemText")->text();
+    QVERIFY2(read.startsWith("GET https://llm.lan.example/v1/models: The server answered HTTP 404"), qPrintable(read));
 }
 
 QTEST_MAIN(TestModelServers)

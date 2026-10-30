@@ -15,6 +15,7 @@
 #include "TeamWidgets.h"
 #include "TeamPhaseScroll.h"
 #include "TeamStages.h"
+#include "TeamHeat.h"
 #include "CollapsibleBlock.h"
 #include "WorkspaceStyle.h"
 #include <QApplication>
@@ -367,6 +368,7 @@ void TeamWorkspace::render()
         auto *left = new QWidget; left->setObjectName("teamWorkspaceLeft");
         auto *lv = new QVBoxLayout(left); lv->setContentsMargins(0, 0, 0, 0); lv->setSpacing(0);
         lv->addWidget(toolbar(*team));
+        if (auto *legend = heatLegendRow(*team)) lv->addWidget(legend);
         // U59: the lead's proposed plan mode and the owner's choice.
         if (team->status == "planning" && team->planModeKnown) {
             auto *modes = new QWidget; modes->setObjectName("teamPlanModeRow");
@@ -1284,11 +1286,23 @@ private:
                 if (b->property("compactFirst").toBool() && !b->property("compactText").toString().isEmpty())
                     m_first += std::max(0, b->sizeHint().width() - (b->iconSize().width() + 16));
         }
+        // U38: a widget marked "toolbarLevels" shows at level 0 ("0") or at any narrower
+        // level ("1"); the Heat switch gives way to its one-button menu at the first.
+        if (m_level == 0) {
+            const int spacing = layout() ? layout()->spacing() : 0;
+            for (auto *w : findChildren<QWidget *>()) {
+                const QString levels = w->property("toolbarLevels").toString();
+                if (levels.contains(QLatin1Char('0')) && !levels.contains(QLatin1Char('1'))) m_labels += w->sizeHint().width() + spacing;
+                if (!levels.isEmpty() && !levels.contains(QLatin1Char('0')) && levels.contains(QLatin1Char('1'))) m_labels -= w->sizeHint().width() + spacing;
+            }
+        }
         const int level = width() >= m_full ? 0 : width() >= m_full - m_labels ? 1 : width() >= m_full - m_labels - m_first ? 2 : 3;
         if (level == m_level) { if (level == 3) fitCompactSpacing(); return; }
         m_level = level;
         const bool compact = level == 3;
         for (auto *l : findChildren<QLabel *>()) if (l->property("compactHide").toBool()) l->setVisible(level == 0);
+        for (auto *w : findChildren<QWidget *>())
+            if (const QString levels = w->property("toolbarLevels").toString(); !levels.isEmpty()) w->setVisible(levels.contains(QLatin1Char(level == 0 ? '0' : '1')));
         // The icon-only row leaves out a view preference (Hide finished, which
         // stays set) and the zoom group.
         for (auto *w : findChildren<QWidget *>()) if (w->property("compactDrop").toBool()) w->setVisible(level < 3);
@@ -1354,6 +1368,8 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
         }
         h->addWidget(filter);
     }
+    // U38: Graph and Board's heat tint.
+    if (auto *heat = heatSwitch(team)) h->addWidget(heat);
     // U58: only a team with cancelled work offers to show it.
     if (const int cancelled = cancelledTasks(team)) {
         auto *show = button(m_teams->showCancelled() ? tr("Hide cancelled (%1)").arg(cancelled) : tr("Show cancelled (%1)").arg(cancelled), "teamWorkspaceShowCancelled");
@@ -1594,6 +1610,7 @@ void TeamWorkspace::graphNodes(TaskView *view, const Team &team, const QList<int
     const auto problemText = problemTexts(team);
     const bool grouped = !phase.isEmpty();
     const double now = workedClock()();
+    const Heat *heatOn = heat(team);
     for (int id : order) {
         const auto *task = team.task(id);
         if (!task) continue;
@@ -1643,6 +1660,8 @@ void TeamWorkspace::graphNodes(TaskView *view, const Team &team, const QList<int
         if (node.late) tip += QLatin1Char('\n') + addedLateTip(*task);
         if (const QString worked = workedTip(*task, now); !worked.isEmpty()) tip += QLatin1Char('\n') + worked;
         node.tooltip = tip;
+        // U38: the heat tint, its loss and top loss.
+        if (heatOn) applyHeat(node, *heatOn, *task, c);
         if (!grouped) {
             QStringList deps;
             for (const auto &d : task->deps) deps << QStringLiteral("#%1").arg(d.task);
@@ -1716,6 +1735,7 @@ QWidget *TeamWorkspace::board(const Team &team)
     for (const auto &task : team.tasks) if (taskStatus(task).problem) problemTasks.insert(task.id);
     const auto groups = phaseGroups(team);
     const double now = workedClock()();
+    const Heat *heatOn = heat(team);
     // One status column over `ids`; `phase` only keeps each phase's scroll.
     const auto makeColumn = [&](const QString &key, const QString &name, const QList<int> &ids, int phase) -> QWidget * {
         auto *col = new QWidget; auto *cv = new QVBoxLayout(col); cv->setContentsMargins(0, 0, 0, 0); cv->setSpacing(6);
@@ -1754,9 +1774,17 @@ QWidget *TeamWorkspace::board(const Team &team)
                     auto *a = label(activity, c.text3, 11); a->setObjectName("teamBoardActivity"); r->addWidget(a);
                 }
             }
+            // U38: the heat tint and its loss in the working time's place.
+            if (auto *lost = heatOn ? heatBoardLabel(*heatOn, task, c) : nullptr) {
+                const QColor edge = problemTasks.contains(task.id) ? c.danger : c.border;
+                cardBox->setStyleSheet(QStringLiteral("QFrame#teamBoardCard{background:%1;border:1px solid %2;border-radius:9px;}")
+                                           .arg(heatCardFill(heatOn, task, c).name(), edge.name()));
+                cardBox->setToolTip(lost->toolTip());
+                r->addWidget(lost);
+            }
             // U37: the working time right after it, in the same color and size;
             // a running one keeps the room it grows to and ticks with the board.
-            if (const QString worked = workedLabel(task, now); !worked.isEmpty()) {
+            else if (const QString worked = workedLabel(task, now); !worked.isEmpty()) {
                 auto *w = label(worked, c.text3, 11, false, "teamBoardWorked");
                 w->setProperty("runningSince", task.timing.runningSince);
                 if (task.timing.runningSince > 0) w->setMinimumWidth(workedRoom(w->fontMetrics(), task.timing.runningSince));
@@ -2549,6 +2577,7 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
     const Colors c = colorsFor(m_dark);
     const auto problemsByTask = problemTasks(team);
     const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
+    const Heat *heatOn = heat(team);
     auto *box = new QWidget; box->setObjectName("teamBoardColumns"); box->setProperty("phase", phase);
     auto *h = new QHBoxLayout(box); h->setContentsMargins(0, 0, 0, 0); h->setSpacing(6);
     // U36: In review and In test sit between Submitted and Accepted once the
@@ -2601,12 +2630,15 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
             QObject::connect(cardBox, &QWidget::customContextMenuRequested, this, [this, id = team.id, card = cardBox, taskId = task->id](const QPoint &at) {
                 if (const auto *fresh = currentTeam(id)) laneMenu(*fresh, taskId, card->mapToGlobal(at));
             });
+            // U38: the heat tint fills the card; its edge and state icon stay.
             cardBox->setStyleSheet(QStringLiteral("QFrame#teamBoardCard{background:%1;border:1px %4 %2;border-radius:8px;} QFrame#teamBoardCard:hover{border-color:%3;}")
-                                       .arg(c.surface.name(), edge.name(), c.accent.name(), task->status == "draft" ? QStringLiteral("dashed") : QStringLiteral("solid")));
+                                       .arg(heatCardFill(heatOn, *task, c).name(), edge.name(), c.accent.name(), task->status == "draft" ? QStringLiteral("dashed") : QStringLiteral("solid")));
             cardBox->clicked = [this, id = task->id] { m_drawerTask = id; scheduleRender(); };
             const auto s = taskStatus(*task);
             const auto mark = phaseMark(team, *task);
-            cardBox->setToolTip(QStringLiteral("#%1 %2 — %3").arg(task->id).arg(task->title, mark.tooltip.isEmpty() ? s.text : mark.tooltip));
+            QString cardTip = QStringLiteral("#%1 %2 — %3").arg(task->id).arg(task->title, mark.tooltip.isEmpty() ? s.text : mark.tooltip);
+            if (const QString tip = heatOn ? heatTip(*heatOn, *task) : QString(); !tip.isEmpty()) cardTip += QLatin1Char('\n') + tip;
+            cardBox->setToolTip(cardTip);
             auto *b = new QVBoxLayout(cardBox); b->setContentsMargins(8, 6, 8, 6); b->setSpacing(4);
             auto *r1 = row(6);
             auto *state = new StatusMark(QString(), toneColor(c, problem ? problemsByTask.value(task->id) : mark.tone != Tone::Neutral ? mark.tone : s.tone),
@@ -2624,6 +2656,10 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
             const QString role = team.assigneeRole(*task, tr("You"));
             auto *pill = new Pill(role, roleColor(role, m_dark)); pill->setObjectName("teamBoardRole"); r2->addWidget(pill);
             if (const auto *m = team.member(task->assignee)) { auto *i = new QLabel; i->setPixmap(agentLogo(m->agent, c.text3).pixmap(14, 14)); r2->addWidget(i); }
+            // U38: with the heat on, the loss takes the working time's place,
+            // at the line's end; the activity label elides before it does.
+            QLabel *lost = heatOn ? heatBoardLabel(*heatOn, *task, c) : nullptr;
+            if (lost) lost->setMinimumWidth(lost->sizeHint().width());
             // The same small activity label as the graph and the plain board
             // (a problem text wins).
             if (!problem) {
@@ -2631,15 +2667,18 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
                 const QString note = stages ? stages->property("note").toString() : QString();
                 const QString activity = note.isEmpty() ? activityLabel(*task, member ? live(*member) : Live{}) : note;
                 if (!activity.isEmpty()) {
-                    auto *a = label(activity, note.isEmpty() ? c.text3 : c.warn, 11); a->setObjectName("teamBoardActivity"); r2->addWidget(a);
+                    const QColor tone = note.isEmpty() ? c.text3 : c.warn;
+                    auto *a = lost ? elided(activity, tone, 11) : label(activity, tone, 11); a->setObjectName("teamBoardActivity");
+                    if (lost) r2->addWidget(a, 1); else r2->addWidget(a);
                 }
             }
-            addWorked(r2, *task, workedClock()(), c.text3, "teamBoardWorked");
+            if (!lost) addWorked(r2, *task, workedClock()(), c.text3, "teamBoardWorked");
             r2->addStretch(1);
             if (problem) {
                 auto *why = elided(problemText(team, task->id), toneColor(c, problemsByTask.value(task->id)), 11); why->setObjectName("teamBoardProblem");
                 r2->insertWidget(r2->count() - 1, why, 3);
             }
+            if (lost) r2->addWidget(lost);
             b->addLayout(r2);
             if (stages) b->addWidget(stages);
             cv->addWidget(cardBox);

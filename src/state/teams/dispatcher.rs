@@ -7362,7 +7362,14 @@ mod tests {
             let real = dir.path().display().to_string();
             let mut shared = json!({
                 "members": view["members"].as_array().unwrap().iter()
-                    .map(|member| json!({"id":member["id"],"role":member["role"],"stage_queue":member["stage_queue"]}))
+                    .map(|member| {
+                        let mut kept = json!({"id":member["id"],"role":member["role"],"stage_queue":member["stage_queue"]});
+                        // #635 N4: the stage that holds the member's folder.
+                        if let Some(held) = member.get("held_by") {
+                            kept["held_by"] = held.clone();
+                        }
+                        kept
+                    })
                     .collect::<Vec<_>>(),
                 "tasks": view["tasks"].as_array().unwrap().iter().filter(|task| task["id"] == 1)
                     .map(|task| json!({"id":task["id"],"title":task["title"],"status":task["status"],"assignee":task["assignee"],

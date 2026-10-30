@@ -11,7 +11,9 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Component, Path, PathBuf};
+#[cfg(not(feature = "live"))]
+use std::path::Component;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Mutex, PoisonError};
@@ -78,6 +80,12 @@ pub fn temp_dir() -> PathBuf {
     temp_dir_from(std::env::var_os("TMPDIR"))
 }
 
+#[cfg(feature = "live")]
+fn temp_dir_from(tmpdir: Option<OsString>) -> PathBuf {
+    zerus_client_core::desktop::temporary_dir_from(tmpdir)
+}
+
+#[cfg(not(feature = "live"))]
 fn temp_dir_from(tmpdir: Option<OsString>) -> PathBuf {
     let temp = tmpdir
         .filter(|value| !value.is_empty())
@@ -89,6 +97,7 @@ fn temp_dir_from(tmpdir: Option<OsString>) -> PathBuf {
 
 /// `QDir::cleanPath`: no repeated or trailing separators, `.` and `..`
 /// resolved by name only; symbolic links stay as they are.
+#[cfg(not(feature = "live"))]
 fn clean_path(path: &Path) -> PathBuf {
     let mut parts: Vec<Component> = Vec::new();
     for component in path.components() {
@@ -107,7 +116,7 @@ fn clean_path(path: &Path) -> PathBuf {
     parts.iter().collect()
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(not(feature = "live"), target_os = "macos"))]
 fn user_temp_dir() -> Option<PathBuf> {
     use std::os::unix::ffi::OsStrExt;
     let mut buffer = [0 as libc::c_char; 1024];
@@ -127,7 +136,7 @@ fn user_temp_dir() -> Option<PathBuf> {
     Some(PathBuf::from(std::ffi::OsStr::from_bytes(text.to_bytes())))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(feature = "live"), not(target_os = "macos")))]
 fn user_temp_dir() -> Option<PathBuf> {
     None
 }
@@ -698,28 +707,48 @@ impl InstanceState {
 
 /// Takes the single-instance socket named `name`, or hands `activation` to
 /// the instance that holds it.
-pub fn claim(name: &str, label: Option<&str>, activation: Activation) -> Claim {
+pub type Reply = std::sync::Arc<dyn Fn(&UnixStream, &[u8]) -> Option<Vec<u8>> + Send + Sync>;
+
+pub fn claim(
+    name: &str,
+    label: Option<&str>,
+    activation: Activation,
+    reply: Option<Reply>,
+) -> Claim {
     let xdg_runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
     let runtime = runtime_dir(
         Platform::current(),
         &crate::identity::home_dir(),
         xdg_runtime.as_deref(),
     );
-    claim_at(
+    claim_with_reply(
         &paths(name, &temp_dir(), &runtime),
         label,
         activation,
         &LockInfo::own(),
         &Timing::default(),
+        reply,
     )
 }
 
+#[cfg(test)]
 pub fn claim_at(
     paths: &Paths,
     label: Option<&str>,
     activation: Activation,
     own: &LockInfo,
     timing: &Timing,
+) -> Claim {
+    claim_with_reply(paths, label, activation, own, timing, None)
+}
+
+fn claim_with_reply(
+    paths: &Paths,
+    label: Option<&str>,
+    activation: Activation,
+    own: &LockInfo,
+    timing: &Timing,
+    reply: Option<Reply>,
 ) -> Claim {
     let mut effects = UnixStart {
         paths,
@@ -740,9 +769,13 @@ pub fn claim_at(
                 .map(|metadata| metadata.ino())
                 .unwrap_or(0);
             let (sender, activations) = mpsc::channel();
-            listen(listener, move |activation| {
-                let _ = sender.send(activation);
-            });
+            listen(
+                listener,
+                move |activation| {
+                    let _ = sender.send(activation);
+                },
+                reply,
+            );
             Claim::Claimed(Claimed {
                 listening: Listening {
                     socket: paths.socket.clone(),
@@ -760,12 +793,19 @@ const LINE_WAIT: Duration = Duration::from_secs(1);
 /// Reads the first line of each connection (`main.cpp:424-433`). Qt acts only
 /// on a complete line (`canReadLine`); a connection gets at most 1 s in all
 /// and 64 bytes, so a silent or slow client cannot hold the next start back.
-fn listen(listener: UnixListener, deliver: impl Fn(Activation) + Send + 'static) {
+fn listen(
+    listener: UnixListener,
+    deliver: impl Fn(Activation) + Send + 'static,
+    reply: Option<Reply>,
+) {
     std::thread::Builder::new()
         .name("zerus-client-instance".into())
         .spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
+                // BSD may inherit the listener file flags. Keep accepted I/O
+                // bounded by the explicit deadlines, as on Linux.
+                let _ = stream.set_nonblocking(false);
                 let deadline = Instant::now() + LINE_WAIT;
                 let mut line = Vec::new();
                 let mut byte = [0u8; 1];
@@ -791,6 +831,16 @@ fn listen(listener: UnixListener, deliver: impl Fn(Activation) + Send + 'static)
                 };
                 if let Some(activation) = complete.then(|| Activation::parse(&line)).flatten() {
                     deliver(activation);
+                } else if complete {
+                    if let Some(bytes) = reply.as_ref().and_then(|reply| reply(&stream, &line)) {
+                        let left = deadline.saturating_duration_since(Instant::now());
+                        if !left.is_zero()
+                            && bytes.len() <= 4096
+                            && stream.set_write_timeout(Some(left)).is_ok()
+                        {
+                            let _ = stream.write_all(&bytes);
+                        }
+                    }
                 }
             }
         })
@@ -1233,6 +1283,67 @@ mod tests {
             start(&mut script, Activation::Show, 100, &fast()),
             Outcome::Failed("address in use".into())
         );
+    }
+
+    #[cfg(feature = "live")]
+    #[test]
+    fn delegation_challenge_leaves_show_and_sessions_on_the_original_socket() {
+        use zerus_client_core::desktop::{self, Build, Observation, Responder};
+        let dir = scratch("delegation");
+        let paths = paths("zerus-test", &dir, &dir);
+        let responder = Responder::new(
+            "com.hgdev.hgs-tray".into(),
+            Build {
+                version: "1.2.3".into(),
+                source_commit: "b".repeat(40),
+                source_dirty: Some(false),
+            },
+            "22222222-2222-4222-8222-222222222222".into(),
+            true,
+            false,
+        );
+        assert!(responder.configure_once("a".repeat(64)));
+        let reply: Reply = std::sync::Arc::new(move |stream, line| {
+            desktop::same_user(stream)
+                .then(|| responder.reply(line))
+                .flatten()
+        });
+        let Claim::Claimed(first) = claim_with_reply(
+            &paths,
+            None,
+            Activation::Show,
+            &LockInfo::own(),
+            &fast(),
+            Some(reply),
+        ) else {
+            panic!("first claims")
+        };
+        assert!(matches!(
+            desktop::probe_at(
+                &paths.socket,
+                "11111111-1111-4111-8111-111111111111",
+                &"a".repeat(64)
+            ),
+            Observation::LiveNext { .. }
+        ));
+        assert!(
+            first.activations.try_recv().is_err(),
+            "a query never activates the window"
+        );
+        for activation in [Activation::Show, Activation::Sessions] {
+            assert!(matches!(
+                claim_at(&paths, None, activation, &LockInfo::own(), &fast()),
+                Claim::Forwarded
+            ));
+            assert_eq!(
+                first
+                    .activations
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap(),
+                activation
+            );
+        }
+        assert!(paths.socket.exists());
     }
 
     #[test]

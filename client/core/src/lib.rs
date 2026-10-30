@@ -18,6 +18,7 @@ pub mod cache;
 mod conpty;
 pub mod content_search;
 pub mod creation;
+pub mod desktop;
 pub mod details;
 pub mod download_cache;
 pub mod drafts;

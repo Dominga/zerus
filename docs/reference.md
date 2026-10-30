@@ -1240,6 +1240,72 @@ Git checkout, otherwise the changed files its report names. A `hold` preset
 implementer's next task in that folder waits; a `checkout` preset tests a
 detached checkout of the attempt's commits instead and frees it.
 
+### Free planning: the plan mode and the open phase
+
+A team plans in `standard` mode (the default) or `free` mode. `hgs team status`
+and the polled team list carry `plan_mode`; a team stored before this field has
+none and reads standard. At the start of planning the lead proposes one of the
+two with a one-line reason in `plan` (or in `extend` while the team is
+Planning):
+
+```json
+{"request_id":"<uuid>","team":"<id>","plan_mode":"free",
+ "plan_mode_reason":"a stream of small support requests","members":[...],"tasks":[...]}
+```
+
+The team keeps it as `plan_mode_offer` and `plan_mode_reason` (status carries
+both) until the owner chooses at approval: `{"plan_mode":"free"}` in `approve`,
+accepted only from you; a lead's approval on the owner's word, or a client that
+sends no mode, keeps standard. The approval clears the offer.
+
+A free team's open phase never closes by itself. `extend` adds tasks to it with
+no new phase and no approval, and each task runs as it is added; an empty queue
+is `idle`, not done. Status carries the phase's state:
+
+```json
+{"plan_mode":"free",
+ "free_phase":{"phase":2,"state":"open","running":[7,8],"accepted":5,
+  "accepted_since":2,"last_build_at":1793300000.0,"close_pending":null}}
+```
+
+`state` is `idle` when no task of the phase is unfinished; `accepted_since`
+counts tasks accepted since the last build, `last_build_at` is the last accepted
+build (0 for none) and `close_pending` is the phase whose close waits for a
+build. Switching mid-plan is the owner's decision, bound to the request:
+
+```sh
+{"request_id":"<uuid>","team":"<id>","kind":"switch-plan-mode","mode":"free",
+ "reason":"the support queue never drains"} | hgs team propose --json
+{"team":"<id>","proposal":"p3","accept":true,"expected_hash":"<sha256>"} |
+  hgs team decide-proposal --json
+```
+
+The proposal answer carries `hash`, the SHA-256 of the kind, mode and reason. A
+missing or different `expected_hash` is refused ("reload the dialog and answer
+again"). Allow sets `plan_mode` and emits `plan_mode_switched`; Deny keeps
+standard, keeps the reason and emits `plan_mode_denied` for the lead.
+
+Integration and a build are ordinary lead tasks, not a phase barrier. The owner
+or the lead adds the build for the open phase (`hgs team integrate-build`) and
+it is handed out and accepted like any task; accepting it sets `last_build_at`
+and resets `accepted_since`. The owner closes the free phase:
+
+```sh
+{"request_id":"<uuid>","team":"<id>","reason":"...","integrate":true} |
+  hgs team close-phase --json
+```
+
+The close is refused while tasks of the phase are undecided, naming them. With
+`"integrate":true` and work accepted since the last build it adds the build task
+and answers `{"status":"close_pending","phase":2,"build":17}`; the phase closes
+when that build is accepted (`plan_mode` standard, `free_phase_closed`), and a
+rejected or cancelled build drops the close (`free_phase_build_failed`) while
+the phase stays open. With nothing accepted since the last build it closes at
+once (`{"status":"closed","phase":2,"plan_mode":"standard"}`) and the team
+continues in standard mode. The feed records `plan_mode_proposed`,
+`plan_mode_switched`, `plan_mode_denied`, `phase_build_added`,
+`free_phase_close_pending`, `free_phase_closed` and `free_phase_build_failed`.
+
 ### A model per task, a task for a role, and the context before one
 
 The owner's catalog gives a role the models its members may switch between,

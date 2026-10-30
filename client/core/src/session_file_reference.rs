@@ -229,8 +229,8 @@ mod tests {
         );
         let home = parse("~/notes.md", Style::Posix);
         assert_eq!(
-            resolve(&home, "/work/session", Some("/home/person"), Style::Posix),
-            "/home/person/notes.md"
+            resolve(&home, "/work/session", Some("/home/user"), Style::Posix),
+            "/home/user/notes.md"
         );
         assert_eq!(resolve(&home, "/work/session", None, Style::Posix), "");
         let relative = parse("../shared/notes.md", Style::Posix);

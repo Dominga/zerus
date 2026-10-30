@@ -3693,20 +3693,21 @@ computer, local and never committed: `model-servers.json` in the private config
 folder (`~/.config/hgs/` by default), written owner-only. A missing file means
 no server and no extra tab.
 
-Each server row has a `name`; the API `base_url` (`http://HOST[:PORT][/path]`,
-no credentials or query) and its `kind` (`openai` or `anthropic`); an optional
-`key` (stored only in this private file, never shown by a listing); an optional
-`ssh` host, either one of this computer's Machines or an SSH alias, always
-reached through hgs's own SSH transport (BatchMode, never a piped `ssh.exe` on
-Windows); and optional control commands as argv templates for `status`, `up`,
-`down` and `logs`. `{model}` is the only input a command receives and `{server}`
-its server name. Commands are argv lists, never shell lines: locally hgs starts
-the program itself and over SSH it quotes each argument for the peer's login
-shell. `up_minutes` bounds a detached `up` (30 by default, 1 to 240).
+Each server row has a `name`; the API `base_url`
+(`http://` or `https://HOST[:PORT][/path]`, no credentials or query) and its
+`kind` (`openai` or `anthropic`); an optional `key` (stored only in this private
+file, never shown by a listing); an optional `ssh` host, either one of this
+computer's Machines or an SSH alias, always reached through hgs's own SSH
+transport (BatchMode, never a piped `ssh.exe` on Windows); and optional control
+commands as argv templates for `status`, `up`, `down` and `logs`. `{model}` is
+the only input a command receives and `{server}` its server name. Commands are
+argv lists, never shell lines: locally hgs starts the program itself and over
+SSH it quotes each argument for the peer's login shell. `up_minutes` bounds a
+detached `up` (30 by default, 1 to 240).
 
 ```json
 {"version":1,"servers":[
-  {"name":"lab","base_url":"http://192.0.2.10:8000","kind":"openai","key":"<private>",
+  {"name":"lab","base_url":"https://192.0.2.10:8443","kind":"openai","key":"<private>",
    "ssh":"labhost","up_minutes":30,
    "status":["serve","status"],"up":["serve","up","{model}"],
    "down":["serve","down","{model}"],"logs":["serve","logs","{model}"]}
@@ -3715,7 +3716,15 @@ shell. `up_minutes` bounds a detached `up` (30 by default, 1 to 240).
 
 Without control commands the server is read only: `status` reads `GET /v1/models`
 (with `Authorization: Bearer` for an OpenAI kind, `x-api-key` for Anthropic) and
-lists the models it returns. A control command may print the Zerus JSON contract
+lists the models it returns. An `http://` server is read by hgs itself; an
+`https://` server is read through the system `curl` (`curl.exe` on Windows 10+,
+`curl` elsewhere), run with an argv list, `--fail-with-body` and `--max-time`,
+with the key in a private `--config` file in the config folder so it never
+appears on the command line. Curl's exit codes keep the errors distinct (6 and 7
+unreachable, 28 timed out, 22 an HTTP error with 401/403 unauthorized); when
+curl is missing, `status` says so as a refusal naming curl, and sessions still
+work because the agents speak TLS themselves. A control command may print the
+Zerus JSON contract
 `{"models":[{"name":"small","state":"running"}],"memory":{"free":12.5,"total":64}}`
 or plain lines `NAME: STATE`, with an optional `memory: FREE/TOTAL GB` line;
 any other line is kept as raw text. States are shown lowercased.

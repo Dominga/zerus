@@ -142,9 +142,10 @@ pub(crate) fn checked_model(value: &str) -> Result<String> {
     Ok(value.to_owned())
 }
 
-/// `http://HOST[:PORT][/path]`, no credentials and no query.
+/// `http://` or `https://` followed by `HOST[:PORT][/path]`, no credentials and
+/// no query.
 fn checked_base_url(value: &str) -> bool {
-    let Some(rest) = value.strip_prefix("http://") else { return false };
+    let Some(rest) = value.strip_prefix("http://").or_else(|| value.strip_prefix("https://")) else { return false };
     if rest.is_empty() || rest.contains(['?', '#', '@', ' ', '\t', '\n']) || value.len() > 2000 {
         return false;
     }
@@ -166,7 +167,7 @@ pub(crate) fn checked(server: Server) -> Result<Server> {
         return Err(Error::new(1, "A server name uses letters, digits and -_. only"));
     }
     if !checked_base_url(&server.base_url) {
-        return Err(Error::new(1, "The API URL must be http://HOST[:PORT][/path], without credentials or a query"));
+        return Err(Error::new(1, "The API URL must be http:// or https://HOST[:PORT][/path], without credentials or a query"));
     }
     if !matches!(server.kind.as_str(), "openai" | "anthropic") {
         return Err(Error::new(1, "A server kind is openai or anthropic"));
@@ -358,7 +359,7 @@ fn first_line(text: &str) -> Option<String> {
 /// lines with an optional memory line; other lines are kept raw.
 pub(crate) fn status(config: &Config, server: &Server) -> std::result::Result<Value, Failure> {
     let value = if server.status.is_empty() {
-        let models = api_models(server)?;
+        let models = api_models(config, server)?;
         json!({"server": server.name, "source": "api", "models": models, "memory": Value::Null, "raw": []})
     } else {
         let argv = filled(&server.status, "", &server.name);
@@ -429,10 +430,16 @@ fn parse_status(text: &str) -> Parsed {
     parsed
 }
 
-/// The API's model list, `GET /v1/models`, with the server's key.
-fn api_models(server: &Server) -> std::result::Result<Vec<Value>, Failure> {
+/// The API's model list, `GET /v1/models`, with the server's key. http uses the
+/// small client below; https runs the system curl, whose TLS is the system's,
+/// so hgs needs no TLS crate and the agents speak TLS themselves anyway.
+fn api_models(config: &Config, server: &Server) -> std::result::Result<Vec<Value>, Failure> {
     let url = format!("{}/v1/models", server.base_url.trim_end_matches('/'));
-    let (code, body) = http_get(&url, server, http_timeout())?;
+    let (code, body) = if url.starts_with("https://") {
+        curl_get(config, server, &url)?
+    } else {
+        http_get(&url, server, http_timeout())?
+    };
     if !(200..300).contains(&code) {
         return Err(http_failure(code, &body));
     }
@@ -444,6 +451,148 @@ fn api_models(server: &Server) -> std::result::Result<Vec<Value>, Failure> {
         models.push(json!({"name": name, "state": "available"}));
     }
     Ok(models)
+}
+
+/// What the system curl did. `Missing` (no curl on this computer) and
+/// `TimedOut` are not exit codes; they are reported as their own errors.
+pub(crate) enum CurlRun {
+    Ran(Run),
+    Missing,
+    TimedOut,
+    Failed(String),
+}
+
+const CURL_MISSING: &str = "curl was not found: install curl to read an https model server";
+
+/// The system curl: `curl.exe` on Windows 10+, `curl` elsewhere.
+fn curl_program() -> &'static str {
+    if cfg!(windows) { "curl.exe" } else { "curl" }
+}
+
+#[cfg(test)]
+pub(crate) type FakeCurl = Box<dyn Fn(&[String], Option<&str>) -> CurlRun>;
+
+#[cfg(test)]
+thread_local! {
+    static FAKE_CURL: std::cell::RefCell<Option<FakeCurl>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_fake_curl(fake: Option<FakeCurl>) {
+    FAKE_CURL.with(|slot| *slot.borrow_mut() = fake);
+}
+
+fn curl_run(argv: &[String], config: Option<&str>, timeout: Duration) -> CurlRun {
+    #[cfg(test)]
+    if let Some(fake) = FAKE_CURL.with(|slot| slot.borrow().as_ref().map(|fake| fake(argv, config))) {
+        return fake;
+    }
+    // The header text is only read by the test fake; curl reads it from its
+    // --config file.
+    let _ = config;
+    if platform::which(curl_program()).is_none() {
+        return CurlRun::Missing;
+    }
+    let mut command = Command::new(curl_program());
+    command.args(argv);
+    match platform::output_until(&mut command, timeout) {
+        Ok(out) => CurlRun::Ran(Run {
+            code: out.status.code(),
+            stdout: String::from_utf8_lossy(&out.stdout).chars().take(MAX_OUTPUT).collect(),
+            stderr: String::from_utf8_lossy(&out.stderr).chars().take(2000).collect(),
+        }),
+        Err(platform::RunError::Stopped) => CurlRun::TimedOut,
+        Err(platform::RunError::Spawn(error)) | Err(platform::RunError::Io(error)) => CurlRun::Failed(error.to_string()),
+        Err(_) => CurlRun::Failed("curl could not run".into()),
+    }
+}
+
+/// The key reaches curl in a private config file (`--config`), never on the
+/// command line: a process listing or a log keeps only the file path.
+fn curl_header(server: &Server) -> std::result::Result<Option<String>, Failure> {
+    if server.key.is_empty() {
+        return Ok(None);
+    }
+    let key = header_safe(&server.key)?.replace('\\', "\\\\").replace('"', "\\\"");
+    let lines = match server.kind.as_str() {
+        "anthropic" => vec![format!("header = \"x-api-key: {key}\""), "header = \"anthropic-version: 2023-06-01\"".to_owned()],
+        _ => vec![format!("header = \"Authorization: Bearer {key}\"")],
+    };
+    Ok(Some(lines.join("\n") + "\n"))
+}
+
+/// `--write-out` appends the status code after the body; split it off.
+fn split_status(stdout: &str) -> (String, Option<u16>) {
+    match stdout.rsplit_once('\n') {
+        Some((body, code)) if code.trim().len() == 3 && code.trim().bytes().all(|b| b.is_ascii_digit()) => {
+            (body.to_owned(), code.trim().parse().ok())
+        }
+        _ => (stdout.to_owned(), None),
+    }
+}
+
+fn curl_failure(code: Option<u16>, body: &str, stderr: &str) -> Failure {
+    match code {
+        Some(401 | 403) => Failure::Unauthorized(format!("The server refused the API key (HTTP {})", code.unwrap_or_default())),
+        Some(code) => http_failure(code, body),
+        None => Failure::Refused(first_line(stderr).or_else(|| first_line(body)).unwrap_or_else(|| "curl printed no HTTP status".into())),
+    }
+}
+
+/// The https model list through the system curl: `--fail-with-body` keeps the
+/// error body and `--write-out` the status code. Curl's exit codes map to the
+/// same failures as the http client: 6/7 unreachable, 28 timed out, 22 an HTTP
+/// error (401/403 unauthorized), anything else refused.
+fn curl_get(config: &Config, server: &Server, url: &str) -> std::result::Result<(u16, String), Failure> {
+    let timeout = http_timeout();
+    let mut argv = vec![
+        "-sS".to_owned(),
+        "--max-time".to_owned(),
+        timeout.as_secs().to_string(),
+        "--fail-with-body".to_owned(),
+        "--write-out".to_owned(),
+        "\n%{http_code}".to_owned(),
+    ];
+    let header = curl_header(server)?;
+    let mut header_file = None;
+    if let Some(header) = &header {
+        platform::private_dir(&config.dir).map_err(|error| Failure::Refused(error.to_string()))?;
+        let mut file = tempfile::Builder::new()
+            .prefix(".model-server-")
+            .suffix(".conf")
+            .tempfile_in(&config.dir)
+            .map_err(|error| Failure::Refused(format!("The private header file could not be created: {error}")))?;
+        file.write_all(header.as_bytes())
+            .map_err(|error| Failure::Refused(format!("The private header file could not be written: {error}")))?;
+        file.flush().ok();
+        argv.push("--config".into());
+        argv.push(file.path().display().to_string());
+        header_file = Some(file);
+    }
+    argv.push(url.to_owned());
+    let run = curl_run(&argv, header.as_deref(), timeout + Duration::from_secs(5));
+    drop(header_file);
+    match run {
+        CurlRun::Missing => Err(Failure::Refused(CURL_MISSING.into())),
+        CurlRun::TimedOut => Err(Failure::TimedOut(format!("The server did not answer in {} s", timeout.as_secs()))),
+        CurlRun::Failed(detail) => Err(Failure::Refused(format!("curl could not run: {detail}"))),
+        CurlRun::Ran(run) => {
+            let (body, status) = split_status(&run.stdout);
+            match run.code {
+                Some(0) => status
+                    .map(|code| (code, body))
+                    .ok_or_else(|| Failure::Refused("curl printed no HTTP status".into())),
+                Some(22) => Err(curl_failure(status, &body, &run.stderr)),
+                Some(6 | 7) => Err(Failure::Unreachable(first_line(&run.stderr).unwrap_or_else(|| "The server did not answer".into()))),
+                Some(28) => Err(Failure::TimedOut(format!("The server did not answer in {} s", timeout.as_secs()))),
+                _ => Err(Failure::Refused(
+                    first_line(&run.stderr)
+                        .or_else(|| first_line(&body))
+                        .unwrap_or_else(|| format!("curl failed ({})", run.code.map_or_else(|| "no exit code".into(), |code| code.to_string()))),
+                )),
+            }
+        }
+    }
 }
 
 /// The status read's time limit; tests shorten it.
@@ -465,12 +614,13 @@ pub(crate) fn set_http_timeout(timeout: Option<Duration>) {
     TEST_TIMEOUT.with(|slot| slot.set(timeout));
 }
 
-/// A minimal HTTP/1.1 GET with a deadline; http only (LAN servers), TLS is not
-/// attempted here. The status line decides: 401/403 is unauthorized, another
-/// failure is refused, a connect error unreachable and a read timeout timed_out.
+/// A minimal HTTP/1.1 GET with a deadline for an http server (an https server
+/// is read through the system curl, `curl_get`). The status line decides:
+/// 401/403 is unauthorized, another failure is refused, a connect error
+/// unreachable and a read timeout timed_out.
 fn http_get(url: &str, server: &Server, timeout: Duration) -> std::result::Result<(u16, String), Failure> {
     let Some(rest) = url.strip_prefix("http://") else {
-        return Err(Failure::Refused("The API URL must be http:// (https needs a TLS endpoint this build does not run)".into()));
+        return Err(Failure::Refused("The API URL must be http:// or https://".into()));
     };
     let (authority, path) = match rest.find('/') {
         Some(at) => (&rest[..at], &rest[at..]),
@@ -844,6 +994,13 @@ mod tests {
         assert!(!row.to_string().contains("sk-test"), "the key is never shown: {row}");
         #[cfg(windows)]
         assert!(platform::verify_private(&path(&config), platform::Private::File).unwrap());
+        // https is accepted and saved: many LAN gateways serve TLS only.
+        let mut https = server();
+        https.base_url = "https://192.0.2.10:8443/api".into();
+        assert_eq!(checked(https.clone()).unwrap(), https);
+        save(&config, &[https.clone()]).unwrap();
+        assert_eq!(load(&config).unwrap(), [https]);
+        save(&config, &[server()]).unwrap();
         // Invalid fields are refused before anything is written.
         let broken = |change: &dyn Fn(&mut Server)| {
             let mut server = server();
@@ -851,11 +1008,69 @@ mod tests {
             checked(server).unwrap_err().to_string()
         };
         assert!(broken(&|s| s.name = "a b".into()).contains("server name"));
-        assert!(broken(&|s| s.base_url = "https://lab".into()).contains("http://"));
+        assert!(broken(&|s| s.base_url = "ftp://lab".into()).contains("http://"));
+        assert!(broken(&|s| s.base_url = "https://user:key@lab".into()).contains("http://"));
         assert!(broken(&|s| s.kind = "grpc".into()).contains("openai or anthropic"));
         assert!(broken(&|s| s.ssh = "-oProxyCommand".into()).contains("SSH host"));
         assert!(broken(&|s| s.up = vec!["serve".into(), "up".into()]).contains("{model}"));
         assert!(broken(&|s| s.up = vec!["serve".into(), "{host}".into()]).contains("placeholder"));
+    }
+
+    /// The rejected gap: https servers are read through the system curl. The key
+    /// travels in the private `--config` file, never on the command line; curl's
+    /// exit codes keep the four failures distinct, and a missing curl is refused
+    /// by name (sessions still work because the agents speak TLS themselves).
+    #[test]
+    fn an_https_server_is_read_with_curl_and_the_key_stays_off_the_argv() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        std::fs::create_dir_all(&config.dir).unwrap();
+        let mut server = server();
+        server.base_url = "https://192.0.2.10:8443".into();
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(Vec<String>, Option<String>)>::new()));
+        let record = seen.clone();
+        set_fake_curl(Some(Box::new(move |argv: &[String], header: Option<&str>| {
+            let at = argv.iter().position(|arg| arg == "--config").expect("a key needs --config");
+            let path = std::path::Path::new(&argv[at + 1]);
+            assert!(path.is_file(), "the private header file exists while curl runs: {path:?}");
+            assert_eq!(std::fs::read_to_string(path).unwrap(), header.unwrap(), "curl reads the key from the private file");
+            record.borrow_mut().push((argv.to_vec(), header.map(str::to_owned)));
+            CurlRun::Ran(Run { code: Some(0), stdout: "{\"data\":[{\"id\":\"small\"}]}\n200".into(), stderr: String::new() })
+        })));
+        let value = status(&config, &server).unwrap();
+        assert_eq!(value["source"], "api");
+        assert_eq!(value["models"], json!([{"name":"small","state":"available"}]));
+        let (argv, header) = seen.borrow()[0].clone();
+        let line = argv.join(" ");
+        assert!(line.contains("--fail-with-body") && line.contains("--max-time"), "{argv:?}");
+        assert!(argv.last().unwrap().ends_with("/v1/models"), "{argv:?}");
+        assert!(!line.contains("sk-test"), "the key never reaches the argv: {argv:?}");
+        assert!(header.as_deref().unwrap().contains("Authorization: Bearer sk-test"), "{header:?}");
+        // 401 is unauthorized; a timeout, a connect failure and a missing curl
+        // are their own errors.
+        set_fake_curl(Some(Box::new(|_: &[String], _: Option<&str>| {
+            CurlRun::Ran(Run { code: Some(22), stdout: "{\"error\":\"no key\"}\n401".into(), stderr: String::new() })
+        })));
+        assert_eq!(status(&config, &server).unwrap_err().kind(), "unauthorized");
+        set_fake_curl(Some(Box::new(|_: &[String], _: Option<&str>| CurlRun::TimedOut)));
+        assert_eq!(status(&config, &server).unwrap_err().kind(), "timed_out");
+        set_fake_curl(Some(Box::new(|_: &[String], _: Option<&str>| {
+            CurlRun::Ran(Run { code: Some(7), stdout: String::new(), stderr: "Failed to connect".into() })
+        })));
+        assert_eq!(status(&config, &server).unwrap_err().kind(), "unreachable");
+        set_fake_curl(Some(Box::new(|_: &[String], _: Option<&str>| CurlRun::Missing)));
+        let missing = status(&config, &server).unwrap_err();
+        assert_eq!(missing.kind(), "refused");
+        assert!(missing.detail().contains("curl was not found"), "{missing:?}");
+        // A server without a key passes no --config.
+        set_fake_curl(Some(Box::new(|argv: &[String], header: Option<&str>| {
+            assert!(header.is_none() && !argv.iter().any(|arg| arg == "--config"), "{argv:?}");
+            CurlRun::Ran(Run { code: Some(0), stdout: "{\"data\":[]}\n200".into(), stderr: String::new() })
+        })));
+        let mut open = server.clone();
+        open.key.clear();
+        assert_eq!(status(&config, &open).unwrap()["models"], json!([]));
+        set_fake_curl(None);
     }
 
     #[test]

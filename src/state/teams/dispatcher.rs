@@ -11809,6 +11809,22 @@ mod tests {
         catalog
     }
 
+    /// #683: Deliver - review, then the command, then land - under the hold rule.
+    fn deliver_preset() -> super::super::catalog::Catalog {
+        let mut catalog = command_preset("command", "git status --porcelain".into(), &[]);
+        let pipeline = catalog.pipelines.last_mut().unwrap();
+        pipeline.id = "deliver".into();
+        pipeline.folder = "hold".into();
+        pipeline.stages.insert(0, super::super::catalog::Stage { kind: "review".into(), role: "reviewer".into(), ..Default::default() });
+        pipeline.stages.push(super::super::catalog::Stage {
+            kind: "land".into(),
+            command: Some(Check { command: "git status --porcelain".into(), expect_exit: 0, timeout_minutes: 5 }),
+            exits: [("0".to_owned(), "accepted".to_owned())].into_iter().collect(),
+            ..Default::default()
+        });
+        catalog
+    }
+
     /// #680: a stage command that writes the environment it got into `env.txt`.
     fn env_command() -> String {
         if cfg!(windows) {
@@ -11970,6 +11986,52 @@ mod tests {
             hand_out(&mut store, STAGE_TEAM, 2, "dev", None, "").unwrap();
             set_fake_hgs(None);
             crate::state::builds::INLINE_RUNNER.with(|inline| inline.set(false));
+        });
+    }
+
+    /// #683: with the hold rule, the review before the command and land stage
+    /// holds the implementer's folder from the report on, so #2 waits.
+    #[test]
+    fn a_review_before_a_command_or_land_stage_holds_the_folder_under_the_hold_rule() {
+        let root = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(root.path(), || {
+            let (lead, dev) = stage_repo(root.path());
+            let team = stage_team(&lead, &dev, "deliver", &|_| deliver_preset());
+            let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+            store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
+            deliver_all();
+            hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
+            stage_report(&mut store, 1);
+            let team = store.load(STAGE_TEAM).unwrap().unwrap();
+            assert_eq!(super::super::stages::held(&team, "dev"), Some(1), "the review before a command and land stage holds the folder");
+            let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
+            let found = steps(&team, &seen, now());
+            assert!(!found.iter().any(|step| matches!(step, Step::HandOut { task: 2, .. })), "no second task while the review is open: {found:?}");
+            set_fake_hgs(None);
+        });
+    }
+
+    /// #683: under the checkout rule the later command and land read their own
+    /// detached checkout, so the review does not hold the implementer.
+    #[test]
+    fn a_review_before_a_command_or_land_stage_does_not_hold_under_the_checkout_rule() {
+        let root = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(root.path(), || {
+            let (lead, dev) = stage_repo(root.path());
+            let mut catalog = deliver_preset();
+            catalog.pipelines.last_mut().unwrap().folder = "checkout".into();
+            let team = stage_team(&lead, &dev, "deliver", &|_| catalog.clone());
+            let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+            store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
+            deliver_all();
+            hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
+            stage_report(&mut store, 1);
+            let team = store.load(STAGE_TEAM).unwrap().unwrap();
+            assert_eq!(super::super::stages::held(&team, "dev"), None, "the checkout rule holds nothing for a review");
+            let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
+            let found = steps(&team, &seen, now());
+            assert!(found.contains(&Step::HandOut { task: 2, member: "dev".into() }), "{found:?}");
+            set_fake_hgs(None);
         });
     }
 

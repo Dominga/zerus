@@ -227,6 +227,10 @@ pub(crate) fn stalled(team: &Team, at: f64) -> Vec<(u32, String, String)> {
 /// holds it under the hold rule; a command or land stage holds it from the
 /// report on whatever its folder rule, so the checked commit stays checked and
 /// landable (a checkout only keeps the command off the implementer's folder).
+/// #683: so does a review the preset puts before a command or land stage under
+/// the hold rule: the later stage lands the commit the review reads, so the
+/// implementer's folder must not move meanwhile. Under the checkout rule the
+/// later stage reads its own detached checkout, and nothing changes.
 pub(crate) fn held(team: &Team, member: &str) -> Option<u32> {
     team.tasks.iter().find_map(|task| {
         let pipeline = task.pipeline_run.as_ref()?;
@@ -240,6 +244,9 @@ pub(crate) fn held(team: &Team, member: &str) -> Option<u32> {
                 }
             }
             "command" | "land" => true,
+            "review" => {
+                pipeline.folder != "checkout" && pipeline.stages.iter().skip(run.stage + 1).any(|stage| stage.runs_command())
+            }
             _ => false,
         };
         let implementer = checked_attempt(task, run).map(|attempt| attempt.member.as_str()).unwrap_or(task.assignee.as_str());

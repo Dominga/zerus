@@ -1539,7 +1539,12 @@ and the output is kept in the run log. The folder follows the preset's `folder`
 rule exactly as a test's does: `checkout` gives a detached checkout of the
 checked attempt's last commit, and otherwise the command runs in the task's
 folder, which the stage holds from the report on, so the implementer gets no
-next task there until the stage ends. The command gets the task as
+next task there until the stage ends. Under the hold rule a review the preset
+puts before a command or land stage also holds the implementer's folder from
+the report on: the later stage checks and lands the very commit the review
+reads, even while that earlier review is open. Under the checkout rule the
+later stage reads its own detached checkout and nothing changes. The command
+gets the task as
 `HGS_TASK_ID`, its branch as `HGS_TASK_BRANCH` and the checked commit as
 `HGS_TASK_COMMIT`. A land stage refuses to run when the stage's folder HEAD is
 not that commit (the task waits for the lead, and the feed says why). The exit

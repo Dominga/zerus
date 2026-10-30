@@ -1765,6 +1765,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // U55: one feed for both banners; it reads while the window shows.
     m_waitingFeed=new TeamWaitingFeed(m_teams,this);
     connect(m_waitingFeed,&TeamWaitingFeed::notify,this,[this](const QString &token,const QString &title,const QString &body){emit teamAttentionRaised(token,title,body);});
+    // #724: an item answered in a banner or on the page leaves both at once and
+    // its notifications are withdrawn.
+    connect(m_waitingFeed,&TeamWaitingFeed::withdrawn,this,[this](const QStringList &tokens){for(const auto &token:tokens)emit teamAttentionCleared(token);});
+    connect(m_waitingFeed,&TeamWaitingFeed::dropped,this,[this](const QString &id){if(m_teamWaitingPage)m_teamWaitingPage->drop(id);});
     for(auto **banner:{&m_waitingBanner,&m_teamWaitingBanner}){
         *banner=new TeamWaitingBanner(m_waitingFeed);
         (*banner)->openItem=[this](const TeamWaitingPage::Item &item){openWaitingItem(item.team,item.kind,item.phase,item.task);};
@@ -7722,6 +7726,7 @@ void SessionsWindow::showTeamWaiting()
             if(m_teamPanel&&m_teamPanel->openWorkspace)m_teamPanel->openWorkspace();
             if(item.phase>0&&item.kind=="phase_draft"&&m_teamWorkspace)m_teamWorkspace->showPhase(item.phase);
         };
+        m_teamWaitingPage->answered=[this](const TeamWaitingPage::Item &item){m_waitingFeed->answered(item);};
         m_teamWaitingPage->countChanged=[this](int total){
             m_teamWaitingNav->setToolTip(total>0?tr("Waiting for you: %1").arg(total):tr("Waiting for you"));
         };

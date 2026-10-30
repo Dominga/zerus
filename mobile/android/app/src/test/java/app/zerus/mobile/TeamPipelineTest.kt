@@ -115,4 +115,48 @@ class TeamPipelineTest {
         assertEquals(listOf("Review · round 1" to ""), TeamPipeline.verdicts(unknown).map { it.title to it.verdict })
         assertEquals(TeamStageTone.Quiet, TeamPipeline.verdicts(unknown).single().tone)
     }
+
+    /** #635 L2: the round count adds the returns of the runs the host trimmed (model.rs returned()). */
+    @Test fun theRoundCountAddsTrimmedReturns() {
+        // Two returns kept and one trimmed reach the limit of 3: the lead decides.
+        val trimmed = JSONObject(tasks[3].toString())
+        val pipeline = trimmed.getJSONObject("pipeline_run")
+        pipeline.getJSONArray("runs").remove(0)
+        assertEquals(TeamStageChip("accept", "Lead", "", TeamStageTone.Accept, outlined = false), TeamPipeline.chip(trimmed))
+        pipeline.put("trimmed_returns", 1)
+        assertEquals(3, TeamPipeline.run(trimmed)!!.returned)
+        assertEquals(TeamStageChip("accept", "Lead decides · 2 findings", "", TeamStageTone.Warn, outlined = false), TeamPipeline.chip(trimmed))
+        // An older host sends none: nothing trimmed.
+        assertEquals(0, TeamPipeline.run(tasks[3])!!.trimmedReturns)
+        assertEquals(3, TeamPipeline.run(tasks[3])!!.returned)
+    }
+
+    /** #635 L3: a command or land return without finding lines counts one, as the desktop's findingsCount. */
+    @Test fun aCommandReturnCountsOneFinding() {
+        val command = JSONObject(tasks[3].toString())
+        val runs = command.getJSONObject("pipeline_run").getJSONArray("runs")
+        for (i in 0 until runs.length()) runs.getJSONObject(i).put("kind", if (i == 1) "land" else "command").put("findings", org.json.JSONArray())
+        assertEquals(3, TeamPipeline.run(command)!!.findings)
+        assertEquals("Lead decides · 3 findings", TeamPipeline.chip(command)!!.caption)
+        // Lines it did name count as they are; a review return without lines still counts none.
+        runs.getJSONObject(0).put("findings", org.json.JSONArray(listOf("exit 1", "test x failed")))
+        runs.getJSONObject(2).put("kind", "review")
+        assertEquals(3, TeamPipeline.run(command)!!.findings)
+    }
+
+    /** #635 L4 (the desktop's #538 N8): Zerus runs a command or land stage, so it reads running or queued, never waits. */
+    @Test fun aCommandStageRunsOrQueues() {
+        val command = JSONObject(tasks[0].toString())
+        val stage = command.getJSONObject("pipeline_run").getJSONArray("runs").getJSONObject(0).put("kind", "command")
+        assertEquals(TeamStageChip("command", "Command queued", "", TeamStageTone.Quiet, outlined = true), TeamPipeline.chip(command))
+        stage.put("state", "delivered")
+        assertEquals(TeamStageChip("command", "Command running", "", TeamStageTone.Quiet, outlined = false), TeamPipeline.chip(command))
+        stage.put("kind", "land")
+        assertEquals("Land running", TeamPipeline.chip(command)!!.caption)
+        stage.put("state", "waiting")
+        assertEquals("Land queued", TeamPipeline.chip(command)!!.caption)
+        // A member's stage is unchanged: it waits for a member.
+        stage.put("kind", "review")
+        assertEquals("Review waits", TeamPipeline.chip(command)!!.caption)
+    }
 }

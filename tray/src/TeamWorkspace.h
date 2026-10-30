@@ -5,6 +5,7 @@
 #include <QPointer>
 #include <QWidget>
 #include <functional>
+#include <memory>
 #include "TeamAccountMove.h"
 #include "TeamModel.h"
 
@@ -16,9 +17,10 @@ class QSplitter;
 class QVBoxLayout;
 class TeamController;
 class TeamConversation;
+namespace TeamProfile { class Cache; }
 class TeamPanel;
 class TeamTaskCard;
-namespace TeamUi { class TaskView; }
+namespace TeamUi { class TaskView; struct Heat; }
 
 // WhiteWh fork: agent teams. The Team tab next to Activity (design D3, HANDOFF
 // §14): the Stuck and plan-error strips (the team's status and actions are in
@@ -134,6 +136,24 @@ private:
     QWidget *memberBlock(const Teams::Team &team, const Teams::Member &member);
     void checkoutMemberBranch(const Teams::Team &team, const Teams::Member &member, const Teams::AccountMove::Block &block);
     QWidget *swappedList(const Teams::Team &team);
+    // U38 (TeamWorkspaceHeat.cpp): Graph and Board's heat tint. The Heat
+    // switch (Off, Time lost, Tokens) is kept per team; its legend sits under
+    // the toolbar; the profile's losses are read in pages and again a minute
+    // after the last read while the tint is on.
+    QString heatShown(const Teams::Team &team) const;   // "", "time" or "tokens"
+    const TeamUi::Heat *heat(const Teams::Team &team);  // null while off, reading or refused
+    QWidget *heatSwitch(const Teams::Team &team);
+    QWidget *heatLegendRow(const Teams::Team &team);
+    void readHeat(const QString &team, const QString &metric, const QJsonValue &cursor, const std::shared_ptr<TeamUi::Heat> &into);
+    struct HeatRead {
+        QString team;
+        std::shared_ptr<TeamUi::Heat> heat;
+        QElapsedTimer at;
+        bool reading = false;
+        QString error;
+        quint64 generation = 0;
+    };
+    QHash<QString, HeatRead> m_heat;   // by metric
     // F7/F8: opens another team in this workspace (previous, next, a new one).
     void openOtherTeam(const QString &team);
     void teamSettings(const Teams::Team &team);
@@ -159,6 +179,8 @@ private:
     const Teams::Team *planTeam(const QString &id);
     QWidget *toolbar(const Teams::Team &team);
     QWidget *canvas(const Teams::Team &team);
+    // U38 (#665): Profile beside Graph, Board and Layers.
+    QWidget *profileView(const Teams::Team &team);
     void linkDraft(const Teams::Team &team, int dependency, int task, bool add);
     QWidget *board(const Teams::Team &team);
     // U25 (spec 5.3, 5.5): every phase a collapsible scroll in Graph, Board and
@@ -275,6 +297,8 @@ private:
     QWidget *m_coordinator, *m_coordinatorHead;
     TeamConversation *m_conversation;
     class TeamProposalCards *m_proposalCards = nullptr;
+    TeamProfile::Cache *m_profileCache = nullptr;
+    QPointer<class TeamProfileView> m_profileView;
     QLabel *m_empty;
     TeamTaskCard *m_drawer;
     QPointer<QFrame> m_popover;

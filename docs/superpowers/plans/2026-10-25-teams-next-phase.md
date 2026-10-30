@@ -1452,6 +1452,19 @@ phase 37. Lanes are balanced by volume and cost (U28 rule 9), not by count.
   retries on its own. A computer without a server shows no tab. Image
   generation is a later phase.
 
+## Auto-accepted drafts stay drafts until work starts (owner, 2026-10-30)
+
+- U61: with Auto-accept drafts on, the next phase is not accepted when it is
+  drafted. While the members work in the current phase and nobody has taken a
+  task of the next auto-accepted phase, it stays a draft: the lead adds,
+  edits, moves and removes its tasks freely.
+- The draft is fixed (accepted by Auto) at the moment the first member is
+  handed one of its tasks: when the current phase is done, or earlier when
+  the lead lets idle members start it.
+- Whether a member may take work from an auto-accepted draft early is the
+  lead's decision, per phase; its reports need no owner approval, as the
+  phase is auto-accepted.
+
 ## Order of work (proposal)
 
 1. Delivery and reports: A1-A6, H5.

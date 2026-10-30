@@ -102,6 +102,10 @@ struct Member {
     struct StageEntry { int task = 0, round = 0; QString stage, state; double since = 0; };
     QList<StageEntry> stageQueue;
     bool stageQueueKnown = false;
+    // #635 N4: the task and stage whose hold keeps this member's folder, as
+    // hgs's status sends it (absent when nothing holds it).
+    struct Hold { int task = 0; QString stage; };
+    Hold heldBy;
     // G7: the MCP servers and services this member's session runs; they outlive
     // the session and are not Background work.
     struct Service { QString name, command; double since = 0; };
@@ -246,10 +250,13 @@ struct PipelineRun {
     int maxRounds = 0, round = 0;
     QList<StageSpec> stages;
     QList<StageRun> runs;
+    // #635 L2: the returns among the runs hgs trimmed (it keeps 64); the
+    // round limit still counts them.
+    int trimmedReturns = 0;
     bool known = false;
     int rounds() const { return maxRounds > 0 ? maxRounds : 3; }
     const StageRun *openRun() const;
-    int returned() const;   // the stage returns so far (the rounds used)
+    int returned() const;   // the stage returns so far (the rounds used), trimmed ones too
 };
 
 // G1: the sub-team a task was delegated to (status children[] and
@@ -756,11 +763,15 @@ const Question *question(const Task &task, const QString &id);
 // (pending, with attempts). Nothing else.
 QList<int> memberQueue(const Team &team, const QString &member);
 // U36: who implemented the attempt a stage run checks (its assignee when the
-// attempt is unknown); the task whose test holds `member`'s folder (0: none),
-// as hgs's stages::held; a member's stage queue; a waiting stage's place among
-// the waiting stages (1 first, 0 when it does not wait); "Review" or "Test".
+// attempt is unknown); the task and stage that hold `member`'s folder (#635
+// N4: the status's held_by; an older hgs: its waiting task's text, else the
+// test rule it had), the task alone (0: none) and "the test stage of #4"; a
+// member's stage queue; a waiting stage's place among the waiting stages (1
+// first, 0 when it does not wait); "Review" or "Test".
 QString implementerOf(const Task &task, const StageRun &run);
+Member::Hold folderHold(const Team &team, const QString &member);
 int folderHeldBy(const Team &team, const QString &member);
+QString holderText(const Member::Hold &hold);
 // #538 L6: the task's open stage waits for a member and hgs names no member
 // that may take it (never a command or land stage, which Zerus runs).
 bool stageWithoutCandidate(const Task &task);

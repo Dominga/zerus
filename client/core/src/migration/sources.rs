@@ -33,6 +33,8 @@ mod preferences;
 pub use preferences::qt_retained_view_preference;
 mod startup;
 pub use startup::tray_config;
+mod attention;
+pub use attention::{next_attention_observed, qt_attention_observed};
 
 #[derive(Clone, Copy)]
 pub enum Origin {

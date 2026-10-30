@@ -387,8 +387,11 @@ identity and persists new choices without rereading a handled Qt family.
 creation/read/task/launch decoders, separate repository-clone checkpoints,
 download indexes, organization observations/backups/drafts, provider operations
 and non-authoritative worktree caches, plus original draft-operation manifests
-and attachment references through the existing draft decoder. Original states,
-identities and private unknown fields are preserved without replay. Its transport
+and attachment references through the existing draft decoder. Qt and interim
+Next attention-observed history also has private bounded evidence through the
+existing seed parser, without notification delivery, withdrawal or token replay.
+Original states, identities and private unknown fields are preserved without
+replay. Its transport
 client streams to G1's selected publisher with exact capability/configuration checks, bounded pipes
 and source rechecks; it has no startup hook. The shared handoff contract lives
 in `crates/desktop-migration`; G1 owns the executable transport, secure publisher,

@@ -2035,6 +2035,12 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         const auto *summary = team.phaseSummaryOf(group.n);
         health->setToolTip(!tip.isEmpty() ? tip : summary ? summary->healthLine : QString());
         info->add(health, 2);
+        // QA #539: the folders the phase's tests hold, as the mock-up's "1 folder held".
+        QString heldTip;
+        if (const QString held = heldFoldersNote(team, group.tasks, &heldTip); !held.isEmpty()) {
+            auto *note = label(held, c.warn, 11, false, "teamPhaseHeld"); note->setToolTip(heldTip);
+            info->add(note, 1);
+        }
     }
     // F12 and F10: why a draft waits, and the lead's edits since you last saw it.
     if (state == "draft" || state == "rejected") {
@@ -3171,8 +3177,7 @@ void TeamWorkspace::memberMenu(const Team &team, const Member &member, const QPo
         // U49: more members of this role at once, and a drain: the member
         // finishes its open work, takes nothing new and then leaves.
         if (team.status == "planning" || team.status == "running" || team.status == "paused") {
-            int seats = 0; for (const auto &m : team.members) seats += !m.lead;
-            const int room = team.maxMembers > 0 ? team.maxMembers - seats : 10;
+            const int room = scaleRoom(team);   // #581 L2: the lead takes a seat too
             auto *scale = menu.addAction(tr("Add more %1…").arg(role), this, [this, teamId = team.id, id = member.id] {
                 QTimer::singleShot(0, this, [this, teamId, id] {
                     const auto *current = currentTeam(teamId);
@@ -3272,8 +3277,7 @@ void TeamWorkspace::memberMenu(const Team &team, const Member &member, const QPo
 
 void TeamWorkspace::scaleRole(const Team &team, const Member &member)
 {
-    int seats = 0; for (const auto &m : team.members) seats += !m.lead;
-    const int room = team.maxMembers > 0 ? team.maxMembers - seats : 10;
+    const int room = scaleRoom(team);
     if (room < 1) return;
     const QString role = team.roleOf(member.id);
     bool ok = false;

@@ -1379,8 +1379,17 @@ QWidget *TeamCatalogEditor::roleEditor(int index)
         const QString id = m_catalog.roles[index].id;
         QStringList losing;
         for (const auto &t : m_catalog.templates) if (std::any_of(t.roster.cbegin(), t.roster.cend(), [&](const Seat &s) { return s.role == id; })) losing << t.name;
-        const QString text = losing.isEmpty() ? tr("Delete the role %1 from the catalog? Running teams keep their members.").arg(m_catalog.roles[index].name)
-                                              : tr("Delete the role %1? These templates lose it: %2. Running teams keep their members.").arg(m_catalog.roles[index].name, losing.join(", "));
+        // #538 N9: the presets whose stages the role takes lose them too; say
+        // which, and which are left with no stage at all.
+        QStringList presets;
+        for (const auto &p : m_catalog.pipelines) {
+            const auto taken = std::count_if(p.stages.cbegin(), p.stages.cend(), [&](const PipelineStage &s) { return s.role == id; });
+            if (taken) presets << (taken == p.stages.size() ? tr("%1 (left with no stage)").arg(p.name) : p.name);
+        }
+        QString text = losing.isEmpty() ? tr("Delete the role %1 from the catalog?").arg(m_catalog.roles[index].name)
+                                        : tr("Delete the role %1? These templates lose it: %2.").arg(m_catalog.roles[index].name, losing.join(", "));
+        if (!presets.isEmpty()) text += QLatin1Char(' ') + tr("These pipelines lose its stages: %1.").arg(presets.join("; "));
+        text += QLatin1Char(' ') + tr("Running teams keep their members.");
         if (confirm && !confirm(QStringLiteral("teamRoleDeleteConfirm"), tr("Delete role"), text, tr("Delete"))) return;
         for (auto &t : m_catalog.templates) {
             t.roster.erase(std::remove_if(t.roster.begin(), t.roster.end(), [&](const Seat &s) { return s.role == id; }), t.roster.end());
@@ -2447,7 +2456,7 @@ QWidget *TeamCatalogEditor::pipelineStageDetails(int index, int stage)
                                                : tr("Any other exit holds the task for the lead."), c.muted), 1);
     v->addLayout(exitsRow);
     // U48: the owner's land_allowed gates it.
-    v->addWidget(warningLine(tr("A land stage runs only in a team whose owner turned on land_allowed in its settings. Without it the plan refuses this preset, "
+    v->addWidget(warningLine(tr("A land stage runs only in a team whose owner turned on land_allowed (Landing in the team's Settings). Without it the plan refuses this preset, "
                                 "and a land stage reached anyway is held for the lead, never run."), c.warn, "teamPipelineLandRule"));
     return frame;
 }

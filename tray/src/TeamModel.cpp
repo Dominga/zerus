@@ -198,10 +198,24 @@ int PipelineRun::returned() const
     return int(std::count_if(runs.cbegin(), runs.cend(), [](const StageRun &run) { return run.state == QLatin1String("returned"); }));
 }
 
+bool stageWithoutCandidate(const Task &task)
+{
+    const auto *run = task.inStage() ? task.pipelineRun.openRun() : nullptr;
+    if (!run || run->state != QLatin1String("waiting") || !task.stageCandidatesKnown || !task.stageCandidates.isEmpty()) return false;
+    return !StageSpec{run->kind}.runsCommand();
+}
+
 QString implementerOf(const Task &task, const StageRun &run)
 {
     for (const auto &attempt : task.attempts) if (attempt.n == run.attempt && !attempt.member.isEmpty()) return attempt.member;
     return task.assignee;
+}
+
+int scaleRoom(const Team &team)
+{
+    if (team.maxMembers <= 0) return 10;
+    const auto seats = std::count_if(team.members.cbegin(), team.members.cend(), [](const Member &m) { return m.state != QLatin1String("removed"); });
+    return team.maxMembers - int(seats);
 }
 
 int folderHeldBy(const Team &team, const QString &member)
@@ -545,6 +559,7 @@ Team parse(const QJsonObject &v)
         }
         // U36: the pipeline chosen in the plan and its snapshot.
         task.pipeline = str(t, "pipeline");
+        task.stageCandidatesKnown = t.value("stage_candidates").isArray();
         for (const auto &value : t.value("stage_candidates").toArray()) task.stageCandidates.append(value.toString());
         if (t.value("pipeline_run").isObject()) {
             const auto o = t.value("pipeline_run").toObject();
@@ -554,7 +569,14 @@ Team parse(const QJsonObject &v)
             run.maxRounds = o.value("max_rounds").toInt(); run.round = o.value("round").toInt();
             for (const auto &v : o.value("stages").toArray()) {
                 const auto st = v.toObject();
-                run.stages.append({str(st, "kind"), str(st, "role"), str(st, "member")});
+                StageSpec spec{str(st, "kind"), str(st, "role"), str(st, "member")};
+                if (const auto command = st.value("command").toObject(); !command.isEmpty()) {
+                    spec.command = str(command, "command"); spec.expectExit = command.value("expect_exit").toInt();
+                    spec.timeoutMinutes = command.value("timeout_minutes").toInt(30);
+                }
+                const auto exits = st.value("exits").toObject();
+                for (auto it = exits.begin(); it != exits.end(); ++it) spec.exits.insert(it.key(), it.value().toString());
+                run.stages.append(spec);
             }
             for (const auto &v : o.value("runs").toArray()) {
                 const auto r = v.toObject();
@@ -566,6 +588,19 @@ Team parse(const QJsonObject &v)
                 for (const auto &f : r.value("findings").toArray()) stage.findings.append(f.toString());
                 stage.holds = r.value("holds").toBool();
                 stage.changed = r.value("changed").toArray();
+                stage.commit = str(r, "commit"); stage.outcome = str(r, "outcome"); stage.flaky = r.value("flaky").toBool();
+                if (const auto check = r.value("check").toObject(); !check.isEmpty())
+                    stage.check = {check.value("exit").toInt(), str(check, "tail"), true};
+                for (const auto &value : r.value("runs").toArray()) {
+                    const auto o = value.toObject();
+                    const auto args = o.value("args").toObject();
+                    StageRun::Ran ran;
+                    ran.templateId = str(o, "template");
+                    for (const char *key : {"suite", "filter", "bin", "package"}) if (const auto v = str(args, key); !v.isEmpty()) { ran.suite = v; break; }
+                    ran.exited = o.value("exit").isDouble(); ran.exit = o.value("exit").toInt();
+                    ran.timedOut = o.value("timed_out").toBool(); ran.ms = qint64(o.value("ms").toDouble());
+                    stage.ran.append(ran);
+                }
                 run.runs.append(stage);
             }
         }
@@ -1170,7 +1205,12 @@ QString displayStatus(const Team &team, const LiveLookup &live)
         if (!scope.isEmpty() && !scope.contains(task.id)) continue;
         open = true;
         if (task.status == "submitted") return team.status;   // the lead decides
-        if (task.inStage()) return team.status;               // U36: a stage works on it
+        // U36: a stage works on it, unless it waits for a member nobody can be
+        // (#538 L6: no candidate; Zerus runs a command or land stage itself).
+        if (task.inStage()) {
+            if (!stageWithoutCandidate(task)) return team.status;
+            continue;
+        }
         const Member *assignee = team.member(task.assignee);
         const Live state = assignee && live ? live(*assignee) : Live{};
         const auto *attempt = openOf(task);

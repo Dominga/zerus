@@ -217,14 +217,28 @@ struct Dep { int task = 0; bool soft = false; };
 // every stage run, oldest first. A run checks one attempt (`attempt` is its n)
 // and is waiting (for a member), delivered, passed, returned, skipped or
 // revoked; #532 adds its folder, checkout, hold and what changed.
-struct StageSpec { QString kind, role, member; };
+// U47/U48: a command or land stage carries the command Zerus runs, its
+// expected exit and time limit, and a land stage's exit map; its run carries
+// the exit and output tail (`check`), the commit it ran on, whether the same
+// tail on the same commit made it flaky and a land stage's outcome. A stage
+// member's runs of the build and test templates are kept on its run.
+struct StageSpec {
+    QString kind, role, member, command;
+    int expectExit = 0, timeoutMinutes = 30;
+    QMap<QString, QString> exits;
+    bool runsCommand() const { return kind == QLatin1String("command") || kind == QLatin1String("land"); }
+};
 struct StageRun {
-    QString id, kind, member, state, by, text, folder, checkout;
+    QString id, kind, member, state, by, text, folder, checkout, commit, outcome;
     int stage = 0, round = 0, attempt = 0;
     double at = 0, deliveredAt = 0, endedAt = 0;
     QStringList findings;
-    bool holds = false;
+    bool holds = false, flaky = false;
     QJsonArray changed;   // {commit, files} or {path, size, deleted}
+    struct Check { int exit = 0; QString tail; bool known = false; };
+    Check check;
+    struct Ran { QString templateId, suite; int exit = 0; bool exited = false, timedOut = false; qint64 ms = 0; };
+    QList<Ran> ran;       // oldest first
     bool open() const { return state == QLatin1String("waiting") || state == QLatin1String("delivered"); }
 };
 struct PipelineRun {
@@ -320,6 +334,7 @@ struct Task {
     QString pipeline;
     PipelineRun pipelineRun;
     QStringList stageCandidates;
+    bool stageCandidatesKnown = false;   // hgs sent the list (an older one does not)
     bool inStage() const { return status == QLatin1String("in_review") || status == QLatin1String("in_test"); }
     bool isCheck() const { return kind == "check" || !check.command.isEmpty(); }
     const Attempt *last() const { return attempts.isEmpty() ? nullptr : &attempts.last(); }
@@ -719,6 +734,13 @@ QList<int> memberQueue(const Team &team, const QString &member);
 // the waiting stages (1 first, 0 when it does not wait); "Review" or "Test".
 QString implementerOf(const Task &task, const StageRun &run);
 int folderHeldBy(const Team &team, const QString &member);
+// #538 L6: the task's open stage waits for a member and hgs names no member
+// that may take it (never a command or land stage, which Zerus runs).
+bool stageWithoutCandidate(const Task &task);
+// U49, #581 L2: how many members "Add more" may add: the team's limit less
+// every member that is not removed, the lead included, as hgs's scale counts;
+// 10 when hgs sends no limit.
+int scaleRoom(const Team &team);
 QList<Member::StageEntry> stageQueue(const Team &team, const QString &member);
 int stageQueuePlace(const Team &team, int task);
 QString stageName(const QString &kind);

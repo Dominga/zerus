@@ -1279,6 +1279,8 @@ private:
         for (auto *l : findChildren<QLabel *>()) if (l->property("compactHide").toBool()) l->setVisible(level == 0);
         for (auto *w : findChildren<QWidget *>())
             if (const QString levels = w->property("toolbarLevels").toString(); !levels.isEmpty()) w->setVisible(levels.contains(QChar('0' + level)));
+        // A view preference (Hide finished) leaves the icon-only row; it stays set.
+        for (auto *w : findChildren<QWidget *>()) if (w->property("compactDrop").toBool()) w->setVisible(level < 2);
         // Icon-only buttons take their icon's width, not the style's text
         // minimum, and the row draws its groups closer together.
         if (auto *row = qobject_cast<QHBoxLayout *>(layout())) {
@@ -1377,6 +1379,7 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
         // Owner, 2026-10-30: hide the phases whose tasks are all decided.
         if (const int finished = finishedPhases(team); finished || m_hideFinished) {
             auto *hideSwitch = new ToggleSwitch(c); hideSwitch->setObjectName("teamWorkspaceHideFinished"); hideSwitch->setChecked(m_hideFinished);
+            hideSwitch->setProperty("compactDrop", true);
             hideSwitch->setAccessibleName(tr("Hide finished"));
             hideSwitch->setToolTip(finished == 1 ? tr("1 phase has every task decided") : tr("%1 phases have every task decided").arg(finished));
             QObject::connect(hideSwitch, &QAbstractButton::clicked, this, [this](bool on) {

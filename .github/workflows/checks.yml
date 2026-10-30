@@ -70,6 +70,31 @@ jobs:
           echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           python3 scripts/ci/select-coverage.py
 
+  client-frontend:
+    name: Desktop frontend tests and build
+    needs: source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.source.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: npm ci
+        working-directory: client
+      - run: npm run check
+        working-directory: client
+      - run: npm test
+        working-directory: client
+      - run: npm run build
+        working-directory: client
+      - name: Main JavaScript chunk budget
+        run: python3 client/scripts/check-bundle-size.py
+
   quick:
     name: Quick checks (source and Rust 1.99)
     needs: source
@@ -1629,7 +1654,7 @@ jobs:
   gate:
     name: Suite results
     if: always() && (github.event.repository.private == false || github.event_name == 'workflow_dispatch')
-    needs: [source, quick, relay, connector, connector-macos, ios, android, client-native-linux, client-native-macos-core, client-native-macos-tauri, client-native-windows, cli, cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, arch, arch-package, mac-desktop, windows-desktop, windows-host]
+    needs: [source, quick, client-frontend, relay, connector, connector-macos, ios, android, client-native-linux, client-native-macos-core, client-native-macos-tauri, client-native-windows, cli, cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, arch, arch-package, mac-desktop, windows-desktop, windows-host]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -1647,6 +1672,7 @@ jobs:
           selected = {
               'source': True,
               'quick': True,
+              'client-frontend': True,
               'relay': True,
               'connector': True,
               'android': True,

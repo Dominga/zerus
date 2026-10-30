@@ -1,32 +1,17 @@
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js";
 import { Icon } from "../lib/icons";
-import { TaskInspector } from "./TaskInspector";
 import { statusOf } from "../sessions/SessionCard";
-import { orderedRows } from "../../store/catalog";
-import { groupOf, grouping, INBOX } from "../../store/organization";
 import { selectedTask, openTask } from "../../store/taskNavigation";
 import { tasks } from "../../store/tasks";
 import { flag, setSetting } from "../../store/settings";
-import { pageHidden } from "../../store/visibility";
-import { now, selected, setSelectedKey, setDetailTab, setMenu } from "../../store/ui";
-import { STAGES, STAGE_ICON, STAGE_LABEL, TASK_PAGE, assignmentLabel, boardRows, belongsTo, executorRef, projectTask, taskPageOffset, taskSessions, type Stage, type Task } from "./tasks-ui";
+import { now, selected, setMenu } from "../../store/ui";
+import { STAGES, STAGE_ICON, STAGE_LABEL, TASK_PAGE, assignmentLabel, boardRows, belongsTo, executorRef, taskPageOffset, type Stage, type Task } from "./tasks-ui";
 import { assign, assigningTask, canAssign, draggedTask, setDraggedTask, taskDragStart, readTaskDrag, TASK_MIME } from "../../store/taskAssignment";
 import { ACTION_ICON, ACTION_LABEL, actOnTask, boardActions, canDrag, primaryAction, reorderGap, stageDropAction, writingTask } from "../../store/taskBoard";
+import { taskProject as project, projectSessions as sessions, findTaskSession as find, projectTasks as rows } from "../../store/taskContext";
 import "../styles/tasks.css";
 
-const project = () => { const s = selected(); return s && s.state !== "archived" ? grouping().headers.find((p) => p.id !== INBOX && p.id === groupOf(s.key)) : undefined; };
-const sessions = createMemo(() => orderedRows().filter((s) => s.state !== "archived" && groupOf(s.key) === project()?.id));
-const find = createMemo(() => taskSessions(sessions()));
-const rows = createMemo(() => tasks.project() === project()?.id ? tasks.tasks().map((t) => projectTask(t, find())) : []);
-export function followProjectTasks() {
-  createEffect(() => tasks.follow(!pageHidden() && project()?.accessible ? project()!.id : undefined));
-  onCleanup(() => tasks.follow(undefined));
-}
 export function TaskTabBadge() { return <Show when={project() && tasks.loaded()}><span class="tk-tabbadge"><Show when={rows().filter((t) => t.stage === "review").length}>{(n) => <span class="tk-tb review">{n()}</span>}</Show><Show when={rows().filter((t) => t.stage === "todo").length}>{(n) => <span class="tk-tb todo">{n()}</span>}</Show></span></Show>; }
-export function TaskView() {
-  const chosen = () => selectedTask()?.project === project()?.id ? rows().find((t) => t.uuid === selectedTask()?.uuid) : undefined;
-  return <div class="tv"><Show when={chosen()} fallback={<p class="tasks-empty">Select a task in the Tasks panel to see its details.<br />Open the side panel's Tasks tab and click a card.</p>}>{(task) => <TaskInspector project={project()!.id} task={tasks.tasks().find((t) => t.uuid === task().uuid)!} presentation={task()} executorAvailable={!!find()(executorRef(task()))} openExecutor={() => { const s = find()(executorRef(task())); if (s) { setSelectedKey(s.key); setDetailTab("activity"); } }} />}</Show></div>;
-}
 const FILTERS = ["current", ...STAGES] as const;
 type Filter = typeof FILTERS[number];
 const LABEL = { current: "Active", ...STAGE_LABEL }, ICON = { current: "activity", ...STAGE_ICON };

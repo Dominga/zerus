@@ -373,7 +373,17 @@ dependencies = [
  "sha2",
  "time",
  "windows-sys",
+ "zerus-desktop-migration",
  "zerus-watch-protocol",
+]
+
+[[package]]
+name = "zerus-desktop-migration"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

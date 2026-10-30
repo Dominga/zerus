@@ -665,3 +665,204 @@ fn the_web_client_defaults_equal_the_table() {
         "regenerate with ZERUS_UPDATE_SETTINGS_DEFAULTS=1 cargo test --test settings"
     );
 }
+
+fn legacy_switch(path: &Path, values: Value) {
+    fs::write(
+        path,
+        serde_json::to_vec(&json!({
+            "version": 1, "seed": {"source":"qt-ini", "at":1, "keys":["workspace/theme"]},
+            "values": values, "future_extension":{"retained":true},
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn first_g3_families_import_once_after_the_switch_and_existing_next_values_win() {
+    let scratch = Scratch::new("g3-families");
+    let qt = scratch.0.join("qt.conf");
+    let bytes = b"[workspace]\ntheme=dark\nlanguage=ru\nallSwarmProjects=true\n[machines]\ncolors\\peer=#123456\ncolors\\local=#abcdef\nvivid\\local=true\n";
+    fs::write(&qt, bytes).unwrap();
+    let modified = fs::metadata(&qt).unwrap().modified().unwrap();
+    let path = scratch.0.join("settings.json");
+    legacy_switch(
+        &path,
+        json!({"workspace/theme":"light", "workspace/allSwarmProjects":false, "machines/colors/peer":"#654321"}),
+    );
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert_eq!(
+        settings.get("workspace/theme"),
+        "light",
+        "the old seed never repeats"
+    );
+    assert_eq!(
+        settings.get("workspace/language"),
+        "en",
+        "old seed keys never newly enter"
+    );
+    assert!(
+        !settings.flag("workspace/allSwarmProjects"),
+        "existing Next false is still a value"
+    );
+    assert_eq!(settings.text("machines/colors/peer"), "#654321");
+    assert_eq!(settings.all()["machines/colors/local"], "#abcdef");
+    assert!(settings.flag("machines/vivid/local"));
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    assert_eq!(fs::read(&qt).unwrap(), bytes);
+    assert_eq!(fs::metadata(&qt).unwrap().modified().unwrap(), modified);
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["future_extension"], json!({"retained":true}));
+    for family in ["machine-appearance", "project-view"] {
+        let record = &saved["g3"]["families"][family];
+        assert_eq!(record["family"], family);
+        assert_eq!(record["schema"], 1);
+        assert_eq!(record["source_path"], qt.to_string_lossy().as_ref());
+        assert_eq!(record["sha256"], zerus_desktop_migration::sha256(bytes));
+        assert_eq!(record["source_mtime_after_switch"], true);
+        assert!(record["at"].as_u64().unwrap() > 1);
+    }
+    assert_eq!(
+        saved["g3"]["families"]["project-view"]["keys"],
+        json!(["workspace/allSwarmProjects"])
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    // Handled families do not even need a readable source on another switch.
+    fs::remove_file(&qt).unwrap();
+    fs::create_dir(&qt).unwrap();
+    let again = Settings::open(path.clone(), Some(QtStore::Ini(qt)));
+    assert_eq!(again.text("machines/colors/local"), "#abcdef");
+    assert!(again.flag("machines/vivid/local"));
+    assert!(again.flush_within(FLUSH));
+    drop(again);
+    let reopened: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(reopened, saved);
+}
+
+#[test]
+fn a_failed_family_is_quarantined_as_metadata_and_retries_without_partial_values() {
+    let scratch = Scratch::new("g3-retry");
+    let qt = scratch.0.join("qt.conf");
+    let bytes = b"[machines]\ncolors\\good=#123456\ncolors\\bad=not-a-color-private-value\n[workspace]\nallSwarmProjects=true\n";
+    fs::write(&qt, bytes).unwrap();
+    let path = scratch.0.join("settings.json");
+    legacy_switch(&path, json!({}));
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert!(
+        !settings.contains("machines/colors/good"),
+        "no partial family is imported"
+    );
+    assert!(
+        settings.flag("workspace/allSwarmProjects"),
+        "independent family completes"
+    );
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(saved["g3"]["families"].get("machine-appearance").is_none());
+    assert_eq!(
+        saved["g3"]["quarantine"]["machine-appearance"]["preserved_in"],
+        "source"
+    );
+    assert!(!saved.to_string().contains("not-a-color-private-value"));
+    assert_eq!(fs::read(&qt).unwrap(), bytes);
+    fs::write(
+        &qt,
+        b"[machines]\ncolors\\good=#abcdef\n[workspace]\nallSwarmProjects=false\n",
+    )
+    .unwrap();
+    let retried = Settings::open(path.clone(), Some(QtStore::Ini(qt)));
+    assert_eq!(retried.text("machines/colors/good"), "#abcdef");
+    assert!(
+        retried.flag("workspace/allSwarmProjects"),
+        "handled families stay handled"
+    );
+    assert!(retried.flush_within(FLUSH));
+    drop(retried);
+    let saved: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(saved["g3"]["families"]["machine-appearance"]["schema"], 1);
+}
+
+#[test]
+fn newer_settings_and_family_records_survive_without_reseeding() {
+    let scratch = Scratch::new("g3-future");
+    let qt = scratch.0.join("qt.conf");
+    fs::write(
+        &qt,
+        b"[workspace]\nallSwarmProjects=true\n[machines]\ncolors\\peer=#abcdef\n",
+    )
+    .unwrap();
+    let path = scratch.0.join("settings.json");
+    let future = br#"{"version":2,"values":{"workspace/theme":"dark"},"unknown":"retained"}"#;
+    fs::write(&path, future).unwrap();
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert!(settings.error().is_some());
+    assert!(settings.set("workspace/theme", json!("light")).is_err());
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    assert_eq!(fs::read(&path).unwrap(), future);
+    let g3 = json!({"version":2,"families":{},"new_schema":"retained"});
+    fs::write(
+        &path,
+        serde_json::to_vec(&json!({"version":1,"values":{},"g3":g3})).unwrap(),
+    )
+    .unwrap();
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt)));
+    assert!(!settings.contains("machines/colors/peer"));
+    assert!(!settings.flag("workspace/allSwarmProjects"));
+    assert!(settings.seed_record().is_none());
+    settings.set("workspace/theme", json!("light")).unwrap();
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    let saved: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(saved["g3"], g3);
+}
+
+#[test]
+fn family_reports_are_bounded_and_never_commit_a_partial_large_family() {
+    let scratch = Scratch::new("g3-bound");
+    let qt = scratch.0.join("qt.conf");
+    let mut source = String::from("[machines]\n");
+    for n in 0..4097 {
+        source.push_str(&format!("colors\\peer-{n}=#123456\n"));
+    }
+    fs::write(&qt, &source).unwrap();
+    let path = scratch.0.join("settings.json");
+    legacy_switch(&path, json!({}));
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert!(!settings.contains("machines/colors/peer-0"));
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    let saved: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert!(saved["g3"]["families"].get("machine-appearance").is_none());
+    assert_eq!(
+        saved["g3"]["quarantine"]["machine-appearance"]["keys"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4096
+    );
+    assert_eq!(fs::read_to_string(qt).unwrap(), source);
+}
+
+#[test]
+fn an_overlapping_source_is_preserved_without_even_a_family_record_write() {
+    let scratch = Scratch::new("g3-overlap");
+    let path = scratch.0.join("settings.json");
+    legacy_switch(&path, json!({"workspace/theme":"dark"}));
+    let before = fs::read(&path).unwrap();
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(path.clone())));
+    assert!(settings.error().is_some());
+    assert!(settings.set("workspace/theme", json!("light")).is_err());
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    assert_eq!(fs::read(path).unwrap(), before);
+}

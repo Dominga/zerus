@@ -31,6 +31,18 @@ record prevents a second import after rollback; Qt's files are never changed.
 Development identities never seed, and a replay uses `settings-replay.json`
 without reading Qt, including when launched from the installed switch.
 
+G3 adds one versioned first import for each previously unhandled preference
+family. Machine color/vivid choices and Projects' All swarm projects preference
+use the same settings reader and writer, including on a switch that already has
+its original seed record. Existing Next values win. `settings.json` keeps private
+`g3.families` metadata (family/schema/source path/time/key names/exact byte hash)
+and a source-mtime observation relative to the original switch. The timestamp
+observation does not prove that bytes stayed unchanged. A failed family has only
+private quarantine metadata pointing to its untouched source, stays unhandled
+and retries next start. Handled families do not reread Qt after rollback. The
+original settings seed, draft seed and run-layout seed retain their own existing
+one-time records. Newer settings/G3 schemas are preserved without reseeding.
+
 ## Menu bar, single instance and notifications (macOS)
 
 | Piece | Where | Qt source it follows |

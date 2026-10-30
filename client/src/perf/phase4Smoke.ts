@@ -355,7 +355,13 @@ async function selectAllCopyStep() {
   const users = activity.events().filter((event) => event.type === "UserPromptSubmit" && event.detail);
   const first = users[0]?.detail, last = users.at(-1)?.detail;
   if (!first || !last) throw new Error("the copy check needs loaded user messages at both ends");
-  const writes: string[] = [], copyNotices = () => notices().filter((notice) => notice.text === "The selected text is on the clipboard").length;
+  // Repeated passing notices coalesce on the bus, so count copies by their notice ids.
+  const copyIds = new Set<number>();
+  const copyNotices = () => {
+    for (const notice of notices()) if (notice.text === "The selected text is on the clipboard") copyIds.add(notice.id);
+    return copyIds.size;
+  };
+  const writes: string[] = [];
   scroller.focus();
   scroller.dispatchEvent(new KeyboardEvent("keydown", { key: "a", ctrlKey: true, bubbles: true, cancelable: true }));
   const mounted = document.getSelection()?.toString() ?? "";

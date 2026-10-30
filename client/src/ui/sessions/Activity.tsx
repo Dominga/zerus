@@ -18,7 +18,7 @@ import type { LocalMessage } from "../../types";
 import { animationFrames, createActivityEnd, newLocalSends } from "./activity-end";
 import { buildTranscript, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
 import { DELETE_TEXT, DELETE_TITLE, retryReason, routeInspect } from "./local-actions";
-import { inlineParts } from "./markdown";
+import { inlineParts, markdownBlocks } from "./markdown";
 import { openExternal, openSessionFile } from "./sessionFiles";
 import { SessionFileDialog } from "./SessionFileDialog";
 import { statusOf } from "./SessionCard";
@@ -170,29 +170,23 @@ function inline(text: string, session?: () => Session | undefined) {
   });
 }
 
-type Block = { kind: "p" | "ul" | "code"; text: string };
-
-/** Splits text into paragraphs, "- " lists and ``` fenced code blocks. */
-function blocks(text: string): Block[] {
-  const out: Block[] = [];
-  const parts = text.split(/^```[^\n]*\n?/m);
-  parts.forEach((part, i) => {
-    if (i % 2 === 1) { out.push({ kind: "code", text: part.replace(/\n$/, "") }); return; }
-    for (const b of part.split(/\n{2,}/)) {
-      const trimmed = b.replace(/^\n+|\n+$/g, "");
-      if (trimmed) out.push({ kind: trimmed.startsWith("- ") ? "ul" : "p", text: trimmed });
-    }
-  });
-  return out;
-}
-
 export function Body(props: { text: string }) {
   const session = useContext(ActivitySession);
   return (
-    <For each={blocks(props.text)}>
-      {(b) => b.kind === "code" ? <pre class="act-code mono">{b.text}</pre> : b.kind === "ul" ? (
-        <ul class="md-list"><For each={b.text.split("\n")}>{(li) => <li>{inline(li.replace(/^- /, ""), session)}</li>}</For></ul>
-      ) : <p>{inline(b.text, session)}</p>}
+    <For each={markdownBlocks(props.text)}>
+      {(b) => {
+        if (b.kind === "code") return <pre class="act-code mono">{b.text}</pre>;
+        if (b.kind === "table") return (
+          <div class="act-table-wrap" role="region" aria-label="Message table" tabindex="0">
+            <table class="act-table" style={{ "--table-columns": b.header.length }}>
+              <thead><tr><For each={b.header}>{(cell, column) => <th scope="col" style={{ "text-align": b.align[column()] }}>{inline(cell, session)}</th>}</For></tr></thead>
+              <Show when={b.rows.length}><tbody><For each={b.rows}>{(row) => <tr><For each={row}>{(cell, column) => <td style={{ "text-align": b.align[column()] }}>{inline(cell, session)}</td>}</For></tr>}</For></tbody></Show>
+            </table>
+          </div>
+        );
+        if (b.kind === "ul") return <ul class="md-list"><For each={b.text.split("\n")}>{(li) => <li>{inline(li.replace(/^- /, ""), session)}</li>}</For></ul>;
+        return <p>{inline(b.text, session)}</p>;
+      }}
     </For>
   );
 }

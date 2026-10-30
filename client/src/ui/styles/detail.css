@@ -100,6 +100,12 @@
   .act-body p + p, .act-body p + ul, .act-body ul + p { margin-top: 8px; }
   .act-body code { font-family: var(--z-font-mono); font-size: .9em; padding: 1px 5px; border-radius: 4px; background: var(--z-color-code-bg); }
   .act-body a { color: var(--z-color-accent); text-decoration: none; }
+  /* Message tables use the mockup proc-table's type, header and divider tokens. */
+  .act-table-wrap { max-width: 100%; overflow-x: auto; margin: 8px 0; }
+  .act-table { width: 100%; min-width: calc(var(--fs-sm) * var(--table-columns) * 9); border-collapse: collapse; font-size: var(--fs-sm); }
+  .act-table th { font-weight: 600; color: var(--z-color-label); font-size: var(--fs-xs); padding: 4px 8px; border-bottom: 1px solid var(--z-color-divider); }
+  .act-table td { padding: 5px 8px; border-bottom: 1px solid color-mix(in srgb, var(--z-color-divider) 60%, transparent); }
+  .act-table th, .act-table td { vertical-align: top; white-space: normal; overflow-wrap: anywhere; }
   .md-list { padding-left: 20px !important; list-style: disc !important; }
   .md-list li { margin: 2px 0; }
   .act-code { margin: 8px 0 0; padding: 9px 12px; border-radius: var(--z-radius-md); background: var(--z-color-code-bg); border: 1px solid var(--z-color-divider); font-size: calc(var(--fs-base) * .9); line-height: 1.45; overflow-x: auto; white-space: pre; }

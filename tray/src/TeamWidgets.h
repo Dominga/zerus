@@ -774,6 +774,7 @@ public:
         bool alongside = false;   // F12/N40: Approve runs it beside a running phase
         int changes = 0;      // the lead's pending edits on a draft
         QStringList changeLines;   // those edits as a diff, for the header's tooltip
+        bool autoDraft = false, startAhead = false;   // U61: Auto accepts it at its first hand-out
     };
     TaskView(const Colors &colors, Mode mode, QWidget *parent = nullptr) : QWidget(parent), m_c(colors), m_mode(mode)
     {
@@ -1404,7 +1405,10 @@ protected:
         } else {
             m_approve.remove(band.n); m_discard.remove(band.n); m_moveUp.remove(band.n); m_moveDown.remove(band.n);
         }
-        if (!band.status.isEmpty()) {
+        if (band.autoDraft) {
+            // U61: a draft Auto accepts at its first hand-out, not one waiting for you.
+            pill(band.startAhead ? QCoreApplication::translate("TeamPanel", "Draft (auto), started ahead") : Teams::autoDraftBadge(), m_c.folder);
+        } else if (!band.status.isEmpty()) {
             pill(phaseStatusText(band.status), phaseStatusColor(m_c, band.status));
         } else if (band.draft) {
             pill(QCoreApplication::translate("TeamPanel", "draft"), m_c.warn);
@@ -1933,6 +1937,7 @@ inline QList<TaskView::PhaseBand> phaseBands(const Team &team, const std::functi
         band.n = group.n; band.title = group.title; band.heading = phaseHeading(group);
         band.barrier = group.barrier; band.draft = group.draft; band.done = group.done; band.total = group.tasks.size();
         band.tasks = group.tasks; band.collapsed = !open(group);
+        if (const auto *record = team.phase(group.n); record && record->autoDraft()) { band.autoDraft = true; band.startAhead = record->startAhead; }
         if (const auto *summary = team.phaseSummaryOf(group.n)) {
             band.status = summary->status;
             band.healthLine = summary->healthLine;

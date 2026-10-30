@@ -742,6 +742,7 @@ Team parse(const QJsonObject &v)
         phase.n = p.value("n").toInt(); phase.title = str(p, "title"); phase.barrier = p.value("barrier").toBool();
         phase.approval = str(p, "approval"); phase.state = str(p, "state");
         phase.addedBy = str(p, "added_by"); phase.decidedBy = str(p, "decided_by");
+        phase.startAhead = p.value("start_ahead").toBool();
         phase.addedAt = p.value("added_at").toDouble(); phase.decidedAt = p.value("decided_at").toDouble();
         for (const auto &id : p.value("tasks").toArray()) phase.tasks.append(id.toInt());
         // F10: the lead's diff for this draft, when the store reports one.
@@ -1602,7 +1603,9 @@ QString PhaseProgress::tooltip() const
     // G8/spec 11: the tooltip names the phase the tasks bar counts.
     const QString name = title.isEmpty() ? tr("Phase %1").arg(phase) : tr("Phase %1 %2").arg(phase).arg(title);
     QString line = QStringLiteral("%1: %2/%3").arg(name).arg(done).arg(total);
-    if (draft) line += QStringLiteral(" · ") + tr("waiting for your approval");
+    if (draft && autoDraft) line += QLatin1Char('\n') + autoDraftBadge() + QStringLiteral(": ") + autoDraftTip(startAhead);
+    else if (draft) line += QStringLiteral(" · ") + tr("waiting for your approval");
+    else if (byAuto) line += QLatin1Char('\n') + tr("Accepted by Auto when its first task started");
     return line + QLatin1Char('\n')
         + tr("%1 of %2 phases finished; discarded drafts do not count").arg(phasesDone).arg(phasesTotal);
 }
@@ -1647,7 +1650,24 @@ PhaseProgress phaseProgress(const Team &team)
         progress.phase = 1; progress.done = done; progress.total = team.tasks.size();
         progress.phasesTotal = 1; progress.phasesDone = done == team.tasks.size();
     }
+    if (const auto *record = team.phase(progress.phase)) {
+        progress.autoDraft = record->autoDraft(); progress.startAhead = record->startAhead; progress.byAuto = record->acceptedByAuto();
+    }
     return progress;
+}
+
+QString autoDraftBadge() { return tr("Draft (auto)"); }
+
+QString autoDraftTip(bool startAhead)
+{
+    return startAhead ? tr("The lead started it ahead: idle members take its tasks now, and Auto accepts it when the first one starts. Its reports need no approval from you.")
+                      : tr("Auto accepts it when its first task starts, once the phases ahead are done. Until then the lead edits it freely.");
+}
+
+QString autoAcceptSwitchTip(bool on)
+{
+    return on ? tr("On: a phase draft without errors stays a draft the lead edits, and Auto accepts it when its first task starts")
+              : tr("Off: every phase draft waits for you");
 }
 
 QString phaseHeading(const PhaseGroup &group)

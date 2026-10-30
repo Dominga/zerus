@@ -133,6 +133,89 @@ describe("transcript", () => {
   });
 });
 
+describe("provider messages in Activity", () => {
+  const body = (item: ReturnType<typeof buildTranscript>[number]) => "body" in item ? item.body : undefined;
+  const message = (id: string, detail: string, at: number, phase = "commentary"): ActivityEvent => ({
+    type: "AgentMessage", source: "codex_transcript", message_id: id, detail, at, message_phase: phase,
+  });
+
+  it("shows snapshot commentary between tool outputs while the turn is still working", () => {
+    createRoot((dispose) => {
+      const { store } = setup();
+      store.follow(target);
+      store.applyActivity([
+        out("events", { events: [ev(10), ev(12, "PreToolUse")], cursor: 12 }),
+        out("state", { rev: 1, value: { activity: "busy", provider_messages: [message("mid-turn", "The tool found the cause.", 1_793_000_011)] } }),
+      ]);
+      const items = buildTranscript(store.events(), store.summary());
+      expect(items.map((i) => i.kind)).toEqual(["tool", "agent", "tool"]);
+      expect(body(items[1])).toBe("The tool found the cause.");
+      // Provider rows do not become fake journal cursors or alter older paging.
+      expect(store.events().map((e) => e.seq)).toEqual([10, 12]);
+      dispose();
+    });
+  });
+
+  it("shows initial and streamed provider messages once as the core updates the summary at the same rev", () => {
+    createRoot((dispose) => {
+      const { store } = setup();
+      store.follow(target);
+      const progress = message("progress", "Checking the output.", 10);
+      const complete = message("complete", "Fixed.", 20, "final_answer");
+      store.applyActivity([out("state", { rev: 7, value: { provider_messages: [progress] } })]);
+      expect(buildTranscript(store.events(), store.summary()).map(body)).toEqual(["Checking the output."]);
+      // This is the core's ActivityUpdate::State for a streamed event frame:
+      // it retains rev 7, replacing the message with its latest content.
+      const latest = { ...progress, detail: "The output confirms the cause." };
+      for (let i = 0; i < 2; i++) store.applyActivity([out("state", { rev: 7, value: { provider_messages: [latest, complete] } })]);
+      expect(buildTranscript(store.events(), store.summary()).map(body)).toEqual(["The output confirms the cause.", "Fixed."]);
+      dispose();
+    });
+  });
+
+  it("merges the full final response into its Stop excerpt and preserves commentary", () => {
+    const given = [ev(1, "Stop", { at: 20, detail: "Fixed the…" })];
+    const items = buildTranscript(given, { provider_messages: [
+      message("progress", "A separate progress update.", 19),
+      message("final", "Fixed the missing message.", 20, "final_answer"),
+    ] });
+    expect(items.map(body)).toEqual(["A separate progress update.", "Fixed the missing message."]);
+    expect(items[1].id).toBe("s1");
+    expect(given[0].detail).toBe("Fixed the…");
+    const emptyStop = buildTranscript([ev(1, "Stop", { at: 20, detail: "" })], {
+      provider_messages: [message("progress", "Still working.", 19)],
+    });
+    expect(body(emptyStop[0])).toBe("Still working.");
+    expect(emptyStop[0].kind).toBe("agent");
+  });
+
+  it("deduplicates a provider message already streamed as an event by native identity", () => {
+    const progress = message("native-id", "Progress.", 10);
+    const items = buildTranscript([progress], { provider_messages: [progress, progress] });
+    expect(items.map(body)).toEqual(["Progress."]);
+  });
+
+  it("preserves distinct native messages even with identical text and timestamps", () => {
+    const items = buildTranscript([], { provider_messages: [message("first", "Still working.", 10), message("second", "Still working.", 10)] });
+    expect(items).toHaveLength(2);
+    expect(items[0].id).not.toBe(items[1].id);
+  });
+
+  it("a Stop excerpt cannot absorb two distinct final messages", () => {
+    const items = buildTranscript([ev(1, "Stop", { detail: "Done.", at: 20 })], {
+      provider_messages: [message("first-final", "Done.", 20, "final_answer"), message("second-final", "Done.", 21, "final_answer")],
+    });
+    expect(items.map(body)).toEqual(["Done.", "Done."]);
+    expect(items[0].id).not.toBe(items[1].id);
+  });
+
+  it("only projects the bounded provider window from the current summary", () => {
+    const items = buildTranscript([], { provider_messages: Array.from({ length: 130 }, (_, i) => message(`native-${i}`, `Update ${i}`, i + 1)) });
+    expect(items).toHaveLength(100);
+    expect(body(items[0])).toBe("Update 30");
+  });
+});
+
 describe("question replies in the transcript", () => {
   it("answers are labelled and keep their questions", () => {
     const items = buildTranscript([

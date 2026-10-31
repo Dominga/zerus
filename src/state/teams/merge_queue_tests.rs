@@ -40,6 +40,11 @@ fn repo() -> Repo {
     )
     .unwrap();
     run_git(&lead, &["init", "-q"]);
+    // The queue's own merge commits use the repository's identity: a CI runner
+    // has no global one.
+    run_git(&lead, &["config", "user.name", "t"]);
+    run_git(&lead, &["config", "user.email", "t@example.com"]);
+    run_git(&lead, &["config", "commit.gpgsign", "false"]);
     write(&lead, "a.txt", "one\n");
     run_git(&lead, &["add", "."]);
     run_git(&lead, &["commit", "-q", "-m", "base"]);

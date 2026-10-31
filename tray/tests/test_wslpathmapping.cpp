@@ -1,4 +1,5 @@
 #include <QtTest>
+#include "Settings.h"
 #include <QCheckBox>
 #include <QFile>
 #include <QJsonDocument>
@@ -37,7 +38,7 @@ private:
 void TestWslPathMapping::init()
 {
     QVERIFY(m_dir.isValid());QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,m_dir.path());
-    QCoreApplication::setOrganizationName("hgs-map-test");QCoreApplication::setApplicationName("mapping");QSettings().clear();
+    QCoreApplication::setOrganizationName("hgs-map-test");QCoreApplication::setApplicationName("mapping");Settings::flush();QSettings().clear();
     QFile::remove(m_dir.filePath("calls"));QFile::remove(m_dir.filePath("mode"));
     QVERIFY(FakeCli::install(m_dir.filePath("hgs"),R"PY(#!/usr/bin/env python3
 import json,pathlib,sys

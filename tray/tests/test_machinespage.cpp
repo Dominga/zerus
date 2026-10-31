@@ -78,7 +78,7 @@ void TestMachinesPage::init()
     MessageBoxIcons::install();
     QVERIFY(m_dir.isValid());
     QSettings::setDefaultFormat(QSettings::IniFormat); QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_dir.path());
-    QCoreApplication::setOrganizationName("hgs-machines-test"); QCoreApplication::setApplicationName("MachinesPage"); QSettings().clear(); MachineAppearance::invalidate();
+    QCoreApplication::setOrganizationName("hgs-machines-test"); QCoreApplication::setApplicationName("MachinesPage"); Settings::flush();QSettings().clear(); MachineAppearance::invalidate();
     for (const auto &name : {"calls.jsonl", "stale", "probe-mode", "resolve-delay", "list-delay", "host-mode"}) QFile::remove(m_dir.filePath(name));
     m_script = m_dir.filePath("hgs");
     QFile fixture(m_script); QVERIFY(fixture.open(QIODevice::WriteOnly));
@@ -364,6 +364,7 @@ void TestMachinesPage::otherTransportSavedBehindAHeldLockReadsBack()
     QTRY_VERIFY(save->isEnabled()); save->click();
     QTRY_VERIFY(!save->isEnabled() && transport->isEnabled());
     QVERIFY(Settings::queued());
+    // Not yet in the file: the save waits for the lock.
     QVERIFY(!QSettings().contains(QStringLiteral("machines/otherTransport/ubuntu")));
     // Shown again: the WSL overrides come back from the queued save.
     page.selectMachine({});
@@ -586,7 +587,7 @@ void TestMachinesPage::colorPickerDismissalKeepsTheSavedColor()
     widget<QPushButton>(page,"machineColor")->click();
     QVERIFY(handled);QVERIFY(!expired);QCoreApplication::processEvents();
     QCOMPARE(MachineAppearance::color("arch"),original);QCOMPARE(changed.size(),0);QCOMPARE(outsideClicked.size(),0);
-    QVERIFY(!QSettings().contains("machines/colors/arch"));
+    QVERIFY(!Settings::contains("machines/colors/arch"));
     QCOMPARE(widget<QLineEdit>(page,"machineAlias")->text(),QString("arch"));
     QVERIFY(!widget<QPushButton>(page,"saveMachine")->isEnabled());
     for(const auto &call:calls())QVERIFY(call.toArray().at(1).toString()!="set");

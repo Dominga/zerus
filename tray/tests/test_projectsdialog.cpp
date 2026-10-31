@@ -1,4 +1,5 @@
 #include <QtTest>
+#include "Settings.h"
 #include <QApplication>
 #include "JsonSettings.h"
 #include "ProjectsDialog.h"
@@ -1051,15 +1052,15 @@ void TestProjectsDialog::folderSplitPrioritizesListAndRemembersAdjustment()
     drag(-60,12);   // up: the worktrees grow by the 60 px dragged, once
     QTRY_VERIFY2(qAbs(split->sizes()[1]-(initial[1]+60))<=6,qPrintable(QStringLiteral("%1 after %2 + 60").arg(split->sizes()[1]).arg(initial[1])));
     QTRY_COMPARE(table->height(),rows);QTRY_COMPARE(split->sizes()[0]+split->sizes()[1]+split->handleWidth(),split->height());
-    QTRY_COMPARE(QSettings().value("workspace/projectFolderWorktrees").toInt(),split->sizes()[1]);
+    QTRY_COMPARE(Settings::value("workspace/projectFolderWorktrees").toInt(),split->sizes()[1]);
     drag(400,20);   // down past the minimum: it stops at 120
     QTRY_COMPARE(split->sizes()[1],120);
     drag(-2000,20); // up past the page: at most two thirds of it
     QTRY_COMPARE(split->sizes()[1],qMax(240,dialog.height()*2/3));
-    QTRY_COMPARE(QSettings().value("workspace/projectFolderWorktrees").toInt(),qMax(240,dialog.height()*2/3));
+    QTRY_COMPARE(Settings::value("workspace/projectFolderWorktrees").toInt(),qMax(240,dialog.height()*2/3));
     drag(split->sizes()[1]-(initial[1]-30),10);   // down to a middle height
     const int adjusted=split->sizes()[1];QVERIFY2(qAbs(adjusted-(initial[1]-30))<=6,qPrintable(QString::number(adjusted)));
-    QTRY_COMPARE(QSettings().value("workspace/projectFolderWorktrees").toInt(),adjusted);
+    QTRY_COMPARE(Settings::value("workspace/projectFolderWorktrees").toInt(),adjusted);
     dialog.refresh();QTRY_COMPARE(split->sizes()[1],adjusted);
     table->clearSelection();QTRY_VERIFY(!split->widget(1)->isVisible());table->setCurrentCell(0,0);QTest::qWait(30);
     QVERIFY(qAbs(split->sizes()[1]-adjusted)<4);

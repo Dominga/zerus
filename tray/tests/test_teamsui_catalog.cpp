@@ -3,6 +3,7 @@
 // The fixture (the fake hgs, its teams and the shot helpers) is shared:
 // support/TeamsUiFixture.h.
 #include "TeamsUiFixture.h"
+#include "Settings.h"
 #include "ActivityView.h"
 #include "CollapsibleBlock.h"
 #include "HgsClient.h"
@@ -531,8 +532,8 @@ void TestTeamsUiCatalog::catalogRoleModelsAndContextAreSaved()
 
 void TestTeamsUiCatalog::catalogPipelinesAreEditedAndSaved()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
-    const auto restore = qScopeGuard([this] { QSettings().remove("workspace/skin"); darkPalette(); writeCatalog(script(), catalog()); });
+    Settings::set("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([this] { Settings::remove("workspace/skin"); darkPalette(); writeCatalog(script(), catalog()); });
     // Opt-in: a catalog without presets saves without them, and its roles and
     // templates gain no pipeline field.
     {
@@ -667,8 +668,8 @@ void TestTeamsUiCatalog::catalogPipelinesAreEditedAndSaved()
 // changed fields old → new; the designer page's Show in catalog opens them.
 void TestTeamsUiCatalog::catalogPipelineProposalsHavePlates()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
-    const auto restore = qScopeGuard([this] { QSettings().remove("workspace/skin"); darkPalette(); writeCatalog(script(), catalog()); });
+    Settings::set("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([this] { Settings::remove("workspace/skin"); darkPalette(); writeCatalog(script(), catalog()); });
     auto drafted = pipelineCatalog();
     const auto presets = drafted.value("catalog").toObject().value("pipelines").toArray();
     auto checkout = presets[0].toObject(); checkout["folder"] = "checkout";
@@ -733,8 +734,8 @@ void TestTeamsUiCatalog::catalogPipelineProposalsHavePlates()
 // the folder hold, a single Tester and a land stage without land_allowed.
 void TestTeamsUiCatalog::catalogPipelineTryWalksASampleTask()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
-    const auto restore = qScopeGuard([this] { QSettings().remove("workspace/skin"); darkPalette(); writeCatalog(script(), catalog()); });
+    Settings::set("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([this] { Settings::remove("workspace/skin"); darkPalette(); writeCatalog(script(), catalog()); });
     const auto c = parseCatalog(pipelineCatalog());
     Team team; team.folder = "/work/orbit";
     const auto member = [&](const QString &id, const QString &role, const QString &agent, const QString &model) {
@@ -804,8 +805,8 @@ void TestTeamsUiCatalog::catalogPipelineTryWalksASampleTask()
 
 void TestTeamsUiCatalog::catalogRoleEditorEditsEveryField()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
-    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    Settings::set("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { Settings::remove("workspace/skin"); darkPalette(); });
     HgsClient client(FakeCli::program(script()));
     TeamController controller(&client);
     TeamCatalogEditor editor(&controller);
@@ -929,8 +930,8 @@ void TestTeamsUiCatalog::catalogRoleEditorEditsEveryField()
 // "task" and an empty template.
 void TestTeamsUiCatalog::aPromptOrderSavesTheTaskTemplateItShows()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
-    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    Settings::set("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { Settings::remove("workspace/skin"); darkPalette(); });
     HgsClient client(FakeCli::program(script()));
     TeamController controller(&client);
     TeamCatalogEditor editor(&controller);
@@ -964,8 +965,8 @@ void TestTeamsUiCatalog::aPromptOrderSavesTheTaskTemplateItShows()
 
 void TestTeamsUiCatalog::catalogRoleListGrowsToItsRows()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
-    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    Settings::set("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { Settings::remove("workspace/skin"); darkPalette(); });
     HgsClient client(FakeCli::program(script()));
     TeamController controller(&client);
     // Settings > Teams: the editor sits in a scrolling page at its size hint.
@@ -993,10 +994,10 @@ void TestTeamsUiCatalog::catalogRoleListGrowsToItsRows()
 // approval, new phases, max members, the checks, and the folding blocks.
 void TestTeamsUiCatalog::catalogTemplateEditorRosterSkeletonAndChecks()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
+    Settings::set("workspace/skin", "whitewh");
     const auto keys = {CollapsibleBlock::settingsKey("catalog-roster"), CollapsibleBlock::settingsKey("catalog-skeleton"), QStringLiteral("ui/catalogHideUnusedRoles")};
-    for (const auto &key : keys) QSettings().remove(key);
-    const auto restore = qScopeGuard([keys] { QSettings().remove("workspace/skin"); for (const auto &key : keys) QSettings().remove(key); darkPalette(); });
+    for (const auto &key : keys) Settings::remove(key);
+    const auto restore = qScopeGuard([keys] { Settings::remove("workspace/skin"); for (const auto &key : keys) Settings::remove(key); darkPalette(); });
     HgsClient client(FakeCli::program(script()));
     TeamController controller(&client);
     TeamCatalogEditor editor(&controller);
@@ -1065,7 +1066,7 @@ void TestTeamsUiCatalog::catalogTemplateEditorRosterSkeletonAndChecks()
     // Roster and Task skeleton fold into summaries, remembered.
     editor.findChild<QPushButton *>("teamTemplateRosterToggle")->click();
     QTRY_VERIFY(editor.findChildren<QWidget *>("teamTemplateSeatCount").isEmpty());
-    QCOMPARE(QSettings().value(CollapsibleBlock::settingsKey("catalog-roster")).toBool(), false);
+    QCOMPARE(Settings::value(CollapsibleBlock::settingsKey("catalog-roster")).toBool(), false);
     QCOMPARE(editor.findChild<QLabel *>("teamTemplateRosterSummary")->text(), QStringLiteral("2 members + 1 only if needed · 2 roles"));
     editor.findChild<QPushButton *>("teamTemplateSkeletonToggle")->click();
     QTRY_VERIFY(editor.findChild<QLabel *>("teamTemplateSkeletonSummary"));
@@ -1109,8 +1110,8 @@ void TestTeamsUiCatalog::catalogTemplateEditorRosterSkeletonAndChecks()
 // rule, the added roles, approval and work mode, with the roster as chips.
 void TestTeamsUiCatalog::catalogRoutingEditsAndTriesAGoal()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
-    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    Settings::set("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { Settings::remove("workspace/skin"); darkPalette(); });
     // The prototype's matching, as the server's route: "+ role" rules add and
     // keep looking, "everything else" always matches, stop words never do.
     auto c = parseCatalog(catalog());
@@ -1197,9 +1198,9 @@ void TestTeamsUiCatalog::catalogRoutingEditsAndTriesAGoal()
 // out-of-date banner with Ask designer to redo.
 void TestTeamsUiCatalog::catalogHeaderRevertDraftAndBanners()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
+    Settings::set("workspace/skin", "whitewh");
     const auto restore = qScopeGuard([this] {
-        QSettings().remove("workspace/skin"); darkPalette();
+        Settings::remove("workspace/skin"); darkPalette();
         QFile c(script() + ".catalog"); if (c.open(QIODevice::WriteOnly)) c.write(QJsonDocument(catalog()).toJson(QJsonDocument::Compact));
     });
     HgsClient client(FakeCli::program(script()));
@@ -1313,10 +1314,10 @@ void TestTeamsUiCatalog::catalogHeaderRevertDraftAndBanners()
 // Shots in both themes, with the Skip form open.
 void TestTeamsUiCatalog::inspectorShowsThePipelineAndOverridesAskForAReason()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
+    Settings::set("workspace/skin", "whitewh");
     TeamUi::workedClock() = &stageNow;
     const auto restore = qScopeGuard([] {
-        QSettings().remove("workspace/skin"); darkPalette();
+        Settings::remove("workspace/skin"); darkPalette();
         TeamUi::workedClock() = [] { return double(QDateTime::currentSecsSinceEpoch()); };
     });
     darkPalette();
@@ -1442,10 +1443,10 @@ void TestTeamsUiCatalog::inspectorShowsThePipelineAndOverridesAskForAReason()
 // lists the suites hgs recorded (no shots line: hgs records none).
 void TestTeamsUiCatalog::commandStagesShowTheirCommandExitAndTail()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
+    Settings::set("workspace/skin", "whitewh");
     TeamUi::workedClock() = &stageNow;
     const auto restore = qScopeGuard([] {
-        QSettings().remove("workspace/skin"); darkPalette();
+        Settings::remove("workspace/skin"); darkPalette();
         TeamUi::workedClock() = [] { return double(QDateTime::currentSecsSinceEpoch()); };
     });
     const QJsonObject value = commandTeam();
@@ -1566,8 +1567,8 @@ void TestTeamsUiCatalog::commandStagesShowTheirCommandExitAndTail()
 // (and one left with none) before it strips them; No keeps everything.
 void TestTeamsUiCatalog::catalogRoleDeleteNamesThePresetsItStrips()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
-    const auto restore = qScopeGuard([this] { QSettings().remove("workspace/skin"); darkPalette(); writeCatalog(script(), catalog()); });
+    Settings::set("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([this] { Settings::remove("workspace/skin"); darkPalette(); writeCatalog(script(), catalog()); });
     writeCatalog(script(), pipelineCatalog());
     HgsClient client(FakeCli::program(script()));
     TeamController controller(&client);

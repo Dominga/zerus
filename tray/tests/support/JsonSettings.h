@@ -1,6 +1,7 @@
 #pragma once
 
 #include "OffGuiThread.h"
+#include "Settings.h"
 #include "SettingsJson.h"
 
 #include <QByteArray>
@@ -50,5 +51,5 @@ inline void removeSetting(const QString &key)
 inline void clearSettings()
 {
     SettingsJson::reset();
-    QSettings().clear();
+    Settings::flush();QSettings().clear();
 }

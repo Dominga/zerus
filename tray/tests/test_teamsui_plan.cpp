@@ -3,6 +3,7 @@
 // The fixture (the fake hgs, its teams and the shot helpers) is shared:
 // support/TeamsUiFixture.h.
 #include "TeamsUiFixture.h"
+#include "Settings.h"
 #include "ActivityView.h"
 #include "CollapsibleBlock.h"
 #include "HgsClient.h"
@@ -186,8 +187,8 @@ void TestTeamsUiPlan::planningEditsSendTheWholePlan()
 // was written against (the server refuses it after a renumbering).
 void TestTeamsUiPlan::sendBackFormBelongsToItsTeamAndPhase()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
-    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); });
+    Settings::set("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { Settings::remove("workspace/skin"); });
     auto first = prototypeTeam(); first["revision"] = 30;
     setTeam(first);
     HgsClient client(FakeCli::program(script()));
@@ -2013,8 +2014,8 @@ void TestTeamsUiPlan::aTaskThatHasNotStartedMovesToAnotherPhase()
 
 void TestTeamsUiPlan::anAutoAcceptedDraftReadsAsDraftUntilItStarts()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
-    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    Settings::set("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { Settings::remove("workspace/skin"); darkPalette(); });
     setTeam(autoDraftTeam(false, false));
     HgsClient client(FakeCli::program(script()));
     TeamController controller(&client);
@@ -2301,8 +2302,8 @@ void TestTeamsUiPlan::planTaskTakesModelsAndARole()
 
 void TestTeamsUiPlan::phaseScrollsInEveryView()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
-    QSettings().remove("ui/collapsed/team/needs");
+    Settings::set("workspace/skin", "whitewh");
+    Settings::remove("ui/collapsed/team/needs");
     setTeam(prototypeTeam());
     HgsClient client(FakeCli::program(script()));
     TeamController controller(&client);
@@ -2394,12 +2395,12 @@ void TestTeamsUiPlan::phaseScrollsInEveryView()
         lightShot(&workspace, "ux-4-graph-light");
     }
     darkPalette();
-    QSettings().remove("workspace/skin");
+    Settings::remove("workspace/skin");
 }
 
 void TestTeamsUiPlan::phaseScrollDecisions()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
+    Settings::set("workspace/skin", "whitewh");
     setTeam(prototypeTeam());
     HgsClient client(FakeCli::program(script()));
     TeamController controller(&client);
@@ -2486,7 +2487,7 @@ void TestTeamsUiPlan::phaseScrollDecisions()
         lightShot(&workspace, "ux-4-phase-rejected-light");
     }
     darkPalette();
-    QSettings().remove("workspace/skin");
+    Settings::remove("workspace/skin");
 }
 
 QTEST_MAIN(TestTeamsUiPlan)

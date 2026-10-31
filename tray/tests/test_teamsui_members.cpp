@@ -3,6 +3,7 @@
 // The fixture (the fake hgs, its teams and the shot helpers) is shared:
 // support/TeamsUiFixture.h.
 #include "TeamsUiFixture.h"
+#include "Settings.h"
 #include "ActivityView.h"
 #include "CollapsibleBlock.h"
 #include "HgsClient.h"
@@ -407,7 +408,7 @@ void TestTeamsUiMembers::memberQueueListsCurrentAndReturned()
     QCOMPARE(more->text(), QStringLiteral("+3 more"));
     // The workspace member card shows the same queue, folded behind "3 tasks"
     // until opened (U25), and opens its task.
-    QSettings().remove("ui/collapsed/teamMemberTasks/team-3/backend");
+    Settings::remove("ui/collapsed/teamMemberTasks/team-3/backend");
     const auto backendCard = [&workspace]() -> QWidget * {
         for (auto *m : workspace.findChildren<QFrame *>("teamWorkspaceMember")) if (m->property("teamMember") == "backend") return m;
         return nullptr;
@@ -1629,9 +1630,9 @@ void TestTeamsUiMembers::memberMenuScalesAndDrains()
 // that open the task; the members' task lists are folded too.
 void TestTeamsUiMembers::sideListsAndMemberTasks()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
-    for (const auto &key : {"ui/collapsed/team/needs", "ui/collapsed/team/stuck", "ui/collapsed/team/plan"}) QSettings().remove(key);
-    QSettings().remove("ui/collapsed/teamMemberTasks/team-1/frontend");
+    Settings::set("workspace/skin", "whitewh");
+    for (const auto &key : {"ui/collapsed/team/needs", "ui/collapsed/team/stuck", "ui/collapsed/team/plan"}) Settings::remove(key);
+    Settings::remove("ui/collapsed/teamMemberTasks/team-1/frontend");
     // Stuck in Build: #2's question, #3 unconfirmed, #4 decided; #5 and #6 wait.
     auto stuck = prototypeTeam();
     auto tasks = stuck["tasks"].toArray();
@@ -1758,7 +1759,7 @@ void TestTeamsUiMembers::sideListsAndMemberTasks()
     workspace.setTheme(false);
     if (!qEnvironmentVariable("ZERUS_TEAM_SHOTS").isEmpty()) lightShot(&workspace, "ux-4-planning-light");
     darkPalette();
-    QSettings().remove("workspace/skin");
+    Settings::remove("workspace/skin");
 }
 
 QTEST_MAIN(TestTeamsUiMembers)

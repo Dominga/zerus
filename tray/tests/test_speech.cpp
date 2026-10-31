@@ -1,4 +1,5 @@
 #include "JsonSettings.h"
+#include "Settings.h"
 #include "speech/SpeechClient.h"
 #include "speech/SpeechRecorder.h"
 #include "speech/RoundVideo.h"
@@ -253,7 +254,7 @@ private slots:
         QCoreApplication::setOrganizationName("zerus-speech-tests"); QCoreApplication::setApplicationName("speech");
         QSettings::setDefaultFormat(QSettings::IniFormat); QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_home.path());
     }
-    void init() { ComposerDraftStore::flushWrites(); QDir(ComposerDraftStore::directory()).removeRecursively(); QSettings().clear(); }
+    void init() { ComposerDraftStore::flushWrites(); QDir(ComposerDraftStore::directory()).removeRecursively(); Settings::flush();QSettings().clear(); }
     void taskVoiceTranscribesIntoItsDraftWithoutNativeInput() {
         QTemporaryDir dir; MessageComposer composer; composer.setTaskMode(true); composer.setSessionKey("task-description\nproject\ntask-one");
         composer.setAvailability(true); QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey())); composer.show();
@@ -365,11 +366,11 @@ private slots:
         SpeechSettings settings(fixture(dir.path()));settings.setPeers({"speech-host","other-host"});settings.show();settings.refresh();
         auto *list=settings.findChild<QListWidget *>("speechProfiles");auto *refresh=settings.findChild<QPushButton *>("speechRefresh");
         QTRY_VERIFY(refresh->isEnabled());QCOMPARE(list->count(),3);QCOMPARE(list->currentItem()->data(Qt::UserRole).toJsonObject().value("id").toString(),"russian");
-        list->setCurrentRow(0);QCOMPARE(QSettings().value("speech/profile").toString(),"russian");
-        settings.findChild<QPushButton *>("speechUseDefault")->click();QCOMPARE(QSettings().value("speech/profile").toString(),"first");
+        list->setCurrentRow(0);QCOMPARE(Settings::value("speech/profile").toString(),"russian");
+        settings.findChild<QPushButton *>("speechUseDefault")->click();QCOMPARE(Settings::value("speech/profile").toString(),"first");
         list->setCurrentRow(2);QVERIFY(settings.findChild<QPushButton *>("speechEdit")->isEnabled());
-        const auto owner=QSettings().value("speech/machine_id").toString();auto *host=settings.findChild<QComboBox *>("speechComputer");host->setCurrentIndex(host->findData("other-host"));
-        QTRY_VERIFY(refresh->isEnabled());QCOMPARE(QSettings().value("speech/profile").toString(),"first");QCOMPARE(QSettings().value("speech/machine_id").toString(),owner);
+        const auto owner=Settings::value("speech/machine_id").toString();auto *host=settings.findChild<QComboBox *>("speechComputer");host->setCurrentIndex(host->findData("other-host"));
+        QTRY_VERIFY(refresh->isEnabled());QCOMPARE(Settings::value("speech/profile").toString(),"first");QCOMPARE(Settings::value("speech/machine_id").toString(),owner);
     }
     void settingsCanRefreshAfterSpeechIsRestoredOnReceiver() {
         QTemporaryDir dir;const auto executable=fixture(dir.path());QFile legacy(dir.path()+"/management-legacy");QVERIFY(legacy.open(QIODevice::WriteOnly));legacy.close();
@@ -377,7 +378,7 @@ private slots:
         SpeechSettings settings(executable);settings.show();settings.refresh();
         auto *status=settings.findChild<QLabel *>("speechSettingsStatus");auto *refresh=settings.findChild<QPushButton *>("speechRefresh");
         QTRY_VERIFY(refresh->isEnabled());QVERIFY(!settings.findChild<QPushButton *>("speechAdd")->isEnabled());QVERIFY(status->text().contains("Update hgs"));
-        QCOMPARE(QSettings().value("speech/profile").toString(),"russian");QVERIFY(!QFile::exists(dir.path()+"/management-actions"));
+        QCOMPARE(Settings::value("speech/profile").toString(),"russian");QVERIFY(!QFile::exists(dir.path()+"/management-actions"));
         QVERIFY(legacy.remove());refresh->click();QTRY_VERIFY(refresh->isEnabled());QVERIFY(settings.findChild<QPushButton *>("speechAdd")->isEnabled());
         QCOMPARE(settings.findChild<QListWidget *>("speechProfiles")->count(),1);
     }
@@ -423,7 +424,7 @@ private slots:
             for(const auto &field:fields)QCOMPARE(field.first->text(),field.second);
             QCOMPARE(credential->currentData().toString(),"replace");QCOMPARE(type->currentData().toString(),"openai_http");QVERIFY(save->isEnabled());QCOMPARE(failure->isHidden(),openSucceeds);
             if(!openSucceeds)QVERIFY(failure->text().contains(opened[1].toString()));checked=true;editor->reject();
-        });add->click();QVERIFY(checked);QVERIFY(!QFile::exists(dir.path()+"/management-actions"));QVERIFY(QSettings().value("speech/providerOperation").toByteArray().isEmpty());
+        });add->click();QVERIFY(checked);QVERIFY(!QFile::exists(dir.path()+"/management-actions"));QVERIFY(Settings::value("speech/providerOperation").toByteArray().isEmpty());
     }
     void managementRequiresItsOwnCapabilityBeforeSendingAKey() {
         QTemporaryDir dir;const auto executable=fixture(dir.path());QFile legacy(dir.path()+"/management-legacy");QVERIFY(legacy.open(QIODevice::WriteOnly));legacy.close();
@@ -447,12 +448,12 @@ private slots:
         });
         add->click();QVERIFY(exercised);auto *list=settings.findChild<QListWidget *>("speechProfiles");QTRY_COMPARE(list->count(),2);
         QCOMPARE(list->currentItem()->data(Qt::UserRole).toJsonObject().value("id").toString(),"remote-fixture");
-        QVERIFY(QSettings().value("speech/profile").toString().isEmpty());QSettings saved;saved.sync();QFile ini(saved.fileName());QVERIFY(ini.open(QIODevice::ReadOnly));QVERIFY(!ini.readAll().contains("synthetic-private-key"));
+        QVERIFY(Settings::value("speech/profile").toString().isEmpty());QSettings saved;saved.sync();QFile ini(saved.fileName());QVERIFY(ini.open(QIODevice::ReadOnly));QVERIFY(!ini.readAll().contains("synthetic-private-key"));
         QFile log(dir.path()+"/management-actions");QVERIFY(log.open(QIODevice::ReadOnly));const auto request=QJsonDocument::fromJson(log.readLine()).object();
         QCOMPARE(request.value("expected_machine_id").toString(),"bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb");QCOMPARE(request.value("expected_revision").toInteger(),1);
         QCOMPARE(request.value("profile").toObject().value("base_url").toString(),"https://speech.example.net/v1");QVERIFY(!request.value("profile").toObject().contains("device"));
         QCOMPARE(request.value("credential").toObject().value("value").toString(),"synthetic-private-key");QVERIFY(log.readAll().isEmpty());
-        settings.findChild<QPushButton *>("speechUseDefault")->click();QCOMPARE(QSettings().value("speech/profile").toString(),"remote-fixture");QCOMPARE(QSettings().value("speech/profile_revision").toLongLong(),2);
+        settings.findChild<QPushButton *>("speechUseDefault")->click();QCOMPARE(Settings::value("speech/profile").toString(),"remote-fixture");QCOMPARE(Settings::value("speech/profile_revision").toLongLong(),2);
     }
     void settingsRemoteCredentialModesAndHttpConsent_data() {
         QTest::addColumn<QString>("mode");QTest::newRow("keep")<<QString("keep");QTest::newRow("remove")<<QString("remove");
@@ -494,7 +495,7 @@ private slots:
             dialog->findChild<QPushButton *>("speechSaveProfile")->click();auto *status=dialog->findChild<QLabel *>("speechEditStatus");QTRY_VERIFY(status->text().contains("configuration changed"));
             QCOMPARE(name->text(),"My unsaved edit");QVERIFY(!dialog->findChild<QPushButton *>("speechSaveProfile")->isEnabled());retained=true;dialog->reject();
         });
-        edit->click();QVERIFY(retained);QVERIFY(QSettings().value("speech/providerOperation").toByteArray().isEmpty());
+        edit->click();QVERIFY(retained);QVERIFY(Settings::value("speech/providerOperation").toByteArray().isEmpty());
         QFile log(dir.path()+"/management-actions");QVERIFY(log.open(QIODevice::ReadOnly));QVERIFY(!log.readLine().isEmpty());QVERIFY(log.readLine().isEmpty());
     }
     void settingsLostSaveUsesTheSameReceiptAfterRestart() {
@@ -505,11 +506,11 @@ private slots:
                 auto *dialog=settings.findChild<QDialog *>("speechProfileEditor");QVERIFY(dialog);dialog->findChild<QLineEdit *>("speechEditName")->setText("Saved despite lost response");
                 dialog->findChild<QPushButton *>("speechSaveProfile")->click();auto *check=dialog->findChild<QPushButton *>("speechEditCheckOperation");QTRY_VERIFY(check->isEnabled());
                 QVERIFY(dialog->findChild<QLabel *>("speechEditStatus")->text().contains("not confirmed"));QVERIFY(!dialog->findChild<QPushButton *>("speechSaveProfile")->isEnabled());
-                requestId=QJsonDocument::fromJson(QSettings().value("speech/providerOperation").toByteArray()).object().value("request_id").toString();QVERIFY(!requestId.isEmpty());dialog->reject();
+                requestId=QJsonDocument::fromJson(Settings::value("speech/providerOperation").toByteArray()).object().value("request_id").toString();QVERIFY(!requestId.isEmpty());dialog->reject();
             });edit->click();
         }
         SpeechSettings restored(executable);restored.refresh();auto *check=restored.findChild<QPushButton *>("speechCheckOperation");QVERIFY(!check->isHidden());check->click();
-        QTRY_VERIFY(QSettings().value("speech/providerOperation").toByteArray().isEmpty());QTRY_VERIFY(restored.findChild<QPushButton *>("speechEdit")->isEnabled());
+        QTRY_VERIFY(Settings::value("speech/providerOperation").toByteArray().isEmpty());QTRY_VERIFY(restored.findChild<QPushButton *>("speechEdit")->isEnabled());
         QCOMPARE(restored.findChild<QListWidget *>("speechProfiles")->currentItem()->data(Qt::UserRole).toJsonObject().value("name").toString(),"Saved despite lost response");
         QFile log(dir.path()+"/management-actions");QVERIFY(log.open(QIODevice::ReadOnly));QCOMPARE(QJsonDocument::fromJson(log.readLine()).object().value("request_id").toString(),requestId);QVERIFY(log.readLine().isEmpty());
     }
@@ -517,7 +518,7 @@ private slots:
         QTemporaryDir dir;const QJsonObject pending{{"host",""},{"computer","This computer"},{"machine_id","bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb"},{"request_id","aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"},{"action","profile_upsert"}};
         setJsonSetting("speech/providerOperation",QJsonDocument(pending).toJson(QJsonDocument::Compact));
         SpeechSettings settings(fixture(dir.path()));settings.refresh();auto *check=settings.findChild<QPushButton *>("speechCheckOperation");check->click();QTRY_VERIFY(check->isEnabled());
-        QCOMPARE(QJsonDocument::fromJson(QSettings().value("speech/providerOperation").toByteArray()).object(),pending);
+        QCOMPARE(QJsonDocument::fromJson(Settings::value("speech/providerOperation").toByteArray()).object(),pending);
         QVERIFY(!settings.findChild<QPushButton *>("speechAdd")->isEnabled());QVERIFY(!QFile::exists(dir.path()+"/management-actions"));
     }
     void managementTransportNeverEchoesAReplacementKey() {
@@ -535,8 +536,8 @@ private slots:
         QTimer::singleShot(0,&settings,[&]{auto *dialog=settings.findChild<QMessageBox *>("speechRemoveConfirm");QVERIFY(dialog);QVERIFY(dialog->text().contains("Russian"));dialog->reject();});remove->click();
         QVERIFY(!QFile::exists(dir.path()+"/management-actions"));
         QTimer::singleShot(0,&settings,[&]{settings.findChild<QPushButton *>("speechConfirmRemove")->click();});remove->click();
-        QTRY_COMPARE(settings.findChild<QListWidget *>("speechProfiles")->count(),0);QCOMPARE(QSettings().value("speech/profile").toString(),"russian");
-        QCOMPARE(QSettings().value("speech/machine_id").toString(),"bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb");QVERIFY(settings.findChild<QLabel *>("speechDefault")->text().contains("unavailable"));
+        QTRY_COMPARE(settings.findChild<QListWidget *>("speechProfiles")->count(),0);QCOMPARE(Settings::value("speech/profile").toString(),"russian");
+        QCOMPARE(Settings::value("speech/machine_id").toString(),"bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb");QVERIFY(settings.findChild<QLabel *>("speechDefault")->text().contains("unavailable"));
     }
     void settingsTestPinsSavedProfileRevision() {
         QTemporaryDir dir;SpeechSettings settings(fixture(dir.path()));settings.refresh();auto *test=settings.findChild<QPushButton *>("speechTest");QTRY_VERIFY(test->isEnabled());test->click();
@@ -548,9 +549,9 @@ private slots:
     void runningProviderTestPollsItsReceiptWithoutAnotherMutation() {
         QTemporaryDir dir;QFile running(dir.path()+"/running-test");QVERIFY(running.open(QIODevice::WriteOnly));running.close();
         SpeechSettings settings(fixture(dir.path()));settings.refresh();auto *test=settings.findChild<QPushButton *>("speechTest");QTRY_VERIFY(test->isEnabled());test->click();
-        QTRY_VERIFY(!QSettings().value("speech/providerOperation").toByteArray().isEmpty());
+        QTRY_VERIFY(!Settings::value("speech/providerOperation").toByteArray().isEmpty());
         QTRY_VERIFY(settings.findChild<QLabel *>("speechOperationResult")->text().contains("completed successfully"));
-        QVERIFY(QSettings().value("speech/providerOperation").toByteArray().isEmpty());
+        QVERIFY(Settings::value("speech/providerOperation").toByteArray().isEmpty());
         QFile actions(dir.path()+"/management-actions");QVERIFY(actions.open(QIODevice::ReadOnly));const auto request=QJsonDocument::fromJson(actions.readLine()).object();QVERIFY(actions.readLine().isEmpty());
         QFile payload(dir.path()+"/payload");QVERIFY(payload.open(QIODevice::ReadOnly));
         QFile calls(dir.path()+"/calls");QVERIFY(calls.open(QIODevice::ReadOnly));QVERIFY(calls.readAll().count("speech")>=2);
@@ -698,7 +699,7 @@ private slots:
             }
             QTest::mouseClick(mode,Qt::LeftButton);
             QCOMPARE(voice->fullLabel(),restored?QString("Voice"):QString("Video"));
-            QCOMPARE(QSettings().value("speech/video_mode").toBool(),!restored);
+            QCOMPARE(Settings::value("speech/video_mode").toBool(),!restored);
             QCOMPARE(audio->starts,0);QCOMPARE(video->starts,0);QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));
         }
     }
@@ -707,7 +708,7 @@ private slots:
         auto *recorder=new FixtureRecorder;SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},recorder);
         auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());
         QTest::mouseClick(voice,Qt::LeftButton);QCOMPARE(recorder->starts,1);QCOMPARE(recorder->stops,0);
-        QCOMPARE(voice->fullLabel(),"Send (0:00)");QVERIFY(!QSettings().value("speech/video_mode",false).toBool());
+        QCOMPARE(voice->fullLabel(),"Send (0:00)");QVERIFY(!Settings::value("speech/video_mode",false).toBool());
         QTRY_COMPARE(composer.findChild<QComboBox *>("voiceProvider")->count(),1);
         QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));QCOMPARE(recorder->stops,0);
         QTest::mouseClick(voice,Qt::LeftButton);
@@ -718,9 +719,9 @@ private slots:
     void previewPreferencePersistsOnThisDevice() {
         QTemporaryDir dir;const auto executable=fixture(dir.path());
         { SpeechSettings settings(executable);auto *option=settings.findChild<QCheckBox *>("speechPreviewBeforeSend");
-          QVERIFY(option);QVERIFY(!option->isChecked());option->click();QVERIFY(QSettings().value("speech/preview_before_send").toBool()); }
+          QVERIFY(option);QVERIFY(!option->isChecked());option->click();QVERIFY(Settings::value("speech/preview_before_send").toBool()); }
         SpeechSettings restored(executable);QVERIFY(restored.findChild<QCheckBox *>("speechPreviewBeforeSend")->isChecked());
-        QVERIFY(!QSettings().contains("speech/profile"));QVERIFY(!QSettings().contains("speech/video_mode"));
+        QVERIFY(!Settings::contains("speech/profile"));QVERIFY(!Settings::contains("speech/video_mode"));
     }
     void secondClickUsesCapturedPreviewPreference_data() {
         QTest::addColumn<bool>("videoMode");QTest::addColumn<bool>("preview");
@@ -762,12 +763,12 @@ private slots:
         auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");auto *mode=composer.findChild<ToolbarChip *>("voiceMode");QTRY_VERIFY(voice->isEnabled());
         QTest::mouseClick(voice,Qt::LeftButton);QCOMPARE(videoMode?video->starts:audio->starts,1);QVERIFY(!mode->isEnabled());
         QVERIFY(!voice->isEnabled());QTest::mouseClick(voice,Qt::LeftButton);QCOMPARE(videoMode?video->starts:audio->starts,1);
-        mode->click();QCOMPARE(QSettings().value("speech/video_mode").toBool(),videoMode);
+        mode->click();QCOMPARE(Settings::value("speech/video_mode").toBool(),videoMode);
         if(videoMode)emit video->started();else emit audio->started();
-        QTRY_VERIFY(voice->isEnabled());mode->click();QCOMPARE(QSettings().value("speech/video_mode").toBool(),videoMode);
+        QTRY_VERIFY(voice->isEnabled());mode->click();QCOMPARE(Settings::value("speech/video_mode").toBool(),videoMode);
         composer.findChild<QPushButton *>("voiceStopPreview")->click();
         QTRY_VERIFY(composer.findChild<QPushButton *>("voiceSend")->isEnabled());QVERIFY(!mode->isEnabled());
-        mode->click();QCOMPARE(QSettings().value("speech/video_mode").toBool(),videoMode);
+        mode->click();QCOMPARE(Settings::value("speech/video_mode").toBool(),videoMode);
         QCOMPARE(videoMode?video->stops:audio->stops,1);QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));
     }
     void cancelledSendClickKeepsCaptureUntilExplicitCancel() {

@@ -1,4 +1,5 @@
 #include <QtTest>
+#include "Settings.h"
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -48,21 +49,21 @@ private slots:
     }
     void machineAppearanceFollowsItsWriters()
     {
-        QSettings().clear(); MachineAppearance::invalidate();
+        Settings::flush();QSettings().clear(); MachineAppearance::invalidate();
         const QColor automatic = MachineAppearance::color("arch");
         // Painting reads the cache; only the appearance writers change it.
         QSettings().setValue("machines/colors/arch", "#123456");
         QCOMPARE(MachineAppearance::color("arch"), automatic);
         MachineAppearance::setColor("arch", QColor(255, 136, 0, 90));
         QCOMPARE(MachineAppearance::color("arch"), QColor("#ff8800"));
-        QCOMPARE(QSettings().value("machines/colors/arch").toString(), QString("#ff8800"));
+        QCOMPARE(Settings::value("machines/colors/arch").toString(), QString("#ff8800"));
         MachineAppearance::setColor("arch", QColor());
         QCOMPARE(MachineAppearance::color("arch"), QColor("#ff8800"));
         MachineAppearance::resetColor("arch");
-        QCOMPARE(MachineAppearance::color("arch"), automatic); QVERIFY(!QSettings().contains("machines/colors/arch"));
+        QCOMPARE(MachineAppearance::color("arch"), automatic); QVERIFY(!Settings::contains("machines/colors/arch"));
         QVERIFY(!MachineAppearance::vivid("arch"));
         MachineAppearance::setVivid("arch", true);
-        QVERIFY(MachineAppearance::vivid("arch")); QVERIFY(QSettings().value("machines/vivid/arch").toBool());
+        QVERIFY(MachineAppearance::vivid("arch")); QVERIFY(Settings::value("machines/vivid/arch").toBool());
         QSettings().setValue("machines/vivid/arch", false);
         QVERIFY(MachineAppearance::vivid("arch"));
         MachineAppearance::invalidate();
@@ -74,7 +75,7 @@ private slots:
         QCOMPARE(MachineAppearance::color("arch"), automatic);
         QCoreApplication::setApplicationName("appearance");
         QCOMPARE(MachineAppearance::color("arch"), QColor("#123456"));
-        QSettings().clear(); MachineAppearance::invalidate();
+        Settings::flush();QSettings().clear(); MachineAppearance::invalidate();
     }
     void textMetricsMatchQFontMetrics()
     {

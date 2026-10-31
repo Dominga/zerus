@@ -3,6 +3,7 @@
 // The fixture (the fake hgs, its teams and the shot helpers) is shared:
 // support/TeamsUiFixture.h.
 #include "TeamsUiFixture.h"
+#include "Settings.h"
 #include "ActivityView.h"
 #include "HgsClient.h"
 #include "TeamHeat.h"
@@ -423,9 +424,9 @@ void TestTeamsUiProfile::profileOfALargeTeamStaysResponsive()
 void TestTeamsUiProfile::heatTintsGraphAndBoardByTimeOrTokens()
 {
     // Off by default: no remembered choice for this team or another one.
-    QSettings().remove("teams/heat/team-1"); QSettings().remove("teams/heat/team-2");
+    Settings::remove("teams/heat/team-1"); Settings::remove("teams/heat/team-2");
     const auto forget = qScopeGuard([this] {
-        QSettings().remove("teams/heat/team-1"); QSettings().remove("teams/heat/team-2");
+        Settings::remove("teams/heat/team-1"); Settings::remove("teams/heat/team-2");
         QFile::remove(script() + ".profilerefuse");
     });
     setTeam(heatTeam());
@@ -593,7 +594,7 @@ void TestTeamsUiProfile::heatTintsGraphAndBoardByTimeOrTokens()
     heatButton(again.get(), "off")->click();
     QTRY_VERIFY(!again->findChild<QWidget *>("teamHeatLegend"));
     QCOMPARE(TeamUi::heatMode("team-1"), QStringLiteral("off"));
-    QVERIFY(!QSettings().contains("teams/heat/team-1"));
+    QVERIFY(!Settings::contains("teams/heat/team-1"));
 }
 
 // #709 L6: the tint is read again a minute later; that read rebuilds Graph

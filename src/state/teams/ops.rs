@@ -4343,7 +4343,10 @@ fn cancel(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     let phase = task.phase;
     let phase_build = task.phase_build;
     task.status = TaskStatus::Cancelled;
-    events.push(Event::new("cancelled", json!({"by":label,"task":id,"revoked_attempt":revoked})));
+    // #759: the tasks it held start once their other dependencies are done;
+    // the event and the lead's inbox name them for a re-plan.
+    let released = super::plan::waiting_on(team, id);
+    events.push(Event::new("cancelled", json!({"by":label,"task":id,"revoked_attempt":revoked,"released":released})));
     // U59: a cancelled build fails a pending close; the phase stays open.
     if phase_build {
         if let Some(n) = team.free_close_pending.take() {
@@ -4351,7 +4354,7 @@ fn cancel(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
         }
     }
     discard_empty_draft(team, phase, &label);
-    Ok(json!({"status":"cancelled","task":id,"revoked_attempt":revoked}))
+    Ok(json!({"status":"cancelled","task":id,"revoked_attempt":revoked,"released":released}))
 }
 
 /// A human settles an unconfirmed hand-off after checking the session: it

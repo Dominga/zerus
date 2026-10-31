@@ -657,6 +657,11 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
                 }
             }
             // C3: every open task says what blocks it and which action frees it.
+            // #759: cancelled dependencies no longer hold the task.
+            let released = super::plan::cancelled_deps(team, task);
+            if !released.is_empty() {
+                value["released_by_cancel"] = json!(released);
+            }
             if let Some(waits) = super::inbox::waits(team, task, ready.contains(&task.id)) {
                 value["waits"] = waits;
             }

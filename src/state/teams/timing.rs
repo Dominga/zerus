@@ -39,6 +39,10 @@ fn satisfied(team: &Team, id: u32, kind: DependencyKind) -> Moment {
     if !super::plan::satisfied(team, id, kind) {
         return Moment::NotYet;
     }
+    // #759: a cancelled dependency released it; when is not recorded.
+    if dep.status == super::model::TaskStatus::Cancelled {
+        return Moment::Unknown;
+    }
     let at = if team.settings.all_hard || kind == DependencyKind::Hard {
         dep.attempts.iter().rev().find_map(|attempt| attempt.decided_at)
     } else {

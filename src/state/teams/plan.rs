@@ -158,15 +158,30 @@ pub(crate) fn chain(tasks: &[Task], id: u32) -> BTreeSet<u32> {
 }
 
 /// Whether one dependency lets its dependent start: a hard one needs the
-/// dependency Accepted, a soft one only started.
+/// dependency Accepted, a soft one only started. #759: a cancelled one never
+/// will be either, so it no longer holds its dependents.
 pub(crate) fn satisfied(team: &Team, task: u32, kind: DependencyKind) -> bool {
     let Some(dep) = team.task(task) else { return false };
+    if dep.status == TaskStatus::Cancelled {
+        return true;
+    }
     let hard = team.settings.all_hard || kind == DependencyKind::Hard;
     if hard {
         dep.status == TaskStatus::Accepted
     } else {
         matches!(dep.status, TaskStatus::InProgress | TaskStatus::Submitted | TaskStatus::InReview | TaskStatus::InTest | TaskStatus::Accepted)
     }
+}
+
+/// #759: the unfinished tasks waiting directly on `id`: the ones its
+/// cancellation releases.
+pub(crate) fn waiting_on(team: &Team, id: u32) -> Vec<u32> {
+    team.tasks.iter().filter(|task| !task.status.finished() && task.deps.iter().any(|dep| dep.task == id)).map(|task| task.id).collect()
+}
+
+/// #759: the cancelled dependencies of a task, which no longer hold it.
+pub(crate) fn cancelled_deps(team: &Team, task: &Task) -> Vec<u32> {
+    task.deps.iter().filter(|dep| team.task(dep.task).is_some_and(|found| found.status == TaskStatus::Cancelled)).map(|dep| dep.task).collect()
 }
 
 /// Every task that depends on `id`, directly or through another task (C6).
@@ -1192,6 +1207,57 @@ mod tests {
         done.tasks[1].status = Accepted;
         done.members[1].starved_since = Some(0.0);
         assert!(!waiting_for_owner(&done));
+    }
+
+    /// #759 (#716 in team 528aebfe): a cancelled dependency never holds its
+    /// dependent; the others still do, and the lead hears which it released.
+    #[test]
+    fn a_cancelled_dependency_releases_the_tasks_that_wait_on_it() {
+        let mut t = team(vec![task(1, &[], Pending), task(2, &[], Pending), task(3, &[], Accepted), task(4, &[(1, Hard), (2, Soft), (3, Hard)], Pending)]);
+        t.tasks[0].status = InProgress;
+        t.tasks[1].status = InProgress;
+        assert!(!ready(&t).contains(&4));
+        // #1 cancelled: it no longer holds #4, and #2 in work meets the soft one.
+        t.tasks[0].status = Cancelled;
+        assert_eq!(cancelled_deps(&t, &t.tasks[3]), vec![1]);
+        assert!(ready(&t).contains(&4), "#2 in work satisfies the soft dependency; #1 no longer holds");
+        // A hard dependency still unmet keeps holding it.
+        t.tasks[3].deps[1].kind = Hard;
+        assert!(!ready(&t).contains(&4));
+        t.tasks[1].status = Cancelled;
+        assert_eq!(cancelled_deps(&t, &t.tasks[3]), vec![1, 2]);
+        assert!(ready(&t).contains(&4), "both cancelled, #3 accepted: ready");
+        assert_eq!(waiting_on(&t, 3), vec![4]);
+        let running = super::super::model::TeamStatus::Running;
+        let inbox = super::super::inbox::items(&Team { status: running, ..t.clone() });
+        let item = inbox.iter().find(|item| item.kind == "dependency_cancelled").expect("the lead's item");
+        assert!(item.summary.contains("no longer waits on cancelled #1, #2"), "{}", item.summary);
+        assert_eq!(item.task, Some(4));
+        // Once it started, the item goes.
+        t.tasks[3].status = InProgress;
+        assert!(super::super::inbox::items(&Team { status: running, ..t }).iter().all(|item| item.kind != "dependency_cancelled"));
+    }
+
+    /// #759: cancelling names the tasks it was holding, in its event and answer.
+    #[test]
+    fn cancelling_a_task_names_the_tasks_it_was_holding() {
+        let mut t = team(vec![task(1, &[], Pending), task(2, &[(1, Hard)], Pending), task(3, &[(1, Soft)], Accepted), task(4, &[], Pending)]);
+        t.status = super::super::model::TeamStatus::Running;
+        let mut events = Vec::new();
+        let answer = super::super::ops::apply(
+            &mut t,
+            "cancel",
+            &serde_json::json!({"task":1}),
+            &super::super::ops::Actor::Human,
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap();
+        // #3 is decided already; only #2 waited on it.
+        assert_eq!(answer["released"], serde_json::json!([2]));
+        let event = events.iter().find(|event| event.kind == "cancelled").unwrap();
+        assert_eq!(event.payload["released"], serde_json::json!([2]));
+        assert!(ready(&t).contains(&2));
     }
 
     #[test]

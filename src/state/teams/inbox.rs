@@ -401,6 +401,36 @@ fn all_items(team: &Team) -> Vec<Item> {
             ),
         });
     }
+    // #759: a pending task a cancelled dependency no longer holds, so the
+    // lead can re-plan it before it starts without that dependency's work.
+    for task in team.tasks.iter().filter(|task| task.status == TaskStatus::Pending) {
+        let released = plan::cancelled_deps(team, task);
+        if released.is_empty() {
+            continue;
+        }
+        let names: Vec<String> = released.iter().map(|id| format!("#{id}")).collect();
+        let since = released
+            .iter()
+            .filter_map(|id| team.task(*id))
+            .flat_map(|dep| dep.attempts.iter().filter_map(|attempt| attempt.decided_at))
+            .fold(team.created, f64::max);
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "dependency_cancelled",
+            key: format!("dependency_cancelled:{}:{}", task.id, names.join(",")),
+            task: Some(task.id),
+            member: String::new(),
+            since,
+            summary: summary(&format!(
+                "#{} {} no longer waits on cancelled {}: it starts once its other dependencies are done",
+                task.id,
+                task.title,
+                names.join(", ")
+            )),
+            command: format!("{} | hgs team status --json", json!({"team":team.id})),
+            detail: "Re-plan it if it needed the cancelled work: give it a new dependency, hold it, or cancel it too.".into(),
+        });
+    }
     // #718: flaky suites to file a task for, suites over their budgets, the
     // quarantine and the proposal of a full run.
     for alert in team.test_alerts.iter().filter(|alert| !alert.dismissed) {

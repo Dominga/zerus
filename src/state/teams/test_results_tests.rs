@@ -24,6 +24,7 @@ fn request(id: &str, suite: &str, command: &str) -> Request {
         budget_minutes: 10.0,
         resources: String::new(),
         command: command.into(),
+        platforms: Vec::new(),
     }
 }
 
@@ -188,6 +189,7 @@ fn section(targets: &[(&str, &str)], files: &[(&str, &[&str])]) -> ProviderMap {
         rules: Vec::new(),
         groups: Default::default(),
         seconds: 0.0,
+        platforms: Vec::new(),
     }
 }
 

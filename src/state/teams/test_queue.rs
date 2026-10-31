@@ -45,6 +45,9 @@ pub(crate) struct Request {
     pub budget_minutes: f64,
     pub resources: String,
     pub command: String,
+    /// U62 (#732): the suite's platform classes (its provider's `platforms`);
+    /// empty runs here. Another class goes only to a test runner of it.
+    pub platforms: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -71,6 +74,8 @@ pub(crate) struct Record {
     pub due: bool,
     /// #718: the suite's recorded time when it ran, to say how much it grew.
     pub recorded_ms: u64,
+    /// #732: the test runner (a Machine's alias) it ran on; empty is here.
+    pub runner: String,
 }
 
 /// #719: a request still in the queue: waiting, or running since `started`.
@@ -80,14 +85,16 @@ pub(crate) struct Pending {
     pub request: Request,
     pub state: String,
     pub started: Option<f64>,
+    /// #732: why a queued request does not run yet; empty when it just waits.
+    pub reason: String,
 }
 
 /// #719: at most this many queued and running requests in one read.
 pub(crate) const PENDING_LIMIT: i64 = 100;
 
-const REQUEST_COLUMNS: &str = "id,team,suite,task,targets,commit_id,input_hash,asked_by,forced,at,seconds,budget_minutes,resources,command";
+const REQUEST_COLUMNS: &str = "id,team,suite,task,targets,commit_id,input_hash,asked_by,forced,at,seconds,budget_minutes,resources,command,platforms";
 // #718: reused_from, flags, due and recorded_ms after #719's task.
-const RECORD_COLUMNS: &str = "id,team,suite,commit_id,input_hash,status,duration_ms,excerpt,asked_by,at,affected,task,reused_from,flags,due,recorded_ms";
+const RECORD_COLUMNS: &str = "id,team,suite,commit_id,input_hash,status,duration_ms,excerpt,asked_by,at,affected,task,reused_from,flags,due,recorded_ms,runner";
 
 fn add_column(db: &Connection, table: &str, column: &str, kind: &str) -> rusqlite::Result<()> {
     let present = db.prepare(&format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name=?1"))?.exists([column])?;
@@ -143,6 +150,10 @@ impl TestStore {
             // #719: a running request's start, and a result's task, in a
             // database #717 made without them.
             add_column(&db, "queue", "started", "REAL")?;
+            // #732: a suite's platform classes, why it waits, and the runner of a result.
+            add_column(&db, "queue", "platforms", "TEXT NOT NULL DEFAULT '[]'")?;
+            add_column(&db, "queue", "reason", "TEXT NOT NULL DEFAULT ''")?;
+            add_column(&db, "results", "runner", "TEXT NOT NULL DEFAULT ''")?;
             add_column(&db, "results", "task", "INTEGER")?;
             db.execute_batch("CREATE INDEX IF NOT EXISTS results_task ON results(team,task,at);")?;
             // #718: the columns an older database lacks.
@@ -162,7 +173,7 @@ impl TestStore {
 
     pub(crate) fn enqueue(&self, request: &Request) -> anyhow::Result<()> {
         self.db.execute(
-            &format!("INSERT OR REPLACE INTO queue({REQUEST_COLUMNS},state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'queued')"),
+            &format!("INSERT OR REPLACE INTO queue({REQUEST_COLUMNS},state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,'queued')"),
             params![
                 request.id,
                 request.team,
@@ -177,7 +188,8 @@ impl TestStore {
                 request.seconds,
                 request.budget_minutes,
                 request.resources,
-                request.command
+                request.command,
+                serde_json::to_string(&request.platforms)?
             ],
         )?;
         Ok(())
@@ -195,11 +207,11 @@ impl TestStore {
     /// first, then the waiting ones in the order the scheduler weighs them.
     pub(crate) fn pending(&self, team: &str) -> anyhow::Result<Vec<Pending>> {
         let mut statement = self.db.prepare(&format!(
-            "SELECT {REQUEST_COLUMNS},state,started FROM queue WHERE team=?1 AND state IN ('queued','running')
+            "SELECT {REQUEST_COLUMNS},state,started,reason FROM queue WHERE team=?1 AND state IN ('queued','running')
              ORDER BY state='running' DESC, forced DESC, at ASC LIMIT ?2"
         ))?;
         let rows = statement.query_map(params![team, PENDING_LIMIT], |row| {
-            Ok(Pending { request: Self::request(row)?, state: row.get(14)?, started: row.get(15)? })
+            Ok(Pending { request: Self::request(row)?, state: row.get(15)?, started: row.get(16)?, reason: row.get(17)? })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
@@ -220,25 +232,33 @@ impl TestStore {
             budget_minutes: row.get(11)?,
             resources: row.get(12)?,
             command: row.get(13)?,
+            platforms: serde_json::from_str(&row.get::<_, String>(14)?).unwrap_or_default(),
         })
     }
 
+    /// #732: the request stays queued, with why it does not run (no runner of
+    /// its class, or its runner unreachable).
+    pub(crate) fn hold(&self, id: &str, reason: &str) -> anyhow::Result<()> {
+        self.db.execute("UPDATE queue SET reason=?2 WHERE id=?1 AND state='queued'", params![id, reason])?;
+        Ok(())
+    }
+
     /// #719: the request runs now; the Tests view shows it as running.
-    fn start(&self, id: &str, at: f64) -> anyhow::Result<()> {
+    pub(crate) fn start(&self, id: &str, at: f64) -> anyhow::Result<()> {
         self.db.execute("UPDATE queue SET state='running', started=?2 WHERE id=?1", params![id, at])?;
         Ok(())
     }
 
-    fn finish(&self, id: &str) -> anyhow::Result<()> {
+    pub(crate) fn finish(&self, id: &str) -> anyhow::Result<()> {
         self.db.execute("UPDATE queue SET state='done' WHERE id=?1", [id])?;
         Ok(())
     }
 
     /// Only the runner calls this: a result names its suite, commit, input
     /// hash, status, duration, a bounded excerpt and who asked.
-    fn write(&self, record: &Record) -> anyhow::Result<()> {
+    pub(crate) fn write(&self, record: &Record) -> anyhow::Result<()> {
         self.db.execute(
-            &format!("INSERT OR REPLACE INTO results({RECORD_COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)"),
+            &format!("INSERT OR REPLACE INTO results({RECORD_COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)"),
             params![
                 record.id,
                 record.team,
@@ -255,7 +275,8 @@ impl TestStore {
                 record.reused_from,
                 serde_json::to_string(&record.flags)?,
                 record.due as i64,
-                record.recorded_ms as i64
+                record.recorded_ms as i64,
+                record.runner
             ],
         )?;
         // Bounded: only the oldest records past the limit go.
@@ -298,6 +319,7 @@ impl TestStore {
             flags: vec!["reused".into()],
             due: true,
             recorded_ms: source.duration_ms,
+            runner: String::new(),
             task: request.task,
         };
         self.write(&record)?;
@@ -359,6 +381,7 @@ impl TestStore {
             flags: serde_json::from_str(&row.get::<_, String>(13)?).unwrap_or_default(),
             due: row.get::<_, i64>(14)? != 0,
             recorded_ms: row.get::<_, i64>(15)? as u64,
+            runner: row.get(16)?,
         })
     }
 }
@@ -434,16 +457,43 @@ pub(crate) fn tick(
     now: f64,
     read_load: impl FnOnce() -> Load,
     policy: &super::test_results::Policy,
+    places: &Places,
 ) -> anyhow::Result<(Vec<Record>, bool)> {
     let queued = store.queued(team)?;
     if queued.is_empty() || now - last_load_at < 30.0 {
         return Ok((Vec::new(), false));
     }
-    let mut load = read_load();
-    load.at_night = config::is_night(local_hour, night);
-    let chosen = schedule(&queued, classes, &load);
-    let records = run_due(store, project, &chosen, now, policy)?;
+    // #732: a suite of a class this computer is not goes only to a runner of
+    // that class (or waits with the reason); the rest runs here as before.
+    let (here, elsewhere): (Vec<Request>, Vec<Request>) =
+        queued.into_iter().partition(|request| super::test_runners::runs_here(&request.platforms, &places.host));
+    let mut records = Vec::new();
+    if !here.is_empty() {
+        let mut load = read_load();
+        load.at_night = config::is_night(local_hour, night);
+        let chosen = schedule(&here, classes, &load);
+        records = run_due(store, project, &chosen, now, policy)?;
+    }
+    if !elsewhere.is_empty() {
+        records.extend(super::test_runners::dispatch(store, project, &elsewhere, &places.runners, places.remote, now, policy)?);
+    }
     Ok((records, true))
+}
+
+/// #732: where a tick may run suites: this computer's classes, the owner's
+/// test runners and how they are reached.
+pub(crate) struct Places<'a> {
+    pub host: Vec<String>,
+    pub runners: Vec<super::test_runners::Runner>,
+    pub remote: &'a dyn super::test_runners::Remote,
+}
+
+#[cfg(test)]
+impl Places<'static> {
+    /// This computer only, as a team without test runners has it.
+    pub(crate) fn here() -> Self {
+        Places { host: super::test_runners::host_classes(), runners: Vec::new(), remote: &super::test_runners::Ssh }
+    }
 }
 
 /// The requests a tick runs, in order: forced first, then short before long,
@@ -478,7 +528,7 @@ pub(crate) fn schedule(requests: &[Request], classes: &Classes, load: &Load) -> 
     chosen
 }
 
-fn shell(command: &str, cwd: &Path) -> Command {
+pub(crate) fn shell(command: &str, cwd: &Path) -> Command {
     let mut process = if cfg!(windows) {
         let mut process = Command::new("cmd");
         process.args(["/D", "/S", "/C", command]);
@@ -566,6 +616,7 @@ pub(crate) fn run_due(store: &TestStore, project: &Path, requests: &[Request], n
             flags,
             due: false,
             recorded_ms: (request.seconds * 1000.0) as u64,
+            runner: String::new(),
             task: request.task,
         };
         store.write(&record)?;
@@ -613,7 +664,14 @@ pub(crate) fn suite_from_config(project: &Path, team: Option<&str>, name: &str, 
         budget_minutes: budget,
         resources: provider.resources.clone(),
         command,
+        platforms: suite_platforms(provider),
     })
+}
+
+/// #732: a suite's platform classes: its provider's `platforms`; Android's
+/// Gradle suites are the android class unless the project names others.
+pub(crate) fn suite_platforms(provider: &crate::test_discipline::config::Provider) -> Vec<String> {
+    provider.platform_classes()
 }
 
 #[cfg(test)]
@@ -624,7 +682,7 @@ mod tests {
         Request {
             id: id.into(), team: "t".into(), suite: suite.into(), task: None, targets: Vec::new(),
             commit: "c".into(), input_hash: "h".into(), asked_by: "dev".into(), forced, at: 1.0,
-            seconds, budget_minutes: 10.0, resources: resources.into(), command: String::new(),
+            seconds, budget_minutes: 10.0, resources: resources.into(), command: String::new(), platforms: Vec::new(),
         }
     }
 
@@ -640,16 +698,16 @@ mod tests {
             Load { cpu_free: 8, ram_free_mb: 8000, gpu_free: true, at_night: false }
         };
         // An empty queue: no read at all.
-        let (records, read) = tick(&store, dir.path(), "t", &classes, &night, 12, 0.0, 100.0, load, &Default::default()).unwrap();
+        let (records, read) = tick(&store, dir.path(), "t", &classes, &night, 12, 0.0, 100.0, load, &Default::default(), &Places::here()).unwrap();
         assert!(records.is_empty() && !read && reads.get() == 0, "an empty queue reads no load");
         let mut queued = request("r1", "unit", 10.0, false, "small");
         queued.command = if cfg!(windows) { "cmd /d /s /c exit 0".into() } else { "true".into() };
         store.enqueue(&queued).unwrap();
         // The last read was a moment ago: no second read.
-        let (records, read) = tick(&store, dir.path(), "t", &classes, &night, 12, 90.0, 100.0, load, &Default::default()).unwrap();
+        let (records, read) = tick(&store, dir.path(), "t", &classes, &night, 12, 90.0, 100.0, load, &Default::default(), &Places::here()).unwrap();
         assert!(records.is_empty() && !read && reads.get() == 0, "a read waits 30 s");
         // Enough time passed and the queue has work: one read, one run.
-        let (records, read) = tick(&store, dir.path(), "t", &classes, &night, 12, 0.0, 100.0, load, &Default::default()).unwrap();
+        let (records, read) = tick(&store, dir.path(), "t", &classes, &night, 12, 0.0, 100.0, load, &Default::default(), &Places::here()).unwrap();
         assert!(read && reads.get() == 1, "the tick read the load once");
         assert_eq!(records.len(), 1, "{records:?}");
         assert_eq!(records[0].status, "passed");
@@ -681,7 +739,7 @@ mod tests {
             excerpt: "the log".into(),
             asked_by: "dev".into(),
             at: 10.0,
-            affected: Vec::new(), reused_from: String::new(), flags: Vec::new(), due: false, recorded_ms: 0, task: None,
+            affected: Vec::new(), reused_from: String::new(), flags: Vec::new(), due: false, recorded_ms: 0, task: None, runner: String::new(),
         };
         record_notices(&mut team, std::slice::from_ref(&record), 100.0);
         assert_eq!(team.test_load_at, 100.0);
@@ -734,7 +792,7 @@ mod tests {
         let record = |id: &str, suite: &str, at: f64| Record {
             id: id.into(), team: "t".into(), suite: suite.into(), commit: "c".into(), input_hash: "h".into(),
             status: "passed".into(), duration_ms: 10, excerpt: "ok".into(), asked_by: "dev".into(), at,
-            affected: vec!["a".into()], reused_from: String::new(), flags: Vec::new(), due: false, recorded_ms: 0, task: None,
+            affected: vec!["a".into()], reused_from: String::new(), flags: Vec::new(), due: false, recorded_ms: 0, task: None, runner: String::new(),
         };
         store.write(&record("1", "cargo", 1.0)).unwrap();
         store.write(&record("2", "cargo", 2.0)).unwrap();
@@ -855,7 +913,7 @@ mod tests {
             let record = Record {
                 id: format!("r{index}"), team: "t".into(), suite: "s".into(), commit: "c".into(), input_hash: "h".into(),
                 status: "passed".into(), duration_ms: 1, excerpt: String::new(), asked_by: "dev".into(), at: index as f64,
-                affected: Vec::new(), reused_from: String::new(), flags: Vec::new(), due: false, recorded_ms: 0, task: None,
+                affected: Vec::new(), reused_from: String::new(), flags: Vec::new(), due: false, recorded_ms: 0, task: None, runner: String::new(),
             };
             store.write(&record).unwrap();
         }

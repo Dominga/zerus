@@ -32,7 +32,13 @@ pub struct Connection {
     pub identity_file: String,
     #[serde(default = "yes")]
     pub enabled: bool,
+    /// U62 (#732): the owner made this Machine a test runner of this platform
+    /// class (windows, linux, macos or android); empty is none.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub test_runner: String,
 }
+/// The platform classes a test runner may serve.
+pub const TEST_RUNNER_CLASSES: [&str; 4] = ["windows", "linux", "macos", "android"];
 impl Default for Connection {
     fn default() -> Self {
         Self {
@@ -43,6 +49,7 @@ impl Default for Connection {
             port: None,
             identity_file: String::new(),
             enabled: true,
+            test_runner: String::new(),
         }
     }
 }
@@ -94,6 +101,9 @@ fn validate_alias(alias: &str) -> Result<()> {
 }
 fn validate(alias: &str, c: &Connection) -> Result<()> {
     validate_alias(alias)?;
+    if !c.test_runner.is_empty() && !TEST_RUNNER_CLASSES.contains(&c.test_runner.as_str()) {
+        return Err(Error::new(1, "A test runner serves windows, linux, macos or android."));
+    }
     if c.transport == crate::wsl::Transport::WslLocal {
         if !c.hostname.is_empty() || !c.user.is_empty() || c.port.is_some() || !c.identity_file.is_empty() {
             return Err(Error::new(2, "wsl-local profiles cannot contain SSH overrides"));

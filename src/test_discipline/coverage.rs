@@ -209,6 +209,7 @@ mod tests {
             rules: Vec::new(),
             groups: BTreeMap::new(),
             seconds: 0.0,
+            platforms: Vec::new(),
         };
         section.files.insert("gui/A.cpp".into(), vec!["test_a".into()]);
         section.files.insert("gui/Unused.cpp".into(), vec!["test_a".into()]);

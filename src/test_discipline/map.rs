@@ -40,6 +40,9 @@ pub struct ProviderMap {
     /// How long reading it took; not written.
     #[serde(skip)]
     pub seconds: f64,
+    /// #732: the platform classes its suites run on; empty is any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub platforms: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -139,6 +142,7 @@ pub fn generate_only(root: &Path, config: &TestsConfig, files: &[String], previo
             }
         }
         section.seconds = started.elapsed().as_secs_f64();
+        section.platforms = provider.platform_classes();
         map.providers.insert(provider.name.clone(), section);
     }
     Ok(map)
@@ -159,6 +163,7 @@ fn whole(provider: &Provider) -> ProviderMap {
         rules: Vec::new(),
         groups: BTreeMap::new(),
         seconds: 0.0,
+        platforms: provider.platform_classes(),
     }
 }
 

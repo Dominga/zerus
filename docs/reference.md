@@ -5709,6 +5709,34 @@ What the test queue makes of its results, by the project's thresholds:
 - Coverage. `hgs test coverage` also names the targets without unique coverage;
   the monthly run of `test-map-coverage.yml` reports them.
 
+#### Remote test runners (#732)
+
+The owner makes a Machine a test runner of one platform class:
+`hgs machine set ALIAS --json '{..., "test_runner":"linux"}'` (windows, linux,
+macos or android; empty is none; a disabled Machine runs nothing). The map
+gives each provider its classes (`platforms` of the provider; a Gradle
+provider without them is `android`), carried by every queued request.
+
+- A suite with no class, or one this computer serves (its own platform, and
+  android with `ANDROID_HOME` or `ANDROID_SDK_ROOT` set), runs here as before.
+  Any other goes only to an enabled runner of its class; with none, or with
+  every such runner unreachable, it stays queued with the reason (`hgs team
+  test --json` action `queue` shows it) and never runs on another platform.
+- The scheduler reaches a runner only through hgs's own SSH transport:
+  `hgs @ALIAS test runner --json` (BatchMode, connect timeout, the Windows peer
+  channel; the peer needs this hgs, marker `test-runner-v1`). It first asks
+  which commits the runner's mirror has, then sends the exact commit as a git
+  bundle of only what it lacks (no reverse connection, nothing pushed).
+- The runner keeps a mirror and run folders below its own Zerus state
+  (`test-runner/<project>`), checks the commit out into a fresh folder, builds
+  the suite's command from that commit's `.zerus/tests.toml` (a command it is
+  sent is never read), runs it with the project's isolation by construction
+  and its fingerprint check, answers exit, duration, excerpt and anything it
+  touched of the person's own paths, and removes the folder.
+- The result goes to the same database with its `runner`; the retry, crash,
+  slower and budget rules are the ones of a local run, and a run that touched
+  the person's paths fails.
+
 #### Missing tools (#742)
 
 A tool the tests or builds need and this computer lacks is offered to the

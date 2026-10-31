@@ -1561,6 +1561,9 @@ fn test_queue_tick(store: &mut Store, team_id: &str, now: f64) -> anyhow::Result
     let night = loaded.config.schedule.clone();
     let policy = super::test_results::Policy::of(&loaded.config);
     let database = super::test_queue::TestStore::open(false)?;
+    // #732: the owner's test runners among this computer's Machines.
+    let runners = crate::config::Config::load().map(|config| super::test_runners::configured(&config)).unwrap_or_default();
+    let places = super::test_queue::Places { host: super::test_runners::host_classes(), runners, remote: &super::test_runners::Ssh };
     let hour = chrono::Local::now().hour();
     let (records, read) = super::test_queue::tick(
         &database,
@@ -1573,6 +1576,7 @@ fn test_queue_tick(store: &mut Store, team_id: &str, now: f64) -> anyhow::Result
         now,
         super::test_queue::load_now,
         &policy,
+        &places,
     )?;
     if !read {
         return Ok(());

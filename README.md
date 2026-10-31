@@ -90,6 +90,8 @@ sends it back. The **Team** tab next to Activity shows the plan as a graph, a bo
 or layers beside the members and the lead's conversation, and **New team** starts a
 team from a template, with the Team designer to help write its goal and protocol.
 
+Read the [agent teams guide](docs/teams-guide.md) for how a team works and how to use every view and feature, with scenarios for common projects.
+
 <p align="center">
   <a href="docs/assets/readme/team-graph.webp"><img src="docs/assets/readme/team-graph.webp" alt="The Team tab: a seven-task plan as a graph in layers, the members with their states and the lead's conversation" width="1100" /></a>
 </p>

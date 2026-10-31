@@ -751,8 +751,15 @@ void TestTeamsUiWorkspace::graphEdgesAreEditedByHandleAndSelection()
     const auto poll = [&] {
         QPointer<TeamUi::TaskView> old = draft;
         auto next = graphTeam(); next["revision"] = ++revision;
-        // #693: a change, so the views are rebuilt.
+        // #693/#706: a change the graph draws (a task title), so the views
+        // are rebuilt; a change nothing draws rebuilds nothing.
         next["description"] = QStringLiteral("poll %1").arg(revision);
+        auto tasks = next["tasks"].toArray();
+        for (int i = 0; i < tasks.size(); ++i) {
+            auto task = tasks[i].toObject();
+            if (task["id"].toInt() == 9) { task["title"] = QStringLiteral("Release poll %1").arg(revision); tasks[i] = task; }
+        }
+        next["tasks"] = tasks;
         setTeam(next);
         controller.refresh();
         QTRY_VERIFY(!old && (draft = phaseGraphOf(&workspace, 3)) && draft->nodeRect(8).width() > 0);

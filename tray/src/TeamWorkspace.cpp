@@ -2923,7 +2923,11 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
         auto held = std::make_shared<Team>(team);
         for (const auto *task : shown) {
             const int taskId = task->id;
-            auto buildCard = [this, held, problemsByTask, cv, taskId, c] {
+            // #739: the column may be gone before this slice runs (a view
+            // retired outside render): the slice then does nothing.
+            const QPointer<QWidget> column = cv->parentWidget();
+            auto buildCard = [this, held, problemsByTask, cv, column, taskId, c] {
+                if (!column) return;
                 const Team &team = *held;
                 const auto *task = team.task(taskId);
                 if (!task) return;
@@ -3042,7 +3046,9 @@ QWidget *TeamWorkspace::layerRows(const Team &team, const QList<int> &ids)
                            && (m_focus.isEmpty() || task->assignee == m_focus);
         if (!match) continue;
         ++matches;
-        auto buildRow = [this, held, id, layers, problemsByTask, c, v] {
+        const QPointer<QWidget> list = v->parentWidget();
+        auto buildRow = [this, held, id, layers, problemsByTask, c, v, list] {
+            if (!list) return;
             const Team &team = *held;
             const auto *task = team.task(id);
             if (!task) return;

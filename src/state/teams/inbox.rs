@@ -353,13 +353,16 @@ fn all_items(team: &Team) -> Vec<Item> {
             task: None,
             member: notice.asked_by.clone(),
             since: notice.at,
-            summary: summary(&format!(
-                "Test {} {} in {} s (record {})",
-                notice.suite,
-                notice.status,
-                notice.duration_ms / 1000,
-                notice.record
-            )),
+            summary: summary(&{
+                // #718: what the result is beyond its status, named on the card.
+                let flags = super::test_results::flag_text(&notice.flags, notice.recorded_seconds, notice.duration_ms);
+                let base = if notice.reused_from.is_empty() {
+                    format!("Test {} {} in {} s (record {})", notice.suite, notice.status, notice.duration_ms / 1000, notice.record)
+                } else {
+                    format!("Test {} reused from record {} (record {})", notice.suite, notice.reused_from, notice.record)
+                };
+                if flags.is_empty() { base } else { format!("{base}: {flags}") }
+            }),
             command: format!(
                 "{} | hgs team test results --json",
                 json!({"request_id":PLACEHOLDER,"team":team.id,"record":notice.record})
@@ -369,6 +372,59 @@ fn all_items(team: &Team) -> Vec<Item> {
                 if notice.asked_by.is_empty() { "an unknown caller" } else { notice.asked_by.as_str() },
                 notice.record
             ),
+        });
+    }
+    // #718: flaky suites to file a task for, suites over their budgets, the
+    // quarantine and the proposal of a full run.
+    for alert in team.test_alerts.iter().filter(|alert| !alert.dismissed) {
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "test_alert",
+            key: format!("test_alert:{}:{}:{}", alert.kind, alert.suite, alert.at),
+            task: None,
+            member: String::new(),
+            since: alert.at,
+            summary: summary(&alert.detail),
+            command: format!(
+                "{} | hgs team test --json",
+                json!({"request_id":PLACEHOLDER,"team":team.id,"action":"dismiss","kind":alert.kind,"suite":alert.suite})
+            ),
+            detail: if alert.kind == "flaky" {
+                "File a task to fix it (hgs team extend or add-to-phase), then dismiss this item; the next one counts newer episodes only.".into()
+            } else {
+                "Split the suite or change its budget in .zerus/tests.toml, then dismiss this item.".into()
+            },
+        });
+    }
+    for quarantine in team.test_quarantine.iter() {
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "test_quarantine",
+            key: format!("test_quarantine:{}:{}", quarantine.suite, quarantine.until),
+            task: None,
+            member: String::new(),
+            since: quarantine.since,
+            summary: summary(&format!(
+                "{} is quarantined as flaky ({} episode(s)) until {}",
+                quarantine.suite,
+                quarantine.episodes,
+                chrono::DateTime::from_timestamp(quarantine.until as i64, 0).map(|time| time.format("%Y-%m-%d").to_string()).unwrap_or_default()
+            )),
+            command: format!("{} | hgs team test --json", json!({"request_id":PLACEHOLDER,"team":team.id,"action":"results"})),
+            detail: "Its failures still show; the quarantine expires by itself.".into(),
+        });
+    }
+    if let Some(proposal) = &team.test_full_proposal {
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "test_full_run",
+            key: format!("test_full_run:{}", proposal.at),
+            task: None,
+            member: String::new(),
+            since: proposal.at,
+            summary: summary(&full_run_text(proposal)),
+            command: format!("{} | hgs team test --json", json!({"request_id":PLACEHOLDER,"team":team.id,"action":"full-done"})),
+            detail: "The full run is the owner's call: ask the owner with this time, then record it with full-done once it ran.".into(),
         });
     }
     // U52: a member whose session crashed too often this hour stays stopped
@@ -492,6 +548,7 @@ fn all_items(team: &Team) -> Vec<Item> {
                                 String::new()
                             },
                             super::pipeline::rounds_text(task),
+                            report.tests.as_ref().map(tests_text).unwrap_or_default(),
                         ]
                         .into_iter()
                         .filter(|part| !part.is_empty())
@@ -1000,6 +1057,35 @@ pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
     out.extend(phase_items);
     out.sort_by(|a, b| a["since"].as_f64().unwrap_or_default().total_cmp(&b["since"].as_f64().unwrap_or_default()));
     out
+}
+
+/// #718: the proposal of a full run, for the lead's card and the owner's list.
+pub(crate) fn full_run_text(proposal: &super::model::FullRunProposal) -> String {
+    let minutes = (proposal.seconds / 60.0).ceil() as u64;
+    let unknown = if proposal.unknown > 0 { format!(" and {} target(s) without a recorded time", proposal.unknown) } else { String::new() };
+    let why = if proposal.reason == "age" { "the oldest reused measurement is too old" } else { "enough results were reused" };
+    format!("A full test run is proposed: {} result(s) reused since the last one ({why}); about {minutes} min{unknown}", proposal.reused)
+}
+
+/// #718: what a report's change does to the tests, on the lead's card.
+pub(crate) fn tests_text(tests: &Value) -> String {
+    if tests["files"].as_u64().unwrap_or(0) == 0 {
+        return "Tests: no test file changed.".into();
+    }
+    let added = tests["functions_added"]["total"].as_u64().unwrap_or(0);
+    let removed = tests["functions_removed"]["total"].as_u64().unwrap_or(0);
+    let names = |key: &str| -> String {
+        let list: Vec<&str> = tests[key]["names"].as_array().into_iter().flatten().filter_map(Value::as_str).take(5).collect();
+        if list.is_empty() { String::new() } else { format!(" ({})", list.join(", ")) }
+    };
+    format!(
+        "Tests: +{} -{} lines in {} file(s); functions +{added}{} -{removed}{}.",
+        tests["lines_added"].as_u64().unwrap_or(0),
+        tests["lines_removed"].as_u64().unwrap_or(0),
+        tests["files"].as_u64().unwrap_or(0),
+        names("functions_added"),
+        names("functions_removed")
+    )
 }
 
 #[cfg(test)]

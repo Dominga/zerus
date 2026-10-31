@@ -36,6 +36,8 @@ pub struct TestsConfig {
     #[serde(default)]
     pub budgets: Budgets,
     #[serde(default)]
+    pub reuse: Reuse,
+    #[serde(default)]
     pub isolation: Isolation,
     #[serde(default)]
     pub build_cache: BuildCache,
@@ -125,6 +127,7 @@ impl Default for TestsConfig {
             full: FullRun::default(),
             retries: Retries::default(),
             budgets: Budgets::default(),
+            reuse: Reuse::default(),
             isolation: Isolation::default(),
             build_cache: BuildCache::default(),
             merge_queue: MergeQueue::default(),
@@ -221,11 +224,19 @@ pub struct Retries {
     /// Days a flaky quarantine lasts before the suite counts again.
     #[serde(default = "quarantine_days")]
     pub quarantine_days: u32,
+    /// #718: flaky episodes of one suite that become one lead item to file a
+    /// task; 0 is off.
+    #[serde(default = "three")]
+    pub episodes: u32,
+}
+
+fn three() -> u32 {
+    3
 }
 
 impl Default for Retries {
     fn default() -> Self {
-        Self { flaky: one(), quarantine_days: quarantine_days() }
+        Self { flaky: one(), quarantine_days: quarantine_days(), episodes: three() }
     }
 }
 
@@ -246,6 +257,38 @@ pub struct Budgets {
     /// A suite's default time budget in minutes; 0 is none.
     #[serde(default)]
     pub suite_minutes: f64,
+    /// #718: a suite's default size budget in test lines; 0 is none.
+    #[serde(default)]
+    pub suite_lines: u32,
+}
+
+/// #718: `[reuse]`, when unchanged results are reused and when Zerus proposes
+/// a full run instead.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Reuse {
+    /// Reused results since the last full run that propose a new one; 0 is off.
+    #[serde(default)]
+    pub full_after: u32,
+    /// Days the oldest reused measurement may reach before a full run is
+    /// proposed; 0 is off.
+    #[serde(default)]
+    pub max_age_days: f64,
+}
+
+/// #718: what a provider's unchanged result is reused by.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReuseBy {
+    /// The kind's own: never for cargo (it runs in seconds when filtered),
+    /// the test binary and its data for ctest, the source hashes otherwise.
+    #[default]
+    Auto,
+    /// The hashes of the map's input files.
+    Inputs,
+    /// The test binary's hash and its data files.
+    Binary,
+    Never,
 }
 
 /// `[isolation]`: only its switch is read here; its other keys (templates,
@@ -406,6 +449,12 @@ pub struct Provider {
     /// Its own time budget in minutes, over `budgets.suite_minutes`.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub budget_minutes: f64,
+    /// #718: its own size budget in test lines, over `budgets.suite_lines`.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub budget_lines: u32,
+    /// #718: what an unchanged result is reused by.
+    #[serde(default, skip_serializing_if = "is_auto")]
+    pub reuse: ReuseBy,
     /// Turned off, here or by the owner's override.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
@@ -416,6 +465,24 @@ fn rule_build() -> Rule {
 }
 fn is_zero(value: &f64) -> bool {
     *value == 0.0
+}
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+fn is_auto(value: &ReuseBy) -> bool {
+    *value == ReuseBy::Auto
+}
+
+impl Provider {
+    /// #718: what this provider's unchanged result is reused by.
+    pub fn reuse_by(&self) -> ReuseBy {
+        match (self.reuse, self.kind) {
+            (ReuseBy::Auto, Kind::Cargo) => ReuseBy::Never,
+            (ReuseBy::Auto, Kind::Ctest) => ReuseBy::Binary,
+            (ReuseBy::Auto, _) => ReuseBy::Inputs,
+            (chosen, _) => chosen,
+        }
+    }
 }
 
 /// A path map entry: a change in `files` runs `targets` (map target ids or

@@ -114,6 +114,10 @@ def main():
                          + ', '.join(f'`{gap}`' for gap in item['gaps'][:20]))
     unused = sum(len(item['unused']) for item in result['targets'])
     lines += ['', f'{unused} mapped file(s) a target never executed (over-selection, for review).', '']
+    # #718, the monthly report: tests that cover nothing no other test covers.
+    redundant = result.get('without_unique_coverage', [])
+    lines += [f'{len(redundant)} target(s) without unique coverage (candidates to merge or drop): '
+              + ', '.join(f'{target}' for target in redundant[:40]), '']
     summary = os.environ.get('GITHUB_STEP_SUMMARY')
     text = '\n'.join(lines) + '\n'
     if summary:

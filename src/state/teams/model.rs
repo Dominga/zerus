@@ -667,6 +667,58 @@ pub(crate) struct TestNotice {
     pub asked_by: String,
     #[serde(default)]
     pub at: f64,
+    /// #718: reused, slower, over_time_budget, retried, crash, quarantined.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flags: Vec<String>,
+    /// #718: the measured record a reused result stands for.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reused_from: String,
+    /// #718: the suite's recorded seconds, to say how much slower it ran.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub recorded_seconds: f64,
+}
+
+/// #718: a test item for the lead: a flaky suite to file a task for, or a
+/// suite over its time or size budget. A dismissed one stays to count from.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct TestAlert {
+    pub kind: String,
+    pub suite: String,
+    pub at: f64,
+    pub detail: String,
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub episodes: usize,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dismissed: bool,
+}
+
+/// #718: a flaky suite's quarantine, shown to the lead and the owner until
+/// it expires.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct TestQuarantine {
+    pub suite: String,
+    pub since: f64,
+    pub until: f64,
+    #[serde(default)]
+    pub episodes: usize,
+}
+
+/// #718: Zerus proposes a full run once enough results were reused (or the
+/// oldest reused measurement is too old), with its estimate.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct FullRunProposal {
+    pub at: f64,
+    pub reused: usize,
+    pub oldest_at: f64,
+    pub seconds: f64,
+    #[serde(default)]
+    pub unknown: usize,
+    /// count or age.
+    pub reason: String,
+}
+
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
 }
 
 impl Member {
@@ -1053,6 +1105,10 @@ pub(crate) struct Report {
     /// D1: a report without a structured object, shown as such in status.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unstructured: bool,
+    /// #718: the test lines and functions the report's change adds and
+    /// removes, read by Zerus from the member's folder (bloat guard).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tests: Option<serde_json::Value>,
 }
 
 /// A report text that a member's real report replaced (A6).
@@ -1758,6 +1814,18 @@ pub(crate) struct Team {
     /// test database and this list is bounded.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub test_notices: Vec<TestNotice>,
+    /// #718: test items for the lead (flaky, time and size budgets), bounded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub test_alerts: Vec<TestAlert>,
+    /// #718: flaky suites in quarantine, until they expire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub test_quarantine: Vec<TestQuarantine>,
+    /// #718: when the last full run was recorded; reuse counts from then.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub test_full_at: f64,
+    /// #718: the open proposal of a full run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_full_proposal: Option<FullRunProposal>,
     /// U59: when the last integration-and-build close of a free phase passed;
     /// the desktop shows it with the free phase.
     #[serde(default, skip_serializing_if = "Option::is_none")]

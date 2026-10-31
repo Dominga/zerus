@@ -1559,6 +1559,7 @@ fn test_queue_tick(store: &mut Store, team_id: &str, now: f64) -> anyhow::Result
     let loaded = crate::test_discipline::load(project, Some(&team.id)).map_err(|error| anyhow::anyhow!("{error}"))?;
     let classes = loaded.config.resources.clone();
     let night = loaded.config.schedule.clone();
+    let policy = super::test_results::Policy::of(&loaded.config);
     let database = super::test_queue::TestStore::open(false)?;
     let hour = chrono::Local::now().hour();
     let (records, read) = super::test_queue::tick(
@@ -1571,12 +1572,15 @@ fn test_queue_tick(store: &mut Store, team_id: &str, now: f64) -> anyhow::Result
         team.test_load_at,
         now,
         super::test_queue::load_now,
+        &policy,
     )?;
     if !read {
         return Ok(());
     }
+    let estimate = super::test_results::full_estimate(project, &loaded.config);
     change(store, team_id, |team, events| {
-        super::test_queue::record_notices(team, &records, now);
+        // #718: notices, flaky quarantine and items, budgets, a full run's proposal.
+        super::test_results::apply(team, &records, &database, &policy, now, estimate)?;
         for record in &records {
             events.push(Event::new(
                 "test_result",

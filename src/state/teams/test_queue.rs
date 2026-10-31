@@ -47,7 +47,7 @@ pub(crate) struct Request {
     pub command: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub(crate) struct Record {
     pub id: String,
     pub team: String,
@@ -63,6 +63,14 @@ pub(crate) struct Record {
     pub affected: Vec<String>,
     /// #719: the task that asked for it, so its drawer lists its runs.
     pub task: Option<u32>,
+    /// #718: the measured record a reused result stands for; empty when it ran.
+    pub reused_from: String,
+    /// #718: reused, slower, over_time_budget, retried, crash.
+    pub flags: Vec<String>,
+    /// #718: a reused result is due for re-measuring.
+    pub due: bool,
+    /// #718: the suite's recorded time when it ran, to say how much it grew.
+    pub recorded_ms: u64,
 }
 
 /// #719: a request still in the queue: waiting, or running since `started`.
@@ -78,7 +86,8 @@ pub(crate) struct Pending {
 pub(crate) const PENDING_LIMIT: i64 = 100;
 
 const REQUEST_COLUMNS: &str = "id,team,suite,task,targets,commit_id,input_hash,asked_by,forced,at,seconds,budget_minutes,resources,command";
-const RECORD_COLUMNS: &str = "id,team,suite,commit_id,input_hash,status,duration_ms,excerpt,asked_by,at,affected,task";
+// #718: reused_from, flags, due and recorded_ms after #719's task.
+const RECORD_COLUMNS: &str = "id,team,suite,commit_id,input_hash,status,duration_ms,excerpt,asked_by,at,affected,task,reused_from,flags,due,recorded_ms";
 
 fn add_column(db: &Connection, table: &str, column: &str, kind: &str) -> rusqlite::Result<()> {
     let present = db.prepare(&format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name=?1"))?.exists([column])?;
@@ -87,6 +96,7 @@ fn add_column(db: &Connection, table: &str, column: &str, kind: &str) -> rusqlit
     }
     Ok(())
 }
+
 
 pub(crate) fn database_path() -> PathBuf {
     super::store::path().with_file_name("tests.sqlite3")
@@ -124,6 +134,9 @@ impl TestStore {
                     duration_ms INTEGER NOT NULL,excerpt TEXT NOT NULL,asked_by TEXT NOT NULL,at REAL NOT NULL,
                     affected TEXT NOT NULL);
                  CREATE INDEX IF NOT EXISTS results_input ON results(suite,commit_id,input_hash);
+                 CREATE TABLE IF NOT EXISTS flaky(seq INTEGER PRIMARY KEY AUTOINCREMENT,team TEXT NOT NULL,suite TEXT NOT NULL,
+                    record TEXT NOT NULL,at REAL NOT NULL);
+                 CREATE INDEX IF NOT EXISTS flaky_suite ON flaky(team,suite,at);
                  CREATE INDEX IF NOT EXISTS results_team ON results(team,at);
                  CREATE INDEX IF NOT EXISTS results_at ON results(at);",
             )?;
@@ -132,6 +145,17 @@ impl TestStore {
             add_column(&db, "queue", "started", "REAL")?;
             add_column(&db, "results", "task", "INTEGER")?;
             db.execute_batch("CREATE INDEX IF NOT EXISTS results_task ON results(team,task,at);")?;
+            // #718: the columns an older database lacks.
+            let present: Vec<String> = db
+                .prepare("SELECT name FROM pragma_table_info('results')")?
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
+            for (name, kind) in [("reused_from", "TEXT NOT NULL DEFAULT ''"), ("flags", "TEXT NOT NULL DEFAULT '[]'"), ("due", "INTEGER NOT NULL DEFAULT 0"), ("recorded_ms", "INTEGER NOT NULL DEFAULT 0")] {
+                if !present.iter().any(|known| known == name) {
+                    db.execute_batch(&format!("ALTER TABLE results ADD COLUMN {name} {kind};"))?;
+                }
+            }
+            db.execute_batch("CREATE INDEX IF NOT EXISTS results_reuse ON results(team,at) WHERE reused_from<>'';")?;
         }
         Ok(Self { db })
     }
@@ -214,7 +238,7 @@ impl TestStore {
     /// hash, status, duration, a bounded excerpt and who asked.
     fn write(&self, record: &Record) -> anyhow::Result<()> {
         self.db.execute(
-            &format!("INSERT OR REPLACE INTO results({RECORD_COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)"),
+            &format!("INSERT OR REPLACE INTO results({RECORD_COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)"),
             params![
                 record.id,
                 record.team,
@@ -227,7 +251,11 @@ impl TestStore {
                 record.asked_by,
                 record.at,
                 serde_json::to_string(&record.affected)?,
-                record.task
+                record.task,
+                record.reused_from,
+                serde_json::to_string(&record.flags)?,
+                record.due as i64,
+                record.recorded_ms as i64
             ],
         )?;
         // Bounded: only the oldest records past the limit go.
@@ -241,12 +269,64 @@ impl TestStore {
         Ok(())
     }
 
-    /// The last result for the same inputs, if the runner already measured it.
-    pub(crate) fn reused(&self, suite: &str, commit: &str, input_hash: &str) -> anyhow::Result<Option<Record>> {
+    /// #718: the last green measured run of a suite with these input hashes,
+    /// at any commit: unchanged inputs give the same result.
+    pub(crate) fn last_green(&self, team: &str, suite: &str, input_hash: &str) -> anyhow::Result<Option<Record>> {
         let mut statement = self.db.prepare(&format!(
-            "SELECT {RECORD_COLUMNS} FROM results WHERE suite=?1 AND commit_id=?2 AND input_hash=?3 ORDER BY seq DESC LIMIT 1"
+            "SELECT {RECORD_COLUMNS} FROM results WHERE team=?1 AND suite=?2 AND input_hash=?3 AND status='passed'
+             AND reused_from='' ORDER BY seq DESC LIMIT 1"
         ))?;
-        Ok(statement.query_row(params![suite, commit, input_hash], Self::record).optional()?)
+        Ok(statement.query_row(params![team, suite, input_hash], Self::record).optional()?)
+    }
+
+    /// #718: records a reused result for `request`: from `source`, due for
+    /// re-measuring.
+    pub(crate) fn write_reused(&self, request: &Request, source: &Record, now: f64) -> anyhow::Result<Record> {
+        let record = Record {
+            id: format!("{}-reused-{}", request.id, now as i64),
+            team: request.team.clone(),
+            suite: request.suite.clone(),
+            commit: request.commit.clone(),
+            input_hash: request.input_hash.clone(),
+            status: "reused".into(),
+            duration_ms: 0,
+            excerpt: format!("Reused from {} ({}): its inputs did not change. Due for re-measuring.", source.id, source.commit),
+            asked_by: request.asked_by.clone(),
+            at: now,
+            affected: request.targets.clone(),
+            reused_from: source.id.clone(),
+            flags: vec!["reused".into()],
+            due: true,
+            recorded_ms: source.duration_ms,
+            task: request.task,
+        };
+        self.write(&record)?;
+        Ok(record)
+    }
+
+    /// #718: how many results of the team were reused since `since`, and when
+    /// the oldest measurement they stand for ran.
+    pub(crate) fn reused_since(&self, team: &str, since: f64) -> anyhow::Result<(usize, Option<f64>)> {
+        let (count, oldest): (i64, Option<f64>) = self.db.query_row(
+            "SELECT COUNT(*), MIN(source.at) FROM results AS reuse LEFT JOIN results AS source ON source.id=reuse.reused_from
+             WHERE reuse.team=?1 AND reuse.reused_from<>'' AND reuse.at>?2",
+            params![team, since],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok((count as usize, oldest))
+    }
+
+    /// #718: a flaky episode: the record that passed only on its retry.
+    pub(crate) fn add_flaky(&self, team: &str, suite: &str, record: &str, at: f64) -> anyhow::Result<()> {
+        self.db.execute("INSERT INTO flaky(team,suite,record,at) VALUES(?1,?2,?3,?4)", params![team, suite, record, at])?;
+        Ok(())
+    }
+
+    /// #718: a suite's flaky episodes after `since`, oldest first (bounded).
+    pub(crate) fn flaky_history(&self, team: &str, suite: &str, since: f64) -> anyhow::Result<Vec<(String, f64)>> {
+        let mut statement = self.db.prepare("SELECT record,at FROM flaky WHERE team=?1 AND suite=?2 AND at>=?3 ORDER BY at ASC LIMIT 200")?;
+        let rows = statement.query_map(params![team, suite, since], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     /// Newest first, a page before `before`; #719: only one task's runs, or
@@ -275,6 +355,10 @@ impl TestStore {
             at: row.get(9)?,
             affected: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or_default(),
             task: row.get(11)?,
+            reused_from: row.get(12)?,
+            flags: serde_json::from_str(&row.get::<_, String>(13)?).unwrap_or_default(),
+            due: row.get::<_, i64>(14)? != 0,
+            recorded_ms: row.get::<_, i64>(15)? as u64,
         })
     }
 }
@@ -299,6 +383,9 @@ pub(crate) fn record_notices(team: &mut super::model::Team, records: &[Record], 
             duration_ms: record.duration_ms,
             asked_by: record.asked_by.clone(),
             at: record.at,
+            flags: record.flags.clone(),
+            reused_from: record.reused_from.clone(),
+            recorded_seconds: record.recorded_ms as f64 / 1000.0,
         });
     }
     let extra = team.test_notices.len().saturating_sub(50);
@@ -346,6 +433,7 @@ pub(crate) fn tick(
     last_load_at: f64,
     now: f64,
     read_load: impl FnOnce() -> Load,
+    policy: &super::test_results::Policy,
 ) -> anyhow::Result<(Vec<Record>, bool)> {
     let queued = store.queued(team)?;
     if queued.is_empty() || now - last_load_at < 30.0 {
@@ -354,7 +442,7 @@ pub(crate) fn tick(
     let mut load = read_load();
     load.at_night = config::is_night(local_hour, night);
     let chosen = schedule(&queued, classes, &load);
-    let records = run_due(store, project, &chosen, now)?;
+    let records = run_due(store, project, &chosen, now, policy)?;
     Ok((records, true))
 }
 
@@ -406,24 +494,62 @@ fn shell(command: &str, cwd: &Path) -> Command {
 
 /// Runs the scheduled requests in order and writes one result each. The command
 /// comes from the project's configuration, never from a report; a timeout or a
-/// nonzero exit is the result's status.
-pub(crate) fn run_due(store: &TestStore, project: &Path, requests: &[Request], now: f64) -> anyhow::Result<Vec<Record>> {
+/// nonzero exit is the result's status. #718: a failure is retried as the
+/// policy says and a pass on a retry is flaky (with its episode recorded); a
+/// crash is never retried; a run slower than its recorded time by more than the
+/// growth share, or over its time budget, is flagged.
+pub(crate) fn run_due(store: &TestStore, project: &Path, requests: &[Request], now: f64, policy: &super::test_results::Policy) -> anyhow::Result<Vec<Record>> {
     let mut written = Vec::new();
     let began = std::time::Instant::now();
     for request in requests {
         let started = std::time::Instant::now();
         let at = now + began.elapsed().as_secs_f64();
         store.start(&request.id, at)?;
-        let mut process = shell(&request.command_for(project), project);
-        let outcome = run_tree(&mut process, Duration::from_secs((request.budget_minutes.max(1.0) * 60.0) as u64), None);
-        let status = if outcome.timed_out {
+        let limit = Duration::from_secs((request.budget_minutes.max(1.0) * 60.0) as u64);
+        let mut outcome = run_tree(&mut shell(&request.command_for(project), project), limit, None);
+        let mut flags = Vec::new();
+        let crash = super::test_results::crashed(outcome.exit, &outcome.tail);
+        let mut status = if crash {
+            flags.push("crash".to_owned());
+            "crashed".to_owned()
+        } else if outcome.timed_out {
             "timeout".to_owned()
         } else if outcome.exit == Some(0) {
             "passed".to_owned()
         } else {
             "failed".to_owned()
         };
-        let excerpt = if outcome.excerpt.is_empty() { last_chars(&outcome.tail, EXCERPT_BYTES) } else { outcome.excerpt };
+        let first = outcome.clone();
+        // Never a crash or a timeout: only a plain failure is tried again.
+        let mut retries = 0;
+        while status == "failed" && retries < policy.retries {
+            retries += 1;
+            let again = run_tree(&mut shell(&request.command_for(project), project), limit, None);
+            if super::test_results::crashed(again.exit, &again.tail) {
+                flags.push("crash".to_owned());
+                status = "crashed".into();
+                outcome = again;
+                break;
+            }
+            if again.exit == Some(0) && !again.timed_out {
+                flags.push("retried".to_owned());
+                status = "flaky".into();
+                outcome = again;
+                break;
+            }
+            outcome = again;
+        }
+        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let ran_ms = if status == "flaky" { duration_ms / u64::from(retries + 1) } else { duration_ms };
+        if request.seconds > 0.0 && policy.grow_percent > 0 && ran_ms as f64 > request.seconds * 1000.0 * (1.0 + f64::from(policy.grow_percent) / 100.0) {
+            flags.push("slower".to_owned());
+        }
+        if request.budget_minutes > 0.0 && (ran_ms as f64 > request.budget_minutes * 60_000.0 || outcome.timed_out) {
+            flags.push("over_time_budget".to_owned());
+        }
+        // A flaky run keeps the failure it hid: that is the episode's evidence.
+        let shown = if status == "flaky" { &first } else { &outcome };
+        let excerpt = if shown.excerpt.is_empty() { last_chars(&shown.tail, EXCERPT_BYTES) } else { shown.excerpt.clone() };
         let record = Record {
             id: format!("{}-{}", request.id, now as i64),
             team: request.team.clone(),
@@ -431,14 +557,21 @@ pub(crate) fn run_due(store: &TestStore, project: &Path, requests: &[Request], n
             commit: request.commit.clone(),
             input_hash: request.input_hash.clone(),
             status,
-            duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            duration_ms,
             excerpt,
             asked_by: request.asked_by.clone(),
             at,
             affected: request.targets.clone(),
+            reused_from: String::new(),
+            flags,
+            due: false,
+            recorded_ms: (request.seconds * 1000.0) as u64,
             task: request.task,
         };
         store.write(&record)?;
+        if record.status == "flaky" {
+            store.add_flaky(&record.team, &record.suite, &record.id, now)?;
+        }
         store.finish(&request.id)?;
         written.push(record);
     }
@@ -507,16 +640,16 @@ mod tests {
             Load { cpu_free: 8, ram_free_mb: 8000, gpu_free: true, at_night: false }
         };
         // An empty queue: no read at all.
-        let (records, read) = tick(&store, dir.path(), "t", &classes, &night, 12, 0.0, 100.0, load).unwrap();
+        let (records, read) = tick(&store, dir.path(), "t", &classes, &night, 12, 0.0, 100.0, load, &Default::default()).unwrap();
         assert!(records.is_empty() && !read && reads.get() == 0, "an empty queue reads no load");
         let mut queued = request("r1", "unit", 10.0, false, "small");
         queued.command = if cfg!(windows) { "cmd /d /s /c exit 0".into() } else { "true".into() };
         store.enqueue(&queued).unwrap();
         // The last read was a moment ago: no second read.
-        let (records, read) = tick(&store, dir.path(), "t", &classes, &night, 12, 90.0, 100.0, load).unwrap();
+        let (records, read) = tick(&store, dir.path(), "t", &classes, &night, 12, 90.0, 100.0, load, &Default::default()).unwrap();
         assert!(records.is_empty() && !read && reads.get() == 0, "a read waits 30 s");
         // Enough time passed and the queue has work: one read, one run.
-        let (records, read) = tick(&store, dir.path(), "t", &classes, &night, 12, 0.0, 100.0, load).unwrap();
+        let (records, read) = tick(&store, dir.path(), "t", &classes, &night, 12, 0.0, 100.0, load, &Default::default()).unwrap();
         assert!(read && reads.get() == 1, "the tick read the load once");
         assert_eq!(records.len(), 1, "{records:?}");
         assert_eq!(records[0].status, "passed");
@@ -548,8 +681,7 @@ mod tests {
             excerpt: "the log".into(),
             asked_by: "dev".into(),
             at: 10.0,
-            affected: Vec::new(),
-            task: None,
+            affected: Vec::new(), reused_from: String::new(), flags: Vec::new(), due: false, recorded_ms: 0, task: None,
         };
         record_notices(&mut team, std::slice::from_ref(&record), 100.0);
         assert_eq!(team.test_load_at, 100.0);
@@ -602,12 +734,11 @@ mod tests {
         let record = |id: &str, suite: &str, at: f64| Record {
             id: id.into(), team: "t".into(), suite: suite.into(), commit: "c".into(), input_hash: "h".into(),
             status: "passed".into(), duration_ms: 10, excerpt: "ok".into(), asked_by: "dev".into(), at,
-            affected: vec!["a".into()],
-            task: None,
+            affected: vec!["a".into()], reused_from: String::new(), flags: Vec::new(), due: false, recorded_ms: 0, task: None,
         };
         store.write(&record("1", "cargo", 1.0)).unwrap();
         store.write(&record("2", "cargo", 2.0)).unwrap();
-        let found = store.reused("cargo", "c", "h").unwrap().unwrap();
+        let found = store.last_green("t", "cargo", "h").unwrap().unwrap();
         assert_eq!(found.id, "2");
         let page = store.results(Some("t"), None, 1, None, None).unwrap();
         assert_eq!(page.len(), 1);
@@ -625,12 +756,12 @@ mod tests {
         request.command = if cfg!(windows) { "echo hello & exit /b 0".into() } else { "echo hello".into() };
         store.enqueue(&request).unwrap();
         assert_eq!(store.queued("t").unwrap().len(), 1);
-        let written = run_due(&store, dir.path(), &store.queued("t").unwrap(), 100.0).unwrap();
+        let written = run_due(&store, dir.path(), &store.queued("t").unwrap(), 100.0, &Default::default()).unwrap();
         assert_eq!(written.len(), 1);
         assert_eq!(written[0].status, "passed");
         assert!(written[0].excerpt.contains("hello"), "{}", written[0].excerpt);
         assert!(store.queued("t").unwrap().is_empty());
-        let found = store.reused("echo", "c", "h").unwrap().unwrap();
+        let found = store.last_green("t", "echo", "h").unwrap().unwrap();
         assert_eq!(found.id, written[0].id);
     }
 
@@ -658,7 +789,7 @@ mod tests {
         assert_eq!(serde_json::to_value(&pending[0]).unwrap()["suite"], "echo", "the request's fields sit beside its state");
         // The scheduler never picks a running request again.
         assert!(store.queued("t").unwrap().iter().all(|item| item.id != "running"));
-        let written = run_due(&store, dir.path(), &[running], 100.0).unwrap();
+        let written = run_due(&store, dir.path(), &[running], 100.0, &Default::default()).unwrap();
         assert_eq!(written[0].task, Some(7));
         assert!(store.pending("t").unwrap().iter().all(|item| item.request.id != "running"));
         let other = Record { id: "other".into(), task: Some(8), at: 200.0, ..written[0].clone() };
@@ -724,8 +855,7 @@ mod tests {
             let record = Record {
                 id: format!("r{index}"), team: "t".into(), suite: "s".into(), commit: "c".into(), input_hash: "h".into(),
                 status: "passed".into(), duration_ms: 1, excerpt: String::new(), asked_by: "dev".into(), at: index as f64,
-                affected: Vec::new(),
-                task: None,
+                affected: Vec::new(), reused_from: String::new(), flags: Vec::new(), due: false, recorded_ms: 0, task: None,
             };
             store.write(&record).unwrap();
         }

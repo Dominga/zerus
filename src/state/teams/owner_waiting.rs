@@ -183,6 +183,19 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
         found["waits_for"] = json!(wait.waits_for);
         out.push(found);
     }
+    // #718: the proposal of a full test run is the owner's call too, and a
+    // flaky suite's quarantine shows the owner until it expires.
+    if let Some(proposal) = &team.test_full_proposal {
+        let mut found = item(team, "test_full_run", &format!("{}", proposal.at as i64), super::inbox::full_run_text(proposal), proposal.at, "open_team");
+        found["seconds"] = json!(proposal.seconds);
+        found["reused"] = json!(proposal.reused);
+        out.push(found);
+    }
+    for quarantine in team.test_quarantine.iter().filter(|quarantine| quarantine.until > now) {
+        let until = chrono::DateTime::from_timestamp(quarantine.until as i64, 0).map(|time| time.format("%Y-%m-%d").to_string()).unwrap_or_default();
+        let title = format!("{} is quarantined as flaky ({} episode(s)) until {until}", quarantine.suite, quarantine.episodes);
+        out.push(item(team, "test_quarantine", &quarantine.suite, title, quarantine.since, "open_team"));
+    }
     // Every task decided: the team waits for the owner (or the lead) to finish
     // it or add the next phase; no draft phase is waiting.
     if super::ops::all_decided(team) && !team.phases.iter().any(|phase| phase.state == PhaseState::Draft) {

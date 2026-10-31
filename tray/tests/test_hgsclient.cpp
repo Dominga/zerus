@@ -793,6 +793,13 @@ print('DeepSeek session ready')
     client.launchDetachedSession("mac","claude",folder,"auto","work","launch-four",{},{},"auto");
     QTRY_COMPARE(result.size(),4);QVERIFY(result[3][1].toBool());QVERIFY(args.open(QIODevice::ReadOnly));
     QCOMPARE(QJsonDocument::fromJson(args.readAll()).array(),QJsonArray({"@mac","claude",folder,"--new","-n","auto","--launch-id","launch-four","-d","--account","work","--permissions","auto"}));
+    args.close();
+    // A native selector is one opaque argument: braces and spaces are never
+    // parsed or split by the client, and the backend validates it.
+    const QString native=QString("native:{\"mode\":\"accept edits\",\"sandbox\":\"strict\"}");
+    client.launchDetachedSession("mac","codex",folder,"native","work","launch-five",{}, {}, native);
+    QTRY_COMPARE(result.size(),5);QVERIFY(result[4][1].toBool());QVERIFY(args.open(QIODevice::ReadOnly));
+    QCOMPARE(QJsonDocument::fromJson(args.readAll()).array(),QJsonArray({"@mac","codex",folder,"--new","-n","native","--launch-id","launch-five","-d","--account","work","--permissions",native}));
 }
 
 

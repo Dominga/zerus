@@ -128,6 +128,12 @@ private:
     void updateModels();
     void updateEfforts();
     void updatePermissions();
+    void updatePermissionMenu();
+    bool openPermissionEditor(int index);
+    QMap<QString, QString> m_permissionSelection;
+    QString m_permissionContext;
+    int m_permissionBeforeEditor = -1;
+    bool m_permissionEditorOpen = false;
     // The selected OpenCode account row of this computer's catalog, if any.
     QJsonObject openCodeProfile() const;
     void updateOpenCodeService();

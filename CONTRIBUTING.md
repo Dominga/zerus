@@ -50,12 +50,15 @@ the previous local run, or else by `scripts/ci/python-durations.json`. The
 desktop script builds with `BUILD_TESTING=ON` and runs the complete Qt suite
 headlessly in parallel (`build` or `test` runs only that half). Each suite
 registered with `zerus_add_test` also writes per-function JUnit results to
-`artifacts/test-results/qt-functions/`. `test_sessionswindow` runs as ten
-shards of its test functions and of the data rows of its slowest functions,
-balanced by the durations in `tray/tests/qt-shard-durations.txt`; tests that
-file does not list go by a hash of their name, and every shard fails unless
-each function and row runs in exactly one shard. `scripts/ci/qt-shard-seed.py`
-rebuilds the file from the `qt-functions` results of the CI desktop jobs. Tray
+`artifacts/test-results/qt-functions/`. The sessions window's tests run as
+area suites, `test_sessionswindow_<area>` (list, inspector, composer,
+questions, push, shortcuts, launch, lifecycle, projects, machines, files,
+OpenCode, teams and settings, the larger areas in numbered parts), each a few
+minutes, sharing the fixture in `tray/tests/support/SessionsWindowFixture.*`.
+`tray/tests/RunQtShard.cmake` can still split a long suite into shards of its
+functions and data rows, balanced by `tray/tests/qt-shard-durations.txt`;
+`scripts/ci/qt-shard-seed.py` rebuilds that file from the `qt-functions`
+results of the CI desktop jobs. Tray
 sources compile once, into the `hgs-tray-*` static libraries that the
 application and the suites link: a new suite links the lowest library that
 covers its code instead of listing `tray/src` files, which fails configuration.
@@ -194,7 +197,7 @@ The dismissing click must cancel without activating the control behind the popup
 ```sh
 QT_QPA_PLATFORM=cocoa .ci-build/gui/tests/test_machinespage colorPickerDismissalKeepsTheSavedColor
 QT_QPA_PLATFORM=cocoa .ci-build/gui/tests/test_projectsdialog projectColorChangesRequireApply customProjectColorRemainsStaged
-QT_QPA_PLATFORM=cocoa .ci-build/gui/tests/test_sessionswindow colorPickerUsesWorkspaceThemeAndCancelsOutside
+QT_QPA_PLATFORM=cocoa .ci-build/gui/tests/test_sessionswindow_settings1 colorPickerUsesWorkspaceThemeAndCancelsOutside
 ```
 
 On a KDE Plasma 6 Wayland desktop, the optional native window-layer check uses
@@ -205,7 +208,7 @@ and leaves unrelated windows and desktop rules alone:
 QT_QPA_PLATFORM=wayland ZERUS_TEST_KWIN=1 \
   tray/build/tests/test_kwinwindowlayer nativeKWinChangesOnlyOurWindowAndRestores
 QT_QPA_PLATFORM=wayland \
-  tray/build/tests/test_sessionswindow windowLayerControlsKeepFocusAndLayout
+  tray/build/tests/test_sessionswindow_settings2 windowLayerControlsKeepFocusAndLayout
 ```
 
 The ordinary `kwinwindowlayer` test runs on a private D-Bus session with a fake

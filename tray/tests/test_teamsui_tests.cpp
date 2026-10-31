@@ -415,7 +415,7 @@ void TestTeamsUiTests::theBuildsTabShowsTheBuildTheQueueTheTimelineAndWhoChanges
     QCOMPARE(reads.first()["team"].toString(), QStringLiteral("team-1"));
     QVERIFY(!reads.first().contains("request_id"));
     QCOMPARE(pillText(view, "teamBuildsRunningCount"), QStringLiteral("1 building"));
-    QCOMPARE(pillText(view, "teamBuildsWaitingCount"), QStringLiteral("1 waiting"));
+    QCOMPARE(pillText(view, "teamBuildsWaitingCount"), QStringLiteral("2 waiting"));   // the cargo-test and the shared-mode ue-build
     QCOMPARE(labelText(view, "teamBuildsFolder"), QStringLiteral("D:/work/shop"));
     QCOMPARE(labelText(view, "teamBuildsBuildFolder"), QStringLiteral("target"));
     QCOMPARE(pillText(view, "teamBuildsHitRate"), QStringLiteral("cache hits 25%"));

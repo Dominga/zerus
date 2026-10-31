@@ -569,6 +569,8 @@ void TestTeamsUiTests::theBuildBrokerSwitchAndTheLeadsProposalCard()
         darkPalette(); workspace.setTheme(true); workspace.render();
     }
     // The settings: the switch is off by default, with one line; on, it is a change to save.
+    // A loaded runner may still be reading the team after the shots.
+    QTRY_VERIFY(controller.watched());
     const auto *team = controller.watched();
     QVERIFY(team);
     for (const bool dark : {true, false}) {

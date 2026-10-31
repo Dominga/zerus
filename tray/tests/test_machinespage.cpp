@@ -1,5 +1,6 @@
 #include "support/PageShots.h"
 #include <QtTest>
+#include <QScopeGuard>
 #include <QApplication>
 #include <QCheckBox>
 #include <QColorDialog>
@@ -377,6 +378,9 @@ void TestMachinesPage::aSavedMachineSwitchesToWslAndBackKeepingItsOverrides()
 // shown again still reads them back (the queue is an overlay), not empty fields.
 void TestMachinesPage::otherTransportSavedBehindAHeldLockReadsBack()
 {
+    // This checks the queued writer, which tests otherwise skip (TestIsolation).
+    qputenv("ZERUS_SETTINGS_SYNC", "0");
+    const auto direct = qScopeGuard([] { qputenv("ZERUS_SETTINGS_SYNC", "1"); });
     flag("data.json", R"({"local":"arch","revision":"revision-1","machines":[{"alias":"ubuntu","connection":{"enabled":true,"hostname":"ubuntu.example","user":"alice","port":2222},"enabled":true,"source":"local"}]})");
     // Another computer's program holds the lock (a lock of this process would
     // be a leftover the writer removes).

@@ -1945,6 +1945,9 @@ void TestTeamsUiPlan::thePlanHidesCancelledTasksAndNeverSendsTheCopy()
     graph->linked(3, 5);
     QTRY_COMPARE(int(calls(script(), "plan").size()), before + 1);
     QCOMPARE(calls(script(), "plan").last()["phases"].toArray(), (QJsonArray{QJsonObject{{"n", 2}, {"title", "Later"}, {"barrier", false}}}));
+    // The first edit's reply clears the panel's notice when it lands: let it
+    // land before the refused save, whose notice is what this checks.
+    QTest::qWait(500);
     // The display copy is never sent: it would drop phase 2 from the plan.
     panel.savePlan(withoutCancelled(*controller.watched()));
     QTest::qWait(80);

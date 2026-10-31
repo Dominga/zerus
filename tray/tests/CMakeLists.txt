@@ -542,6 +542,9 @@ foreach(area IN LISTS ZERUS_SESSIONSWINDOW_SUITES)
     add_executable(test_sessionswindow_${area} test_sessionswindow_${area}.cpp)
     target_link_libraries(test_sessionswindow_${area} PRIVATE sessionswindow-fixture sessionswindow-resources Qt6::Test Qt6::Widgets)
     zerus_add_test(sessionswindow_${area} test_sessionswindow_${area})
+    # The longest area (questions) takes about 270 s on a loaded runner; the
+    # old shards had 480 s too.
+    set_tests_properties(sessionswindow_${area} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 600)
 endforeach()
 
 # A plugin for another interface: the native browser loader must reject it.

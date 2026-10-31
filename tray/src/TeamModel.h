@@ -335,6 +335,12 @@ struct Task {
     struct AddedLate { QString by, request, confirm; double at = 0; bool known = false; };
     AddedLate addedLate;
     Timing timing;
+    // Owner 2026-10-31 (#745, #746): the time estimate in minutes (-1: none),
+    // where it comes from (history, role, lead, none; empty: an older hgs
+    // sends none), hgs's text, and the minutes the open attempt has run.
+    double estimateMinutes = -1, estimateSpent = -1;
+    QString estimateSource, estimateText;
+    bool estimateKnown() const { return !estimateSource.isEmpty(); }
     // U36: the pipeline the plan chose ("" the default, "none", or a preset
     // id), its snapshot once handed out, and the members that may take its
     // open stage.

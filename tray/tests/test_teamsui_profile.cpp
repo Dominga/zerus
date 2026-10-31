@@ -198,6 +198,7 @@ private slots:
     void profileViewShowsThePhaseAndItsLosses();
     void profileReadsInBoundedPagesAndKeepsABoundedCache();
     void profileShowsTheTestRunsOfItsWindow();
+    void profileComparesEstimateAndActualPerTask();
     void profileOfALargeTeamStaysResponsive();
     void heatTintsGraphAndBoardByTimeOrTokens();
     void aHeatReadThatDrawsTheSameRebuildsNothing();
@@ -724,6 +725,61 @@ void TestTeamsUiProfile::profileShowsTheTestRunsOfItsWindow()
     const auto model = TeamProfile::Model::build(Teams::parse(phasedTeam()), profileOfPhase2(), spansOfPhase2(), t0 + 21600, runs);
     QCOMPARE(model.tests.size(), 3);
     QVERIFY(TeamProfile::Model::build(Teams::parse(phasedTeam()), profileOfPhase2(), spansOfPhase2(), t0 + 21600).tests.isEmpty());
+}
+
+// Owner 2026-10-31 (#746): the Time view compares each task's estimate with
+// its work and rework, the largest overrun first; a task without one says so.
+void TestTeamsUiProfile::profileComparesEstimateAndActualPerTask()
+{
+    setTeam(phasedTeam());
+    QVERIFY(FakeCli::replace(script() + ".profile", QJsonDocument(profileOfPhase2()).toJson(QJsonDocument::Compact)));
+    auto spans = spansOfPhase2();
+    auto three = spans[0].toObject(); three["estimate_minutes"] = 180; three["estimate_source"] = "history"; spans[0] = three;
+    auto four = spans[1].toObject(); four["estimate_minutes"] = 30; four["estimate_source"] = "lead"; spans[1] = four;
+    QVERIFY(FakeCli::replace(script() + ".spans", QJsonDocument(spans).toJson(QJsonDocument::Compact)));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1600, 980); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QPushButton *profile = nullptr;
+    QTRY_VERIFY(([&] {
+        for (auto *b : workspace.findChildren<QPushButton *>()) if (b->property("segment") == "profile" && b->isVisible()) profile = b;
+        return profile != nullptr;
+    })());
+    profile->click();
+    TeamProfileView *view = nullptr;
+    QTRY_VERIFY((view = profileViewOf(&workspace)) && view->isVisible());
+    QTRY_COMPARE(view->model().estimates.size(), 2);
+    // #3: rework 50 min and work 195 min against 180; #4: 23 min against 30.
+    QTRY_VERIFY(workspace.findChild<QFrame *>("teamProfileEstimates"));
+    QStringList order, values, actual, diff;
+    for (auto *task : workspace.findChildren<QPushButton *>("teamProfileEstimateTask")) order << task->property("task").toString();
+    for (auto *l : workspace.findChildren<QLabel *>("teamProfileEstimateValue")) values << l->text();
+    for (auto *l : workspace.findChildren<QLabel *>("teamProfileEstimateActual")) actual << l->text();
+    for (auto *l : workspace.findChildren<QLabel *>("teamProfileEstimateDiff")) diff << l->text();
+    QCOMPARE(order, (QStringList{"3", "4"}));
+    QCOMPARE(values, (QStringList{"~180 min", "~30 min"}));
+    QCOMPARE(actual, (QStringList{"245 min", "23 min"}));
+    QCOMPARE(diff, (QStringList{"65 min over", "7 min under"}));
+    QCOMPARE(workspace.findChildren<QLabel *>("teamProfileEstimateDiff").first()->palette().color(QPalette::WindowText), TeamUi::colorsFor(true).warn);
+    QCOMPARE(workspace.findChild<QLabel *>("teamProfileEstimatesSummary")->text(), QStringLiteral("1 of 2 over the estimate"));
+    if (shotsWanted()) {
+        shot(&workspace, "u746-profile-estimates-dark");
+        workspace.setTheme(false); workspace.render();
+        lightShot(&workspace, "u746-profile-estimates-light");
+        darkPalette(); workspace.setTheme(true); workspace.render();
+    }
+    // A task row opens the task.
+    workspace.findChildren<QPushButton *>("teamProfileEstimateTask").first()->click();
+    QTRY_COMPARE(view->selectedTask(), 3);
+    // Without estimate fields (an older hgs) there is no card.
+    const auto model = TeamProfile::Model::build(Teams::parse(phasedTeam()), profileOfPhase2(), spansOfPhase2(), profileStart() + 21600);
+    QVERIFY(model.estimates.isEmpty());
 }
 
 QTEST_MAIN(TestTeamsUiProfile)

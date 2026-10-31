@@ -571,6 +571,13 @@ Team parse(const QJsonObject &v)
             const auto a = t.value("added_late").toObject();
             task.addedLate = {str(a, "by"), str(a, "request"), str(a, "confirm"), a.value("at").toDouble(), true};
         }
+        // Owner 2026-10-31 (#746): the estimate, from #745's status fields.
+        if (t.contains("estimate_source")) {
+            task.estimateSource = str(t, "estimate_source");
+            task.estimateText = str(t, "estimate_text");
+            task.estimateMinutes = t.value("estimate_minutes").isDouble() ? t.value("estimate_minutes").toDouble() : -1;
+            task.estimateSpent = t.value("estimate_spent_minutes").isDouble() ? t.value("estimate_spent_minutes").toDouble() : -1;
+        }
         if (t.value("timing").isObject()) {
             // U37: the working time and the waits, computed by hgs.
             const auto o = t.value("timing").toObject();
@@ -1053,6 +1060,9 @@ QJsonObject Task::json() const
     if (!role.isEmpty()) value.insert("role", role);
     // U36: the plan's pipeline choice; a plan without it keeps the default.
     if (!pipeline.isEmpty()) value.insert("pipeline", pipeline);
+    // #746: only the lead's own estimate goes back in a plan; one from the
+    // history stays the history's.
+    if (estimateSource == "lead" && estimateMinutes > 0) value.insert("estimate_minutes", estimateMinutes);
     return value;
 }
 
@@ -1376,7 +1386,11 @@ QStringList proposalChanges(const Team &team, const Team::Proposal &proposal)
             const auto task = value.toObject();
             const QString title = task.value("title").toString(tr("Untitled task"));
             const QString assignee = task.value("assignee").toString();
-            lines << (assignee.isEmpty() ? title : tr("%1, for %2").arg(title, team.member(assignee) ? team.roleOf(assignee) : assignee));
+            QString line = assignee.isEmpty() ? title : tr("%1, for %2").arg(title, team.member(assignee) ? team.roleOf(assignee) : assignee);
+            // #746: the lead's estimate, when the proposal names one.
+            const double estimate = task.value("estimate_minutes").toDouble();
+            if (estimate > 0) line += tr(", ~%1 min").arg(qRound64(estimate));
+            lines << line;
         }
     } else if (proposal.kind == "cancel-tasks") {
         for (const auto &value : change.value("tasks").toArray()) lines << taskLine(value.toInt());
@@ -1775,6 +1789,9 @@ QByteArray visibleShape(QJsonObject status)
         const QString state = task.value("status").toString();
         const bool decided = state == "accepted" || state == "rejected" || state == "cancelled";
         if (task.value("timing").isObject()) task["timing"] = steadyTiming(task.value("timing").toObject(), decided);
+        // #746: the spent minutes grow every minute; the views tick them from
+        // the running time, so they never rebuild a view.
+        task.remove("estimate_spent_minutes");
         tasks.append(task);
     }
     if (status.contains("tasks")) status["tasks"] = tasks;

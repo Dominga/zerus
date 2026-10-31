@@ -10,6 +10,7 @@
 #include "TeamPhaseScroll.h"
 #include "TeamTaskCard.h"
 #include "TeamWorkspace.h"
+#include <QSpinBox>
 
 namespace {
 QPushButton *phaseAction(QWidget *root, int phase, const char *name)
@@ -134,6 +135,7 @@ private slots:
     void anAutoAcceptedDraftReadsAsDraftUntilItStarts();
     void addedLateTaskIsOutOfScopeEverywhere();
     void planTaskTakesModelsAndARole();
+    void theEstimateIsSetInThePlanAndWhenATaskJoinsAPhase();
     void phaseScrollsInEveryView();
     void phaseScrollDecisions();
 };
@@ -2189,10 +2191,16 @@ void TestTeamsUiPlan::addedLateTaskIsOutOfScopeEverywhere()
     QVERIFY(!next->isEnabled());
     dialog->findChild<QLineEdit *>("teamAddLateTitle")->setText("Retry the payment webhook");
     dialog->findChild<QPlainTextEdit *>("teamAddLateDescription")->setPlainText("Retry with backoff");
+    // #746: the estimate in minutes; From experience (0) sends none.
+    auto *estimate = dialog->findChild<QSpinBox *>("teamAddLateEstimate");
+    QVERIFY(estimate);
+    QCOMPARE(estimate->text(), QStringLiteral("From experience"));
+    estimate->setValue(30);
     QVERIFY(next->isEnabled());
     next->click();
     QTRY_COMPARE(calls(script(), "add-to-phase").size(), 1);
     const auto first = calls(script(), "add-to-phase").first();
+    QCOMPARE(first["tasks"].toArray().first().toObject()["estimate_minutes"].toInt(), 30);
     QCOMPARE(first["phase"].toInt(), 2);
     QCOMPARE(first["tasks"].toArray().first().toObject()["id"].toInt(), 7);
     QCOMPARE(first["tasks"].toArray().first().toObject()["title"].toString(), QStringLiteral("Retry the payment webhook"));
@@ -2228,6 +2236,81 @@ void TestTeamsUiPlan::addedLateTaskIsOutOfScopeEverywhere()
              QStringLiteral("Asked to add 1 task to running phase 2 · waits for your confirmation"));
     QCOMPARE(line("phase_tasks_added", {{"phase", 2}, {"tasks", QJsonArray{7, 8}}}),
              QStringLiteral("Added #7, #8 to running phase 2 · outside its original scope"));
+}
+
+// Owner 2026-10-31 (#746): the plan editor shows and sets a task's estimate in
+// minutes ("From experience" leaves it to the solved tasks, and shows their
+// number); the add-to-phase dialog sends one; the lead's add-to-phase card
+// shows each task's.
+void TestTeamsUiPlan::theEstimateIsSetInThePlanAndWhenATaskJoinsAPhase()
+{
+    auto planning = team("planning");
+    auto tasks = planning["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto task = tasks[i].toObject();
+        if (i == 0) { task["estimate_minutes"] = 25; task["estimate_source"] = "history"; task["estimate_text"] = "25 min"; }
+        else { task["estimate_minutes"] = QJsonValue(); task["estimate_source"] = "none"; task["estimate_text"] = "no estimate yet"; }
+        tasks[i] = task;
+    }
+    planning["tasks"] = tasks;
+    const int first = tasks.first().toObject()["id"].toInt();
+    setTeam(planning);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    panel.resize(420, 1200); panel.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    QTRY_VERIFY(controller.watched() && controller.watched()->full);
+    std::function<void(QDialog *)> with;
+    std::function<void(int)> look = [&](int tries) {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        if (!dialog || dialog->objectName() != "teamTaskEditor") { if (tries > 0) QTimer::singleShot(10, &panel, [&look, tries] { look(tries - 1); }); return; }
+        with(dialog);
+        for (auto *b : dialog->findChildren<QPushButton *>()) if (b->text() == QStringLiteral("Save")) { b->click(); return; }
+        dialog->reject();
+    };
+    // From experience: the history's number shows; the lead sets 45 minutes.
+    with = [&](QDialog *dialog) {
+        auto *estimate = dialog->findChild<QSpinBox *>("teamTaskEditEstimate");
+        QVERIFY(estimate);
+        QCOMPARE(estimate->value(), 0);
+        QCOMPARE(estimate->text(), QStringLiteral("From experience, ~25 min"));
+        estimate->setValue(45);
+        shot(dialog, "u746-plan-editor-dark");
+        lightPalette(); lightShot(dialog, "u746-plan-editor-light"); darkPalette();
+    };
+    QTimer::singleShot(0, &panel, [&look] { look(300); });
+    panel.editTask(*controller.watched(), first);
+    QTRY_COMPARE(calls(script(), "plan").size(), 1);
+    QJsonObject sent;
+    for (const auto &value : calls(script(), "plan").first()["tasks"].toArray()) {
+        const auto task = value.toObject();
+        if (task["id"].toInt() == first) sent = task;
+        else QVERIFY(!task.contains("estimate_minutes"));   // the history's stays the history's
+    }
+    QCOMPARE(sent["estimate_minutes"].toDouble(), 45.0);
+    // The lead's estimate reads back into the editor; clearing it leaves it out.
+    auto read = planning; auto again = read["tasks"].toArray(); auto one = again[0].toObject();
+    one["estimate_minutes"] = 45; one["estimate_source"] = "lead"; again[0] = one; read["tasks"] = again;
+    setTeam(read);
+    QTRY_VERIFY(([&] { controller.refresh(); const auto *t = controller.watched(); return t && t->task(first) && t->task(first)->estimateSource == "lead"; })());
+    with = [&](QDialog *dialog) {
+        auto *estimate = dialog->findChild<QSpinBox *>("teamTaskEditEstimate");
+        QCOMPARE(estimate->value(), 45);
+        estimate->setValue(0);
+    };
+    QTimer::singleShot(0, &panel, [&look] { look(300); });
+    panel.editTask(*controller.watched(), first);
+    QTRY_COMPARE(calls(script(), "plan").size(), 2);
+    for (const auto &value : calls(script(), "plan").last()["tasks"].toArray()) QVERIFY(!value.toObject().contains("estimate_minutes"));
+    // The lead's add-to-phase card names each task's estimate.
+    Team::Proposal proposal;
+    proposal.kind = QStringLiteral("add-to-phase");
+    proposal.change = QJsonObject{{"phase", 2}, {"tasks", QJsonArray{QJsonObject{{"title", "Retry the webhook"}, {"estimate_minutes", 30}},
+                                                                       QJsonObject{{"title", "Log the retries"}}}}};
+    const auto lines = Teams::proposalChanges(parse(phasedTeam()), proposal);
+    QCOMPARE(lines, (QStringList{"Retry the webhook, ~30 min", "Log the retries"}));
 }
 
 // U45: the plan editor gives a task models and a role instead of an assignee;

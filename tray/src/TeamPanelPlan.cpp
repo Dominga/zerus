@@ -6,6 +6,7 @@
 #include "TeamController.h"
 #include "TeamPanel.h"
 #include "TeamWidgets.h"
+#include <QSpinBox>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
@@ -253,6 +254,15 @@ void TeamPanel::editTask(const Team &team, int taskId)
     form->addRow(tr("Acceptance criteria"), criteria);
     form->addRow(tr("Assignee"), assignee);
     form->addRow(tr("Models"), models);
+    // Owner 2026-10-31 (#746): the estimate in minutes; "From experience"
+    // (0) leaves it to the team's solved tasks.
+    auto *estimate = new QSpinBox; estimate->setObjectName("teamTaskEditEstimate");
+    estimate->setRange(0, 1440); estimate->setSuffix(tr(" min")); estimate->setSingleStep(5);
+    estimate->setSpecialValueText(task.estimateSource != "lead" && task.estimateMinutes > 0
+                                      ? tr("From experience, ~%1 min").arg(qRound64(task.estimateMinutes)) : tr("From experience"));
+    estimate->setValue(task.estimateSource == "lead" && task.estimateMinutes > 0 ? int(qRound64(task.estimateMinutes)) : 0);
+    estimate->setToolTip(tr("Your estimate in minutes; From experience uses the median of this role's solved tasks"));
+    form->addRow(tr("Estimate"), estimate);
     // U36: the task's pipeline: the default (its role's, else the template's),
     // a catalog preset, or none; the task keeps a snapshot once handed out.
     auto *pipeline = new QComboBox; pipeline->setObjectName("teamTaskEditPipeline");
@@ -347,6 +357,8 @@ void TeamPanel::editTask(const Team &team, int taskId)
     for (const auto &model : models->text().split(QRegularExpression(QStringLiteral("[,\\s]+")), Qt::SkipEmptyParts))
         if (!task.models.contains(model) && task.models.size() < 20) task.models << model;
     task.pipeline = pipeline->currentData().toString();
+    if (estimate->value() > 0) { task.estimateMinutes = estimate->value(); task.estimateSource = QStringLiteral("lead"); }
+    else if (task.estimateSource == "lead") { task.estimateMinutes = -1; task.estimateSource = QStringLiteral("none"); }
     task.deps.clear();
     for (const auto &[id, on, soft] : depRows) if (on->isChecked()) task.deps.append({id, soft->isChecked()});
     bool replaced = false;

@@ -5771,6 +5771,32 @@ What the test queue makes of its results, by the project's thresholds:
 - Coverage. `hgs test coverage` also names the targets without unique coverage;
   the monthly run of `test-map-coverage.yml` reports them.
 
+#### The merge queue (#760)
+
+With `[merge_queue] enabled = true` (the owner may override it), the lead's or
+the owner's accept of a report does not decide it at once: it answers
+`merge_queued`, the task stays undecided with a `merge` entry (status shows it)
+and the worker takes the queue in accept order, one merge under test at a time.
+A check, a phase build, a sub-team's task and work done in the lead's own
+folder are decided at once as before.
+
+- The worker merges the commit the author reported (`folder_head`; a clone's
+  branch is fetched first) into the lead's folder: a fast-forward or a merge
+  commit "Merge accepted work from MEMBER (SHA) (#N): TITLE", hooks and the
+  repository's code-running config off. A lead folder with uncommitted changes
+  makes it wait, with that note.
+- A conflict is aborted and the task goes back to its author (pinned, Pending,
+  rejected by Zerus) with the conflicting files.
+- A clean merge queues the task's affected tests of `prev..merged` in the
+  test queue (forced, never reused) on the merged commit. All green keeps the
+  merge and accepts the task; any failure resets the lead branch to `prev`
+  (only while it is still the merge) and sends the task back with the failed
+  suites, their records and the end of the failing log.
+- Every kept merge moves `merge_tested` and the bounded `merge_log`; a phase
+  build then checks only `hgs test affected MERGE_TESTED..HEAD`.
+- With the queue on, every hand-out tells the member to merge the lead branch
+  into its folder before it starts (the git-merge-lead template).
+
 #### Remote test runners (#732)
 
 The owner makes a Machine a test runner of one platform class:

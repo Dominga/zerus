@@ -657,6 +657,10 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
                 }
             }
             // C3: every open task says what blocks it and which action frees it.
+            // U62 (#760): the task's place in the merge queue.
+            if let Some(merge) = super::merge_queue::view(task) {
+                value["merge"] = merge;
+            }
             // #759: cancelled dependencies no longer hold the task.
             let released = super::plan::cancelled_deps(team, task);
             if !released.is_empty() {

@@ -1867,10 +1867,19 @@ fn add_build_task(team: &mut Team, phase: u32, by: &str, events: &mut Vec<Event>
     );
     let id = team.tasks.iter().map(|task| task.id).max().unwrap_or(0) + 1;
     let assignee = if team.member(&team.lead).is_some() { team.lead.clone() } else { String::new() };
+    // U62 (#760): the merge queue tested its merged range already; the build
+    // checks only what came after.
+    let description = match super::merge_queue::untested_since(team) {
+        Some(tested) => format!(
+            "Integrate the accepted work and run the build. The merge queue tested the lead branch up to {tested}: \
+             check only what came after it (hgs test affected {tested}..HEAD)."
+        ),
+        None => "Integrate the accepted work and run the build.".into(),
+    };
     team.tasks.push(Task {
         id,
         title: format!("Build phase {phase}"),
-        description: "Integrate the accepted work and run the build.".into(),
+        description,
         assignee,
         phase,
         status: TaskStatus::Pending,
@@ -4157,8 +4166,15 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
         );
     }
     let lead_id = team.lead.clone();
+    // U62 (#760): with the merge queue on, an accept queues the author's commit
+    // for the lead branch; the queue's own accept (merged) decides it.
+    let merged = input["merged"].as_bool() == Some(true);
+    let queue = if accept && !merged { super::merge_queue::entry(team, id, &label, human, &reason) } else { None };
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!(task.decided_by == Some(Decider::Human) && task.status.finished()), "You already decided task #{id}");
+    if task.merge.as_ref().is_some_and(|entry| entry.state == "testing") && !merged {
+        bail!("Task #{id} is merged into the lead branch and its tests run; wait for the merge queue's result");
+    }
     // #538 N1: accepting over an open stage names why, as skip-stage does.
     ensure!(!accept || !task.status.in_stage() || !reason.is_empty(), "Accepting task #{id} in a stage needs a reason");
     if human {
@@ -4171,6 +4187,16 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
             "Task #{id}'s pipeline is accepted by the lead"
         );
     }
+    if let Some(entry) = queue {
+        if task.merge.is_none() {
+            let commit = entry.commit.clone();
+            task.merge = Some(entry);
+            events.push(Event::new("merge_queued", json!({"by":label,"task":id,"commit":commit})));
+        }
+        return Ok(json!({"status":"merge_queued","task":id}));
+    }
+    // A reject or a decision that skips the queue takes the task out of it.
+    task.merge = None;
     let n = task.attempts.iter().rev().find(|a| a.state == AttemptState::Reported).map(|a| a.n);
     // N15: the lead's accept filed this report's findings already; the
     // owner's accept over it does not file them again.

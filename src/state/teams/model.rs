@@ -697,6 +697,47 @@ pub(crate) struct TestAlert {
     pub dismissed: bool,
 }
 
+/// U62 (#760): an accepted report in the merge queue: the commit its author
+/// reported, and, while its tests run, the lead branch before and after.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct MergeEntry {
+    /// queued or testing.
+    pub state: String,
+    pub author: String,
+    pub commit: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub branch: String,
+    pub folder: String,
+    pub at: f64,
+    /// Who accepted it, and whether that was the owner.
+    pub by: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub by_owner: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prev: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub merged: String,
+    /// The test queue's requests of its affected set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requests: Vec<String>,
+    /// Why it waits (the lead's folder has uncommitted changes).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
+/// U62 (#760): one merge the queue kept, with the range it tested.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct MergeLog {
+    pub task: u32,
+    pub prev: String,
+    pub merged: String,
+    pub at: f64,
+    #[serde(default)]
+    pub suites: Vec<String>,
+}
+
 /// #718: a flaky suite's quarantine, shown to the lead and the owner until
 /// it expires.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -1354,6 +1395,10 @@ pub(crate) struct Task {
     /// U59: when this task is the free phase's integration-and-build task.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub phase_build: bool,
+    /// U62 (#760): the accepted report waiting in the merge queue, or under
+    /// its affected tests on the merged commit; the task stays undecided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge: Option<MergeEntry>,
     #[serde(default)]
     pub status: TaskStatus,
     /// Held back from the dispatcher until the lead releases it (A5).
@@ -1831,6 +1876,13 @@ pub(crate) struct Team {
     /// #718: the open proposal of a full run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_full_proposal: Option<FullRunProposal>,
+    /// U62 (#760): the newest lead-branch commit whose merged range the merge
+    /// queue tested; a phase integration checks only what came after it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub merge_tested: String,
+    /// U62 (#760): the merges the queue kept, newest last (bounded).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merge_log: Vec<MergeLog>,
     /// U59: when the last integration-and-build close of a free phase passed;
     /// the desktop shows it with the free phase.
     #[serde(default, skip_serializing_if = "Option::is_none")]

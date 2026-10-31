@@ -893,6 +893,32 @@ void TestSessionsWindow::leadSessionAnswersAProposalOnItsCard()
         auto *composer = window.findChild<MessageComposer *>("messageComposer"); QVERIFY(composer);
         QVERIFY(card->mapTo(&window, QPoint()).y() < composer->mapTo(&window, QPoint()).y());
         if (!shots.isEmpty()) { TestWait::settle(); QVERIFY(window.grab().save(QDir(shots).filePath(QStringLiteral("u57-session-card-%1.png").arg(theme)))); }
+        // #754: a refused Allow says why on the card, which stays to answer again.
+        const auto decisions = [&] {
+            QFile file(fixture + ".calls");
+            int count = 0;
+            if (file.open(QIODevice::ReadOnly))
+                for (const auto &line : file.readAll().split('\n'))
+                    if (QJsonDocument::fromJson(line).object()["args"].toArray().at(1).toString() == "decide-proposal") ++count;
+            return count;
+        };
+        {
+            QFile refuse(fixture + ".proposalrefuse"); QVERIFY(refuse.open(QIODevice::WriteOnly));
+            refuse.write("hgs: Task #3 depends on #9, which is neither in the plan nor among the new tasks");
+        }
+        card->findChild<QPushButton *>("teamProposalAllow")->click();
+        QTRY_COMPARE_WITH_TIMEOUT(decisions(), 1, 10000);
+        QLabel *notice = nullptr;
+        QTRY_VERIFY_WITH_TIMEOUT((card = cards->findChild<QFrame *>("teamProposalCard")) && (notice = card->findChild<QLabel *>("teamProposalNotice"))
+                                     && card->findChild<QPushButton *>("teamProposalAllow")->isEnabled(), 10000);
+        QCOMPARE(notice->text(), QStringLiteral("Allow was refused, nothing was applied: Task #3 depends on #9, which is neither in the plan nor among the new tasks"));
+        QTRY_VERIFY(notice->isVisible());
+        // The card's answers scroll into view, whole.
+        auto *again = card->findChild<QPushButton *>("teamProposalAllow");
+        QTRY_COMPARE(again->visibleRegion().boundingRect().size(), again->size());
+        if (!shots.isEmpty()) { TestWait::settle(); QVERIFY(window.grab().save(QDir(shots).filePath(QStringLiteral("u754-session-refused-%1.png").arg(theme)))); }
+        QFile::remove(fixture + ".proposalrefuse");
+        QFile::remove(fixture + ".calls");
         card->findChild<QPushButton *>("teamProposalAllow")->click();
         QJsonObject input;
         QTRY_VERIFY_WITH_TIMEOUT(([&] {

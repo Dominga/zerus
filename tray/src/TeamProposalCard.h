@@ -46,6 +46,7 @@ protected:
 private:
     // At most half the parent's height; the rest scrolls.
     void fit();
+    void reveal();
     struct View {
         QString id, hash, kind, by, reason, what;
         QStringList lines;
@@ -74,6 +75,7 @@ private:
     QWidget *m_inner;
     QVBoxLayout *m_layout;
     QString m_team, m_only;
+    QString m_reveal;   // #754: the refused card kept scrolled to its answers
     QList<View> m_views;
     // A card whose answer found its proposal changed or decided: the view it
     // was answered on and what the card says.

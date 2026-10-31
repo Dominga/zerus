@@ -416,3 +416,82 @@ fn an_accepted_next_goal_runs_as_the_owner() {
     assert_eq!(store.load(&next).unwrap().unwrap().goal, "Ship v2");
     assert_eq!(store.load("t").unwrap().unwrap().next, next);
 }
+
+/// #754 (owner, 2026-10-31: "I press Allow and nothing happens"): p11 named
+/// #747 and #748, already taken, and Allow failed every time. Added tasks take
+/// the team's next free numbers when Allow applies them, their dependencies
+/// with them; an earlier Allow that stopped after its warning never leaves a
+/// stale addition behind; a proposal Allow could never apply (a number given
+/// twice, a dependency on an unknown task) is refused when the lead makes it,
+/// and a dependency named twice is kept once.
+#[test]
+fn allowed_tasks_take_the_next_free_numbers_and_a_retry_never_meets_a_stale_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+    let mut team = running_team();
+    let lead = Actor::Member("lead".into());
+    // #1 is taken: the proposal names it, and #7 depends on it (twice).
+    let input = json!({"kind":"add-to-phase","reason":"two follow-ups","phase":1,
+        "tasks":[{"id":1,"title":"First","assignee":"dev"},{"id":7,"title":"Second","assignee":"dev","deps":[{"task":1},{"task":1}]}]});
+    ops::apply(&mut team, "propose", &input, &lead, &BTreeSet::new(), &mut Vec::new()).unwrap();
+    for (tasks, words) in [
+        (json!([{"id":5,"title":"A","assignee":"dev"},{"id":5,"title":"B","assignee":"dev"}]), "Task #5 is given twice among the new tasks"),
+        (json!([{"id":5,"title":"A","assignee":"dev","deps":[{"task":42}]}]), "Task #5 depends on #42, which is neither in the plan nor among the new tasks"),
+    ] {
+        let bad = json!({"kind":"add-to-phase","reason":"bad","phase":1,"tasks":tasks});
+        let error = format!("{:#}", ops::apply(&mut team, "propose", &bad, &lead, &BTreeSet::new(), &mut Vec::new()).unwrap_err());
+        assert!(error.contains("Allow could not apply") && error.contains(words), "{error}");
+    }
+    assert_eq!(team.proposals.len(), 1, "only the good proposal is made");
+    let hash = team.proposals[0]["hash"].as_str().unwrap().to_owned();
+    let operation = team.proposals[0]["operation_request"].as_str().unwrap().to_owned();
+    store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+    // An earlier Allow's warning, stored under the proposal's request id with
+    // an addition that no longer exists (it expired).
+    let stale = json!({"team":"t","request_id":operation,"by":"human","phase":1,"tasks":input["tasks"]});
+    store
+        .mutate(Some((&operation, &stale)), "t", None, |_, _| Ok(json!({"status":"warning","pending":"gone-long-ago"})))
+        .unwrap();
+    let receipt = decide_proposal_in(
+        &mut store,
+        &json!({"team":"t","proposal":"p1","accept":true,"by":"human","expected_hash":hash}),
+        &Actor::Human,
+    )
+    .unwrap();
+    assert_eq!(receipt["status"], "accepted", "{receipt}");
+    let team = store.load("t").unwrap().unwrap();
+    let first = team.task(2).expect("#1 joined as #2");
+    let second = team.task(3).expect("#7 joined as #3");
+    assert_eq!((first.title.as_str(), first.phase), ("First", 1));
+    assert_eq!(second.title, "Second");
+    assert_eq!(second.deps.iter().map(|dep| dep.task).collect::<Vec<_>>(), vec![2], "the dependency moved with its task");
+    assert_eq!(team.task(1).unwrap().title, "API", "the taken task is untouched");
+    // The decision is not applied twice when asked again.
+    let again = decide_proposal_in(
+        &mut store,
+        &json!({"team":"t","proposal":"p1","accept":true,"by":"human","expected_hash":hash}),
+        &Actor::Human,
+    )
+    .unwrap();
+    assert_eq!(again["status"], "accepted", "{again}");
+    assert_eq!(store.load("t").unwrap().unwrap().tasks.len(), 3);
+}
+
+/// #754: the lead's extend takes the next free numbers too, with the
+/// dependencies on its own tasks.
+#[test]
+fn an_extend_with_taken_numbers_takes_the_next_free_ones() {
+    let mut team = running_team();
+    let receipt = ops::apply(
+        &mut team,
+        "extend",
+        &json!({"tasks":[{"id":1,"title":"Docs","assignee":"dev"},{"id":9,"title":"Review the docs","assignee":"dev","deps":[{"task":1}]}]}),
+        &Actor::Member("lead".into()),
+        &BTreeSet::new(),
+        &mut Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(receipt["renumbered"], json!({"1":2,"9":3}), "{receipt}");
+    assert_eq!(team.task(2).unwrap().title, "Docs");
+    assert_eq!(team.task(3).unwrap().deps.iter().map(|dep| dep.task).collect::<Vec<_>>(), vec![2]);
+}

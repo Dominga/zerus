@@ -371,8 +371,11 @@ elif c=='team':
  elif op=='events':out(d['feed'])
  elif op=='catalog' and a[2:3]==['get']:out(d['catalog'])
  else:
-  # A change is kept for the test to read (U57: decide-proposal).
+  # A change is kept for the test to read (U57: decide-proposal); #754:
+  # `.proposalrefuse` refuses a decision with its words.
   open(__file__+'.calls','a',encoding='utf-8').write(json.dumps({'args':a,'input':json.loads(sys.stdin.read() or '{}')})+'\n')
+  import os
+  if op=='decide-proposal' and os.path.exists(__file__+'.proposalrefuse'):print(open(__file__+'.proposalrefuse').read(),file=sys.stderr);sys.exit(1)
   out({'status':'accepted' if op=='decide-proposal' else 'ok'})
 elif c=='model-server':out(d.get('model_servers',{'servers':[]}) if a[1:2]==['list'] else {'status':'error','error':'refused','detail':'not in this fixture'})
 elif c=='git-status' and 'git' in d:out(d['git'].get(host+'\n'+a[a.index('--path')+1],{'state':'not_repo'}))

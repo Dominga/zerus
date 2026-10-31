@@ -165,6 +165,7 @@ private slots:
     void followUpsShowThePermissionAnswerAndPlanFixes();
     void proposalsAreAcceptedOrRejectedOnce();
     void proposalCardsNameTheChangeAndAStaleCardSendsNothing();
+    void aRefusedDecisionSaysWhyOnItsCard();
     void coordinatorQueuesASecondMessageWithCancel_data();
     void coordinatorQueuesASecondMessageWithCancel();
     void heldSentTakesEachLostMessageOnce();
@@ -1073,7 +1074,7 @@ void TestTeamsUiWaiting::proposalCardsNameTheChangeAndAStaleCardSendsNothing()
     cardOf("p2")->findChild<QPushButton *>("teamProposalAllow")->click();
     QTRY_COMPARE(calls(script(), "decide-proposal").size(), 1);
     QCOMPARE(calls(script(), "decide-proposal").first()["expected_hash"].toString(), QStringLiteral("h2"));
-    QTRY_VERIFY(noticeOf("p2").contains("nothing was applied"));
+    QTRY_COMPARE(noticeOf("p2"), QStringLiteral("Allow was refused, nothing was applied: The proposal changed; reload the card and answer again with its hash"));
     QTRY_VERIFY(cardOf("p2") && cardOf("p2")->findChild<QPushButton *>("teamProposalAllow")->isEnabled());
     QFile::remove(script() + ".proposalrefuse");
     // Discard asks; an earlier decision (a replay) shows on a card of its own.
@@ -1092,6 +1093,94 @@ void TestTeamsUiWaiting::proposalCardsNameTheChangeAndAStaleCardSendsNothing()
     QVERIFY(!cardOf("p4")->findChild<QPushButton *>("teamProposalAllow"));
     cardOf("p4")->findChild<QPushButton *>("teamProposalDismiss")->click();
     QTRY_VERIFY(!cardOf("p4"));
+}
+
+// #754 (owner, 2026-10-31: "I press Allow and nothing happens"): a refused
+// decision says why on its card, in the server's words, on the team view and
+// in Waiting for you; the card stays with Allow and Deny to answer again, and
+// a later Deny goes through.
+void TestTeamsUiWaiting::aRefusedDecisionSaysWhyOnItsCard()
+{
+    Settings::set("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { Settings::remove("workspace/skin"); darkPalette(); });
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    setTeam(answerTeam());
+    QVERIFY(writeWaiting(script() + ".waiting", answerItems(now)));
+    const QString words = "Task #3 depends on #9, which is neither in the plan nor among the new tasks";
+    { QFile refuse(script() + ".proposalrefuse"); QVERIFY(refuse.open(QIODevice::WriteOnly)); refuse.write(("hgs: " + words).toUtf8()); }
+    const QString refused = "Allow was refused, nothing was applied: " + words;
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    // The team view: the card in the lead's conversation.
+    {
+        TeamWorkspace workspace(&controller, &panel);
+        workspace.setLive(live);
+        workspace.resize(1300, 820); workspace.show();
+        controller.refresh();
+        panel.showTeam("team-1");
+        workspace.showTeam("team-1");
+        const auto cardOf = [&](const QString &id) -> QFrame * {
+            for (auto *card : workspace.findChildren<QFrame *>("teamProposalCard")) if (card->property("proposal") == id) return card;
+            return nullptr;
+        };
+        QTRY_VERIFY(cardOf("p1"));
+        cardOf("p1")->findChild<QPushButton *>("teamProposalAllow")->click();
+        QTRY_COMPARE(calls(script(), "decide-proposal").size(), 1);
+        QTRY_VERIFY(cardOf("p1") && cardOf("p1")->findChild<QLabel *>("teamProposalNotice")
+                    && cardOf("p1")->findChild<QPushButton *>("teamProposalAllow")->isEnabled());
+        QCOMPARE(cardOf("p1")->findChild<QLabel *>("teamProposalNotice")->text(), refused);
+        QTRY_VERIFY(cardOf("p1") && cardOf("p1")->findChild<QLabel *>("teamProposalNotice") && cardOf("p1")->findChild<QLabel *>("teamProposalNotice")->isVisible());
+        QVERIFY(cardOf("p1")->findChild<QPushButton *>("teamProposalDeny")->isEnabled());
+        // A refresh keeps it saying so.
+        controller.refresh(); TestWait::settle();
+        QVERIFY(cardOf("p1") && cardOf("p1")->findChild<QLabel *>("teamProposalNotice"));
+        if (shotsWanted()) {
+            shot(&workspace, "u754-team-refused-dark");
+            workspace.setTheme(false); workspace.render();
+            lightShot(&workspace, "u754-team-refused-light");
+            darkPalette(); workspace.setTheme(true); workspace.render();
+        }
+    }
+    // Waiting for you: the same card in its row.
+    TeamWaitingPage page(&controller);
+    QStringList answered;
+    page.answered = [&](const TeamWaitingPage::Item &item) { answered << item.id; };
+    darkPalette(); page.setDark(true);
+    page.resize(900, 1000); page.show();
+    const QString proposal = "team-1/owner_word_asked/proposal-p1";
+    const auto row = [&](const QString &id) -> QFrame * {
+        for (auto *frame : page.findChildren<QFrame *>("teamWaitingRow")) if (frame->property("itemId") == id) return frame;
+        return nullptr;
+    };
+    QTRY_VERIFY(row(proposal));
+    row(proposal)->findChild<QPushButton *>("teamWaitingAnswerToggle")->click();
+    QTRY_VERIFY(row(proposal)->findChild<QFrame *>("teamProposalCard"));
+    row(proposal)->findChild<QFrame *>("teamProposalCard")->findChild<QPushButton *>("teamProposalAllow")->click();
+    QTRY_COMPARE(calls(script(), "decide-proposal").size(), 2);
+    const auto card = [&] { return row(proposal) ? row(proposal)->findChild<QFrame *>("teamProposalCard") : nullptr; };
+    QTRY_VERIFY(card() && card()->findChild<QLabel *>("teamProposalNotice") && card()->isEnabled()
+                && card()->findChild<QPushButton *>("teamProposalAllow")->isEnabled());
+    QCOMPARE(card()->findChild<QLabel *>("teamProposalNotice")->text(), refused);
+    QTRY_VERIFY(card() && card()->findChild<QLabel *>("teamProposalNotice") && card()->findChild<QLabel *>("teamProposalNotice")->isVisible());
+    QVERIFY(!row(proposal)->findChild<QLabel *>("teamWaitingAnswerSending"));
+    QVERIFY(answered.isEmpty());
+    TestWait::settle();
+    if (shotsWanted()) {
+        shot(&page, "u754-waiting-refused-dark");
+        page.setDark(false);
+        lightShot(&page, "u754-waiting-refused-light");
+        darkPalette(); page.setDark(true);
+    }
+    // The owner denies it instead: that goes through and the row leaves.
+    QFile::remove(script() + ".proposalrefuse");
+    QTRY_VERIFY(card());
+    card()->findChild<QLineEdit *>("teamProposalDenyReason")->setText("Renumber it first");
+    card()->findChild<QPushButton *>("teamProposalDeny")->click();
+    QTRY_COMPARE(calls(script(), "decide-proposal").size(), 3);
+    QCOMPARE(calls(script(), "decide-proposal").last()["accept"].toBool(), false);
+    QTRY_VERIFY(!row(proposal));
+    QCOMPARE(answered, QStringList{proposal});
 }
 
 // U35: the coordinator's composer, against an hgs that holds a message while

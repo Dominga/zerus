@@ -8,7 +8,7 @@ use super::store::Event;
 use anyhow::{bail, ensure, Context};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Who asks for a change.
 #[derive(Clone, Debug, PartialEq)]
@@ -995,13 +995,13 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
     let title = clean(text(input, "phase_title").trim(), 120, "A phase title")?;
     let mut tasks = values.iter().map(parse_task).collect::<anyhow::Result<Vec<Task>>>()?;
     // Ids continue after the highest live number: a discarded draft frees its
-    // numbers, and drafts close the gaps (F285).
+    // numbers, and drafts close the gaps (F285). #754: tasks numbered otherwise
+    // take those numbers, their dependencies with them.
+    let renumbered = renumber_new_tasks(team, &mut tasks)?;
     let last = team.tasks.iter().map(|task| task.id).max().unwrap_or(0);
     let next = last.checked_add(1).context("Task numbers are exhausted")?;
     let end = next.checked_add(tasks.len() as u32).context("Task numbers are exhausted")?;
     let wanted: BTreeSet<u32> = (next..end).collect();
-    let given: BTreeSet<u32> = tasks.iter().map(|task| task.id).collect();
-    ensure!(given == wanted, "New tasks are numbered from #{next}");
     let n = match target {
         Some(at) => team.phases[at].n,
         None => free_open.unwrap_or_else(|| {
@@ -1076,7 +1076,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
         }
         team.phases[at].tasks.extend(ids.iter().copied());
         events.push(Event::new("phase_edited", json!({"by":by,"phase":n,"diff":{"added":ids}})));
-        return Ok(json!({"status":"edited","phase":n,"tasks":ids,"validation":validation}));
+        return Ok(json!({"status":"edited","phase":n,"tasks":ids,"validation":validation,"renumbered":renumbered_json(&renumbered)}));
     }
     if let Some(n) = free_open {
         // U59: the open phase's record takes the new tasks; no phase is added.
@@ -1084,7 +1084,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
             team.phases[at].tasks.extend(ids.iter().copied());
         }
         events.push(Event::new("phase_edited", json!({"by":by,"phase":n,"diff":{"added":ids},"free":true})));
-        return Ok(json!({"status":"added","phase":n,"tasks":ids,"validation":validation}));
+        return Ok(json!({"status":"added","phase":n,"tasks":ids,"validation":validation,"renumbered":renumbered_json(&renumbered)}));
     }
     team.phases.push(Phase {
         n,
@@ -1110,7 +1110,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
         "phase_added",
         json!({"by":by,"phase":n,"title":title,"tasks":ids.len(),"barrier":barrier,"approval":approval}),
     ));
-    Ok(json!({"status":"added","phase":n,"tasks":ids,"approval":approval,"validation":validation}))
+    Ok(json!({"status":"added","phase":n,"tasks":ids,"approval":approval,"validation":validation,"renumbered":renumbered_json(&renumbered)}))
 }
 
 /// U51: the hash of an intake key; the team keeps only this.
@@ -1249,6 +1249,46 @@ pub(crate) fn addition_warning(phase: u32, titles: &[String]) -> String {
 /// The second call names that pending addition and carries a confirmation
 /// newer than the warning; only then the tasks join as Pending with
 /// `added_late`. A member never adds; a draft phase keeps edit-draft.
+/// Owner 2026-10-31 (#754): new tasks take the team's next free numbers when
+/// they join, whatever numbers they were proposed with (the lead's p11 named
+/// #747 and #748, already taken, and Allow failed), in the order given; their
+/// dependencies on each other follow them. A number given twice and a
+/// dependency on a task neither in the plan nor among the new tasks are
+/// refused (parse_task already keeps a dependency named twice once). Returns
+/// the numbers that changed, old to new.
+fn renumber_new_tasks(team: &Team, tasks: &mut [Task]) -> anyhow::Result<BTreeMap<u32, u32>> {
+    let mut given = BTreeSet::new();
+    for task in tasks.iter() {
+        ensure!(given.insert(task.id), "Task #{} is given twice among the new tasks", task.id);
+    }
+    let next = team.tasks.iter().map(|task| task.id).max().unwrap_or(0).checked_add(1).context("Task numbers are exhausted")?;
+    let mut numbers = BTreeMap::new();
+    for (index, task) in tasks.iter().enumerate() {
+        let number = u32::try_from(index).ok().and_then(|index| next.checked_add(index)).context("Task numbers are exhausted")?;
+        numbers.insert(task.id, number);
+    }
+    for task in tasks.iter_mut() {
+        for dep in &mut task.deps {
+            match numbers.get(&dep.task) {
+                Some(number) => dep.task = *number,
+                None => ensure!(
+                    team.task(dep.task).is_some(),
+                    "Task #{} depends on #{}, which is neither in the plan nor among the new tasks",
+                    task.id,
+                    dep.task
+                ),
+            }
+        }
+        task.id = numbers[&task.id];
+    }
+    Ok(numbers.into_iter().filter(|(old, new)| old != new).collect())
+}
+
+/// The changed numbers as the receipts name them: {"747": 760}.
+fn renumbered_json(numbers: &BTreeMap<u32, u32>) -> Value {
+    Value::Object(numbers.iter().map(|(old, new)| (old.to_string(), json!(new))).collect())
+}
+
 fn add_to_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead, on your word, or you add a task to a running phase");
     ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "Only a running or paused team takes a task in a running phase");
@@ -1287,6 +1327,8 @@ fn add_to_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
             task.phase = n;
             task.status = TaskStatus::Pending;
         }
+        // #754: the next free numbers, whatever the proposal named.
+        let renumbered = renumber_new_tasks(team, &mut tasks)?;
         check(team, &tasks)?;
         // One waiting addition per phase: a new request replaces the old one.
         team.pending_additions.retain(|pending| pending.phase != n);
@@ -1299,7 +1341,7 @@ fn add_to_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
         team.pending_additions.push(PendingAddition { id: id.clone(), phase: n, tasks, by: by.clone(), request: quote.clone(), warned_at: at });
         events.push(Event::new("phase_addition_warned", json!({"by":by,"phase":n,"tasks":ids,"request":quote})));
         return Ok(json!({"status":"warning","phase":n,"pending":id,"tasks":ids,"warning":addition_warning(n, &titles),
-            "expires_at":at + PENDING_ADDITION_SECONDS}));
+            "expires_at":at + PENDING_ADDITION_SECONDS,"renumbered":renumbered_json(&renumbered)}));
     };
     let found = team.pending_additions.iter().position(|pending| pending.id == confirm).context("That addition is unknown or expired; ask again")?;
     let pending = &team.pending_additions[found];
@@ -1318,12 +1360,14 @@ fn add_to_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
         (None, _) => bail!("The lead adds a task to a running phase only on your word: pass \"owner_word\""),
     };
     let pending = team.pending_additions.remove(found);
-    // The plan may have grown since the warning: then the numbers no longer fit.
+    // #754: the plan may have grown since the warning: the tasks move on to the
+    // next free numbers again, their dependencies with them.
     let mut tasks = pending.tasks;
+    let renumbered = renumber_new_tasks(team, &mut tasks)?;
     for task in &mut tasks {
         task.added_late = Some(AddedLate { by: by.clone(), at, request: pending.request.clone(), confirm: confirmation.clone() });
     }
-    let validation = check(team, &tasks).context("The plan changed since the warning; ask again")?;
+    let validation = check(team, &tasks).context("The plan changed since the warning; these tasks no longer fit it")?;
     let ids: Vec<u32> = tasks.iter().map(|task| task.id).collect();
     team.tasks.extend(tasks);
     if let Some(record) = team.phases.iter_mut().find(|phase| phase.n == n) {
@@ -1335,7 +1379,7 @@ fn add_to_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
         json!({"by":by,"phase":n,"tasks":ids,"request":pending.request,"confirm":confirmation,
             "critical_path":health.critical_path,"parallelism":health.parallelism}),
     ));
-    Ok(json!({"status":"added","phase":n,"tasks":ids,"validation":validation}))
+    Ok(json!({"status":"added","phase":n,"tasks":ids,"validation":validation,"renumbered":renumbered_json(&renumbered)}))
 }
 
 /// Approves a draft phase once every phase before it ended (owner), or discards

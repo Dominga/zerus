@@ -477,6 +477,8 @@ void TeamTaskCard::rebuild()
             if (run.overBudget) h->addWidget(new Pill(tr("Over budget"), c.danger));
             h->addStretch();
             h->addWidget(label(QDateTime::fromSecsSinceEpoch(qint64(run.at)).toString("HH:mm"), c.muted, 11));
+            // #732: the machine it ran on.
+            h->addWidget(label(tr("on %1").arg(TeamTests::runnerName(run.runner)), c.muted, 11, false, "teamTaskTestRunner"));
             if (openTestRecord) {
                 auto *open = new QPushButton(tr("Open record"));
                 open->setObjectName("teamTaskTestRecord"); open->setProperty("record", run.id);

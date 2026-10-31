@@ -28,10 +28,18 @@ Run Run::parse(const QJsonObject &record)
     run.at = record.value("at").toDouble();
     run.durationMs = qint64(record.value("duration_ms").toDouble());
     for (const auto &target : record.value("affected").toArray()) run.affected << target.toString();
-    // #718's marks, read when a record carries them.
-    run.reused = record.value("reused").toBool() || run.status == QLatin1String("reused");
+    run.runner = record.value("runner").toString();
+    // #718's marks: its flags, reused_from, due and the recorded time.
+    QStringList flags;
+    for (const auto &flag : record.value("flags").toArray()) flags << flag.toString();
     run.reusedFrom = record.value("reused_from").toString();
-    run.overBudget = record.value("over_budget").toBool();
+    run.reused = record.value("reused").toBool() || run.status == QLatin1String("reused") || flags.contains("reused") || !run.reusedFrom.isEmpty();
+    run.due = record.value("due").toBool();
+    run.overBudget = record.value("over_budget").toBool() || flags.contains("over_time_budget");
+    run.retried = flags.contains("retried");
+    run.slower = flags.contains("slower");
+    run.crash = flags.contains("crash");
+    run.recordedMs = qint64(record.value("recorded_ms").toDouble());
     run.budgetMinutes = record.value("budget_minutes").toDouble();
     const auto flaky = record.value("flaky").toObject();
     run.flakyRuns = flaky.value("runs").toInt();
@@ -53,7 +61,20 @@ Pending Pending::parse(const QJsonObject &item)
     pending.started = item.value("started").toDouble();
     pending.seconds = item.value("seconds").toDouble();
     pending.budgetMinutes = item.value("budget_minutes").toDouble();
+    for (const auto &platform : item.value("platforms").toArray()) pending.platforms << platform.toString();
+    pending.reason = item.value("reason").toString();
     return pending;
+}
+
+QString Run::flakyTip() const
+{
+    if (flakyRuns > 0) return QObject::tr("%1 of the last %2 runs failed").arg(flakyFailed).arg(flakyRuns);
+    return QObject::tr("Failed, then passed on its automatic retry");
+}
+
+QString runnerName(const QString &runner)
+{
+    return runner.isEmpty() ? QObject::tr("this computer") : runner;
 }
 
 QString runTime(qint64 ms)
@@ -71,6 +92,7 @@ QString statusName(const QString &status)
     if (status == QLatin1String("failed")) return QObject::tr("Failed");
     if (status == QLatin1String("timeout")) return QObject::tr("Timed out");
     if (status == QLatin1String("reused")) return QObject::tr("Reused");
+    if (status == QLatin1String("flaky")) return QObject::tr("Passed on retry");
     return status.isEmpty() ? QObject::tr("Unknown") : status;
 }
 
@@ -84,6 +106,7 @@ namespace {
 std::pair<QString, QColor> statusLook(const QString &status, const Colors &c)
 {
     if (status == QLatin1String("passed") || status == QLatin1String("reused")) return {QStringLiteral("done"), c.accent};
+    if (status == QLatin1String("flaky")) return {QStringLiteral("done"), c.warn};
     if (status == QLatin1String("failed")) return {QStringLiteral("failed"), c.danger};
     if (status == QLatin1String("timeout")) return {QStringLiteral("late"), c.warn};
     if (status == QLatin1String("running")) return {QStringLiteral("running"), c.accent};
@@ -316,13 +339,20 @@ QWidget *TeamTestsView::queueRow(const Pending &item)
 {
     const Colors c = colorsFor(m_dark);
     auto *frame = box(c, "teamTestsQueued"); frame->setProperty("request", item.id);
-    auto *h = new QHBoxLayout(frame); h->setContentsMargins(10, 6, 10, 6); h->setSpacing(8);
+    auto *rows = new QVBoxLayout(frame); rows->setContentsMargins(10, 6, 10, 6); rows->setSpacing(3);
+    auto *h = new QHBoxLayout; h->setSpacing(8); rows->addLayout(h);
     h->addWidget(glyphLabel(QStringLiteral("queued"), c));
     h->addWidget(label(item.suite, c.fg, 13, true, "teamTestsSuiteName"));
     if (item.forced) {
         auto *forced = new Pill(tr("Forced"), c.warn); forced->setObjectName("teamTestsForced");
         forced->setToolTip(tr("Runs first, at day too, and never reuses an earlier result"));
         h->addWidget(forced);
+    }
+    // #732: the platforms it needs.
+    for (const auto &platform : item.platforms) {
+        auto *chip = new Pill(platform, c.folder); chip->setObjectName("teamTestsPlatform");
+        chip->setToolTip(tr("Runs only on %1: here when this computer serves it, else on a test runner of it").arg(platform));
+        h->addWidget(chip);
     }
     if (item.task) h->addWidget(taskLink(item.task));
     h->addWidget(label(tr("waiting since %1").arg(clockOf(item.at)), c.text2, 12));
@@ -334,6 +364,14 @@ QWidget *TeamTestsView::queueRow(const Pending &item)
     }
     h->addStretch();
     if (!item.askedBy.isEmpty()) h->addWidget(label(tr("asked by %1").arg(item.askedBy), c.muted, 11));
+    if (!item.waitsForRunner()) return frame;
+    // #732: no runner of its class, or that runner unreachable: it waits with
+    // the reason and never runs on another platform.
+    frame->setStyleSheet(QStringLiteral("QFrame#teamTestsQueued{background:%1;border:1px solid %2;border-radius:9px;}")
+                             .arg(c.surface.name(QColor::HexArgb), alpha(c.warn, .55).name(QColor::HexArgb)));
+    auto *why = label(item.reason, c.warn, 11, false, "teamTestsReason"); why->setWordWrap(true);
+    why->setContentsMargins(26, 0, 0, 0);
+    rows->addWidget(why);
     return frame;
 }
 
@@ -406,14 +444,25 @@ QWidget *TeamTestsView::historyRow(const Run &run)
     h->addWidget(inert(label(runTime(run.durationMs), c.text2, 12, false, "teamTestsDuration")));
     if (run.reused) {
         auto *reused = new Pill(tr("Reused"), c.folder); reused->setObjectName("teamTestsReused");
-        reused->setToolTip(run.reusedFrom.isEmpty() ? tr("The inputs did not change: the last result stands, due for re-measuring")
-                                                    : tr("The inputs did not change: the result of %1 stands, due for re-measuring").arg(run.reusedFrom));
+        const QString due = run.due ? tr("; due for re-measuring") : QString();
+        reused->setToolTip(run.reusedFrom.isEmpty() ? tr("The inputs did not change: the last result stands%1").arg(due)
+                                                    : tr("The inputs did not change: the result of %1 stands%2").arg(run.reusedFrom, due));
         h->addWidget(reused);
     }
     if (run.flaky()) {
         auto *flaky = new Pill(tr("Flaky"), c.warn); flaky->setObjectName("teamTestsFlaky");
-        flaky->setToolTip(tr("%1 of the last %2 runs failed").arg(run.flakyFailed).arg(run.flakyRuns));
+        flaky->setToolTip(run.flakyTip());
         h->addWidget(flaky);
+    }
+    if (run.slower) {
+        auto *slower = new Pill(tr("Slower"), c.warn); slower->setObjectName("teamTestsSlower");
+        slower->setToolTip(run.recordedMs > 0 ? tr("Took %1; recorded %2").arg(runTime(run.durationMs), runTime(run.recordedMs)) : tr("Slower than recorded"));
+        h->addWidget(slower);
+    }
+    if (run.crash) {
+        auto *crash = new Pill(tr("Crash"), c.danger); crash->setObjectName("teamTestsCrash");
+        crash->setToolTip(tr("The suite crashed; a crash is never retried"));
+        h->addWidget(crash);
     }
     if (run.overBudget) {
         auto *over = new Pill(tr("Over budget"), c.danger); over->setObjectName("teamTestsOverBudget");
@@ -424,6 +473,10 @@ QWidget *TeamTestsView::historyRow(const Run &run)
     const double now = double(QDateTime::currentSecsSinceEpoch());
     auto *when = inert(label(clockOf(run.at), c.text2, 12, false, "teamTestsWhen")); when->setToolTip(agoText(run.at, now));
     h->addWidget(when);
+    // #732: the machine it ran on.
+    auto *machine = inert(label(tr("on %1").arg(runnerName(run.runner)), run.runner.isEmpty() ? c.muted : c.text2, 11, false, "teamTestsRunner"));
+    machine->setToolTip(run.runner.isEmpty() ? tr("Ran on this computer") : tr("Ran on the test runner %1 over SSH").arg(run.runner));
+    h->addWidget(machine);
     if (!run.askedBy.isEmpty()) h->addWidget(inert(label(tr("asked by %1").arg(run.askedBy), c.muted, 11)));
     connect(top, &QPushButton::clicked, this, [this, id = run.id] { m_open = m_open == id ? QString() : id; render(); });
     auto *head = row(8); head->addWidget(top, 1);
@@ -475,6 +528,9 @@ void TeamTestsView::render()
     count(tr("%n running", nullptr, running), running ? c.accent : c.muted, "teamTestsRunningCount");
     count(tr("%n waiting", nullptr, waiting), waiting ? c.text2 : c.muted, "teamTestsWaitingCount");
     if (failed) count(failed == 1 ? tr("1 suite failing") : tr("%1 suites failing").arg(failed), c.danger, "teamTestsFailingCount");
+    int stuck = 0;
+    for (const auto &item : m_pending) if (item.waitsForRunner()) ++stuck;
+    if (stuck) count(tr("%1 waiting for a runner").arg(stuck), c.warn, "teamTestsRunnerWaitCount");
     head->addStretch();
     v->addLayout(head);
     auto *hint = label(tr("Test requests wait in a queue; Zerus runs them when the machine has room and keeps each result with its excerpt."),

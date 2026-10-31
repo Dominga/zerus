@@ -79,6 +79,7 @@ private slots:
     void cleanup() { tearDown(); }
     void theTestsViewShowsTheQueueTheRunAndTheHistory();
     void aTasksDrawerListsItsRunsAndOpensTheirRecords();
+    void eachRunNamesItsMachineAndAWaitingRunnerSaysWhy();
 };
 
 // #719: Tests beside Graph, Board, Layers and Profile: what runs now, the queue,
@@ -237,6 +238,85 @@ void TestTeamsUiTests::aTasksDrawerListsItsRunsAndOpensTheirRecords()
     if (shotsWanted()) {
         workspace.setTheme(false); workspace.render();
         lightShot(&workspace, "u719-tests-record-light");
+        darkPalette(); workspace.setTheme(true); workspace.render();
+    }
+}
+
+// U62 (#733): a run on a test runner names that Machine, one here says this
+// computer; a suite whose runner is unreachable (or missing) waits in the
+// queue with the platform it needs and the reason; #718's flags show as marks.
+void TestTeamsUiTests::eachRunNamesItsMachineAndAWaitingRunnerSaysWhy()
+{
+    setTeam(phasedTeam());
+    const double now = nowSeconds();
+    auto queue = queueNow();
+    auto waiting = queue[2].toObject();
+    waiting["platforms"] = QJsonArray{"linux"};
+    waiting["reason"] = "test runner box unreachable: ssh: connect to host box.example port 22: Connection refused; it waits for it";
+    queue[2] = waiting;
+    auto none = queue[1].toObject();
+    none["id"] = "r4"; none["suite"] = "macos-ui"; none["forced"] = false; none["platforms"] = QJsonArray{"macos"};
+    none["reason"] = "no test runner for macos: the owner makes a Machine one (Settings > Machines)";
+    queue.append(none);
+    writeArray(script() + ".testqueue", queue);
+    writeArray(script() + ".testresults", QJsonArray{
+        record("rec-l", "android", "passed", now - 600, 300000, 4, {{"runner", "box"}}),
+        record("rec-h", "qt-teams", "flaky", now - 1200, 120000, 3, {{"flags", QJsonArray{"retried", "slower"}}, {"recorded_ms", 90000}}),
+        record("rec-r", "cargo-teams", "passed", now - 1800, 1000, 0, {{"flags", QJsonArray{"reused"}}, {"reused_from", "rec-c"}, {"due", true}}),
+        record("rec-x", "qt-teams", "failed", now - 2400, 5000, 3, {{"flags", QJsonArray{"crash", "over_time_budget"}}})});
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1500, 980); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QPushButton *tests = nullptr;
+    QTRY_VERIFY((tests = withProperty<QPushButton>(&workspace, QString(), "segment", "tests")));
+    tests->click();
+    TeamTestsView *view = nullptr;
+    QTRY_VERIFY((view = testsViewOf(&workspace)) && view->isVisible());
+    QTRY_COMPARE(view->runs().size(), 4);
+    QTRY_COMPARE(view->pending().size(), 4);
+    const auto tip = [](QWidget *root, const char *name) { auto *found = root ? root->findChild<QWidget *>(name) : nullptr; return found ? found->toolTip() : QStringLiteral("<none %1>").arg(name); };
+    const auto text = [](QWidget *root, const char *name) { auto *found = root ? root->findChild<QLabel *>(name) : nullptr; return found ? found->text() : QStringLiteral("<none %1>").arg(name); };
+    // Each run's machine.
+    QTRY_VERIFY(withProperty<QFrame>(&workspace, "teamTestsRun", "record", "rec-l"));
+    QCOMPARE(text(withProperty<QFrame>(&workspace, "teamTestsRun", "record", "rec-l"), "teamTestsRunner"), QStringLiteral("on box"));
+    QCOMPARE(text(withProperty<QFrame>(&workspace, "teamTestsRun", "record", "rec-h"), "teamTestsRunner"), QStringLiteral("on this computer"));
+    // #718's flags as marks.
+    auto *flaky = withProperty<QFrame>(&workspace, "teamTestsRun", "record", "rec-h");
+    QCOMPARE(text(flaky, "teamTestsStatus"), QStringLiteral("Passed on retry"));
+    QCOMPARE(tip(flaky, "teamTestsFlaky"), QStringLiteral("Failed, then passed on its automatic retry"));
+    QCOMPARE(tip(flaky, "teamTestsSlower"), QStringLiteral("Took 2m 00s; recorded 1m 30s"));
+    QVERIFY(tip(withProperty<QFrame>(&workspace, "teamTestsRun", "record", "rec-r"), "teamTestsReused").endsWith("due for re-measuring"));
+    auto *crash = withProperty<QFrame>(&workspace, "teamTestsRun", "record", "rec-x");
+    QVERIFY(!tip(crash, "teamTestsCrash").startsWith("<none"));
+    QVERIFY(!tip(crash, "teamTestsOverBudget").startsWith("<none"));
+    // The queue: the platform it needs and why it waits.
+    auto *unreachable = withProperty<QFrame>(&workspace, "teamTestsQueued", "request", "r3");
+    QVERIFY(unreachable);
+    QCOMPARE(text(unreachable, "teamTestsReason"), waiting["reason"].toString());
+    QCOMPARE(unreachable->findChild<QWidget *>("teamTestsPlatform")->toolTip(),
+             QStringLiteral("Runs only on linux: here when this computer serves it, else on a test runner of it"));
+    QVERIFY(text(withProperty<QFrame>(&workspace, "teamTestsQueued", "request", "r4"), "teamTestsReason").startsWith("no test runner for macos"));
+    QCOMPARE(text(withProperty<QFrame>(&workspace, "teamTestsQueued", "request", "r2"), "teamTestsReason"), QStringLiteral("<none teamTestsReason>"));
+    QCOMPARE(tip(&workspace, "teamTestsRunnerWaitCount"), QStringLiteral("2 waiting for a runner"));
+    // The drawer names the machine too.
+    withProperty<QPushButton>(&workspace, "teamTestsTask", "task", 4)->click();
+    auto *drawer = static_cast<TeamTaskCard *>(workspace.findChild<QWidget *>("teamWorkspaceDrawer"));
+    QTRY_VERIFY(drawer->isVisible() && drawer->task() == 4 && drawer->findChild<QLabel *>("teamTaskTestRunner"));
+    QCOMPARE(drawer->findChild<QLabel *>("teamTaskTestRunner")->text(), QStringLiteral("on box"));
+    drawer->findChild<QPushButton *>("teamTaskTestRecord")->click();
+    QTRY_VERIFY(!drawer->isVisible());
+    // No dots as separators.
+    for (auto *l : view->findChildren<QLabel *>()) QVERIFY2(!l->text().contains(QStringLiteral(" · ")), qPrintable(l->text()));
+    if (shotsWanted()) {
+        shot(&workspace, "u733-tests-runners-dark");
+        workspace.setTheme(false); workspace.render();
+        lightShot(&workspace, "u733-tests-runners-light");
         darkPalette(); workspace.setTheme(true); workspace.render();
     }
 }

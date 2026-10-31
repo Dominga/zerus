@@ -239,7 +239,19 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
     m_port = new QSpinBox; m_port->setObjectName("machinePort"); m_port->setRange(0, 65535); m_port->setSpecialValueText(tr("SSH configuration (usually 22)")); m_port->setMaximumWidth(120); form->addRow(tr("Port"), m_port);
     auto *keyRow = new QHBoxLayout; m_key = new QLineEdit; m_key->setObjectName("machineKey"); m_key->setPlaceholderText(tr("Use SSH agent / configuration")); keyRow->addWidget(m_key, 1);
     m_browse = new QPushButton(tr("Browse…")); m_browse->setObjectName("browseMachineKey"); keyRow->addWidget(m_browse); m_keyRow = new QWidget; keyRow->setContentsMargins(0,0,0,0); m_keyRow->setLayout(keyRow); form->addRow(tr("Private key"), m_keyRow);
-    m_enabled = new QCheckBox(tr("Show sessions and include in background polling")); m_enabled->setObjectName("machineEnabled"); form->addRow(QString(), m_enabled); connectionBox->addLayout(form);
+    m_enabled = new QCheckBox(tr("Show sessions and include in background polling")); m_enabled->setObjectName("machineEnabled"); form->addRow(QString(), m_enabled);
+    // U62 (#733): the owner makes the Machine a test runner of one platform:
+    // the team's suites of that platform run there over SSH, never here.
+    m_testRunner = new QComboBox; m_testRunner->setObjectName("machineTestRunner");
+    m_testRunner->addItem(tr("Not a test runner"), QString());
+    m_testRunner->addItem(tr("Linux"), "linux"); m_testRunner->addItem(tr("macOS"), "macos");
+    m_testRunner->addItem(tr("Windows"), "windows"); m_testRunner->addItem(tr("Android"), "android");
+    m_testRunner->setToolTip(tr("Test suites of this platform run on this Machine over SSH, each on the exact commit, isolated"));
+    form->addRow(tr("Test runner"), m_testRunner);
+    m_testRunnerHint = new QLabel; m_testRunnerHint->setObjectName("machineTestRunnerHint"); m_testRunnerHint->setWordWrap(true);
+    m_testRunnerHint->setProperty("pageHint", true);
+    form->addRow(QString(), m_testRunnerHint);
+    connectionBox->addLayout(form);
     // Save (only with changes), Discard changes / Discard draft, then the
     // actions that need a saved connection.
     auto *actions = new QHBoxLayout; actions->setSpacing(8);
@@ -320,6 +332,7 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
     for (auto *field : {m_alias, m_hostname, m_user, m_key, m_wslDistribution, m_wslUser, m_wslHgs}) connect(field, &QLineEdit::textChanged, this, &MachinesPage::changed);
     connect(m_transport, &QComboBox::currentIndexChanged, this, &MachinesPage::changed);
     connect(m_port, &QSpinBox::valueChanged, this, &MachinesPage::changed); connect(m_enabled, &QCheckBox::toggled, this, &MachinesPage::changed);
+    connect(m_testRunner, &QComboBox::currentIndexChanged, this, &MachinesPage::changed);
     connect(m_browse, &QPushButton::clicked, this, [this] {
         if (!m_key->isEnabled()) return;
         const auto file = QFileDialog::getOpenFileName(this, tr("Choose SSH private key")); if (!file.isEmpty()) m_key->setText(file);
@@ -438,11 +451,12 @@ bool MachinesPage::aliasExists() const {
 }
 QJsonObject MachinesPage::connection() const {
     if (m_transport->currentData().toString() == "wsl-local") {
-        return {{"transport","wsl-local"},{"enabled",m_enabled->isChecked()},
+        return {{"transport","wsl-local"},{"enabled",m_enabled->isChecked()},{"test_runner",m_testRunner->currentData().toString()},
             {"wsl", QJsonObject{{"distribution",m_wslDistribution->text().trimmed()},
                 {"user",m_wslUser->text().trimmed()},{"hgs_path",m_wslHgs->text()}}}};
     }
-    return {{"hostname", m_hostname->text().trimmed()}, {"user", m_user->text().trimmed()}, {"port", m_port->value() ? QJsonValue(m_port->value()) : QJsonValue(QJsonValue::Null)}, {"identity_file", m_key->text().trimmed()}, {"enabled", m_enabled->isChecked()}};
+    return {{"hostname", m_hostname->text().trimmed()}, {"user", m_user->text().trimmed()}, {"port", m_port->value() ? QJsonValue(m_port->value()) : QJsonValue(QJsonValue::Null)}, {"identity_file", m_key->text().trimmed()}, {"enabled", m_enabled->isChecked()},
+            {"test_runner", m_testRunner->currentData().toString()}};
 }
 void MachinesPage::report(const QString &text, bool error) { m_status->setText(text); m_status->setStyleSheet(error ? "color:#d37c69;" : QString()); m_status->setVisible(!text.isEmpty()); }
 void MachinesPage::changed() { if (!m_loading) { m_dirty = true; if (!m_effectiveData.isEmpty()) showEffectiveConnection(m_effectiveData); updateControls(); } }
@@ -594,6 +608,7 @@ void MachinesPage::loadSelection() {
     m_wslUser->setText(wsl.value("user").toString());
     m_wslHgs->setText(wsl.value("hgs_path").toString());
     m_port->setValue(c.value("port").toInt()); m_key->setText(c.value("identity_file").toString()); m_enabled->setChecked(c.value("enabled").toBool(true));
+    m_testRunner->setCurrentIndex(qMax(0, m_testRunner->findData(c.value("test_runner").toString())));
     // #650 N2: hgs keeps one connection type per machine. The other type's
     // overrides, kept on this device when the machine was saved, come back
     // into their (hidden) fields, so switching the type back restores them.
@@ -692,6 +707,12 @@ void MachinesPage::updateControls() {
     m_alias->setReadOnly(!m_new); m_alias->setEnabled(!busy && !local);
     for (auto *field : {m_hostname, m_user, m_key}) field->setEnabled(!busy && !local);
     m_port->setEnabled(!busy && !local); m_enabled->setEnabled(!busy && !local); m_browse->setEnabled(!busy && !local);
+    // #733: this computer runs its own platform's suites; a peer runs one class.
+    m_testRunner->setEnabled(!busy && !local);
+    const QString runner = m_testRunner->currentData().toString();
+    m_testRunnerHint->setText(runner.isEmpty() ? tr("The team's suites run on this computer, or wait for a test runner of their platform.")
+                              : !m_enabled->isChecked() ? tr("Turned off: a disabled Machine runs no suites; their %1 suites wait.").arg(m_testRunner->currentText())
+                              : tr("%1 suites go to this Machine over SSH; when it cannot be reached they wait in the Tests view with the reason.").arg(m_testRunner->currentText()));
     const QRegularExpression wslName("^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,127}$");
     const bool validWsl = wslName.match(m_wslDistribution->text().trimmed()).hasMatch()
         && wslName.match(m_wslUser->text().trimmed()).hasMatch() && m_wslHgs->text().startsWith('/');
@@ -741,6 +762,8 @@ void MachinesPage::updateControls() {
     // #650 N2: every remote machine, saved or not, can change its connection
     // type here (and back); this computer has none.
     m_form->setRowVisible(m_transport, !console && !windows && !local);
+    // #733: a peer is a test runner; this computer serves its own platform.
+    for (QWidget *field : QList<QWidget *>{m_testRunner, m_testRunnerHint}) m_form->setRowVisible(field, !console && !windows && !local);
     for (auto *button : {m_save, m_check, m_ssh, m_install, m_reset, m_remove}) button->setVisible(!console && !windows);
     m_discardDraft->setVisible(!console && !windows && (m_new || !local));
     if (console || windows) m_unsaved->hide();

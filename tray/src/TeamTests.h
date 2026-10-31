@@ -23,26 +23,39 @@ namespace TeamTests {
 // One result of the database (test_queue.rs Record) as the view shows it.
 struct Run {
     QString id, suite, status, askedBy, commit, excerpt, reusedFrom;
+    // #732: the test runner (a Machine's alias) it ran on; empty is here.
+    QString runner;
     int task = 0;
     double at = 0;
-    qint64 durationMs = 0;
-    bool reused = false, overBudget = false;
-    int flakyRuns = 0, flakyFailed = 0;     // #718's recent history; 0 runs: no mark
+    qint64 durationMs = 0, recordedMs = 0;
+    bool reused = false, overBudget = false, due = false;
+    // #718's flags: passed only on its retry, slower than recorded, crashed.
+    bool retried = false, slower = false, crash = false;
+    int flakyRuns = 0, flakyFailed = 0;     // a recent history when sent; 0 runs: none
     double budgetMinutes = 0;
     QStringList affected;
     static Run parse(const QJsonObject &record);
-    bool flaky() const { return flakyRuns > 0 && flakyFailed > 0 && flakyFailed < flakyRuns; }
+    bool flaky() const { return retried || status == QLatin1String("flaky") || (flakyRuns > 0 && flakyFailed > 0 && flakyFailed < flakyRuns); }
+    QString flakyTip() const;
 };
 
 // A request still in the queue: waiting, or running since `started`.
 struct Pending {
     QString id, suite, askedBy, state, resources;
+    // #732: the platform classes it needs and why it does not run yet (no
+    // runner of its class, or that runner unreachable); empty: it just waits.
+    QStringList platforms;
+    QString reason;
     int task = 0;
     bool forced = false;
     double at = 0, started = 0, seconds = 0, budgetMinutes = 0;
     static Pending parse(const QJsonObject &item);
     bool running() const { return state == QLatin1String("running"); }
+    bool waitsForRunner() const { return !running() && !reason.isEmpty(); }
 };
+
+// #732: "box", or "this computer" for a run here.
+QString runnerName(const QString &runner);
 
 // "45s", "3m 05s", "1h 20m".
 QString runTime(qint64 ms);

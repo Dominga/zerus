@@ -66,6 +66,10 @@ private:
     QWidget *m_keyRow;
     QSpinBox *m_port;
     QCheckBox *m_enabled;
+    // U62 (#733): the platform class the Machine runs test suites for; the
+    // first item is none.
+    QComboBox *m_testRunner;
+    QLabel *m_testRunnerHint;
     QFormLayout *m_form;
     QPushButton *m_save, *m_check, *m_ssh, *m_install, *m_remove, *m_reset, *m_sessions, *m_accounts, *m_add, *m_browse, *m_refresh;
     QPushButton *m_discardDraft, *m_enableLocal;

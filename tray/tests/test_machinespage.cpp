@@ -38,6 +38,7 @@ private slots:
     void removalRequiresExplicitConfirmationOfSameConnection_data();
     void removalRequiresExplicitConfirmationOfSameConnection();
     void localReadOnlyAndNewProfileCannotOverwrite();
+    void aMachineBecomesATestRunnerOfOnePlatform();
     void wslProfileKeepsItsTargetAcrossSaveAndReload();
     void aSavedMachineSwitchesToWslAndBackKeepingItsOverrides();
     void otherTransportSavedBehindAHeldLockReadsBack();
@@ -228,6 +229,53 @@ void TestMachinesPage::localReadOnlyAndNewProfileCannotOverwrite()
     QCOMPARE(profile["port"].toInt(), 2222);
     QCOMPARE(profile["identity_file"].toString(), QString::fromUtf8("~/Keys/ключ space"));
 }
+// U62 (#733): the owner makes a Machine a test runner of one platform class;
+// the connection it saves carries test_runner (empty clears it), the page
+// reads it back, and this computer has no such row.
+void TestMachinesPage::aMachineBecomesATestRunnerOfOnePlatform()
+{
+    flag("data.json", R"({"local":"arch","revision":"revision-1","machines":[{"alias":"box","connection":{"enabled":true,"hostname":"box.example"},"enabled":true,"source":"local"}]})");
+    MachinesPage page(FakeCli::program(m_script)); start(page);
+    auto *runner = widget<QComboBox>(page, "machineTestRunner");
+    auto *hint = widget<QLabel>(page, "machineTestRunnerHint");
+    // This computer runs its own platform's suites: no runner row.
+    QVERIFY(!runner->isVisible());
+    page.selectMachine("box");
+    QTRY_VERIFY(runner->isVisible() && runner->isEnabled());
+    QCOMPARE(runner->currentData().toString(), QString());
+    QCOMPARE(runner->currentText(), QStringLiteral("Not a test runner"));
+    QStringList classes; for (int i = 1; i < runner->count(); ++i) classes << runner->itemData(i).toString();
+    QCOMPARE(classes, (QStringList{"linux", "macos", "windows", "android"}));
+    QVERIFY(hint->text().contains("run on this computer"));
+    runner->setCurrentIndex(runner->findData("linux"));
+    QCOMPARE(hint->text(), QStringLiteral("Linux suites go to this Machine over SSH; when it cannot be reached they wait in the Tests view with the reason."));
+    auto *save = widget<QPushButton>(page, "saveMachine");
+    QVERIFY(save->isEnabled());   // an unsaved change
+    PageShots::shot(page, true, "u733-machine-test-runner-dark");
+    PageShots::shot(page, false, "u733-machine-test-runner-light");
+    save->click();
+    const auto saved = [&] {
+        QJsonObject profile;
+        for (const auto &call : calls()) if (call.toArray().at(1).toString() == "set" && call.toArray().at(2).toString() == "box")
+            profile = QJsonDocument::fromJson(call.toArray().at(4).toString().toUtf8()).object();
+        return profile;
+    };
+    QTRY_COMPARE(saved().value("test_runner").toString(), QStringLiteral("linux"));
+    QCOMPARE(saved().value("hostname").toString(), QStringLiteral("box.example"));
+    // Read back from the saved settings the page reloads after a save.
+    QTRY_VERIFY(!save->isEnabled() && runner->isEnabled());
+    QTRY_COMPARE(runner->currentData().toString(), QStringLiteral("linux"));
+    // A disabled Machine runs nothing: the hint says so.
+    widget<QCheckBox>(page, "machineEnabled")->setChecked(false);
+    QVERIFY(hint->text().startsWith("Turned off: a disabled Machine runs no suites"));
+    widget<QCheckBox>(page, "machineEnabled")->setChecked(true);
+    // Not a test runner again: an empty class clears it.
+    runner->setCurrentIndex(0);
+    QTRY_VERIFY(save->isEnabled());
+    save->click();
+    QTRY_VERIFY(saved().contains("test_runner") && saved().value("test_runner").toString().isEmpty());
+}
+
 void TestMachinesPage::wslProfileKeepsItsTargetAcrossSaveAndReload()
 {
     MachinesPage page(FakeCli::program(m_script)); start(page);

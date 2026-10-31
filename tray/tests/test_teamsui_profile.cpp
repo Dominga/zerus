@@ -466,10 +466,15 @@ void TestTeamsUiProfile::heatTintsGraphAndBoardByTimeOrTokens()
     // Off: the switch is there, nothing is tinted and no profile is read.
     QTRY_VERIFY(heatButton(workspace.get(), "off"));
     QVERIFY(heatButton(workspace.get(), "off")->isChecked());
-    // A wide toolbar says the choices in words (a narrow one keeps the icons).
-    QTRY_COMPARE(heatButton(workspace.get(), "time")->text(), QStringLiteral("Time lost"));
-    QCOMPARE(heatButton(workspace.get(), "tokens")->text(), QStringLiteral("Tokens"));
-    QCOMPARE(heatButton(workspace.get(), "off")->text(), QStringLiteral("Off"));
+    // #755: the choices are icons alone, named with their purpose in their
+    // tooltips and accessible names.
+    QTRY_VERIFY(heatButton(workspace.get(), "time") && heatButton(workspace.get(), "time")->text().isEmpty());
+    for (const auto &[value, name] : QList<std::pair<const char *, QString>>{{"off", "Off"}, {"time", "Time lost"}, {"tokens", "Tokens"}}) {
+        auto *choice = heatButton(workspace.get(), value);
+        QVERIFY2(choice->text().isEmpty() && !choice->icon().isNull(), value);
+        QVERIFY2(choice->toolTip().startsWith(name + QLatin1Char('\n')), qPrintable(choice->toolTip()));
+        QCOMPARE(choice->accessibleName(), QStringLiteral("Heat: ") + name);
+    }
     QVERIFY(!workspace->findChild<QWidget *>("teamHeatLegend"));
     QVERIFY(node(483).heat.isEmpty() && !node(483).heatFill.isValid());
     QCOMPARE(calls(script(), "profile").size(), profileCalls);

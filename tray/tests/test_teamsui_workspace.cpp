@@ -299,10 +299,10 @@ void TestTeamsUiWorkspace::workspaceShowsGraphBoardAndFocus()
         if (b->property("segment") == "active") { b->click(); break; }
     QTest::qWait(150);
     QVERIFY(workspace.findChildren<QPushButton *>("teamConversationAsk").isEmpty());
-    // U25: the views carry their icons and their names.
+    // U25, #755: the views carry their icons, and their names in tooltips and accessible names.
     auto *views = workspace.findChild<QWidget *>("teamWorkspaceView");
     QVERIFY(views);
-    for (auto *b : views->findChildren<QPushButton *>()) QVERIFY(!b->text().isEmpty() && !b->icon().isNull());
+    for (auto *b : views->findChildren<QPushButton *>()) QVERIFY(b->text().isEmpty() && !b->icon().isNull() && !b->accessibleName().isEmpty() && !b->toolTip().isEmpty());
     for (auto *b : views->findChildren<QPushButton *>()) if (b->property("segment") == "board") { b->click(); break; }
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceBoard"));
     QCOMPARE(workspace.findChildren<QFrame *>("teamBoardCard").size(), 5);
@@ -2177,8 +2177,18 @@ void TestTeamsUiWorkspace::aNarrowToolbarKeepsOnlyItsIcons()
         for (auto *b : workspace.findChild<QWidget *>(group)->findChildren<QPushButton *>()) if (b->property("segment") == value) return b;
         return nullptr;
     };
-    QTRY_COMPARE(segment("teamWorkspaceView", "graph")->text(), QStringLiteral("Graph"));
-    QCOMPARE(segment("teamWorkspaceFilter", "problems")->text(), QStringLiteral("Problems"));
+    // #755: the views are icons alone at every width; each names itself and
+    // what it shows in its tooltip and accessible name.
+    QTRY_VERIFY(segment("teamWorkspaceView", "graph") && segment("teamWorkspaceFilter", "problems")->text() == QStringLiteral("Problems"));
+    for (const auto &[value, name] : QList<std::pair<const char *, QString>>{{"graph", "Graph"}, {"board", "Board"}, {"layers", "Layers"}, {"profile", "Profile"}, {"tests", "Tests"}}) {
+        auto *view = segment("teamWorkspaceView", value);
+        QVERIFY2(view && view->text().isEmpty() && !view->icon().isNull(), value);
+        QVERIFY2(view->toolTip().startsWith(name + QLatin1Char('\n')) && view->toolTip().size() > name.size() + 10, qPrintable(view->toolTip()));
+        QCOMPARE(view->accessibleName(), name);
+        QVERIFY(!view->accessibleDescription().isEmpty());
+        QCOMPARE(view->focusPolicy() & Qt::TabFocus, Qt::TabFocus);
+    }
+    QVERIFY(segment("teamWorkspaceView", "graph")->isChecked());
     QVERIFY(segment("teamWorkspaceFilter", "problems")->icon().isNull());
     // U38: with the switch labels gone, Heat is one flame button whose menu
     // holds the same three choices; a choice is kept for the team.
@@ -2194,15 +2204,14 @@ void TestTeamsUiWorkspace::aNarrowToolbarKeepsOnlyItsIcons()
     QTRY_COMPARE(workspace.findChild<QPushButton *>("teamWorkspaceHeatMenu")->toolTip(), QStringLiteral("Heat: Time lost"));
     workspace.findChild<QPushButton *>("teamWorkspaceHeatMenu")->menu()->actions().at(0)->trigger();
     QCOMPARE(TeamUi::heatMode("team-1"), QStringLiteral("off"));
-    QTRY_COMPARE(segment("teamWorkspaceView", "graph")->text(), QStringLiteral("Graph"));
+    QTRY_COMPARE(segment("teamWorkspaceFilter", "problems")->text(), QStringLiteral("Problems"));
     auto *split = workspace.findChild<QSplitter *>("teamWorkspaceSplit");
     QVERIFY(split);
     split->setSizes({430, 1110});
-    QTRY_VERIFY(segment("teamWorkspaceView", "graph")->text().isEmpty());
-    QVERIFY(!segment("teamWorkspaceView", "graph")->icon().isNull());
-    QCOMPARE(segment("teamWorkspaceView", "graph")->toolTip(), QStringLiteral("Graph"));
+    QTRY_VERIFY(segment("teamWorkspaceFilter", "problems")->text().isEmpty());
+    QVERIFY(segment("teamWorkspaceView", "graph")->text().isEmpty() && !segment("teamWorkspaceView", "graph")->icon().isNull());
+    QVERIFY(segment("teamWorkspaceView", "graph")->toolTip().startsWith(QStringLiteral("Graph\n")));
     QCOMPARE(segment("teamWorkspaceView", "graph")->accessibleName(), QStringLiteral("Graph"));
-    QVERIFY(segment("teamWorkspaceFilter", "problems")->text().isEmpty());
     QVERIFY(!segment("teamWorkspaceFilter", "problems")->icon().isNull());
     if (auto *expand = workspace.findChild<QPushButton *>("teamWorkspaceExpandAll")) QVERIFY(expand->text().isEmpty());
     // U38: the icon-only step leaves the Heat switch out.
@@ -2212,8 +2221,11 @@ void TestTeamsUiWorkspace::aNarrowToolbarKeepsOnlyItsIcons()
     QTest::qWait(200); shot(bar(), "team-toolbar-narrow-dark");
     QTRY_VERIFY2(bar()->sizeHint().width() <= bar()->width() + 1, qPrintable(QStringLiteral("%1 px for a %2 px row").arg(bar()->sizeHint().width()).arg(bar()->width())));
     split->setSizes({1100, 340});
-    QTRY_COMPARE(segment("teamWorkspaceView", "graph")->text(), QStringLiteral("Graph"));
     QTRY_COMPARE(segment("teamWorkspaceFilter", "problems")->text(), QStringLiteral("Problems"));
+    QVERIFY(segment("teamWorkspaceView", "graph")->text().isEmpty());
+    shot(bar(), "team-toolbar-wide-dark");
+    lightPalette(); workspace.setTheme(false); QTest::qWait(200); shot(bar(), "team-toolbar-wide-light");
+    darkPalette(); workspace.setTheme(true);
     Settings::remove("workspace/skin");
 }
 

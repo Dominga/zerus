@@ -42,6 +42,15 @@ inline const char *prototypeIconPath(const QString &name)
         {"mute", "M8.7 4.3A6 6 0 0 1 18 11v4M6 11v5l-2 2h12M10 20a2 2 0 0 0 4 0M3 3l18 18"},
         // The lead's session header and the composer row (spec 3, 4).
         {"clock", "M4 13a8 8 0 1 0 16 0a8 8 0 1 0 -16 0ZM12 9v4l2.5 2M10 2h4"},
+        // #755 (owner, 2026-10-31): the team views and the Heat choices as icons
+        // alone, one stroke style, read at 16 and 20 px (design/agent-teams/view-icons).
+        {"view-graph", "M2.8 7a2.2 2.2 0 1 0 4.4 0a2.2 2.2 0 1 0 -4.4 0ZM2.8 17a2.2 2.2 0 1 0 4.4 0a2.2 2.2 0 1 0 -4.4 0ZM9.8 12a2.2 2.2 0 1 0 4.4 0a2.2 2.2 0 1 0 -4.4 0ZM16.8 12a2.2 2.2 0 1 0 4.4 0a2.2 2.2 0 1 0 -4.4 0ZM6.8 8.3L10.2 10.7M6.8 15.7L10.2 13.3M14.2 12H16.8"},
+        {"view-board", "M3 4.5h5v15H3ZM9.5 4.5h5v10h-5ZM16 4.5h5v6.5h-5ZM3 8h5M9.5 8h5M16 8h5"},
+        {"view-profile", "M5 13.5a7 7 0 1 0 14 0a7 7 0 1 0 -14 0ZM10 3h4M12 3v3.5M9 11h5M9 14h6.5M9 17h3.5"},
+        {"view-tests", "M3.5 6l1.5 1.5L8 4.5M11 6h9.5M3.5 12l1.5 1.5L8 10.5M11 12h9.5M3.5 18l1.5 1.5L8 16.5M11 18h9.5"},
+        {"view-builds", "M10.8 6L13 3.8L18.2 9L16 11.2ZM13.4 8.6L6 16M3.5 20.5h3M10.5 20.5h3M17.5 20.5h3"},
+        {"heat-off", "M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.4-.5-2-1-3-1.1-2.1-.2-4.1 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.2.4-2.3 1-3a2.5 2.5 0 0 0 2.5 2.5zM4 4l16 16"},
+        {"heat-coins", "M5 7a7 2.6 0 1 0 14 0a7 2.6 0 1 0 -14 0ZM5 7v10M19 7v10M5 12a7 2.6 0 0 0 14 0M5 17a7 2.6 0 0 0 14 0"},
         // U38: the heat tint's legend and its Tokens choice.
         {"flame", "M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.4-.5-2-1-3-1.1-2.1-.2-4.1 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.2.4-2.3 1-3a2.5 2.5 0 0 0 2.5 2.5z"},
         {"coins","M2 8a6 6 0 1 0 12 0a6 6 0 1 0 -12 0ZM18.1 10.4A6 6 0 1 1 10.3 18M7 6h1v4M16.7 13.9l.7.7-2.8 2.8"},

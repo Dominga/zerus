@@ -1581,13 +1581,22 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
     auto *bar = new ToolbarRow; bar->setObjectName("teamWorkspaceToolbar");
     bar->setMinimumWidth(0); bar->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     auto *h = new QHBoxLayout(bar); h->setContentsMargins(12, 8, 12, 6); h->setSpacing(8);
-    // U25 (spec 5.1): Graph / Board / Layers with their icons and names.
+    // #755 (owner, 2026-10-31): the views as icons alone; each names itself
+    // and what it shows in its tooltip and to a screen reader.
+    const QHash<QString, QString> purposes{{"graph", tr("Tasks and the dependencies between them")},
+                                           {"board", tr("Tasks in columns by their state")},
+                                           {"layers", tr("Tasks in the waves they run in")},
+                                           {"profile", tr("Where the phase's time and tokens went")},
+                                           {"tests", tr("The tests the team ran and their results")},
+                                           {"builds", tr("The builds the team ran and their queue")}};
     auto *views = segmented({{"graph", tr("Graph")}, {"board", tr("Board")}, {"layers", tr("Layers")}, {"profile", tr("Profile")}, {"tests", tr("Tests")}}, m_view, "teamWorkspaceView",
                             [this](const QString &value) { m_view = value; m_fit = true; scheduleRender(); });
     for (auto *b : views->findChildren<QPushButton *>()) {
         const QString value = b->property("segment").toString();
-        b->setIcon(workspaceIcon(QStringLiteral("view-") + value, b->isChecked() ? c.accent : c.text2)); b->setIconSize(QSize(13, 13));
-        b->setAccessibleName(b->text()); b->setProperty("compactText", b->text());
+        b->setIcon(workspaceIcon(QStringLiteral("view-") + value, b->isChecked() ? c.accent : c.text2)); b->setIconSize(QSize(16, 16));
+        b->setAccessibleName(b->text()); b->setAccessibleDescription(purposes.value(value));
+        b->setToolTip(b->text() + QLatin1Char('\n') + purposes.value(value));
+        b->setText(QString()); b->setFixedWidth(b->iconSize().width() + 16);
     }
     h->addWidget(views);
     const bool planning = team.status == "planning";

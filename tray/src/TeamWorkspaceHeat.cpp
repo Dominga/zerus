@@ -105,16 +105,20 @@ QWidget *TeamWorkspace::heatSwitch(const Team &team)
         QObject::connect(action, &QAction::triggered, this, [pick, value = value] { pick(value); });
     }
     menuButton->setMenu(menu);
+    // #755: Off, Time lost and Tokens as icons alone (a crossed-out flame, a
+    // flame, a coin stack), each named with its purpose in its tooltip.
     for (auto *b : seg->findChildren<QPushButton *>()) {
         const QString value = b->property("segment").toString();
-        if (value != QLatin1String("off")) {
-            b->setIcon(workspaceIcon(value == QLatin1String("time") ? QStringLiteral("clock") : QStringLiteral("coins"), b->isChecked() ? c.accent : c.text2));
-            b->setIconSize(QSize(12, 12));
-        }
-        b->setAccessibleName(tr("Heat: %1").arg(b->text()));
-        b->setToolTip(value == QLatin1String("off") ? tr("No tint")
-                      : value == QLatin1String("time") ? tr("Tint each task by the time it lost to waits and rework")
-                                                       : tr("Tint each task by the tokens it lost to rework and long tests"));
+        b->setIcon(workspaceIcon(value == QLatin1String("time") ? QStringLiteral("flame") : value == QLatin1String("tokens") ? QStringLiteral("heat-coins")
+                                                                                                                      : QStringLiteral("heat-off"),
+                                 b->isChecked() ? c.accent : c.text2));
+        b->setIconSize(QSize(16, 16));
+        const QString purpose = value == QLatin1String("off") ? tr("No tint")
+                              : value == QLatin1String("time") ? tr("Tint each task by the time it lost to waits and rework")
+                                                               : tr("Tint each task by the tokens it lost to rework and long tests");
+        b->setAccessibleName(tr("Heat: %1").arg(b->text())); b->setAccessibleDescription(purpose);
+        b->setToolTip(b->text() + QLatin1Char('\n') + purpose);
+        b->setText(QString()); b->setFixedWidth(b->iconSize().width() + 16);
     }
     wh->addWidget(seg);
     h->addWidget(wide); h->addWidget(menuButton);

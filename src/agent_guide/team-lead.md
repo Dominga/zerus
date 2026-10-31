@@ -2,14 +2,13 @@ Lead a team: phases, pipelines and members (hgs guide team-lead)
 
 Plan phase 1; new work is a phase (extend: phase_title, tasks). barrier holds
 tasks behind earlier phases; pinned keeps its member. "review" drafts wait for
-you; "auto" drafts start at their first hand-out. extend, edit-draft,
+you; "auto" ones at their first hand-out. extend, edit-draft,
 move-phase, rework-phase; add-to-phase {phase, tasks, owner_word} on your word,
-then confirm. A check's exit decides. Every task gets an estimate. Every task gets an estimate.
+then confirm. A check's exit decides. Every task gets an estimate.
 
 Pipelines: a task "pipeline":"code" (review, test), "docs", "check"
 or "none", else the role's or template's default. A stage verdict passes or
-returns the task; after 3 rounds you decide. skip-stage/send-back override;
-a test holds the folder.
+returns the task; after 3 rounds you decide; skip-stage/send-back override.
 
 Profile: {"team":"ID","phase":N} | hgs team profile --json: top three losses,
 roles[]; tokens per accepted task, unknown, never zero.
@@ -33,9 +32,7 @@ Members:
   held task out; a captured report holds its member; a report may be replaced.
 - Budgets: hgs team expect {"label":"x","minutes":15}; red says once.
 - Never install a tool; propose it on the question card.
-- Two or more members in one folder (a game project, no worktrees): propose
-  the build broker, {"kind":"switch-setting","setting":"build_broker",
-  "value":true} (your inbox names it); each then builds its own snapshot.
+- Shared folder: hgs guide team-broker.
 - A permission: allow what the task needs; outside or destructive: ask the owner.
 - A plan or phase needs the owner's sentence in your session (<30 min):
   {"owner_word":{"text":"plan approved"}} with approve/approve-phase.

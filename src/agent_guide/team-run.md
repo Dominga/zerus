@@ -22,18 +22,13 @@ Ask for one as the member (identity as report; a sandbox needs no approval):
    "template":"cargo-test","args":{"bin":"hgs","filter":"teams"}} | hgs team run --json
 Use a new request_id for every run; --wait returns the exit code when ready
 (90 s), without it "queued". Ask again with the same request_id to read the
-result; it never runs the command twice. Values are typed: an unknown template,
-a value outside its type, a path outside your folder or a shell metacharacter is
-refused. What you build is your own code: it runs outside the sandbox by the
-owner's rule. The owner turns the set off in Settings > Teams and may add fixed
-templates in Zerus state.
+result; it never runs the command twice. Values are typed; a path outside your
+folder or a shell metacharacter is refused. The owner may turn the set off or
+add fixed templates.
 In a pipeline stage (review or test) the hand-out names your stage attempt;
 answer it with a verdict (hgs team report --json); edit none of its files.
 Command and land stages are Zerus', with no member. A role's context_before_task
 may compact or clear your context before a hand-out: it then carries the full
 task text.
-With the owner's build broker (members sharing one folder) a build template
-runs in your own snapshot of the folder: name the files you change,
-"args":{"files":["src/a.cpp"]}; the rest builds at HEAD. A failure in another
-member's file is theirs: wait and build again, never edit their files.
+Build broker on: hgs guide team-broker.
 Anything else still asks the lead.

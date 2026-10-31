@@ -4,7 +4,7 @@ Zerus runs persistent agent sessions on this computer and on configured peers.
 Put @alias before a command to run it on that peer over SSH (hgs machine ls).
 Session names look like provider/project/tag. [@h] marks an optional @alias.
 
-  hgs self --json             your own name, run, conversation and zerus:// reference
+  hgs self --json             your name, run and zerus:// reference
   hgs [@h] ls                 sessions here and on peers
   hgs [@h] inspect SESSION | jq '{run_id,conversation_id,activity,last_message}'
   hgs inspect 'zerus://session?...'   resolve a pasted session reference
@@ -13,12 +13,13 @@ Session names look like provider/project/tag. [@h] marks an optional @alias.
   hgs guide team              lead or work in an agent team
   hgs guide team-tests        affected tests, never a full suite
   hgs guide team-lead         add a phase to a running team, or finish it
-  hgs guide team-custom       models, context, stages, branches, scale, intake
-  hgs guide team-draft        plan a team draft with the owner before it exists
+  hgs guide team-custom       models, stages, branches, scale, intake
+  hgs guide team-draft        plan a draft with the owner
   hgs guide team-tree         lead a sub-team and pass work up
   hgs guide team-run          run a routine command outside the sandbox
   hgs guide team-safe         allow a member's routine request without asking
-  hgs guide team-propose      propose a change the owner answers on a card
+  hgs guide team-propose      propose a change on a card
+  hgs guide team-broker       builds in one shared folder
   hgs guide run               start a build or long test so it shows as your work
   hgs guide tests             run only the tests your change touches
   hgs guide designer          propose roles and templates for agent teams

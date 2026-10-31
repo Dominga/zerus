@@ -341,6 +341,10 @@ pub(crate) enum Step {
     MarkStuck { member: String, reason: String, phase: String, since: f64 },
     /// U56: the member reported again or is idle: no longer stuck.
     Unstuck { member: String },
+    /// #761: a DeepSeek member with no open attempt whose listing looks stuck
+    /// is read once (at most once a minute) before it is called stuck; only a
+    /// read that sees work without progress past `limit` seconds marks it.
+    CheckStuck { member: String, last: f64, limit: f64, reason: String },
     /// U52: the member's session exited on its own and the team setting lets
     /// Zerus launch it again into the same conversation.
     Restart { member: String },
@@ -772,6 +776,10 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 .find_map(|task| task.open_attempt().filter(|attempt| attempt.member == member.id).map(|attempt| (task.id, attempt)));
             let listed = found.last_event_at;
             let read = open.as_ref().and_then(|(_, attempt)| attempt.activity_at);
+            // #761: a report, a turn's end or a native event a read saw is
+            // progress too: a member that just reported is not stuck because
+            // its DeepSeek listing still says working.
+            let read = [read, member.native_at, last_progress(team, &member.id)].into_iter().flatten().reduce(f64::max);
             let last = match (listed, read) {
                 (Some(listed), Some(read)) => Some(listed.max(read)),
                 (listed, read) => listed.or(read),
@@ -802,8 +810,10 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                         if attempt.silent_read_at.is_none_or(|at| now - at >= 60.0) {
                             steps.push(Step::CheckSilent { task: *task_id, last: listed.unwrap_or(0.0) });
                         }
-                    } else {
-                        steps.push(Step::MarkStuck { member: member.id.clone(), reason: reason.into(), phase: found.phase.clone(), since: last.unwrap_or(now) });
+                    } else if member.stuck_read_at.is_none_or(|at| now - at >= 60.0) {
+                        // #761: no open attempt: read the session before the
+                        // listing alone calls it stuck, at most once a minute.
+                        steps.push(Step::CheckStuck { member: member.id.clone(), last: last.unwrap_or(0.0), limit, reason: reason.into() });
                     }
                 } else {
                     steps.push(Step::MarkStuck { member: member.id.clone(), reason: reason.into(), phase: found.phase.clone(), since: last.unwrap_or(now) });
@@ -832,13 +842,24 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             .or_else(|| member.seen.map(|seen| !seen.live))
             .unwrap_or(false);
         let reason = match (stuck, stopped) {
-            (Some(stuck), _) => Some(format!(
-                "pinned to {} ({}), stuck for {} min (phase {})",
-                member.id,
-                team.role_of(&member.id),
-                ((now - stuck.since.unwrap_or(stuck.at)) / 60.0).max(0.0).round() as u64,
-                if stuck.phase.is_empty() { "unknown" } else { stuck.phase.as_str() }
-            )),
+            // #761: the minutes since the last progress Zerus saw, never the
+            // time since the mark ("stuck for 0 min"); an old mark without that
+            // time names no minutes.
+            (Some(stuck), _) => Some(match stuck.since {
+                Some(since) => format!(
+                    "pinned to {} ({}), no progress for {} min (phase {})",
+                    member.id,
+                    team.role_of(&member.id),
+                    ((now - since) / 60.0).max(1.0).round() as u64,
+                    if stuck.phase.is_empty() { "unknown" } else { stuck.phase.as_str() }
+                ),
+                None => format!(
+                    "pinned to {} ({}), no progress (phase {})",
+                    member.id,
+                    team.role_of(&member.id),
+                    if stuck.phase.is_empty() { "unknown" } else { stuck.phase.as_str() }
+                ),
+            }),
             (None, true) => Some(format!(
                 "pinned to {} ({}), whose session is stopped or offline",
                 member.id,
@@ -5164,6 +5185,54 @@ fn check_dsh_silent(store: &mut Store, team: &Team, task_id: u32, listing_last: 
     Ok(())
 }
 
+/// #761: the member's last report or turn end, the progress a DeepSeek listing
+/// does not show once the turn is over.
+fn last_progress(team: &Team, member: &str) -> Option<f64> {
+    team.tasks
+        .iter()
+        .flat_map(|task| task.attempts.iter())
+        .filter(|attempt| attempt.member == member)
+        .flat_map(|attempt| [attempt.report.as_ref().map(|report| report.at), attempt.turn_ended_at])
+        .flatten()
+        .reduce(f64::max)
+}
+
+/// #761 (owner, 2026-10-31, team 6d0aabee): a DeepSeek member with no open
+/// attempt whose listing still says working is read before it is called
+/// stuck. The read is recorded, so the next is a minute away. A read that
+/// fails, another run's record, an idle session or a native event newer than
+/// the bound marks nothing; only a busy session without progress past the
+/// bound is marked, since its last progress.
+fn check_dsh_stuck(store: &mut Store, team: &Team, member_id: &str, listing_last: f64, limit: f64, reason: &str) -> anyhow::Result<()> {
+    let Some(member) = team.member(member_id) else { return Ok(()) };
+    let Some(session) = member.session.clone() else { return Ok(()) };
+    let record = inspect_reply(&session).ok().filter(|record| record["run_id"].as_str().unwrap_or_default() == session.run_id);
+    let newest = record.as_ref().and_then(newest_event);
+    let at = now();
+    let busy = record.as_ref().is_some_and(|record| {
+        record["activity"] == "busy" || matches!(record["phase"].as_str().unwrap_or_default(), "working" | "tool" | "compacting")
+    });
+    let phase = record.as_ref().and_then(|record| record["phase"].as_str()).unwrap_or_default().to_owned();
+    let last = listing_last.max(newest.unwrap_or(0.0));
+    let stuck = busy && at - last >= limit;
+    change(store, &team.id, |team, events| {
+        let role = team.role_of(member_id);
+        let Some(found) = team.members.iter_mut().find(|found| found.id == member_id) else { return Ok(()) };
+        found.stuck_read_at = Some(at);
+        if let Some(newest) = newest {
+            if found.native_at.is_none_or(|old| newest > old) {
+                found.native_at = Some(newest);
+            }
+        }
+        if stuck && found.stuck.is_none() {
+            found.stuck = Some(MemberStuck { at, reason: reason.to_owned(), phase: phase.clone(), since: Some(last) });
+            let minutes = ((at - last) / 60.0).max(1.0).round() as u64;
+            events.push(Event::new("member_stuck", json!({"member":role,"id":member_id,"reason":reason,"phase":phase,"minutes":minutes})));
+        }
+        Ok(())
+    })
+}
+
 /// The newest `at` of a session record's events, in seconds; a native DeepSeek
 /// session's dsh_native tool events are such entries (#628).
 fn newest_event(record: &Value) -> Option<f64> {
@@ -5994,6 +6063,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::BudgetRed { member } => tell_lead_budget_red(store, team, member, false, String::new(), 0.0),
         Step::BackgroundRed { member, command, since } => tell_lead_budget_red(store, team, member, true, command.clone(), *since),
         Step::CheckSilent { task, last } => check_dsh_silent(store, team, *task, *last),
+        Step::CheckStuck { member, last, limit, reason } => check_dsh_stuck(store, team, member, *last, *limit, reason),
         Step::Silent { task, minutes } => tell_lead_silent(store, team, *task, *minutes, false),
         Step::Quiet { member, session, muted, revision } => {
             if !*muted {

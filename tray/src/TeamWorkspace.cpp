@@ -391,7 +391,13 @@ void TeamWorkspace::renderLive()
     m_renderedLive = liveKey(); m_renderedLiveRest = liveKey(false);
 }
 
-static QString activityLabel(const Teams::Task &task, const Teams::Live &live);
+static QString activityLabel(const Teams::Task &task, const Teams::Live &live, const Teams::BuildState *build = nullptr);
+// #756: the assignee's build through the build broker, if any.
+static const Teams::BuildState *buildOf(const Teams::Team &team, const Teams::Task &task)
+{
+    const auto it = team.buildStates.constFind(task.assignee);
+    return it == team.buildStates.constEnd() ? nullptr : &it.value();
+}
 
 namespace {
 // A member's state mark in the Members column: its status, or the phase icon
@@ -433,7 +439,7 @@ void TeamWorkspace::refreshCanvasLive(const Team &team)
     const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
     const auto activityOf = [&](const Task &task) {
         const auto *member = team.member(task.assignee);
-        return activityLabel(task, member ? live(*member) : Live{});
+        return activityLabel(task, member ? live(*member) : Live{}, buildOf(team, task));
     };
     // Board and Layers: the labels that show a task's activity carry its id.
     for (auto *label : m_left->findChildren<QLabel *>()) {
@@ -1829,7 +1835,7 @@ static QString waitLabel(const Teams::Task &task)
     return TeamWorkspace::tr("waits for %1").arg(on.join(QStringLiteral(", ")));
 }
 
-static QString activityLabel(const Teams::Task &task, const Teams::Live &live = {})
+static QString activityLabel(const Teams::Task &task, const Teams::Live &live, const Teams::BuildState *build)
 {
     if (task.status == QLatin1String("submitted")) return TeamWorkspace::tr("review");
     // U36: the stage chip says what the stage does; the card names the attempt.
@@ -1838,6 +1844,9 @@ static QString activityLabel(const Teams::Task &task, const Teams::Live &live = 
     if (task.status == QLatin1String("cancelled")) return TeamWorkspace::tr("cancelled");
     if (task.subteam.known && !task.subteam.team.isEmpty())
         return TeamWorkspace::tr("sub-team %1/%2").arg(task.subteam.done).arg(task.subteam.total);
+    // #756: a member building through the build broker says so on its task.
+    if (task.status == QLatin1String("in_progress") && build && !build->state.isEmpty())
+        return build->text(double(QDateTime::currentSecsSinceEpoch()));
     if (task.status == QLatin1String("in_progress") || task.status == QLatin1String("assigned")) {
         const auto *attempt = task.last();
         const int n = attempt ? attempt->n : 0;
@@ -1901,7 +1910,7 @@ void TeamWorkspace::graphNodes(TaskView *view, const Team &team, const QList<int
         if (unassigned) { node.error = true; node.problemText = tr("No assignee"); node.tone = c.danger; }
         else if (node.problem) node.problemText = problemText.value(id);
         // The owner's activity label; a problem text wins over it.
-        if (!unassigned && !node.problem) node.activity = activityLabel(*task, assignee ? live(*assignee) : Live{});
+        if (!unassigned && !node.problem) node.activity = activityLabel(*task, assignee ? live(*assignee) : Live{}, buildOf(team, *task));
         // U37: the working time after it; the tooltip breaks it down.
         // #746: against its estimate, over it in the warning color.
         const auto time = taskTime(*task, now);
@@ -2051,7 +2060,7 @@ QWidget *TeamWorkspace::board(const Team &team)
             // The same small activity label as the graph (a problem text wins).
             if (!problemTasks.contains(task.id)) {
                 const auto *member = team.member(task.assignee);
-                const QString activity = activityLabel(task, member ? live(*member) : Live{});
+                const QString activity = activityLabel(task, member ? live(*member) : Live{}, buildOf(team, task));
                 if (!activity.isEmpty()) {
                     auto *a = label(activity, c.text3, 11); a->setObjectName("teamBoardActivity"); a->setProperty("liveTask", task.id); r->addWidget(a);
                 }
@@ -2968,7 +2977,7 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
             if (!problem) {
                 const auto *member = team.member(task->assignee);
                 const QString note = stages ? stages->property("note").toString() : QString();
-                const QString activity = note.isEmpty() ? activityLabel(*task, member ? live(*member) : Live{}) : note;
+                const QString activity = note.isEmpty() ? activityLabel(*task, member ? live(*member) : Live{}, buildOf(team, *task)) : note;
                 if (!activity.isEmpty()) {
                     const QColor tone = note.isEmpty() ? c.text3 : c.warn;
                     auto *a = lost ? elided(activity, tone, 11) : label(activity, tone, 11); a->setObjectName("teamBoardActivity");
@@ -3341,6 +3350,13 @@ QWidget *TeamWorkspace::members(const Team &team)
         // U54: its step in a move this desktop runs, or what keeps it from its
         // move or launch, with the review action.
         if (auto *block = memberBlock(team, m)) col->addWidget(block);
+        // #756: its build through the build broker, short.
+        if (const auto build = team.buildStates.value(m.id); !build.state.isEmpty()) {
+            auto *buildLabel = label(build.text(double(QDateTime::currentSecsSinceEpoch())), build.building() ? c.accent : c.text3, 11, false, "teamMemberBuild");
+            buildLabel->setProperty("buildState", build.state);
+            buildLabel->setAccessibleName(tr("Build: %1").arg(buildLabel->text()));
+            col->addWidget(buildLabel);
+        }
         // U36: the stages it has and may take.
         if (team.status == "running" || team.status == "paused")
             if (auto *stages = memberStageQueue(team, m, c, workedClock()(), [this](int task) { m_drawerTask = task; scheduleRender(); }))

@@ -3875,7 +3875,9 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
             let setting = text(input, "setting");
             ensure!(SWITCHES.contains(&setting), "A switch proposal names one of: {}", SWITCHES.join(", "));
             let value = input["value"].as_bool().context("A switch proposal names its value, true or false")?;
-            json!({"setting":setting,"value":value})
+            // #756: the card names the members who share a folder.
+            let shared: Vec<Value> = super::broker::shared_folders(team).into_iter().map(|(folder, members)| json!({"folder":folder,"members":members})).collect();
+            json!({"setting":setting,"value":value,"shared":shared})
         }
         _ => Value::Null,
     };

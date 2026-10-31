@@ -79,6 +79,12 @@ TeamSettingsDialog::TeamSettingsDialog(TeamController *teams, const Teams::Team 
     v->addWidget(m_restart);
     v->addWidget(note(tr("At most three times an hour, into the same folder and conversation; its open task goes back to the lead as unconfirmed. "
                          "A pause, an archive or a usage limit never restarts it."), c.muted));
+    // #756: the build broker for members sharing one folder (#752), off by default.
+    v->addWidget(label(tr("Builds"), c.text2, 12, true));
+    m_broker = new QCheckBox(tr("Build broker for members sharing a folder")); m_broker->setObjectName("teamSettingsBuildBroker");
+    m_broker->setChecked(m_settings.value("build_broker").toBool());
+    v->addWidget(m_broker);
+    v->addWidget(note(tr("Each member builds its own snapshot of the shared folder, one build at a time per build folder, and an unchanged tree builds once."), c.muted, "teamSettingsBuildBrokerNote"));
     // U45, #581 N6: the models each member may switch to before a task; only
     // the owner edits them, a running member included.
     v->addWidget(label(tr("Member models"), c.text2, 12, true));
@@ -155,6 +161,7 @@ TeamSettingsDialog::TeamSettingsDialog(TeamController *teams, const Teams::Team 
     root->addWidget(buttons);
     connect(m_branch, &QCheckBox::toggled, this, [this] { update(); });
     connect(m_restart, &QCheckBox::toggled, this, [this] { update(); });
+    connect(m_broker, &QCheckBox::toggled, this, [this] { update(); });
     // Turning landing on asks first; turning it off, or back to what the owner
     // already allowed, does not.
     connect(m_land, &QCheckBox::clicked, this, [this](bool on) {
@@ -184,6 +191,7 @@ QJsonObject TeamSettingsDialog::changes() const
     if (base != m_settings.value("base_branch").toString()) out.insert("base_branch", base);
     if (m_restart->isChecked() != m_settings.value("restart_crashed").toBool()) out.insert("restart_crashed", m_restart->isChecked());
     if (m_land->isChecked() != m_settings.value("land_allowed").toBool()) out.insert("land_allowed", m_land->isChecked());
+    if (m_broker->isChecked() != m_settings.value("build_broker").toBool()) out.insert("build_broker", m_broker->isChecked());
     return out;
 }
 

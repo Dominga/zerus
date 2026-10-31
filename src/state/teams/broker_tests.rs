@@ -209,7 +209,10 @@ fn the_lead_proposes_the_broker_for_a_shared_folder_and_the_owners_allow_sets_it
     assert!(ops::apply(&mut team, "propose", &json!({"kind":"switch-setting","setting":"land_allowed","value":true,"reason":"x"}), &lead, &none, &mut events).is_err());
     assert!(ops::apply(&mut team, "propose", &json!({"kind":"switch-setting","setting":"build_broker","reason":"x"}), &lead, &none, &mut events).is_err());
     let proposed = ops::apply(&mut team, "propose", &json!({"kind":"switch-setting","setting":"build_broker","value":true,"reason":"dev and dev2 share the folder"}), &lead, &none, &mut events).unwrap();
-    assert_eq!(proposed["change"], json!({"setting":"build_broker","value":true}));
+    assert_eq!(proposed["change"]["setting"], "build_broker");
+    assert_eq!(proposed["change"]["value"], true);
+    // #756: the card names the members who share the folder.
+    assert_eq!(proposed["change"]["shared"][0]["members"], json!(["dev", "dev2"]));
     assert!(!team.settings.build_broker, "the card sets nothing by itself");
     // Proposed once: the item goes.
     assert!(!crate::state::teams::inbox::items(&team).iter().any(|item| item.kind == "build_broker"));
@@ -223,4 +226,52 @@ fn the_lead_proposes_the_broker_for_a_shared_folder_and_the_owners_allow_sets_it
     let mut alone = team_in(dir.path());
     alone.members.retain(|member| member.id != "dev2");
     assert!(!crate::state::teams::inbox::items(&alone).iter().any(|item| item.kind == "build_broker"));
+}
+
+// #756: the Builds tab's read: the running build against its usual time, the
+// queue with a request that waits for the same tree, the hit rate, the recent
+// builds with a failure blamed on another member's file, the changed files
+// and the file two members change, and each member's build state.
+#[test]
+fn the_builds_view_shows_the_running_build_the_queue_the_timeline_and_who_changes_what() {
+    let dir = project();
+    let team = team_in(dir.path());
+    let shared = dir.path();
+    let runs = shared.join(".zerus-team").join("runs");
+    fs::create_dir_all(runs.join("broker-building")).unwrap();
+    fs::create_dir_all(runs.join("broker-waiting")).unwrap();
+    let now = 1_000_000.0;
+    let ok = |ms: u64| json!({"exit":0,"tail":"","ms":ms,"timed_out":false,"error":""});
+    let results = json!([
+        {"key":"a","member":"dev","template":"cargo-build","at":now - 900.0,"hit":false,"blamed":[],"outcome":ok(120_000)},
+        {"key":"a","member":"dev2","template":"cargo-build","at":now - 800.0,"hit":true,"by":"dev","outcome":ok(120_000)},
+        {"key":"b","member":"dev2","template":"cargo-build","at":now - 600.0,"hit":false,"blamed":[{"member":"dev","files":["src/a.c"]}],
+         "outcome":{"exit":1,"tail":"","ms":60_000,"timed_out":false,"error":"the build failed in another member's files"}},
+        {"key":"c","member":"dev","template":"cargo-build","at":now - 300.0,"hit":false,"blamed":[],"outcome":ok(100_000)}
+    ]);
+    fs::write(runs.join("broker-results.json"), results.to_string()).unwrap();
+    fs::write(runs.join("broker-building").join("k"), json!({"member":"dev","template":"cargo-test","started":now - 130.0}).to_string()).unwrap();
+    fs::write(runs.join("broker-waiting").join("dev2.json"), json!({"member":"dev2","template":"cargo-build","since":now - 40.0,"coalesced_with":"dev"}).to_string()).unwrap();
+    record_edits(shared, "dev", &["src/a.c".into(), "src/b.c".into()]).unwrap();
+    fs::write(shared.join("src").join("a.c"), "int a(void) { return 3; }\n").unwrap();
+    fs::write(shared.join("src").join("b.c"), "int b(void) { return 4; }\n").unwrap();
+    record_edits(shared, "dev2", &["src/b.c".into()]).unwrap();
+
+    let view = builds_view(&team, now);
+    let folder = &view["folders"][0];
+    assert_eq!(folder["members"], json!(["dev", "dev2"]), "{view}");
+    let target = &folder["build_folders"][0];
+    assert_eq!(target["name"], "target");
+    assert_eq!(target["running"][0]["member"], "dev");
+    assert_eq!(target["running"][0]["seconds"], 130.0);
+    assert_eq!(target["running"][0]["snapshot"], true);
+    assert_eq!(target["usual_ms"], 120_000.0, "the median of the green builds that ran");
+    assert_eq!(target["hit_rate"], 0.25);
+    assert_eq!(target["queue"][0]["member"], "dev2");
+    assert_eq!(target["queue"][0]["coalesced_with"], "dev");
+    assert_eq!(target["timeline"].as_array().unwrap().len(), 4);
+    assert_eq!(target["timeline"][1]["blamed"][0], json!({"member":"dev","files":["src/a.c"]}), "newest first");
+    assert_eq!(folder["overlaps"], json!([{"file":"src/b.c","members":["dev","dev2"]}]));
+    assert_eq!(view["members"]["dev"]["state"], "building");
+    assert_eq!(view["members"]["dev2"], json!({"state":"waiting","template":"cargo-build","since":now - 40.0,"ahead":1}));
 }

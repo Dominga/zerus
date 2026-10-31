@@ -26,6 +26,7 @@ QString kindLabel(const QString &kind)
     if (kind == "cancel-tasks") return TeamProposalCards::tr("Cancel");
     if (kind == "discard-phase") return TeamProposalCards::tr("Phase");
     if (kind == "question") return TeamProposalCards::tr("Question");
+    if (kind == "switch-setting") return TeamProposalCards::tr("Setting");
     return kind;
 }
 

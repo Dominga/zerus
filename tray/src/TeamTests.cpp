@@ -2,7 +2,12 @@
 #include "NewSessionDense.h"
 #include "TeamController.h"
 #include "TeamWidgets.h"
+#include "WorkspaceIcons.h"
 #include <QDateTime>
+#include <QJsonDocument>
+#include <QPointer>
+#include <QProgressBar>
+#include <QTimer>
 #include <QHBoxLayout>
 #include <QPainter>
 #include <QPlainTextEdit>
@@ -97,6 +102,69 @@ QString statusName(const QString &status)
 }
 
 }   // namespace TeamTests
+
+namespace TeamBuilds {
+
+namespace {
+QList<Files> filesOf(const QJsonArray &list, const char *whoKey, const char *filesKey)
+{
+    QList<Files> out;
+    for (const auto &value : list) {
+        const auto o = value.toObject();
+        Files entry{o.value(QLatin1String(whoKey)).toString(), {}};
+        for (const auto &file : o.value(QLatin1String(filesKey)).toArray()) entry.files << file.toString();
+        out << entry;
+    }
+    return out;
+}
+}
+
+State State::parse(const QJsonObject &result)
+{
+    State state;
+    state.enabled = result.value("enabled").toBool();
+    for (const auto &value : result.value("folders").toArray()) {
+        const auto f = value.toObject();
+        Folder folder;
+        folder.folder = f.value("folder").toString();
+        for (const auto &member : f.value("members").toArray()) folder.members << member.toString();
+        for (const auto &groupValue : f.value("build_folders").toArray()) {
+            const auto g = groupValue.toObject();
+            BuildFolder group;
+            group.name = g.value("name").toString();
+            group.usualMs = g.value("usual_ms").toDouble();
+            group.hitRate = g.value("hit_rate").isDouble() ? g.value("hit_rate").toDouble() : -1;
+            for (const auto &r : g.value("running").toArray()) {
+                const auto o = r.toObject();
+                group.running << Running{o.value("member").toString(), o.value("template").toString(), o.value("started").toDouble(),
+                                         o.value("seconds").toDouble(), o.value("usual_ms").toDouble(), o.value("snapshot").toBool(true)};
+            }
+            for (const auto &q : g.value("queue").toArray()) {
+                const auto o = q.toObject();
+                group.queue << Waiting{o.value("member").toString(), o.value("template").toString(), o.value("coalesced_with").toString(),
+                                       o.value("since").toDouble(), o.value("seconds").toDouble()};
+            }
+            for (const auto &t : g.value("timeline").toArray()) {
+                const auto o = t.toObject();
+                Done done;
+                done.member = o.value("member").toString(); done.templateName = o.value("template").toString();
+                done.by = o.value("by").toString(); done.error = o.value("error").toString();
+                done.at = o.value("at").toDouble(); done.ms = qint64(o.value("ms").toDouble());
+                done.exit = o.value("exit").isDouble() ? o.value("exit").toInt() : -1;
+                done.hit = o.value("hit").toBool(); done.timedOut = o.value("timed_out").toBool();
+                done.blamed = filesOf(o.value("blamed").toArray(), "member", "files");
+                group.timeline << done;
+            }
+            folder.builds << group;
+        }
+        folder.changes = filesOf(f.value("changes").toArray(), "member", "files");
+        folder.overlaps = filesOf(f.value("overlaps").toArray(), "file", "members");
+        state.folders << folder;
+    }
+    return state;
+}
+
+}   // namespace TeamBuilds
 
 using namespace TeamTests;
 
@@ -201,6 +269,7 @@ void TeamTestsView::setTeam(const Team &team)
         m_teamId = team.id; ++m_generation;
         m_pending.clear(); m_runs.clear(); m_open.clear(); m_error.clear(); m_forcing.clear(); m_forceError.clear();
         m_read = false; m_hasMore = false; m_pages = 0; m_queueLoading = m_resultsLoading = false;
+        m_builds = {}; m_buildsShape.clear(); m_buildsError.clear(); m_buildsLoading = m_buildsRead = false;
         render();
     }
     if (!m_read && isVisible()) reload();
@@ -222,9 +291,39 @@ void TeamTestsView::hideEvent(QHideEvent *event)
 void TeamTestsView::reload()
 {
     if (m_teamId.isEmpty()) return;
+    if (m_tab == QLatin1String("builds")) { readBuilds(); return; }
     m_read = true;
     readQueue();
     readResults(false);
+}
+
+void TeamTestsView::setTab(const QString &tab)
+{
+    if (m_tab == tab) return;
+    m_tab = tab;
+    render();
+    if (isVisible()) reload();
+}
+
+void TeamTestsView::readBuilds()
+{
+    if (m_buildsLoading) return;
+    m_buildsLoading = true;
+    QPointer<TeamTestsView> self(this);
+    const quint64 generation = m_generation;
+    m_teams->call(QStringLiteral("builds"), {{"team", m_teamId}}, [self, generation](bool ok, const QJsonObject &result, const QString &error) {
+        if (!self || self->m_generation != generation) return;
+        self->m_buildsLoading = false;
+        const bool first = !self->m_buildsRead;
+        self->m_buildsRead = true;
+        if (!ok) { self->m_buildsError = error; self->render(); return; }
+        // An unchanged answer leaves the rows as they are.
+        const QByteArray shape = QJsonDocument(result).toJson(QJsonDocument::Compact);
+        const bool same = !first && shape == self->m_buildsShape && self->m_buildsError.isEmpty();
+        self->m_buildsShape = shape; self->m_buildsError.clear();
+        self->m_builds = TeamBuilds::State::parse(result);
+        if (!same) self->render();
+    }, false);
 }
 
 void TeamTestsView::showRecord(const QString &id)
@@ -511,9 +610,34 @@ void TeamTestsView::render()
     if (m_content) { m_body->removeWidget(m_content); retire(m_content); }
     m_content = new QWidget; m_content->setObjectName("teamTestsContent");
     auto *v = new QVBoxLayout(m_content); v->setContentsMargins(0, 0, 0, 0); v->setSpacing(6);
+    // #756 (owner, 2026-10-31): Tests and Builds, as two tabs.
+    auto *tabs = segmented({{"tests", tr("Tests")}, {"builds", tr("Builds")}}, m_tab, "teamTestsTabs",
+                           [this](const QString &value) { QTimer::singleShot(0, this, [this, value] { setTab(value); }); });
+    for (auto *b : tabs->findChildren<QPushButton *>()) {
+        const QString value = b->property("segment").toString();
+        b->setObjectName(value == QLatin1String("builds") ? "teamTestsTabBuilds" : "teamTestsTabTests");
+        b->setIcon(workspaceIcon(QStringLiteral("view-") + value, b->isChecked() ? c.accent : c.text2)); b->setIconSize(QSize(16, 16));
+    }
+    if (m_tab == QLatin1String("builds")) {
+        auto *head = row(8);
+        head->addWidget(tabs);
+        int building = 0, waiting = 0;
+        for (const auto &folder : m_builds.folders)
+            for (const auto &group : folder.builds) { building += int(group.running.size()); waiting += int(group.queue.size()); }
+        auto *runningPill = new Pill(tr("%n building", nullptr, building), building ? c.accent : c.muted); runningPill->setObjectName("teamBuildsRunningCount");
+        auto *waitingPill = new Pill(tr("%n waiting", nullptr, waiting), waiting ? c.text2 : c.muted); waitingPill->setObjectName("teamBuildsWaitingCount");
+        head->addWidget(runningPill); head->addWidget(waitingPill);
+        head->addStretch();
+        v->addLayout(head);
+        renderBuilds(v);
+        v->addStretch();
+        m_body->addWidget(m_content);
+        m_content->show();
+        return;
+    }
     // The header: what runs, what waits and what failed among the runs shown.
     auto *head = row(8);
-    head->addWidget(label(tr("Tests"), c.fg, 16, true));
+    head->addWidget(tabs);
     int running = 0, waiting = 0, failed = 0;
     for (const auto &item : m_pending) (item.running() ? running : waiting)++;
     QSet<QString> seen;
@@ -571,4 +695,186 @@ void TeamTestsView::render()
     m_body->addWidget(m_content);
     // Shown at once: a layout shows a new child only after the event loop runs.
     m_content->show();
+}
+
+// #756: the Builds tab.
+QString TeamTestsView::who(const QString &member) const
+{
+    return member.isEmpty() ? QString() : m_team.member(member) ? m_team.roleOf(member) : member;
+}
+
+QWidget *TeamTestsView::changesStrip(const TeamBuilds::Folder &folder)
+{
+    // Who changes what: each member's own edits in the folder, and a warning
+    // for the lead when two members change the same file.
+    const Colors c = colorsFor(m_dark);
+    auto *frame = box(c, "teamBuildsChanges", folder.overlaps.isEmpty() ? QColor() : alpha(c.warn, .6));
+    auto *v = new QVBoxLayout(frame); v->setContentsMargins(10, 7, 10, 7); v->setSpacing(4);
+    v->addWidget(label(tr("Who changes what"), c.text2, 12, true));
+    for (const auto &entry : folder.changes) {
+        auto *line = row(8);
+        const QString role = who(entry.who);
+        line->addWidget(new Pill(role, roleColor(role, m_dark)));
+        const QString files = entry.files.isEmpty() ? tr("no changed files") : entry.files.join(QStringLiteral(", "));
+        auto *text = elided(files, entry.files.isEmpty() ? c.muted : c.text2, 11); text->setObjectName("teamBuildsChangedFiles");
+        text->setProperty("member", entry.who); text->setToolTip(entry.files.join(QLatin1Char('\n')));
+        line->addWidget(text, 1);
+        v->addLayout(line);
+    }
+    for (const auto &overlap : folder.overlaps) {
+        QStringList roles;
+        for (const auto &member : overlap.files) roles << who(member);
+        const QString last = roles.isEmpty() ? QString() : roles.takeLast();
+        auto *warn = label(tr("%1 and %2 both change %3: the lead decides who keeps it.").arg(roles.join(QStringLiteral(", ")), last, overlap.who),
+                           c.warn, 11, false, "teamBuildsOverlap");
+        warn->setWordWrap(true); warn->setProperty("file", overlap.who);
+        v->addWidget(warn);
+    }
+    return frame;
+}
+
+QWidget *TeamTestsView::buildRunningRow(const TeamBuilds::Running &item)
+{
+    const Colors c = colorsFor(m_dark);
+    auto *frame = box(c, "teamBuildsRunning", alpha(c.accent, .5)); frame->setProperty("member", item.member);
+    auto *v = new QVBoxLayout(frame); v->setContentsMargins(10, 7, 10, 7); v->setSpacing(4);
+    auto *h = row(8);
+    h->addWidget(glyphLabel(QStringLiteral("running"), c));
+    const QString role = who(item.member);
+    h->addWidget(new Pill(role, roleColor(role, m_dark)));
+    h->addWidget(label(item.templateName, c.fg, 13, true, "teamBuildsTemplate"));
+    auto *where = new Pill(item.snapshot ? tr("snapshot") : tr("shared"), c.text3); where->setObjectName("teamBuildsWhere");
+    where->setToolTip(where->toolTip() + QLatin1Char('\n')
+                      + (item.snapshot ? tr("Built in the member's own snapshot: its edits, everyone else's files at HEAD") : tr("Built in the shared folder")));
+    h->addWidget(where);
+    h->addStretch();
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    const qint64 elapsed = qint64(std::max(0.0, item.started > 0 ? now - item.started : item.seconds) * 1000);
+    h->addWidget(label(item.usualMs > 0 ? tr("%1 of usually %2").arg(runTime(elapsed), runTime(qint64(item.usualMs)))
+                                        : tr("running %1").arg(runTime(elapsed)), c.text2, 12, false, "teamBuildsElapsed"));
+    v->addLayout(h);
+    if (item.usualMs > 0) {
+        // Its progress against the usual time of this build folder.
+        auto *bar = new QProgressBar; bar->setObjectName("teamBuildsProgress");
+        const int percent = int(std::min<qint64>(100, elapsed * 100 / qint64(item.usualMs)));
+        bar->setRange(0, 100); bar->setValue(percent); bar->setTextVisible(false); bar->setFixedHeight(5);
+        bar->setProperty("percent", percent);
+        bar->setAccessibleName(tr("%1% of its usual time").arg(percent));
+        const QColor tone = elapsed > qint64(item.usualMs) ? c.warn : c.accent;
+        bar->setStyleSheet(QStringLiteral("QProgressBar{background:%1;border:none;border-radius:2px;} QProgressBar::chunk{background:%2;border-radius:2px;}")
+                               .arg(c.border.name(QColor::HexArgb), tone.name()));
+        v->addWidget(bar);
+    }
+    return frame;
+}
+
+QWidget *TeamTestsView::buildQueueRow(const TeamBuilds::Waiting &item, int ahead)
+{
+    const Colors c = colorsFor(m_dark);
+    auto *frame = box(c, "teamBuildsQueued"); frame->setProperty("member", item.member);
+    auto *h = new QHBoxLayout(frame); h->setContentsMargins(10, 7, 10, 7); h->setSpacing(8);
+    h->addWidget(glyphLabel(QStringLiteral("pending"), c));
+    const QString role = who(item.member);
+    h->addWidget(new Pill(role, roleColor(role, m_dark)));
+    h->addWidget(label(item.templateName, c.fg, 13, true, "teamBuildsTemplate"));
+    if (!item.coalescedWith.isEmpty()) {
+        // The same tree another member builds now: one build, one result.
+        auto *same = label(tr("same tree as %1: one result").arg(who(item.coalescedWith)), c.accent, 11, false, "teamBuildsCoalesced");
+        same->setToolTip(tr("Nothing changed between the two requests, so the build runs once and both get its result"));
+        h->addWidget(same);
+    } else {
+        h->addWidget(label(ahead == 1 ? tr("1 ahead") : tr("%1 ahead").arg(ahead), c.muted, 11, false, "teamBuildsAhead"));
+    }
+    h->addStretch();
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    h->addWidget(label(tr("waiting %1").arg(runTime(qint64(std::max(0.0, item.since > 0 ? now - item.since : item.seconds) * 1000))),
+                       c.text2, 12, false, "teamBuildsWaited"));
+    return frame;
+}
+
+QWidget *TeamTestsView::buildDoneRow(const TeamBuilds::Done &item)
+{
+    const Colors c = colorsFor(m_dark);
+    const bool blamed = !item.blamed.isEmpty();
+    auto *frame = box(c, "teamBuildsDone", item.failed() ? alpha(blamed ? c.warn : c.danger, .5) : QColor());
+    frame->setProperty("member", item.member); frame->setProperty("failed", item.failed()); frame->setProperty("hit", item.hit);
+    auto *v = new QVBoxLayout(frame); v->setContentsMargins(10, 6, 10, 6); v->setSpacing(3);
+    auto *h = row(8);
+    h->addWidget(glyphLabel(item.hit || item.exit == 0 ? QStringLiteral("passed") : item.timedOut ? QStringLiteral("timeout") : QStringLiteral("failed"), c));
+    if (item.at > 0) h->addWidget(label(clockOf(item.at), c.muted, 11));
+    const QString role = who(item.member);
+    h->addWidget(new Pill(role, roleColor(role, m_dark)));
+    h->addWidget(label(item.templateName, c.fg, 12, true, "teamBuildsTemplate"));
+    if (item.hit) {
+        auto *hit = label(item.by.isEmpty() ? tr("from the cache") : tr("from the cache, built by %1").arg(who(item.by)), c.accent, 11, false, "teamBuildsHit");
+        hit->setToolTip(tr("The tree was unchanged, so its earlier result served this request"));
+        h->addWidget(hit);
+    }
+    h->addStretch();
+    if (!item.hit && item.ms > 0) h->addWidget(label(runTime(item.ms), c.text2, 12));
+    v->addLayout(h);
+    // A failure in another member's file names the file and its member.
+    for (const auto &entry : item.blamed) {
+        auto *line = label(tr("Failed in %1's %2 %3: theirs to fix")
+                               .arg(who(entry.who), entry.files.size() == 1 ? tr("file") : tr("files"), entry.files.join(QStringLiteral(", "))),
+                           c.warn, 11, false, "teamBuildsBlame");
+        line->setWordWrap(true); line->setProperty("member", entry.who); line->setProperty("files", entry.files);
+        v->addWidget(line);
+    }
+    if (item.failed() && !blamed && !item.error.isEmpty()) {
+        auto *error = label(item.error, c.danger, 11, false, "teamBuildsError"); error->setWordWrap(true);
+        v->addWidget(error);
+    }
+    return frame;
+}
+
+void TeamTestsView::renderBuilds(QVBoxLayout *v)
+{
+    const Colors c = colorsFor(m_dark);
+    auto *hint = label(m_builds.enabled || !m_buildsRead
+                           ? tr("Members sharing a folder build through the build broker: each in its own snapshot, one build at a time per build folder.")
+                           : tr("The build broker is off: members sharing a folder build in it directly. The owner turns it on in the team's settings."),
+                       c.muted, 11, false, "teamBuildsHint");
+    hint->setWordWrap(true); v->addWidget(hint);
+    if (!m_buildsError.isEmpty()) v->addWidget(refusal(tr("Could not read the builds: %1").arg(m_buildsError), c, "teamBuildsReadError"));
+    if (!m_buildsRead) {
+        v->addWidget(label(tr("Reading the builds…"), c.muted, 12, false, "teamBuildsLoading"));
+        return;
+    }
+    if (m_builds.folders.isEmpty()) {
+        v->addWidget(label(tr("No two members share a folder."), c.muted, 12, false, "teamBuildsEmpty"));
+        return;
+    }
+    for (const auto &folder : m_builds.folders) {
+        QStringList roles;
+        for (const auto &member : folder.members) roles << who(member);
+        auto *title = section(folder.folder, c, "teamBuildsFolder"); title->setProperty("folder", folder.folder);
+        title->setToolTip(tr("Shared by %1").arg(roles.join(QStringLiteral(", "))));
+        v->addWidget(title);
+        v->addWidget(changesStrip(folder));
+        if (folder.builds.isEmpty()) v->addWidget(label(tr("No build through the broker yet."), c.muted, 12, false, "teamBuildsNone"));
+        for (const auto &group : folder.builds) {
+            auto *line = row(8);
+            auto *name = label(group.name, c.text2, 12, true, "teamBuildsBuildFolder"); name->setContentsMargins(0, 6, 0, 0);
+            line->addWidget(name);
+            if (group.usualMs > 0) line->addWidget(label(tr("usually %1").arg(runTime(qint64(group.usualMs))), c.muted, 11));
+            if (group.hitRate >= 0) {
+                auto *rate = new Pill(tr("cache hits %1%").arg(qRound(group.hitRate * 100)), group.hitRate > 0 ? c.accent : c.muted);
+                rate->setObjectName("teamBuildsHitRate");
+                rate->setToolTip(rate->toolTip() + QLatin1Char('\n') + tr("The share of recent requests an unchanged tree served from an earlier build"));
+                line->addWidget(rate);
+            }
+            line->addStretch();
+            v->addLayout(line);
+            for (const auto &item : group.running) v->addWidget(buildRunningRow(item));
+            int ahead = int(group.running.size());
+            for (const auto &item : group.queue) v->addWidget(buildQueueRow(item, ahead++));
+            if (group.running.isEmpty() && group.queue.isEmpty())
+                v->addWidget(label(tr("Nothing builds or waits."), c.muted, 12, false, "teamBuildsIdle"));
+            if (!group.timeline.isEmpty()) {
+                v->addWidget(label(tr("Recent builds"), c.text3, 11, true));
+                for (const auto &item : group.timeline) v->addWidget(buildDoneRow(item));
+            }
+        }
+    }
 }

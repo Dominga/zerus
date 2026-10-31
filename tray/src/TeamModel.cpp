@@ -389,6 +389,17 @@ Team::Health parseHealth(const QJsonObject &h)
     return health;
 }
 
+QString BuildState::text(double now) const
+{
+    if (building()) {
+        const qint64 secs = qint64(std::max(0.0, now - since));
+        const QString clock = QStringLiteral("%1:%2").arg(secs / 60).arg(secs % 60, 2, 10, QLatin1Char('0'));
+        return snapshot ? tr("building (snapshot) %1").arg(clock) : tr("building (shared) %1").arg(clock);
+    }
+    if (waiting()) return ahead == 1 ? tr("waiting for a build, 1 ahead") : tr("waiting for a build, %1 ahead").arg(ahead);
+    return {};
+}
+
 Team parse(const QJsonObject &v)
 {
     Team team;
@@ -957,6 +968,12 @@ Team parse(const QJsonObject &v)
     team.resumeAfterLimits = settings.value("resume_after_limits").toBool();
     team.autoAccept = settings.value("auto_accept").toBool() || v.value("auto_accept").toBool();
     team.workAhead = settings.value("work_ahead").toBool();
+    team.buildBroker = settings.value("build_broker").toBool();
+    const auto builds = v.value("build_states").toObject();
+    for (auto it = builds.begin(); it != builds.end(); ++it) {
+        const auto b = it.value().toObject();
+        team.buildStates.insert(it.key(), {str(b, "state"), str(b, "template"), b.value("since").toDouble(), b.value("ahead").toInt(), b.value("snapshot").toBool()});
+    }
     for (const auto &value : v.value("intakes").toArray()) {
         const auto i = value.toObject();
         team.intakes.append({str(i, "id"), str(i, "label"), i.value("created").toDouble()});
@@ -1360,6 +1377,13 @@ QString proposalText(const Team &team, const Team::Proposal &proposal)
     if (proposal.kind == "discard-phase") return tr("Discard %1").arg(phaseName(team, change.value("phase").toInt()));
     // #740: the lead's question to the owner, whole.
     if (proposal.kind == "question") return change.value("question").toString();
+    // #756: the lead's switch card for one owner setting.
+    if (proposal.kind == "switch-setting") {
+        const bool on = change.value("value").toBool();
+        if (change.value("setting").toString() == QLatin1String("build_broker"))
+            return on ? tr("Turn on the build broker") : tr("Turn off the build broker");
+        return on ? tr("Turn on %1").arg(change.value("setting").toString()) : tr("Turn off %1").arg(change.value("setting").toString());
+    }
     return proposal.kind;
 }
 
@@ -1398,6 +1422,17 @@ QStringList proposalChanges(const Team &team, const Team::Proposal &proposal)
         const auto *phase = team.phase(change.value("phase").toInt());
         if (phase) for (int id : phase->tasks) lines << taskLine(id);
         if (lines.isEmpty()) lines << tr("It has no tasks.");
+    } else if (proposal.kind == "switch-setting" && change.value("setting").toString() == QLatin1String("build_broker")) {
+        // #756: who shares which folder, and what the broker gives them.
+        for (const auto &value : change.value("shared").toArray()) {
+            const auto shared = value.toObject();
+            QStringList roles;
+            for (const auto &member : shared.value("members").toArray()) roles << team.roleOf(member.toString());
+            lines << tr("%1 share %2").arg(roles.join(QStringLiteral(", ")), shared.value("folder").toString());
+        }
+        if (change.value("value").toBool())
+            lines << tr("Each member builds its own snapshot of the folder, one build at a time per build folder; an unchanged tree builds once, "
+                        "and a failure in another member's file goes to that member.");
     }
     return lines;
 }

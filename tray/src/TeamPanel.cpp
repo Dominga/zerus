@@ -950,6 +950,13 @@ QWidget *TeamPanel::memberRow(const Team &team, const Member &member, bool narro
         }
     }
     body->addLayout(line2);
+    // #756: its build through the build broker, short.
+    if (const auto build = team.buildStates.value(member.id); !build.state.isEmpty()) {
+        auto *buildLabel = label(build.text(double(QDateTime::currentSecsSinceEpoch())), build.building() ? c.accent : c.text3, 11, false, "teamMemberBuild");
+        buildLabel->setProperty("buildState", build.state);
+        buildLabel->setAccessibleName(tr("Build: %1").arg(buildLabel->text()));
+        body->addWidget(buildLabel);
+    }
     // A5: the member's queue, the current task first.
     if (auto *queue = memberQueueWidget(team, member, c, [this](int id) { openTask(id); })) body->addWidget(queue);
     h->addLayout(body, 1);

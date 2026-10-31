@@ -101,6 +101,7 @@ private slots:
     void teamCustomizationIsOptIn();
     void teamSettingsSendOnlyWhatChanged();
     void teamSettingsAllowLandingAndEditMemberModels();
+    void teamSettingsPausesAndPhaseAcceptance();
     void aboutNamesTheForkAndItsUpdate();
     void teamDialogsDrawTheThemeNotTheSystem();
 };
@@ -768,6 +769,48 @@ void TestTeamsUiSettings::teamSettingsSendOnlyWhatChanged()
     // Off: the branch setting goes as null, the untouched restart stays out.
     dialog.findChild<QCheckBox *>("teamSettingsBranchPerTask")->setChecked(false);
     QCOMPARE(dialog.changes(), (QJsonObject{{"branch_per_task", QJsonValue(QJsonValue::Null)}}));
+}
+
+// U63 (owner, 2026-10-31): who removes the lead's pause (only with the
+// owner's consent unless he lets the lead) and whether new phases require his
+// acceptance; both off by default and sent only when changed.
+void TestTeamsUiSettings::teamSettingsPausesAndPhaseAcceptance()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    {
+        TeamSettingsDialog dialog(&controller, parse(team()), true);
+        dialog.show();
+        auto *unpause = dialog.findChild<QComboBox *>("teamSettingsLeadUnpause");
+        auto *acceptance = dialog.findChild<QCheckBox *>("teamSettingsPhaseAcceptance");
+        QVERIFY(unpause && acceptance);
+        QCOMPARE(unpause->currentData().toBool(), false);
+        QCOMPARE(unpause->currentText(), QStringLiteral("Only with my consent"));
+        QVERIFY(!acceptance->isChecked());
+        QVERIFY(dialog.changes().isEmpty());
+        auto *save = dialog.findChild<QPushButton *>("teamSettingsSave");
+        QVERIFY(!save->isEnabled());
+        unpause->setCurrentIndex(unpause->findData(true));
+        QCOMPARE(unpause->currentText(), QStringLiteral("The lead removes its own pause"));
+        acceptance->setChecked(true);
+        QVERIFY(save->isEnabled());
+        save->click();
+        QTRY_COMPARE(calls(script(), "settings").size(), 1);
+        QCOMPARE(calls(script(), "settings").first()["settings"].toObject(),
+                 (QJsonObject{{"lead_removes_own_pause", true}, {"phase_acceptance", "owner"}}));
+    }
+    auto set = team();
+    set["settings"] = QJsonObject{{"lead_removes_own_pause", true}, {"phase_acceptance", "owner"}};
+    TeamSettingsDialog dialog(&controller, parse(set), true);
+    auto *unpause = dialog.findChild<QComboBox *>("teamSettingsLeadUnpause");
+    auto *acceptance = dialog.findChild<QCheckBox *>("teamSettingsPhaseAcceptance");
+    QCOMPARE(unpause->currentData().toBool(), true);
+    QVERIFY(acceptance->isChecked());
+    QVERIFY(dialog.changes().isEmpty());
+    acceptance->setChecked(false);
+    QCOMPARE(dialog.changes(), (QJsonObject{{"phase_acceptance", "lead"}}));
+    unpause->setCurrentIndex(unpause->findData(false));
+    QCOMPARE(dialog.changes(), (QJsonObject{{"phase_acceptance", "lead"}, {"lead_removes_own_pause", false}}));
 }
 
 // #581 N5: Landing (land_allowed) asks before it turns on, since a land stage's

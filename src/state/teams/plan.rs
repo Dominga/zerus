@@ -1,7 +1,7 @@
 //! WhiteWh fork: pure rules of a team's task graph, as the prototype
 //! (design/agent-teams/index.html: cycleNodes, layersOf, chainOf, readyTasks,
 //! planErrors) defines them. Edges run from a dependency to its dependent.
-use super::model::{Approval, DependencyKind, MemberState, PhaseState, Task, TaskStatus, Team};
+use super::model::{Approval, DependencyKind, MemberState, Phase, PhaseAcceptance, PhasePause, PhaseState, Task, TaskStatus, Team};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -210,6 +210,40 @@ pub(crate) fn dispatch_order(team: &Team, ready: Vec<u32>) -> Vec<u32> {
     ordered
 }
 
+/// U63 (owner, 2026-10-31): the pause that holds phase `n`, if any.
+pub(crate) fn phase_pause(team: &Team, n: u32) -> Option<&PhasePause> {
+    team.phases.iter().find(|phase| phase.n == n).and_then(|phase| phase.pause.as_ref())
+}
+
+/// U63: a phase that requires the owner's acceptance and has every task
+/// decided waits for it: stored as AwaitingAcceptance, or (before the next
+/// change records that) an approved phase whose last task was just decided.
+pub(crate) fn awaits_acceptance(team: &Team, phase: &Phase) -> bool {
+    match phase.state {
+        PhaseState::AwaitingAcceptance => true,
+        PhaseState::Approved => {
+            phase.acceptance == PhaseAcceptance::Owner && !phase.acceptance_rework && {
+                let mut tasks = team.tasks.iter().filter(|task| task.phase == phase.n).peekable();
+                tasks.peek().is_some() && tasks.all(|task| task.status.finished())
+            }
+        }
+        _ => false,
+    }
+}
+
+/// U63: the phase before phase `n` in the display order that waits for the
+/// owner's acceptance, or for the lead's rework after the owner sent it back
+/// there; nothing after it starts, urgent work included.
+pub(crate) fn acceptance_block(team: &Team, n: u32) -> Option<u32> {
+    let order_of = |m: u32| team.phases.iter().find(|phase| phase.n == m).map_or(m, |phase| phase.order());
+    let target = order_of(n);
+    team.phases
+        .iter()
+        .filter(|phase| phase.n != n && phase.order() < target && (awaits_acceptance(team, phase) || phase.acceptance_rework))
+        .min_by_key(|phase| (phase.order(), phase.n))
+        .map(|phase| phase.n)
+}
+
 /// The earlier-phase tasks a barrier phase still waits for (C3): a barrier
 /// task starts only once every task of a lower phase is finished.
 pub(crate) fn barrier_blockers(team: &Team, task: &Task) -> Vec<u32> {
@@ -253,6 +287,9 @@ pub(crate) fn ready(team: &Team) -> Vec<u32> {
         .filter(|task| task.waits.is_none())
         .filter(|task| task.deps.iter().all(|dep| satisfied(team, dep.task, dep.kind)))
         .filter(|task| !barrier_holds(team, task))
+        // U63 (owner, 2026-10-31): a paused phase hands nothing out, and no
+        // phase after one that waits for the owner's acceptance starts.
+        .filter(|task| phase_pause(team, task.phase).is_none() && acceptance_block(team, task.phase).is_none())
         .map(|task| task.id)
         .collect();
     // D2: an urgent phase's tasks go before every other pending one.
@@ -269,6 +306,8 @@ pub(crate) fn ready_ahead(team: &Team, phase: u32) -> Vec<u32> {
         .filter(|task| task.phase == phase && matches!(task.status, TaskStatus::Pending | TaskStatus::Draft) && !cycles.contains(&task.id))
         .filter(|task| task.hold.is_none() && task.waits.is_none())
         .filter(|task| task.deps.iter().all(|dep| satisfied(team, dep.task, dep.kind)))
+        // U63: nothing starts ahead behind a phase awaiting the owner's acceptance.
+        .filter(|task| acceptance_block(team, task.phase).is_none())
         .map(|task| task.id)
         .collect()
 }
@@ -633,7 +672,13 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
                 let order_of = |m: u32| team.phases.iter().find(|phase| phase.n == m).map_or(m, |phase| phase.order());
                 team.tasks.iter().any(|task| task.phase != n && order_of(task.phase) < target && !task.status.finished())
             };
-            let blocked = blocked || queued;
+            // U63 (owner, 2026-10-31): a paused phase, and a phase behind one
+            // that waits for the owner's acceptance, wait as queued.
+            let pause = record.and_then(|phase| phase.pause.clone());
+            let awaiting = record.is_some_and(|phase| awaits_acceptance(team, phase));
+            let held = !awaiting && open > 0 && (pause.is_some() || acceptance_block(team, n).is_some());
+            let rework = record.is_some_and(|phase| phase.acceptance_rework);
+            let blocked = blocked || queued || held;
             // U58: a phase whose tasks are all cancelled reads cancelled; the
             // dashboard hides it with its tasks unless the caller asks for them.
             let cancelled = phase_cancelled(team, n);
@@ -644,7 +689,7 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
                 "cancelled"
             } else if !approved || record.is_some_and(|phase| phase.state.is_draft()) {
                 "draft"
-            } else if open == 0 {
+            } else if open == 0 && !rework {
                 "done"
             } else if blocked {
                 "approved"
@@ -663,6 +708,8 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
                 "rejected"
             } else if status == "draft" {
                 "draft"
+            } else if awaiting {
+                "awaiting_acceptance"
             } else if status == "done" {
                 "done"
             } else if blocked {
@@ -696,6 +743,9 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
                 // whether the lead started it ahead.
                 "auto": record.is_some_and(|phase| phase.approval == super::model::Approval::Auto),
                 "start_ahead": record.is_some_and(|phase| phase.start_ahead),
+                // U63: the phase's pause and who accepts it.
+                "pause": pause,
+                "acceptance": record.map_or(PhaseAcceptance::Lead, |phase| phase.acceptance),
                 "health_line": line,
             })
         })
@@ -759,13 +809,18 @@ pub(crate) fn waiting_for_owner(team: &Team) -> bool {
         if phase.state.is_draft() {
             return true;
         }
+        // U63: a phase the owner paused, or one behind a phase that waits for
+        // the owner's acceptance, waits for the owner.
+        if phase.pause.as_ref().is_some_and(|pause| pause.owner) || acceptance_block(team, phase.n).is_some() {
+            return true;
+        }
         phase.state.is_accepted()
             && (phase.barrier || phase.state == PhaseState::Queued)
             && team
                 .tasks
                 .iter()
                 .filter(|lower| lower.phase < phase.n && !lower.status.finished())
-                .all(|lower| phase_draft(team, lower.phase))
+                .all(|lower| phase_draft(team, lower.phase) || phase_pause(team, lower.phase).is_some_and(|pause| pause.owner))
     })
 }
 

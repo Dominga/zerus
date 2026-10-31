@@ -20,7 +20,7 @@ QColor kindColor(const Colors &c, const QString &kind)
     if (kind == "report_escalated" || kind == "permission_escalated") return c.warn;
     if (kind == "phase_draft" || kind == "plan_draft") return c.folder;
     if (kind == "owner_word_asked") return c.violet;
-    if (kind == "team_finished") return c.accent;
+    if (kind == "team_finished" || kind == "phase_acceptance") return c.accent;
     return c.text2;
 }
 }

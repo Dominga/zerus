@@ -794,6 +794,8 @@ Team parse(const QJsonObject &v)
         phase.approval = str(p, "approval"); phase.state = str(p, "state");
         phase.addedBy = str(p, "added_by"); phase.decidedBy = str(p, "decided_by");
         phase.startAhead = p.value("start_ahead").toBool();
+        phase.pause = readPhasePause(p.value("pause"));
+        phase.acceptance = str(p, "acceptance");
         phase.addedAt = p.value("added_at").toDouble(); phase.decidedAt = p.value("decided_at").toDouble();
         for (const auto &id : p.value("tasks").toArray()) phase.tasks.append(id.toInt());
         // F10: the lead's diff for this draft, when the store reports one.
@@ -808,6 +810,7 @@ Team parse(const QJsonObject &v)
             change.title = str(entry, "title");
             change.from = text(entry.value("from"));
             change.to = text(entry.value("to"));
+            change.accepted = entry.value("accepted").toBool();
             if (!change.kind.isEmpty()) phase.changes.append(change);
         }
         // F12: the draft's predecessor is not ready, with its open tasks.
@@ -930,6 +933,8 @@ Team parse(const QJsonObject &v)
             summary.done = entry.value("done").toInt();
             summary.total = entry.value("total").toInt();
             summary.barrier = entry.value("barrier").toBool();
+            summary.pause = readPhasePause(entry.value("pause"));
+            summary.acceptance = str(entry, "acceptance");
             if (summary.n > 0) team.phaseSummary.append(summary);
         }
         // G9 (spec 10.1): each phase's own plan health, keyed by phase number.
@@ -1638,6 +1643,19 @@ Team withoutFinished(const Team &team)
     return shown;
 }
 
+PhasePause readPhasePause(const QJsonValue &value)
+{
+    PhasePause pause;
+    if (!value.isObject()) return pause;
+    const auto p = value.toObject();
+    pause.on = true;
+    pause.by = p.value("by").toString();
+    pause.owner = p.value("owner").toBool();
+    pause.at = p.value("at").toDouble();
+    pause.reason = p.value("reason").toString();
+    return pause;
+}
+
 bool taskStarted(const Task &task)
 {
     return std::any_of(task.attempts.cbegin(), task.attempts.cend(), [](const Attempt &attempt) { return attempt.state != QLatin1String("refused"); });
@@ -1687,6 +1705,8 @@ QString ownerPhaseState(const Team &team, const PhaseGroup &group)
     if (record && record->rejected()) return QStringLiteral("rejected");
     if (record && record->draft()) return QStringLiteral("draft");
     if (record && record->queued()) return QStringLiteral("queued");
+    // U63: the owner's acceptance waits, or he gave it.
+    if (record && (record->awaitingAcceptance() || record->state == QLatin1String("done"))) return record->state;
     return group.finished() ? QStringLiteral("done") : QStringLiteral("running");
 }
 
@@ -1860,8 +1880,9 @@ PhaseBlocker nearestBlocker(const Team &team, int phase)
         // A discarded phase is out of the plan, and phase 1 has no record: the
         // approved initial plan is approved by definition.
         if (previous && previous->state == "discarded") continue;
-        // U25: a queued phase is accepted; it only waits for its turn.
-        if (previous && previous->state != "approved" && !previous->queued())
+        // U25: a queued phase is accepted; it only waits for its turn. U63: a
+        // phase waiting for the owner's acceptance, or accepted by him, was too.
+        if (previous && previous->state != "approved" && !previous->queued() && !previous->awaitingAcceptance() && previous->state != "done")
             return {lower, false, 0};
         int open = 0;
         for (const auto &task : team.tasks) if (task.phase == lower && !task.finished()) ++open;

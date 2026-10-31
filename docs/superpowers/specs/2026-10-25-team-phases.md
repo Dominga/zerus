@@ -141,7 +141,7 @@ Receipt:
 
 ### `hgs team return-to-draft --json` (owner, or the lead on the owner's word; U42, #587)
 
-`{"request_id":"UUID","team":"ID","phase":3}` → `{"status":"phase_returned_to_draft","phase":4,"from_phase":3,"tasks":[21],"renumbered":{...}}`
+`{"request_id":"UUID","team":"ID","phase":3}` → `{"status":"phase_returned_to_draft","phase":3,"from_phase":3,"tasks":[21],"renumbered":{"phases":[],"tasks":[]}}`
 
 - An approved or queued phase whose work has not started (every task Pending or Draft with no attempt beyond a
   revoked or refused one) goes back to a draft that waits for approval again; a done phase and started work are
@@ -149,10 +149,63 @@ Receipt:
 - The lead passes `owner_word` with the owner's sentence from its own session (under 30 minutes) naming the phase
   and the draft ("return phase 3 to draft", "верни фазу 3 в черновик"); `discard-phase` of an accepted phase takes
   the lead's word the same way, naming the phase and the discard. A word is spent on that one change.
-- Effect: the phase's Pending tasks become Draft, `decided_*` and `owner_word` clear, and the drafts are numbered after
-  the accepted phases again (F285). Event `phase_returned_to_draft` `{by, phase, title, tasks, from, owner_word}`.
+- Effect: the phase's Pending tasks become Draft and `decided_*`, `owner_word` and a pause clear. U63 (owner,
+  2026-10-31): the phase keeps its place in the order, its number and its task ids; nothing is renumbered
+  (`from_phase` equals `phase` and `renumbered` is empty, kept for older callers). Event `phase_returned_to_draft`
+  `{by, phase, title, tasks, from, owner_word}`.
+- To change an accepted phase that has not started, edit it in place (see Phase control below); return it to a draft
+  only when it must be approved again.
 - A `plan` edit while planning keeps each phase it already had: its order (a move stays), `added_by` and `added_at`;
   a new phase goes after them by number.
+
+## Phase control (U63, owner 2026-10-31)
+
+**Order.** A phase keeps its place when it is edited or returned to a draft. Numbering (F285) renumbers only the
+drafts after the last accepted phase in the display order (`order`, then `n`), on a discard, a move and the compaction
+of an old discarded record; a draft between accepted phases keeps its number and task ids.
+
+**Changing an accepted phase.** An approved or queued phase whose work has not started (no attempt beyond a refused
+one) is changed in place and stays accepted:
+
+- `edit-draft` and `extend` with `"phase"` (U58), and `move-phase`, which now moves such a phase too: `phase` and
+  `to` must each be a draft or an accepted phase that has not started. After a move, an approved phase in the moved
+  range that has open work before it becomes `queued`; barriers read the new order.
+- The owner does it directly. The lead does it only with `owner_word`, the owner's sentence naming the phase and the
+  change ("change phase 3: ...", "move phase 3 before phase 2"), verified by the CLI as for `return-to-draft`;
+  without it: "The lead edits an accepted phase only on the owner's word: ...". Drafts stay the lead's own.
+- Every change recorded on an accepted phase carries `"accepted": true` in `changes[]`, so the owner sees the lead's
+  changes after the approval too. `phase_edited` carries `owner_word`.
+
+**Pause.** `hgs team pause-phase --json` `{"request_id","team","phase","reason"?}` (owner, or the lead on its own)
+holds an approved or queued phase whose work has not started → `{"status":"phase_paused","phase":N,"pause":{by,
+owner, at, reason}}`, event `phase_paused`. The record keeps `pause {by, owner, at, reason}`. Its tasks are not
+handed out and wait "Paused by ...: reason"; it keeps its place, so a later barrier or queued phase waits for it as
+for an unfinished phase, and a queued paused phase does not start. `hgs team unpause-phase --json`
+`{"request_id","team","phase"}` → `{"status":"phase_unpaused"}`, event `phase_unpaused`: the owner's pause only the
+owner removes; the lead removes its own pause by itself when the owner set `settings.lead_removes_own_pause`, else
+(the default) on the owner's word naming the phase ("remove the pause of phase 3"). `return-to-draft` clears a pause.
+
+**Owner acceptance.** A phase record carries `acceptance: "lead" | "owner"` (skipped when `lead`); a new phase takes
+`settings.phase_acceptance` (default `lead`, the old behaviour; urgent phases always `lead`). `hgs team
+phase-acceptance --json` `{"request_id","team","phase","acceptance"}` sets it for a phase that is not done (the
+owner; the lead on the owner's word), event `phase_acceptance_changed`.
+
+- When every task of an approved owner-acceptance phase is decided, it becomes `awaiting_acceptance`
+  (`awaiting_since`, event `phase_awaiting_acceptance {phase,title,accepted,rejected,cancelled}`); `phase_done` waits.
+  While it waits (and while its rework after a send-back is open), no later phase in the display order starts:
+  `ready`, start-ahead, work ahead and queued phases are held, urgent and non-barrier phases included. `finish` is
+  refused.
+- `hgs team accept-phase --json` `{"request_id","team","phase"}` (the owner; the lead on the owner's word, "phase 3
+  accepted") → `{"status":"phase_accepted"}`: the record becomes `done`, event `phase_owner_accepted`, then
+  `phase_done`. `done` is reached only through this path; a phase the lead accepts stays `approved` when finished.
+- `hgs team send-back-phase --json` `{"request_id","team","phase","comment"}` (owner) → `{"status":"phase_sent_back"}`:
+  the phase is `approved` again with `acceptance_rework`, `rejection` and a note; event `phase_acceptance_sent_back`.
+  The lead's inbox shows `phase_acceptance_sent_back`; the lead adds the rework to the same phase with `extend`
+  `"phase"` (no word needed), and the phase waits for the acceptance again once that work is decided.
+- The owner's attention list and Waiting for you carry `phase_acceptance` (action `accept_phase`) with a summary
+  `{accepted, rejected, cancelled, tests, minutes}`. The lead's session reads "Waiting for you to accept phase N"
+  (`team_phase_acceptance`, a Waiting for you reason under the existing contract) while nothing else is out; a
+  member held behind it waits for the owner. Task timelines show `phase_pause` and `owner_acceptance` spans.
 
 ### `hgs team finish --json` (lead or owner)
 

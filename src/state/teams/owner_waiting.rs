@@ -90,6 +90,15 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
                 found["phase"] = json!(phase);
                 out.push(found);
             }
+            // U63 (owner, 2026-10-31): a phase ready for the owner's acceptance.
+            "phase_acceptance" => {
+                let phase = attention["phase"].as_u64().unwrap_or_default();
+                let mut found = item(team, "phase_acceptance", &phase.to_string(),
+                    format!("Phase {phase} is ready for your acceptance"), at, "accept_phase");
+                found["phase"] = json!(phase);
+                found["summary"] = attention["outcome"].clone();
+                out.push(found);
+            }
             "report" => {
                 let task = attention["task"].as_u64().unwrap_or_default();
                 let title = team.task(task as u32).map(|task| task.title.clone()).unwrap_or_default();
@@ -198,7 +207,10 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
     }
     // Every task decided: the team waits for the owner (or the lead) to finish
     // it or add the next phase; no draft phase is waiting.
-    if super::ops::all_decided(team) && !team.phases.iter().any(|phase| phase.state == PhaseState::Draft) {
+    // U63: a phase that waits for the owner's acceptance (its own item) or
+    // for its rework is not the end yet.
+    let accepting = team.phases.iter().any(|phase| super::plan::awaits_acceptance(team, phase) || phase.acceptance_rework);
+    if super::ops::all_decided(team) && !accepting && !team.phases.iter().any(|phase| phase.state == PhaseState::Draft) {
         let decided = team
             .tasks
             .iter()

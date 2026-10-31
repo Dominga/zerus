@@ -503,12 +503,32 @@ fn phase_word_sentence(phase: u32, kind: PhaseWord) -> String {
 pub(crate) enum PhaseChange {
     Discard,
     ToDraft,
+    /// U63 (owner, 2026-10-31): an edit, an addition or a move of an
+    /// accepted phase.
+    Edit,
+    /// U63: removing the lead's own pause of the phase.
+    Unpause,
+    /// U63: whether the owner accepts the phase.
+    Acceptance,
+    /// U63: the owner's acceptance of the phase itself.
+    Accept,
 }
 
 /// The verbs of a discard, English whole and Russian at a word start.
 const DISCARD_VERBS: &[&str] = &["discard", "drop", "remove", "delete", "scrap", "cancel", "отмен", "удали", "убери", "выброс", "выкин"];
 /// The words of a return to a draft.
 const DRAFT_WORDS: &[&str] = &["draft", "drafts", "redraft", "черновик"];
+/// U63: the verbs of an edit, an addition or a move of a phase.
+const EDIT_VERBS: &[&str] = &[
+    "edit", "change", "rename", "move", "add", "reorder", "update", "replace", "remove", "rework",
+    "измен", "поменя", "перенес", "передвин", "добав", "редакт", "переимен", "передела", "убери", "удали",
+];
+/// U63: the verbs that end a pause by themselves.
+const UNPAUSE_VERBS: &[&str] = &["unpause", "resume", "continue", "unblock", "возобнов", "продолж", "сними паузу", "снять паузу", "сними с паузы"];
+/// U63: the words of who accepts a phase.
+const ACCEPTANCE_WORDS: &[&str] = &["acceptance", "приемк", "приёмк"];
+/// U63: the verbs of the owner's acceptance.
+const ACCEPT_VERBS: &[&str] = &["accept", "accepted", "прими", "принима", "принят"];
 
 /// The owner's sentence names phase `phase` and the change; a refusal never
 /// authorizes a change (#595 C1).
@@ -519,6 +539,21 @@ fn asks_phase_change(lowered: &str, phase: u32, change: PhaseChange) -> bool {
     let words = match change {
         PhaseChange::Discard => DISCARD_VERBS,
         PhaseChange::ToDraft => DRAFT_WORDS,
+        PhaseChange::Edit => EDIT_VERBS,
+        PhaseChange::Unpause => {
+            // "remove the pause of phase 3" says the change too.
+            let removes = (verb_in(lowered, "remove") || verb_in(lowered, "lift") || verb_in(lowered, "убери"))
+                && (lowered.contains("pause") || lowered.contains("пауз"));
+            return named_phases(lowered).contains(&phase) && (removes || UNPAUSE_VERBS.iter().any(|word| verb_in(lowered, word)));
+        }
+        PhaseChange::Acceptance => ACCEPTANCE_WORDS,
+        PhaseChange::Accept => {
+            // The acceptance itself, not a sentence about who accepts.
+            if ACCEPTANCE_WORDS.iter().any(|word| verb_in(lowered, word)) {
+                return false;
+            }
+            ACCEPT_VERBS
+        }
     };
     named_phases(lowered).contains(&phase) && words.iter().any(|word| verb_in(lowered, word))
 }
@@ -545,11 +580,19 @@ pub(crate) fn verify_phase_change_in(db: &Connection, name: &str, conversation: 
     let expect = match change {
         PhaseChange::Discard => format!("\"discard phase {phase}\""),
         PhaseChange::ToDraft => format!("\"return phase {phase} to a draft\""),
+        PhaseChange::Edit => format!("\"change phase {phase}: ...\""),
+        PhaseChange::Unpause => format!("\"remove the pause of phase {phase}\""),
+        PhaseChange::Acceptance => format!("\"phase {phase} needs my acceptance\""),
+        PhaseChange::Accept => format!("\"phase {phase} accepted\""),
     };
     verify_scan(db, name, conversation, text, now, ScanOptions { phrases: &[], needed: &[], exact: true, add: false, verbs: &[], names: &[], accept: Some(&accept), after: 0.0, expect: expect.clone() })
         .with_context(|| match change {
             PhaseChange::Discard => format!("The owner has not asked to discard phase {phase}: quote the owner's whole sentence, such as {expect}"),
             PhaseChange::ToDraft => format!("The owner has not asked to return phase {phase} to a draft: quote the owner's whole sentence, such as {expect}"),
+            PhaseChange::Edit => format!("The owner has not asked to change phase {phase}: quote the owner's whole sentence, such as {expect}"),
+            PhaseChange::Unpause => format!("The owner has not asked to remove the pause of phase {phase}: quote the owner's whole sentence, such as {expect}"),
+            PhaseChange::Acceptance => format!("The owner has not said who accepts phase {phase}: quote the owner's whole sentence, such as {expect}"),
+            PhaseChange::Accept => format!("The owner has not accepted phase {phase}: quote the owner's whole sentence, such as {expect}"),
         })
 }
 
@@ -713,8 +756,34 @@ mod tests {
         assert!(error.contains("\"remove dev\""), "{error}");
         let error = verify_phase_change_in(&db, "claude/x/lead", "c1", "please continue", 2, PhaseChange::Discard, 2010.0).unwrap_err().to_string();
         assert!(error.contains("\"discard phase 2\""), "{error}");
+        let error = verify_phase_change_in(&db, "claude/x/lead", "c1", "please continue", 2, PhaseChange::Accept, 2010.0).unwrap_err().to_string();
+        assert!(error.contains("\"phase 2 accepted\""), "{error}");
         let error = verify_phase_in(&db, "claude/x/lead", "c1", "please continue", 2, PhaseWord::Request, 0.0, 2010.0).unwrap_err().to_string();
         assert!(error.contains("\"add a task to phase 2\""), "{error}");
+    }
+
+    /// U63 (owner, 2026-10-31): the sentences that let the lead change an
+    /// accepted phase, remove its own pause, set who accepts a phase and
+    /// accept one name the phase and the change; another change does not.
+    #[test]
+    fn the_owners_phase_control_words_name_the_phase_and_the_change() {
+        let db = database();
+        add(&db, "claude/x/lead", "c1", prompt(2000.0, "Move phase 3 before phase 2"));
+        add(&db, "claude/x/lead", "c1", prompt(2001.0, "Remove the pause of phase 3"));
+        add(&db, "claude/x/lead", "c1", prompt(2002.0, "Pause phase 4"));
+        add(&db, "claude/x/lead", "c1", prompt(2003.0, "Phase 3 needs my acceptance"));
+        add(&db, "claude/x/lead", "c1", prompt(2004.0, "Phase 3 accepted"));
+        add(&db, "claude/x/lead", "c1", prompt(2005.0, "сними паузу с фазы 5"));
+        let check = |text: &str, phase: u32, change: PhaseChange| verify_phase_change_in(&db, "claude/x/lead", "c1", text, phase, change, 2010.0).is_ok();
+        assert!(check("Move phase 3 before phase 2", 3, PhaseChange::Edit));
+        assert!(check("Remove the pause of phase 3", 3, PhaseChange::Unpause));
+        assert!(check("сними паузу с фазы 5", 5, PhaseChange::Unpause));
+        assert!(!check("Pause phase 4", 4, PhaseChange::Unpause));
+        assert!(check("Phase 3 needs my acceptance", 3, PhaseChange::Acceptance));
+        assert!(!check("Phase 3 needs my acceptance", 3, PhaseChange::Accept));
+        assert!(check("Phase 3 accepted", 3, PhaseChange::Accept));
+        assert!(!check("Phase 3 accepted", 4, PhaseChange::Accept));
+        assert!(!check("Phase 3 accepted", 3, PhaseChange::Edit));
     }
 
     #[test]

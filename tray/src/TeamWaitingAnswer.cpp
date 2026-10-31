@@ -24,7 +24,7 @@ const QString additionPrefix = QStringLiteral("/owner_word_asked/addition-");
 bool TeamWaitingAnswer::opensCard(const QString &action)
 {
     return action == QLatin1String("decide_proposal") || action == QLatin1String("confirm_addition") || action == QLatin1String("answer_permission")
-           || action == QLatin1String("decide_tool");
+           || action == QLatin1String("decide_tool") || action == QLatin1String("accept_phase");
 }
 
 bool TeamWaitingAnswer::approves(const QString &action)
@@ -142,6 +142,12 @@ QString TeamWaitingAnswer::staleReason(const Team &team) const
         const auto *phase = team.phase(m_item.phase);
         if (team.status != QLatin1String("planning") && phase && phase->draft()) return {};
         return tr("Phase %1 no longer waits for your approval; nothing was sent.").arg(m_item.phase);
+    }
+    if (action == QLatin1String("accept_phase")) {
+        const auto *phase = team.phase(m_item.phase);
+        const auto *summary = team.phaseSummaryOf(m_item.phase);
+        if ((phase && phase->awaitingAcceptance()) || (summary && summary->state == QLatin1String("awaiting_acceptance"))) return {};
+        return tr("Phase %1 no longer waits for your acceptance; nothing was sent.").arg(m_item.phase);
     }
     if (action == QLatin1String("approve_plan")) {
         if (team.status == QLatin1String("planning")) return {};
@@ -313,6 +319,28 @@ void TeamWaitingAnswer::sendAddition()
     });
 }
 
+void TeamWaitingAnswer::sendAcceptance(bool accept)
+{
+    if (busy() || m_reading || m_done) return;
+    const QString comment = m_comment.trimmed();
+    if (!accept && comment.isEmpty()) return;
+    m_notice.clear();
+    read([this, accept, comment](const Team *team) {
+        if (!team) return;
+        if (const QString stale = staleReason(*team); !stale.isEmpty()) { m_notice = stale; render(); return; }
+        QJsonObject input{{"team", m_item.team}, {"phase", m_item.phase}};
+        if (!accept) input.insert("comment", comment);
+        m_sending = true; render();
+        QPointer<TeamWaitingAnswer> guard(this);
+        m_teams->act(accept ? QStringLiteral("accept-phase") : QStringLiteral("send-back-phase"), input, [guard](bool ok, const QString &message) {
+            if (!guard) return;
+            guard->m_sending = false;
+            if (ok) guard->finish();
+            else { guard->m_notice = message; guard->render(); }
+        });
+    });
+}
+
 void TeamWaitingAnswer::sendTool(bool allow)
 {
     if (busy() || m_done || !m_teams) return;
@@ -470,6 +498,49 @@ void TeamWaitingAnswer::render()
         QObject::connect(add, &QPushButton::clicked, this, [this] { sendAddition(); });
         QObject::connect(cancel, &QPushButton::clicked, this, [this] { if (closed) closed(); });
         answers->addWidget(typed, 1); answers->addWidget(cancel); answers->addWidget(add);
+        v->addLayout(answers);
+        m_layout->addWidget(box);
+    } else if (action == QLatin1String("accept_phase")) {
+        // U63: how the phase ended, then Send back with a comment or Accept phase.
+        auto *box = new QFrame; box->setObjectName("teamWaitingAcceptance"); box->setProperty("phase", m_item.phase);
+        box->setStyleSheet(QStringLiteral("QFrame#teamWaitingAcceptance{background:%1;border:1px solid %2;border-radius:7px;}")
+                               .arg(alpha(c.accent, .08).name(QColor::HexArgb), alpha(c.accent, .40).name(QColor::HexArgb)));
+        auto *v = new QVBoxLayout(box); v->setContentsMargins(8, 5, 8, 6); v->setSpacing(3);
+        auto *head = label(tr("Phase %1 is ready for your acceptance").arg(m_item.phase), c.fg, 12, true, "teamWaitingAcceptanceHead");
+        head->setWordWrap(true);
+        v->addWidget(head);
+        // The item's own summary; an hgs that sends none gets the team's counts.
+        QString summaryText = m_item.summary.text();
+        if (summaryText.isEmpty()) {
+            TeamWaitingPage::Item::Summary counted;
+            counted.known = true;
+            for (int id : team.tasksOfPhase(m_item.phase)) if (const auto *task = team.task(id)) {
+                counted.accepted += task->status == QLatin1String("accepted");
+                counted.rejected += task->status == QLatin1String("rejected");
+                counted.cancelled += task->status == QLatin1String("cancelled");
+            }
+            summaryText = counted.text();
+        }
+        auto *summary = label(summaryText, c.text2, 11, false, "teamWaitingAcceptanceSummary");
+        summary->setWordWrap(true);
+        v->addWidget(summary);
+        auto *answers = row(6);
+        auto *comment = new QLineEdit(m_comment); comment->setObjectName("teamWaitingSendBackComment");
+        comment->setPlaceholderText(tr("What should the lead rework? Required to send back"));
+        comment->setMaxLength(4000); comment->setEnabled(!waiting);
+        auto *sendBack = button(tr("Send back with a comment"), "teamWaitingSendBack"); sendBack->setProperty("ghost", true);
+        sendBack->setToolTip(tr("The lead reworks the phase with your comment; it stays the same phase"));
+        sendBack->setEnabled(!waiting && !m_comment.trimmed().isEmpty());
+        auto *accept = button(tr("Accept phase"), "teamWaitingAcceptPhase", true);
+        accept->setToolTip(tr("Accept the phase's result; it becomes Done"));
+        accept->setEnabled(!waiting);
+        QObject::connect(comment, &QLineEdit::textChanged, this, [this, sendBack](const QString &text) {
+            m_comment = text;
+            sendBack->setEnabled(!m_reading && !m_sending && !text.trimmed().isEmpty());
+        });
+        QObject::connect(sendBack, &QPushButton::clicked, this, [this] { sendAcceptance(false); });
+        QObject::connect(accept, &QPushButton::clicked, this, [this] { sendAcceptance(true); });
+        answers->addWidget(comment, 1); answers->addWidget(sendBack); answers->addWidget(accept);
         v->addLayout(answers);
         m_layout->addWidget(box);
     } else if (action == QLatin1String("answer_permission") && !memberOf(team)->permission.record.value("questions").toArray().isEmpty()) {

@@ -32,7 +32,7 @@ QColor kindColor(const Colors &c, const QString &kind)
     if (kind == "report_escalated" || kind == "permission_escalated") return c.warn;
     if (kind == "phase_draft" || kind == "plan_draft") return c.folder;
     if (kind == "owner_word_asked") return c.violet;
-    if (kind == "team_finished") return c.accent;
+    if (kind == "team_finished" || kind == "phase_acceptance") return c.accent;
     return c.text2;
 }
 
@@ -55,8 +55,27 @@ TeamWaitingPage::Item TeamWaitingPage::parse(const QJsonObject &item)
     out.offer = item["offer"].toString(); out.tool = item["tool"].toString(); out.why = item["why"].toString();
     out.saves = item["saves"].toString(); out.command = item["command"].toString(); out.output = item["output"].toString();
     out.toolState = item["state"].toString();
+    if (item["summary"].isObject()) {
+        const auto summary = item["summary"].toObject();
+        out.summary.known = true;
+        out.summary.accepted = summary["accepted"].toInt(); out.summary.rejected = summary["rejected"].toInt();
+        out.summary.cancelled = summary["cancelled"].toInt(); out.summary.minutes = qRound(summary["minutes"].toDouble());
+        out.summary.tests = summary["tests"].toString();
+    }
     if (out.teamName.isEmpty()) out.teamName = out.team;
     return out;
+}
+
+QString TeamWaitingPage::Item::Summary::text() const
+{
+    if (!known) return {};
+    const QStringList counts{TeamWaitingPage::tr("%1 accepted").arg(accepted), TeamWaitingPage::tr("%1 rejected").arg(rejected),
+                             TeamWaitingPage::tr("%1 cancelled").arg(cancelled)};
+    QStringList parts{counts.join(QStringLiteral(", "))};
+    if (!tests.trimmed().isEmpty()) parts << tests.trimmed();
+    if (minutes > 0) parts << TeamWaitingPage::tr("%1 min").arg(minutes);
+    // #724: no dots between the parts of an answer.
+    return parts.join(QStringLiteral("; "));
 }
 
 QString TeamWaitingPage::kindLabel(const QString &kind)
@@ -71,6 +90,7 @@ QString TeamWaitingPage::kindLabel(const QString &kind)
     if (kind == "tool_missing") return tr("Tool");
     if (kind == "test_full_run") return tr("Full test run");
     if (kind == "test_quarantine") return tr("Flaky tests");
+    if (kind == "phase_acceptance") return tr("Phase acceptance");   // U63
     return kind;
 }
 
@@ -86,6 +106,7 @@ QString TeamWaitingPage::kindIcon(const QString &kind)
     if (kind == "tool_missing") return QStringLiteral("terminal");
     if (kind == "test_full_run") return QStringLiteral("refresh");
     if (kind == "test_quarantine") return QStringLiteral("attention");
+    if (kind == "phase_acceptance") return QStringLiteral("check-circle");
     return QStringLiteral("warning");
 }
 

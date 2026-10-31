@@ -389,7 +389,7 @@ void TeamWorkspace::switchModeDialog(const Team &team, const QString &proposalId
     for (const auto &group : phaseGroups(team)) {
         const QString state = ownerPhaseState(team, group);
         if (state == "running") { n = group.n; break; }
-        if (state == "done" || state == "queued") n = n ? n : group.n;
+        if (state == "done" || state == "queued" || state == "awaiting_acceptance") n = n ? n : group.n;
     }
     QList<int> queued;
     for (const auto &group : phaseGroups(team)) if (group.n != n && ownerPhaseState(team, group) == "queued") queued << group.n;

@@ -566,6 +566,46 @@ fn all_items(team: &Team) -> Vec<Item> {
             ),
         });
     }
+    // U63 (owner, 2026-10-31): a phase the owner sent back at its acceptance
+    // is reworked in the same phase; one that waits for the acceptance holds
+    // every later phase, and the lead accepts it only on the owner's word.
+    for phase in team.phases.iter().filter(|phase| phase.acceptance_rework) {
+        let Some(rejection) = &phase.rejection else { continue };
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "phase_acceptance_sent_back",
+            key: format!("phase_acceptance_sent_back:{}:{}", phase.n, rejection.at),
+            task: None,
+            member: "owner".into(),
+            since: rejection.at,
+            summary: summary(&format!("The owner sent {} back at its acceptance: {}", phase_name(phase), rejection.comment)),
+            command: format!(
+                "{} | hgs team extend --json",
+                json!({"request_id":PLACEHOLDER,"team":team.id,"phase":phase.n,"tasks":[{"id":0,"title":"...","assignee":"..."}]})
+            ),
+            detail: format!(
+                "Add the rework to phase {} itself (extend with \"phase\":{}); it waits for the owner's acceptance again once that work is decided. No later phase starts meanwhile.\n{}",
+                phase.n, phase.n, rejection.comment
+            ),
+        });
+    }
+    for phase in team.phases.iter().filter(|phase| plan::awaits_acceptance(team, phase)) {
+        let since = phase.awaiting_since.unwrap_or(team.updated);
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "phase_awaiting_acceptance",
+            key: format!("phase_awaiting_acceptance:{}:{}", phase.n, since),
+            task: None,
+            member: "owner".into(),
+            since,
+            summary: summary(&format!("{} waits for the owner's acceptance; no later phase starts until then", phase_name(phase))),
+            command: format!(
+                "{} | hgs team accept-phase --json",
+                json!({"request_id":PLACEHOLDER,"team":team.id,"phase":phase.n,"owner_word":{"text":"..."}})
+            ),
+            detail: format!("The owner accepts phase {} or sends it back in Zerus; you accept it only on the owner's word naming the phase.", phase.n),
+        });
+    }
     for task in &team.tasks {
         // A report to decide (C2).
         if task.status == TaskStatus::Submitted {
@@ -981,6 +1021,27 @@ pub(crate) fn waits(team: &Team, task: &Task, ready: bool) -> Option<Value> {
             "unblock":format!("approve phase {}", task.phase)
         }));
     }
+    // U63 (owner, 2026-10-31): a paused phase waits for its pause to be
+    // removed, and a phase behind one awaiting the owner's acceptance for it.
+    if let Some(pause) = plan::phase_pause(team, task.phase) {
+        let mut value = json!({
+            "for":if pause.owner { "owner" } else { "lead" },"on":[format!("phase {}", task.phase)],
+            "unblock":format!("remove the pause of phase {}", task.phase)
+        });
+        if !pause.reason.is_empty() {
+            value["reason"] = json!(format!("Paused by {}: {}", pause.by, pause.reason));
+        } else {
+            value["reason"] = json!(format!("Paused by {}", pause.by));
+        }
+        return Some(value);
+    }
+    if let Some(held) = plan::acceptance_block(team, task.phase) {
+        return Some(json!({
+            "for":"owner","on":[format!("phase {held}")],
+            "reason":format!("Phase {held} waits for the owner's acceptance"),
+            "unblock":format!("accept phase {held}")
+        }));
+    }
     // A pending task: the dependency that is not satisfied names the action.
     let unmet: Vec<u32> = task.deps.iter().filter(|dep| !plan::satisfied(team, dep.task, dep.kind)).map(|dep| dep.task).collect();
     if !unmet.is_empty() {
@@ -1109,8 +1170,34 @@ pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
         }
     }
     out.extend(phase_items);
+    // U63 (owner, 2026-10-31): a phase ready for the owner's acceptance.
+    for phase in team.phases.iter().filter(|phase| plan::awaits_acceptance(team, phase)) {
+        out.push(json!({"kind":"phase_acceptance","phase":phase.n,"since":phase.awaiting_since.unwrap_or(team.updated),
+            "summary":format!("{} is ready for your acceptance", phase_name(phase)),
+            "outcome":acceptance_summary(team, phase, now)}));
+    }
     out.sort_by(|a, b| a["since"].as_f64().unwrap_or_default().total_cmp(&b["since"].as_f64().unwrap_or_default()));
     out
+}
+
+/// U63: what the owner reads before accepting a phase: its tasks by outcome,
+/// its test stages and how long it took from its approval.
+pub(crate) fn acceptance_summary(team: &Team, phase: &Phase, now: f64) -> Value {
+    let mut outcome = super::ops::phase_outcome(team, phase.n);
+    let (mut passed, mut returned) = (0, 0);
+    for task in team.tasks.iter().filter(|task| task.phase == phase.n) {
+        for run in task.pipeline_run.iter().flat_map(|pipeline| pipeline.runs.iter()).filter(|run| run.kind == "test") {
+            match run.state {
+                StageState::Passed => passed += 1,
+                StageState::Returned => returned += 1,
+                _ => {}
+            }
+        }
+    }
+    outcome["tests"] = json!(if passed + returned == 0 { String::new() } else { format!("Tests: {passed} passed, {returned} returned") });
+    let end = phase.awaiting_since.unwrap_or(now);
+    outcome["minutes"] = json!(phase.decided_at.map_or(0, |start| ((end - start).max(0.0) / 60.0).round() as u64));
+    outcome
 }
 
 /// #718: the proposal of a full run, for the lead's card and the owner's list.

@@ -85,6 +85,22 @@ TeamSettingsDialog::TeamSettingsDialog(TeamController *teams, const Teams::Team 
     m_broker->setChecked(m_settings.value("build_broker").toBool());
     v->addWidget(m_broker);
     v->addWidget(note(tr("Each member builds its own snapshot of the shared folder, one build at a time per build folder, and an unchanged tree builds once."), c.muted, "teamSettingsBuildBrokerNote"));
+    // U63 (owner, 2026-10-31): who may lift a pause the lead put on an
+    // accepted phase (only with the owner's consent by default), and whether
+    // new phases wait for the owner's acceptance once their work is decided.
+    v->addWidget(label(tr("Phases"), c.text2, 12, true));
+    auto *unpauseRow = new QHBoxLayout; unpauseRow->setSpacing(6);
+    unpauseRow->addWidget(label(tr("Who removes the lead's pause"), c.muted, 12));
+    m_leadUnpause = new QComboBox; m_leadUnpause->setObjectName("teamSettingsLeadUnpause");
+    m_leadUnpause->addItem(tr("Only with my consent"), false);
+    m_leadUnpause->addItem(tr("The lead removes its own pause"), true);
+    m_leadUnpause->setCurrentIndex(m_settings.value("lead_removes_own_pause").toBool() ? 1 : 0);
+    unpauseRow->addWidget(m_leadUnpause); unpauseRow->addStretch();
+    v->addLayout(unpauseRow);
+    m_acceptance = new QCheckBox(tr("New phases require my acceptance")); m_acceptance->setObjectName("teamSettingsPhaseAcceptance");
+    m_acceptance->setChecked(m_settings.value("phase_acceptance").toString() == QLatin1String("owner"));
+    v->addWidget(m_acceptance);
+    v->addWidget(note(tr("When every task of such a phase is decided, it waits for you to accept it or send it back to the lead with a comment."), c.muted));
     // U45, #581 N6: the models each member may switch to before a task; only
     // the owner edits them, a running member included.
     v->addWidget(label(tr("Member models"), c.text2, 12, true));
@@ -162,6 +178,8 @@ TeamSettingsDialog::TeamSettingsDialog(TeamController *teams, const Teams::Team 
     connect(m_branch, &QCheckBox::toggled, this, [this] { update(); });
     connect(m_restart, &QCheckBox::toggled, this, [this] { update(); });
     connect(m_broker, &QCheckBox::toggled, this, [this] { update(); });
+    connect(m_acceptance, &QCheckBox::toggled, this, [this] { update(); });
+    connect(m_leadUnpause, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { update(); });
     // Turning landing on asks first; turning it off, or back to what the owner
     // already allowed, does not.
     connect(m_land, &QCheckBox::clicked, this, [this](bool on) {
@@ -192,6 +210,11 @@ QJsonObject TeamSettingsDialog::changes() const
     if (m_restart->isChecked() != m_settings.value("restart_crashed").toBool()) out.insert("restart_crashed", m_restart->isChecked());
     if (m_land->isChecked() != m_settings.value("land_allowed").toBool()) out.insert("land_allowed", m_land->isChecked());
     if (m_broker->isChecked() != m_settings.value("build_broker").toBool()) out.insert("build_broker", m_broker->isChecked());
+    // U63: absent settings read as "only with my consent" and "lead".
+    const bool leadUnpause = m_leadUnpause->currentData().toBool();
+    if (leadUnpause != m_settings.value("lead_removes_own_pause").toBool()) out.insert("lead_removes_own_pause", leadUnpause);
+    const bool ownerAccepts = m_settings.value("phase_acceptance").toString() == QLatin1String("owner");
+    if (m_acceptance->isChecked() != ownerAccepts) out.insert("phase_acceptance", m_acceptance->isChecked() ? QStringLiteral("owner") : QStringLiteral("lead"));
     return out;
 }
 

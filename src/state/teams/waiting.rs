@@ -126,6 +126,14 @@ fn lead_reason(team: &Team) -> Option<Value> {
         let tasks: Vec<u32> = out.iter().map(|(_, id)| *id).collect();
         return reason(team, "team_reports", format!("Waiting for reports: {}", names.join(", ")), json!({"tasks":tasks}));
     }
+    // U63 (owner, 2026-10-31): a phase that waits for the owner's acceptance
+    // holds every later phase; the lead waits for the owner (no contract
+    // change: a "Waiting for you" reason, like a phase approval).
+    let awaiting = team.phases.iter().filter(|phase| plan::awaits_acceptance(team, phase)).min_by_key(|phase| phase.order());
+    if let Some(phase) = awaiting {
+        let title = if phase.title.is_empty() { String::new() } else { format!(" \u{b7} {}", phase.title) };
+        return reason(team, "team_phase_acceptance", format!("Waiting for you to accept phase {}{title}", phase.n), json!({"phase":phase.n}));
+    }
     let draft = team.phases.iter().filter(|phase| phase.state == PhaseState::Draft).min_by_key(|phase| phase.order());
     if let Some(phase) = draft {
         let title = if phase.title.is_empty() { String::new() } else { format!(" \u{b7} {}", phase.title) };
@@ -176,6 +184,17 @@ fn member_reason(team: &Team, member: &Member) -> Option<Value> {
         return reason(team, "team_draft_phase",
             format!("Waiting for Lead: phase {} is not accepted yet (#{})", next.phase, next.id),
             json!({"task":next.id,"phase":next.phase}));
+    }
+    // U63: a paused phase, and one behind a phase awaiting the owner's
+    // acceptance, wait for that.
+    if let Some(pause) = plan::phase_pause(team, next.phase) {
+        let who = if pause.owner { "you" } else { "the lead" };
+        return reason(team, "team_phase_paused", format!("Waiting for {who} to remove the pause of phase {} (#{})", next.phase, next.id),
+            json!({"task":next.id,"phase":next.phase,"owner":pause.owner}));
+    }
+    if let Some(held) = plan::acceptance_block(team, next.phase) {
+        return reason(team, "team_phase_acceptance", format!("Waiting for the owner to accept phase {held} (#{})", next.id),
+            json!({"task":next.id,"phase":next.phase,"held_by":held}));
     }
     let blockers = plan::barrier_blockers(team, next);
     if !blockers.is_empty() || phase_of(next.phase).is_some_and(|phase| phase.state == PhaseState::Queued) {
@@ -310,6 +329,29 @@ mod tests {
         drafted.tasks[1].phase = 2;
         drafted.phases = vec![Phase { n: 2, title: "Next".into(), state: PhaseState::Draft, tasks: vec![2], ..Default::default() }];
         assert_eq!(text(&reasons(&[drafted], 0.0), "lead"), "Waiting for you to approve phase 2 \u{b7} Next");
+    }
+
+    /// U63 (owner, 2026-10-31): a phase awaiting the owner's acceptance makes
+    /// the lead wait for you (a Waiting for you reason, no new state); a
+    /// member behind it, or in a paused phase, waits for that.
+    #[test]
+    fn the_lead_waits_for_your_acceptance_and_members_for_the_pause() {
+        let mut held = team(vec![task(1, "dev", TaskStatus::Accepted), task(2, "qa", TaskStatus::Pending), task(3, "dev", TaskStatus::Pending)]);
+        held.tasks[0].phase = 2;
+        held.tasks[1].phase = 3;
+        held.tasks[2].phase = 4;
+        held.phases = vec![
+            Phase { n: 2, order: 2, title: "Checkout".into(), state: PhaseState::AwaitingAcceptance, acceptance: super::super::model::PhaseAcceptance::Owner, tasks: vec![1], ..Default::default() },
+            Phase { n: 3, order: 3, state: PhaseState::Queued, tasks: vec![2], ..Default::default() },
+            Phase { n: 4, order: 4, state: PhaseState::Approved, tasks: vec![3], ..Default::default() },
+        ];
+        let found = reasons(&[held.clone()], 0.0);
+        assert_eq!((kind(&found, "lead"), text(&found, "lead")), ("team_phase_acceptance".into(), "Waiting for you to accept phase 2 \u{b7} Checkout".into()));
+        assert_eq!(text(&found, "qa"), "Waiting for the owner to accept phase 2 (#2)");
+        held.phases[0].state = PhaseState::Done;
+        held.phases[1].pause = Some(super::super::model::PhasePause { by: "Lead".into(), owner: false, at: 1.0, reason: "API".into() });
+        let found = reasons(&[held], 0.0);
+        assert_eq!(text(&found, "qa"), "Waiting for the lead to remove the pause of phase 3 (#2)");
     }
 
     #[test]

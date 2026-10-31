@@ -167,6 +167,20 @@ mod tests {
         assert!(lead.contains("Every task gets an estimate"), "{lead}");
     }
 
+    /// U63 (owner, 2026-10-31): the lead protocol says an accepted phase that
+    /// has not started changes on the owner's word, how a phase pauses, and
+    /// that a phase needing the owner's acceptance holds the later ones.
+    #[test]
+    fn the_lead_protocol_names_phase_control() {
+        let lead = TOPICS.iter().find(|(name, _)| *name == "team-lead").unwrap().1;
+        assert!(lead.contains("Accepted phase not started"), "{lead}");
+        assert!(lead.contains("return-to-draft re-approves"), "{lead}");
+        assert!(lead.contains("pause-phase {phase, reason}"), "{lead}");
+        assert!(lead.contains("accept-phase (owner's word)"), "{lead}");
+        let tree = TOPICS.iter().find(|(name, _)| *name == "team-tree").unwrap().1;
+        assert!(tree.contains("hgs team sub-lead"), "{tree}");
+    }
+
     #[test]
     fn topics_and_arguments_are_exact() {
         assert!(dispatch(&[]).is_ok());

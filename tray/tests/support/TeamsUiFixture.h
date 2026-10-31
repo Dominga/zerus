@@ -887,6 +887,9 @@ elif a[:2]==['team','decide-proposal']:
  if os.path.exists(__file__+'.proposalrefuse'):print(open(__file__+'.proposalrefuse').read(),file=sys.stderr);sys.exit(1)
  status=open(__file__+'.proposalstatus').read() if os.path.exists(__file__+'.proposalstatus') else ('accepted' if body.get('accept') else 'rejected')
  print(json.dumps({'status':status,'proposal':body.get('proposal')}))
+elif a[:2]==['team','edit-draft'] and os.path.exists(__file__+'.editrefuse'):
+ # U63: `.editrefuse` refuses an edit with its text, as the store does.
+ print(open(__file__+'.editrefuse').read(),file=sys.stderr);sys.exit(1)
 elif a[:2]==['team','approve-phase'] and body.get('phase')==9:
  print('hgs: Phase 9 is not waiting for approval',file=sys.stderr);sys.exit(1)
 elif a[:2]==['team','intake-key']:
@@ -940,6 +943,7 @@ inline void TeamsUiFixture::setUp()
     for (const char *suffix : {".swaphold", ".swaprefuse", ".swapreceipt", ".accounts", ".models"}) QFile::remove(script() + QLatin1String(suffix));
     QFile::remove(script() + ".refuse");
     QFile::remove(script() + ".refuseapply");
+    QFile::remove(script() + ".editrefuse");
     QFile::remove(script() + ".proposalrefuse");
     for (const char *suffix : {".profile", ".profilerefuse", ".spans", ".compare"}) QFile::remove(script() + QLatin1String(suffix));
     QFile::remove(script() + ".proposalstatus");

@@ -13,6 +13,7 @@
 class QDialog;
 class QFrame;
 class QLabel;
+class QMenu;
 class QScrollArea;
 class QSplitter;
 class QTimer;
@@ -114,6 +115,21 @@ private:
     // that waits for your approval again; asks first.
     bool returnPhaseToDraft(const QString &team, int phase);
     void movePhase(const Teams::Team &team, int phase, int to, const QString &position);
+    // U63 (owner, 2026-10-31): an accepted phase whose work has not started
+    // (no attempt but a refused one) is edited, moved and paused in place and
+    // stays accepted. The phases Move earlier/later pass are the movable ones
+    // (drafts and such accepted phases) in display order. A phase may require
+    // the owner's acceptance once its tasks are decided; he accepts it or
+    // sends it back to the lead with a comment.
+    static bool acceptedUnstarted(const Teams::Team &team, int phase);
+    static QList<int> movablePhases(const Teams::Team &team);
+    void addPhaseMoves(QMenu *menu, const QString &team, int phase);
+    void addPhaseAcceptance(QMenu *menu, const QString &team, int phase);
+    void editPhaseDialog(const Teams::Team &team, int phase);
+    void pausePhaseDialog(const Teams::Team &team, int phase);
+    void unpausePhase(const QString &team, int phase);
+    bool acceptOwnerPhase(const QString &team, int phase);
+    void sendBackPhaseDialog(const Teams::Team &team, int phase);
     QWidget *inboxStrip(const Teams::Team &team, const QList<Teams::InboxItem> &items);
     // F8, U57: the proposals answered (the coordinator's cards, the plan-mode
     // dialog) until the store takes them; a decision goes out once.

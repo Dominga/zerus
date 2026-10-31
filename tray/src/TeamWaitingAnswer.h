@@ -32,6 +32,9 @@ class TeamProposalCards;
 // - #742: a tool the project lacks on this computer: why, what it saves and
 //   the install command; Deny with a reason, or Allow, which Zerus runs as the
 //   owner's operation (hgs team decide-tool). It has no team to read.
+// - U63 (owner, 2026-10-31): a phase that waits for the owner's acceptance:
+//   how its tasks ended, Accept phase, or Send back with a comment (the lead
+//   reworks it in the same phase).
 // It reads the team's status before it shows anything and again before it
 // sends: an item decided, withdrawn or changed meanwhile says so and sends
 // nothing. A report to accept and a held task are read in the team first and
@@ -71,6 +74,9 @@ private:
     QString staleReason(const Teams::Team &team) const;
     void sendPermission(bool allow);
     void sendAddition();
+    // U63: accept-phase, or send-back-phase with the comment.
+    void sendAcceptance(bool accept);
+    QString m_comment;
     // #740: the member the item names: by id, else (an older hgs) by role.
     const Teams::Member *memberOf(const Teams::Team &team) const;
     // #740: a session's question (the lead's AskUserQuestion, a member's

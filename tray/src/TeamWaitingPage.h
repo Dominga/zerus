@@ -33,6 +33,16 @@ public:
         QString offer, tool, why, saves, command, output, toolState;
         double since = 0;
         int phase = 0, task = 0;
+        // U63 (owner, 2026-10-31): a phase that waits for the owner's
+        // acceptance (accept_phase) carries how its tasks ended, its tests
+        // and the minutes it took.
+        struct Summary {
+            bool known = false;
+            int accepted = 0, rejected = 0, cancelled = 0, minutes = 0;
+            QString tests;
+            QString text() const;   // "3 accepted, 1 rejected, 0 cancelled; tests pass; 42 min"
+        };
+        Summary summary;
     };
     explicit TeamWaitingPage(TeamController *teams, QWidget *parent = nullptr);
     void setDark(bool dark);

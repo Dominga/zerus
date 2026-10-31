@@ -3,6 +3,7 @@
 // The fixture (the fake hgs, its teams and the shot helpers) is shared:
 // support/TeamsUiFixture.h.
 #include "TeamsUiFixture.h"
+#include "Settings.h"
 #include "ActivityView.h"
 #include "HgsClient.h"
 #include "QuestionCard.h"
@@ -859,7 +860,7 @@ void TestTeamsUiNewteam::draftCreateSavesFirstAndShowsBlockersInRed()
 // big card is not part of the list.
 void TestTeamsUiNewteam::templatesAreCompactWithSearchAndFavourites()
 {
-    QSettings().remove(QStringLiteral("teams/templateFavourites"));
+    Settings::remove(QStringLiteral("teams/templateFavourites"));
     const QJsonArray featureRoster{QJsonObject{{"role", "backend"}, {"count", 1}}, QJsonObject{{"role", "tester"}, {"count", 1}}};
     const QJsonArray bugfixRoster{QJsonObject{{"role", "backend"}, {"count", 1}}};
     const QJsonArray devRoster{QJsonObject{{"role", "backend"}, {"count", 5}}};
@@ -930,7 +931,7 @@ void TestTeamsUiNewteam::templatesAreCompactWithSearchAndFavourites()
             list.setDark(true);
         }
     }
-    QSettings().remove(QStringLiteral("teams/templateFavourites"));
+    Settings::remove(QStringLiteral("teams/templateFavourites"));
 }
 
 // Owner, 2026-10-30 (Debian 13, KDE): New team showed the empty list's "No
@@ -1043,8 +1044,8 @@ void TestTeamsUiNewteam::designerRedoAsksOnlyARunningDesigner()
 // Show in catalog, Apply from the bar, decided cards close and come back.
 void TestTeamsUiNewteam::designerPageStartsOrOpensTheDesigner()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
-    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    Settings::set("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { Settings::remove("workspace/skin"); darkPalette(); });
     HgsClient client(FakeCli::program(script()));
     TeamController controller(&client);
     TeamDesignerPage page(&controller);

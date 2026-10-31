@@ -269,7 +269,7 @@ void TeamTaskCard::rebuild()
         if (it->permissions.isEmpty()) continue;
         section(tr("Permissions"));
         const QString key = QStringLiteral("ui/expanded/taskPermissions/%1/%2/%3").arg(m_team.id).arg(task->id).arg(it->n);
-        const bool open = QSettings().value(key, false).toBool();
+        const bool open = Settings::value(key, false).toBool();
         auto *summary = permissionToggle(it->permissions, c, open, "teamTaskPermissionsToggle");
         summary->setProperty("attempt", it->n);
         QObject::connect(summary, &QToolButton::clicked, this, [this, key](bool expanded) {

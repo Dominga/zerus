@@ -344,7 +344,7 @@ TaskInspector::TaskInspector(HgsClient *client, TasksView *board, QWidget *paren
         m_commandLayout->addWidget(button); m_commandButtons.insert(int(action), button);
     }
     m_headerColumn->addWidget(m_commands); m_splitter->addWidget(m_details);
-    auto saved = QSettings().value("tasks/inspectorSplit").toList();
+    auto saved = Settings::value("tasks/inspectorSplit").toList();
     m_splitter->setSizes(saved.size() == 2 && saved[0].toInt() > 0 && saved[1].toInt() > 0
         ? QList<int>{saved[0].toInt(), saved[1].toInt()} : QList<int>{400, 320});
     connect(m_splitter, &QSplitter::splitterMoved, this, [this] {
@@ -668,13 +668,13 @@ void TaskInspector::renderDetail() {
         m_commentComposer->setSessionKey(noteKey); m_noteKey = noteKey; m_noteError->hide();
         m_commentComposer->setDraftLabel((descriptionMode(m_detail) ? tr("Description · %1") : tr("Comment · %1")).arg(task.id));
         const auto legacyKey = QStringLiteral("tasks/noteDraft/%1/%2").arg(m_project, m_selected);
-        const auto legacy = QSettings().value(legacyKey).toString();
+        const auto legacy = Settings::value(legacyKey).toString();
         if (!legacy.isEmpty() && m_commentComposer->offerDraft(noteKey, legacy)) Settings::remove(legacyKey);
     }
     m_commentComposer->setAvailability(!m_detail.isEmpty() && task.writable);
     m_commentComposer->setSessionStatus(task.writable ? QString() : tr("Update Zerus to comment on this task"), false, !task.writable);
     const bool description = descriptionMode(m_detail);
-    m_checkMessage->setVisible(!m_selected.isEmpty() && QSettings().contains(QStringLiteral("tasks/messageRequest/%1/%2").arg(m_project, m_selected)));
+    m_checkMessage->setVisible(!m_selected.isEmpty() && Settings::contains(QStringLiteral("tasks/messageRequest/%1/%2").arg(m_project, m_selected)));
     m_cancelDescription->setVisible(description); m_messageMode->setEnabled(!description && canLeaveDetails());
     const auto messageLabel = m_noteOnly ? tr("Save note only · no delivery")
         : queued ? tr("Add to task · sent on Start") : task.stage == "active" ? tr("Send to %1").arg(workerLabel)
@@ -886,7 +886,7 @@ void TaskInspector::beginRename() {
     if (selectionPending() || m_detail.isEmpty() || !m_detail.value("writable").toBool(true) || !canLeaveDetails()) return;
     m_renameRequested.clear();
     const auto key = "tasks/titleDraft/" + m_project + '/' + m_selected;
-    m_titleEditor->setPlainText(QSettings().value(key, TaskBoard::item(m_detail).displayTitle()).toString());
+    m_titleEditor->setPlainText(Settings::value(key, TaskBoard::item(m_detail).displayTitle()).toString());
     m_titleEditor->setFixedHeight(qMax(m_title->height() + 8, m_titleEditor->fontMetrics().lineSpacing() * 2 + 16));
     m_title->hide(); m_titleEditor->setReadOnly(false); m_titleEditor->show(); m_titleEditor->setFocus(); m_titleEditor->selectAll(); m_titleError->hide();
 }

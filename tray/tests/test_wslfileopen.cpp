@@ -1,4 +1,5 @@
 #include <QtTest>
+#include "Settings.h"
 #include <QFile>
 #include <QDir>
 #include <QFileInfo>
@@ -52,7 +53,7 @@ private:
 void TestWslFileOpen::init()
 {
     QVERIFY(m_dir.isValid());QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,m_dir.path());
-    QCoreApplication::setOrganizationName("hgs-mapped-file-test");QCoreApplication::setApplicationName("mapped-files");QSettings().clear();
+    QCoreApplication::setOrganizationName("hgs-mapped-file-test");QCoreApplication::setApplicationName("mapped-files");Settings::flush();QSettings().clear();
     QFile::remove(m_dir.filePath("mode"));QFile::remove(m_dir.filePath("calls"));
     write(file(),"fixture content\n");write(m_dir.filePath("result.ps1"),"fixture content\n");
     QVERIFY(FakeCli::install(m_dir.filePath("hgs"),R"PY(#!/usr/bin/env python3

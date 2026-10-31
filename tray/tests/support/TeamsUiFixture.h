@@ -12,6 +12,7 @@
 // workspace. Each sends one `hgs team` request per change, recorded by a fake
 // CLI.
 #include "Wait.h"
+#include "Settings.h"
 #include <QPointer>
 #include <QScrollBar>
 #include <QtTest>
@@ -906,6 +907,8 @@ else:print(json.dumps({'status':'ok','version':4,'request_id':body.get('request_
 
 inline void TeamsUiFixture::setUp()
 {
+    // #729: a change the last test queued is written before this one starts.
+    Settings::flush();
     m_modals = std::make_unique<TestWait::ModalGuard>();
     QFile::remove(script() + ".calls");
     QFile::remove(script() + ".draftrev");

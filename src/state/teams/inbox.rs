@@ -180,6 +180,7 @@ fn all_items(team: &Team) -> Vec<Item> {
             let found = team.member(&target);
             let state = found.map(|member| member.state).unwrap_or(MemberState::NotCreated);
             let live = found.and_then(|member| member.seen).is_some_and(|seen| seen.live);
+            let member_stuck = found.is_some_and(|member| member.stuck.is_some());
             let free = team
                 .members
                 .iter()
@@ -214,6 +215,10 @@ fn all_items(team: &Team) -> Vec<Item> {
                 ),
                 (None, MemberState::Paused) => (resume, format!("{} Resume the member to free it.", wait.reason)),
                 (None, _) if !live => (relaunch, format!("{} Relaunch its session to free it.", wait.reason)),
+                (None, _) if team.settings.lead_restarts_stuck && member_stuck => (
+                    relaunch,
+                    format!("{} Restart it: relaunch interrupts its stuck turn, or relaunches it in its conversation.", wait.reason),
+                ),
                 (None, _) => (
                     owner,
                     format!(
@@ -282,7 +287,13 @@ fn all_items(team: &Team) -> Vec<Item> {
             .filter(|task| task.assignee == member.id && !task.status.finished())
             .map(|task| task.id)
             .collect();
-        let minutes = ((crate::state::now() - stuck.at) / 60.0).max(0.0).round() as u64;
+        // #728: the minutes since the member's last progress, never the time
+        // since the mark; under the stuck bound there is no item at all.
+        let quiet = crate::state::now() - stuck.since.unwrap_or(stuck.at);
+        if quiet < super::ops::stuck_minutes(team) * 60.0 {
+            continue;
+        }
+        let minutes = (quiet / 60.0).round() as u64;
         let why = if stuck.reason == "compaction_timeout" { "is stuck in compaction" } else { "has made no progress" };
         let phase = if stuck.phase.is_empty() { "unknown".to_owned() } else { stuck.phase.clone() };
         let label = format!("{} ({})", member.id, team.role_of(&member.id));
@@ -302,7 +313,10 @@ fn all_items(team: &Team) -> Vec<Item> {
                     "{} | hgs team relaunch --json",
                     json!({"request_id":PLACEHOLDER,"team":team.id,"member":member.id})
                 ),
-                format!("You may interrupt it and relaunch it: hgs team relaunch {}.", member.id),
+                format!(
+                    "You may restart it: hgs team relaunch {} interrupts its stuck turn and continues it, or relaunches the session in its own conversation.",
+                    member.id
+                ),
             )
         } else {
             (

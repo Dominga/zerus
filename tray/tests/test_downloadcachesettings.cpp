@@ -1,4 +1,5 @@
 #include <QtTest>
+#include "Settings.h"
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QLabel>
@@ -18,7 +19,7 @@ private slots:
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
     }
     void policyIsExplicitAndDefaultsToNeverClear() {
-        QSettings().clear(); QTemporaryDir dir; QSettings().setValue("downloads/folder", dir.path());
+        Settings::flush();QSettings().clear(); QTemporaryDir dir; QSettings().setValue("downloads/folder", dir.path());
         QFile unrelated(dir.filePath("user.txt")); QVERIFY(unrelated.open(QIODevice::WriteOnly)); unrelated.write("user file"); unrelated.close();
         DownloadCacheSettings page; page.show();
         auto *mode = page.findChild<QComboBox *>("downloadCachePolicy");

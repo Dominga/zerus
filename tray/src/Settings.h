@@ -11,14 +11,15 @@
 // process, so the tray waited on itself and the watchdog aborted it four times
 // on 2026-10-29/30.
 //
-// set() and remove() on the GUI thread therefore try the lock first with
-// tryLock(0). Free, the change is written at once. Busy, it joins an ordered
-// queue that one background thread writes as soon as the lock is free; every
-// later change joins that queue too, so a newer value is never overwritten by
-// an older one. The background thread waits for a free lock before it enters
-// QSettings, which holds its in-process mutex during a sync: GUI-thread reads
-// never wait behind it. A queued change is not visible to QSettings reads until
-// it is written. Other threads write at once unless the queue is busy.
+// #729 (#709 N5, L8): no thread of the desktop calls QSettings::sync with a
+// change. set() and remove() queue the change for one background writer and
+// return at once; value() and contains() read the queue first (an overlay), so
+// a queued save reads back at once. The writer holds the INI's lock for the
+// whole write: it applies the batch to a copy of the INI and renames the copy
+// over it, so no other writer gets in between, and it removes a lock it left
+// behind. Every QSettings read in this process then sees the new file. Only a
+// format without an INI file (macOS' native preferences) is still written by
+// QSettings itself, on the writer's thread.
 //
 // watchLock() starts the janitor: a lock file older than a second is logged to
 // zerus.log with its holder (pid, application, host, age, executable). A lock
@@ -29,12 +30,22 @@ namespace Settings {
 void set(const QString &key, const QVariant &value);
 void remove(const QString &key);
 
+// What key reads now: the newest queued change of it (or of a removed group
+// above it), else the stored value.
+QVariant value(const QString &key, const QVariant &defaultValue = {});
+bool contains(const QString &key);
+
 // For a reservation that must be stored before its action (a message identity,
-// a clone's recovery): writes now and says whether it was stored. On the GUI
-// thread with the lock busy or changes queued it writes nothing and returns
-// false, so the caller takes its "could not save" path instead of waiting.
+// a clone's recovery): queued like any change, then waited for, at most a
+// second on the GUI thread (30 s elsewhere). One the writer has not started by
+// then is withdrawn and false is returned, so the caller takes its "could not
+// save" path; nothing of it is stored later.
 bool setNow(const QString &key, const QVariant &value);
 bool removeNow(const QString &key);
+
+// HGS_TRAY_HOME (a test's tray): the settings are an INI file below home on
+// every platform (main(), before any QSettings).
+void useHome(const QString &home);
 
 // Waits until every queued change is written (quit, tests).
 void flush();

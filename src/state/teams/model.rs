@@ -647,6 +647,10 @@ pub(crate) struct MemberStuck {
     pub reason: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub phase: String,
+    /// #728: the member's last progress Zerus saw (its last event, or the
+    /// start of the tool call it waits in); its minutes are the stuck time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<f64>,
 }
 
 /// U62 (#717): one test result announced to the team: the record's id, its

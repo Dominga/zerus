@@ -1,4 +1,5 @@
 #include <QtTest>
+#include "Settings.h"
 #include <QTemporaryDir>
 #include <QSettings>
 #include <QJsonArray>
@@ -34,7 +35,7 @@ private slots:
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
     }
-    void init() { QSettings().clear(); }
+    void init() { Settings::flush();QSettings().clear(); }
     void defaultNeverClearAndFailedPreparation() {
         QCOMPARE(DownloadCache::limitBytes(), 0);
         QVERIFY(DownloadCache::directory().endsWith("/Zerus Files"));

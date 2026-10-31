@@ -292,6 +292,8 @@ zerus_add_test(pathprobe test_pathprobe)
 add_executable(test_settings test_settings.cpp)
 target_include_directories(test_settings PRIVATE ../src)
 target_link_libraries(test_settings PRIVATE Qt6::Test Qt6::Gui hgs-tray-core)
+# #729: the check that no direct QSettings write is left reads the sources.
+target_compile_definitions(test_settings PRIVATE ZERUS_TRAY_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/../src")
 zerus_add_test(settings test_settings)
 add_executable(test_sloweventlog test_sloweventlog.cpp)
 target_include_directories(test_sloweventlog PRIVATE ../src)

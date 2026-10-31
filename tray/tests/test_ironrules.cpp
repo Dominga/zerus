@@ -1,4 +1,5 @@
 #include <QtTest>
+#include "Settings.h"
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
@@ -19,7 +20,7 @@ private slots:
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_settings.path());
     }
-    void init() { QSettings().clear(); }
+    void init() { Settings::flush();QSettings().clear(); }
     void wrapAndStripRoundTrip()
     {
         QCOMPARE(IronRules::wrap({}, "Hello"), QString("Hello"));

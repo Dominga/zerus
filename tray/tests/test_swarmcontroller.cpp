@@ -1,4 +1,5 @@
 #include <QtTest>
+#include "Settings.h"
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -248,7 +249,7 @@ print(json.dumps(result))
         QCOMPARE(ids(input(1,"base")),QStringList({"posix","peer"}));QCOMPARE(ids(input(1,"desired")),QStringList({"posix","peer","kept"}));
         QTRY_VERIFY(controller.settled());
         catalog({posix,peer,kept});controller.refresh();QTRY_COMPARE(requests().size(),3);QTRY_VERIFY(controller.settled());
-        QCOMPARE(ids(ready),QStringList({"posix","peer","kept"}));QVERIFY(QSettings().value("swarm/driveFoldersShared").toBool());
+        QCOMPARE(ids(ready),QStringList({"posix","peer","kept"}));QVERIFY(Settings::value("swarm/driveFoldersShared").toBool());
         // Removed on another computer, it is gone here too: the upload happens once.
         catalog({posix,peer});controller.refresh();QTRY_COMPARE(requests().size(),4);QTRY_VERIFY(controller.settled());
         QCOMPARE(ids(ready),QStringList({"posix","peer"}));

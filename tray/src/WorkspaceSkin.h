@@ -1,4 +1,5 @@
 #pragma once
+#include "Settings.h"
 #include "JsonParse.h"
 #include "ProcessRunner.h"
 #include <QCoreApplication>
@@ -312,7 +313,7 @@ inline QList<Skin> builtins() {
     return result;
 }
 
-inline QString currentId() { return QSettings().value(QStringLiteral("workspace/skin"), QStringLiteral("zerus")).toString(); }
+inline QString currentId() { return Settings::value(QStringLiteral("workspace/skin"), QStringLiteral("zerus")).toString(); }
 
 inline Skin current()
 {

@@ -1,4 +1,5 @@
 #include <QtTest>
+#include "Settings.h"
 #include <QTemporaryDir>
 #include <QApplication>
 #include <QFile>
@@ -46,7 +47,7 @@ private slots:
     }
     void init()
     {
-        QSettings().clear();
+        Settings::flush();QSettings().clear();
         for (const auto *name : {"no-plugin", "native", "connected", "indexed", "running", "calls"}) flag(name, false);
         QVERIFY(FakeCli::install(m_fixture.filePath("hgs"), R"PY(#!/usr/bin/env python3
 import json,pathlib,sys

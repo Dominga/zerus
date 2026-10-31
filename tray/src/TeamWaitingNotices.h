@@ -34,7 +34,7 @@ public:
     {
         while (m_known.size() > Limit) m_known.removeFirst();
     }
-    static TeamWaitingNotices stored() { return TeamWaitingNotices(QSettings().value(QLatin1String(kSetting)).toStringList()); }
+    static TeamWaitingNotices stored() { return TeamWaitingNotices(Settings::value(QLatin1String(kSetting)).toStringList()); }
     void store() const { Settings::set(QLatin1String(kSetting), m_known); }
     QStringList known() const { return m_known; }
 

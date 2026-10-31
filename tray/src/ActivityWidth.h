@@ -14,10 +14,10 @@ constexpr int Default = 900;
 inline int clamp(int width) { return qBound(Minimum, width, Maximum); }
 inline int width()
 {
-    bool ok = false; const int width = QSettings().value("workspace/activityWidth", Default).toInt(&ok);
+    bool ok = false; const int width = Settings::value("workspace/activityWidth", Default).toInt(&ok);
     return ok ? clamp(width) : Default;
 }
-inline bool fullWidth() { return QSettings().value("workspace/activityFullWidth", false).toBool(); }
+inline bool fullWidth() { return Settings::value("workspace/activityFullWidth", false).toBool(); }
 inline void setWidth(int width) { Settings::set("workspace/activityWidth", clamp(width)); }
 inline void setFullWidth(bool full) { Settings::set("workspace/activityFullWidth", full); }
 // The column in pixels at a content scale, or 0 when Activity fills its pane.

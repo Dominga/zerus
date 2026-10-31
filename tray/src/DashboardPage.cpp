@@ -1,4 +1,5 @@
 #include "DashboardPage.h"
+#include "Settings.h"
 #include "SessionCardDelegate.h"
 #include "SessionPresentation.h"
 #include <QStandardItemModel>
@@ -401,7 +402,7 @@ void DashboardPage::arrangeMachines()
 void DashboardPage::render()
 {
     const auto now = QDateTime::currentMSecsSinceEpoch();
-    const bool includeCompleted = QSettings().value("workspace/showCompletedSubagents", false).toBool();
+    const bool includeCompleted = Settings::value("workspace/showCompletedSubagents", false).toBool();
     struct Machine { QString key, alias, host; BoxState box; bool fresh; };
     QList<Machine> machines;
     const auto local = m_fleet.local();

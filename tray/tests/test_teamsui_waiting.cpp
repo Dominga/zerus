@@ -4,6 +4,7 @@
 // The fixture (the fake hgs, its teams and the shot helpers) is shared:
 // support/TeamsUiFixture.h.
 #include "TeamsUiFixture.h"
+#include "Settings.h"
 #include "ActivityView.h"
 #include "HgsClient.h"
 #include "TeamAttentionNotices.h"
@@ -184,8 +185,8 @@ private slots:
 // shared with the window through teams/attentionNotified.
 void TestTeamsUiWaiting::teamAttentionWatchNotifiesWithoutTheWindow()
 {
-    const auto restore = qScopeGuard([] { QSettings().remove("teams/attentionNotified"); });
-    QSettings().remove("teams/attentionNotified");
+    const auto restore = qScopeGuard([] { Settings::remove("teams/attentionNotified"); });
+    Settings::remove("teams/attentionNotified");
     auto team = phasedTeam(); team["status"] = "running";
     team["attention"] = QJsonArray{QJsonObject{{"kind", "permission"}, {"member", "Backend"}, {"since", 1000}, {"minutes", 12},
         {"summary", "Backend waits for your answer: Bash cargo test"}}};
@@ -213,14 +214,14 @@ else:print('{}')
     QCOMPARE(raised[0][1].toString(), QString("Team %1 needs you").arg(team["name"].toString()));
     QCOMPARE(raised[0][2].toString(), QString("Backend waits for your answer: Bash cargo test · 12 min"));
     const auto token = raised[0][0].toString();
-    QCOMPARE(QSettings().value("teams/attentionNotified").toStringList(), QStringList{token});
+    QCOMPARE(Settings::value("teams/attentionNotified").toStringList(), QStringList{token});
     // Later polls: the same item, no second notice.
     const int before = lists(); QTRY_VERIFY_WITH_TIMEOUT(lists() >= before + 2, 10000);
     QCOMPARE(raised.size(), 1);
     // The window took over and answered it: the watch stops; restarted, it
     // starts from what the window stored and raises nothing old.
     watch.setActive(false); const int stopped = lists(); QTest::qWait(600); QVERIFY(lists() <= stopped + 1);
-    QSettings().setValue("teams/attentionNotified", QStringList{token});
+    Settings::set("teams/attentionNotified", QStringList{token});
     TeamAttentionWatch again(&client, nullptr, 200);
     QSignalSpy raisedAgain(&again, &TeamAttentionWatch::raised), clearedAgain(&again, &TeamAttentionWatch::cleared);
     again.setActive(true);
@@ -230,7 +231,7 @@ else:print('{}')
     team.remove("attention"); QVERIFY(list(team));
     QTRY_COMPARE_WITH_TIMEOUT(clearedAgain.size(), 1, 10000);
     QCOMPARE(clearedAgain[0][0].toString(), token);
-    QVERIFY(QSettings().value("teams/attentionNotified").toStringList().isEmpty());
+    QVERIFY(Settings::value("teams/attentionNotified").toStringList().isEmpty());
 }
 
 void TestTeamsUiWaiting::permissionAnswersFoldToOneLineAndOpenToFive()
@@ -272,8 +273,8 @@ void TestTeamsUiWaiting::permissionAnswersFoldToOneLineAndOpenToFive()
     tasks[0] = first;
     t["tasks"] = tasks;
     setTeam(t);
-    QSettings().remove("ui/expanded/teamPermissions/team-1/backend");
-    QSettings().remove("ui/expanded/taskPermissions/team-1/1/1");
+    Settings::remove("ui/expanded/teamPermissions/team-1/backend");
+    Settings::remove("ui/expanded/taskPermissions/team-1/1/1");
     HgsClient client(FakeCli::program(script()));
     TeamController controller(&client);
     TeamPanel panel(&controller);
@@ -518,8 +519,8 @@ void TestTeamsUiWaiting::permissionAttentionFocusKeepsItsContext()
 // reason text an older hgs sends.
 void TestTeamsUiWaiting::leadAnswersAMembersSubagentRequest()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
-    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    Settings::set("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { Settings::remove("workspace/skin"); darkPalette(); });
     const auto record = [](const QString &reason, const QJsonArray &list, int count) {
         QJsonArray ids; for (int i = 0; i < count; ++i) ids << QStringLiteral("toolu_%1").arg(i + 1);
         QJsonObject q{{"question_id", "claude-approval:subagents"}, {"question_hash", QString(64, QLatin1Char('h'))}, {"tool", "Subagents"},
@@ -1458,8 +1459,8 @@ else:print('{}')
 
 void TestTeamsUiWaiting::waitingPageListsEveryKindAcrossTeams()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
-    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    Settings::set("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { Settings::remove("workspace/skin"); darkPalette(); });
     const double now = double(QDateTime::currentSecsSinceEpoch());
     QVERIFY(writeWaiting(script() + ".waiting", waitingKinds(now)));
     HgsClient client(FakeCli::program(script()));
@@ -1530,9 +1531,9 @@ void TestTeamsUiWaiting::waitingPageListsEveryKindAcrossTeams()
 // once per item. Shots in both themes.
 void TestTeamsUiWaiting::waitingBannerFoldsOpensAndHides()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
-    QSettings().remove(TeamWaitingNotices::kSetting);
-    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); QSettings().remove(TeamWaitingNotices::kSetting); darkPalette(); });
+    Settings::set("workspace/skin", "whitewh");
+    Settings::remove(TeamWaitingNotices::kSetting);
+    const auto restore = qScopeGuard([] { Settings::remove("workspace/skin"); Settings::remove(TeamWaitingNotices::kSetting); darkPalette(); });
     const double now = double(QDateTime::currentSecsSinceEpoch());
     const auto items = waitingKinds(now);
     QVERIFY(writeWaiting(script() + ".waiting", QJsonArray{items[1]}));
@@ -1684,8 +1685,8 @@ void TestTeamsUiWaiting::waitingPagePagesStayStableWhileItemsArrive()
 // reason and the next read clears it.
 void TestTeamsUiWaiting::waitingPageEmptyAndRefused()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
-    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    Settings::set("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { Settings::remove("workspace/skin"); darkPalette(); });
     QVERIFY(writeWaiting(script() + ".waiting", {}));
     HgsClient client(FakeCli::program(script()));
     TeamController controller(&client);
@@ -1721,8 +1722,8 @@ void TestTeamsUiWaiting::waitingPageEmptyAndRefused()
 // leaves at once.
 void TestTeamsUiWaiting::waitingItemsAreAnsweredInPlace()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
-    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    Settings::set("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { Settings::remove("workspace/skin"); darkPalette(); });
     const double now = double(QDateTime::currentSecsSinceEpoch());
     auto team = answerTeam();
     setTeam(team);
@@ -1874,9 +1875,9 @@ void TestTeamsUiWaiting::waitingItemsAreAnsweredInPlace()
 // team attention one that covers it) are withdrawn.
 void TestTeamsUiWaiting::waitingBannerAnswersInPlaceAndWithdrawsTheNotice()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
-    QSettings().remove(TeamWaitingNotices::kSetting);
-    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); QSettings().remove(TeamWaitingNotices::kSetting); darkPalette(); });
+    Settings::set("workspace/skin", "whitewh");
+    Settings::remove(TeamWaitingNotices::kSetting);
+    const auto restore = qScopeGuard([] { Settings::remove("workspace/skin"); Settings::remove(TeamWaitingNotices::kSetting); darkPalette(); });
     const double now = double(QDateTime::currentSecsSinceEpoch());
     const auto team = answerTeam();
     setTeam(team);
@@ -1959,8 +1960,8 @@ void TestTeamsUiWaiting::waitingBannerAnswersInPlaceAndWithdrawsTheNotice()
 // list changed, and asks for no team poll of its own.
 void TestTeamsUiWaiting::aWaitingReadThatChangesNothingRedrawsNothing()
 {
-    QSettings().remove(TeamWaitingNotices::kSetting);
-    const auto restore = qScopeGuard([] { QSettings().remove(TeamWaitingNotices::kSetting); });
+    Settings::remove(TeamWaitingNotices::kSetting);
+    const auto restore = qScopeGuard([] { Settings::remove(TeamWaitingNotices::kSetting); });
     const auto items = waitingKinds(double(QDateTime::currentSecsSinceEpoch()));
     QVERIFY(writeWaiting(script() + ".waiting", QJsonArray{items[1]}));
     HgsClient client(FakeCli::program(script()));

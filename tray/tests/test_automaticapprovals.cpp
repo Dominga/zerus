@@ -1,4 +1,5 @@
 #include <QtTest>
+#include "Settings.h"
 #include <QCheckBox>
 #include <QFile>
 #include <QJsonDocument>
@@ -109,7 +110,7 @@ private slots:
         QCoreApplication::setOrganizationName("hgs-tests"); QCoreApplication::setApplicationName("automatic-approvals");
         QSettings::setDefaultFormat(QSettings::IniFormat); QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,settings.path());
     }
-    void init() { QSettings().clear(); }
+    void init() { Settings::flush();QSettings().clear(); }
     void disabledByDefaultAndOldCliNeverReceivesANewCommand() {
         QTemporaryDir dir; const auto path=fixture(dir,"old"); QVERIFY(!path.isEmpty());
         AutomaticApprovals worker(FakeCli::program(path)); worker.setFleet(fleet()); fast(worker);

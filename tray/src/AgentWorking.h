@@ -1,4 +1,5 @@
 #pragma once
+#include "Settings.h"
 #include <QDateTime>
 #include <QIcon>
 #include <QPainter>
@@ -31,7 +32,7 @@ inline std::optional<bool> &animatedValue() { static std::optional<bool> value; 
 inline bool animated()
 {
     auto &value = animatedValue();
-    if (!value) value = QSettings().value(QStringLiteral("workspace/animateActivity"), true).toBool();
+    if (!value) value = Settings::value(QStringLiteral("workspace/animateActivity"), true).toBool();
     return *value;
 }
 inline void setAnimated(bool on) { animatedValue() = on; }

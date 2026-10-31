@@ -119,7 +119,7 @@ fn a_stuck_member_is_marked_when_busy_without_events() {
     // Marked once: the same state is not marked again, and a member that
     // reports again is unmarked.
     t.members.iter_mut().find(|member| member.id == "dev").unwrap().stuck =
-        Some(MemberStuck { at, reason: "no_progress".into(), phase: "tool".into() });
+        Some(MemberStuck { at, reason: "no_progress".into(), phase: "tool".into(), ..Default::default() });
     assert!(!steps(&t, &[lead.clone(), dev.clone()], at).iter().any(|step| matches!(step, Step::MarkStuck { .. })));
     let mut fresh = dev.clone();
     fresh.last_event_at = Some(at - 5.0);
@@ -141,7 +141,7 @@ fn a_pinned_pending_task_waits_for_a_stuck_or_stopped_member() {
     let mut dev = session("codex/x/dev", "r1", true);
     // Stuck: the wait says so with the member id, role and cause.
     t.members.iter_mut().find(|member| member.id == "dev").unwrap().stuck =
-        Some(MemberStuck { at: at - 15.0 * 60.0, reason: "no_progress".into(), phase: "tool".into() });
+        Some(MemberStuck { at: at - 15.0 * 60.0, reason: "no_progress".into(), phase: "tool".into(), ..Default::default() });
     let found = steps(&t, &[lead.clone(), dev.clone()], at);
     let reason = found
         .iter()
@@ -191,7 +191,7 @@ fn a_pinned_pending_task_waits_for_a_stuck_or_stopped_member() {
     let mut kept = team();
     kept.settings.keep_assignees = true;
     kept.members.iter_mut().find(|member| member.id == "dev").unwrap().stuck =
-        Some(MemberStuck { at: at - 15.0 * 60.0, reason: "no_progress".into(), phase: "tool".into() });
+        Some(MemberStuck { at: at - 15.0 * 60.0, reason: "no_progress".into(), phase: "tool".into(), ..Default::default() });
     {
         let task = kept.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap();
         task.status = TaskStatus::Pending;
@@ -251,7 +251,7 @@ fn a_restart_interrupts_the_session_and_resumes_it_in_its_conversation() {
     let mut t = team();
     {
         let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
-        dev.stuck = Some(MemberStuck { at: 1.0, reason: "no_progress".into(), phase: "tool".into() });
+        dev.stuck = Some(MemberStuck { at: 1.0, reason: "no_progress".into(), phase: "tool".into(), ..Default::default() });
         dev.restart_pending = true;
     }
     store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
@@ -330,7 +330,7 @@ fn a_stuck_member_gets_one_item_and_a_feed_event() {
     run_step(
         &mut store,
         &t,
-        &Step::MarkStuck { member: "dev".into(), reason: "no_progress".into(), phase: "tool".into() },
+        &Step::MarkStuck { member: "dev".into(), reason: "no_progress".into(), phase: "tool".into(), since: crate::state::now() - 12.0 * 60.0 },
         "",
     )
     .unwrap();
@@ -342,6 +342,14 @@ fn a_stuck_member_gets_one_item_and_a_feed_event() {
     assert!(item.command.contains("settings"), "{}", item.command);
     let feed = store.events(&t.id, None, 20).unwrap().to_string();
     assert!(feed.contains("member_stuck"), "{feed}");
+    // #728 (live, 2026-10-31): the item says the real minutes since the last
+    // progress, never "0 min" from the time of the mark.
+    assert!(item.summary.contains("for 12 min"), "{}", item.summary);
+    assert!(feed.contains("\"minutes\":12"), "{feed}");
+    // A mark whose quiet time is under the stuck bound sends no item.
+    let mut early = saved.clone();
+    early.members.iter_mut().find(|member| member.id == "dev").unwrap().stuck.as_mut().unwrap().since = Some(crate::state::now() - 60.0);
+    assert!(!super::inbox::items(&early).iter().any(|item| item.kind == "member_stuck"));
 }
 
 /// #628: a DeepSeek session's listing `last_event_at` does not advance with

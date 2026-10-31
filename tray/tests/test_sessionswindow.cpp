@@ -1,4 +1,5 @@
 #include "Wait.h"
+#include "Settings.h"
 #include <QtTest>
 #include <QAction>
 #include <QApplication>
@@ -1373,8 +1374,8 @@ void TestSessionsWindow::inspectorIsAColumnOfCards()
     QVERIFY(dialog->findChild<QPlainTextEdit *>("inspectorDiffText")->isReadOnly());
     dialog->close();
     // The state of every card is kept.
-    QVERIFY(QSettings().value("ui/collapsed/inspector/changes").toBool());
-    QVERIFY(!QSettings().value("ui/collapsed/inspector/environment", true).toBool());
+    QVERIFY(Settings::value("ui/collapsed/inspector/changes").toBool());
+    QVERIFY(!Settings::value("ui/collapsed/inspector/environment", true).toBool());
 }
 
 void TestSessionsWindow::teamMembersFollowTheirSubLead_data()
@@ -3349,24 +3350,24 @@ void TestSessionsWindow::taskExecutorStartsOnlyThroughTheLaunchDialog()
     QSignalSpy launches(&window, &SessionsWindow::newSessionRequested);
     TaskItem task; task.uuid = "task-uuid"; task.targetKind = "new_session"; task.targetSession = "codex/hgs/dashboard";
     task.targetId = "launch_id:parent"; task.targetMachine = "parent-node";
-    QVERIFY(QSettings().value("tasks/pendingExecutorLaunches").toByteArray().isEmpty()); QCOMPARE(launches.size(), 0);
+    QVERIFY(Settings::value("tasks/pendingExecutorLaunches").toByteArray().isEmpty()); QCOMPARE(launches.size(), 0);
     bool submitted = false;
     QTimer::singleShot(0, &window, [&] {
         auto *dialog = qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget()); if (!dialog) return;
         const auto close = qScopeGuard([dialog] { dialog->reject(); });
         QCOMPARE(launches.size(), 0);
-        QVERIFY(QSettings().value("tasks/pendingExecutorLaunches").toByteArray().isEmpty());
+        QVERIFY(Settings::value("tasks/pendingExecutorLaunches").toByteArray().isEmpty());
         dialog->launchRequested({}, "codex", "/workspace/project", "task-helper", "native-codex", project, true, {}, {}, {}, {});
         submitted = true;
     });
     tasks->newExecutorRequested(task, project); QVERIFY(submitted); QCOMPARE(launches.size(), 1);
-    const auto records = QJsonDocument::fromJson(QSettings().value("tasks/pendingExecutorLaunches").toByteArray()).object();
+    const auto records = QJsonDocument::fromJson(Settings::value("tasks/pendingExecutorLaunches").toByteArray()).object();
     QCOMPARE(records.size(), 1); const auto record = records.begin().value().toObject();
     QCOMPARE(record.value("task").toString(), task.uuid); QCOMPARE(record.value("parent").toString(), QString("parent-node/launch_id:parent"));
     QCOMPARE(record.value("phase").toString(), QString("waiting"));
     QVERIFY(tasks->hasExecutorLaunch(task.uuid));
     const auto token = records.begin().key(); window.newSessionLaunchFailed(token, "Fixture launch failure");
-    const auto failed = QJsonDocument::fromJson(QSettings().value("tasks/pendingExecutorLaunches").toByteArray()).object().value(token).toObject();
+    const auto failed = QJsonDocument::fromJson(Settings::value("tasks/pendingExecutorLaunches").toByteArray()).object().value(token).toObject();
     QCOMPARE(failed.value("phase").toString(), QString("review"));
 }
 
@@ -3399,8 +3400,8 @@ void TestSessionsWindow::restoredTaskLaunchDeliveryIsReservedAndNeverReplayed()
         SessionsWindow window(FakeCli::program(fixture)); keepDetailsPollsOut(window); window.setFleet(state); window.show();
         auto *client = window.findChild<HgsClient *>(); QSignalSpy replied(client, &HgsClient::taskReady);
         // A listing reply cannot be mistaken for a durable exact task-send receipt.
-        if (confirmed) QTRY_VERIFY(!QJsonDocument::fromJson(QSettings().value("tasks/pendingExecutorLaunches").toByteArray()).object().contains(token));
-        else QTRY_VERIFY(QJsonDocument::fromJson(QSettings().value("tasks/pendingExecutorLaunches").toByteArray()).object().value(token).toObject().value("phase") == "review");
+        if (confirmed) QTRY_VERIFY(!QJsonDocument::fromJson(Settings::value("tasks/pendingExecutorLaunches").toByteArray()).object().contains(token));
+        else QTRY_VERIFY(QJsonDocument::fromJson(Settings::value("tasks/pendingExecutorLaunches").toByteArray()).object().value(token).toObject().value("phase") == "review");
         QFile calls(fixture + ".tasks"); QVERIFY(calls.open(QIODevice::ReadOnly)); const auto text = calls.readAll();
         QVERIFY(text.contains("--expect-new-session-parent")); QVERIFY(text.contains("parent-node/launch_id:parent"));
         window.setFleet(state); QTest::qWait(80); window.close();
@@ -4241,7 +4242,7 @@ void TestSessionsWindow::contentScaleLeavesWorkspaceChrome()
     QCOMPARE(slider->minimum(), 15); QCOMPARE(slider->maximum(), 40); QCOMPARE(slider->value(), 20);
     QCOMPARE(settings->findChild<QLabel *>("workspaceContentScaleValue")->text(), QString("100%"));
     slider->setValue(15);
-    QCOMPARE(QSettings().value("workspace/contentScale").toDouble(), 0.75);
+    QCOMPARE(Settings::value("workspace/contentScale").toDouble(), 0.75);
     QCOMPARE(settings->findChild<QLabel *>("workspaceContentScaleValue")->text(), QString("75%"));
     QTRY_COMPARE(editorPixels(), 10);
     QCOMPARE(pixels("activity"), 10); QCOMPARE(pixels("subagentJournal"), 10); QCOMPARE(pixels("terminalScreen"), 10);
@@ -4251,7 +4252,7 @@ void TestSessionsWindow::contentScaleLeavesWorkspaceChrome()
     QVERIFY(preview("content-scale-75.png"));
     window.findChild<QPushButton *>("workspaceSettings")->click();
     slider->setValue(30); slider->setValue(40);
-    QCOMPARE(QSettings().value("workspace/contentScale").toDouble(), 2.0);
+    QCOMPARE(Settings::value("workspace/contentScale").toDouble(), 2.0);
     QCOMPARE(settings->findChild<QLabel *>("workspaceContentScaleValue")->text(), QString("200%"));
     QTRY_COMPARE(editorPixels(), 26);
     if (!qEnvironmentVariable("HGS_PREVIEW_DIR").isEmpty())
@@ -4268,7 +4269,7 @@ void TestSessionsWindow::contentScaleLeavesWorkspaceChrome()
     QCOMPARE(QFontInfo(restored.findChild<MessageComposer *>("messageComposer")->editor()->font()).pixelSize(), 26);
     QSettings().setValue("workspace/contentScale", 2.5);
     SessionsWindow legacy(program()); legacy.setFleet(fleet());
-    QCOMPARE(QSettings().value("workspace/contentScale").toDouble(), 2.0);
+    QCOMPARE(Settings::value("workspace/contentScale").toDouble(), 2.0);
     QCOMPARE(QFontInfo(legacy.findChild<MessageComposer *>("messageComposer")->editor()->font()).pixelSize(), 26);
     window.findChild<QPushButton *>("workspaceSettings")->click(); slider->setValue(20);
     QTRY_COMPARE(editorPixels(), 13);
@@ -4348,7 +4349,7 @@ void TestSessionsWindow::activityReadingColumnFollowsSettingsAndEdges()
     QCOMPARE(slider->minimum(), 480); QCOMPARE(slider->maximum(), 2400); QCOMPARE(slider->value(), 900);
     QCOMPARE(value->text(), QString("900 px"));
     slider->setValue(1100);
-    QCOMPARE(QSettings().value("workspace/activityWidth").toInt(), 1100); QCOMPARE(value->text(), QString("1100 px"));
+    QCOMPARE(Settings::value("workspace/activityWidth").toInt(), 1100); QCOMPARE(value->text(), QString("1100 px"));
     if (!qEnvironmentVariable("HGS_PREVIEW_DIR").isEmpty())
         QVERIFY(window.grab().save(qEnvironmentVariable("HGS_PREVIEW_DIR") + "/activity-width-settings.png"));
     open();
@@ -4361,14 +4362,14 @@ void TestSessionsWindow::activityReadingColumnFollowsSettingsAndEdges()
     window.findChild<QPushButton *>("workspaceSettings")->click();
     settings->findChild<QSlider *>("workspaceContentScale")->setValue(20);
     full->setChecked(true);
-    QVERIFY(QSettings().value("workspace/activityFullWidth").toBool()); QVERIFY(!slider->isEnabled());
+    QVERIFY(Settings::value("workspace/activityFullWidth").toBool()); QVERIFY(!slider->isEnabled());
     open();
     QTRY_COMPARE(composer->width(), pane); QCOMPARE(left(viewport), left(activity));
     QVERIFY(preview("activity-full-width.png"));
     // Activity's own menu returns to the column and Settings follows.
     emit activity->fullWidthRequested(false);
     QTRY_COMPARE(viewport->width(), 1100); QTRY_COMPARE(composer->width(), 1100);
-    QVERIFY(!QSettings().value("workspace/activityFullWidth").toBool()); QVERIFY(!full->isChecked()); QVERIFY(slider->isEnabled());
+    QVERIFY(!Settings::value("workspace/activityFullWidth").toBool()); QVERIFY(!full->isChecked()); QVERIFY(slider->isEnabled());
     // Dragging a column edge stores the width for both Activity views.
     auto edges = activity->browser()->findChildren<QWidget *>("activityColumnEdge");
     std::sort(edges.begin(), edges.end(), [](QWidget *a, QWidget *b) { return a->x() < b->x(); });
@@ -4389,12 +4390,12 @@ void TestSessionsWindow::activityReadingColumnFollowsSettingsAndEdges()
     mouse(edges[1], QEvent::MouseMove, start + QPoint(100, 0), Qt::NoButton, Qt::LeftButton);
     mouse(edges[1], QEvent::MouseButtonRelease, start + QPoint(100, 0), Qt::LeftButton, Qt::NoButton);
     QCOMPARE(viewport->width(), 1300); QTRY_COMPARE(composer->width(), 1300); QCOMPARE(left(composer), left(viewport));
-    QCOMPARE(QSettings().value("workspace/activityWidth").toInt(), 1300);
+    QCOMPARE(Settings::value("workspace/activityWidth").toInt(), 1300);
     QCOMPARE(slider->value(), 1300); QCOMPARE(value->text(), QString("1300 px"));
     QCOMPARE(window.findChild<ActivityView *>("subagentActivity")->columnWidth(), 1300);
     emit activity->columnResetRequested();
     QTRY_COMPARE(viewport->width(), 900); QCOMPARE(slider->value(), 900);
-    QCOMPARE(QSettings().value("workspace/activityWidth").toInt(), 900);
+    QCOMPARE(Settings::value("workspace/activityWidth").toInt(), 900);
     settings->findChild<QComboBox *>("workspaceTheme")->setCurrentIndex(1);
     open(); QTRY_COMPARE(composer->width(), 900); QVERIFY(plainMargins());
     QVERIFY(preview("activity-column-dark.png"));
@@ -4446,11 +4447,11 @@ void TestSessionsWindow::settingsSlidersResetToDefaults()
     // Resetting from the keyboard leaves focus on the slider, not on a later control.
     resetScale->setFocus(Qt::TabFocusReason); QVERIFY(resetScale->hasFocus());
     QTest::keyClick(resetScale, Qt::Key_Space);
-    QCOMPARE(scale->value(), 20); QCOMPARE(QSettings().value("workspace/contentScale").toDouble(), 1.0);
+    QCOMPARE(scale->value(), 20); QCOMPARE(Settings::value("workspace/contentScale").toDouble(), 1.0);
     QCOMPARE(settings->findChild<QLabel *>("workspaceContentScaleValue")->text(), QString("100%"));
     QVERIFY(!resetScale->isVisible()); QVERIFY(scale->hasFocus());
     QTest::mouseClick(resetWidth, Qt::LeftButton);
-    QCOMPARE(width->value(), 900); QCOMPARE(QSettings().value("workspace/activityWidth").toInt(), 900);
+    QCOMPARE(width->value(), 900); QCOMPARE(Settings::value("workspace/activityWidth").toInt(), 900);
     QCOMPARE(settings->findChild<QLabel *>("workspaceActivityWidthValue")->text(), QString("900 px"));
     QVERIFY(!resetWidth->isVisible());
     QTest::qWait(50); QCOMPARE(full->mapTo(settings, QPoint()).y(), below);
@@ -4476,13 +4477,13 @@ void TestSessionsWindow::alwaysOnTopSettingKeepsWindowAbove()
     auto *option = window.findChild<QCheckBox *>("workspaceAlwaysOnTop");
     QVERIFY(option && option->isVisible() && option->isEnabled() && !option->isChecked());
     option->setChecked(true);
-    QVERIFY(QSettings().value("workspace/alwaysOnTop").toBool());
+    QVERIFY(Settings::value("workspace/alwaysOnTop").toBool());
     QVERIFY(above(window)); QVERIFY(window.windowFlags().testFlag(Qt::WindowStaysOnTopHint)); QVERIFY(window.isVisible());
     SessionsWindow restored(program()); restored.setFleet(fleet()); restored.show(); QVERIFY(QTest::qWaitForWindowExposed(&restored));
     QVERIFY(above(restored));
     option->setChecked(false);
     QVERIFY(!above(window)); QVERIFY(window.isVisible());
-    QVERIFY(!QSettings().value("workspace/alwaysOnTop").toBool());
+    QVERIFY(!Settings::value("workspace/alwaysOnTop").toBool());
     QSettings().remove("workspace/alwaysOnTop");
 }
 
@@ -4499,7 +4500,7 @@ void TestSessionsWindow::railPinTogglesAlwaysOnTop()
     QVERIFY(pin->isChecked()); QVERIFY(above(window)); QVERIFY(window.isVisible());
     QVERIFY(pin->icon().pixmap(pin->iconSize()).toImage() != unpinnedIcon);
     QVERIFY(pin->toolTip() != pinAction); QCOMPARE(pin->accessibleName(), pin->toolTip());
-    QVERIFY(QSettings().value("workspace/alwaysOnTop").toBool());
+    QVERIFY(Settings::value("workspace/alwaysOnTop").toBool());
     auto *option = window.findChild<QCheckBox *>("workspaceAlwaysOnTop"); QVERIFY(option && option->isChecked());
     option->setChecked(false);
     QVERIFY(!pin->isChecked()); QVERIFY(!above(window));
@@ -4598,7 +4599,7 @@ void TestSessionsWindow::emptyProjectsSettingPreservesArchiveAndProjects()
     };
     changeSetting(false, false); QVERIFY(!hasHeader(empty));
     changeSetting(false, true); QVERIFY(hasHeader(empty)); QVERIFY(hasHeader(archived));
-    QVERIFY(!QSettings().value("workspace/hideEmptyProjects").toBool());
+    QVERIFY(!Settings::value("workspace/hideEmptyProjects").toBool());
     { SessionsWindow reopened(program()); reopened.setFleet(state); reopened.show();
       auto *rows = reopened.findChild<SessionList *>("sessionList"); bool found = false;
       for (int i = 0; i < rows->count(); ++i) found |= rows->item(i)->data(SessionRoles::Group).toString() == empty;
@@ -4776,7 +4777,7 @@ void TestSessionsWindow::markAllReadIgnoresFiltersAndKeepsCurrentDraft()
     window.showSessionList(); window.findChild<MachineFilter *>("machineFilterChips")->setSelection({});
     window.findChild<QLineEdit *>("search")->setText("review");
     QCOMPARE(window.findChild<QListWidget *>("searchResults")->count(), 1); // The real approval still needs attention.
-    FleetState restarted; restarted.setReadReplies(QJsonDocument::fromJson(QSettings().value("attention/readReplies").toByteArray()).object());
+    FleetState restarted; restarted.setReadReplies(QJsonDocument::fromJson(Settings::value("attention/readReplies").toByteArray()).object());
     restarted.setLocal(box, QDateTime::currentMSecsSinceEpoch()); QVERIFY(restarted.unreadReplies().isEmpty());
     box.sessions[0].replyId = "11:101"; state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
     QVERIFY(action->isEnabled()); QVERIFY(action->text().contains("(1)")); // Even when that session is hidden by search.
@@ -4787,7 +4788,7 @@ void TestSessionsWindow::markAllReadIgnoresFiltersAndKeepsCurrentDraft()
 
 void TestSessionsWindow::markAllReadFromTheRailAndBesideDraftsSkipsReviewReminders()
 {
-    const auto previousMarks = QSettings().value("attention/sessionMarks");
+    const auto previousMarks = Settings::value("attention/sessionMarks");
     const auto restore = qScopeGuard([previousMarks] {
         setJsonSetting("attention/sessionMarks", previousMarks); QSettings().remove("attention/readReplies");
     });
@@ -5004,7 +5005,7 @@ void TestSessionsWindow::usageIndicatorSettingUpdatesFooter()
     auto *option = window.findChild<QComboBox *>("workspaceUsageIndicator"); QVERIFY(option);
     QCOMPARE(option->currentData().toString(), QString("rails")); QCOMPARE(usage->indicator(), AccountUsage::Indicator::Rails);
     option->setCurrentIndex(option->findData("marker-countdown"));
-    QCOMPARE(QSettings().value("workspace/usageIndicator").toString(), QString("marker-countdown"));
+    QCOMPARE(Settings::value("workspace/usageIndicator").toString(), QString("marker-countdown"));
     QCOMPARE(usage->indicator(), AccountUsage::Indicator::MarkerCountdown);
     SessionsWindow restored(script()); restored.setFleet(fleet());
     QCOMPARE(restored.findChild<QComboBox *>("workspaceUsageIndicator")->currentData().toString(), QString("marker-countdown"));
@@ -5910,7 +5911,7 @@ if a[:1]!=['a']:
     auto *settings=window.findChild<QWidget *>("settingsPage");
     settings->findChild<QDoubleSpinBox *>("activeSeconds")->setValue(1);
     settings->findChild<QDoubleSpinBox *>("backgroundSeconds")->setValue(5);
-    QCOMPARE(QSettings().value("processes/activeSeconds").toDouble(),1.);
+    QCOMPARE(Settings::value("processes/activeSeconds").toDouble(),1.);
     ProcessSettings::setPollFloorForTests(0.2);QSettings().setValue("processes/activeSeconds",0.2);
     const auto before=log().size();QTRY_VERIFY(log().size()>before);
     QVERIFY(log().last().contains("--skip-processes"));QCOMPARE(tabs->tabText(processes),QString("Processes"));
@@ -6796,7 +6797,7 @@ void TestSessionsWindow::activeFilterCombinesWorkAndAttentionOnce()
     box.sessions.append({overlap, child, preview, reminder, exited, ended, unknown, archived});
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
     QVERIFY(state.setReviewLater({}, reminder, true));
-    const auto previousMarks = QSettings().value("attention/sessionMarks");
+    const auto previousMarks = Settings::value("attention/sessionMarks");
     const auto restoreMarks = qScopeGuard([previousMarks] { setJsonSetting("attention/sessionMarks", previousMarks); });
     setJsonSetting("attention/sessionMarks", QJsonDocument(state.attentionMarks()).toJson(QJsonDocument::Compact));
     SessionsWindow window(program()); window.setFleet(state); window.show();
@@ -8235,7 +8236,7 @@ void TestSessionsWindow::optionalQuestionNotificationsAreOptIn()
     QVERIFY(!check->isChecked()); QVERIFY(!QuestionNotificationSettings::enabled());
     check->setChecked(true);
     QVERIFY(QuestionNotificationSettings::enabled());
-    QCOMPARE(QSettings().value("notifications/optionalQuestions").toBool(), true);
+    QCOMPARE(Settings::value("notifications/optionalQuestions").toBool(), true);
     SessionsWindow reopened(program());
     QVERIFY(reopened.findChild<QCheckBox *>("notifyOptionalQuestions")->isChecked());
     check->setChecked(false); QVERIFY(!QuestionNotificationSettings::enabled());
@@ -8632,7 +8633,7 @@ void TestSessionsWindow::compactSessionRowActionsPreserveSelectionAndDraft()
     QVERIFY(!target->data(SessionRoles::RowCollapsed).toBool()); QCOMPARE(list->visualItemRect(target).height(), normalHeight);
     QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(), selected); QCOMPARE(composer->editor()->toPlainText(), QString("Keep this other conversation draft"));
     QCOMPARE(writes.size(), 0); QCOMPARE(sends.size(), 0); QCOMPARE(reads.size(), 0); QCOMPARE(activated.size(), 0);
-    QVERIFY(QSettings().value("workspace/collapsedSessionRows").toByteArray().isEmpty());
+    QVERIFY(Settings::value("workspace/collapsedSessionRows").toByteArray().isEmpty());
     // Double-click is the compact/expand gesture on the open conversation.
     // It persists density without a native action or a lost composer draft.
     for (bool collapsed : {true, false}) {
@@ -8642,7 +8643,7 @@ void TestSessionsWindow::compactSessionRowActionsPreserveSelectionAndDraft()
         QCOMPARE(list->currentItem()->data(SessionRoles::RowCollapsed).toBool(), collapsed);
         QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(), selected);
         QCOMPARE(composer->editor()->toPlainText(), QString("Keep this other conversation draft"));
-        QCOMPARE(QSettings().value("workspace/collapsedSessionRows").toByteArray().isEmpty(), !collapsed);
+        QCOMPARE(Settings::value("workspace/collapsedSessionRows").toByteArray().isEmpty(), !collapsed);
         QCOMPARE(writes.size(), 0); QCOMPARE(sends.size(), 0); QCOMPARE(reads.size(), 0); QCOMPARE(activated.size(), 0);
     }
 }
@@ -8691,7 +8692,7 @@ void TestSessionsWindow::selectedSessionRowsCompactAndExpandLocally()
     QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(), current);
     QCOMPARE(composer->editor()->toPlainText(), QString("Keep the open conversation draft"));
     QSet<QString> after; for (const auto *item : list->selectedItems()) after.insert(item->data(SessionRoles::Key).toString()); QCOMPARE(after, selected);
-    QVERIFY(QSettings().value("workspace/collapsedSessionRows").toByteArray().isEmpty());
+    QVERIFY(Settings::value("workspace/collapsedSessionRows").toByteArray().isEmpty());
     QCOMPARE(writes.size(), 0); QCOMPARE(sends.size(), 0); QCOMPARE(activated.size(), 0); QCOMPARE(reads.size(), 0);
     window.setFleet(state);
     after.clear(); for (const auto *item : list->selectedItems()) after.insert(item->data(SessionRoles::Key).toString()); QCOMPARE(after, selected);
@@ -8757,7 +8758,7 @@ void TestSessionsWindow::compactSessionRowsPersistAndExpandAllIncludesHidden()
             QContextMenuEvent context(QContextMenuEvent::Mouse, point, list->viewport()->mapToGlobal(point)); QApplication::sendEvent(list->viewport(), &context);
             auto *action = menu->findChild<QAction *>("contextSessionRowDensity"); QVERIFY(action); action->trigger(); menu->hide();
         }
-        QVERIFY(!QSettings().value("workspace/collapsedSessionRows").toByteArray().isEmpty());
+        QVERIFY(!Settings::value("workspace/collapsedSessionRows").toByteArray().isEmpty());
     }
     SessionsWindow restored(program()); restored.setDetailsPollForTests(60000, 60000); restored.setFleet(state); restored.show();
     auto *list = restored.findChild<SessionList *>("sessionList");
@@ -8774,7 +8775,7 @@ void TestSessionsWindow::compactSessionRowsPersistAndExpandAllIncludesHidden()
     QVERIFY(saved); QVERIFY(all); saved->click(); QCOMPARE(list->count(), 1); QVERIFY(list->item(0)->data(SessionRoles::RowCollapsed).toBool());
     QSignalSpy writes(restored.findChild<HgsClient *>(), &HgsClient::writeDone);
     expandAll->trigger(); QVERIFY(!list->item(0)->data(SessionRoles::RowCollapsed).toBool()); QVERIFY(!expandAll->isEnabled());
-    QVERIFY(QSettings().value("workspace/collapsedSessionRows").toByteArray().isEmpty()); QCOMPARE(writes.size(), 0);
+    QVERIFY(Settings::value("workspace/collapsedSessionRows").toByteArray().isEmpty()); QCOMPARE(writes.size(), 0);
     all->click(); for (int i = 0; i < list->count(); ++i) QVERIFY(!list->item(i)->data(SessionRoles::RowCollapsed).toBool());
     SessionsWindow reopened(program()); reopened.setFleet(state); reopened.show();
     auto *again = reopened.findChild<SessionList *>("sessionList"); QCOMPARE(again->count(), list->count());
@@ -9106,7 +9107,7 @@ elif c=='notifications':
     box.sessions[0].phase="approval"; box.sessions[0].activity="waiting"; box.sessions[0].replyId="reply-1";
     box.sessions[0].sharedNotifications=true; box.sessions[0].notificationPreferences=preferences(false,0);
     state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
-    const auto originalMarks=QSettings().value("attention/sessionMarks");
+    const auto originalMarks=Settings::value("attention/sessionMarks");
     SessionsWindow window(FakeCli::program(fixture)); keepDetailsPollsOut(window); window.setFleet(state); window.show();
     auto *list=window.findChild<QListWidget *>("sessionList"); QVERIFY(list);
     auto *menu=window.findChild<QMenu *>("sessionContextMenu"); QVERIFY(menu);
@@ -9136,7 +9137,7 @@ elif c=='notifications':
     QVERIFY(list->item(0)->data(SessionRoles::Muted).toBool()); QVERIFY(list->item(0)->data(SessionRoles::Attention).toBool());
     QVERIFY(list->item(0)->data(SessionRoles::Unread).toBool()); QCOMPARE(rail->text().toInt(),count-1);
     QVERIFY(list->item(0)->data(Qt::AccessibleTextRole).toString().contains("Muted on all devices"));
-    QCOMPARE(QSettings().value("attention/sessionMarks"),originalMarks);
+    QCOMPARE(Settings::value("attention/sessionMarks"),originalMarks);
     QFile log(fixture+".calls");QVERIFY(log.open(QIODevice::ReadOnly));const auto call=QJsonDocument::fromJson(log.readLine()).object();log.close();
     QCOMPARE(call["argv"].toArray(),(QJsonArray{"notifications",box.sessions.first().name,"--json"}));
     QCOMPARE(call["payload"].toObject(),(QJsonObject{{"run_id","run"},{"conversation_id","mute-conversation"},{"muted",true},{"expected_revision",0}}));
@@ -9166,7 +9167,7 @@ elif c=='notifications':
     box=state.local();box.ok=true;box.sessions[0].sharedNotifications=false;box.sessions[0].notificationPreferences={};box.sessions[0].muted=false;
     state.setLocal(box,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);open();
     mute=menu->findChild<QAction *>("contextToggleMute");QVERIFY(!mute->isEnabled());QVERIFY(mute->toolTip().contains("Update hgs"));menu->hide();
-    QCOMPARE(calls(),4);QCOMPARE(marks.size(),0);QCOMPARE(QSettings().value("attention/sessionMarks"),originalMarks);
+    QCOMPARE(calls(),4);QCOMPARE(marks.size(),0);QCOMPARE(Settings::value("attention/sessionMarks"),originalMarks);
     QVERIFY(state.takeNewReadMarks().isEmpty());
 }
 
@@ -9793,11 +9794,11 @@ void TestSessionsWindow::inspectorWidthSurvivesResizeHideAndRestartAndResetsOnDo
         QApplication::sendEvent(handle, &move);
         QTest::mouseRelease(handle, Qt::LeftButton, {}, handle->mapFromGlobal(destination));
         QTRY_VERIFY(panel->width() > 600);
-        preferred = panel->width(); QTRY_COMPARE(QSettings().value("workspace/inspectorWidth").toInt(), preferred);
+        preferred = panel->width(); QTRY_COMPARE(Settings::value("workspace/inspectorWidth").toInt(), preferred);
         window.resize(1100, 900); QTRY_VERIFY(panel->width() < preferred);
-        QCOMPARE(QSettings().value("workspace/inspectorWidth").toInt(), preferred);
+        QCOMPARE(Settings::value("workspace/inspectorWidth").toInt(), preferred);
         toggle->click(); toggle->click(); QTest::qWait(30);
-        QCOMPARE(QSettings().value("workspace/inspectorWidth").toInt(), preferred);
+        QCOMPARE(Settings::value("workspace/inspectorWidth").toInt(), preferred);
         window.resize(1840, 900); QTRY_COMPARE(panel->width(), preferred);
         toggle->click(); toggle->click(); QTRY_COMPARE(panel->width(), preferred);
         window.close();
@@ -9806,7 +9807,7 @@ void TestSessionsWindow::inspectorWidthSurvivesResizeHideAndRestartAndResetsOnDo
     auto *panel = restored.findChild<QFrame *>("sessionInspectorPanel"); auto *splitter = restored.findChild<QSplitter *>("sessionWorkSplitter");
     QTRY_VERIFY(panel->isVisible()); QTRY_COMPARE(panel->width(), preferred);
     auto *handle = splitter->handle(1); QTest::mouseDClick(handle, Qt::LeftButton); QTest::mouseRelease(handle, Qt::LeftButton);
-    QTRY_COMPARE(QSettings().value("workspace/inspectorWidth").toInt(), 400);
+    QTRY_COMPARE(Settings::value("workspace/inspectorWidth").toInt(), 400);
     QTRY_COMPARE(panel->width(), qMax(400, panel->minimumWidth()));
 }
 
@@ -10218,7 +10219,7 @@ void TestSessionsWindow::cachedRemoteFilesOpenAndRevealWithoutAnotherDownload()
 {
     QTemporaryDir directory; QVERIFY(directory.isValid());
     const auto cache = directory.filePath("Zerus Files"), fixture = directory.filePath("file-cache-hgs");
-    const auto previous = QSettings().value("downloads/folder");
+    const auto previous = Settings::value("downloads/folder");
     const auto restore = qScopeGuard([&] {
         if (previous.isValid()) QSettings().setValue("downloads/folder", previous);
         else QSettings().remove("downloads/folder");
@@ -10281,7 +10282,7 @@ void TestSessionsWindow::manualRemoteSaveRetiresTheOutstandingCacheLookup()
     });
     QTemporaryDir directory; QVERIFY(directory.isValid());
     const auto cache = directory.filePath("Zerus Files");
-    const auto previous = QSettings().value("downloads/folder");
+    const auto previous = Settings::value("downloads/folder");
     const auto restoreCache = qScopeGuard([&] {
         if (previous.isValid()) QSettings().setValue("downloads/folder", previous);
         else QSettings().remove("downloads/folder");
@@ -12346,7 +12347,7 @@ void TestSessionsWindow::sessionListCollapsesIntoWorkingStrip()
     if (!preview.isEmpty()) { QTest::qWait(70); shot(window.get(), "collapsing.png"); }
     QTRY_COMPARE(list->property("expansion").toReal(), 0.0);
     QCOMPARE(panel->width(), SessionStrip::width(true)); QCOMPARE(slot->width(), SessionStrip::width(true)); QVERIFY(detail->width() > detailWidth);
-    QVERIFY(QSettings().value("workspace/sessionsCollapsed").toBool());
+    QVERIFY(Settings::value("workspace/sessionsCollapsed").toBool());
     QVERIFY(!window->findChild<QLineEdit *>("search")->isVisible()); QVERIFY(window->findChild<QPushButton *>("sessionStripSearch")->isVisible());
     auto *readAll = window->findChild<QPushButton *>("markAllReadButton"); QVERIFY(readAll);
     QVERIFY(!readAll->isVisible()); QVERIFY(!window->findChild<QPushButton *>("savedDrafts")->isVisible());
@@ -12417,7 +12418,7 @@ void TestSessionsWindow::sessionListCollapsesIntoWorkingStrip()
     QTRY_COMPARE(panel->width(), SessionStrip::width(true));
     window->findChild<QPushButton *>("sessionPanelToggle")->click();
     QTRY_COMPARE(slot->width(), 360); QTRY_COMPARE(panel->width(), 360); QVERIFY(docked != 360);
-    QVERIFY(!QSettings().value("workspace/sessionsCollapsed").toBool());
+    QVERIFY(!Settings::value("workspace/sessionsCollapsed").toBool());
     QCOMPARE(window->findChild<SessionList *>("sessionList")->property("expansion").toReal(), 1.0);
 }
 
@@ -12460,7 +12461,7 @@ void TestSessionsWindow::collapsedStripExpandsOverContentOnlyWhenEnabled()
     QCOMPARE(window.findChild<QPushButton *>("sessionPanelToggle")->property("glyph").toString(), QString("pin"));
     QTest::mouseMove(detail, QPoint(detail->width() - 40, 300));
     QTRY_COMPARE(panel->width(), SessionStrip::width(true));
-    QVERIFY(QSettings().value("workspace/sessionsCollapsed").toBool());
+    QVERIFY(Settings::value("workspace/sessionsCollapsed").toBool());
 }
 
 void TestSessionsWindow::collapsingKeepsRowsInPlace()
@@ -12732,7 +12733,7 @@ void TestSessionsWindow::collapsedStripSearchOpensPanel()
     window.findChild<QPushButton *>("sessionStripSearch")->click(); QTRY_VERIFY(panel->width() >= 270);
     window.findChild<QPushButton *>("sessionPanelToggle")->click();
     QTRY_COMPARE(window.findChild<QWidget *>("sessionListSlot")->width(), panel->width());
-    QVERIFY(!QSettings().value("workspace/sessionsCollapsed").toBool());
+    QVERIFY(!Settings::value("workspace/sessionsCollapsed").toBool());
 }
 
 // Screenshots of a control console (hgs.exe on Windows): this computer runs no
@@ -14737,7 +14738,7 @@ void TestSessionsWindow::newSessionPersistsImplicitInboxIntent()
         submitted=true;
     });
     window.findChild<QPushButton *>("newSession")->click();QVERIFY(submitted);QCOMPARE(native.size(),1);
-    const auto pending=QJsonDocument::fromJson(QSettings().value("workspace/pendingLaunches").toByteArray()).object();
+    const auto pending=QJsonDocument::fromJson(Settings::value("workspace/pendingLaunches").toByteArray()).object();
     QCOMPARE(pending.size(),1);
     const auto intent=pending.begin().value().toObject();
     QCOMPARE(intent.value("implicit_inbox"),QJsonValue(!explicitChoice));
@@ -14775,7 +14776,7 @@ void TestSessionsWindow::pendingImplicitInboxDoesNotOverrideNativeProject()
     const bool passive=intent=="implicit";
     const auto expected=passive?(nativeFirst?work:QString("ungrouped")):intent=="concrete"?chosen:QString("ungrouped");
     QCOMPARE(SessionOrganization(saved()).groupFor(identity),expected);
-    QVERIFY(QJsonDocument::fromJson(QSettings().value("workspace/pendingLaunches").toByteArray()).object().isEmpty());
+    QVERIFY(QJsonDocument::fromJson(Settings::value("workspace/pendingLaunches").toByteArray()).object().isEmpty());
     if(passive){
         QVERIFY(SessionOrganization(saved()).group("ungrouped")->folders.isEmpty());
         QCOMPARE(saved().value("unassigned_sessions").toArray().contains(identity),!nativeFirst);
@@ -14885,7 +14886,7 @@ void TestSessionsWindow::newSessionGroupFollowsLaunchIdentity()
     QVERIFY(!placeholder());
     stored = SessionOrganization(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QCOMPARE(stored.groupFor(machine + '\n' + created.name), mode == "deleted" ? QString("ungrouped") : destination);
-    QVERIFY(!QJsonDocument::fromJson(QSettings().value("workspace/pendingLaunches").toByteArray()).object().contains(token));
+    QVERIFY(!QJsonDocument::fromJson(Settings::value("workspace/pendingLaunches").toByteArray()).object().contains(token));
     const auto *resultGroup=stored.group(mode=="deleted"?stored.defaultProject():destination);QVERIFY(resultGroup);
     // The listed folder already belongs to the project, whatever path confirmed it.
     const bool added=std::any_of(resultGroup->folders.cbegin(),resultGroup->folders.cend(),[&](const SessionOrganization::Folder &f){return f.machine==machine&&f.path=="/remote/work tree";});
@@ -14940,7 +14941,7 @@ void TestSessionsWindow::launchPlaceholderReportsASessionThatEndedUnlisted()
     window.setFleet(state);
     const bool ends = mode != "listed" && mode != "other" && mode != "unavailable";
     QCOMPARE(placeholder() == nullptr, ends || mode == "hidden");
-    QCOMPARE(QJsonDocument::fromJson(QSettings().value("workspace/pendingLaunches").toByteArray()).object().contains(token), !ends);
+    QCOMPARE(QJsonDocument::fromJson(Settings::value("workspace/pendingLaunches").toByteArray()).object().contains(token), !ends);
     if (mode == "ended") {
         QCOMPARE(notice->text(), QString("Session failing ended before it appeared (exit code 3).\n"
             "hgs: tracking needs trusted hooks\ncannot start: example failure"));
@@ -14997,7 +14998,7 @@ void TestSessionsWindow::endedLaunchOutranksALaterStartedCallback()
         QCOMPARE(notice->text(), QString("Session started. Loading activity…"));
     }
     deliver(order != "listed", order == "listed");
-    QVERIFY(!QJsonDocument::fromJson(QSettings().value("workspace/pendingLaunches").toByteArray()).object().contains(token));
+    QVERIFY(!QJsonDocument::fromJson(Settings::value("workspace/pendingLaunches").toByteArray()).object().contains(token));
     if (order != "started") client->nativeSessionLaunched(token, true, {});
     if (order == "listed") {
         // A placed launch still opens its session after a late success callback.
@@ -15050,7 +15051,7 @@ void TestSessionsWindow::endedLaunchOutranksALaterFailure()
         return;
     }
     end();
-    QVERIFY(!QJsonDocument::fromJson(QSettings().value("workspace/pendingLaunches").toByteArray()).object().contains(token));
+    QVERIFY(!QJsonDocument::fromJson(Settings::value("workspace/pendingLaunches").toByteArray()).object().contains(token));
     if (order == "hidden") QVERIFY(!notice->text().contains("ended before it appeared"));
     else QCOMPARE(notice->text(), ended);
     // A terminal launch reports its failure directly, possibly without a reason.
@@ -15113,7 +15114,7 @@ void TestSessionsWindow::endedLaunchesWithoutAResultStayBounded()
         box.endedLaunches.insert(token, QJsonObject{{"launch_id", token}, {"code", 3}});
         state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
     }
-    QVERIFY(QJsonDocument::fromJson(QSettings().value("workspace/pendingLaunches").toByteArray()).object().isEmpty());
+    QVERIFY(QJsonDocument::fromJson(Settings::value("workspace/pendingLaunches").toByteArray()).object().isEmpty());
     const QString newest = QString("Session ended-%1 ended before it appeared (exit code 3).").arg(remembered);
     QCOMPARE(notice->text(), newest);
     // The oldest remembered launch still keeps the ended notice over a late result.
@@ -15150,7 +15151,7 @@ void TestSessionsWindow::legacyProjectsMigrateWithBackupAndLocalFolders()
     auto ignored=local;ignored.name="Ansible";ignored.fromAnsible=true;
     client->projectsForHostReady({}, {local,ignored});
     auto remote=local;remote.dir="/Users/test/shared";client->projectsForHostReady("mac",{remote});
-    QCOMPARE(QSettings().value("workspace/organizationBeforeProjects").toByteArray(),legacy);
+    QCOMPARE(Settings::value("workspace/organizationBeforeProjects").toByteArray(),legacy);
     SessionOrganization migrated(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QCOMPARE(migrated.groups().size(),2);QVERIFY(!migrated.group("pinned"));
     QCOMPARE(migrated.groupFor("arch\ncodex/hgs/dashboard"),QString("work"));
@@ -15388,7 +15389,7 @@ void TestSessionsWindow::localWindowsLaunchJoinsTheFolderInAnyCase()
     // A drive-less rooted path is no folder of a Windows machine: the session still joins.
     QCOMPARE(paths,QStringList({"C:/Work/Repo","D:/New/Folder"}));QCOMPARE(saved.group(project)->folders[0].id,existing);
     for(const auto &tag:tags)QCOMPARE(saved.groupFor("arch\ncodex/work/"+tag),project);
-    QVERIFY(QJsonDocument::fromJson(QSettings().value("workspace/pendingLaunches").toByteArray()).object().isEmpty());
+    QVERIFY(QJsonDocument::fromJson(Settings::value("workspace/pendingLaunches").toByteArray()).object().isEmpty());
 }
 
 void TestSessionsWindow::localWindowsFolderFilterIgnoresCase()
@@ -16267,14 +16268,14 @@ void TestSessionsWindow::zoomChordsChangeContentScale()
     const auto editorPixels = [composer] { return QFontInfo(composer->editor()->font()).pixelSize(); };
     QCOMPARE(editorPixels(), 13);
     pressCommand(&window, "zoom.in");
-    QCOMPARE(QSettings().value("workspace/contentScale").toDouble(), 1.1);
+    QCOMPARE(Settings::value("workspace/contentScale").toDouble(), 1.1);
     QCOMPARE(slider->value(), 22); QCOMPARE(value->text(), QString("110%")); QCOMPARE(notice->text(), QString("Content scale 110%"));
     QTRY_COMPARE(editorPixels(), 14);
     pressCommand(&window, "zoom.reset");
-    QCOMPARE(QSettings().value("workspace/contentScale").toDouble(), 1.0);
+    QCOMPARE(Settings::value("workspace/contentScale").toDouble(), 1.0);
     QCOMPARE(slider->value(), 20); QCOMPARE(value->text(), QString("100%")); QTRY_COMPARE(editorPixels(), 13);
     for (int i = 0; i < 4; ++i) pressCommand(&window, "zoom.out");
-    QCOMPARE(QSettings().value("workspace/contentScale").toDouble(), 0.75); QCOMPARE(notice->text(), QString("Content scale 75%"));
+    QCOMPARE(Settings::value("workspace/contentScale").toDouble(), 0.75); QCOMPARE(notice->text(), QString("Content scale 75%"));
 }
 
 void TestSessionsWindow::reboundChordsApplyAtOnce()

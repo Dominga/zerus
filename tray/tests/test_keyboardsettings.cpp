@@ -1,4 +1,5 @@
 #include "KeyboardSettings.h"
+#include "Settings.h"
 #include "ShortcutsDialog.h"
 #include <QApplication>
 #include <QDialogButtonBox>
@@ -20,7 +21,7 @@ class TestKeyboardSettings : public QObject {
     Q_OBJECT
 private slots:
     void init();
-    void cleanup() { QSettings().clear(); }
+    void cleanup() { Settings::flush();QSettings().clear(); }
     void listsEveryCommandOnce();
     void editingPersistsAChord();
     void protectedKeyIsRefusedWithAReason();
@@ -46,7 +47,7 @@ void TestKeyboardSettings::init()
 {
     QSettings::setDefaultFormat(QSettings::IniFormat);
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_settings.path());
-    QSettings().clear();
+    Settings::flush();QSettings().clear();
 }
 
 QTreeWidgetItem *TestKeyboardSettings::commandItem(QTreeWidget *tree, const QString &id)

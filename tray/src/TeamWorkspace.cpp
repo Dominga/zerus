@@ -169,8 +169,8 @@ TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *p
     if (!m_sideSplit->restoreState(settings.value("teams/workspaceSideSplit").toByteArray())) m_sideSplit->setSizes({420, 520});
     QObject::connect(m_split, &QSplitter::splitterMoved, this, [this] { Settings::set("teams/workspaceSplit", m_split->saveState()); });
     QObject::connect(m_sideSplit, &QSplitter::splitterMoved, this, [this] { Settings::set("teams/workspaceSideSplit", m_sideSplit->saveState()); });
-    m_membersOpen = QSettings().value("teams/membersOpen", true).toBool();
-    m_hideFinished = QSettings().value("teams/hideFinished", false).toBool();
+    m_membersOpen = Settings::value("teams/membersOpen", true).toBool();
+    m_hideFinished = Settings::value("teams/hideFinished", false).toBool();
     // U38 (#665): the Profile view's reads, kept across renders and teams.
     m_profileCache = new TeamProfile::Cache(teams, this);
     m_drawer = new TeamTaskCard(this);
@@ -2585,7 +2585,7 @@ QWidget *TeamWorkspace::laneSections(const Team &team, const PhaseGroup &group)
     auto *v = new QVBoxLayout(box); v->setContentsMargins(0, 0, 0, 0); v->setSpacing(4);
     for (const auto &[lane, ids] : lanes) {
         const QString key = QStringLiteral("ui/collapsed/teamLane/%1/%2/%3").arg(team.id).arg(group.n).arg(lane);
-        const bool open = !QSettings().value(key, false).toBool();
+        const bool open = !Settings::value(key, false).toBool();
         auto *header = new QToolButton;
         header->setObjectName("teamLaneHeader");
         header->setProperty("lane", lane); header->setProperty("phase", group.n); header->setProperty("collapsed", !open);
@@ -2606,7 +2606,7 @@ QWidget *TeamWorkspace::laneSections(const Team &team, const PhaseGroup &group)
                                              "QToolButton#teamLaneHeader:hover{color:%2;}")
                                   .arg(c.text2.name(), c.fg.name()));
         QObject::connect(header, &QToolButton::clicked, this, [this, key](bool) {
-            Settings::set(key, !QSettings().value(key, false).toBool());
+            Settings::set(key, !Settings::value(key, false).toBool());
             scheduleRender();
         });
         // U27: a lane is renamed in the plan and in a draft phase.
@@ -3289,7 +3289,7 @@ QWidget *TeamWorkspace::members(const Team &team)
         // folded by default behind "N tasks"; the choice is kept per member.
         if (!m.queue.isEmpty()) {
             const QString key = QStringLiteral("ui/collapsed/teamMemberTasks/%1/%2").arg(team.id, m.id);
-            const bool tasksOpen = QSettings().value(key, false).toBool();
+            const bool tasksOpen = Settings::value(key, false).toBool();
             auto *tasks = new QToolButton; tasks->setObjectName("teamMemberTasksToggle"); tasks->setProperty("member", m.id);
             tasks->setText(m.queue.size() == 1 ? tr("1 task") : tr("%1 tasks").arg(m.queue.size()));
             tasks->setIcon(workspaceIcon(tasksOpen ? "chevron-down" : "chevron-right", c.text2)); tasks->setIconSize(QSize(10, 10));
@@ -3470,7 +3470,7 @@ QWidget *TeamWorkspace::members(const Team &team)
         // newest five; the choice is kept for the team and the member.
         if (!m.permissionAnswers.isEmpty()) {
             const QString key = QStringLiteral("ui/expanded/teamPermissions/%1/%2").arg(team.id, m.id);
-            const bool open = QSettings().value(key, false).toBool();
+            const bool open = Settings::value(key, false).toBool();
             auto *summary = permissionToggle(m.permissionAnswers, c, open, "teamMemberPermissionsToggle");
             summary->setProperty("member", m.id);
             QObject::connect(summary, &QToolButton::clicked, this, [this, key](bool expanded) {

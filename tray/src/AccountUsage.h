@@ -1,4 +1,5 @@
 #pragma once
+#include "Settings.h"
 #include <QDateTime>
 #include <QFrame>
 #include <QFontMetricsF>
@@ -105,7 +106,7 @@ inline QString forecast(const QJsonObject &w) {
 // Footer indicator chosen in Settings → Appearance.
 enum class Indicator { Rails, Marker, MarkerCountdown };
 inline Indicator indicator() {
-    const auto value=QSettings().value("workspace/usageIndicator").toString();
+    const auto value=Settings::value("workspace/usageIndicator").toString();
     return value=="marker" ? Indicator::Marker : value=="marker-countdown" ? Indicator::MarkerCountdown : Indicator::Rails;
 }
 inline QString windowText(const QJsonObject &w,bool withReset=true) {

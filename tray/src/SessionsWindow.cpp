@@ -1731,7 +1731,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         }
         return choices;
     };
-    m_collapsedTeams=[]{const auto list=QSettings().value("workspace/collapsedTeams").toStringList();return QSet<QString>(list.cbegin(),list.cend());}();
+    m_collapsedTeams=[]{const auto list=Settings::value("workspace/collapsedTeams").toStringList();return QSet<QString>(list.cbegin(),list.cend());}();
     connect(m_sessions,&SessionList::teamActivated,this,&SessionsWindow::showTeam);
     // U25 (spec 2.1): a project's '+' opens New session for that project.
     connect(m_sessions,&SessionList::projectNewSession,this,[this](const QString &group){showNewSession({},group,selectedHostTarget());});
@@ -1804,7 +1804,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_teamPanel->openWorkspace=[this]{if(m_detailTabs->indexOf(m_teamWorkspace)<0)m_detailTabs->addTab(m_teamWorkspace,tr("Team"));m_detailTabs->setCurrentWidget(m_teamWorkspace);};
     // N7 (U18): every team's attention items reach the desktop notifications,
     // once each; the known ones are kept across restarts.
-    m_teamNotices=std::make_shared<TeamAttentionNotices>(QSettings().value("teams/attentionNotified").toStringList());
+    m_teamNotices=std::make_shared<TeamAttentionNotices>(Settings::value("teams/attentionNotified").toStringList());
     connect(m_teams,&TeamController::watchedChanged,this,[this]{updateProposalCards();});
     connect(m_teams,&TeamController::teamsChanged,this,[this]{
         const SlowEventLog::Scope scope(this,"teams changed");
@@ -2209,9 +2209,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         m_detailTabs->setTabVisible(m_detailTabs->indexOf(m_processes),enabled);renderDetails();
     };
     m_settingsPage->appearanceChanged=[this]{
-        m_sessions->setProperty("compact",QSettings().value("workspace/compact",false).toBool());m_sessions->doItemsLayout();
+        m_sessions->setProperty("compact",Settings::value("workspace/compact",false).toBool());m_sessions->doItemsLayout();
         m_sessionDock->setStripWidth(sessionCardTileInset() ? 0 : SessionStrip::width(m_sessions->property("compact").toBool()));
-        m_sessionDock->setHoverExpands(QSettings().value("workspace/expandSessionsOnHover",true).toBool());
+        m_sessionDock->setHoverExpands(Settings::value("workspace/expandSessionsOnHover",true).toBool());
         const auto usageIndicator=AccountUsage::indicator();m_accountUsage->setIndicator(usageIndicator);m_dashboard->setUsageIndicator(usageIndicator);
         applyTheme();rebuild();
     };
@@ -2645,7 +2645,7 @@ void SessionsWindow::updateWindowPinAppearance()
 
 void SessionsWindow::applyTheme()
 {
-    const QString theme = QSettings().value("workspace/theme", "system").toString();
+    const QString theme = Settings::value("workspace/theme", "system").toString();
     m_dark = theme == "dark" || (theme != "light" && qApp->palette().color(QPalette::Window).lightness() < 128);
     m_sessionLoading->setTheme(m_dark);
     // WhiteWh fork: the selected skin supplies the workspace colors and may
@@ -2870,10 +2870,10 @@ void SessionsWindow::applyTheme()
     if (m_sessionDock) m_sessionDock->setEdgeColor(QColor(m_border));
     if (m_titleBar) m_titleBar->setColors(QColor(bg), QColor(m_border), QColor(colors.inset), QColor(m_border), QColor(m_fg), QColor(m_muted), QColor(hover));
     if (m_brand) m_brand->setAppearance(m_dark ? QColor(Qt::white) : QColor(m_accent), QColor(m_dark ? "#ffda76" : "#a66000"),
-        m_attentionCount > 0, QSettings().value("workspace/reduceMotion", false).toBool());
+        m_attentionCount > 0, Settings::value("workspace/reduceMotion", false).toBool());
     m_sessions->setProperty("hgsDark", m_dark);
-    m_sessions->setActivityAnimationEnabled(QSettings().value("workspace/animateActivity", true).toBool());
-    AgentWorking::setAnimated(QSettings().value("workspace/animateActivity", true).toBool());   // U25: the working dots
+    m_sessions->setActivityAnimationEnabled(Settings::value("workspace/animateActivity", true).toBool());
+    AgentWorking::setAnimated(Settings::value("workspace/animateActivity", true).toBool());   // U25: the working dots
     m_projectsPage->setTheme(m_dark); m_accountsPage->setTheme(m_dark); m_machinesPage->setTheme(m_dark); m_providerBadge->setTheme(m_dark); m_machineBadge->setTheme(m_dark);
     m_accountUsage->setTheme(m_dark);
     m_usageWarning->setStyleSheet(QString("QLabel{color:%1;}").arg(m_dark?"#ffabab":"#a42330"));
@@ -4107,7 +4107,7 @@ void SessionsWindow::updateAttentionIndicator()
     m_sessionsNav->setAccessibleName(hint); m_sessionsNav->setToolTip(ShortcutRegistry::instance().tooltip(hint, "go.sessions"));
     m_brand->setProperty("attentionCount",m_attentionCount);
     m_brand->setAppearance(m_dark ? QColor(Qt::white) : QColor(m_accent), QColor(m_dark ? "#ffda76" : "#a66000"),
-        m_attentionCount > 0, QSettings().value("workspace/reduceMotion", false).toBool());
+        m_attentionCount > 0, Settings::value("workspace/reduceMotion", false).toBool());
 }
 
 void SessionsWindow::markAllRepliesRead()
@@ -5138,7 +5138,7 @@ void SessionsWindow::renderDetails()
         // workspace/inspectorFinishedSubagents is set or the owner
         // opens them here; the list is what works now (a profile's groups
         // keep their rows).
-        const bool showFinished = m_showFinishedChildren || QSettings().value("workspace/inspectorFinishedSubagents", false).toBool();
+        const bool showFinished = m_showFinishedChildren || Settings::value("workspace/inspectorFinishedSubagents", false).toBool();
         int finished = 0;
         QList<QJsonObject> shownRoster;
         for (const auto &child : roster) {
@@ -5247,7 +5247,7 @@ void SessionsWindow::renderDetails()
 QString SessionsWindow::foldInspectorSections(const QString &html) const
 {
     if (WorkspaceSkin::current().view(QStringLiteral("inspector")) != QLatin1String("foldable")) return html;
-    const QStringList folded = QSettings().value(QStringLiteral("workspace/foldedInspector")).toStringList();
+    const QStringList folded = Settings::value(QStringLiteral("workspace/foldedInspector")).toStringList();
     const auto parts = html.split(QStringLiteral("<h3>"));
     QString result = parts.value(0);
     static const QRegularExpression tags(QStringLiteral("<[^>]*>"));
@@ -5267,7 +5267,7 @@ QString SessionsWindow::foldInspectorSections(const QString &html) const
 
 void SessionsWindow::toggleInspectorSection(const QString &key)
 {
-    auto folded = QSettings().value(QStringLiteral("workspace/foldedInspector")).toStringList();
+    auto folded = Settings::value(QStringLiteral("workspace/foldedInspector")).toStringList();
     if (!folded.removeAll(key)) folded << key;
     Settings::set(QStringLiteral("workspace/foldedInspector"), folded);
     m_childrenHtml.clear(); m_info->setProperty("inspectorHtml", QString()); renderDetails();
@@ -7146,7 +7146,7 @@ void SessionsWindow::terminateSession()
     if(live && keepArchive && linked) {
         removeWorktree=new QCheckBox(tr("Remove the working folder after stopping"),&confirm);
         removeWorktree->setObjectName("removeTerminatedWorktree");
-        removeWorktree->setChecked(QSettings().value("workspace/removeWorktreeAfterTermination",false).toBool());
+        removeWorktree->setChecked(Settings::value("workspace/removeWorktreeAfterTermination",false).toBool());
         removeWorktree->setToolTip(tr("Cleanup runs in the background. Unsaved work, unknown local files and folders in use are kept for review."));
         confirm.setCheckBox(removeWorktree);
         confirm.setInformativeText(tr("Computer: %1\nThe conversation and branch are kept. Folders that need review stay on disk.").arg(original.machine));
@@ -7458,7 +7458,7 @@ void SessionsWindow::changeEvent(QEvent *event)
     // now picks the other theme.
     if (event->type() == QEvent::PaletteChange && m_activityView)
         QTimer::singleShot(0, this, [this] {
-            if (QSettings().value("workspace/theme", "system").toString() != "system") return;
+            if (Settings::value("workspace/theme", "system").toString() != "system") return;
             if ((qApp->palette().color(QPalette::Window).lightness() < 128) != m_dark) applyTheme();
         });
 }

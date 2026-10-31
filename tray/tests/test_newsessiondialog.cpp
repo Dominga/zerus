@@ -1,4 +1,5 @@
 #include "Wait.h"
+#include "Settings.h"
 #include <QtTest>
 #include <memory>
 #include <QComboBox>
@@ -653,7 +654,7 @@ elif a and a[0]=='worktrees':
             auto *start=dialog.findChild<QPushButton *>("primary");QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);
             QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launched.size(),1);
         }
-        QCOMPARE(QSettings().value("workspace/launchWorktree").toString(),QString("none"));
+        QCOMPARE(Settings::value("workspace/launchWorktree").toString(),QString("none"));
         NewSessionDialog next(program(),fleet(),{},"codex");next.selectPath("/workspace/example");next.show();
         auto *automatic=next.findChild<QPushButton *>("automaticLaunchWorktree");auto *plain=next.findChild<QPushButton *>("launchWithoutWorktree");
         // Auto stays available for this repository; only the default changed.

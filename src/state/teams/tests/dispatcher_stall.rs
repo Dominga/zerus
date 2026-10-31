@@ -311,10 +311,11 @@ fn a_quiet_dsh_member_is_read_at_most_once_a_minute() {
     run_step(&mut store, &t, &Step::CheckSilent { task: 1, last: old }, "").unwrap();
     let saved = store.load(&t.id).unwrap().unwrap();
     let attempt = saved.task(1).unwrap().attempts.last().unwrap();
-    assert!(attempt.silent_read_at.is_some());
+    // Counted from the read itself: a slow machine may take seconds to get there.
+    let read = attempt.silent_read_at.expect("the read is recorded");
     // A few seconds later there is no second read; a minute later there is.
-    assert!(!steps(&saved, &[lead.clone(), dev.clone()], at + 3.0).iter().any(|step| matches!(step, Step::CheckSilent { .. })));
-    assert!(steps(&saved, &[lead, dev], at + 61.0).iter().any(|step| matches!(step, Step::CheckSilent { .. })));
+    assert!(!steps(&saved, &[lead.clone(), dev.clone()], read + 3.0).iter().any(|step| matches!(step, Step::CheckSilent { .. })));
+    assert!(steps(&saved, &[lead, dev], read + 61.0).iter().any(|step| matches!(step, Step::CheckSilent { .. })));
     set_fake_hgs(None);
 }
 

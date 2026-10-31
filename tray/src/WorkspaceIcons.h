@@ -46,11 +46,10 @@ inline const char *prototypeIconPath(const QString &name)
         // alone, one stroke style, read at 16 and 20 px (design/agent-teams/view-icons).
         {"view-graph", "M2.8 7a2.2 2.2 0 1 0 4.4 0a2.2 2.2 0 1 0 -4.4 0ZM2.8 17a2.2 2.2 0 1 0 4.4 0a2.2 2.2 0 1 0 -4.4 0ZM9.8 12a2.2 2.2 0 1 0 4.4 0a2.2 2.2 0 1 0 -4.4 0ZM16.8 12a2.2 2.2 0 1 0 4.4 0a2.2 2.2 0 1 0 -4.4 0ZM6.8 8.3L10.2 10.7M6.8 15.7L10.2 13.3M14.2 12H16.8"},
         {"view-board", "M3 4.5h5v15H3ZM9.5 4.5h5v10h-5ZM16 4.5h5v6.5h-5ZM3 8h5M9.5 8h5M16 8h5"},
-        {"view-profile", "M5 13.5a7 7 0 1 0 14 0a7 7 0 1 0 -14 0ZM10 3h4M12 3v3.5M9 11h5M9 14h6.5M9 17h3.5"},
+        {"view-profile", "M3 6h9M3 11h6M3 16h8M12 14.5a4.5 4.5 0 1 0 9 0a4.5 4.5 0 1 0 -9 0ZM15.5 8h3M16.5 14.5v-2.5M16.5 14.5h2"},
         {"view-tests", "M3.5 6l1.5 1.5L8 4.5M11 6h9.5M3.5 12l1.5 1.5L8 10.5M11 12h9.5M3.5 18l1.5 1.5L8 16.5M11 18h9.5"},
-        {"view-builds", "M10.8 6L13 3.8L18.2 9L16 11.2ZM13.4 8.6L6 16M3.5 20.5h3M10.5 20.5h3M17.5 20.5h3"},
+        {"view-builds", "M8.8 4L11 1.8L16.2 7L14 9.2ZM11.4 6.6L4 14M17 13h4M17 16.5h4M17 20h4"},
         {"heat-off", "M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.4-.5-2-1-3-1.1-2.1-.2-4.1 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.2.4-2.3 1-3a2.5 2.5 0 0 0 2.5 2.5zM4 4l16 16"},
-        {"heat-coins", "M5 7a7 2.6 0 1 0 14 0a7 2.6 0 1 0 -14 0ZM5 7v10M19 7v10M5 12a7 2.6 0 0 0 14 0M5 17a7 2.6 0 0 0 14 0"},
         // U38: the heat tint's legend and its Tokens choice.
         {"flame", "M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.4-.5-2-1-3-1.1-2.1-.2-4.1 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.2.4-2.3 1-3a2.5 2.5 0 0 0 2.5 2.5z"},
         {"coins","M2 8a6 6 0 1 0 12 0a6 6 0 1 0 -12 0ZM18.1 10.4A6 6 0 1 1 10.3 18M7 6h1v4M16.7 13.9l.7.7-2.8 2.8"},
@@ -143,19 +142,6 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
         } else if (name == "team") {   // WhiteWh fork: agent teams, a lead above two members
             p.drawEllipse(QPointF(12, 6), 2.5, 2.5); p.drawEllipse(QPointF(6, 18), 2.5, 2.5); p.drawEllipse(QPointF(18, 18), 2.5, 2.5);
             p.drawLine(QPointF(10.8, 8.2), QPointF(7.2, 15.8)); p.drawLine(QPointF(13.2, 8.2), QPointF(16.8, 15.8));
-        } else if (name == "view-graph") {   // tasks as a graph: nodes joined by edges
-            p.drawRoundedRect(QRectF(3, 4, 7, 5), 1.5, 1.5); p.drawRoundedRect(QRectF(14, 4, 7, 5), 1.5, 1.5);
-            p.drawRoundedRect(QRectF(8.5, 15, 7, 5), 1.5, 1.5);
-            p.drawLine(QPointF(6.5, 9), QPointF(11, 15)); p.drawLine(QPointF(17.5, 9), QPointF(13, 15));
-        } else if (name == "view-board") {   // tasks as a board: columns of cards
-            p.drawRoundedRect(QRectF(3, 4, 5, 16), 1.5, 1.5); p.drawRoundedRect(QRectF(9.5, 4, 5, 11), 1.5, 1.5);
-            p.drawRoundedRect(QRectF(16, 4, 5, 7), 1.5, 1.5);
-        } else if (name == "view-profile") {   // U38: a profile: lanes of spans
-            p.drawLine(QPointF(4, 7), QPointF(16, 7)); p.drawLine(QPointF(4, 12), QPointF(20, 12)); p.drawLine(QPointF(4, 17), QPointF(12, 17));
-        } else if (name == "view-tests") {   // U62 (#719): a flask
-            QPainterPath flask; flask.moveTo(9.5, 4); flask.lineTo(9.5, 10); flask.lineTo(4.5, 19); flask.quadTo(4, 20.5, 6, 20.5);
-            flask.lineTo(18, 20.5); flask.quadTo(20, 20.5, 19.5, 19); flask.lineTo(14.5, 10); flask.lineTo(14.5, 4); p.drawPath(flask);
-            p.drawLine(QPointF(8, 4), QPointF(16, 4)); p.drawLine(QPointF(7, 15), QPointF(17, 15));
         } else if (name == "view-layers") {   // tasks in layers: stacked sheets
             QPainterPath top; top.moveTo(12, 4); top.lineTo(21, 8.5); top.lineTo(12, 13); top.lineTo(3, 8.5); top.closeSubpath(); p.drawPath(top);
             QPainterPath mid; mid.moveTo(3, 12.5); mid.lineTo(12, 17); mid.lineTo(21, 12.5); p.drawPath(mid);

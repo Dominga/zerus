@@ -106,10 +106,10 @@ QWidget *TeamWorkspace::heatSwitch(const Team &team)
     }
     menuButton->setMenu(menu);
     // #755: Off, Time lost and Tokens as icons alone (a crossed-out flame, a
-    // flame, a coin stack), each named with its purpose in its tooltip.
+    // flame, two coins), each named with its purpose in its tooltip.
     for (auto *b : seg->findChildren<QPushButton *>()) {
         const QString value = b->property("segment").toString();
-        b->setIcon(workspaceIcon(value == QLatin1String("time") ? QStringLiteral("flame") : value == QLatin1String("tokens") ? QStringLiteral("heat-coins")
+        b->setIcon(workspaceIcon(value == QLatin1String("time") ? QStringLiteral("flame") : value == QLatin1String("tokens") ? QStringLiteral("coins")
                                                                                                                       : QStringLiteral("heat-off"),
                                  b->isChecked() ? c.accent : c.text2));
         b->setIconSize(QSize(16, 16));

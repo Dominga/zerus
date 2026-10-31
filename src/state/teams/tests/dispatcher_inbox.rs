@@ -53,7 +53,12 @@ fn a_closed_question_is_never_sent() {
     let question = &team.task(1).unwrap().attempts[0].questions[0];
     assert!(!question.open() && question.answer.is_empty() && question.answered_at.is_some());
     let sent = steps(&team, &[session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)], 100.0);
-    assert!(!sent.iter().any(|step| matches!(step, Step::AnswerQuestion { .. } | Step::Inbox)), "{sent:?}");
+    assert!(!sent.iter().any(|step| matches!(step, Step::AnswerQuestion { .. })), "{sent:?}");
+    // #759: the lead hears only that #1's cancellation released #2, never the
+    // closed question.
+    let items = inbox::items(&team);
+    assert!(items.iter().all(|item| item.kind != "question"), "{items:?}");
+    assert!(items.iter().all(|item| item.kind == "dependency_cancelled"), "{items:?}");
 }
 
 #[test]

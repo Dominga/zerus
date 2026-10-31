@@ -171,15 +171,66 @@ fn push_history(state: &mut Value, sample: Value) {
     {
         let history = state["history"].as_array_mut().unwrap();
         history.push(sample);
-        if history.len() > 1000 {
-            let drop = history.len() - 1000;
-            history.drain(0..drop);
-            truncated = true;
+        // The newest FINE samples stay as they came; older ones fold into one
+        // sample per minute, provider and model, so a long session (a day of
+        // work, thousands of requests) still answers a span over its first
+        // hours. Folded samples lead the list; once the unfolded ones reach
+        // twice FINE, all but the newest FINE fold. Only past MINUTES folded
+        // samples does the oldest go.
+        let folded_count = history.iter().take_while(|sample| sample["minute"] == true).count();
+        if history.len() - folded_count > 2 * FINE {
+            let split = history.len() - FINE;
+            let mut kept = fold_minutes(&history[..split]);
+            if kept.len() > MINUTES {
+                let drop = kept.len() - MINUTES;
+                kept.drain(0..drop);
+                truncated = true;
+            }
+            kept.extend(history.drain(split..));
+            *history = kept;
         }
     }
     if truncated {
         state["history_truncated"] = json!(true);
     }
+}
+
+/// The newest usage samples kept one per request.
+const FINE: usize = 1000;
+/// Older samples folded per minute (about four weeks of one model's minutes).
+const MINUTES: usize = 40_000;
+
+/// Samples folded per minute, provider and model: request counters summed,
+/// a cumulative reading (cost, work) kept as the minute's last, the moment
+/// the minute's end. Already folded samples fold again unchanged.
+fn fold_minutes(samples: &[Value]) -> Vec<Value> {
+    let mut folded: BTreeMap<(i64, String, String), Value> = BTreeMap::new();
+    for sample in samples {
+        let at = sample["at"].as_f64().unwrap_or(0.0);
+        let minute = (at / 60.0).ceil() as i64;
+        let key = (minute, sample["provider"].as_str().unwrap_or_default().to_owned(), sample["model"].as_str().unwrap_or_default().to_owned());
+        let entry = folded.entry(key).or_insert_with(|| {
+            json!({"at":(minute * 60) as f64,"provider":sample["provider"],"model":sample["model"],"minute":true})
+        });
+        if let Some(tokens) = sample["tokens"].as_object() {
+            if !entry["tokens"].is_object() {
+                entry["tokens"] = json!({});
+            }
+            for (bucket, value) in tokens {
+                if let Some(count) = number(value) {
+                    entry["tokens"][bucket] = json!(number(&entry["tokens"][bucket]).unwrap_or(0).saturating_add(count));
+                }
+            }
+        }
+        for key in ["cost_usd", "work_ms"] {
+            if !sample[key].is_null() {
+                entry[key] = sample[key].clone();
+            }
+        }
+    }
+    let mut out: Vec<Value> = folded.into_values().collect();
+    out.sort_by(|a, b| a["at"].as_f64().unwrap_or(0.0).total_cmp(&b["at"].as_f64().unwrap_or(0.0)));
+    out
 }
 
 /// U38: a request sample minus the same request's previous snapshot, so a
@@ -408,16 +459,19 @@ fn scanned(path: &Path, cache_path: &Path, provider: &str, conversation: &str) -
         .unwrap_or(Value::Null);
     let mut offset = number(&state["offset"]).unwrap_or(0);
     let stamp = json!([identity.modified, identity.modified_nanos]);
-    if state["version"] != 5
+    // Version 6 (2026-10-31): older samples fold per minute instead of being
+    // dropped; a version-5 cache lost them, so it is read again from the start.
+    let rescan = state["version"] != 6;
+    if state["version"] != 6
         || state["fingerprint"] != fingerprint
         || offset > meta.len()
         || (state["size"] == meta.len() && state["stamp"] != stamp)
     {
         // U38: a restarted session's history survives its old transcript, so a
         // span across the restart still reads both runs.
-        let carried = state["history"].as_array().filter(|history| !history.is_empty()).cloned();
-        let truncated = state["history_truncated"] == true;
-        state = json!({"version":5,"fingerprint":fingerprint,"totals":{},"seen":{},"context":{},"history":[],"codex_seen":{}});
+        let carried = state["history"].as_array().filter(|history| !history.is_empty() && !rescan).cloned();
+        let truncated = state["history_truncated"] == true && !rescan;
+        state = json!({"version":6,"fingerprint":fingerprint,"totals":{},"seen":{},"context":{},"history":[],"codex_seen":{}});
         if let Some(history) = carried {
             state["history"] = Value::Array(history);
         }
@@ -946,6 +1000,34 @@ mod tests {
 
     /// #736: several windows count only the samples inside them: the gap
     /// between a task's own spans is not read.
+    #[test]
+    fn a_long_sessions_early_hours_stay_countable() {
+        // 3000 requests a minute apart: the first 2000 fold per minute instead
+        // of going, so a span over the first hour still counts every request.
+        let mut state = json!({});
+        for n in 0..3000u64 {
+            push_history(&mut state, json!({"at":1_000_000.0 + n as f64 * 60.0 + 10.0,"provider":"claude","model":"opus","tokens":{"uncached_input":1,"output":2}}));
+        }
+        let history = state["history"].as_array().unwrap();
+        assert_eq!(history.len(), 3000, "one request a minute folds into one sample a minute");
+        assert!(history.iter().filter(|sample| sample["minute"] == true).count() >= 1000);
+        assert!(state["history_truncated"] != json!(true));
+        let record_state = state.clone();
+        let first_hour: u64 = record_state["history"].as_array().unwrap().iter()
+            .filter(|sample| sample["at"].as_f64().unwrap() <= 1_000_000.0 + 3600.0 + 60.0)
+            .map(|sample| sample["tokens"]["output"].as_u64().unwrap_or(0)).sum();
+        assert_eq!(first_hour, 2 * 61, "the first hour's requests are all still counted");
+        // A minute with several requests folds into one sample with their sum.
+        let mut busy = json!({});
+        for n in 0..(2 * FINE as u64 + 50) {
+            push_history(&mut busy, json!({"at":2_000_000.0 + n as f64,"provider":"claude","model":"opus","tokens":{"output":1}}));
+        }
+        let folded: Vec<&Value> = busy["history"].as_array().unwrap().iter().filter(|sample| sample["minute"] == true).collect();
+        assert!(!folded.is_empty());
+        let sum: u64 = busy["history"].as_array().unwrap().iter().map(|sample| sample["tokens"]["output"].as_u64().unwrap_or(0)).sum();
+        assert_eq!(sum, 2 * FINE as u64 + 50, "no request is lost when folded");
+    }
+
     #[test]
     fn a_span_many_counts_only_the_samples_inside_its_windows() {
         let temp = tempfile::tempdir().unwrap();

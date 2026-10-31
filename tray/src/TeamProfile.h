@@ -163,4 +163,6 @@ private:
     QVBoxLayout *m_bodyHost, *m_lossList;
     QLabel *m_state;
     QPointer<TeamProfileTimeline> m_timeline;
+    QPushButton *m_lossesToggle = nullptr;
+    bool m_lossesOpen = true;
 };

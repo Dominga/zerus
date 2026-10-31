@@ -1,3 +1,7 @@
+#include <QWheelEvent>
+#include <QPointer>
+#include <cmath>
+#include "Settings.h"
 #include "TeamProfile.h"
 #include "TeamController.h"
 #include "TeamWidgets.h"
@@ -382,10 +386,24 @@ public:
         setObjectName("teamProfileTimeline"); setMouseTracking(true);
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     }
-    void setModel(const Model *model, bool dark) { m_model = model; m_dark = dark; setFixedHeight(heightFor()); update(); }
-    void select(int task) { m_selected = task; update(); }
+    void setModel(const Model *model, bool dark) { m_model = model; m_dark = dark; m_paint = {}; setFixedHeight(heightFor()); update(); }
+    void select(int task) { m_selected = task; m_paint = {}; update(); }
     int selected() const { return m_selected; }
     std::function<void(int task)> clicked;
+    // Owner 2026-10-31: zoom (1 is the whole scope) and the first moment shown.
+    double zoom() const { return m_zoom; }
+    double start() const { return m_start; }
+    void setView(double zoom, double start) { m_zoom = std::clamp(zoom, 1.0, 512.0); m_start = start; clampView(); m_paint = {}; setProperty("zoom", m_zoom); update(); }
+    void zoomBy(double factor, double around = -1)
+    {
+        if (!m_model) return;
+        const double at = around >= 0 ? around : m_start + visibleSeconds() / 2;
+        const double share = (at - m_start) / std::max(1.0, visibleSeconds());
+        m_zoom = std::clamp(m_zoom * factor, 1.0, 512.0);
+        m_start = at - share * visibleSeconds();
+        clampView(); m_paint = {}; setProperty("zoom", m_zoom); update();
+    }
+    void fit() { m_zoom = 1; m_start = m_model ? m_model->from : 0; m_paint = {}; setProperty("zoom", m_zoom); update(); }
     static constexpr int Top = 34, Row = 52, Label = 210;
     int heightFor() const { return m_model ? Top + Row * (2 + int(m_model->lanes.size()) + (m_model->tests.isEmpty() ? 0 : 1)) + 8 : 120; }
     int laneY(const QString &member) const
@@ -395,40 +413,79 @@ public:
         return -1;
     }
 protected:
+    double visibleSeconds() const { return m_model ? std::max(1.0, m_model->to - m_model->from) / m_zoom : 1.0; }
+    void clampView()
+    {
+        if (!m_model) return;
+        if (m_start < m_model->from || m_zoom <= 1.0) m_start = std::max(m_start, m_model->from);
+        m_start = std::clamp(m_start, m_model->from, std::max(m_model->from, m_model->to - visibleSeconds()));
+    }
+    double at(int px) const { return m_start + (px - Label) / std::max(1.0, double(width() - Label - 12)) * visibleSeconds(); }
     double x(double at) const
     {
-        const double span = std::max(1.0, m_model->to - m_model->from);
-        return Label + (width() - Label - 12) * std::clamp((at - m_model->from) / span, 0.0, 1.0);
+        return Label + (width() - Label - 12) * std::clamp((at - m_start) / visibleSeconds(), -0.02, 1.02);
     }
+    // A span outside the shown time draws nothing.
+    bool shown(double from, double to) const { return to >= m_start && from <= m_start + visibleSeconds(); }
     void paintEvent(QPaintEvent *) override
     {
         if (!m_model) return;
+        // The lanes are drawn once into a picture and reused until the size,
+        // theme, zoom, view or selection changes: scrolling and tooltips no
+        // longer repaint hundreds of spans.
+        const qreal ratio = devicePixelRatioF();
+        if (m_paint.isNull() || m_paint.size() != size() * ratio) {
+            m_paint = QPixmap(size() * ratio); m_paint.setDevicePixelRatio(ratio); m_paint.fill(Qt::transparent);
+            QPainter into(&m_paint); paintLanes(into);
+        }
+        QPainter p(this); p.drawPixmap(0, 0, m_paint);
+    }
+    void resizeEvent(QResizeEvent *event) override { m_paint = {}; QWidget::resizeEvent(event); }
+    void wheelEvent(QWheelEvent *event) override
+    {
+        if (!m_model) return QWidget::wheelEvent(event);
+        const double steps = event->angleDelta().y() / 120.0;
+        if (event->modifiers() & Qt::ControlModifier) {
+            zoomBy(std::pow(1.25, steps), at(int(event->position().x())));
+            event->accept();
+        } else if ((event->modifiers() & Qt::ShiftModifier) || event->angleDelta().x() != 0) {
+            const double delta = event->angleDelta().x() != 0 ? event->angleDelta().x() / 120.0 : steps;
+            m_start -= delta * visibleSeconds() / 10; clampView(); m_paint = {}; setProperty("zoom", m_zoom); update();
+            event->accept();
+        } else QWidget::wheelEvent(event);
+    }
+    void paintLanes(QPainter &p)
+    {
         const Colors c = colorsFor(m_dark);
-        QPainter p(this); p.setRenderHint(QPainter::Antialiasing);
+        p.setRenderHint(QPainter::Antialiasing);
         QFont small = font(); small.setPixelSize(11); QFont bold = small; bold.setWeight(QFont::DemiBold);
         // The axis: about ten ticks, at whole minutes.
         p.setFont(small);
-        const double span = std::max(60.0, m_model->to - m_model->from);
-        const QList<int> steps{300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400};
+        const double span = std::max(60.0, visibleSeconds());
+        const QList<int> steps{60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400};
         int step = steps.last();
         for (int candidate : steps) if (span / candidate <= 11) { step = candidate; break; }
         p.setPen(c.muted);
         p.drawText(QRect(12, 6, Label - 20, 20), Qt::AlignVCenter, tr("MEMBERS"));
-        const double first = std::ceil(m_model->from / step) * step;
-        for (double at = first; at <= m_model->to + 1; at += step) {
+        const double first = std::ceil(m_start / step) * step;
+        for (double at = first; at <= m_start + visibleSeconds() + 1; at += step) {
             const int px = int(x(at));
             p.setPen(alpha(c.border, .6)); p.drawLine(px, Top - 4, px, height() - 6);
             p.setPen(c.muted);
             p.drawText(QRect(px - 30, 6, 60, 20), Qt::AlignCenter, QDateTime::fromSecsSinceEpoch(qint64(at)).toString(QStringLiteral("HH:mm")));
         }
         int y = Top;
+        p.setClipRect(QRect(Label - 2, 0, width() - Label + 2, height()));
         const auto rowLabel = [&](const QString &text, const QString &right, bool strong) {
+            p.save(); p.setClipping(false);
             p.setFont(strong ? bold : small); p.setPen(c.fg);
             p.drawText(QRect(12, y, Label - 70, Row), Qt::AlignVCenter, text);
             p.setFont(small); p.setPen(c.muted);
             p.drawText(QRect(Label - 66, y, 56, Row), Qt::AlignVCenter | Qt::AlignRight, right);
+            p.restore();
         };
         const auto bar = [&](const Span &span, int top, int h, const QColor &color, bool dashed, const QString &text) {
+            if (!shown(span.from, span.to)) return;
             const QRectF r(x(span.from), top, std::max(2.0, x(span.to) - x(span.from)), h);
             QColor fill = color;
             if (dashed) { p.setPen(QPen(color, 1.2, Qt::DashLine)); p.setBrush(Qt::NoBrush); }
@@ -452,6 +509,7 @@ protected:
         for (const auto &lane : m_model->lanes) {
             // The member as its role-colored pill, and its utilization.
             {
+                p.save(); p.setClipping(false);
                 const QColor tone = roleColor(lane.role.isEmpty() ? lane.member : lane.role, m_dark);
                 p.setFont(small);
                 const int w = std::min(Label - 90, QFontMetrics(small).horizontalAdvance(lane.member) + 16);
@@ -460,10 +518,11 @@ protected:
                 p.setPen(tone); p.drawText(pill, Qt::AlignCenter, QFontMetrics(small).elidedText(lane.member, Qt::ElideRight, w - 10));
                 p.setPen(c.muted);
                 p.drawText(QRect(Label - 66, y, 56, Row), Qt::AlignVCenter | Qt::AlignRight, QStringLiteral("%1%").arg(qRound(lane.utilization * 100)));
+                p.restore();
             }
             // Idle while tasks were open: a dashed outline under the work.
             for (const auto &[from, to] : lane.idle) {
-                Span idle; idle.from = from; idle.to = to;
+                if (!shown(from, to)) continue;
                 const QRectF r(x(from), y + 8, std::max(1.0, x(to) - x(from)), 22);
                 p.setPen(QPen(alpha(c.danger, .7), 1, Qt::DashLine)); p.setBrush(alpha(c.danger, .07)); p.drawRoundedRect(r, 3, 3);
                 if (r.width() > 70) {
@@ -476,6 +535,7 @@ protected:
                     span.kind == "work" || span.kind == "rework" ? label(span.task) : QString());
             // The waits of its tasks: a hatched strip under the lane.
             for (const auto &span : lane.waits) {
+                if (!shown(span.from, span.to)) continue;
                 const QRectF r(x(span.from), y + 34, std::max(2.0, x(span.to) - x(span.from)), 7);
                 QBrush hatch(kindColor(span.kind, {}, m_dark), Qt::BDiagPattern);
                 p.setPen(QPen(alpha(kindColor(span.kind, {}, m_dark), .8), 1)); p.setBrush(hatch); p.drawRoundedRect(r, 2, 2);
@@ -502,7 +562,7 @@ protected:
         if (!m_model) return nullptr;
         const int row = (point.y() - Top) / Row;
         const auto hit = [&](const QList<Span> &spans) -> const Span * {
-            for (const auto &span : spans) if (point.x() >= x(span.from) - 1 && point.x() <= x(span.to) + 1) return &span;
+            for (const auto &span : spans) if (shown(span.from, span.to) && point.x() >= x(span.from) - 1 && point.x() <= x(span.to) + 1) return &span;
             return nullptr;
         };
         if (row == 0) return hit(m_model->real);
@@ -536,15 +596,36 @@ protected:
     }
     void mousePressEvent(QMouseEvent *event) override
     {
+        m_press = event->position().toPoint(); m_pressStart = m_start; m_dragged = false;
+    }
+    void mouseMoveEvent(QMouseEvent *event) override
+    {
+        if (!(event->buttons() & Qt::LeftButton) || m_zoom <= 1.0) return QWidget::mouseMoveEvent(event);
+        const int dx = event->position().toPoint().x() - m_press.x();
+        if (!m_dragged && std::abs(dx) < 5) return;
+        m_dragged = true; setCursor(Qt::ClosedHandCursor);
+        m_start = m_pressStart - dx / std::max(1.0, double(width() - Label - 12)) * visibleSeconds();
+        clampView(); m_paint = {}; setProperty("zoom", m_zoom); update();
+    }
+    void mouseReleaseEvent(QMouseEvent *event) override
+    {
+        unsetCursor();
+        if (m_dragged) { m_dragged = false; return; }
         if (const auto *span = spanAt(event->position().toPoint()); span && span->task) {
-            m_selected = span->task; update();
+            m_selected = span->task; m_paint = {}; update();
             if (clicked) clicked(span->task);
         }
     }
+    void mouseDoubleClickEvent(QMouseEvent *) override { fit(); }
 private:
     const Model *m_model = nullptr;
     bool m_dark = true;
     int m_selected = 0;
+    double m_zoom = 1.0, m_start = 0;
+    QPoint m_press;
+    double m_pressStart = 0;
+    bool m_dragged = false;
+    QPixmap m_paint;
 };
 
 // Tokens per task as one painted list: the task, its title and member, a bar
@@ -686,6 +767,17 @@ TeamProfileView::TeamProfileView(TeamController *teams, Cache *cache, QWidget *p
                        [this](const QString &value) { setTab(value); });
     bar->addWidget(m_tabs);
     m_state = new QLabel; m_state->setObjectName("teamProfileState"); bar->addWidget(m_state, 1);
+    // Owner 2026-10-31: the Top losses column folds away for a wider timeline.
+    m_lossesOpen = Settings::value(QStringLiteral("teams/profileLossesOpen"), true).toBool();
+    m_lossesToggle = button(m_lossesOpen ? tr("Hide losses") : tr("Show losses"), "teamProfileLossesToggle");
+    m_lossesToggle->setToolTip(tr("Fold or unfold the Top losses column"));
+    QObject::connect(m_lossesToggle, &QPushButton::clicked, this, [this] {
+        m_lossesOpen = !m_lossesOpen;
+        Settings::set(QStringLiteral("teams/profileLossesOpen"), m_lossesOpen);
+        m_lossesToggle->setText(m_lossesOpen ? tr("Hide losses") : tr("Show losses"));
+        m_side->setVisible(m_lossesOpen && m_tab != "compare" && m_tab != "members");
+    });
+    bar->addWidget(m_lossesToggle);
     auto *exportButton = button(tr("Export JSON"), "teamProfileExport");
     QObject::connect(exportButton, &QPushButton::clicked, this, [this] { exportJson(); });
     bar->addWidget(exportButton);
@@ -833,7 +925,7 @@ void TeamProfileView::render()
     page->setProperty("tab", tab);
     if (m_body) { m_bodyHost->removeWidget(m_body); retire(m_body); }
     m_bodyHost->addWidget(page); m_body = page;
-    m_side->setVisible(tab != "compare" && tab != "members");
+    m_side->setVisible(m_lossesOpen && tab != "compare" && tab != "members");
     renderLosses();
 }
 
@@ -887,7 +979,24 @@ QWidget *TeamProfileView::timePage()
     auto *card = new QFrame; card->setObjectName("teamProfileCard");
     auto *cv = new QVBoxLayout(card); cv->setContentsMargins(4, 6, 4, 6);
     auto *timeline = new TeamProfileTimeline; timeline->setModel(&m_model, m_dark);
-    if (m_timeline) timeline->select(m_timeline->selected());
+    if (m_timeline) { timeline->select(m_timeline->selected()); timeline->setView(m_timeline->zoom(), m_timeline->start()); }
+    else timeline->setView(1, m_model.from);
+    // Owner 2026-10-31: zoom. Ctrl+wheel zooms at the pointer, a drag pans,
+    // a double click (or Fit) shows the whole scope again.
+    {
+        auto *zoomRow = new QHBoxLayout; zoomRow->setContentsMargins(4, 0, 4, 0); zoomRow->setSpacing(6);
+        zoomRow->addWidget(label(tr("Ctrl+wheel zooms at the pointer, drag pans, double click fits"), c.muted, 11, false, "teamProfileZoomHint"));
+        zoomRow->addStretch(1);
+        auto *out = button(QStringLiteral("\u2212"), "teamProfileZoomOut"); out->setToolTip(tr("Zoom out"));
+        auto *fitButton = button(tr("Fit"), "teamProfileZoomFit"); fitButton->setToolTip(tr("Show the whole scope"));
+        auto *in = button(QStringLiteral("+"), "teamProfileZoomIn"); in->setToolTip(tr("Zoom in"));
+        const QPointer<TeamProfileTimeline> view = timeline;
+        QObject::connect(out, &QPushButton::clicked, this, [view] { if (view) view->zoomBy(1 / 1.5); });
+        QObject::connect(fitButton, &QPushButton::clicked, this, [view] { if (view) view->fit(); });
+        QObject::connect(in, &QPushButton::clicked, this, [view] { if (view) view->zoomBy(1.5); });
+        zoomRow->addWidget(out); zoomRow->addWidget(fitButton); zoomRow->addWidget(in);
+        v->addLayout(zoomRow);
+    }
     timeline->clicked = [this](int task) { if (openTask) openTask(task); };
     m_timeline = timeline;
     // Many lanes scroll inside the card; the timeline is painted, never a widget per span.
@@ -937,10 +1046,22 @@ QWidget *TeamProfileView::estimatesCard()
     int known = 0, past = 0;
     for (const auto &row : rows) if (row.estimate > 0 && row.worked > 0) { ++known; if (row.worked / 60 > row.estimate) ++past; }
     auto *head = row(10);
+    // Owner 2026-10-31: the table folds to its one line.
+    const bool open = Settings::value(QStringLiteral("teams/profileEstimatesOpen"), true).toBool();
+    auto *toggle = new QPushButton(open ? QStringLiteral("\u25be") : QStringLiteral("\u25b8"));
+    toggle->setObjectName("teamProfileEstimatesToggle"); toggle->setFlat(true); toggle->setCursor(Qt::PointingHandCursor);
+    toggle->setToolTip(open ? tr("Fold the table") : tr("Unfold the table")); toggle->setFixedWidth(22);
+    toggle->setStyleSheet(QStringLiteral("QPushButton{color:%1;border:none;padding:0;}").arg(c.muted.name()));
+    QObject::connect(toggle, &QPushButton::clicked, this, [this, open] {
+        Settings::set(QStringLiteral("teams/profileEstimatesOpen"), !open);
+        render();
+    });
+    head->addWidget(toggle);
     head->addWidget(label(tr("ESTIMATE AND ACTUAL"), c.muted, 11, true));
     if (known) head->addWidget(label(tr("%1 of %2 over the estimate").arg(past).arg(known), past ? c.warn : c.text2, 11, false, "teamProfileEstimatesSummary"));
     head->addStretch(1);
     v->addLayout(head);
+    if (!open) return card;
     auto *grid = new QGridLayout; grid->setHorizontalSpacing(14); grid->setVerticalSpacing(3);
     int line = 0;
     for (const auto &column : {tr("TASK"), tr("ESTIMATE"), tr("ACTUAL"), tr("DIFFERENCE")}) grid->addWidget(label(column, c.muted, 10, true), 0, line++);

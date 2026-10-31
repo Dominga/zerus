@@ -4,6 +4,7 @@
 // support/TeamsUiFixture.h.
 #include "TeamsUiFixture.h"
 #include "Settings.h"
+#include <QWheelEvent>
 #include "ActivityView.h"
 #include "HgsClient.h"
 #include "TeamHeat.h"
@@ -196,6 +197,7 @@ private slots:
     void init() { setUp(); }
     void cleanup() { tearDown(); }
     void profileViewShowsThePhaseAndItsLosses();
+    void profileTimelineZoomsAndTheSidesFold();
     void profileReadsInBoundedPagesAndKeepsABoundedCache();
     void profileShowsTheTestRunsOfItsWindow();
     void profileComparesEstimateAndActualPerTask();
@@ -785,6 +787,69 @@ void TestTeamsUiProfile::profileComparesEstimateAndActualPerTask()
     // Without estimate fields (an older hgs) there is no card.
     const auto model = TeamProfile::Model::build(Teams::parse(phasedTeam()), profileOfPhase2(), spansOfPhase2(), profileStart() + 21600);
     QVERIFY(model.estimates.isEmpty());
+}
+
+// Owner 2026-10-31: the timeline zooms (buttons, Ctrl+wheel, double click fits);
+// the Top losses column and the estimates table fold, and stay so.
+void TestTeamsUiProfile::profileTimelineZoomsAndTheSidesFold()
+{
+    Settings::set(QStringLiteral("teams/profileLossesOpen"), true);
+    Settings::set(QStringLiteral("teams/profileEstimatesOpen"), true);
+    setTeam(phasedTeam());
+    QVERIFY(FakeCli::replace(script() + ".profile", QJsonDocument(profileOfPhase2()).toJson(QJsonDocument::Compact)));
+    QVERIFY(FakeCli::replace(script() + ".spans", QJsonDocument(spansOfPhase2()).toJson(QJsonDocument::Compact)));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1600, 980); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QPushButton *profile = nullptr;
+    QTRY_VERIFY(([&] {
+        for (auto *b : workspace.findChildren<QPushButton *>()) if (b->property("segment") == "profile" && b->isVisible()) profile = b;
+        return profile != nullptr;
+    })());
+    profile->click();
+    QWidget *timeline = nullptr;
+    QTRY_VERIFY((timeline = workspace.findChild<QWidget *>("teamProfileTimeline")) && timeline->isVisible());
+    const auto zoom = [&] { auto *now = workspace.findChild<QWidget *>("teamProfileTimeline"); return now ? now->property("zoom").toDouble() : 0.0; };
+    QCOMPARE(zoom(), 1.0);
+    workspace.findChild<QPushButton *>("teamProfileZoomIn")->click();
+    QCOMPARE(zoom(), 1.5);
+    // Ctrl+wheel at the pointer zooms further; a plain wheel does not.
+    const QPointF at(timeline->width() * 0.6, 60);
+    QWheelEvent ctrl(at, timeline->mapToGlobal(at), {}, QPoint(0, 120), Qt::NoButton, Qt::ControlModifier, Qt::NoScrollPhase, false);
+    QApplication::sendEvent(timeline, &ctrl);
+    QVERIFY(zoom() > 1.5);
+    const double zoomed = zoom();
+    QWheelEvent plain(at, timeline->mapToGlobal(at), {}, QPoint(0, 120), Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+    QApplication::sendEvent(timeline, &plain);
+    QCOMPARE(zoom(), zoomed);
+    QTest::mouseDClick(timeline, Qt::LeftButton, {}, QPoint(timeline->width() / 2, 60));
+    QCOMPARE(zoom(), 1.0);
+    // The Top losses column folds and the timeline widens.
+    auto *losses = workspace.findChild<QFrame *>("teamProfileLosses");
+    QVERIFY(losses && losses->isVisible());
+    const int wide = timeline->width();
+    workspace.findChild<QPushButton *>("teamProfileLossesToggle")->click();
+    QTRY_VERIFY(!losses->isVisible());
+    QTRY_VERIFY(timeline->width() > wide);
+    QCOMPARE(Settings::value(QStringLiteral("teams/profileLossesOpen")).toBool(), false);
+    workspace.findChild<QPushButton *>("teamProfileLossesToggle")->click();
+    QTRY_VERIFY(losses->isVisible());
+    // The estimates table folds to its line, and unfolds.
+    if (auto *toggle = workspace.findChild<QPushButton *>("teamProfileEstimatesToggle")) {
+        QVERIFY(!workspace.findChildren<QPushButton *>("teamProfileEstimateTask").isEmpty());
+        toggle->click();
+        QTRY_VERIFY(workspace.findChildren<QPushButton *>("teamProfileEstimateTask").isEmpty());
+        QCOMPARE(Settings::value(QStringLiteral("teams/profileEstimatesOpen")).toBool(), false);
+        QTRY_VERIFY(workspace.findChild<QPushButton *>("teamProfileEstimatesToggle"));
+        workspace.findChild<QPushButton *>("teamProfileEstimatesToggle")->click();
+        QTRY_VERIFY(!workspace.findChildren<QPushButton *>("teamProfileEstimateTask").isEmpty());
+    }
 }
 
 QTEST_MAIN(TestTeamsUiProfile)

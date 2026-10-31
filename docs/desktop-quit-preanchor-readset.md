@@ -32,6 +32,13 @@ The future implementation would keep these private, separate types:
   produced only inside a typed fixture root. That root cannot be promoted to a
   production root by a path, environment flag, JSON value or matching digest.
 
+The fixture root, its constructors and the entire fixture I/O backend are
+compiled **only under `cfg(test)`** and are absent from production binaries.
+Release and Dev artifacts never compile that root or backend. No non-default
+qualification feature is proposed by this slice; adding one would require
+separate review and build guards that prevent release/Dev enablement. A runtime
+flag or an unreachable public constructor is not an equivalent boundary.
+
 Native raw-input capture does not mutate or normalize the environment. Record
 presence and original OS bytes, including empty and non-UTF8 inputs; never use
 lossy string conversion to decide absence. Proposed capture limits are 256
@@ -90,33 +97,58 @@ executor lifetime need platform agreement. An unqualified call is not attempted
 by this production evaluator. In particular, do not presume an OS-account lookup
 has no NSS/IPC behavior, or borrow G1's passive selector as a new quit executor.
 
+For a later raw-capture review only, Linux's
+[initial environment view](https://man7.org/linux/man-pages/man5/proc_pid_environ.5.html)
+could be compared, within bounds, with the entry-time environment walk as refusal
+evidence. Ordinary environment updates do not necessarily rewrite that original
+block; in-place writes or a changed kernel environment range can still defeat
+such a comparison. It is not immutable GUI provenance or authority, and no
+`environ` file read is added to this slice's production or fixture allowlist.
+
+Open/read effects include fanotify `FAN_OPEN_PERM`/`FAN_ACCESS_PERM` permission
+events that can wait indefinitely, FUSE/network-filesystem waits, and inotify
+`IN_OPEN`/`IN_ACCESS` notifications observed by other processes. This is another
+reason production performs no file I/O here. Any future production read-root
+needs its executor and actual lifetime contract before any I/O; never add
+synchronous file reads to the GUI or registration path to discover availability.
+
 ## Mechanism-only fixture read set
 
 The initial private fixture mechanism may read only its supplied typed root and
 selected regular leaves below it. For Linux, propose this exact acquisition
 sequence, subject to native review and private kernel qualification:
 
-1. Pin the fixture root and traverse at most 64 fixed relative components and
-   4096 path bytes with `O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC`. Reject
-   absolute paths, dot/dot-dot, links, unexpected ancestry and unqualified
-   filesystems. No directory scan, include discovery or PATH search fills a
-   missing input.
-2. Acquire the leaf with `O_PATH | O_NOFOLLOW | O_CLOEXEC`, then inspect that
-   descriptor with `fstat`/`fstatfs`. Refuse non-regular files, unknown owner/mode,
+1. Pin the fixture root. Validate at most 64 fixed relative components and
+   4096 path bytes, rejecting absolute paths and dot/dot-dot. Resolve metadata
+   with `openat2`, `O_PATH | O_NOFOLLOW | O_CLOEXEC` and
+   `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV`.
+   Use `O_DIRECTORY` for a required directory. `ENOSYS`, `EAGAIN` or any failed
+   resolution refuses; do not fall back to a manual walk or a normal path open.
+   No directory scan, include discovery or PATH search fills a missing input.
+2. Inspect the returned leaf descriptor with `fstat`/`fstatfs`; reject a symlink
+   even if an O_PATH/no-follow combination returned a handle to the link itself.
+   Refuse non-regular files, owner unequal to effective UID, unknown mode,
    unsupported filesystem and oversized input before any data-open attempt. A
    check followed by an ordinary pathname open and later `fstat` is insufficient:
    replacement by a device could already have caused effects at open time.
 3. Only for that pinned regular object, obtain a read descriptor through its
-   exact entry in a pinned, verified kernel procfs view of this process's fd
-   directory. This is a controlled kernel-fd reopen, not permission to follow
-   caller links or scan another process. Keep the original `OwnedFd` private and
-   alive; its number is generated internally, never supplied by JSON or reused
-   after close. Reopen read-only with `O_CLOEXEC | O_NONBLOCK | O_NOCTTY`, then
+   exact entry in a pinned kernel procfs view of this process. Pin a descriptor
+   for `/proc/self` (or `/proc/thread-self`) and require `fstatfs` to identify
+   `PROC_SUPER_MAGIC`, with the remaining native view/namespace checks still
+   qualified separately. Open the internally generated `fd/N` relative to that
+   descriptor; never resolve a fresh absolute `/proc/self/fd/N` string. This
+   controlled reopen deliberately follows the kernel fd magic link: **do not use
+   O_NOFOLLOW or RESOLVE_NO_MAGICLINKS at this step**. The metadata acquisition's
+   no-link rules do not authorize caller links or scanning another process.
+   Keep the original `OwnedFd` private and alive; its number is generated
+   internally, never supplied by JSON or reused after close. Reopen read-only
+   with `O_CLOEXEC | O_NONBLOCK | O_NOCTTY | O_NOATIME`, then
    verify the read descriptor's type/device/inode/owner/mode against the pinned
    object. Missing, unverified or inaccessible procfs refuses with no pathname
    fallback. Procfs authenticity, namespace behavior, fd lifetime/reuse and
    permissions are explicit qualification obligations, not supplied by a string
-   spelling such as `/proc/self/fd`.
+   spelling such as `/proc/self/fd`. `EPERM` or unsupported no-atime behavior
+   refuses; never retry silently without `O_NOATIME` or use a capability override.
 4. Read only through the verified descriptor within the image/configuration
    bounds, then recheck source/ancestor and file observations. Changed or
    incomplete observations refuse. `O_NONBLOCK` is not a regular-file read
@@ -124,7 +156,10 @@ sequence, subject to native review and private kernel qualification:
 
 Linux's [open manual](https://man7.org/linux/man-pages/man2/open.2.html)
 documents `O_PATH` as a descriptor reference without opening the object for file
-I/O; a no-follow symlink result must still be rejected by type. The
+I/O and the owned-file condition for `O_NOATIME`; a no-follow symlink result
+must still be rejected by type. The
+[openat2 manual](https://man7.org/linux/man-pages/man2/openat2.2.html) documents
+the chosen resolution constraints. The
 [proc fd manual](https://man7.org/linux/man-pages/man5/proc_pid_fd.5.html)
 documents fd links and their access checks. The bounded regular-file reopening
 sequence above is a proposed use requiring the listed native proofs, not a claim

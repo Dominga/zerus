@@ -27,6 +27,7 @@ namespace TeamProfile {
 struct Span {
     int task = 0, attempt = 0;
     QString kind, member, stageKind;
+    QString record;   // #719: a test run's record ("tests": member is its suite, stageKind its status)
     double from = 0, to = 0;
     bool running = false;
     double seconds() const { return to - from; }
@@ -48,12 +49,14 @@ struct Model {
     double from = 0, to = 0;                  // the scope's window
     QList<Lane> lanes;
     QList<Span> real, planned;                // the critical paths as bars
+    QList<Span> tests;                        // U62 (#719): the test runs of the window, oldest first
     qint64 plannedSeconds = 0, realSeconds = 0;
     QHash<int, QString> titles;               // task id -> title
     QHash<int, QString> assignees;
     bool truncated = false;                   // spans past the page bound
     int tasks = 0;
-    static Model build(const Teams::Team &team, const QJsonObject &profile, const QJsonArray &timelines, double now);
+    static Model build(const Teams::Team &team, const QJsonObject &profile, const QJsonArray &timelines, double now,
+                       const QJsonArray &tests = {});
 };
 
 // The kinds the timeline colors (legend order).
@@ -71,11 +74,12 @@ class Cache : public QObject {
     Q_OBJECT
 public:
     explicit Cache(TeamController *teams, QObject *parent = nullptr);
-    static constexpr int MaxEntries = 6, MaxSpanPages = 20, SpanPage = 50, LossPage = 20;
+    // U62 (#719): at most TestPage test runs of the window, one read.
+    static constexpr int MaxEntries = 6, MaxSpanPages = 20, SpanPage = 50, LossPage = 20, TestPage = 100;
     static constexpr qint64 Stale = 60000;
     struct Entry {
         QJsonObject profile, compare;
-        QJsonArray timelines;
+        QJsonArray timelines, tests;
         QString error;
         bool loading = false, ready = false, truncated = false;
         qint64 at = 0, revision = -1;
@@ -92,6 +96,7 @@ signals:
 private:
     void load(const QString &team, const QString &scope, qint64 revision);
     void spans(const QString &key, const QString &team, int phase, int after, int pages);
+    void tests(const QString &key, const QString &team);
     void touch(const QString &key);
     TeamController *m_teams;
     QHash<QString, Entry> m_entries;

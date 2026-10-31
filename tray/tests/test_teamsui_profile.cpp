@@ -196,6 +196,7 @@ private slots:
     void cleanup() { tearDown(); }
     void profileViewShowsThePhaseAndItsLosses();
     void profileReadsInBoundedPagesAndKeepsABoundedCache();
+    void profileShowsTheTestRunsOfItsWindow();
     void profileOfALargeTeamStaysResponsive();
     void heatTintsGraphAndBoardByTimeOrTokens();
     void aHeatReadThatDrawsTheSameRebuildsNothing();
@@ -657,6 +658,71 @@ void TestTeamsUiProfile::aHeatReadThatDrawsTheSameRebuildsNothing()
     QTRY_VERIFY(!view || view != graph());
     QTRY_COMPARE(node(483).heat, QStringLiteral("lost 3h 58m"));
     QVERIFY2(node(483).tooltip.contains("Top loss: Waited for the lead (decision 1h 42m, questions 20m), 2h 02m"), qPrintable(node(483).tooltip));
+}
+
+// U62 (#719): the profiler's timeline shows the team's test runs of the scope's
+// window in a Tests row under the lanes, colored by status; one bounded read
+// after the spans, a refusal leaves the row out.
+void TestTeamsUiProfile::profileShowsTheTestRunsOfItsWindow()
+{
+    setTeam(phasedTeam());
+    QVERIFY(FakeCli::replace(script() + ".profile", QJsonDocument(profileOfPhase2()).toJson(QJsonDocument::Compact)));
+    QVERIFY(FakeCli::replace(script() + ".spans", QJsonDocument(spansOfPhase2()).toJson(QJsonDocument::Compact)));
+    const double t0 = profileStart();
+    const auto run = [](const QString &id, const QString &suite, const QString &status, double at, qint64 ms, int task) {
+        return QJsonObject{{"id", id}, {"team", "team-1"}, {"suite", suite}, {"status", status}, {"at", at}, {"duration_ms", ms},
+                           {"task", task}, {"excerpt", "x"}, {"asked_by", "frontend"}, {"affected", QJsonArray()}};
+    };
+    const QJsonArray runs{run("before", "qt-teams", "passed", t0 - 5000, 60000, 3), run("one", "qt-teams", "failed", t0 + 9000, 600000, 3),
+                          run("two", "cargo-teams", "passed", t0 + 15600, 900000, 0), run("three", "android", "timeout", t0 + 20000, 1200000, 4),
+                          run("after", "qt-teams", "passed", t0 + 30000, 60000, 3)};
+    QVERIFY(FakeCli::replace(script() + ".testresults", QJsonDocument(runs).toJson(QJsonDocument::Compact)));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1600, 980); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QPushButton *profile = nullptr;
+    QTRY_VERIFY(([&] {
+        for (auto *b : workspace.findChildren<QPushButton *>()) if (b->property("segment") == "profile" && b->isVisible()) profile = b;
+        return profile != nullptr;
+    })());
+    profile->click();
+    TeamProfileView *view = nullptr;
+    QTRY_VERIFY((view = profileViewOf(&workspace)) && view->isVisible());
+    QTRY_COMPARE(view->model().tests.size(), 3);
+    // One read of the window, after the spans: a read, bounded.
+    const auto reads = calls(script(), "test");
+    QCOMPARE(reads.size(), 1);
+    QCOMPARE(reads[0]["action"].toString(), QStringLiteral("results"));
+    QCOMPARE(reads[0]["from"].toDouble(), t0);
+    QCOMPARE(reads[0]["before"].toDouble(), t0 + 21601);
+    QCOMPARE(reads[0]["limit"].toInt(), TeamProfile::Cache::TestPage);
+    QVERIFY(!reads[0].contains("request_id"));
+    QStringList ids, suites;
+    for (const auto &span : view->model().tests) { ids << span.record; suites << span.member; }
+    QCOMPARE(ids, (QStringList{"one", "two", "three"}));
+    QCOMPARE(suites, (QStringList{"qt-teams", "cargo-teams", "android"}));
+    QCOMPARE(view->model().tests[0].stageKind, QStringLiteral("failed"));
+    QCOMPARE(view->model().tests[0].task, 3);
+    QCOMPARE(view->model().tests[0].seconds(), 600.0);
+    // The row under the lanes: the timeline is one row taller.
+    auto *timeline = workspace.findChild<QWidget *>("teamProfileTimeline");
+    QTRY_COMPARE(timeline->height(), 34 + 52 * (2 + int(view->model().lanes.size()) + 1) + 8);
+    if (shotsWanted()) {
+        shot(&workspace, "u719-profile-tests-dark");
+        workspace.setTheme(false); workspace.render();
+        lightShot(&workspace, "u719-profile-tests-light");
+        darkPalette(); workspace.setTheme(true); workspace.render();
+    }
+    // Built directly: a run outside the window stays out; no runs, no row.
+    const auto model = TeamProfile::Model::build(Teams::parse(phasedTeam()), profileOfPhase2(), spansOfPhase2(), t0 + 21600, runs);
+    QCOMPARE(model.tests.size(), 3);
+    QVERIFY(TeamProfile::Model::build(Teams::parse(phasedTeam()), profileOfPhase2(), spansOfPhase2(), t0 + 21600).tests.isEmpty());
 }
 
 QTEST_MAIN(TestTeamsUiProfile)

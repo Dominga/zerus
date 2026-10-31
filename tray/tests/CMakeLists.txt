@@ -737,8 +737,9 @@ set_tests_properties(teams PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # Graph, Board and Layers views; member cards and the task card; the plan and its
 # phases; New team and the designer; the catalog and pipelines; settings and
 # accounts; the profile and heat; what waits (permissions, the waiting page,
-# proposals, the coordinator). They share support/TeamsUiFixture.h.
-foreach(area workspace members plan newteam catalog settings profile waiting)
+# proposals, the coordinator); the Tests view (#719). They share
+# support/TeamsUiFixture.h.
+foreach(area workspace members plan newteam catalog settings profile waiting tests)
     add_executable(test_teamsui_${area} test_teamsui_${area}.cpp)
     target_include_directories(test_teamsui_${area} PRIVATE ../src)
     target_link_libraries(test_teamsui_${area} PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui hgs-speech)

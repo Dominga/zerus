@@ -58,8 +58,34 @@ pub(crate) struct Record {
     pub duration_ms: u64,
     pub excerpt: String,
     pub asked_by: String,
+    /// When the run started.
     pub at: f64,
     pub affected: Vec<String>,
+    /// #719: the task that asked for it, so its drawer lists its runs.
+    pub task: Option<u32>,
+}
+
+/// #719: a request still in the queue: waiting, or running since `started`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub(crate) struct Pending {
+    #[serde(flatten)]
+    pub request: Request,
+    pub state: String,
+    pub started: Option<f64>,
+}
+
+/// #719: at most this many queued and running requests in one read.
+pub(crate) const PENDING_LIMIT: i64 = 100;
+
+const REQUEST_COLUMNS: &str = "id,team,suite,task,targets,commit_id,input_hash,asked_by,forced,at,seconds,budget_minutes,resources,command";
+const RECORD_COLUMNS: &str = "id,team,suite,commit_id,input_hash,status,duration_ms,excerpt,asked_by,at,affected,task";
+
+fn add_column(db: &Connection, table: &str, column: &str, kind: &str) -> rusqlite::Result<()> {
+    let present = db.prepare(&format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name=?1"))?.exists([column])?;
+    if !present {
+        db.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"))?;
+    }
+    Ok(())
 }
 
 pub(crate) fn database_path() -> PathBuf {
@@ -101,13 +127,18 @@ impl TestStore {
                  CREATE INDEX IF NOT EXISTS results_team ON results(team,at);
                  CREATE INDEX IF NOT EXISTS results_at ON results(at);",
             )?;
+            // #719: a running request's start, and a result's task, in a
+            // database #717 made without them.
+            add_column(&db, "queue", "started", "REAL")?;
+            add_column(&db, "results", "task", "INTEGER")?;
+            db.execute_batch("CREATE INDEX IF NOT EXISTS results_task ON results(team,task,at);")?;
         }
         Ok(Self { db })
     }
 
     pub(crate) fn enqueue(&self, request: &Request) -> anyhow::Result<()> {
         self.db.execute(
-            "INSERT OR REPLACE INTO queue VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'queued')",
+            &format!("INSERT OR REPLACE INTO queue({REQUEST_COLUMNS},state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'queued')"),
             params![
                 request.id,
                 request.team,
@@ -129,29 +160,49 @@ impl TestStore {
     }
 
     pub(crate) fn queued(&self, team: &str) -> anyhow::Result<Vec<Request>> {
-        let mut statement = self.db.prepare(
-            "SELECT id,team,suite,task,targets,commit_id,input_hash,asked_by,forced,at,seconds,budget_minutes,resources,command
-             FROM queue WHERE team=?1 AND state='queued' ORDER BY forced DESC, at ASC",
-        )?;
-        let rows = statement.query_map([team], |row| {
-            Ok(Request {
-                id: row.get(0)?,
-                team: row.get(1)?,
-                suite: row.get(2)?,
-                task: row.get(3)?,
-                targets: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default(),
-                commit: row.get(5)?,
-                input_hash: row.get(6)?,
-                asked_by: row.get(7)?,
-                forced: row.get::<_, i64>(8)? != 0,
-                at: row.get(9)?,
-                seconds: row.get(10)?,
-                budget_minutes: row.get(11)?,
-                resources: row.get(12)?,
-                command: row.get(13)?,
-            })
+        let mut statement = self.db.prepare(&format!(
+            "SELECT {REQUEST_COLUMNS} FROM queue WHERE team=?1 AND state='queued' ORDER BY forced DESC, at ASC"
+        ))?;
+        let rows = statement.query_map([team], Self::request)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// #719: what the Tests view shows as the queue: the running requests
+    /// first, then the waiting ones in the order the scheduler weighs them.
+    pub(crate) fn pending(&self, team: &str) -> anyhow::Result<Vec<Pending>> {
+        let mut statement = self.db.prepare(&format!(
+            "SELECT {REQUEST_COLUMNS},state,started FROM queue WHERE team=?1 AND state IN ('queued','running')
+             ORDER BY state='running' DESC, forced DESC, at ASC LIMIT ?2"
+        ))?;
+        let rows = statement.query_map(params![team, PENDING_LIMIT], |row| {
+            Ok(Pending { request: Self::request(row)?, state: row.get(14)?, started: row.get(15)? })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    fn request(row: &rusqlite::Row<'_>) -> rusqlite::Result<Request> {
+        Ok(Request {
+            id: row.get(0)?,
+            team: row.get(1)?,
+            suite: row.get(2)?,
+            task: row.get(3)?,
+            targets: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default(),
+            commit: row.get(5)?,
+            input_hash: row.get(6)?,
+            asked_by: row.get(7)?,
+            forced: row.get::<_, i64>(8)? != 0,
+            at: row.get(9)?,
+            seconds: row.get(10)?,
+            budget_minutes: row.get(11)?,
+            resources: row.get(12)?,
+            command: row.get(13)?,
+        })
+    }
+
+    /// #719: the request runs now; the Tests view shows it as running.
+    fn start(&self, id: &str, at: f64) -> anyhow::Result<()> {
+        self.db.execute("UPDATE queue SET state='running', started=?2 WHERE id=?1", params![id, at])?;
+        Ok(())
     }
 
     fn finish(&self, id: &str) -> anyhow::Result<()> {
@@ -163,8 +214,7 @@ impl TestStore {
     /// hash, status, duration, a bounded excerpt and who asked.
     fn write(&self, record: &Record) -> anyhow::Result<()> {
         self.db.execute(
-            "INSERT OR REPLACE INTO results(id,team,suite,commit_id,input_hash,status,duration_ms,excerpt,asked_by,at,affected)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            &format!("INSERT OR REPLACE INTO results({RECORD_COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)"),
             params![
                 record.id,
                 record.team,
@@ -176,7 +226,8 @@ impl TestStore {
                 record.excerpt,
                 record.asked_by,
                 record.at,
-                serde_json::to_string(&record.affected)?
+                serde_json::to_string(&record.affected)?,
+                record.task
             ],
         )?;
         // Bounded: only the oldest records past the limit go.
@@ -192,20 +243,21 @@ impl TestStore {
 
     /// The last result for the same inputs, if the runner already measured it.
     pub(crate) fn reused(&self, suite: &str, commit: &str, input_hash: &str) -> anyhow::Result<Option<Record>> {
-        let mut statement = self.db.prepare(
-            "SELECT id,team,suite,commit_id,input_hash,status,duration_ms,excerpt,asked_by,at,affected
-             FROM results WHERE suite=?1 AND commit_id=?2 AND input_hash=?3 ORDER BY seq DESC LIMIT 1",
-        )?;
+        let mut statement = self.db.prepare(&format!(
+            "SELECT {RECORD_COLUMNS} FROM results WHERE suite=?1 AND commit_id=?2 AND input_hash=?3 ORDER BY seq DESC LIMIT 1"
+        ))?;
         Ok(statement.query_row(params![suite, commit, input_hash], Self::record).optional()?)
     }
 
-    pub(crate) fn results(&self, team: Option<&str>, before: Option<f64>, limit: usize) -> anyhow::Result<Vec<Record>> {
+    /// Newest first, a page before `before`; #719: only one task's runs, or
+    /// only runs that started at `from` or later (the profiler's window).
+    pub(crate) fn results(&self, team: Option<&str>, before: Option<f64>, limit: usize, task: Option<u32>, from: Option<f64>) -> anyhow::Result<Vec<Record>> {
         let limit = limit.clamp(1, 100) as i64;
-        let mut statement = self.db.prepare(
-            "SELECT id,team,suite,commit_id,input_hash,status,duration_ms,excerpt,asked_by,at,affected
-             FROM results WHERE (?1 IS NULL OR team=?1) AND (?2 IS NULL OR at<?2) ORDER BY at DESC, seq DESC LIMIT ?3",
-        )?;
-        let rows = statement.query_map(params![team, before, limit], Self::record)?;
+        let mut statement = self.db.prepare(&format!(
+            "SELECT {RECORD_COLUMNS} FROM results WHERE (?1 IS NULL OR team=?1) AND (?2 IS NULL OR at<?2)
+             AND (?4 IS NULL OR task=?4) AND (?5 IS NULL OR at>=?5) ORDER BY at DESC, seq DESC LIMIT ?3"
+        ))?;
+        let rows = statement.query_map(params![team, before, limit, task, from], Self::record)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -222,6 +274,7 @@ impl TestStore {
             asked_by: row.get(8)?,
             at: row.get(9)?,
             affected: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or_default(),
+            task: row.get(11)?,
         })
     }
 }
@@ -356,8 +409,11 @@ fn shell(command: &str, cwd: &Path) -> Command {
 /// nonzero exit is the result's status.
 pub(crate) fn run_due(store: &TestStore, project: &Path, requests: &[Request], now: f64) -> anyhow::Result<Vec<Record>> {
     let mut written = Vec::new();
+    let began = std::time::Instant::now();
     for request in requests {
         let started = std::time::Instant::now();
+        let at = now + began.elapsed().as_secs_f64();
+        store.start(&request.id, at)?;
         let mut process = shell(&request.command_for(project), project);
         let outcome = run_tree(&mut process, Duration::from_secs((request.budget_minutes.max(1.0) * 60.0) as u64), None);
         let status = if outcome.timed_out {
@@ -378,8 +434,9 @@ pub(crate) fn run_due(store: &TestStore, project: &Path, requests: &[Request], n
             duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             excerpt,
             asked_by: request.asked_by.clone(),
-            at: now,
+            at,
             affected: request.targets.clone(),
+            task: request.task,
         };
         store.write(&record)?;
         store.finish(&request.id)?;
@@ -492,6 +549,7 @@ mod tests {
             asked_by: "dev".into(),
             at: 10.0,
             affected: Vec::new(),
+            task: None,
         };
         record_notices(&mut team, std::slice::from_ref(&record), 100.0);
         assert_eq!(team.test_load_at, 100.0);
@@ -545,15 +603,16 @@ mod tests {
             id: id.into(), team: "t".into(), suite: suite.into(), commit: "c".into(), input_hash: "h".into(),
             status: "passed".into(), duration_ms: 10, excerpt: "ok".into(), asked_by: "dev".into(), at,
             affected: vec!["a".into()],
+            task: None,
         };
         store.write(&record("1", "cargo", 1.0)).unwrap();
         store.write(&record("2", "cargo", 2.0)).unwrap();
         let found = store.reused("cargo", "c", "h").unwrap().unwrap();
         assert_eq!(found.id, "2");
-        let page = store.results(Some("t"), None, 1).unwrap();
+        let page = store.results(Some("t"), None, 1, None, None).unwrap();
         assert_eq!(page.len(), 1);
         assert_eq!(page[0].id, "2");
-        let older = store.results(Some("t"), Some(2.0), 10).unwrap();
+        let older = store.results(Some("t"), Some(2.0), 10, None, None).unwrap();
         assert_eq!(older.len(), 1);
         assert_eq!(older[0].id, "1");
     }
@@ -573,6 +632,73 @@ mod tests {
         assert!(store.queued("t").unwrap().is_empty());
         let found = store.reused("echo", "c", "h").unwrap().unwrap();
         assert_eq!(found.id, written[0].id);
+    }
+
+    /// #719: the Tests view reads the queue with what runs now first; a result
+    /// names its task, and a task or the profiler's window reads only its own.
+    #[test]
+    fn the_queue_shows_what_runs_and_a_result_names_its_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TestStore::open_at(&dir.path().join("tests.sqlite3"), false).unwrap();
+        let mut waiting = request("waiting", "qt", 5.0, false, "small");
+        waiting.task = Some(7);
+        store.enqueue(&waiting).unwrap();
+        let mut forced = request("forced", "cargo", 5.0, true, "small");
+        forced.at = 2.0;
+        store.enqueue(&forced).unwrap();
+        let mut running = request("running", "echo", 5.0, false, "small");
+        running.task = Some(7);
+        running.command = if cfg!(windows) { "exit /b 0".into() } else { "true".into() };
+        store.enqueue(&running).unwrap();
+        store.start("running", 50.0).unwrap();
+        let pending = store.pending("t").unwrap();
+        let order: Vec<(&str, &str)> = pending.iter().map(|item| (item.request.id.as_str(), item.state.as_str())).collect();
+        assert_eq!(order, [("running", "running"), ("forced", "queued"), ("waiting", "queued")]);
+        assert_eq!(pending[0].started, Some(50.0));
+        assert_eq!(serde_json::to_value(&pending[0]).unwrap()["suite"], "echo", "the request's fields sit beside its state");
+        // The scheduler never picks a running request again.
+        assert!(store.queued("t").unwrap().iter().all(|item| item.id != "running"));
+        let written = run_due(&store, dir.path(), &[running], 100.0).unwrap();
+        assert_eq!(written[0].task, Some(7));
+        assert!(store.pending("t").unwrap().iter().all(|item| item.request.id != "running"));
+        let other = Record { id: "other".into(), task: Some(8), at: 200.0, ..written[0].clone() };
+        store.write(&other).unwrap();
+        let mine: Vec<String> = store.results(Some("t"), None, 20, Some(7), None).unwrap().into_iter().map(|record| record.id).collect();
+        assert_eq!(mine, [written[0].id.clone()]);
+        let window: Vec<String> = store.results(Some("t"), None, 20, None, Some(150.0)).unwrap().into_iter().map(|record| record.id).collect();
+        assert_eq!(window, ["other"]);
+    }
+
+    /// #719: a database #717 made without the new columns gains them on open
+    /// and keeps its rows.
+    #[test]
+    fn an_older_database_gains_the_start_and_task_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tests.sqlite3");
+        {
+            let db = Connection::open(&path).unwrap();
+            db.execute_batch(
+                "CREATE TABLE queue(id TEXT PRIMARY KEY,team TEXT NOT NULL,suite TEXT NOT NULL,task INTEGER,
+                    targets TEXT NOT NULL,commit_id TEXT NOT NULL,input_hash TEXT NOT NULL,asked_by TEXT NOT NULL,
+                    forced INTEGER NOT NULL,at REAL NOT NULL,seconds REAL NOT NULL,budget_minutes REAL NOT NULL,
+                    resources TEXT NOT NULL,command TEXT NOT NULL,state TEXT NOT NULL);
+                 CREATE TABLE results(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,team TEXT NOT NULL,
+                    suite TEXT NOT NULL,commit_id TEXT NOT NULL,input_hash TEXT NOT NULL,status TEXT NOT NULL,
+                    duration_ms INTEGER NOT NULL,excerpt TEXT NOT NULL,asked_by TEXT NOT NULL,at REAL NOT NULL,
+                    affected TEXT NOT NULL);
+                 INSERT INTO results(id,team,suite,commit_id,input_hash,status,duration_ms,excerpt,asked_by,at,affected)
+                    VALUES('old','t','cargo','c','h','passed',5,'ok','dev',1.0,'[]');",
+            )
+            .unwrap();
+        }
+        let store = TestStore::open_at(&path, false).unwrap();
+        let old = store.results(Some("t"), None, 10, None, None).unwrap();
+        assert_eq!((old[0].id.as_str(), old[0].task), ("old", None));
+        store.enqueue(&request("new", "cargo", 1.0, false, "small")).unwrap();
+        assert_eq!(store.pending("t").unwrap()[0].started, None);
+        // Opening again changes nothing.
+        drop(store);
+        assert_eq!(TestStore::open_at(&path, false).unwrap().pending("t").unwrap().len(), 1);
     }
 
     #[test]
@@ -599,6 +725,7 @@ mod tests {
                 id: format!("r{index}"), team: "t".into(), suite: "s".into(), commit: "c".into(), input_hash: "h".into(),
                 status: "passed".into(), duration_ms: 1, excerpt: String::new(), asked_by: "dev".into(), at: index as f64,
                 affected: Vec::new(),
+                task: None,
             };
             store.write(&record).unwrap();
         }
@@ -606,7 +733,7 @@ mod tests {
         assert_eq!(count, RESULT_LIMIT);
         let indexed: i64 = store.db.query_row("SELECT COUNT(*) FROM pragma_index_list('results') WHERE name='results_input'", [], |row| row.get(0)).unwrap();
         assert_eq!(indexed, 1);
-        let newest = store.results(Some("t"), None, 1).unwrap();
+        let newest = store.results(Some("t"), None, 1, None, None).unwrap();
         assert_eq!(newest[0].id, format!("r{}", RESULT_LIMIT + 1));
     }
 }

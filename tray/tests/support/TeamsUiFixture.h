@@ -855,6 +855,26 @@ elif a[:2]==['team','spans']:
  tl=json.load(open(__file__+'.spans')) if os.path.exists(__file__+'.spans') else []
  rest=[t for t in tl if t['task']>body.get('after',0)];page=rest[:body.get('limit',50)]
  print(json.dumps({'team':body.get('team'),'tasks':page,'next_cursor':page[-1]['task'] if len(rest)>len(page) else None,'events':{'read':0,'truncated':False}}))
+elif a[:2]==['team','test']:
+ # #719: `.testqueue` and `.testresults` hold the database's rows; a forced
+ # submit joins the queue; `.testrefuse` refuses every call.
+ import os,time
+ if os.path.exists(__file__+'.testrefuse'):print(open(__file__+'.testrefuse').read(),file=sys.stderr);sys.exit(1)
+ queue=json.load(open(__file__+'.testqueue')) if os.path.exists(__file__+'.testqueue') else []
+ act=body.get('action')
+ if act=='queue':print(json.dumps({'status':'ok','items':queue}))
+ elif act=='results':
+  rows=json.load(open(__file__+'.testresults')) if os.path.exists(__file__+'.testresults') else []
+  rows=[r for r in rows if (body.get('task') is None or r.get('task')==body['task']) and (body.get('from') is None or r['at']>=body['from'])
+        and (body.get('before') is None or r['at']<body['before'])]
+  rows.sort(key=lambda r:-r['at']);page=rows[:min(body.get('limit',20),100)]
+  print(json.dumps({'status':'ok','items':page,'next_cursor':page[-1]['at'] if page else None}))
+ elif act=='submit':
+  item={'id':'forced-%d'%len(queue),'team':body.get('team'),'suite':body.get('suite'),'task':None,'targets':[],'asked_by':body.get('asked_by',''),
+        'forced':bool(body.get('forced')),'at':time.time(),'seconds':30,'budget_minutes':10,'resources':'small','state':'queued','started':None}
+  json.dump(queue+[item],open(__file__+'.testqueue','w'))
+  print(json.dumps({'status':'queued','suite':body.get('suite'),'request':item}))
+ else:print('hgs: Unknown test action',file=sys.stderr);sys.exit(1)
 elif a[:2]==['team','decide-proposal']:
  # U57: the receipt names the stored decision; `.proposalrefuse` refuses it,
  # `.proposalstatus` names an earlier decision (a replay).
@@ -918,6 +938,7 @@ inline void TeamsUiFixture::setUp()
     QFile::remove(script() + ".proposalstatus");
     QFile::remove(script() + ".waiting");
     QFile::remove(script() + ".waitingrefuse");
+    for (const char *suffix : {".testqueue", ".testresults", ".testrefuse"}) QFile::remove(script() + QLatin1String(suffix));
     // Decisions and Apply change the fake catalog: each test starts from the fixture.
     QVERIFY(FakeCli::replace(script() + ".catalog", QJsonDocument(catalog()).toJson(QJsonDocument::Compact)));
     setTeam(team());

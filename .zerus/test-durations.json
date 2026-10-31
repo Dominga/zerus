@@ -300,6 +300,96 @@
       "seconds": 11.477,
       "tests": 16
     },
+    "tray/test_sessionswindow_composer1": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 239.3,
+      "tests": 43
+    },
+    "tray/test_sessionswindow_composer2": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 216.46,
+      "tests": 40
+    },
+    "tray/test_sessionswindow_composer3": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 184.468,
+      "tests": 31
+    },
+    "tray/test_sessionswindow_inspector1": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 47.632,
+      "tests": 16
+    },
+    "tray/test_sessionswindow_inspector2": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 75.865,
+      "tests": 16
+    },
+    "tray/test_sessionswindow_list1": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 40.106,
+      "tests": 14
+    },
+    "tray/test_sessionswindow_list2": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 24.691,
+      "tests": 8
+    },
+    "tray/test_sessionswindow_list3": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 87.461,
+      "tests": 24
+    },
+    "tray/test_sessionswindow_list4": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 102.623,
+      "tests": 23
+    },
+    "tray/test_sessionswindow_machines": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 109.313,
+      "tests": 29
+    },
+    "tray/test_sessionswindow_projects": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 62.096,
+      "tests": 13
+    },
+    "tray/test_sessionswindow_questions": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 324.593,
+      "tests": 67
+    },
+    "tray/test_sessionswindow_settings1": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 59.115,
+      "tests": 19
+    },
+    "tray/test_sessionswindow_settings2": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 113.906,
+      "tests": 21
+    },
+    "tray/test_sessionswindow_teams": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 139.544,
+      "tests": 19
+    },
     "tray/test_shortcuts": {
       "recorded": "2026-10-28",
       "runs": 1,

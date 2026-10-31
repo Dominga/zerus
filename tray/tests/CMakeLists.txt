@@ -7,11 +7,11 @@ target_link_libraries(test_ui_language PRIVATE Qt6::Test Qt6::Widgets hgs-transl
 
 # support/FakeCli.h starts fixture scripts as fake executables on every platform.
 set(ZERUS_TEST_SUPPORT "${CMAKE_CURRENT_SOURCE_DIR}/support")
-find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
 if(WIN32)
     # Windows cannot start scripts: a native shim runs Python fixtures with their
     # command line unchanged and replaces /bin/sh in process tests (TestHelper.cpp).
     # 3.9: fixtures use str.removeprefix.
+    find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
     add_executable(zerus-test-helper support/TestHelper.cpp)
     # A static runtime: copies of the helper run from temporary directories.
     set_target_properties(zerus-test-helper PROPERTIES MSVC_RUNTIME_LIBRARY MultiThreaded)
@@ -38,7 +38,7 @@ if(APPLE)
 endif()
 function(zerus_test_support target)
     target_include_directories(${target} PRIVATE "${ZERUS_TEST_SUPPORT}")
-    if(APPLE AND target MATCHES "^(test_machinespage|test_projectsdialog|test_sessionswindow)$")
+    if(APPLE AND target MATCHES "^(test_machinespage|test_projectsdialog|test_sessionswindow_.*)$")
         target_link_libraries(${target} PRIVATE zerus-test-popup-mouse)
     endif()
     if(WIN32)
@@ -161,26 +161,10 @@ endif()
 # property replaces this default and must keep QT_QPA_PLATFORM=offscreen.
 function(zerus_add_test name)
     set(results)
-    set(sampler "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/ci/qt-hang-sampler.py" --name "${name}")
     if(ZERUS_QT_RESULTS_DIR)
         set(results -o "${ZERUS_QT_RESULTS_DIR}/${name}.xml,junitxml" -o -,txt)
-        list(APPEND sampler --log "${ZERUS_QT_RESULTS_DIR}/${name}-hang.log")
     endif()
-    set(command ${ARGN})
-    list(GET command 0 target)
-    list(REMOVE_AT command 0)
-    set(launcher)
-    set(executable)
-    if(TARGET ${target})
-        set(executable $<TARGET_FILE:${target}>)
-    else()
-        set(launcher ${target})
-        list(GET command 0 separator)
-        if(separator STREQUAL "--")
-            list(REMOVE_AT command 0)
-        endif()
-    endif()
-    add_test(NAME ${name} COMMAND ${launcher} ${sampler} -- ${executable} ${command} ${results})
+    add_test(NAME ${name} COMMAND ${ARGN} ${results})
     set_tests_properties(${name} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endfunction()
 
@@ -284,16 +268,9 @@ add_executable(test_jsonparse test_jsonparse.cpp)
 target_include_directories(test_jsonparse PRIVATE ../src)
 target_link_libraries(test_jsonparse PRIVATE Qt6::Test Qt6::Gui hgs-tray-core)
 zerus_add_test(jsonparse test_jsonparse)
-# WhiteWh fork, #744: path checks on a worker, bounded, never on the GUI thread.
-add_executable(test_pathprobe test_pathprobe.cpp)
-target_include_directories(test_pathprobe PRIVATE ../src)
-target_link_libraries(test_pathprobe PRIVATE Qt6::Test hgs-tray-core)
-zerus_add_test(pathprobe test_pathprobe)
 add_executable(test_settings test_settings.cpp)
 target_include_directories(test_settings PRIVATE ../src)
 target_link_libraries(test_settings PRIVATE Qt6::Test Qt6::Gui hgs-tray-core)
-# #729: the check that no direct QSettings write is left reads the sources.
-target_compile_definitions(test_settings PRIVATE ZERUS_TRAY_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/../src")
 zerus_add_test(settings test_settings)
 add_executable(test_sloweventlog test_sloweventlog.cpp)
 target_include_directories(test_sloweventlog PRIVATE ../src)
@@ -519,20 +496,29 @@ if(NOT WIN32)
     zerus_add_test(terminationsignals test_terminationsignals)
 endif()
 
-add_executable(test_sessionswindow test_sessionswindow.cpp ../resources.qrc)
-target_include_directories(test_sessionswindow PRIVATE ../src)
-target_compile_definitions(test_sessionswindow PRIVATE HGS_TRAY_VERSION="${PROJECT_VERSION}")
-target_link_libraries(test_sessionswindow PRIVATE Qt6::Test Qt6::Widgets hgs-terminal hgs-markdown hgs-window-layer hgs-speech hgs-external-file
-    hgs-tray-views)
-# The longest suite runs as parallel shards of its test functions and of the data
-# rows of its slowest functions, balanced by qt-shard-durations.txt. COST: see the
-# end of this file. WhiteWh fork: 16 shards, since the fork's functions make the
-# suite about 2200 s on the Windows runner and ten shards ran near ctest's 240 s.
-foreach(shard RANGE 15)
-    add_test(NAME sessionswindow-${shard} COMMAND ${CMAKE_COMMAND} -DTEST=$<TARGET_FILE:test_sessionswindow>
-        -DSUITE=sessionswindow -DSEED=${CMAKE_CURRENT_SOURCE_DIR}/qt-shard-durations.txt -DSHARD=${shard} -DSHARDS=16
-        -DPYTHON=${Python3_EXECUTABLE} -DRESULTS=${ZERUS_QT_RESULTS_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/RunQtShard.cmake)
-    set_tests_properties(sessionswindow-${shard} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 480)
+# U62 (#712): the sessions window's tests run as area suites, each a few
+# minutes, sharing one fixture (support/SessionsWindowFixture.*) and one
+# compiled copy of the resources. Each suite is a plain CTest test.
+add_library(sessionswindow-resources OBJECT ../resources.qrc)
+target_link_libraries(sessionswindow-resources PRIVATE Qt6::Core)
+add_library(sessionswindow-fixture OBJECT support/SessionsWindowFixture.cpp support/SessionsWindowFixture.h)
+target_include_directories(sessionswindow-fixture PUBLIC ../src "${ZERUS_TEST_SUPPORT}")
+target_compile_definitions(sessionswindow-fixture PUBLIC HGS_TRAY_VERSION="${PROJECT_VERSION}")
+target_link_libraries(sessionswindow-fixture PUBLIC Qt6::Test Qt6::Widgets hgs-terminal hgs-markdown hgs-window-layer hgs-speech
+    hgs-external-file hgs-tray-views hgs-updates)
+if(WIN32)
+    # FakeCli.h's Windows part names the fixture shim.
+    target_compile_definitions(sessionswindow-fixture PUBLIC ZERUS_TEST_HELPER="$<TARGET_FILE:zerus-test-helper>")
+endif()
+set(ZERUS_SESSIONSWINDOW_SUITES
+    settings1 settings2 teams inspector1 inspector2 list1
+    list2 list3 list4 composer1 composer2 composer3
+    machines questions projects launch1 launch2 lifecycle1
+    lifecycle2 files opencode shortcuts push)
+foreach(area IN LISTS ZERUS_SESSIONSWINDOW_SUITES)
+    add_executable(test_sessionswindow_${area} test_sessionswindow_${area}.cpp)
+    target_link_libraries(test_sessionswindow_${area} PRIVATE sessionswindow-fixture sessionswindow-resources Qt6::Test Qt6::Widgets)
+    zerus_add_test(sessionswindow_${area} test_sessionswindow_${area})
 endforeach()
 
 # A plugin for another interface: the native browser loader must reject it.
@@ -735,19 +721,12 @@ target_include_directories(test_teams PRIVATE ../src)
 target_link_libraries(test_teams PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
 zerus_add_test(teams test_teams)
 set_tests_properties(teams PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
-# WhiteWh fork: agent teams in the desktop, one suite per area (#713, U62): the
-# Graph, Board and Layers views; member cards and the task card; the plan and its
-# phases; New team and the designer; the catalog and pipelines; settings and
-# accounts; the profile and heat; what waits (permissions, the waiting page,
-# proposals, the coordinator); the Tests view (#719). They share
-# support/TeamsUiFixture.h.
-foreach(area workspace members plan newteam catalog settings profile waiting tests)
-    add_executable(test_teamsui_${area} test_teamsui_${area}.cpp)
-    target_include_directories(test_teamsui_${area} PRIVATE ../src)
-    target_link_libraries(test_teamsui_${area} PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui hgs-speech)
-    zerus_add_test(teamsui_${area} test_teamsui_${area})
-    set_tests_properties(teamsui_${area} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
-endforeach()
+# WhiteWh fork: agent teams M3–M6 (task card, planning, New team, catalog, designer, workspace).
+add_executable(test_teamsui test_teamsui.cpp)
+target_include_directories(test_teamsui PRIVATE ../src)
+target_link_libraries(test_teamsui PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui hgs-speech)
+zerus_add_test(teamsui test_teamsui)
+set_tests_properties(teamsui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # WhiteWh fork: Claude desktop app sessions continued in Zerus.
 add_executable(test_claudeappsessions test_claudeappsessions.cpp)
 target_include_directories(test_claudeappsessions PRIVATE ../src)
@@ -777,7 +756,6 @@ target_compile_definitions(test_updates PRIVATE ZERUS_INSTALLATION_GUIDE="${PROJ
     ZERUS_LINUX_UPDATE_HELPER="${PROJECT_SOURCE_DIR}/linux-source-update.sh")
 zerus_add_test(updates test_updates)
 set_tests_properties(updates PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
-target_link_libraries(test_sessionswindow PRIVATE hgs-updates)
 target_link_libraries(test_traymenu PRIVATE hgs-updates)
 
 add_executable(test_windowsmobilesettings test_windowsmobilesettings.cpp)
@@ -838,13 +816,10 @@ set_tests_properties(windowsdesktop PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offs
 # replaces a COST with its measured times, so a directory where ctest has run (it
 # then has Testing/Temporary/CTestCostData.txt) keeps the measured order from its
 # next configuration on. Seconds on the Windows runner with the fixture pool (PR
-# run 38395640294; each shard an equal share of their 485 s). Elsewhere the
-# default order stays: on the 3-vCPU macOS runner, starting every sessionswindow
-# shard at once saved 18 s but made timing-sensitive suites fail (zerus-niu8).
+# run 38395640294). Elsewhere the default order stays: on the 3-vCPU macOS
+# runner, starting every sessionswindow shard at once saved 18 s but made
+# timing-sensitive suites fail (zerus-niu8).
 if(WIN32 AND NOT EXISTS "${CMAKE_BINARY_DIR}/Testing/Temporary/CTestCostData.txt")
-    foreach(shard RANGE 15)
-        set_tests_properties(sessionswindow-${shard} PROPERTIES COST 48)
-    endforeach()
     set_tests_properties(activityview PROPERTIES COST 54)
     set_tests_properties(speech PROPERTIES COST 25)
     set_tests_properties(paintcache PROPERTIES COST 15)

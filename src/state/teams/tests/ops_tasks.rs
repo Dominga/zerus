@@ -911,3 +911,54 @@ fn only_a_finding_makes_an_urgent_phase_and_only_the_owner_forces_a_finish() {
     apply(&mut team, "finish", &json!({"summary":"Done","force":true}), &Actor::Human, &none, &mut events).unwrap();
     assert_eq!(team.status, TeamStatus::Done);
 }
+
+#[test]
+fn the_lead_sets_a_tasks_estimate_in_the_plan_and_edits_it_in_the_draft() {
+    let (mut team, _) = create(
+        "t",
+        &json!({"name":"Checkout","lead":{"id":"lead","agent":"claude","session":{"name":"claude/x/lead"}}}),
+    )
+    .unwrap();
+    let lead = Actor::Member("lead".into());
+    let mut events = Vec::new();
+    plan(
+        &mut team,
+        &json!({"members":[{"id":"dev","role":"Backend","agent":"codex"}],
+            "tasks":[{"id":1,"title":"API","assignee":"dev","estimate_minutes":45}]}),
+        &lead,
+        &mut events,
+    )
+    .unwrap();
+    let task = team.task(1).unwrap();
+    assert_eq!((task.estimate_minutes, task.estimate_source.as_str()), (Some(45.0), "lead"));
+    // A plan estimate is in minutes and bounded.
+    let (mut bad, _) = create(
+        "b",
+        &json!({"name":"Bad","lead":{"id":"lead","agent":"claude","session":{"name":"claude/x/lead"}}}),
+    )
+    .unwrap();
+    let error = plan(
+        &mut bad,
+        &json!({"members":[{"id":"dev","role":"Backend","agent":"codex"}],
+            "tasks":[{"id":1,"title":"API","assignee":"dev","estimate_minutes":0}]}),
+        &lead,
+        &mut Vec::new(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("1 to 1440"), "{error}");
+    // The lead sets the estimate on a later phase too (extend parses the
+    // tasks like the plan does).
+    approve(&mut team, &json!({}), &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
+    apply(
+        &mut team,
+        "extend",
+        &json!({"phase_title":"Next","tasks":[{"id":2,"title":"Next API","assignee":"dev","estimate_minutes":60}]}),
+        &lead,
+        &BTreeSet::new(),
+        &mut Vec::new(),
+    )
+    .unwrap();
+    let extended = team.task(2).unwrap();
+    assert_eq!((extended.estimate_minutes, extended.estimate_source.as_str()), (Some(60.0), "lead"));
+}

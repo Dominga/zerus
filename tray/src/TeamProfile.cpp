@@ -1,6 +1,7 @@
 #include "TeamProfile.h"
 #include "TeamController.h"
 #include "TeamWidgets.h"
+#include "TeamTests.h"
 #include <QComboBox>
 #include <QFile>
 #include <QFileDialog>
@@ -118,7 +119,7 @@ QString kindName(const QString &kind, const QString &stageKind)
     return QObject::tr("Not recorded");
 }
 
-Model Model::build(const Teams::Team &team, const QJsonObject &profile, const QJsonArray &timelines, double now)
+Model Model::build(const Teams::Team &team, const QJsonObject &profile, const QJsonArray &timelines, double now, const QJsonArray &tests)
 {
     Model model;
     model.profile = profile;
@@ -214,6 +215,17 @@ Model Model::build(const Teams::Team &team, const QJsonObject &profile, const QJ
         model.planned << span;
         model.plannedSeconds += qint64(first);
     }
+    // U62 (#719): the window's test runs, from the team's test database.
+    for (const auto &value : tests) {
+        const auto record = value.toObject();
+        Span run; run.kind = QStringLiteral("tests"); run.task = record.value("task").toInt();
+        run.record = record.value("id").toString(); run.member = record.value("suite").toString();
+        run.stageKind = record.value("status").toString();
+        run.from = record.value("at").toDouble(); run.to = run.from + std::max(1.0, record.value("duration_ms").toDouble() / 1000);
+        if (model.to > model.from && (run.to < model.from || run.from > model.to)) continue;
+        model.tests << run;
+    }
+    std::sort(model.tests.begin(), model.tests.end(), [](const Span &a, const Span &b) { return a.from < b.from; });
     return model;
 }
 
@@ -295,9 +307,27 @@ void Cache::spans(const QString &key, const QString &team, int phase, int after,
         // Bounded: at most MaxSpanPages pages; the rest is named, never read.
         if (next > 0 && pages + 1 < MaxSpanPages) { spans(key, team, phase, next, pages + 1); return; }
         entry.truncated = next > 0;
-        entry.loading = false; entry.ready = true; entry.at = QDateTime::currentMSecsSinceEpoch();
-        emit changed(team, scope);
+        tests(key, team);
     }, false, 60000);
+}
+
+// U62 (#719): the test runs of the scope's window, one bounded read. A refusal
+// (an older hgs) leaves the Tests row out; the profile still shows.
+void Cache::tests(const QString &key, const QString &team)
+{
+    const quint64 generation = m_generation.value(key);
+    const auto summary = m_entries.value(key).profile.value("summary").toObject();
+    QJsonObject input{{"team", team}, {"action", "results"}, {"limit", TestPage}};
+    if (summary.value("from").toDouble() > 0) input.insert("from", summary.value("from").toDouble());
+    if (summary.value("to").toDouble() > 0) input.insert("before", summary.value("to").toDouble() + 1);
+    ++m_reads;
+    m_teams->call(QStringLiteral("test"), input, [this, key, team, generation](bool ok, const QJsonObject &result, const QString &) {
+        if (!m_entries.contains(key) || m_generation.value(key) != generation) return;
+        auto &entry = m_entries[key];
+        entry.tests = ok ? result.value("items").toArray() : QJsonArray();
+        entry.loading = false; entry.ready = true; entry.at = QDateTime::currentMSecsSinceEpoch();
+        emit changed(team, key.section(QLatin1Char('\n'), 1));
+    }, false);
 }
 
 void Cache::moreTasks(const QString &team, const QString &scope)
@@ -347,7 +377,7 @@ public:
     int selected() const { return m_selected; }
     std::function<void(int task)> clicked;
     static constexpr int Top = 34, Row = 52, Label = 210;
-    int heightFor() const { return m_model ? Top + Row * (2 + int(m_model->lanes.size())) + 8 : 120; }
+    int heightFor() const { return m_model ? Top + Row * (2 + int(m_model->lanes.size()) + (m_model->tests.isEmpty() ? 0 : 1)) + 8 : 120; }
     int laneY(const QString &member) const
     {
         if (!m_model) return -1;
@@ -444,6 +474,18 @@ protected:
             p.setPen(alpha(c.border, .5)); p.drawLine(12, y + Row - 1, width() - 12, y + Row - 1);
             y += Row;
         }
+        // U62 (#719): the test runs, colored by their status, named by suite.
+        if (!m_model->tests.isEmpty()) {
+            const int count = int(m_model->tests.size());
+            rowLabel(tr("Tests"), count >= Cache::TestPage ? QStringLiteral("%1+").arg(count) : QString::number(count), true);
+            for (const auto &run : m_model->tests) bar(run, y + 12, 18, testColor(run.stageKind, c), false, run.member);
+        }
+    }
+    static QColor testColor(const QString &status, const Colors &c)
+    {
+        if (status == "passed" || status == "reused") return c.accent;
+        if (status == "timeout") return c.warn;
+        return c.danger;
     }
     const Span *spanAt(const QPoint &point, QString *lane = nullptr) const
     {
@@ -456,6 +498,7 @@ protected:
         if (row == 0) return hit(m_model->real);
         if (row == 1) return hit(m_model->planned);
         const int at = row - 2;
+        if (at == m_model->lanes.size() && !m_model->tests.isEmpty()) return hit(m_model->tests);
         if (at < 0 || at >= m_model->lanes.size()) return nullptr;
         if (lane) *lane = m_model->lanes[at].member;
         const int inRow = (point.y() - Top) % Row;
@@ -465,7 +508,13 @@ protected:
     {
         if (event->type() == QEvent::ToolTip) {
             const auto *help = static_cast<QHelpEvent *>(event);
-            if (const auto *span = spanAt(help->pos())) {
+            if (const auto *span = spanAt(help->pos()); span && span->kind == "tests") {
+                const QString when = QStringLiteral("%1 to %2").arg(QDateTime::fromSecsSinceEpoch(qint64(span->from)).toString("HH:mm"),
+                                                                     QDateTime::fromSecsSinceEpoch(qint64(span->to)).toString("HH:mm"));
+                QString text = tr("Tests: %1\n%2, %3, %4").arg(span->member, TeamTests::statusName(span->stageKind), duration(qint64(span->seconds())), when);
+                if (span->task) text += tr("\nAsked for #%1 %2").arg(span->task).arg(m_model->titles.value(span->task));
+                QToolTip::showText(help->globalPos(), text, this);
+            } else if (const auto *span = spanAt(help->pos())) {
                 const QString when = QStringLiteral("%1 to %2").arg(QDateTime::fromSecsSinceEpoch(qint64(span->from)).toString("HH:mm"),
                                                                      span->running ? tr("now") : QDateTime::fromSecsSinceEpoch(qint64(span->to)).toString("HH:mm"));
                 QToolTip::showText(help->globalPos(), tr("#%1 %2\n%3: %4, %5").arg(span->task).arg(m_model->titles.value(span->task),
@@ -753,7 +802,7 @@ void TeamProfileView::read()
     if (key == m_shownKey) return;
     m_shownKey = key;
     if (m_tab != "compare" && entry->ready) {
-        m_model = Model::build(m_team, entry->profile, entry->timelines, double(QDateTime::currentSecsSinceEpoch()));
+        m_model = Model::build(m_team, entry->profile, entry->timelines, double(QDateTime::currentSecsSinceEpoch()), entry->tests);
         m_model.truncated = entry->truncated;
     }
     render();

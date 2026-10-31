@@ -1,4 +1,5 @@
 #include "FakeTasksCli.h"
+#include "Settings.h"
 #include "ActivityView.h"
 #include "TaskDialogs.h"
 #include <QSplitter>
@@ -119,7 +120,7 @@ void TestTasksView::namedCardsOpenCentralViewAndRecoverTheOriginalIdentity() {
     QFile fail(dir.filePath("fail")); QVERIFY(fail.open(QIODevice::WriteOnly)); fail.write("add"); fail.close();
     QTest::keyClick(title, Qt::Key_Return);
     auto *error = inspector.findChild<QLabel *>("taskCreateError"); QTRY_VERIFY(error->isVisible()); QVERIFY(title->isReadOnly());
-    QJsonObject intent = QJsonDocument::fromJson(QSettings().value("tasks/newCard/project-1/request").toByteArray()).object();
+    QJsonObject intent = QJsonDocument::fromJson(Settings::value("tasks/newCard/project-1/request").toByteArray()).object();
     const auto identity = intent.value("request_id").toString(); QVERIFY(!QUuid(identity).isNull());
     QVERIFY(fail.remove()); QTest::keyClick(title, Qt::Key_Return);
     QTRY_COMPARE(inspector.selectedTask(), identity); QTRY_VERIFY(!opened.isEmpty());
@@ -132,7 +133,7 @@ void TestTasksView::namedCardsOpenCentralViewAndRecoverTheOriginalIdentity() {
     input->findChild<QPushButton *>("sendMessage")->click(); QTRY_VERIFY(input->sessionKey().startsWith("task-comment\n"));
     QTRY_VERIFY(taskView->findChild<QTextBrowser *>("taskInspectorDetail")->toPlainText().contains("Detailed content"));
     QCOMPARE(taskView->findChild<QLabel *>("taskViewTitle")->text(), QString("Named requirement"));
-    QVERIFY(QSettings().value("tasks/newCard/project-1/request").toByteArray().isEmpty());
+    QVERIFY(Settings::value("tasks/newCard/project-1/request").toByteArray().isEmpty());
     QFile saved(dir.filePath("tasks.json")); QVERIFY(saved.open(QIODevice::ReadOnly)); const auto state = QJsonDocument::fromJson(saved.readAll()).object(); QCOMPARE(state.value("tasks").toArray().size(), 1);
     int creates = 0;
     for (const auto &call : FakeTasksCli::calls(dir.path())) {
@@ -886,7 +887,7 @@ void TestTasksView::onlyThisSessionFiltersAndIsRemembered() {
     QCOMPARE(tile(view, "todo")->property("count").toInt(), 2); QCOMPARE(visibleRows(view), QStringList({"T-000002", "T-000003"}));
     // Queue numbers stay the project's.
     QCOMPARE(row(view, 3)->findChild<QLabel *>("taskGlyph")->text(), QString("3"));
-    QVERIFY(QSettings().value("tasks/onlySession").toBool());
+    QVERIFY(Settings::value("tasks/onlySession").toBool());
     TasksView again(&client); again.setContext("project-1", "orchard", "", "codex/api", "\ncodex/api", sessions());
     QVERIFY(again.findChild<QToolButton *>("taskOnlySession")->isChecked());
 }

@@ -334,7 +334,7 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     // Every swarm project, and the catalogs of computers not joined yet.
     m_allProjects=new QCheckBox(tr("All swarm projects"));m_allProjects->setObjectName("allSwarmProjects");
     m_allProjects->setToolTip(tr("Include projects on computers without a configured connection here."));
-    m_allProjects->setChecked(QSettings().value("workspace/allSwarmProjects",false).toBool());
+    m_allProjects->setChecked(Settings::value("workspace/allSwarmProjects",false).toBool());
     auto *catalogRow=new QHBoxLayout;catalogRow->setContentsMargins(6,4,6,0);catalogRow->addWidget(m_allProjects);catalogRow->addStretch();leftLayout->addLayout(catalogRow);
     m_swarmStatus=new QLabel; m_swarmStatus->setObjectName("projectSwarmStatus");m_swarmStatus->setTextFormat(Qt::PlainText);m_swarmStatus->setWordWrap(true);
     m_swarmStatus->setContentsMargins(6,0,6,0);leftLayout->addWidget(m_swarmStatus);
@@ -512,7 +512,7 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     connect(m_name,&QLineEdit::textEdited,this,[this]{emit catalogDraftEditing(true);});
     connect(m_name,&QLineEdit::editingFinished,this,[this]{finishRename(true);});
     connect(m_color,&QPushButton::clicked,this,&ProjectsDialog::chooseColor);
-    m_worktreeHeight=QSettings().value("workspace/projectFolderWorktrees",0).toInt();
+    m_worktreeHeight=Settings::value("workspace/projectFolderWorktrees",0).toInt();
     if(m_worktreeHeight>0)m_worktreeHeight=boundedWorktrees(m_worktreeHeight);
     m_live=new QTimer(this);m_live->setSingleShot(true);m_live->setInterval(1000);
     connect(m_live,&QTimer::timeout,this,&ProjectsDialog::refreshLive);

@@ -87,6 +87,9 @@ pub(crate) struct Seen {
     pub limited: Option<SeenLimit>,
     /// When its session last reported any event.
     pub last_event_at: Option<f64>,
+    /// #728: the tool call its turn is in, and when that call started.
+    pub tool: String,
+    pub tool_started: Option<f64>,
     /// U45: the model and effort its session record names now.
     pub model: String,
     pub effort: String,
@@ -206,6 +209,8 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 services,
                 asking: live && matches!(field("phase"), "question" | "input" | "approval"),
                 last_event_at: record["last_event_at"].as_f64(),
+                tool: field("current_tool").to_owned(),
+                tool_started: record["tool_started"].as_f64().filter(|at| *at > 0.0),
                 agent: field("agent").to_owned(),
                 live,
                 state: field("state").to_owned(),
@@ -331,7 +336,9 @@ pub(crate) enum Step {
     /// status shows them without an inspect.
     Watch { member: String, phase: String, activity: String, last_event_at: Option<f64> },
     /// U56: a busy member with no session event for stuck_minutes is stuck.
-    MarkStuck { member: String, reason: String, phase: String },
+    /// #728: `since` is the last progress Zerus saw, so the item says the
+    /// real minutes.
+    MarkStuck { member: String, reason: String, phase: String, since: f64 },
     /// U56: the member reported again or is idle: no longer stuck.
     Unstuck { member: String },
     /// U52: the member's session exited on its own and the team setting lets
@@ -770,8 +777,20 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 (listed, read) => listed.or(read),
             };
             let busy = found.activity == "busy" || matches!(found.phase.as_str(), "working" | "tool" | "compacting");
+            // #728: a turn inside a running tool call (one long Bash call that
+            // polls a test run) is the agent waiting for its own tool: working,
+            // stuck only past the much longer tool bound, counted from the
+            // call's start. A tool phase with no running call has the usual bound.
+            let in_tool = found.phase == "tool"
+                && !found.tool.is_empty()
+                && found.tool_started.is_some_and(|started| found.turn_started.is_none_or(|turn| started >= turn));
+            let last = match (in_tool, last, found.tool_started) {
+                (true, Some(last), Some(started)) => Some(last.max(started)),
+                (true, None, started) => started,
+                (_, last, _) => last,
+            };
             let quiet = last.map(|at| now - at).unwrap_or(0.0);
-            let limit = super::ops::stuck_minutes(team) * 60.0;
+            let limit = if in_tool { tool_stuck_minutes(team) * 60.0 } else { super::ops::stuck_minutes(team) * 60.0 };
             let stuck = busy && !found.asking && !found.background && !found.building && quiet >= limit;
             if stuck && member.stuck.is_none() {
                 let reason = if found.phase == "compacting" { "compaction_timeout" } else { "no_progress" };
@@ -784,10 +803,10 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                             steps.push(Step::CheckSilent { task: *task_id, last: listed.unwrap_or(0.0) });
                         }
                     } else {
-                        steps.push(Step::MarkStuck { member: member.id.clone(), reason: reason.into(), phase: found.phase.clone() });
+                        steps.push(Step::MarkStuck { member: member.id.clone(), reason: reason.into(), phase: found.phase.clone(), since: last.unwrap_or(now) });
                     }
                 } else {
-                    steps.push(Step::MarkStuck { member: member.id.clone(), reason: reason.into(), phase: found.phase.clone() });
+                    steps.push(Step::MarkStuck { member: member.id.clone(), reason: reason.into(), phase: found.phase.clone(), since: last.unwrap_or(now) });
                 }
             } else if !stuck && member.stuck.is_some() {
                 steps.push(Step::Unstuck { member: member.id.clone() });
@@ -817,7 +836,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 "pinned to {} ({}), stuck for {} min (phase {})",
                 member.id,
                 team.role_of(&member.id),
-                ((now - stuck.at) / 60.0).max(0.0).round() as u64,
+                ((now - stuck.since.unwrap_or(stuck.at)) / 60.0).max(0.0).round() as u64,
                 if stuck.phase.is_empty() { "unknown" } else { stuck.phase.as_str() }
             )),
             (None, true) => Some(format!(
@@ -1846,6 +1865,8 @@ pub(crate) fn hand_off_text_with(
         text += &format!("\nDepends on: {}\n", deps.join(", "));
     }
     text += &dependencies_text(team, task, report_host);
+    // Owner 2026-10-31: the hand-out says the task's time estimate.
+    text += &super::estimates::prompt_line(team, task);
     if let Some(previous) = task.attempts.iter().rev().find(|a| a.n < attempt.n && a.state == AttemptState::Rejected) {
         // U36: a stage returned it (no lead step): its findings, not a decision.
         let returned = task.pipeline_run.as_ref().and_then(|run| {
@@ -5091,6 +5112,11 @@ fn tell_sub_inbox(store: &mut Store, team: &Team, member: &str) -> anyhow::Resul
 /// Reminds the free lead once that a report still waits for a decision (C4).
 /// How long a member in its turn may say nothing before the lead hears.
 const SILENT_MINUTES: f64 = 20.0;
+/// #728: a member waiting in one running tool call is stuck only after six
+/// times the stuck bound, and never under an hour.
+pub(crate) fn tool_stuck_minutes(team: &Team) -> f64 {
+    (super::ops::stuck_minutes(team) * 6.0).max(60.0)
+}
 
 /// #628: a DeepSeek member's listing `last_event_at` does not advance with its
 /// dsh_native PreToolUse/PostToolUse events. Read the session's newest event
@@ -6204,14 +6230,15 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             found.seen_event_at = *last_event_at;
             Ok(())
         }),
-        Step::MarkStuck { member, reason, phase } => {
+        Step::MarkStuck { member, reason, phase, since } => {
             let role = team.role_of(member);
             change(store, &team.id, |team, events| {
                 let found = team.members.iter_mut().find(|found| found.id == *member).context("unknown member")?;
-                found.stuck = Some(MemberStuck { at: now(), reason: reason.clone(), phase: phase.clone() });
+                found.stuck = Some(MemberStuck { at: now(), reason: reason.clone(), phase: phase.clone(), since: Some(*since) });
+                let minutes = ((now() - since) / 60.0).max(0.0).round() as u64;
                 events.push(Event::new(
                     "member_stuck",
-                    json!({"member":role,"id":member,"reason":reason,"phase":phase}),
+                    json!({"member":role,"id":member,"reason":reason,"phase":phase,"minutes":minutes}),
                 ));
                 Ok(())
             })

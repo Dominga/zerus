@@ -63,6 +63,8 @@ public:
     // "Phase N waits for you": opens the Team tab with that phase unfolded.
     std::function<void()> openWorkspace;
     void showPhase(int phase);
+    // U62 (#719): the Tests view with a record's row open (a drawer's link).
+    void showTestRecord(const QString &record);
     void addMember(const Teams::Team &team);
     void render();
     // U38: how old a shown heat tint is before it is read again (a minute);
@@ -208,6 +210,7 @@ private:
     QWidget *canvas(const Teams::Team &team);
     // U38 (#665): Profile beside Graph, Board and Layers.
     QWidget *profileView(const Teams::Team &team);
+    QWidget *testsView(const Teams::Team &team);
     void linkDraft(const Teams::Team &team, int dependency, int task, bool add);
     QWidget *board(const Teams::Team &team);
     // U25 (spec 5.3, 5.5): every phase a collapsible scroll in Graph, Board and
@@ -334,6 +337,7 @@ private:
     class TeamProposalCards *m_proposalCards = nullptr;
     TeamProfile::Cache *m_profileCache = nullptr;
     QPointer<class TeamProfileView> m_profileView;
+    QPointer<class TeamTestsView> m_testsView;
     QLabel *m_empty;
     TeamTaskCard *m_drawer;
     QPointer<QFrame> m_popover;

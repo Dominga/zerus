@@ -1,4 +1,5 @@
 #include <QtTest>
+#include "Settings.h"
 
 #include <QSettings>
 #include <QSignalSpy>
@@ -83,7 +84,7 @@ void TestJsonParse::settingsReadPreparedValuesWithoutParsing()
 {
     const QString key = QStringLiteral("test/stored");
     SettingsJson::store(key, QJsonDocument(QJsonObject{{"a", 1}}));
-    QCOMPARE(QSettings().value(key).toByteArray(), QByteArray(R"({"a":1})"));
+    QCOMPARE(Settings::value(key).toByteArray(), QByteArray(R"({"a":1})"));
     QCOMPARE(SettingsJson::object(key).value("a").toInt(), 1);
     QSettings settings; SettingsJson::store(settings, key, QJsonDocument(QJsonObject{{"a", 2}}));
     QCOMPARE(SettingsJson::object(key).value("a").toInt(), 2);

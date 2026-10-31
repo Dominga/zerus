@@ -566,6 +566,9 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
     strip_stage_facts(&mut value);
     // C7: the plan-health block, with the members starving on the plan now.
     let now = super::super::now();
+    // Owner 2026-10-31: every task carries its time estimate and, while it
+    // runs, the time spent against it; accepted tasks refresh the history.
+    super::estimates::fill_status(&mut value, team, now);
     let mut validation = plan::validate(team, &BTreeSet::new());
     validation.health.starved = plan::starved(team, now);
     for starving in &validation.health.starved {
@@ -2353,10 +2356,20 @@ fn spans_view(input: &Value) -> anyhow::Result<Value> {
         None => (Vec::new(), false),
     };
     let holders = spans::holders(&team, now);
+    // Owner 2026-10-31: each timeline carries the task's estimate and, while it
+    // runs, the time spent against it.
+    let history = super::estimates::load();
     let tasks: Vec<Value> = chosen
         .iter()
         .map(|task| {
             let mut value = spans::spans(&team, task, &journal, &holders, now);
+            let estimate = super::estimates::estimate_from(&history, &team, task);
+            value["estimate_minutes"] = estimate.minutes.map_or(Value::Null, |minutes| json!(minutes));
+            value["estimate_source"] = json!(estimate.source);
+            value["estimate_text"] = json!(estimate.text());
+            if let Some(spent) = super::estimates::spent_minutes(task, now) {
+                value["estimate_spent_minutes"] = json!(spent.round());
+            }
             if cut {
                 let mut unknown: BTreeSet<String> = serde_json::from_value(value["unknown"].clone()).unwrap_or_default();
                 unknown.insert("events".into());
@@ -2455,7 +2468,8 @@ fn affected_targets(project: &std::path::Path, team: &str, suite: &str) -> anyho
     Ok(selection.runs.iter().filter(|run| run.provider == suite).flat_map(|run| run.targets.clone()).collect())
 }
 
-/// #717: `hgs team test submit|force|results` on the team's test database.
+/// #717: `hgs team test submit|force|results` on the team's test database;
+/// #719: `queue` lists what waits and what runs now.
 fn test_command(input: &Value) -> anyhow::Result<Value> {
     use super::test_queue::{self, Load, TestStore};
     let team_id = text(input, "team").to_owned();
@@ -2492,7 +2506,10 @@ fn test_command(input: &Value) -> anyhow::Result<Value> {
             request.team = team_id.clone();
             request.task = input["task"].as_u64().and_then(|id| u32::try_from(id).ok());
             request.asked_by = if asked_by.is_empty() { "You".to_owned() } else { asked_by };
-            request.forced = action == "force";
+            // #719: the desktop's Force run queues the suite as forced: the worker
+            // runs it first at its next tick, never a reused result, and no
+            // desktop call waits for the run.
+            request.forced = action == "force" || input["forced"].as_bool() == Some(true);
             request.commit = if text(input, "commit").is_empty() {
                 super::dispatcher::git_at(&project.to_string_lossy(), &["rev-parse", "HEAD"]).unwrap_or_default()
             } else {
@@ -2571,11 +2588,14 @@ fn test_command(input: &Value) -> anyhow::Result<Value> {
         "results" => {
             let limit = input["limit"].as_u64().map_or(20, |n| n as usize);
             let before = input["before"].as_f64();
-            let records = database.results(Some(&team_id), before, limit)?;
+            // #719: a task's drawer reads its own runs; the profiler its window.
+            let task = input["task"].as_u64().and_then(|id| u32::try_from(id).ok());
+            let records = database.results(Some(&team_id), before, limit, task, input["from"].as_f64())?;
             let next = records.last().map(|record| record.at);
             Ok(json!({"status":"ok","items":records,"next_cursor":next}))
         }
-        other => anyhow::bail!("Unknown test action {other}; use submit, force, results, dismiss or full-done"),
+        "queue" => Ok(json!({"status":"ok","items":database.pending(&team_id)?})),
+        other => anyhow::bail!("Unknown test action {other}; use submit, force, queue, results, dismiss or full-done"),
     }
 }
 

@@ -1,4 +1,5 @@
 #include <QtTest>
+#include "Settings.h"
 #include <QLocale>
 #include <QLabel>
 #include <QTemporaryDir>
@@ -21,7 +22,7 @@ private slots:
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
         QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, settings.path());
     }
-    void init() { QSettings().clear(); }
+    void init() { Settings::flush();QSettings().clear(); }
     void cleanup() {
         qApp->removeTranslator(&translator);
         qApp->removeTranslator(&qtTranslator);
@@ -44,7 +45,7 @@ private slots:
         choice->setCurrentIndex(choice->findData("ru"));
         QCOMPARE(zerusUiLanguage(), QString("ru"));
         QCOMPARE(QCoreApplication::translate("SettingsPage", "Appearance"), QString("Appearance"));
-        QCOMPARE(QSettings().value("fixture/unchanged").toString(), QString("keep"));
+        QCOMPARE(Settings::value("fixture/unchanged").toString(), QString("keep"));
         QCOMPARE(QSettings().allKeys(), QStringList({"fixture/unchanged", "workspace/language"}));
     }
     void russianResourceKeepsNativeAndUnfinishedText() {

@@ -1,4 +1,5 @@
 #include "Shortcuts.h"
+#include "Settings.h"
 #include <QAction>
 #include <QApplication>
 #include <QComboBox>
@@ -42,7 +43,7 @@ class TestShortcuts : public QObject {
     Q_OBJECT
 private slots:
     void init();
-    void cleanup() { QSettings().clear(); }
+    void cleanup() { Settings::flush();QSettings().clear(); }
     void defaultsAreAssignableAndUnambiguous_data();
     void defaultsAreAssignableAndUnambiguous();
     void platformDefaultsKeepSystemAndTerminalKeys();
@@ -66,7 +67,7 @@ void TestShortcuts::init()
 {
     QSettings::setDefaultFormat(QSettings::IniFormat);
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_settings.path());
-    QSettings().clear();
+    Settings::flush();QSettings().clear();
 }
 
 void TestShortcuts::defaultsAreAssignableAndUnambiguous_data()
@@ -186,7 +187,7 @@ void TestShortcuts::overridesPersistAsPortableChords()
     registry.setKeys("go.anywhere", {QKeySequence("Ctrl+J"), QKeySequence("Alt+G")});
     QCOMPARE(changed.count(), 1);
     QVERIFY(registry.customized("go.anywhere"));
-    QCOMPARE(QSettings().value("shortcuts/go.anywhere").toStringList(), (QStringList{"Ctrl+J", "Alt+G"}));
+    QCOMPARE(Settings::value("shortcuts/go.anywhere").toStringList(), (QStringList{"Ctrl+J", "Alt+G"}));
     QCOMPARE(ShortcutRegistry(Platform::Linux).keys("go.anywhere"), (QList<QKeySequence>{QKeySequence("Ctrl+J"), QKeySequence("Alt+G")}));
 
     // No chord is stored as an empty list and differs from the defaults.
@@ -210,7 +211,7 @@ void TestShortcuts::overridesPersistAsPortableChords()
     QVERIFY(!registry.customized("panel.toggle"));
     QCOMPARE(changed.count(), 8);
     registry.setKeys("go.nowhere", {QKeySequence("Ctrl+J")});
-    QVERIFY(!QSettings().contains("shortcuts/go.nowhere"));
+    QVERIFY(!Settings::contains("shortcuts/go.nowhere"));
 }
 
 void TestShortcuts::conflictsIncludeSequencePrefixes()

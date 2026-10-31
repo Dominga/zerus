@@ -1,4 +1,5 @@
 #include <QtTest>
+#include "Settings.h"
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QFile>
@@ -51,7 +52,7 @@ private slots:
         QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,m_settings.path());
     }
     void init(){
-        QSettings().clear();for(const auto &n:{"calls","old","fail-check","uncertain","wrong","hold-check","release","check-started","wrong-check","canonical-parent"})QFile::remove(m_fixture.filePath(n));
+        Settings::flush();QSettings().clear();for(const auto &n:{"calls","old","fail-check","uncertain","wrong","hold-check","release","check-started","wrong-check","canonical-parent"})QFile::remove(m_fixture.filePath(n));
         QVERIFY(FakeCli::install(m_fixture.filePath("hgs"),R"PY(#!/usr/bin/env python3
 import json,pathlib,sys,time
 root=pathlib.Path(__file__).parent
@@ -142,7 +143,7 @@ elif a[:2]==['repository','status']:print((root/'receipt').read_text())
         CloneRepositoryDialog secondAgain(&secondClient,secondHost,"Second",MachinePlatform::Style::Posix,p,{},false);
         QCOMPARE(firstAgain.findChild<QLineEdit *>("cloneParentFolder")->text(),QString("/canonical"));
         QCOMPARE(secondAgain.findChild<QLineEdit *>("cloneParentFolder")->text(),QString("/second-canonical"));
-        QCOMPARE(mutations(),before);QCOMPARE(QSettings().value("workspace/unrelated-clone-test").toString(),QString("kept"));
+        QCOMPARE(mutations(),before);QCOMPARE(Settings::value("workspace/unrelated-clone-test").toString(),QString("kept"));
     }
     void pendingRecoveryIsScopedToExecutableAndHost_data(){sourceContexts();}
     void pendingRecoveryIsScopedToExecutableAndHost(){

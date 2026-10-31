@@ -1,5 +1,6 @@
 #pragma once
 #include <QHash>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QWidget>
 #include <functional>
@@ -29,7 +30,16 @@ public:
     // The actions a member's problem offers (the Team tab's own buttons).
     std::function<QWidget *(const Teams::Member &member, const Teams::Status &status)> problemActions;
     std::function<bool(const QString &name, const QString &title, const QString &text, const QString &action)> confirm;
+    // U62 (#719): the task's test runs, read in the background when the card
+    // opens and at most every RunsStaleMs after; a run's link opens its record.
+    using RunsRead = std::function<void(const QJsonArray &runs, const QString &error)>;
+    std::function<void(int task, const RunsRead &done)> readTestRuns;
+    std::function<void(const QString &record)> openTestRecord;
+    static constexpr qint64 RunsStaleMs = 15000;
 private:
+    void readRuns();
+    struct TestRuns { int task = 0; qint64 at = 0; bool loading = false; QJsonArray runs; QString error; quint64 generation = 0; };
+    TestRuns m_runs;
     void rebuild();
     Teams::Team m_team;
     // #744: an evidence file's check and bytes, read by PathProbe's worker,

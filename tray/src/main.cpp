@@ -225,14 +225,11 @@ int main(int argc, char *argv[])
 #endif
     // HGS_TRAY_HOME (a test's launch) keeps the settings out of the real
     // profile too, not only the log and the socket (ForkLog.h): a test's tray
-    // must never write or lock the person's hgs-tray.ini.
-    if (const QString home = qEnvironmentVariable("HGS_TRAY_HOME"); !home.isEmpty()) {
-#ifdef Q_OS_WIN
-        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, home + QStringLiteral("/AppData/Roaming"));
-#else
-        QSettings::setPath(QSettings::NativeFormat, QSettings::UserScope, home + QStringLiteral("/.config"));
-#endif
-    }
+    // must never write or lock the person's hgs-tray.ini. #729 (#709 L5): an
+    // INI file on every platform, since Qt ignores setPath for macOS' native
+    // preferences, which would be the person's own.
+    if (const QString home = qEnvironmentVariable("HGS_TRAY_HOME"); !home.isEmpty())
+        Settings::useHome(home);
 
     AppConfig cfg;
     QString parseError;
@@ -344,14 +341,14 @@ int main(int argc, char *argv[])
     ForkLog::launch(QCoreApplication::applicationPid());
     // The slow-event log, on request: ZERUS_SLOW_EVENTS or debug/slowEventsMs.
     if (const int slow = SlowEventLog::thresholdFromEnvironment() ? SlowEventLog::thresholdFromEnvironment()
-                                                                 : QSettings().value(QStringLiteral("debug/slowEventsMs"), 0).toInt();
+                                                                 : Settings::value(QStringLiteral("debug/slowEventsMs"), 0).toInt();
         slow > 0) {
         app.watchSlowEvents(slow);
         ForkLog::write("info", QStringLiteral("Slow GUI event log on: events of %1 ms or more").arg(slow));
     }
     // WhiteWh fork: the fork's published builds open in the WhiteWh skin until
     // the person picks another one in Settings → Appearance.
-    if (ForkUpdater::installedBuild() > 0 && !QSettings().contains(QStringLiteral("workspace/skin")))
+    if (ForkUpdater::installedBuild() > 0 && !Settings::contains(QStringLiteral("workspace/skin")))
         Settings::set(QStringLiteral("workspace/skin"), QStringLiteral("whitewh"));
     ZerusTranslator translator;
     QTranslator qtTranslator;

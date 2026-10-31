@@ -188,8 +188,11 @@ fn a_stuck_member_is_relaunched_by_the_lead_only_with_the_owners_setting() {
     let lead = Actor::Member("lead".into());
     let none = BTreeSet::new();
     let mut events = Vec::new();
-    team.members.iter_mut().find(|member| member.id == "qa").unwrap().stuck =
-        Some(MemberStuck { at: 1.0, reason: "no_progress".into(), phase: "tool".into() });
+    {
+        let qa = team.members.iter_mut().find(|member| member.id == "qa").unwrap();
+        qa.stuck = Some(MemberStuck { at: 1.0, reason: "no_progress".into(), phase: "tool".into(), ..Default::default() });
+        qa.session = Some(SessionRef { name: "kimi/x/qa".into(), run_id: "r1".into(), conversation_id: "c".into(), ..Default::default() });
+    }
     let error = apply(&mut team, "relaunch", &json!({"member":"qa"}), &lead, &none, &mut events).unwrap_err().to_string();
     assert!(error.contains("lead_restarts_stuck"), "{error}");
     team.settings.lead_restarts_stuck = true;

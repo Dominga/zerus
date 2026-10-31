@@ -3,6 +3,7 @@
 // The fixture (the fake hgs, its teams and the shot helpers) is shared:
 // support/TeamsUiFixture.h.
 #include "TeamsUiFixture.h"
+#include "Settings.h"
 #include "ActivityView.h"
 #include "AgentWorking.h"
 #include "CollapsibleBlock.h"
@@ -240,7 +241,8 @@ void TestTeamsUiWorkspace::workspaceShowsGraphBoardAndFocus()
     TeamPanel panel(&controller);
     TeamWorkspace workspace(&controller, &panel);
     workspace.setLive(live);
-    workspace.resize(1300, 820); workspace.show();
+    // #719: Tests is a fifth view; its words need 100 px more.
+    workspace.resize(1400, 820); workspace.show();
     controller.refresh();
     panel.showTeam("team-1");
     workspace.showTeam("team-1");
@@ -409,8 +411,8 @@ void TestTeamsUiWorkspace::lanesGroupACollapseInEveryView()
     t["phases"] = phases;
     t["pending_phases"] = QJsonArray{3};
     setTeam(t);
-    QSettings().remove("ui/collapsed/teamLane/team-1/3/1");
-    QSettings().remove("ui/collapsed/teamLane/team-1/3/2");
+    Settings::remove("ui/collapsed/teamLane/team-1/3/1");
+    Settings::remove("ui/collapsed/teamLane/team-1/3/2");
     HgsClient client(FakeCli::program(script()));
     TeamController controller(&client);
     TeamPanel panel(&controller);
@@ -443,7 +445,7 @@ void TestTeamsUiWorkspace::lanesGroupACollapseInEveryView()
     // Collapsing a lane hides its body and remembers the choice.
     laneHeaders(3)[0]->click();
     QTRY_VERIFY(!laneBody(3, 1));
-    QCOMPARE(QSettings().value("ui/collapsed/teamLane/team-1/3/1").toBool(), true);
+    QCOMPARE(Settings::value("ui/collapsed/teamLane/team-1/3/1").toBool(), true);
     workspace.render();
     QTest::qWait(150);
     if (shotsWanted()) {   // #713: the light half of the shots
@@ -562,7 +564,7 @@ void TestTeamsUiWorkspace::lightThemeShots()
 // decided, with its tasks, in Graph, Board and Layers, and is remembered.
 void TestTeamsUiWorkspace::hideFinishedLeavesOutDecidedPhases()
 {
-    QSettings().remove("teams/hideFinished");
+    Settings::remove("teams/hideFinished");
     const auto team = Teams::parse(phasedTeam());
     QVERIFY(phaseFinished(team, 1) && !phaseFinished(team, 2) && !phaseFinished(team, 3));
     QCOMPARE(finishedPhases(team), 1);
@@ -587,12 +589,12 @@ void TestTeamsUiWorkspace::hideFinishedLeavesOutDecidedPhases()
     workspace.findChild<QAbstractButton *>("teamWorkspaceHideFinished")->click();
     QTRY_VERIFY(!phaseScrollOf(&workspace, 1));
     QVERIFY(phaseScrollOf(&workspace, 2) && phaseScrollOf(&workspace, 3));
-    QVERIFY(QSettings().value("teams/hideFinished").toBool());
+    QVERIFY(Settings::value("teams/hideFinished").toBool());
     QTRY_VERIFY(workspace.findChild<QAbstractButton *>("teamWorkspaceHideFinished")->isChecked());
     shot(&workspace, "hide-finished-dark");
     workspace.findChild<QAbstractButton *>("teamWorkspaceHideFinished")->click();
     QTRY_VERIFY(phaseScrollOf(&workspace, 1));
-    QSettings().remove("teams/hideFinished");
+    Settings::remove("teams/hideFinished");
 }
 
 // Spec 5.4: the Wide graph's geometry and routes - nodes 196x54, columns 236
@@ -1394,8 +1396,8 @@ void TestTeamsUiWorkspace::workingTimeFollowsTheActivityLabel()
 // Graph and Layers keep their columns without a horizontal bar.
 void TestTeamsUiWorkspace::boardScrollsInsteadOfSqueezingColumns()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
-    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    Settings::set("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { Settings::remove("workspace/skin"); darkPalette(); });
     setTeam(prototypeTeam());
     HgsClient client(FakeCli::program(script()));
     TeamController controller(&client);
@@ -1481,8 +1483,8 @@ void TestTeamsUiWorkspace::boardScrollsInsteadOfSqueezingColumns()
 // and one horizontal scroll at 700 px, none at 1600 px, the place kept.
 void TestTeamsUiWorkspace::planningBoardScrollsInsteadOfSqueezingColumns()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
-    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    Settings::set("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { Settings::remove("workspace/skin"); darkPalette(); });
     auto planning = team(); planning["status"] = "planning";
     setTeam(planning);
     HgsClient client(FakeCli::program(script()));
@@ -1579,11 +1581,11 @@ void TestTeamsUiWorkspace::skinTokensMatchThePrototype()
     own.darkViewColors.insert("roleCoder", "#123456");
     QCOMPARE(WorkspaceSkin::color(own, true, "roleCoder"), QColor("#123456"));
     // The team surfaces read the tokens of the selected skin.
-    QSettings().setValue("workspace/skin", "whitewh");
+    Settings::set("workspace/skin", "whitewh");
     const auto c = TeamUi::colorsFor(false);
     QCOMPARE(c.text3, QColor("#415060")); QCOMPARE(c.accentMuted, QColor("#4f8f78")); QCOMPARE(c.label, QColor("#647181"));
     QCOMPARE(c.cardBorder, QColor("#e1e6eb")); QCOMPARE(c.segOn, QColor("#e0f0e9")); QCOMPARE(c.tile, QColor("#eef2f5"));
-    QSettings().remove("workspace/skin");
+    Settings::remove("workspace/skin");
 }
 
 // U25 part 1: the new roles have the prototype's colors; a color the catalog
@@ -1592,7 +1594,7 @@ void TestTeamsUiWorkspace::rolePaletteReadsTheCatalog()
 {
     const auto saved = Teams::catalogRoleColors();
     Teams::catalogRoleColors().clear();
-    QSettings().setValue("workspace/skin", "whitewh");
+    Settings::set("workspace/skin", "whitewh");
     const QList<std::tuple<QString, QString, QString>> roles{
         {"secretary", "#7fcf9a", "#2f7d4a"}, {"coder", "#e8a75a", "#a35f10"}, {"qa", "#4fd1c5", "#0f7a72"},
         {"designer", "#ef7d8d", "#b8384b"}, {"leadgpt", "#9aa5ff", "#4652c4"}, {"expert", "#e0b070", "#8a5d16"},
@@ -1618,13 +1620,15 @@ void TestTeamsUiWorkspace::rolePaletteReadsTheCatalog()
     QCOMPARE(TeamUi::roleColor("Coder", false), QColor("#22aa55"));
     QCOMPARE(TeamUi::roleColor("qa", true), QColor("#4fd1c5"));
     Teams::catalogRoleColors() = saved;
-    QSettings().remove("workspace/skin");
+    Settings::remove("workspace/skin");
 }
 
 // U25 part 1: thin 8 px scroll bars without arrows, the thumb text3 at 24 %.
 void TestTeamsUiWorkspace::scrollBarsAreThin()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
+    // #729: through Settings, as the desktop sets it (a queued skin would hide
+    // a direct write).
+    Settings::set("workspace/skin", "whitewh");
     const QString sheet = workspaceScrollbars(true);
     QVERIFY(sheet.contains("QScrollBar:vertical { width:8px;"));
     QColor thumb("#aab1ba"); thumb.setAlphaF(.24);
@@ -1637,7 +1641,7 @@ void TestTeamsUiWorkspace::scrollBarsAreThin()
     box.show(); QTest::qWait(20);
     QTRY_VERIFY(list->verticalScrollBar()->isVisible());
     QCOMPARE(list->verticalScrollBar()->width(), 8);
-    QSettings().remove("workspace/skin");
+    Settings::remove("workspace/skin");
 }
 
 // U25 part 1: the toothed gear of the prototype (the title bar's 19 px and the
@@ -1670,7 +1674,7 @@ void TestTeamsUiWorkspace::gearAndBellOffIcons()
 // collapsed summary and its state in QSettings under its key.
 void TestTeamsUiWorkspace::collapsibleBlockKeepsItsState()
 {
-    QSettings().remove(CollapsibleBlock::settingsKey("test/folders"));
+    Settings::remove(CollapsibleBlock::settingsKey("test/folders"));
     QList<bool> changes;
     {
         CollapsibleBlock block("test/folders", "Folders", false);
@@ -1691,7 +1695,7 @@ void TestTeamsUiWorkspace::collapsibleBlockKeepsItsState()
         header->click();
         QVERIFY(block.isExpanded()); QVERIFY(row->isVisible()); QVERIFY(!summary->isVisible()); QVERIFY(add->isVisible());
         QVERIFY(header->isChecked()); QCOMPARE(header->accessibleDescription(), QString("Expanded"));
-        QCOMPARE(QSettings().value(CollapsibleBlock::settingsKey("test/folders")).toBool(), true);
+        QCOMPARE(Settings::value(CollapsibleBlock::settingsKey("test/folders")).toBool(), true);
         // The keyboard toggles it as well.
         header->setFocus(); QTest::keyClick(header, Qt::Key_Space);
         QVERIFY(!block.isExpanded());
@@ -1705,15 +1709,15 @@ void TestTeamsUiWorkspace::collapsibleBlockKeepsItsState()
     // No key keeps no state.
     CollapsibleBlock loose({}, "Loose", false);
     loose.setExpanded(true);
-    QVERIFY(!QSettings().contains(CollapsibleBlock::settingsKey({})));
-    QSettings().remove(CollapsibleBlock::settingsKey("test/folders"));
+    QVERIFY(!Settings::contains(CollapsibleBlock::settingsKey({})));
+    Settings::remove(CollapsibleBlock::settingsKey("test/folders"));
 }
 
 // U25 part 1: the agent-works indicator: an accent ring and three dots in a
 // wave under the model tile; static when animations are off.
 void TestTeamsUiWorkspace::agentWorkingIndicatorFollowsTheSetting()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
+    Settings::set("workspace/skin", "whitewh");
     const auto frame = [](bool working, double phase) {
         QImage image(17, 17 + AgentWorking::Below, QImage::Format_ARGB32_Premultiplied); image.fill(Qt::transparent);
         QPainter p(&image);
@@ -1746,13 +1750,13 @@ void TestTeamsUiWorkspace::agentWorkingIndicatorFollowsTheSetting()
     QCOMPARE(tile.size(), QSize(17, 17 + AgentWorking::Below));
     tile.hide(); QVERIFY(!tile.isAnimating());
     tile.show(); tile.setWorking(false); QVERIFY(!tile.isAnimating());
-    QSettings().remove("workspace/skin");
+    Settings::remove("workspace/skin");
 }
 
 // U25 part 1: the shots of the pieces, dark and light (ux-1-*).
 void TestTeamsUiWorkspace::foundationShots()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
+    Settings::set("workspace/skin", "whitewh");
     darkPalette();
     std::unique_ptr<QWidget> dark(foundationShowcase(true));
     dark->resize(460, 600); dark->show(); QTest::qWait(60);
@@ -1762,7 +1766,7 @@ void TestTeamsUiWorkspace::foundationShots()
     light->resize(460, 600); light->show(); QTest::qWait(60);
     if (!qEnvironmentVariable("ZERUS_TEAM_SHOTS").isEmpty()) lightShot(light.get(), "ux-1-foundation-light");
     darkPalette();
-    QSettings().remove("workspace/skin");
+    Settings::remove("workspace/skin");
 }
 
 // U25 (spec 3): the team's part of the lead session's header, in every state:
@@ -1949,7 +1953,7 @@ void TestTeamsUiWorkspace::leadHeaderFollowsTheTeamState()
 void TestTeamsUiWorkspace::leadHeaderShots()
 {
     if (qEnvironmentVariable("ZERUS_TEAM_SHOTS").isEmpty()) QSKIP("Set ZERUS_TEAM_SHOTS=<dir> to keep the pictures.");
-    QSettings().setValue("workspace/skin", "whitewh");
+    Settings::set("workspace/skin", "whitewh");
     auto phased = phasedTeam(); phased["created"] = QDateTime::currentSecsSinceEpoch() - 4140;
     auto decided = team(); decided["created"] = QDateTime::currentSecsSinceEpoch() - 8940;
     auto tasks = decided["tasks"].toArray();
@@ -1979,7 +1983,7 @@ void TestTeamsUiWorkspace::leadHeaderShots()
         }
     }
     darkPalette();
-    QSettings().remove("workspace/skin");
+    Settings::remove("workspace/skin");
 }
 
 // U25 (spec 5.1, 5.3, 5.5): every phase a collapsible scroll in Graph, Board
@@ -1991,7 +1995,7 @@ void TestTeamsUiWorkspace::leadHeaderShots()
 // and stay in the tooltips and accessible names.
 void TestTeamsUiWorkspace::aNarrowToolbarKeepsOnlyItsIcons()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
+    Settings::set("workspace/skin", "whitewh");
     setTeam(prototypeTeam());
     HgsClient client(FakeCli::program(script()));
     TeamController controller(&client);
@@ -1999,7 +2003,8 @@ void TestTeamsUiWorkspace::aNarrowToolbarKeepsOnlyItsIcons()
     TeamWorkspace workspace(&controller, &panel);
     workspace.setLive(prototypeLive);
     darkPalette(); workspace.setTheme(true);
-    workspace.resize(1440, 900); workspace.show();
+    // #719: Tests is a fifth view; its words need 100 px more.
+    workspace.resize(1540, 900); workspace.show();
     controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceFilter"));
     const auto segment = [&](const char *group, const char *value) -> QPushButton * {
@@ -2017,7 +2022,7 @@ void TestTeamsUiWorkspace::aNarrowToolbarKeepsOnlyItsIcons()
     QCOMPARE(heatMenu->toolTip(), QStringLiteral("Heat: Off"));
     QStringList choices; for (auto *action : heatMenu->menu()->actions()) choices << action->text();
     QCOMPARE(choices, (QStringList{"Off", "Time lost", "Tokens"}));
-    QSettings().remove("teams/heat/team-1");
+    Settings::remove("teams/heat/team-1");
     heatMenu->menu()->actions().at(1)->trigger();
     QCOMPARE(TeamUi::heatMode("team-1"), QStringLiteral("time"));
     QTRY_COMPARE(workspace.findChild<QPushButton *>("teamWorkspaceHeatMenu")->toolTip(), QStringLiteral("Heat: Time lost"));
@@ -2026,7 +2031,7 @@ void TestTeamsUiWorkspace::aNarrowToolbarKeepsOnlyItsIcons()
     QTRY_COMPARE(segment("teamWorkspaceView", "graph")->text(), QStringLiteral("Graph"));
     auto *split = workspace.findChild<QSplitter *>("teamWorkspaceSplit");
     QVERIFY(split);
-    split->setSizes({430, 1010});
+    split->setSizes({430, 1110});
     QTRY_VERIFY(segment("teamWorkspaceView", "graph")->text().isEmpty());
     QVERIFY(!segment("teamWorkspaceView", "graph")->icon().isNull());
     QCOMPARE(segment("teamWorkspaceView", "graph")->toolTip(), QStringLiteral("Graph"));
@@ -2043,7 +2048,7 @@ void TestTeamsUiWorkspace::aNarrowToolbarKeepsOnlyItsIcons()
     split->setSizes({1100, 340});
     QTRY_COMPARE(segment("teamWorkspaceView", "graph")->text(), QStringLiteral("Graph"));
     QTRY_COMPARE(segment("teamWorkspaceFilter", "problems")->text(), QStringLiteral("Problems"));
-    QSettings().remove("workspace/skin");
+    Settings::remove("workspace/skin");
 }
 
 // whitewh-115: in the shortened mode the toolbar jumped between its fit steps
@@ -2052,7 +2057,7 @@ void TestTeamsUiWorkspace::aNarrowToolbarKeepsOnlyItsIcons()
 // keep it across refits and polls.
 void TestTeamsUiWorkspace::theNarrowToolbarSettlesOnOneStep()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
+    Settings::set("workspace/skin", "whitewh");
     setTeam(prototypeTeam());
     HgsClient client(FakeCli::program(script()));
     TeamController controller(&client);
@@ -2141,7 +2146,7 @@ void TestTeamsUiWorkspace::theNarrowToolbarSettlesOnOneStep()
     settle(narrow);
     QTest::qWait(100);
     lightShot(bar(), "team-toolbar-settled-light");
-    QSettings().remove("workspace/skin");
+    Settings::remove("workspace/skin");
 }
 
 // U36: the Board's In review and In test columns sit between Submitted and
@@ -2152,10 +2157,10 @@ void TestTeamsUiWorkspace::theNarrowToolbarSettlesOnOneStep()
 // and stage queue. Shots of the wide and the narrow Board in both themes.
 void TestTeamsUiWorkspace::stageColumnsAndChipsOnTheBoard()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
+    Settings::set("workspace/skin", "whitewh");
     TeamUi::workedClock() = &stageNow;
     const auto restore = qScopeGuard([] {
-        QSettings().remove("workspace/skin"); darkPalette();
+        Settings::remove("workspace/skin"); darkPalette();
         TeamUi::workedClock() = [] { return double(QDateTime::currentSecsSinceEpoch()); };
     });
     setTeam(pipelineTeam());
@@ -2282,10 +2287,10 @@ void TestTeamsUiWorkspace::stageColumnsAndChipsOnTheBoard()
 // both themes.
 void TestTeamsUiWorkspace::heldByFromTheStatusOnTheBoard()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
+    Settings::set("workspace/skin", "whitewh");
     TeamUi::workedClock() = &stageNow;
     const auto restore = qScopeGuard([] {
-        QSettings().remove("workspace/skin"); darkPalette();
+        Settings::remove("workspace/skin"); darkPalette();
         TeamUi::workedClock() = [] { return double(QDateTime::currentSecsSinceEpoch()); };
     });
     auto json = pipelineTeam();
@@ -2348,11 +2353,11 @@ void TestTeamsUiWorkspace::heldByFromTheStatusOnTheBoard()
 // scroll, the open phases and the open task.
 void TestTeamsUiWorkspace::aPollThatChangesNothingDrawnRebuildsNothing()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
+    Settings::set("workspace/skin", "whitewh");
     double now = stageNow();
     TeamUi::workedClock() = [&now] { return now; };
     const auto restore = qScopeGuard([] {
-        QSettings().remove("workspace/skin"); darkPalette();
+        Settings::remove("workspace/skin"); darkPalette();
         TeamUi::workedClock() = [] { return double(QDateTime::currentSecsSinceEpoch()); };
     });
     const auto tick = [] { QVERIFY(QMetaObject::invokeMethod(&TeamUi::workedTicker(), "timeout")); };

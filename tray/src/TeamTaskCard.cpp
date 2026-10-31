@@ -1,9 +1,12 @@
 #include "Settings.h"
 #include "TeamTaskCard.h"
 #include "TeamStages.h"
+#include "TeamTests.h"
 #include "TeamWidgets.h"
 #include <QCheckBox>
 #include <QCursor>
+#include <QDateTime>
+#include <QPointer>
 #include <QDesktopServices>
 #include <QFile>
 #include <QFileInfo>
@@ -63,7 +66,25 @@ void TeamTaskCard::setTask(const Team &team, int task, const LiveLookup &live, b
 {
     if (task != m_task) { m_form.clear(); m_evidence.clear(); }
     m_team = team; m_task = task; m_live = live; m_dark = dark;
+    if (m_runs.task != task) m_runs = {task, 0, false, {}, {}, m_runs.generation + 1};
+    readRuns();
     rebuild();
+}
+
+void TeamTaskCard::readRuns()
+{
+    if (!readTestRuns || m_runs.loading || !m_task) return;
+    if (m_runs.at && QDateTime::currentMSecsSinceEpoch() - m_runs.at < RunsStaleMs) return;
+    m_runs.loading = true;
+    QPointer<TeamTaskCard> self(this);
+    const quint64 generation = m_runs.generation;
+    readTestRuns(m_task, [self, generation](const QJsonArray &runs, const QString &error) {
+        if (!self || self->m_runs.generation != generation) return;
+        const bool changed = runs != self->m_runs.runs || error != self->m_runs.error;
+        self->m_runs.loading = false; self->m_runs.at = QDateTime::currentMSecsSinceEpoch();
+        self->m_runs.runs = runs; self->m_runs.error = error;
+        if (changed) self->rebuild();
+    });
 }
 
 void TeamTaskCard::rebuild()
@@ -269,7 +290,7 @@ void TeamTaskCard::rebuild()
         if (it->permissions.isEmpty()) continue;
         section(tr("Permissions"));
         const QString key = QStringLiteral("ui/expanded/taskPermissions/%1/%2/%3").arg(m_team.id).arg(task->id).arg(it->n);
-        const bool open = QSettings().value(key, false).toBool();
+        const bool open = Settings::value(key, false).toBool();
         auto *summary = permissionToggle(it->permissions, c, open, "teamTaskPermissionsToggle");
         summary->setProperty("attempt", it->n);
         QObject::connect(summary, &QToolButton::clicked, this, [this, key](bool expanded) {
@@ -418,6 +439,39 @@ void TeamTaskCard::rebuild()
             if (!detail.isEmpty()) { auto *d = label(detail, c.text2, 12); d->setWordWrap(true); b->addWidget(d); }
             if (a.state == "revoked" || a.state == "rejected") {
                 auto *effect = new QGraphicsOpacityEffect(box); effect->setOpacity(.7); box->setGraphicsEffect(effect);
+            }
+            v->addWidget(box);
+        }
+    }
+    // U62 (#719): the test runs the task asked for, newest first; each links
+    // its record in the Tests view, where its excerpt is.
+    if (!m_runs.runs.isEmpty() || !m_runs.error.isEmpty()) {
+        section(tr("Test runs"));
+        if (!m_runs.error.isEmpty()) v->addWidget(refusal(tr("Could not read the test runs: %1").arg(m_runs.error), c, "teamTaskTestRunsError"));
+        for (const auto &value : m_runs.runs) {
+            const auto run = TeamTests::Run::parse(value.toObject());
+            auto *box = new QFrame; box->setObjectName("teamTaskTestRun"); box->setProperty("record", run.id);
+            box->setStyleSheet(QStringLiteral("QFrame#teamTaskTestRun{background:%1;border:1px solid %2;border-radius:9px;}")
+                                   .arg(c.surface.name(QColor::HexArgb), c.border.name(QColor::HexArgb)));
+            auto *h = new QHBoxLayout(box); h->setContentsMargins(10, 6, 10, 6); h->setSpacing(8);
+            const bool good = run.status == "passed" || run.status == "reused";
+            const QColor tone = good ? c.accent : run.status == "timeout" ? c.warn : c.danger;
+            auto *icon = new QLabel; icon->setPixmap(glyphPixmap(tone, good ? "done" : run.status == "timeout" ? "late" : "failed", 14)); h->addWidget(icon);
+            h->addWidget(label(run.suite, c.fg, 12, true));
+            h->addWidget(label(TeamTests::statusName(run.status), tone, 12));
+            h->addWidget(label(TeamTests::runTime(run.durationMs), c.text2, 12));
+            if (run.reused) h->addWidget(new Pill(tr("Reused"), c.folder));
+            if (run.flaky()) h->addWidget(new Pill(tr("Flaky"), c.warn));
+            if (run.overBudget) h->addWidget(new Pill(tr("Over budget"), c.danger));
+            h->addStretch();
+            h->addWidget(label(QDateTime::fromSecsSinceEpoch(qint64(run.at)).toString("HH:mm"), c.muted, 11));
+            if (openTestRecord) {
+                auto *open = new QPushButton(tr("Open record"));
+                open->setObjectName("teamTaskTestRecord"); open->setProperty("record", run.id);
+                open->setFlat(true); open->setCursor(Qt::PointingHandCursor); open->setToolTip(tr("Record %1 in the Tests view").arg(run.id));
+                open->setStyleSheet(QStringLiteral("QPushButton{color:%1;border:none;padding:0;}").arg(c.accent.name()));
+                QObject::connect(open, &QPushButton::clicked, this, [this, id = run.id] { if (openTestRecord) openTestRecord(id); });
+                h->addWidget(open);
             }
             v->addWidget(box);
         }

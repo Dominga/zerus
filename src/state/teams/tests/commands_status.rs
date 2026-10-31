@@ -1003,7 +1003,7 @@ fn status_shows_each_members_phase_activity_and_minutes_without_progress() {
     dev.seen_phase = "tool".into();
     dev.seen_activity = "busy".into();
     dev.seen_event_at = Some(crate::state::now() - 25.0 * 60.0);
-    dev.stuck = Some(MemberStuck { at: crate::state::now() - 15.0 * 60.0, reason: "no_progress".into(), phase: "tool".into() });
+    dev.stuck = Some(MemberStuck { at: crate::state::now() - 15.0 * 60.0, reason: "no_progress".into(), phase: "tool".into(), ..Default::default() });
     let value = view_with(&team, &[], None);
     let dev = value["members"].as_array().unwrap().iter().find(|member| member["id"] == "dev").unwrap();
     assert_eq!((dev["phase"].as_str(), dev["activity"].as_str()), (Some("tool"), Some("busy")));

@@ -1,4 +1,5 @@
 #include "support/PageShots.h"
+#include "Settings.h"
 #include <QtTest>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -114,7 +115,7 @@ void TestAccountsPage::initTestCase()
 }
 void TestAccountsPage::init()
 {
-    QSettings().clear();
+    Settings::flush();QSettings().clear();
     QVERIFY(m_dir.isValid()); m_script = m_dir.filePath("hgs");
     for (const auto &name : QDir(m_dir.path()).entryList(QDir::Files)) QFile::remove(m_dir.filePath(name));
     QFile script(m_script); QVERIFY(script.open(QIODevice::WriteOnly));

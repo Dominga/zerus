@@ -1,4 +1,5 @@
 #include <QtTest>
+#include "Settings.h"
 #include <QDBusMessage>
 #include <QDBusPendingReply>
 #include <QFile>
@@ -187,7 +188,7 @@ private slots:
         owned.hide(); owned.show(); QTRY_VERIFY(controller.supported() && !controller.busy()); QVERIFY(controller.onTop());
         backend.request(owned.windowTitle(), {}, std::nullopt); QTRY_COMPARE(results.size(), 3);
         backend.request(owned.windowTitle(), results.last()[0].toString(), false); QTRY_COMPARE(results.size(), 4);
-        QTRY_VERIFY(!controller.onTop() && !controller.busy()); QVERIFY(!QSettings().value("workspace/alwaysOnTop").toBool());
+        QTRY_VERIFY(!controller.onTop() && !controller.busy()); QVERIFY(!Settings::value("workspace/alwaysOnTop").toBool());
         backend.request(peer.windowTitle(), {}, std::nullopt); QTRY_COMPARE(results.size(), 5);
         QVERIFY(results.last()[2].toString().isEmpty()); QVERIFY(!results.last()[1].toBool());
         QSettings().remove("workspace/alwaysOnTop");

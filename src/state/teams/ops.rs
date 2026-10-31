@@ -334,6 +334,15 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
     if let Some(lane) = task.lane.as_mut() {
         clean_lane(lane, task.id)?;
     }
+    // Owner 2026-10-31: the lead's estimate is in minutes; a task without one
+    // gets Zerus' own from the per-computer history when it is shown.
+    if let Some(minutes) = task.estimate_minutes {
+        ensure!((1.0..=1440.0).contains(&minutes), "Task #{}: an estimate is 1 to 1440 minutes", task.id);
+        task.estimate_minutes = Some(minutes.round());
+        task.estimate_source = "lead".into();
+    } else {
+        task.estimate_source = "none".into();
+    }
     task.status = TaskStatus::Draft;
     // `plan` (and `create`'s planning tasks) always start phase 1; `extend`
     // sets the computed phase afterwards.
@@ -2121,6 +2130,25 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
             }
             task.pinned = pinned;
             fields.push("pinned");
+        }
+        // Owner 2026-10-31: the lead's estimate in minutes; null clears it and
+        // Zerus computes it from the history again.
+        if let Some(value) = value.get("estimate_minutes") {
+            let old = task.estimate_minutes.map(|minutes| format!("{} min", minutes.round() as u64)).unwrap_or_else(|| "no estimate".into());
+            task.estimate_minutes = match value {
+                Value::Null => None,
+                _ => {
+                    let minutes = value.as_f64().context("estimate_minutes is a number of minutes or null")?;
+                    ensure!((1.0..=1440.0).contains(&minutes), "Task #{id}: an estimate is 1 to 1440 minutes");
+                    Some(minutes.round())
+                }
+            };
+            task.estimate_source = if task.estimate_minutes.is_some() { "lead".into() } else { "none".into() };
+            let new = task.estimate_minutes.map(|minutes| format!("{} min", minutes.round() as u64)).unwrap_or_else(|| "no estimate".into());
+            if old != new {
+                changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"estimate_minutes","from":old,"to":new}));
+            }
+            fields.push("estimate_minutes");
         }
         // U36: the pipeline the task takes when it is assigned.
         if let Some(value) = value.get("pipeline") {

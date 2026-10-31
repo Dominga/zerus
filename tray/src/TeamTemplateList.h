@@ -107,7 +107,7 @@ public:
         for (int i = 0; i < m_list->count(); ++i) ids << m_list->item(i)->data(Qt::UserRole).toString();
         return ids;
     }
-    static QStringList favourites() { return QSettings().value(QStringLiteral("teams/templateFavourites")).toStringList(); }
+    static QStringList favourites() { return Settings::value(QStringLiteral("teams/templateFavourites")).toStringList(); }
     static bool isFavourite(const QString &id) { return favourites().contains(id); }
     void toggleFavourite(const QString &id)
     {

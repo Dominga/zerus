@@ -1,4 +1,5 @@
 #include <QMenu>
+#include "Settings.h"
 #include "MessageComposer.h"
 #include "OpenCodeModelPicker.h"
 #include "SessionCardDelegate.h"
@@ -1242,7 +1243,7 @@ void TestMessageComposer::dragResizesMessageFieldAndDoubleClickRestoresDefault()
     QCOMPARE(sendButton(*composer)->mapTo(&workspace, QPoint()), sendPosition);
     QCOMPARE(composer->editor()->toPlainText(), text);
     QCOMPARE(composer->editor()->textCursor().position(), 40); QCOMPARE(composer->editor()->textCursor().anchor(), 10);
-    QCOMPARE(QSettings().value("workspace/messageEditorHeight").toInt(), initial + 160);
+    QCOMPARE(Settings::value("workspace/messageEditorHeight").toInt(), initial + 160);
     const auto preview = qEnvironmentVariable("HGS_COMPOSER_PREVIEW");
     if (!preview.isEmpty()) {
         QVERIFY(QDir().mkpath(preview));
@@ -1256,7 +1257,7 @@ void TestMessageComposer::dragResizesMessageFieldAndDoubleClickRestoresDefault()
     QTRY_COMPARE(composer->editor()->height(), qRound((initial + 160) * 1.25));
     QTest::mouseDClick(handle, Qt::LeftButton);
     QTRY_COMPARE(composer->editor()->height(), 95); // Scaled default, rather than a hard-coded 76 px.
-    QVERIFY(!QSettings().contains("workspace/messageEditorHeight"));
+    QVERIFY(!Settings::contains("workspace/messageEditorHeight"));
     QCOMPARE(composer->editor()->toPlainText(), text); QCOMPARE(sent.count(), 0);
     composer->setInputVisible(false); QVERIFY(!handle->isVisible());
     composer->setInputVisible(true); QVERIFY(handle->isVisible());
@@ -1276,7 +1277,7 @@ void TestMessageComposer::resizedMessageFieldFitsSmallerWindowWithoutLosingPrefe
     QTRY_COMPARE(workspace.height(), 400); // A large saved preference must not raise the window's minimum height.
     QTRY_VERIFY(composer->height() <= workspace.height() * 2/3);
     QVERIFY(composer->editor()->height() >= 76); QVERIFY(sendButton(*composer)->isVisible());
-    QCOMPARE(QSettings().value("workspace/messageEditorHeight").toInt(), 420);
+    QCOMPARE(Settings::value("workspace/messageEditorHeight").toInt(), 420);
     workspace.resize(700, 1000); QTRY_COMPARE(composer->editor()->height(), 420);
     auto *handle = composer->findChild<QWidget *>("messageResizeHandle"); QVERIFY(handle);
     const auto origin = handle->rect().center();

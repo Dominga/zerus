@@ -30,7 +30,7 @@ RepositoryClone::RepositoryClone(HgsClient *client,const QString &host,MachinePl
     :QObject(parent),m_client(client),m_host(host),m_style(style)
 {
     connect(m_client,&HgsClient::repositoryFinished,this,&RepositoryClone::finish);
-    m_parent=QSettings().value(settingsKey()+"/parent","~").toString();
+    m_parent=Settings::value(settingsKey()+"/parent","~").toString();
     const auto saved=SettingsJson::object(settingsKey()+"/pending");
     if(!saved.isEmpty()){
         m_url=saved["url"].toString();m_parent=saved["parent"].toString();m_name=saved["name"].toString();
@@ -65,7 +65,7 @@ void RepositoryClone::checkResult()
 void RepositoryClone::chooseAnotherDestination()
 {
     if(busy()||!m_uncertain)return;
-    Settings::set(settingsKey()+"/previous",QSettings().value(settingsKey()+"/pending"));Settings::remove(settingsKey()+"/pending");
+    Settings::set(settingsKey()+"/previous",Settings::value(settingsKey()+"/pending"));Settings::remove(settingsKey()+"/pending");
     m_uncertain=false;m_token.clear();m_expected.clear();m_created.clear();m_name.clear();
     m_status=tr("The original checkout is kept. Choose a different destination for a new clone.");emit changed();
 }

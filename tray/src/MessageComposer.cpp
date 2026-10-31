@@ -268,7 +268,7 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
 {
     setObjectName("messageComposer"); setProperty("messageComposer", true);
     auto *layout = new QVBoxLayout(this); layout->setContentsMargins(0, 4, 0, 0); layout->setSpacing(0);
-    m_editorHeight = qBound(DefaultEditorHeight, QSettings().value(EditorHeightSetting, DefaultEditorHeight).toInt(), MaximumEditorHeight);
+    m_editorHeight = qBound(DefaultEditorHeight, Settings::value(EditorHeightSetting, DefaultEditorHeight).toInt(), MaximumEditorHeight);
     auto *handle = new ComposerResizeHandle(this); m_resizeHandle = handle; layout->addWidget(handle);
     m_toolbar = new ComposerToolbar(this); layout->addWidget(m_toolbar);
     m_attachmentsChip = new ToolbarChip; m_attachmentsChip->setObjectName("attachmentsChip");

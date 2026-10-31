@@ -1,4 +1,5 @@
 #pragma once
+#include "Settings.h"
 #include <QRegularExpression>
 #include <QSettings>
 #include <QString>
@@ -12,7 +13,7 @@ constexpr double Minimum = 0.75;
 constexpr double Maximum = 2.0;
 constexpr double Default = 1.0;
 inline double clamp(double scale) { return qBound(Minimum, scale, Maximum); }
-inline double factor() { return clamp(QSettings().value("workspace/contentScale", Default).toDouble()); }
+inline double factor() { return clamp(Settings::value("workspace/contentScale", Default).toDouble()); }
 inline int px(double size, double scale) { return qRound(size * scale); }
 
 // Scales every pixel length of generated rich text. Only markup is touched:

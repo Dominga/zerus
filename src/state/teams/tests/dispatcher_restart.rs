@@ -208,3 +208,41 @@ fn a_stage_hand_off_names_the_change_the_folder_and_the_verdict() {
     let text = stage_hand_off_text(&without, &without.task(1).unwrap().clone(), &review);
     assert!(text.contains("No commits were recorded"), "{text}");
 }
+
+/// #728 (live, 2026-10-31): frontend waited in one long Bash call polling
+/// its own test run and was marked stuck. A member inside a running tool
+/// call is working until the much longer tool bound, counted from the
+/// call's start; a tool phase with no running call has the usual bound.
+#[test]
+fn a_member_waiting_in_its_own_running_tool_call_is_not_stuck() {
+    let t = team();
+    let at = 100_000.0;
+    let lead = session("claude/x/lead", "r0", true);
+    let mut dev = session("codex/x/dev", "r1", false);
+    dev.activity = "busy".into();
+    dev.phase = "tool".into();
+    dev.turn_started = Some(at - 50.0 * 60.0);
+    dev.tool = "Bash".into();
+    dev.tool_started = Some(at - 40.0 * 60.0);
+    dev.last_event_at = Some(at - 40.0 * 60.0);
+    let marked = |seen: &Seen| steps(&t, &[lead.clone(), seen.clone()], at).into_iter().find_map(|step| match step {
+        Step::MarkStuck { since, .. } => Some(since),
+        _ => None,
+    });
+    assert_eq!(marked(&dev), None, "40 min in one running Bash call is work");
+    assert_eq!(tool_stuck_minutes(&t), 60.0);
+    // Past the tool bound it is stuck, since the call's start.
+    let mut long = dev.clone();
+    long.tool_started = Some(at - 61.0 * 60.0);
+    long.last_event_at = Some(at - 61.0 * 60.0);
+    assert_eq!(marked(&long), Some(at - 61.0 * 60.0));
+    // A tool phase with no running call: the usual 10-minute bound.
+    let mut idle_tool = dev.clone();
+    idle_tool.tool.clear();
+    idle_tool.tool_started = None;
+    assert_eq!(marked(&idle_tool), Some(at - 40.0 * 60.0));
+    // A tool started before this turn is not this turn's running call.
+    let mut old = dev.clone();
+    old.tool_started = Some(at - 55.0 * 60.0);
+    assert!(marked(&old).is_some());
+}

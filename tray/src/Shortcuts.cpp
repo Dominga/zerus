@@ -230,7 +230,7 @@ QList<QKeySequence> ShortcutRegistry::keys(const QString &id) const
     return result;
 }
 
-bool ShortcutRegistry::customized(const QString &id) const { return QSettings().contains(settingsKey(id)); }
+bool ShortcutRegistry::customized(const QString &id) const { return Settings::contains(settingsKey(id)); }
 
 void ShortcutRegistry::setKeys(const QString &id, const QList<QKeySequence> &keys)
 {

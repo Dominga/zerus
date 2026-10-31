@@ -593,7 +593,7 @@ fn the_lead_relaunches_a_stuck_member_with_lead_restarts_stuck() {
     let (mut team, _, _) = review_team();
     team.settings.lead_restarts_stuck = true;
     team.members.iter_mut().find(|member| member.id == "dev").unwrap().stuck =
-        Some(MemberStuck { at: 1.0, reason: "no_progress".into(), phase: "tool".into() });
+        Some(MemberStuck { at: 1.0, reason: "no_progress".into(), phase: "tool".into(), ..Default::default() });
     with_review_team(&team, || {
         let receipt = as_lead(|| call("relaunch", json!({"member":"dev"}))).unwrap();
         assert_eq!(receipt["status"], json!("relaunching"));
@@ -605,7 +605,7 @@ fn the_lead_relaunches_a_stuck_member_with_lead_restarts_stuck() {
     // Without the setting the lead still needs the owner's word.
     let (mut strict, _, _) = review_team();
     strict.members.iter_mut().find(|member| member.id == "dev").unwrap().stuck =
-        Some(MemberStuck { at: 1.0, reason: "no_progress".into(), phase: "tool".into() });
+        Some(MemberStuck { at: 1.0, reason: "no_progress".into(), phase: "tool".into(), ..Default::default() });
     with_review_team(&strict, || {
         let error = as_lead(|| call("relaunch", json!({"member":"dev"}))).unwrap_err().to_string();
         assert!(error.contains("owner_word"), "{error}");

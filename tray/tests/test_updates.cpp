@@ -1,4 +1,5 @@
 #include "UpdateController.h"
+#include "Settings.h"
 #include "UpdatesWidget.h"
 #include "WindowsUpdateTrust.h"
 #include "ForkUpdater.h"
@@ -326,7 +327,7 @@ echo "gui $HGS_TRAY_RESTART $ZERUS_DEV_BUILD_NUMBER $ZERUS_FORK_FEED_URL" >> "$L
         value["sourceDirty"]=false;QVERIFY(!parsedFeed(QJsonDocument(value).toJson(),"dev").valid);
     }
     void devChannelPersistsAndChecksItsIndependentFeed(){
-        QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/automatic",false);QString requested;
+        QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());Settings::flush();QSettings().clear();QSettings().setValue("updates/automatic",false);QString requested;
         UpdateController controller(nullptr,dir.path()+"/missing",[&](const QNetworkRequest &request){requested=request.url().toString();auto *reply=new FixtureReply;QTimer::singleShot(0,reply,[reply]{reply->finish("{}");});return reply;});
         controller.setChannel("dev");QCOMPARE(controller.channel(),QString("dev"));controller.check();QTRY_VERIFY(!controller.busy());QCOMPARE(requested,QString("https://zerus.dev/updates/v2/desktop/dev.json"));
         UpdateController restored(nullptr,dir.path()+"/missing");QCOMPARE(restored.channel(),QString("dev"));
@@ -335,7 +336,7 @@ echo "gui $HGS_TRAY_RESTART $ZERUS_DEV_BUILD_NUMBER $ZERUS_FORK_FEED_URL" >> "$L
     // Tests point the settings at temporary folders of their own. Later writes
     // (the next test, deferred work) go to empty settings that outlive the test
     // run instead of recreating a removed folder.
-    void cleanup(){QVERIFY(m_settings.isValid());QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,m_settings.path());QSettings().clear();}
+    void cleanup(){QVERIFY(m_settings.isValid());QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,m_settings.path());Settings::flush();QSettings().clear();}
     void validCatalog(){auto value=parsedFeed(QJsonDocument(raw()).toJson(),"stable");QVERIFY(value.valid);QCOMPARE(value.version,QString("0.37.0"));QCOMPARE(value.packages["zerus-git"].toString(),QString("0.37.0.r10.gaaaaaaa-1"));}
     void maliciousCatalog(){
         for(QString key:{"schemaVersion","product","platform","channel","releaseUrl","sourceCommit","publishedAt"}){auto value=raw();value[key]=key=="schemaVersion"?QJsonValue(2):QJsonValue("evil");QVERIFY2(!parsedFeed(QJsonDocument(value).toJson(),"stable").valid,qPrintable(key));}
@@ -405,7 +406,7 @@ echo "gui $HGS_TRAY_RESTART $ZERUS_DEV_BUILD_NUMBER $ZERUS_FORK_FEED_URL" >> "$L
     }
     void portableBuildDefaultsToStableAndFollowsNightlyNeverDev(){
 #ifdef Q_OS_WIN
-        QTemporaryDir dir;QVERIFY(dir.isValid());QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/automatic",false);
+        QTemporaryDir dir;QVERIFY(dir.isValid());QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());Settings::flush();QSettings().clear();QSettings().setValue("updates/automatic",false);
         const auto version=QCoreApplication::applicationVersion();QCoreApplication::setApplicationVersion("0.42.2");const auto restore=qScopeGuard([version]{QCoreApplication::setApplicationVersion(version);});
         QFile executable(dir.path()+"/hgs-tray.exe");QVERIFY(executable.open(QIODevice::WriteOnly));executable.close();
         QFile info(dir.path()+"/build-info.json");QVERIFY(info.open(QIODevice::WriteOnly));info.close();
@@ -416,7 +417,7 @@ echo "gui $HGS_TRAY_RESTART $ZERUS_DEV_BUILD_NUMBER $ZERUS_FORK_FEED_URL" >> "$L
             UpdateController controller(nullptr,executable.fileName(),fetch);QSignalSpy notified(&controller,&UpdateController::newerReleaseVerified);
             // Stable releases carry the same tested zip as nightlies: a new portable installation follows stable.
             QTRY_COMPARE(controller.installation().kind,QString("portable"));QCOMPARE(controller.channel(),QString("stable"));
-            QVERIFY(!QSettings().contains("updates/channel"));
+            QVERIFY(!Settings::contains("updates/channel"));
             controller.check();QTRY_VERIFY(!controller.busy());QCOMPARE(requested,QStringList{"stable.json"});
             QVERIFY(controller.updateAvailable());QCOMPARE(notified.size(),1);QCOMPARE(controller.feed().releaseUrl,QString("https://github.com/ufna/zerus/releases/tag/v0.42.3"));
             QVERIFY(controller.comparison().contains("Download its Windows zip"));
@@ -773,7 +774,7 @@ echo "gui $HGS_TRAY_RESTART $ZERUS_DEV_BUILD_NUMBER $ZERUS_FORK_FEED_URL" >> "$L
     }
     void controllerOffersRestartAfterBundleReplacement(){
 #ifdef Q_OS_MACOS
-        QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/automatic",false);
+        QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());Settings::flush();QSettings().clear();QSettings().setValue("updates/automatic",false);
         const QString contents=dir.path()+"/Zerus.app/Contents";QVERIFY(QDir().mkpath(contents+"/MacOS"));
         auto plist=[&](const QByteArray &release){QFile file(contents+"/Info.plist");QVERIFY(file.open(QIODevice::WriteOnly|QIODevice::Truncate));file.write("<plist><dict><key>CFBundleShortVersionString</key><string>0.38.0</string><key>ZerusReleaseVersion</key><string>"+release+"</string></dict></plist>");};
         plist("0.38.0.r812.gabcdef0.n41");
@@ -818,7 +819,7 @@ echo "gui $HGS_TRAY_RESTART $ZERUS_DEV_BUILD_NUMBER $ZERUS_FORK_FEED_URL" >> "$L
         QVERIFY(!UpdateController::launchedDeprioritized(20,{}));
 #ifdef Q_OS_MACOS
         QVERIFY(UpdateController::threadMaxPriority()>0);
-        QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/automatic",false);
+        QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());Settings::flush();QSettings().clear();QSettings().setValue("updates/automatic",false);
         const auto restore=qScopeGuard([]{UpdateController::setLaunchForTests(-1);});
         const QString executable=dir.path()+"/Zerus.app/Contents/MacOS/hgs-tray";
         UpdateController::setLaunchForTests(20,label);
@@ -833,7 +834,7 @@ echo "gui $HGS_TRAY_RESTART $ZERUS_DEV_BUILD_NUMBER $ZERUS_FORK_FEED_URL" >> "$L
 #ifndef Q_OS_UNIX
         QSKIP("zerus-setup is part of the macOS bundle");
 #else
-        QTemporaryDir dir;QVERIFY(dir.isValid());QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/automatic",false);
+        QTemporaryDir dir;QVERIFY(dir.isValid());QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());Settings::flush();QSettings().clear();QSettings().setValue("updates/automatic",false);
         const QString contents=dir.path()+"/Zerus.app/Contents",setup=contents+"/Resources/bin/zerus-setup";
         QVERIFY(QDir().mkpath(contents+"/MacOS"));QVERIFY(QDir().mkpath(contents+"/Resources/bin"));
         UpdateController controller(nullptr,contents+"/MacOS/hgs-tray");
@@ -854,7 +855,7 @@ echo "gui $HGS_TRAY_RESTART $ZERUS_DEV_BUILD_NUMBER $ZERUS_FORK_FEED_URL" >> "$L
     }
     void canonicalOwnershipAsync(){
 #ifdef Q_OS_LINUX
-        QTemporaryDir dir;QVERIFY(dir.isValid());QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();auto oldPath=qgetenv("PATH");qputenv("PATH",dir.path().toUtf8()+":"+oldPath);qputenv("ZERUS_TEST_LOG",(dir.path()+"/args.json").toUtf8());
+        QTemporaryDir dir;QVERIFY(dir.isValid());QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());Settings::flush();QSettings().clear();auto oldPath=qgetenv("PATH");qputenv("PATH",dir.path().toUtf8()+":"+oldPath);qputenv("ZERUS_TEST_LOG",(dir.path()+"/args.json").toUtf8());
         // The owner query answers only after the test has seen it start, which a probe
         // that held the event loop would prevent until its deadline failed the query.
         tool(dir.path()+"/pacman","#!/usr/bin/python3\nimport os,sys,json,time\nif sys.argv[1]=='-Qqo':\n open(os.environ['ZERUS_TEST_LOG'],'w').write(json.dumps(sys.argv[2:]))\n start=time.time()\n while not os.path.exists(os.environ['ZERUS_TEST_LOG']+'.release') and time.time()-start<20: time.sleep(0.01)\n print('zerus-ade-nightly-bin')\nelse: print('zerus-ade-nightly-bin 0.37.0.r100.gaaaaaaa.n1-1')\n");
@@ -872,7 +873,7 @@ echo "gui $HGS_TRAY_RESTART $ZERUS_DEV_BUILD_NUMBER $ZERUS_FORK_FEED_URL" >> "$L
     void packageProbesInheritOnlyStdio(){
 #ifdef Q_OS_LINUX
         if(!ChildProcess::inheritsStdioOnly)QSKIP("This Qt cannot close inherited descriptors");
-        QTemporaryDir dir;QVERIFY(dir.isValid());QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/automatic",false);
+        QTemporaryDir dir;QVERIFY(dir.isValid());QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());Settings::flush();QSettings().clear();QSettings().setValue("updates/automatic",false);
         auto oldPath=qgetenv("PATH");qputenv("PATH",dir.path().toUtf8()+":"+oldPath);const auto restorePath=qScopeGuard([oldPath]{qputenv("PATH",oldPath);});
         tool(dir.path()+"/pacman","#!/bin/sh\nif [ \"$1\" = -Qqo ]; then ls /dev/fd > \"$0.fds.part\" && mv \"$0.fds.part\" \"$0.fds\"; echo zerus-ade-bin; else echo 'zerus-ade-bin 0.36.2-1'; fi\n");
         QFile executable(dir.path()+"/gui");QVERIFY(executable.open(QIODevice::WriteOnly));executable.close();
@@ -885,7 +886,7 @@ echo "gui $HGS_TRAY_RESTART $ZERUS_DEV_BUILD_NUMBER $ZERUS_FORK_FEED_URL" >> "$L
 #endif
     }
     void verifiedCatalogSurvivesRestartAndRejectsCorruption(){
-        QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/automatic",false);QSettings().setValue("updates/channel","stable");QSettings().setValue("updates/catalog/stable",QJsonDocument(raw()).toJson());QSettings().setValue("updates/lastSuccess/stable",QDateTime::currentSecsSinceEpoch()-30);
+        QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());Settings::flush();QSettings().clear();QSettings().setValue("updates/automatic",false);QSettings().setValue("updates/channel","stable");QSettings().setValue("updates/catalog/stable",QJsonDocument(raw()).toJson());QSettings().setValue("updates/lastSuccess/stable",QDateTime::currentSecsSinceEpoch()-30);
         // The saved catalog is parsed off the GUI thread after startup (every suite fails on a GUI-thread parse).
         UpdateController restored(nullptr,dir.path()+"/missing");QSignalSpy changed(&restored,&UpdateController::changed);
         QTRY_VERIFY(restored.feed().valid);QVERIFY(restored.message().contains("cached"));QVERIFY(!changed.isEmpty());QCOMPARE(restored.feed().version,QString("0.37.0"));
@@ -898,7 +899,7 @@ echo "gui $HGS_TRAY_RESTART $ZERUS_DEV_BUILD_NUMBER $ZERUS_FORK_FEED_URL" >> "$L
     void archVersionComparisonUsesEpochAndPackageRelease(){
 #ifdef Q_OS_LINUX
         if(QStandardPaths::findExecutable("vercmp").isEmpty())QSKIP("Arch vercmp is unavailable");
-        QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/channel","stable");auto value=raw();value["packages"]=QJsonObject{{"zerus-ade-bin","0.37.0-10"}};QSettings().setValue("updates/catalog/stable",QJsonDocument(value).toJson());QSettings().setValue("updates/lastSuccess/stable",QDateTime::currentSecsSinceEpoch()-30);
+        QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());Settings::flush();QSettings().clear();QSettings().setValue("updates/channel","stable");auto value=raw();value["packages"]=QJsonObject{{"zerus-ade-bin","0.37.0-10"}};QSettings().setValue("updates/catalog/stable",QJsonDocument(value).toJson());QSettings().setValue("updates/lastSuccess/stable",QDateTime::currentSecsSinceEpoch()-30);
         auto oldPath=qgetenv("PATH");qputenv("PATH",dir.path().toUtf8()+":"+oldPath);tool(dir.path()+"/pacman","#!/usr/bin/python3\nimport os,sys\nprint('zerus-ade-bin' if sys.argv[1]=='-Qqo' else 'zerus-ade-bin '+os.environ['ZERUS_TEST_VERSION'])\n");QFile executable(dir.path()+"/gui");QVERIFY(executable.open(QIODevice::WriteOnly));executable.close();
         qputenv("ZERUS_TEST_VERSION","0.37.0-2");{UpdateController controller(nullptr,executable.fileName());QTRY_VERIFY_WITH_TIMEOUT(controller.message().contains("Update available"),2000);}
         qputenv("ZERUS_TEST_VERSION","1:0.37.0-2");{UpdateController controller(nullptr,executable.fileName());QTRY_VERIFY_WITH_TIMEOUT(controller.message().contains("at least"),2000);}
@@ -912,30 +913,30 @@ echo "gui $HGS_TRAY_RESTART $ZERUS_DEV_BUILD_NUMBER $ZERUS_FORK_FEED_URL" >> "$L
         QVERIFY(UpdateController::plainStableIsNewer("0.9.0","0.10.0"));QVERIFY(!UpdateController::plainStableIsNewer("0.37.0-dev","0.38.0"));QVERIFY(!UpdateController::plainStableIsNewer("0.37.0","0.37.0"));
     }
     void optOutStopsAutomaticRequestsAndKeepsManualCheck(){
-        QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/automatic",false);int requests=0;
+        QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());Settings::flush();QSettings().clear();QSettings().setValue("updates/automatic",false);int requests=0;
         UpdateController controller(nullptr,dir.path()+"/missing",[&](const QNetworkRequest &request){++requests;if(request.url()!=QUrl("https://zerus.dev/updates/v1/desktop/stable.json"))qFatal("Unexpected test endpoint");auto *reply=new FixtureReply;QTimer::singleShot(0,reply,[reply,this]{reply->finish(QJsonDocument(raw()).toJson());});return reply;});
         controller.checkOnStart();controller.checkAutomatically();controller.setChannel("nightly");controller.checkAutomatically();controller.setChannel("stable");QTest::qWait(50);QCOMPARE(requests,0);
         controller.check();QTRY_COMPARE(requests,1);QTRY_VERIFY(!controller.busy());QVERIFY(controller.feed().valid);QVERIFY(!controller.automaticChecks());
         UpdateController restored(nullptr,dir.path()+"/missing");QVERIFY(!restored.automaticChecks());
     }
     void selectedChannelChecksImmediatelyOnlyWhenEnabledAndDue(){
-        QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();int requests=0;QString selected;
+        QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());Settings::flush();QSettings().clear();int requests=0;QString selected;
         UpdateController controller(nullptr,dir.path()+"/missing",[&](const QNetworkRequest &request){++requests;selected=request.url().fileName();return new FixtureReply;});QTRY_COMPARE(controller.installation().kind,QString("unknown"));controller.setChannel("nightly");QCOMPARE(requests,1);QCOMPARE(selected,QString("nightly.json"));controller.setChannel("nightly");QCOMPARE(requests,1);controller.setAutomaticChecks(false);controller.setChannel("stable");QCOMPARE(requests,1);
     }
     void disablingChecksCancelsInFlightAutomaticRequest(){
-        QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QPointer<FixtureReply> pending;int requests=0;
+        QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());Settings::flush();QSettings().clear();QPointer<FixtureReply> pending;int requests=0;
         UpdateController controller(nullptr,dir.path()+"/missing",[&](const QNetworkRequest &){++requests;pending=new FixtureReply;return pending.data();});QTRY_COMPARE(controller.installation().kind,QString("unknown"));controller.checkAutomatically();QCOMPARE(requests,1);QVERIFY(controller.busy());controller.setAutomaticChecks(false);QVERIFY(!controller.busy());QSignalSpy notify(&controller,&UpdateController::newerReleaseVerified);QTest::qWait(30);QCOMPARE(notify.count(),0);controller.checkAutomatically();QCOMPARE(requests,1);
     }
     void optOutSuppressesDelayedAutomaticComparisonNotification(){
 #ifdef Q_OS_LINUX
-        QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();auto oldPath=qgetenv("PATH");qputenv("PATH",dir.path().toUtf8()+":"+oldPath);
+        QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());Settings::flush();QSettings().clear();auto oldPath=qgetenv("PATH");qputenv("PATH",dir.path().toUtf8()+":"+oldPath);
         tool(dir.path()+"/pacman","#!/usr/bin/python3\nimport sys\nprint('zerus-ade-bin' if sys.argv[1]=='-Qqo' else 'zerus-ade-bin 0.36.2-1')\n");tool(dir.path()+"/vercmp","#!/usr/bin/python3\nimport time\ntime.sleep(0.4)\nprint(1)\n");QFile executable(dir.path()+"/gui");QVERIFY(executable.open(QIODevice::WriteOnly));executable.close();
         UpdateController controller(nullptr,executable.fileName(),[&](const QNetworkRequest &){auto *reply=new FixtureReply;QTimer::singleShot(0,reply,[reply,this]{reply->finish(QJsonDocument(raw()).toJson());});return reply;});QSignalSpy notify(&controller,&UpdateController::newerReleaseVerified);QTRY_VERIFY(!controller.installation().version.isEmpty());controller.checkAutomatically();QTRY_VERIFY(!controller.busy());controller.setAutomaticChecks(false);QTRY_VERIFY(controller.updateAvailable());QCOMPARE(notify.count(),0);
         controller.check();QTRY_COMPARE(notify.count(),1);qputenv("PATH",oldPath);
 #endif
     }
     void notificationsAreFreshNewerOnlyAndDeduplicated(){
-        QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/automatic",false);QCoreApplication::setApplicationVersion("0.36.2");QSettings().setValue("updates/catalog/stable",QJsonDocument(raw()).toJson());QSettings().setValue("updates/lastSuccess/stable",QDateTime::currentSecsSinceEpoch()-30);
+        QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());Settings::flush();QSettings().clear();QSettings().setValue("updates/automatic",false);QCoreApplication::setApplicationVersion("0.36.2");QSettings().setValue("updates/catalog/stable",QJsonDocument(raw()).toJson());QSettings().setValue("updates/lastSuccess/stable",QDateTime::currentSecsSinceEpoch()-30);
         UpdateController controller(nullptr,dir.path()+"/missing",[&](const QNetworkRequest &){auto *reply=new FixtureReply;QTimer::singleShot(0,reply,[reply,this]{reply->finish(QJsonDocument(raw()).toJson());});return reply;});QSignalSpy notify(&controller,&UpdateController::newerReleaseVerified);QTRY_VERIFY(controller.updateAvailable());QCOMPARE(notify.count(),0);
         controller.check();QTRY_COMPARE(notify.count(),1);QCOMPARE(notify[0][0].toString(),QString("zerus-update:v1:stable:407198248"));QVERIFY(UpdateController::isUpdateToken(controller.updateToken()));QVERIFY(!UpdateController::isUpdateToken("session-attention:407198248"));controller.check();QTRY_VERIFY(!controller.busy());QCOMPARE(notify.count(),1);
         QCoreApplication::setApplicationVersion("0.37.0-dev");controller.check();QTRY_VERIFY(!controller.busy());QVERIFY(!controller.updateAvailable());QCOMPARE(notify.count(),1);

@@ -1,6 +1,7 @@
 //! WhiteWh fork: agent teams. A lead session plans; members (any agent,
 //! model and computer) work through dependency-ordered tasks that a dispatcher
 //! hands out. See docs/superpowers/specs/2026-10-24-agent-teams-core-design.md.
+pub(crate) mod broker;
 pub(crate) mod catalog;
 pub(crate) mod commands;
 pub(crate) mod dispatcher;

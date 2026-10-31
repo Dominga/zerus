@@ -33,6 +33,9 @@ Members:
   held task out; a captured report holds its member; a report may be replaced.
 - Budgets: hgs team expect {"label":"x","minutes":15}; red says once.
 - Never install a tool; propose it on the question card.
+- Two or more members in one folder (a game project, no worktrees): propose
+  the build broker, {"kind":"switch-setting","setting":"build_broker",
+  "value":true} (your inbox names it); each then builds its own snapshot.
 - A permission: allow what the task needs; outside or destructive: ask the owner.
 - A plan or phase needs the owner's sentence in your session (<30 min):
   {"owner_word":{"text":"plan approved"}} with approve/approve-phase.

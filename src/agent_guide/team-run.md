@@ -32,4 +32,8 @@ answer it with a verdict (hgs team report --json); edit none of its files.
 Command and land stages are Zerus', with no member. A role's context_before_task
 may compact or clear your context before a hand-out: it then carries the full
 task text.
+With the owner's build broker (members sharing one folder) a build template
+runs in your own snapshot of the folder: name the files you change,
+"args":{"files":["src/a.cpp"]}; the rest builds at HEAD. A failure in another
+member's file is theirs: wait and build again, never edit their files.
 Anything else still asks the lead.

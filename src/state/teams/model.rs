@@ -189,6 +189,10 @@ pub(crate) struct Settings {
     /// U56: the lead may interrupt or relaunch a stuck member; the owner sets it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lead_restarts_stuck: bool,
+    /// #752: members sharing one folder build their own snapshots through the
+    /// build broker (broker.rs); off by default, the owner sets it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub build_broker: bool,
     /// U56: every task with a planned assignee stays with it, as a pinned
     /// task does; off by default, so a free same-role member may take it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -295,6 +299,7 @@ impl Default for Settings {
             restart_crashed: false,
             stuck_minutes: 0,
             lead_restarts_stuck: false,
+            build_broker: false,
             keep_assignees: false,
             full_tests: FullTests::default(),
             tests: None,

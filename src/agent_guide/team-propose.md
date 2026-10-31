@@ -7,6 +7,7 @@ sentence. Each kind sends its exact change:
   {"kind":"cancel-tasks","tasks":[ids]}
   {"kind":"discard-phase","phase":N}
   {"kind":"question","question":"...","options":["A","B"],"recommended":"A"}
+  {"kind":"switch-setting","setting":"build_broker","value":true}
   remove-member, swap-member, next-goal and switch-plan-mode as before
 with "reason" and a request_id, piped to hgs team propose --json.
 

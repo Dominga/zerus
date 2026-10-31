@@ -1871,19 +1871,29 @@ On, a build template of a member runs in that member's snapshot,
   files come from the working copy. A file another member is changing (or
   anyone's uncommitted change) is taken at HEAD, so its half-written state
   never reaches this build.
-- Files up to `copy_limit_mb` (4 MB) are copies. Larger files are hard links,
-  and the project's asset folders are one link each (a junction on Windows),
-  so a 300 GB project costs no second copy. Only files whose source changed
-  are written again, so an unchanged file keeps its time and the build stays
-  incremental. The shared compiler cache (`[build_cache]`) serves it as usual.
+- Source files are copies, never hard links: a hard link shares the file's
+  data, so a write on either side would reach the other. The project's asset
+  and linked folders are one link each (a junction on Windows), so a 300 GB
+  project costs no second copy; their contents count in the tree's key by a
+  listing of paths, sizes and times (up to 200,000 entries; a larger folder
+  makes the tree unknown, and an unknown tree is never served by another
+  build's result). Only files whose content changed are written again (a
+  clean file by its git blob, the member's own by a content digest, never by
+  size and time), so the build stays incremental. The shared compiler cache
+  (`[build_cache]`) serves it as usual.
 - Builds of one build folder run one at a time: the folder's lock is the
-  queue. A request whose tree, template and arguments match a finished build
-  is served by that build's result, and one that matches a build still running
-  waits for it, so an unchanged tree is built once. The newest 64 results are
-  kept in `.zerus-team/runs/broker-results.json`.
-- A failure in a file another member is changing is told to the asker as that
-  member's, with the files named, and the member hears it in its session. The
-  asker waits and builds again; it never edits the other member's files.
+  queue. The key is the tree, the template, its arguments and the toolchain's
+  version lines (`rustc -vV` and `cargo -V`, or `cmake --version`). A build
+  of the same key still running is waited for through a marker taken
+  atomically. A finished result serves a check template (`cargo-test`,
+  `cargo-clippy`, `qt-test`) as its verdict for any member; a build
+  template's result serves only the member whose tree holds its outputs. The
+  newest 64 results are kept in `.zerus-team/runs/broker-results.json`.
+- A failure in a file another member is changing is reported to both as an
+  observation, with the files named: it may be the other member's unfinished
+  change or a dependency of the asker's own. The asker checks whether its
+  change touches what they use, else waits and builds again; it never edits
+  the other member's files.
 
 `.zerus/tests.toml` configures it:
 
@@ -1893,7 +1903,7 @@ enabled = true                 # false: the project vetoes the broker
 templates = ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test"]
 assets = ["Content"]           # folders linked whole, never copied
 link = ["ThirdParty"]          # untracked folders the build needs, linked
-copy_limit_mb = 4              # larger files are hard links
+copy_limit_mb = 4              # copies above this size are named in the note
 ```
 
 `hgs team builds --json` (`{"team": ...}`) reads the broker's state for the

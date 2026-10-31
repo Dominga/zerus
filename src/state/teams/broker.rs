@@ -10,14 +10,21 @@
 //! below the shared folder: the folder's tracked files at HEAD, with the
 //! member's own changed files (the `files` it names in its build requests) from
 //! its working copy. Another member's changed file is taken at HEAD, so its
-//! half-written state never reaches this build. Small files are copies; large
-//! files are hard links and the project's asset folders one link each, so a
-//! 300 GB project costs no second copy. Unchanged files keep their time, so the
-//! build stays incremental, and the shared compiler cache (#721) still serves
-//! it. Builds of one build folder run one at a time (a lock is the queue), and
-//! a request whose tree, template and arguments match a finished build is
-//! served by that build's result. A failure in a file another member is
-//! changing is that member's: the asker is told to wait, and the member hears.
+//! half-written state never reaches this build. Source files are copies, never
+//! hard links: a hard link shares the file's data, so a write on either side
+//! would change the other (1.2, 2026-10-31). The project's asset and linked
+//! folders are one link each, so a 300 GB project costs no second copy; their
+//! contents count in the tree's key by a bounded listing, and a tree whose
+//! listing is too large to know is never served by another build's result.
+//! Files are written again only when their content changed (a git blob or a
+//! content digest, never a size and a time), so the build stays incremental,
+//! and the shared compiler cache (#721) still serves it. Builds of one build
+//! folder run one at a time (a lock is the queue); the same tree, template,
+//! arguments and toolchain built by another member is waited for (an atomic
+//! marker), and its verdict serves a check template (tests, lint). A build
+//! template's result serves only the member whose tree holds its outputs. A
+//! failure in a file another member is changing is reported as an observation
+//! to both, never as a verdict on who broke it.
 //!
 //! `.zerus/tests.toml` configures it in `[build_broker]`; the team setting
 //! switches it. Off, nothing changes.
@@ -42,7 +49,8 @@ pub(crate) struct Config {
     pub assets: Vec<String>,
     /// Untracked folders the build needs (third-party, generated), linked.
     pub link: Vec<String>,
-    /// Files up to this size are copies; larger ones are hard links.
+    /// Copied files above this size are named in the build's note (every
+    /// file is a copy; the key stays for older tests files).
     pub copy_limit: u64,
 }
 
@@ -149,11 +157,14 @@ fn nul_list(bytes: &[u8]) -> Vec<String> {
     bytes.split(|byte| *byte == 0).filter(|part| !part.is_empty()).map(|part| String::from_utf8_lossy(part).into_owned()).collect()
 }
 
-/// Where one snapshot file comes from.
+/// Where one snapshot file comes from; each names its content, so a file is
+/// written again exactly when its content changed.
 #[derive(Clone, Debug, PartialEq)]
 enum Source {
-    /// The working copy, copied (small) or hard-linked (large).
-    Work { size: u64, modified: u128, link: bool },
+    /// A clean tracked file: the working copy, whose content is its index blob.
+    Clean { blob: String },
+    /// The member's own changed file: the working copy, by its content digest.
+    Own { digest: String },
     /// The HEAD blob: another member's changed file.
     Head { blob: String },
 }
@@ -161,10 +172,56 @@ enum Source {
 impl Source {
     fn stamp(&self) -> String {
         match self {
-            Source::Work { size, modified, link } => format!("w:{size}:{modified}:{}", u8::from(*link)),
+            Source::Clean { blob } => format!("b:{blob}"),
+            Source::Own { digest } => format!("o:{digest}"),
             Source::Head { blob } => format!("h:{blob}"),
         }
     }
+}
+
+/// Entries a linked folder's listing may have before its contents count as
+/// unknown.
+const LISTING_LIMIT: usize = 200_000;
+
+/// A linked folder's contents as a digest of its files' paths, sizes and
+/// times; None when it has more than `LISTING_LIMIT` entries or cannot be read.
+fn listing(folder: &Path) -> Option<String> {
+    let mut entries = Vec::new();
+    let mut stack = vec![folder.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).ok()? {
+            let entry = entry.ok()?;
+            let meta = entry.metadata().ok()?;
+            let path = entry.path();
+            if meta.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let modified = meta.modified().ok().and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |at| at.as_nanos());
+            let relative = path.strip_prefix(folder).ok()?.display().to_string().replace('\\', "/");
+            entries.push(format!("{relative}\0{}\0{modified}", meta.len()));
+            if entries.len() > LISTING_LIMIT {
+                return None;
+            }
+        }
+    }
+    entries.sort();
+    Some(format!("{:x}", Sha256::digest(entries.join("\n").as_bytes())))
+}
+
+/// A file's content digest, read in bounded pieces.
+fn digest_of(path: &Path) -> anyhow::Result<String> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1 << 16];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// One member's snapshot after a sync: its folder, the tree's hash and the
@@ -177,6 +234,11 @@ pub(crate) struct Snapshot {
     pub others: BTreeMap<String, String>,
     pub copied: usize,
     pub linked: usize,
+    /// Copied files larger than the project's `copy_limit_mb`.
+    pub large: usize,
+    /// False when a linked folder's contents are unknown (too many files):
+    /// such a tree is never served by another build's result.
+    pub known: bool,
 }
 
 /// The broker's folder for `member` below the shared folder.
@@ -184,10 +246,10 @@ pub(crate) fn member_dir(shared: &Path, member: &str) -> PathBuf {
     shared.join(".zerus-team").join("runs").join(format!("broker-{}", super::dispatcher::tag(member)))
 }
 
-/// Brings `member`'s snapshot of `shared` up to date: tracked files at HEAD,
-/// the member's own changed `edits` from the working copy, other members'
-/// changed files at HEAD, asset and linked folders as one link each. Only
-/// files whose source changed are written again.
+/// Brings `member`'s snapshot of `shared` up to date: clean tracked files and
+/// the member's own changed `edits` copied from the working copy, other
+/// members' changed files at HEAD, asset and linked folders as one link each.
+/// Only files whose content changed are written again.
 pub(crate) fn sync(shared: &Path, member: &str, edits: &[String], others: &BTreeMap<String, String>, config: &Config) -> anyhow::Result<Snapshot> {
     let dir = member_dir(shared, member);
     let tree = dir.join("tree");
@@ -203,7 +265,15 @@ pub(crate) fn sync(shared: &Path, member: &str, edits: &[String], others: &BTree
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
     let mine: BTreeSet<String> = edits.iter().map(|path| path.replace('\\', "/")).collect();
-    let tracked = nul_list(&git(shared, &["ls-files", "-z"])?);
+    // Tracked files with their index blobs ("mode blob stage\tpath").
+    let mut blobs: BTreeMap<String, String> = BTreeMap::new();
+    for entry in nul_list(&git(shared, &["ls-files", "-s", "-z"])?) {
+        if let Some((info, path)) = entry.split_once('\t') {
+            if let Some(blob) = info.split_whitespace().nth(1) {
+                blobs.insert(path.to_owned(), blob.to_owned());
+            }
+        }
+    }
     // Dirty paths: modified, added, deleted or untracked.
     let status = nul_list(&git(shared, &["status", "--porcelain", "-z", "--untracked-files=all"])?);
     let mut dirty = BTreeSet::new();
@@ -216,7 +286,7 @@ pub(crate) fn sync(shared: &Path, member: &str, edits: &[String], others: &BTree
     let excluded = |path: &str| path.starts_with(".zerus-team/") || under(path, &config.assets) || under(path, &config.link);
     let mut wanted: BTreeMap<String, Source> = BTreeMap::new();
     let mut taken: BTreeMap<String, String> = BTreeMap::new();
-    let mut paths: BTreeSet<String> = tracked.iter().cloned().collect();
+    let mut paths: BTreeSet<String> = blobs.keys().cloned().collect();
     // The member's own new files are part of its tree.
     paths.extend(mine.iter().filter(|path| shared.join(path.as_str()).is_file()).cloned());
     for path in paths {
@@ -235,15 +305,19 @@ pub(crate) fn sync(shared: &Path, member: &str, edits: &[String], others: &BTree
             }
             continue;
         }
-        let Ok(meta) = fs::metadata(shared.join(&path)) else { continue };
-        if !meta.is_file() {
+        let source = shared.join(&path);
+        if !source.is_file() {
             continue;
         }
-        let modified = meta.modified().ok().and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |at| at.as_nanos());
-        wanted.insert(path, Source::Work { size: meta.len(), modified, link: meta.len() > config.copy_limit });
+        let found = match (own, blobs.get(&path)) {
+            (false, Some(blob)) => Source::Clean { blob: blob.clone() },
+            _ => Source::Own { digest: digest_of(&source)? },
+        };
+        wanted.insert(path, found);
     }
     let mut copied = 0;
     let mut linked = 0;
+    let mut large = 0;
     let mut manifest: BTreeMap<String, String> = BTreeMap::new();
     for (path, source) in &wanted {
         let stamp = source.stamp();
@@ -252,17 +326,16 @@ pub(crate) fn sync(shared: &Path, member: &str, edits: &[String], others: &BTree
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
             }
+            // Never a hard link: an old snapshot's link would let a write on
+            // either side reach the other, so the old file goes first.
             let _ = fs::remove_file(&target);
             match source {
-                Source::Work { link: true, .. } => {
-                    if fs::hard_link(shared.join(path), &target).is_err() {
-                        fs::copy(shared.join(path), &target)?;
-                    }
-                    linked += 1;
-                }
-                Source::Work { .. } => {
-                    fs::copy(shared.join(path), &target)?;
+                Source::Clean { .. } | Source::Own { .. } => {
+                    let bytes = fs::copy(shared.join(path), &target)?;
                     copied += 1;
+                    if bytes > config.copy_limit {
+                        large += 1;
+                    }
                 }
                 Source::Head { blob } => {
                     fs::write(&target, git(shared, &["cat-file", "blob", blob])?)?;
@@ -276,7 +349,9 @@ pub(crate) fn sync(shared: &Path, member: &str, edits: &[String], others: &BTree
     for path in previous.keys().filter(|path| !manifest.contains_key(*path) && !path.starts_with("link:")) {
         let _ = fs::remove_file(tree.join(path));
     }
-    // Asset and linked folders: one link each to the shared folder, never a copy.
+    // Asset and linked folders: one link each to the shared folder, never a
+    // copy; their contents count in the key by a bounded listing.
+    let mut known = true;
     for folder in config.assets.iter().chain(&config.link) {
         let source = shared.join(folder);
         let target = tree.join(folder);
@@ -287,28 +362,21 @@ pub(crate) fn sync(shared: &Path, member: &str, edits: &[String], others: &BTree
             link_dir(&source, &target)?;
             linked += 1;
         }
-        manifest.insert(format!("link:{folder}"), "dir".into());
+        let contents = if source.is_dir() { listing(&source) } else { Some("none".into()) };
+        known &= contents.is_some();
+        manifest.insert(format!("link:{folder}"), contents.unwrap_or_else(|| "unknown".into()));
     }
     fs::write(&manifest_path, serde_json::to_vec(&manifest)?)?;
+    // Every stamp names content (a blob, a digest or a folder listing), so an
+    // untouched tree hashes the same and any changed byte changes it.
     let mut hasher = Sha256::new();
     for (path, stamp) in &manifest {
-        // A working copy's time is not its content: the hash names the content
-        // of what was copied, so an untouched tree hashes the same.
-        let content = match wanted.get(path) {
-            Some(Source::Work { link: false, .. }) => {
-                let mut file = fs::File::open(tree.join(path))?;
-                let mut bytes = Vec::new();
-                file.read_to_end(&mut bytes)?;
-                format!("{:x}", Sha256::digest(&bytes))
-            }
-            _ => stamp.clone(),
-        };
         hasher.update(path.as_bytes());
         hasher.update([0]);
-        hasher.update(content.as_bytes());
+        hasher.update(stamp.as_bytes());
         hasher.update([0]);
     }
-    Ok(Snapshot { tree, hash: format!("{:x}", hasher.finalize()), others: taken, copied, linked })
+    Ok(Snapshot { tree, hash: format!("{:x}", hasher.finalize()), others: taken, copied, linked, large, known })
 }
 
 /// A folder link: a junction on Windows (no privilege needed), a symlink
@@ -354,12 +422,42 @@ fn results_path(shared: &Path) -> PathBuf {
     shared.join(".zerus-team").join("runs").join("broker-results.json")
 }
 
-pub(crate) fn request_key(hash: &str, template: &str, args: &Value) -> String {
+pub(crate) fn request_key(hash: &str, template: &str, args: &Value, toolchain: &str) -> String {
     let mut args = args.clone();
     if let Some(object) = args.as_object_mut() {
         object.remove("files");
     }
-    format!("{:x}", Sha256::digest(format!("{hash}\0{template}\0{args}").as_bytes()))
+    format!("{:x}", Sha256::digest(format!("{hash}\0{template}\0{args}\0{toolchain}").as_bytes()))
+}
+
+/// The templates whose result is a verdict (tests, lint): another member's
+/// result for the same key serves it. A build template's result is its
+/// outputs in one member's tree, so it serves only that member.
+fn verdict(template: &str) -> bool {
+    matches!(template, "cargo-test" | "cargo-clippy" | "qt-test")
+}
+
+/// The tools a template builds with, as their version lines; an unknown tool
+/// is named so, and its tree is never served by another build. Templates the
+/// broker does not know keep their own name.
+fn toolchain(template: &str, tree: &Path) -> String {
+    let version = |program: &str, args: &[&str]| -> String {
+        Command::new(program)
+            .args(args)
+            .current_dir(tree)
+            .stdin(Stdio::null())
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map_or_else(|| format!("{program}:unknown"), |output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    };
+    if template.starts_with("cargo-") {
+        format!("{}\n{}", version("rustc", &["-vV"]), version("cargo", &["-V"]))
+    } else if template.starts_with("qt-") {
+        version("cmake", &["--version"])
+    } else {
+        format!("template:{template}")
+    }
 }
 
 pub(crate) fn cached(shared: &Path, key: &str) -> Option<Value> {
@@ -432,8 +530,9 @@ pub(crate) fn blame(failing: &BTreeSet<String>, others: &BTreeMap<String, String
     }
     let names: Vec<String> = by_member.iter().map(|(member, paths)| format!("{} ({})", team.name_of(member), paths.join(", "))).collect();
     let line = format!(
-        "Build broker: this build failed in files another member is changing: {}. That is theirs to fix, not yours: \
-         Zerus told them; wait for it and build again, never edit their files.",
+        "Build broker: this build failed in files another member is changing (taken at HEAD in your tree): {}. \
+         That may be their unfinished change or a dependency of yours: check whether your change touches what they \
+         use; if not, wait for them and build again. Zerus told them. Never edit their files.",
         names.join("; ")
     );
     Some((line, by_member))
@@ -506,32 +605,63 @@ pub(crate) fn run(team: &Team, member: &Member, shared: &Path, template: &str, a
     let waiting = Waiting::start(shared, &member.id, template);
     let _queue = queue(&dir, timeout)?;
     let snapshot = sync(shared, &member.id, &edits, &others, config)?;
-    let key = request_key(&snapshot.hash, template, &plain);
-    // Another member building the very same tree now: wait for its result.
+    let tools = toolchain(template, &snapshot.tree);
+    let key = request_key(&snapshot.hash, template, &plain, &tools);
+    // A finished result serves this request only when the tree is fully known,
+    // the tools are, and it is a verdict or this member's own outputs.
+    let serves = |entry: &Value| snapshot.known && !tools.contains(":unknown") && (verdict(template) || entry["member"] == member.id.as_str());
+    // Another member building the very same tree now: wait for it. The marker
+    // is taken atomically, so two members never build one key at once; a
+    // marker older than the timeout is a crashed build's and goes.
     let building = shared.join(".zerus-team").join("runs").join("broker-building");
+    fs::create_dir_all(&building)?;
     let marker = building.join(&key);
     let until = Instant::now() + timeout;
-    if marker.exists() {
-        waiting.coalesced(fs::read(&marker).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()).and_then(|value| value["member"].as_str().map(str::to_owned)));
-    }
-    while marker.exists() && Instant::now() < until && cached(shared, &key).is_none() {
-        std::thread::sleep(Duration::from_millis(500));
-    }
+    let mut told = false;
+    let served = loop {
+        if let Some(entry) = cached(shared, &key).filter(|entry| serves(entry)) {
+            break Some(entry);
+        }
+        match fs::OpenOptions::new().write(true).create_new(true).open(&marker) {
+            Ok(mut file) => {
+                use std::io::Write;
+                let _ = file.write_all(json!({"member":member.id,"template":template,"started":super::super::now()}).to_string().as_bytes());
+                break None;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let stale = fs::metadata(&marker).and_then(|meta| meta.modified()).ok().and_then(|at| at.elapsed().ok()).is_some_and(|age| age > timeout);
+                if stale {
+                    let _ = fs::remove_file(&marker);
+                    continue;
+                }
+                if !told {
+                    waiting.coalesced(fs::read(&marker).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()).and_then(|value| value["member"].as_str().map(str::to_owned)));
+                    told = true;
+                }
+                anyhow::ensure!(Instant::now() < until, "the same tree's build by another member did not finish in {} s", timeout.as_secs());
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
     drop(waiting);
-    if let Some(entry) = cached(shared, &key) {
+    if let Some(entry) = served {
         // #756: a result served for an unchanged tree counts as a cache hit.
         remember(shared, &key, json!({"member":member.id,"template":template,"at":super::super::now(),"hit":true,"by":entry["member"],"outcome":entry["outcome"]}));
         let mut outcome = outcome_of(&entry["outcome"]);
-        outcome.tail = format!(
-            "{}\nBuild broker: the same tree was built by {} at {:.0}; this is its result.",
-            outcome.tail.trim_end(),
-            team.name_of(entry["member"].as_str().unwrap_or_default()),
-            entry["at"].as_f64().unwrap_or_default()
-        );
+        let by = entry["member"].as_str().unwrap_or_default();
+        outcome.tail = if by == member.id {
+            format!("{}\nBuild broker: this tree was already built here at {:.0}; its outputs are in place.", outcome.tail.trim_end(), entry["at"].as_f64().unwrap_or_default())
+        } else {
+            format!(
+                "{}\nBuild broker: the same tree and tools were checked by {} at {:.0}; this is its verdict (no outputs were made here).",
+                outcome.tail.trim_end(),
+                team.name_of(by),
+                entry["at"].as_f64().unwrap_or_default()
+            )
+        };
         return Ok(outcome);
     }
-    fs::create_dir_all(&building)?;
-    fs::write(&marker, json!({"member":member.id,"template":template,"started":super::super::now()}).to_string())?;
     let built = (|| -> anyhow::Result<super::templates::Outcome> {
         let plan = super::templates::plan(template, &plain, &snapshot.tree)?;
         Ok(super::templates::execute(&plan, &snapshot.tree, timeout, &[]))
@@ -540,11 +670,13 @@ pub(crate) fn run(team: &Team, member: &Member, shared: &Path, template: &str, a
     let mut outcome = built?;
     let mut blamed: Vec<Value> = Vec::new();
     let note = format!(
-        "Build broker: built {} in {} ({} files written, {} linked){}",
+        "Build broker: built {} in {} ({} files written{}, {} folders linked{}){}",
         template,
         snapshot.tree.display(),
         snapshot.copied,
+        if snapshot.large > 0 { format!(", {} of them large", snapshot.large) } else { String::new() },
         snapshot.linked,
+        if snapshot.known { "" } else { "; a linked folder is too large to list, so this result is never reused" },
         if snapshot.others.is_empty() { String::new() } else { format!("; at HEAD, being changed by others: {}", snapshot.others.keys().cloned().collect::<Vec<_>>().join(", ")) }
     );
     if outcome.exit != Some(0) {
@@ -552,12 +684,13 @@ pub(crate) fn run(team: &Team, member: &Member, shared: &Path, template: &str, a
         if let Some((line, by_member)) = blame(&failing, &snapshot.others, team) {
             blamed = by_member.iter().map(|(owner, paths)| json!({"member":owner,"files":paths})).collect();
             outcome.tail = format!("{}\n{line}", outcome.tail.trim_end());
-            outcome.error = "the build failed in another member's files".into();
+            outcome.error = "the build failed in files another member is changing".into();
             for (owner, paths) in by_member {
                 let Some(session) = team.member(&owner).and_then(|found| found.session.clone()) else { continue };
                 let text = format!(
                     "[Zerus team \u{b7} from: Zerus \u{b7} build broker]\n{}'s build failed in files you are changing: {}.\n\
-                     It built them at HEAD; fix them when your change is ready, then the build passes again.",
+                     It built them at HEAD, so this is an observation, not a verdict: it may be your unfinished change, or \
+                     theirs depending on it. Nothing is decided; finish your change as planned.",
                     team.name_of(&member.id),
                     paths.join(", ")
                 );

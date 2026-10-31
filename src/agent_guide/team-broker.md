@@ -11,5 +11,5 @@ Member, with the broker on: a build template runs in your own snapshot of the
 folder. Name the files you change: "args":{"files":["src/a.cpp"]}; the rest
 builds at HEAD, so another member's unfinished file never reaches your build.
 Builds of one build folder run one at a time; an unchanged tree builds once.
-A failure in another member's file is theirs: wait and build again, never
-edit their files.
+A failure in another member's file may be theirs or a dependency of yours:
+check what your change touches, else wait and build again; never edit theirs.

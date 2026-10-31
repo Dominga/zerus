@@ -90,12 +90,22 @@ fn a_snapshot_has_its_own_edits_others_at_head_and_no_asset_copies() {
     assert_eq!(fs::read_to_string(tree.join("src").join("a.c")).unwrap(), "int a(void) { return 10; }\n", "its own edit");
     assert_eq!(fs::read_to_string(tree.join("src").join("b.c")).unwrap(), "int b(void) { return 2; }\n", "the other member's file at HEAD");
     assert_eq!(snapshot.others.get("src/b.c").map(String::as_str), Some("dev2"));
-    // The big file is a hard link and the asset folder one link: no copies.
+    // The big file is a copy (never a hard link) and the asset folder one link.
     assert_eq!(fs::read(tree.join("big.bin")).unwrap().len(), 4096);
+    assert_eq!(snapshot.large, 1, "named as large in the note");
     let assets = fs::symlink_metadata(tree.join("Content")).unwrap();
     assert!(assets.file_type().is_symlink() || fs::read_link(tree.join("Content")).is_ok(), "Content is a link");
     assert_eq!(fs::read(tree.join("Content").join("Maps").join("level.umap")).unwrap().len(), 8192);
-    assert_eq!(snapshot.linked, 2);
+    assert_eq!(snapshot.linked, 1);
+    assert!(snapshot.known);
+    // A write in the shared folder never reaches the snapshot's copy, nor the
+    // other way round.
+    fs::write(root.join("big.bin"), vec![9u8; 4096]).unwrap();
+    assert_eq!(fs::read(tree.join("big.bin")).unwrap()[0], 7, "the snapshot keeps its own data");
+    fs::write(root.join("big.bin"), vec![7u8; 4096]).unwrap();
+    fs::write(tree.join("big.bin"), vec![3u8; 4096]).unwrap();
+    assert_eq!(fs::read(root.join("big.bin")).unwrap()[0], 7, "the shared folder keeps its data");
+    fs::write(tree.join("big.bin"), vec![7u8; 4096]).unwrap();
     // Nothing changed: nothing is written again and the tree hashes the same.
     let again = sync(root, "dev", &["src/a.c".into()], &others, &small_config()).unwrap();
     assert_eq!((again.copied, again.linked, again.hash.clone()), (0, 0, snapshot.hash.clone()));
@@ -104,6 +114,20 @@ fn a_snapshot_has_its_own_edits_others_at_head_and_no_asset_copies() {
     let edited = sync(root, "dev", &["src/a.c".into()], &others, &small_config()).unwrap();
     assert_eq!(edited.copied, 1);
     assert_ne!(edited.hash, snapshot.hash);
+    // The same size and time with other bytes is still a new tree: content
+    // decides, never a size and a time.
+    let before = fs::metadata(root.join("src").join("a.c")).unwrap().modified().unwrap();
+    fs::write(root.join("src").join("a.c"), "int a(void) { return 12; }
+").unwrap();
+    fs::File::options().write(true).open(root.join("src").join("a.c")).unwrap().set_modified(before).unwrap();
+    let same_stamp = sync(root, "dev", &["src/a.c".into()], &others, &small_config()).unwrap();
+    assert_ne!(same_stamp.hash, edited.hash);
+    assert_eq!(fs::read_to_string(same_stamp.tree.join("src").join("a.c")).unwrap(), "int a(void) { return 12; }
+");
+    // A changed file inside a linked folder changes the tree's key.
+    fs::write(root.join("Content").join("Maps").join("level.umap"), vec![2u8; 8193]).unwrap();
+    let assets_changed = sync(root, "dev", &["src/a.c".into()], &others, &small_config()).unwrap();
+    assert_ne!(assets_changed.hash, same_stamp.hash);
     // Another member's snapshot of the same folder is its own folder.
     let theirs = sync(root, "dev2", &["src/b.c".into()], &BTreeMap::new(), &small_config()).unwrap();
     assert_ne!(theirs.tree, edited.tree);
@@ -135,6 +159,8 @@ fn a_failure_in_another_members_file_is_theirs() {
     let others = BTreeMap::from([("src/c.c".to_owned(), "dev2".to_owned())]);
     let (line, by_member) = blame(&failing, &others, &team).unwrap();
     assert!(line.contains("dev2 (Gameplay) (src/c.c)") && line.contains("wait"), "{line}");
+    // An observation, never a verdict: it may be a dependency of the asker's.
+    assert!(line.contains("may be their unfinished change or a dependency of yours"), "{line}");
     assert_eq!(by_member.get("dev2"), Some(&vec!["src/c.c".to_owned()]));
     // Only its own files failing: the asker's own to fix.
     assert!(blame(&BTreeSet::from(["src/b.rs".to_owned()]), &others, &team).is_none());
@@ -170,9 +196,9 @@ fn a_build_runs_in_the_snapshot_an_unchanged_tree_once_and_tells_the_other_membe
     let first = run(&team, &dev, root, "build", &json!({}), &config, Duration::from_secs(60)).unwrap();
     assert_eq!(first.exit, Some(0), "{first:?}");
     assert!(first.tail.contains("built") && first.tail.contains("Build broker: built build in"), "{}", first.tail);
-    // The same tree again: served by that build, not built twice.
+    // The same tree again: its own outputs are in place, not built twice.
     let again = run(&team, &dev, root, "build", &json!({"files":[]}), &config, Duration::from_secs(60)).unwrap();
-    assert!(again.tail.contains("the same tree was built by dev"), "{}", again.tail);
+    assert!(again.tail.contains("already built here"), "{}", again.tail);
     // dev2 builds its own snapshot with its half-written file and fails in its
     // own file: that is its own to fix, nobody else is told.
     let dev2 = team.member("dev2").unwrap().clone();
@@ -186,11 +212,12 @@ fn a_build_runs_in_the_snapshot_an_unchanged_tree_once_and_tells_the_other_membe
     let blamed = run(&team, &dev, root, "build", &json!({"files":["src/a.c"]}), &config, Duration::from_secs(60)).unwrap();
     crate::state::teams::dispatcher::set_fake_hgs(None);
     crate::state::teams::templates::settings_override(None);
-    assert_eq!(blamed.error, "the build failed in another member's files", "{blamed:?}");
-    assert!(blamed.tail.contains("dev2 (Gameplay) (src/b.c)") && blamed.tail.contains("never edit their files"), "{}", blamed.tail);
+    assert_eq!(blamed.error, "the build failed in files another member is changing", "{blamed:?}");
+    assert!(blamed.tail.contains("dev2 (Gameplay) (src/b.c)") && blamed.tail.contains("Never edit their files"), "{}", blamed.tail);
     let told = sent.borrow().iter().find(|(args, _)| args[0] == "send").cloned().expect("dev2 is told");
     assert_eq!(told.0[1], "codex/x/dev2");
     assert!(told.1["text"].as_str().unwrap().contains("dev (Backend)'s build failed in files you are changing: src/b.c"), "{}", told.1);
+    assert!(told.1["text"].as_str().unwrap().contains("an observation, not a verdict"), "{}", told.1);
     assert_eq!(edits_of(root, "dev"), vec!["src/a.c".to_owned()]);
 }
 
@@ -274,4 +301,34 @@ fn the_builds_view_shows_the_running_build_the_queue_the_timeline_and_who_change
     assert_eq!(folder["overlaps"], json!([{"file":"src/b.c","members":["dev","dev2"]}]));
     assert_eq!(view["members"]["dev"]["state"], "building");
     assert_eq!(view["members"]["dev2"], json!({"state":"waiting","template":"cargo-build","since":now - 40.0,"ahead":1}));
+}
+
+/// 1.2: a build template's result is its outputs in one member's tree, so it
+/// never serves another member; a check template's verdict does, and the key
+/// names the tools.
+#[test]
+fn a_build_result_serves_only_its_own_tree_and_a_verdict_serves_anyone() {
+    assert!(verdict("cargo-test") && verdict("qt-test") && verdict("cargo-clippy"));
+    assert!(!verdict("cargo-build") && !verdict("qt-configure") && !verdict("qt-build") && !verdict("build"));
+    let args = json!({"files":["src/a.c"]});
+    assert_eq!(request_key("h", "cargo-test", &args, "rustc 1"), request_key("h", "cargo-test", &json!({}), "rustc 1"), "named files are not the request");
+    assert_ne!(request_key("h", "cargo-test", &args, "rustc 1"), request_key("h", "cargo-test", &args, "rustc 2"), "another toolchain is another result");
+    let dir = project();
+    let root = dir.path();
+    let templates = tempfile::tempdir().unwrap();
+    crate::state::teams::templates::settings_override(Some(templates.path().join("templates.json")));
+    let (program, flag) = if cfg!(windows) { ("cmd", "/c") } else { ("sh", "-c") };
+    crate::state::teams::templates::set_additions(&[json!({"id":"build","program":program,"args":[flag, "echo built"]})]).unwrap();
+    let mut team = team_in(root);
+    team.settings.build_broker = true;
+    let config = Config { templates: vec!["build".into()], ..small_config() };
+    let dev = team.member("dev").unwrap().clone();
+    let dev2 = team.member("dev2").unwrap().clone();
+    let first = run(&team, &dev, root, "build", &json!({}), &config, Duration::from_secs(60)).unwrap();
+    assert!(first.tail.contains("Build broker: built build"), "{}", first.tail);
+    // dev2's tree is the same content, but dev's outputs are not in it.
+    let theirs = run(&team, &dev2, root, "build", &json!({}), &config, Duration::from_secs(60)).unwrap();
+    crate::state::teams::templates::settings_override(None);
+    assert!(theirs.tail.contains("Build broker: built build"), "built, not served: {}", theirs.tail);
+    assert!(!theirs.tail.contains("verdict"), "{}", theirs.tail);
 }

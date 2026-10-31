@@ -1895,11 +1895,38 @@ On, a build template of a member runs in that member's snapshot,
   change touches what they use, else waits and builds again; it never edits
   the other member's files.
 
+Shared mode is for projects where a snapshot costs too much. An Unreal
+project (a `*.uproject` at the folder's root) uses it unless the tests file
+says `mode = "snapshot"`; any project can choose it with `mode = "shared"`:
+
+- A build runs in the shared folder itself: no copy, no second build folder
+  (for Unreal, no second `Intermediate`), and the editor loads the DLL that
+  was built. Builds of the folder run one at a time.
+- Asking for a build says the member's own edits are ready
+  (`.zerus-team/runs/broker-ready/<member>.json`). Before it runs, a build
+  waits until every other member sharing the folder has asked for a build
+  since it last wrote one of its changed files (a file no longer changed does
+  not count), at most `ready_wait_s` (300 by default). Past that wait it runs
+  anyway, and its note names the unfinished changes it included.
+- A failure in a file another member is changing is reported to both as an
+  observation, as in snapshot mode. Results are not reused: the folder is not
+  a fixed tree.
+- An Unreal project's `Content`, `Plugins/<plugin>/Content` and
+  `Plugins/<group>/<plugin>/Content` count as asset folders without being
+  configured, in either mode.
+
+The lead's item states the mode and its cost: in shared mode, builds queue and
+a member in the middle of an edit delays the others' builds up to the wait; in
+snapshot mode, each member's sources are copied and its first build is a full
+build in its own build folder.
+
 `.zerus/tests.toml` configures it:
 
 ```toml
 [build_broker]
 enabled = true                 # false: the project vetoes the broker
+mode = "auto"                  # "shared", "snapshot"; auto: shared for Unreal
+ready_wait_s = 300             # shared mode: the wait for others' edits
 templates = ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test"]
 assets = ["Content"]           # folders linked whole, never copied
 link = ["ThirdParty"]          # untracked folders the build needs, linked
@@ -1908,9 +1935,11 @@ copy_limit_mb = 4              # copies above this size are named in the note
 
 `hgs team builds --json` (`{"team": ...}`) reads the broker's state for the
 desktop's Builds tab inside Tests: for each folder two or more members share,
-per build folder (`target`, `.ci-build/gui`) the running build with its usual
+per build folder (`target`, `.ci-build/gui`, and `.` for shared-mode builds
+in the folder itself) the running build with its usual
 time (the median of recent green builds), the queue with each request's wait
-and the member whose identical tree it waits for, the cache's hit rate and the
+and the member whose identical tree it waits for (in shared mode,
+`waiting_for`: the members whose edits are not ready), the cache's hit rate and the
 recent builds (a failure lists the members whose files broke it); each
 member's changed files and the files two members change; and `members`, each
 member's `building` or `waiting` state with `ahead`. With the broker on, `hgs

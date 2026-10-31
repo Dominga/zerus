@@ -155,10 +155,7 @@ fn all_items(team: &Team) -> Vec<Item> {
                     json!({"request_id":PLACEHOLDER,"team":team.id,"kind":"switch-setting","setting":"build_broker","value":true,
                         "reason":format!("{} share {folder}; their builds compile each other's half-done edits", names.join(", "))})
                 ),
-                detail: "With the build broker each member builds its own snapshot of the folder (its own changed files, the rest at HEAD) \
-                         in its own build folder, one build at a time; a failure in another member's file is told as theirs. \
-                         The owner's Allow on your switch card turns it on (hgs guide team-propose)."
-                    .into(),
+                detail: broker_detail(&super::broker::config(std::path::Path::new(&folder))),
             });
         }
     }
@@ -1145,6 +1142,32 @@ pub(crate) fn tests_text(tests: &Value) -> String {
     )
 }
 
+/// #752: what the build broker does in this folder and what it costs, for the
+/// lead's item (owner, 2026-10-31: say the cost plainly).
+fn broker_detail(config: &super::broker::Config) -> String {
+    let assets = if config.assets.is_empty() { String::new() } else { format!(" Asset folders are never copied: {}.", config.assets.join(", ")) };
+    if config.shared {
+        format!(
+            "With the build broker, builds run in this folder itself{}, one at a time. Each build first waits (at most {} s) until \
+             every other member has asked for a build since it last changed its files, so nobody compiles another's half-written \
+             file.{assets} Cost: no copy and no second build folder, but builds queue behind each other, and a member in the middle \
+             of an edit delays the others' builds up to that wait. The owner's Allow on your switch card turns it on \
+             (hgs guide team-broker).",
+            if config.unreal { " (an Unreal project: no second Intermediate, and the editor loads the DLL that was built)" } else { "" },
+            config.ready_wait.as_secs()
+        )
+    } else {
+        format!(
+            "With the build broker each member builds its own snapshot of the folder (its own changed files, the rest at HEAD) \
+             in its own build folder, one build at a time; a failure in another member's file is told as theirs.{assets} \
+             Cost: each member gets a copy of the tracked sources and its own build folder, so each member's first build is a \
+             full build and its outputs take disk once per member. For a large project, mode = \"shared\" in [build_broker] of \
+             .zerus/tests.toml builds in the folder itself instead. The owner's Allow on your switch card turns it on \
+             (hgs guide team-broker)."
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::ops::{self, Actor};
@@ -1171,6 +1194,14 @@ mod tests {
         team
     }
 
+    #[test]
+    fn the_broker_card_names_the_mode_and_its_cost() {
+        let shared = super::super::broker::Config { shared: true, unreal: true, assets: vec!["Content".into()], ..Default::default() };
+        let text = broker_detail(&shared);
+        assert!(text.contains("in this folder itself") && text.contains("no second Intermediate") && text.contains("Cost:") && text.contains("never copied: Content"), "{text}");
+        let text = broker_detail(&Default::default());
+        assert!(text.contains("own snapshot") && text.contains("Cost:") && text.contains("mode = \"shared\""), "{text}");
+    }
     #[test]
     fn an_ended_turn_without_a_report_is_an_owner_visible_item() {
         let mut team = team();

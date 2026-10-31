@@ -26,6 +26,17 @@
 //! failure in a file another member is changing is reported as an observation
 //! to both, never as a verdict on who broke it.
 //!
+//! Shared mode (owner, 2026-10-31) is for projects where a snapshot costs too
+//! much: an Unreal project (a `*.uproject` at the root) uses it unless the
+//! tests file says otherwise. A build runs in the shared folder itself, so
+//! there is no copy, no second Intermediate and the editor loads the DLL that
+//! was built. Builds of the folder run one at a time, and each first waits
+//! (bounded) until every other member has asked for a build since it last
+//! changed one of its files: a member that asks for a build says its edits are
+//! ready. Past that wait the build runs anyway and names the unfinished
+//! changes it included. An Unreal project's `Content` and `Plugins/*/Content`
+//! count as asset folders without being configured.
+//!
 //! `.zerus/tests.toml` configures it in `[build_broker]`; the team setting
 //! switches it. Off, nothing changes.
 use super::model::{Member, Team};
@@ -52,6 +63,13 @@ pub(crate) struct Config {
     /// Copied files above this size are named in the build's note (every
     /// file is a copy; the key stays for older tests files).
     pub copy_limit: u64,
+    /// Builds run in the shared folder itself, after the others' edits are
+    /// ready (`mode = "shared"`, or an Unreal project under `"auto"`).
+    pub shared: bool,
+    /// How long a shared build waits for the others' edits to be ready.
+    pub ready_wait: Duration,
+    /// The folder is an Unreal project (a `*.uproject` at its root).
+    pub unreal: bool,
 }
 
 impl Default for Config {
@@ -62,17 +80,81 @@ impl Default for Config {
             assets: Vec::new(),
             link: Vec::new(),
             copy_limit: 4 * 1024 * 1024,
+            shared: false,
+            ready_wait: Duration::from_secs(300),
+            unreal: false,
         }
     }
+}
+
+/// The `*.uproject` file at the folder's root, if any.
+fn unreal_project(folder: &Path) -> bool {
+    fs::read_dir(folder).into_iter().flatten().flatten().take(2000).any(|entry| {
+        entry.path().extension().is_some_and(|extension| extension.eq_ignore_ascii_case("uproject")) && entry.file_type().is_ok_and(|kind| kind.is_file())
+    })
+}
+
+/// An Unreal project's asset folders: `Content` and each plugin's `Content`
+/// (one or two levels below `Plugins`), bounded.
+fn unreal_assets(folder: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    if folder.join("Content").is_dir() {
+        found.push("Content".to_owned());
+    }
+    let plugins = folder.join("Plugins");
+    let dirs = |path: &Path| -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(path)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .take(500)
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    for plugin in dirs(&plugins) {
+        if plugins.join(&plugin).join("Content").is_dir() {
+            found.push(format!("Plugins/{plugin}/Content"));
+            continue;
+        }
+        // A plugin group folder (Plugins/Group/Plugin/Content).
+        for inner in dirs(&plugins.join(&plugin)) {
+            if plugins.join(&plugin).join(&inner).join("Content").is_dir() {
+                found.push(format!("Plugins/{plugin}/{inner}/Content"));
+            }
+        }
+    }
+    found
 }
 
 /// The `[build_broker]` table of the project's tests file over the defaults; a
 /// value of the wrong type keeps its default.
 pub(crate) fn config(folder: &Path) -> Config {
     let mut config = Config::default();
-    let Ok(text) = fs::read_to_string(folder.join(".zerus").join("tests.toml")) else { return config };
-    let Ok(document) = text.parse::<toml_edit::DocumentMut>() else { return config };
-    let Some(table) = document.get("build_broker").and_then(toml_edit::Item::as_table_like) else { return config };
+    let mut mode = String::from("auto");
+    read_table(folder, &mut config, &mut mode);
+    config.unreal = unreal_project(folder);
+    config.shared = match mode.as_str() {
+        "shared" => true,
+        "snapshot" => false,
+        _ => config.unreal,
+    };
+    if config.unreal {
+        for asset in unreal_assets(folder) {
+            if !config.assets.contains(&asset) {
+                config.assets.push(asset);
+            }
+        }
+    }
+    config
+}
+
+fn read_table(folder: &Path, config: &mut Config, mode: &mut String) {
+    let Ok(text) = fs::read_to_string(folder.join(".zerus").join("tests.toml")) else { return };
+    let Ok(document) = text.parse::<toml_edit::DocumentMut>() else { return };
+    let Some(table) = document.get("build_broker").and_then(toml_edit::Item::as_table_like) else { return };
     let strings = |item: &toml_edit::Item| -> Option<Vec<String>> {
         item.as_array().map(|list| list.iter().filter_map(|value| value.as_str()).filter(|value| relative(value)).map(str::to_owned).collect())
     };
@@ -83,10 +165,15 @@ pub(crate) fn config(folder: &Path) -> Config {
             "assets" => config.assets = strings(item).unwrap_or_default(),
             "link" => config.link = strings(item).unwrap_or_default(),
             "copy_limit_mb" => config.copy_limit = item.as_integer().filter(|mb| *mb >= 0).map_or(config.copy_limit, |mb| mb as u64 * 1024 * 1024),
+            "mode" => {
+                if let Some(value) = item.as_str().filter(|value| ["auto", "shared", "snapshot"].contains(value)) {
+                    *mode = value.to_owned();
+                }
+            }
+            "ready_wait_s" => config.ready_wait = item.as_integer().filter(|s| *s >= 0).map_or(config.ready_wait, |s| Duration::from_secs(s as u64)),
             _ => {}
         }
     }
-    config
 }
 
 /// A path below the folder: relative, no "..".
@@ -550,12 +637,8 @@ pub(crate) fn edits_of(shared: &Path, member: &str) -> Vec<String> {
 /// Adds the files a build request names to the member's own edits; a file
 /// that is clean again (its change committed or undone) leaves the list.
 fn record_edits(shared: &Path, member: &str, named: &[String]) -> anyhow::Result<Vec<String>> {
-    let dirty: BTreeSet<String> = nul_list(&git(shared, &["status", "--porcelain", "-z", "--untracked-files=all"])?)
-        .into_iter()
-        .filter(|entry| entry.len() > 3)
-        .map(|entry| entry[3..].to_owned())
-        .collect();
-    let mut edits: BTreeSet<String> = edits_of(shared, member).into_iter().filter(|path| dirty.contains(path)).collect();
+    let dirty = dirty_files(shared);
+    let mut edits: BTreeSet<String> = edits_of(shared, member).into_iter().filter(|path| dirty.as_ref().is_none_or(|dirty| dirty.contains(path))).collect();
     edits.extend(named.iter().map(|path| path.replace('\\', "/")).filter(|path| relative(path)));
     let edits: Vec<String> = edits.into_iter().take(5000).collect();
     let path = edits_path(shared, member);
@@ -564,6 +647,132 @@ fn record_edits(shared: &Path, member: &str, named: &[String]) -> anyhow::Result
     }
     fs::write(path, serde_json::to_vec(&edits)?)?;
     Ok(edits)
+}
+
+/// The folder's changed files by git; None when git cannot read it (a folder
+/// under another version control keeps every recorded edit).
+fn dirty_files(shared: &Path) -> Option<BTreeSet<String>> {
+    let status = git(shared, &["status", "--porcelain", "-z", "--untracked-files=all"]).ok()?;
+    Some(nul_list(&status).into_iter().filter(|entry| entry.len() > 3).map(|entry| entry[3..].to_owned()).collect())
+}
+
+/// When `member` last asked for a build (its edits ready then).
+fn ready_path(shared: &Path, member: &str) -> PathBuf {
+    shared.join(".zerus-team").join("runs").join("broker-ready").join(format!("{member}.json"))
+}
+
+fn mark_ready(shared: &Path, member: &str) {
+    let path = ready_path(shared, member);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, json!({"at":super::super::now()}).to_string());
+}
+
+/// The other members' changed files written since they last asked for a
+/// build: their edits are not ready yet. A file no longer changed (committed
+/// or undone) does not count.
+pub(crate) fn unready(shared: &Path, team: &Team, member: &Member) -> BTreeMap<String, Vec<String>> {
+    let dirty = dirty_files(shared);
+    let mut found = BTreeMap::new();
+    for other in sharing(team, member) {
+        let ready = fs::read(ready_path(shared, &other))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|value| value["at"].as_f64())
+            .unwrap_or(0.0);
+        let files: Vec<String> = edits_of(shared, &other)
+            .into_iter()
+            .filter(|path| dirty.as_ref().is_none_or(|dirty| dirty.contains(path)))
+            .filter(|path| {
+                fs::metadata(shared.join(path))
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                    .is_some_and(|at| at.as_secs_f64() > ready)
+            })
+            .take(20)
+            .collect();
+        if !files.is_empty() {
+            found.insert(other, files);
+        }
+    }
+    found
+}
+
+/// Shared mode: the build runs in the folder itself, one at a time, once the
+/// other members' edits are ready (bounded by `ready_wait`).
+#[allow(clippy::too_many_arguments)]
+fn run_shared(
+    team: &Team,
+    member: &Member,
+    shared: &Path,
+    template: &str,
+    plain: &Value,
+    config: &Config,
+    timeout: Duration,
+    others: &BTreeMap<String, String>,
+) -> anyhow::Result<super::templates::Outcome> {
+    // Asking for a build says this member's own edits are ready.
+    mark_ready(shared, &member.id);
+    let waiting = Waiting::start(shared, &member.id, template);
+    waiting.note("snapshot", json!(false));
+    let _queue = queue(&shared.join(".zerus-team").join("runs").join("broker-shared"), timeout)?;
+    let started = Instant::now();
+    let until = started + config.ready_wait.min(timeout);
+    let mut pending = unready(shared, team, member);
+    let mut told = false;
+    while !pending.is_empty() && Instant::now() < until {
+        if !told {
+            waiting.note("waiting_for", json!(pending.keys().collect::<Vec<_>>()));
+            told = true;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        pending = unready(shared, team, member);
+    }
+    let waited = started.elapsed().as_secs();
+    drop(waiting);
+    let building = shared.join(".zerus-team").join("runs").join("broker-building");
+    fs::create_dir_all(&building)?;
+    let marker = building.join(format!("shared-{}", member.id));
+    let _ = fs::write(&marker, json!({"member":member.id,"template":template,"started":super::super::now(),"snapshot":false}).to_string());
+    let built = (|| -> anyhow::Result<super::templates::Outcome> {
+        let plan = super::templates::plan(template, plain, shared)?;
+        Ok(super::templates::execute(&plan, shared, timeout, &[]))
+    })();
+    let _ = fs::remove_file(&marker);
+    let mut outcome = built?;
+    let mut blamed: Vec<Value> = Vec::new();
+    if outcome.exit != Some(0) {
+        let failing = failing_files(&outcome.tail, shared);
+        if let Some((line, by_member)) = blame(&failing, others, team) {
+            blamed = by_member.iter().map(|(owner, paths)| json!({"member":owner,"files":paths})).collect();
+            let line = line.replace("(taken at HEAD in your tree)", "(as they are now in the shared folder)");
+            outcome.tail = format!("{}\n{line}", outcome.tail.trim_end());
+            outcome.error = "the build failed in files another member is changing".into();
+            for (owner, paths) in by_member {
+                let Some(session) = team.member(&owner).and_then(|found| found.session.clone()) else { continue };
+                let text = format!(
+                    "[Zerus team \u{b7} from: Zerus \u{b7} build broker]\n{}'s build in the shared folder failed in files you are changing: {}.\n\
+                     It built them as they are now, so this is an observation, not a verdict: it may be your unfinished change, or \
+                     theirs depending on it. Nothing is decided; finish your change as planned and ask for a build when it is ready.",
+                    team.name_of(&member.id),
+                    paths.join(", ")
+                );
+                let _ = super::dispatcher::send(&session, &uuid::Uuid::new_v4().to_string(), &text);
+            }
+        }
+    }
+    let unfinished: Vec<String> = pending.iter().map(|(owner, files)| format!("{} ({})", team.name_of(owner), files.join(", "))).collect();
+    let note = format!(
+        "Build broker: built {template} in the shared folder itself (no copy){}{}",
+        if waited > 0 { format!("; waited {waited} s for the other members' edits to be ready") } else { String::new() },
+        if unfinished.is_empty() { String::new() } else { format!("; included unfinished changes of {}", unfinished.join("; ")) }
+    );
+    outcome.tail = format!("{}\n{note}", outcome.tail.trim_end());
+    let key = format!("shared-{}", uuid::Uuid::new_v4());
+    remember(shared, &key, json!({"member":member.id,"template":template,"at":super::super::now(),"hit":false,"snapshot":false,"blamed":blamed,"outcome":outcome_value(&outcome)}));
+    Ok(outcome)
 }
 
 fn outcome_value(outcome: &super::templates::Outcome) -> Value {
@@ -599,6 +808,9 @@ pub(crate) fn run(team: &Team, member: &Member, shared: &Path, template: &str, a
         for path in edits_of(shared, &other) {
             others.insert(path, other.clone());
         }
+    }
+    if config.shared {
+        return run_shared(team, member, shared, template, &plain, config, timeout, &others);
     }
     let dir = member_dir(shared, &member.id);
     // #756: who waits, since when and for what, for the Builds tab.
@@ -707,20 +919,26 @@ pub(crate) fn run(team: &Team, member: &Member, shared: &Path, template: &str, a
 /// member builds; the file goes when it stops waiting.
 struct Waiting {
     path: PathBuf,
-    entry: Value,
+    entry: std::cell::RefCell<Value>,
 }
 
 impl Waiting {
     fn start(shared: &Path, member: &str, template: &str) -> Self {
         let dir = shared.join(".zerus-team").join("runs").join("broker-waiting");
         let _ = fs::create_dir_all(&dir);
-        let waiting = Waiting { path: dir.join(format!("{member}.json")), entry: json!({"member":member,"template":template,"since":super::super::now()}) };
-        let _ = fs::write(&waiting.path, waiting.entry.to_string());
+        let waiting = Waiting {
+            path: dir.join(format!("{member}.json")),
+            entry: std::cell::RefCell::new(json!({"member":member,"template":template,"since":super::super::now()})),
+        };
+        let _ = fs::write(&waiting.path, waiting.entry.borrow().to_string());
         waiting
     }
     fn coalesced(&self, with: Option<String>) {
-        let mut entry = self.entry.clone();
-        entry["coalesced_with"] = json!(with);
+        self.note("coalesced_with", json!(with));
+    }
+    fn note(&self, key: &str, value: Value) {
+        let mut entry = self.entry.borrow_mut();
+        entry[key] = value;
         let _ = fs::write(&self.path, entry.to_string());
     }
 }
@@ -766,8 +984,10 @@ pub(crate) fn builds_view(team: &Team, now: f64) -> Value {
         let running = read_dir_json(&runs.join("broker-building"));
         let waiting = read_dir_json(&runs.join("broker-waiting"));
         let mut groups = Vec::new();
-        for name in ["target", ".ci-build/gui"] {
-            let ours = |entry: &&Value| build_folder(entry["template"].as_str().unwrap_or("qt-build")) == name;
+        for name in ["target", ".ci-build/gui", "."] {
+            let ours = |entry: &&Value| {
+                (if entry["snapshot"] == false { "." } else { build_folder(entry["template"].as_str().unwrap_or("qt-build")) }) == name
+            };
             let finished: Vec<&Value> = results.iter().filter(ours).collect();
             let mut built: Vec<f64> = finished
                 .iter()
@@ -783,7 +1003,7 @@ pub(crate) fn builds_view(team: &Team, now: f64) -> Value {
                 .map(|entry| {
                     let started = entry["started"].as_f64().unwrap_or(now);
                     json!({"member":entry["member"],"template":entry["template"],"started":started,"seconds":(now - started).max(0.0),
-                        "usual_ms":usual,"snapshot":true})
+                        "usual_ms":usual,"snapshot":entry["snapshot"] != false})
                 })
                 .collect();
             let mut queue: Vec<Value> = waiting
@@ -792,13 +1012,13 @@ pub(crate) fn builds_view(team: &Team, now: f64) -> Value {
                 .map(|entry| {
                     let since = entry["since"].as_f64().unwrap_or(now);
                     json!({"member":entry["member"],"template":entry["template"],"since":since,"seconds":(now - since).max(0.0),
-                        "coalesced_with":entry["coalesced_with"]})
+                        "coalesced_with":entry["coalesced_with"],"waiting_for":entry["waiting_for"]})
                 })
                 .collect();
             queue.sort_by(|a, b| a["since"].as_f64().partial_cmp(&b["since"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
             for entry in &now_running {
                 if let Some(member) = entry["member"].as_str() {
-                    states.insert(member.to_owned(), json!({"state":"building","snapshot":true,"template":entry["template"],"since":entry["started"]}));
+                    states.insert(member.to_owned(), json!({"state":"building","snapshot":entry["snapshot"] != false,"template":entry["template"],"since":entry["started"]}));
                 }
             }
             for (ahead, entry) in queue.iter().enumerate() {

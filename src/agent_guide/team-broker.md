@@ -13,3 +13,9 @@ builds at HEAD, so another member's unfinished file never reaches your build.
 Builds of one build folder run one at a time; an unchanged tree builds once.
 A failure in another member's file may be theirs or a dependency of yours:
 check what your change touches, else wait and build again; never edit theirs.
+
+Shared mode (an Unreal project, or mode = "shared" in [build_broker]):
+builds run in the folder itself, one at a time, with no copy. Each build
+waits (ready_wait_s, 300 by default) until the others have asked for a
+build since they last changed their files. So ask for a build when your
+edits compile, never mid-edit, and name your files as above.

@@ -79,6 +79,8 @@ struct Running {
 struct Waiting {
     QString member, templateName, coalescedWith;
     double since = 0, seconds = 0;
+    // Shared mode: the members whose edits are not ready yet.
+    QStringList waitingFor;
 };
 // A member and the files: a blame, a change list or an overlap.
 struct Files {

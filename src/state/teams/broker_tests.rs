@@ -332,3 +332,73 @@ fn a_build_result_serves_only_its_own_tree_and_a_verdict_serves_anyone() {
     assert!(theirs.tail.contains("Build broker: built build"), "built, not served: {}", theirs.tail);
     assert!(!theirs.tail.contains("verdict"), "{}", theirs.tail);
 }
+
+#[test]
+fn an_unreal_project_builds_in_the_folder_itself_and_its_content_is_never_copied() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // Not Unreal: snapshots, as before.
+    assert!(!config(root).shared);
+    fs::write(root.join("Game.uproject"), "{}").unwrap();
+    for folder in ["Content/Maps", "Plugins/Tools/Content", "Plugins/Group/Inner/Content", "Plugins/Code/Source"] {
+        fs::create_dir_all(root.join(folder)).unwrap();
+    }
+    let found = config(root);
+    assert!(found.shared && found.unreal);
+    assert_eq!(found.assets, vec!["Content".to_owned(), "Plugins/Group/Inner/Content".into(), "Plugins/Tools/Content".into()]);
+    assert_eq!(found.ready_wait, Duration::from_secs(300));
+    // The tests file chooses: snapshots for this Unreal project, shared for another.
+    fs::create_dir_all(root.join(".zerus")).unwrap();
+    fs::write(root.join(".zerus").join("tests.toml"), "[build_broker]\nmode = \"snapshot\"\nready_wait_s = 30\n").unwrap();
+    let chosen = config(root);
+    assert!(!chosen.shared && chosen.unreal);
+    assert_eq!(chosen.ready_wait, Duration::from_secs(30));
+    let other = project();
+    fs::create_dir_all(other.path().join(".zerus")).unwrap();
+    fs::write(other.path().join(".zerus").join("tests.toml"), "[build_broker]\nmode = \"shared\"\n").unwrap();
+    assert!(config(other.path()).shared);
+}
+
+#[test]
+fn a_shared_build_waits_for_the_others_edits_then_runs_in_the_folder_itself() {
+    let dir = project();
+    let root = dir.path();
+    let templates = tempfile::tempdir().unwrap();
+    crate::state::teams::templates::settings_override(Some(templates.path().join("templates.json")));
+    let (program, flag) = if cfg!(windows) { ("cmd", "/c") } else { ("sh", "-c") };
+    let script = if cfg!(windows) { "echo built>built.txt & echo built" } else { "echo built > built.txt; echo built" };
+    crate::state::teams::templates::set_additions(&[json!({"id":"build","program":program,"args":[flag, script]})]).unwrap();
+    let mut team = team_in(root);
+    team.settings.build_broker = true;
+    let config = Config { templates: vec!["build".into()], shared: true, ready_wait: Duration::from_secs(1), ..small_config() };
+    let dev = team.member("dev").unwrap().clone();
+    let dev2 = team.member("dev2").unwrap().clone();
+    // dev2 is changing b.c and has not asked for a build since: not ready.
+    fs::write(root.join("src").join("b.c"), "int b(void) { return 2 +").unwrap();
+    record_edits(root, "dev2", &["src/b.c".into()]).unwrap();
+    assert_eq!(unready(root, &team, &dev), BTreeMap::from([("dev2".to_owned(), vec!["src/b.c".to_owned()])]));
+    let first = run(&team, &dev, root, "build", &json!({}), &config, Duration::from_secs(60)).unwrap();
+    crate::state::teams::templates::settings_override(None);
+    assert_eq!(first.exit, Some(0), "{first:?}");
+    assert!(first.tail.contains("built build in the shared folder itself (no copy)"), "{}", first.tail);
+    assert!(first.tail.contains("waited 1 s") && first.tail.contains("included unfinished changes of dev2 (Gameplay) (src/b.c)"), "{}", first.tail);
+    // It ran in the folder: its output is there, and no snapshot was made.
+    assert!(root.join("built.txt").exists());
+    assert!(!member_dir(root, "dev").join("tree").exists());
+    // dev2 asks for a build: its edits are ready, and dev now builds at once.
+    mark_ready(root, "dev2");
+    assert!(unready(root, &team, &dev).is_empty());
+    assert!(unready(root, &team, &dev2).is_empty(), "dev's own build marked dev ready");
+    crate::state::teams::templates::settings_override(Some(templates.path().join("templates.json")));
+    let second = run(&team, &dev, root, "build", &json!({}), &config, Duration::from_secs(60)).unwrap();
+    crate::state::teams::templates::settings_override(None);
+    assert!(!second.tail.contains("waited") && !second.tail.contains("unfinished"), "{}", second.tail);
+    // A later write by dev2 makes it unready again.
+    std::thread::sleep(Duration::from_millis(1100));
+    fs::write(root.join("src").join("b.c"), "int b(void) { return 3; }\n").unwrap();
+    assert!(unready(root, &team, &dev).contains_key("dev2"));
+    // The Builds tab shows these builds in the folder's own group.
+    let view = builds_view(&team, crate::state::now());
+    let groups = view["folders"][0]["build_folders"].as_array().unwrap();
+    assert!(groups.iter().any(|group| group["name"] == "." && group["timeline"].as_array().is_some_and(|items| items.len() == 2)), "{view}");
+}

@@ -142,7 +142,8 @@ State State::parse(const QJsonObject &result)
             for (const auto &q : g.value("queue").toArray()) {
                 const auto o = q.toObject();
                 group.queue << Waiting{o.value("member").toString(), o.value("template").toString(), o.value("coalesced_with").toString(),
-                                       o.value("since").toDouble(), o.value("seconds").toDouble()};
+                                       o.value("since").toDouble(), o.value("seconds").toDouble(), {}};
+                for (const auto &member : o.value("waiting_for").toArray()) group.queue.last().waitingFor << member.toString();
             }
             for (const auto &t : g.value("timeline").toArray()) {
                 const auto o = t.toObject();
@@ -782,6 +783,13 @@ QWidget *TeamTestsView::buildQueueRow(const TeamBuilds::Waiting &item, int ahead
         auto *same = label(tr("same tree as %1: one result").arg(who(item.coalescedWith)), c.accent, 11, false, "teamBuildsCoalesced");
         same->setToolTip(tr("Nothing changed between the two requests, so the build runs once and both get its result"));
         h->addWidget(same);
+    } else if (!item.waitingFor.isEmpty()) {
+        // Shared mode: the build waits until the others' edits are ready.
+        QStringList names;
+        for (const auto &member : item.waitingFor) names << who(member);
+        auto *edits = label(tr("waiting for edits of %1").arg(names.join(QStringLiteral(", "))), c.warn, 11, false, "teamBuildsWaitingFor");
+        edits->setToolTip(tr("They changed files since their last build request; the build runs when they ask for one, or after the project's wait"));
+        h->addWidget(edits);
     } else {
         h->addWidget(label(ahead == 1 ? tr("1 ahead") : tr("%1 ahead").arg(ahead), c.muted, 11, false, "teamBuildsAhead"));
     }
@@ -855,7 +863,7 @@ void TeamTestsView::renderBuilds(QVBoxLayout *v)
         if (folder.builds.isEmpty()) v->addWidget(label(tr("No build through the broker yet."), c.muted, 12, false, "teamBuildsNone"));
         for (const auto &group : folder.builds) {
             auto *line = row(8);
-            auto *name = label(group.name, c.text2, 12, true, "teamBuildsBuildFolder"); name->setContentsMargins(0, 6, 0, 0);
+            auto *name = label(group.name == QStringLiteral(".") ? tr("the shared folder itself") : group.name, c.text2, 12, true, "teamBuildsBuildFolder"); name->setContentsMargins(0, 6, 0, 0);
             line->addWidget(name);
             if (group.usualMs > 0) line->addWidget(label(tr("usually %1").arg(runTime(qint64(group.usualMs))), c.muted, 11));
             if (group.hitRate >= 0) {

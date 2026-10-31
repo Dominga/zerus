@@ -351,7 +351,11 @@ QJsonObject buildsNow()
                                 done("tester", now - 600, false, 1, 60000, QJsonArray{QJsonObject{{"member", "backend"}, {"files", QJsonArray{"src/a.c"}}}}),
                                 done("tester", now - 800, true, 0, 120000),
                                 done("backend", now - 900, false, 0, 120000)}}};
-    const QJsonObject folder{{"folder", "D:/work/shop"}, {"members", QJsonArray{"backend", "tester"}}, {"build_folders", QJsonArray{target}},
+    // Shared mode (owner, 2026-10-31): a build in the folder itself waits for Backend's edits.
+    const QJsonObject itself{{"name", "."}, {"running", QJsonArray{}}, {"timeline", QJsonArray{}},
+                             {"queue", QJsonArray{QJsonObject{{"member", "tester"}, {"template", "ue-build"}, {"since", now - 20}, {"seconds", 20},
+                                                              {"waiting_for", QJsonArray{"backend"}}}}}};
+    const QJsonObject folder{{"folder", "D:/work/shop"}, {"members", QJsonArray{"backend", "tester"}}, {"build_folders", QJsonArray{target, itself}},
                              {"changes", QJsonArray{QJsonObject{{"member", "backend"}, {"files", QJsonArray{"src/a.c", "src/b.c"}}},
                                                     QJsonObject{{"member", "tester"}, {"files", QJsonArray{"src/b.c"}}}}},
                              {"overlaps", QJsonArray{QJsonObject{{"file", "src/b.c"}, {"members", QJsonArray{"backend", "tester"}}}}}};
@@ -431,6 +435,12 @@ void TestTeamsUiTests::theBuildsTabShowsTheBuildTheQueueTheTimelineAndWhoChanges
     QCOMPARE(queued->property("member").toString(), QStringLiteral("tester"));
     QCOMPARE(labelText(queued, "teamBuildsCoalesced"), QStringLiteral("same tree as Backend: one result"));
     QVERIFY2(labelText(queued, "teamBuildsWaited").startsWith("waiting 4"), qPrintable(labelText(queued, "teamBuildsWaited")));
+    const auto queues = view->findChildren<QFrame *>("teamBuildsQueued");
+    QCOMPARE(queues.size(), 2);
+    QCOMPARE(labelText(queues[1], "teamBuildsWaitingFor"), QStringLiteral("waiting for edits of Backend"));
+    bool itselfNamed = false;
+    for (auto *name : view->findChildren<QLabel *>("teamBuildsBuildFolder")) itselfNamed |= name->text() == QStringLiteral("the shared folder itself");
+    QVERIFY(itselfNamed);
     // The timeline, newest first: a cache hit, and a failure in Backend's file.
     const auto done = view->findChildren<QFrame *>("teamBuildsDone");
     QCOMPARE(done.size(), 4);

@@ -1549,6 +1549,25 @@ fn clear_restarted(store: &mut Store, team_id: &str, member_id: &str, role: &str
 /// U62 (#717): one test-queue tick. An empty queue costs no load read; a read
 /// is at least 30 s after the previous one; the night window comes from the
 /// project's `[schedule]`; each result becomes one notice for the lead's card.
+/// U62 (#760): one step of the merge queue: a merge under test decides once
+/// all its results are in; else the oldest accepted report merges. Nothing is
+/// written while a merge only waits for its tests.
+fn merge_queue_tick(store: &mut Store, team_id: &str, now: f64) -> anyhow::Result<()> {
+    let team = store.load(team_id)?.with_context(|| format!("Unknown team {team_id}"))?;
+    if team.status != TeamStatus::Running || !team.tasks.iter().any(|task| task.merge.is_some()) {
+        return Ok(());
+    }
+    let database = super::test_queue::TestStore::open(false)?;
+    if let Some(entry) = team.tasks.iter().filter_map(|task| task.merge.as_ref()).find(|entry| entry.state == "testing") {
+        for request in &entry.requests {
+            if database.result_of(request)?.is_none() {
+                return Ok(());
+            }
+        }
+    }
+    change(store, team_id, |team, events| super::merge_queue::step(team, &database, now, events).map(|_| ()))
+}
+
 fn test_queue_tick(store: &mut Store, team_id: &str, now: f64) -> anyhow::Result<()> {
     use chrono::Timelike;
     let team = store.load(team_id)?.with_context(|| format!("Unknown team {team_id}"))?;
@@ -1926,6 +1945,13 @@ pub(crate) fn hand_off_text_with(
         current = json!({"attempt":attempt.id}),
         report = report
     );
+    // U62 (#760): with the merge queue, a task starts from the lead's branch
+    // and its accepted report goes back through the queue.
+    if super::merge_queue::enabled(team) && !task.is_check() {
+        text += "\nThe merge queue is on: merge the lead branch into your folder before you start (the git-merge-lead template). \
+                 When the lead accepts your report, Zerus merges your reported commit into the lead branch and runs its affected tests there; \
+                 a conflict or a failure comes back to you with the files or the failure.";
+    }
     // U21: the routine commands Zerus runs outside the member's sandbox; the
     // owner turned the set off in Settings > Teams when it is off.
     if super::templates::enabled() {
@@ -2757,7 +2783,7 @@ fn clone_of(folder: &str, source: &str) -> bool {
 
 /// The same folder written two ways (separators, case on Windows drives, the
 /// `\\?\` prefix, a trailing separator).
-fn same_path(left: &str, right: &str) -> bool {
+pub(crate) fn same_path(left: &str, right: &str) -> bool {
     let key = |path: &str| {
         let path = path.strip_prefix(r"\\?\").unwrap_or(path).replace('\\', "/");
         let path = path.trim_end_matches('/').to_owned();
@@ -5524,7 +5550,7 @@ pub(crate) fn send_denial(session: &SessionRef, tool: &str, reason: &str) -> any
 /// C2: why a repository's own configuration (the `local` and `worktree`
 /// scopes of `git config --list --show-scope --name-only`) cannot be committed
 /// with, or None.
-fn refused_repository_config(listing: &str) -> Option<String> {
+pub(crate) fn refused_repository_config(listing: &str) -> Option<String> {
     for line in listing.lines() {
         let Some((scope, key)) = line.split_once(char::is_whitespace) else { continue };
         if !matches!(scope, "local" | "worktree") {
@@ -5714,7 +5740,7 @@ pub(crate) fn merge_lead(folder: &str, source: &str, branch: &str, timeout: Dura
 
 /// N12: whether two folders are the same repository (a worktree and its main
 /// checkout share refs); a clone is not.
-fn same_repository(folder: &str, source: &str, deadline: Instant) -> bool {
+pub(crate) fn same_repository(folder: &str, source: &str, deadline: Instant) -> bool {
     let common = |path: &str| {
         super::super::worktrees::git(Path::new(path), &["rev-parse", "--path-format=absolute", "--git-common-dir"], deadline)
             .map(|out| String::from_utf8_lossy(&out).trim().to_owned())
@@ -6463,6 +6489,10 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
         }
         // U62 (#717): the team's test queue. An empty queue is a no-op (no load
         // read); a read is at most once per 30 s, and results become notices.
+        // U62 (#760): the merge queue first, so its tests run in the same tick.
+        if let Err(error) = merge_queue_tick(store, &team.id, now()) {
+            eprintln!("hgs team worker: {}: merge queue: {error}", team.name);
+        }
         if let Err(error) = test_queue_tick(store, &team.id, now()) {
             eprintln!("hgs team worker: {}: test queue: {error}", team.name);
         }

@@ -290,6 +290,14 @@ impl TestStore {
         Ok(())
     }
 
+    /// #760: the result a request produced, once the runner wrote it.
+    pub(crate) fn result_of(&self, request: &str) -> anyhow::Result<Option<Record>> {
+        let mut statement = self.db.prepare(&format!(
+            "SELECT {RECORD_COLUMNS} FROM results WHERE id LIKE ?1 || '-%' ORDER BY seq DESC LIMIT 1"
+        ))?;
+        Ok(statement.query_row(params![request], Self::record).optional()?)
+    }
+
     /// #718: the last green measured run of a suite with these input hashes,
     /// at any commit: unchanged inputs give the same result.
     pub(crate) fn last_green(&self, team: &str, suite: &str, input_hash: &str) -> anyhow::Result<Option<Record>> {

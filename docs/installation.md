@@ -380,6 +380,14 @@ runs them, and the next host starts from the new image. **Machines** shows the
 session host's state for this computer, and `hgs.exe session-host status` reports
 the marker, the staged files and the host.
 
+When testing a local build with an explicit `--hgs` argument or `hgs=` in
+`tray.conf`, run `.\hgs.exe session-host install` from that build's extracted
+folder first. The explicit path selects the GUI's CLI and skips automatic
+staging; native sessions and their hooks still run the stable CLI above. Keep
+both CLIs on the same build before saving native permission selections.
+Staging updates the CLI for new launches without restarting a running host or
+its agents.
+
 The session host starts with the first launch, resume or fork and exits a few
 seconds after its last session has ended; listings never start it. Sessions keep
 running when Zerus closes or updates and when the terminal or SSH connection that

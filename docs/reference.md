@@ -4873,7 +4873,12 @@ each start first asks that `hgs.exe` for `session-host status`, before the tray
 icon appears; once local sessions are enabled, the app then runs the stable CLI
 instead, after `session-host install` when that `hgs.exe` differs from the staged
 one and is at least as new. A small *Starting Zerus…* note shows while these
-checks take longer than half a second. Settings are in
+checks take longer than half a second. An explicit `--hgs` or `hgs=` skips
+automatic staging: before testing such a local build, run its
+`hgs.exe session-host install` so the stable CLI used by native sessions and
+hooks matches the GUI's CLI. Staging preserves running hosts and agents. This
+also ensures the session lifecycle can read saved `native:` permission choices.
+Settings are in
 `%APPDATA%\hgdev\hgs-tray.ini`, with drafts beside it, and one instance runs per
 user. When the local box reports `local_sessions: false`, the app offers remote
 machines only: in New session, Overview, the tray menu, Accounts, Projects and

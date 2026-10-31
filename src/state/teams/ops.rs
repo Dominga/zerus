@@ -890,7 +890,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-pub(crate) const OWNER_SETTINGS: [&str; 18] = [
+pub(crate) const OWNER_SETTINGS: [&str; 19] = [
     "approval",
     "phase_approval",
     "max_members",
@@ -911,6 +911,8 @@ pub(crate) const OWNER_SETTINGS: [&str; 18] = [
     "restart_crashed",
     // U56: only the owner lets the lead restart a stuck member.
     "lead_restarts_stuck",
+    // #752: only the owner turns the build broker on.
+    "build_broker",
     // U62: the owner's override of the project's test configuration.
     "tests",
     // U62: only the owner says who may start a full test run.
@@ -3822,8 +3824,8 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
     let kind = text(input, "kind").to_owned();
     ensure!(
         ["add-member", "remove-member", "swap-member", "next-goal", "switch-plan-mode",
-         "add-to-phase", "cancel-tasks", "discard-phase", "question"].contains(&kind.as_str()),
-        "A proposal adds or removes members, adds tasks to a running phase, cancels tasks, discards a phase, starts the next goal, switches the plan mode or asks you a question"
+         "add-to-phase", "cancel-tasks", "discard-phase", "question", "switch-setting"].contains(&kind.as_str()),
+        "A proposal adds or removes members, adds tasks to a running phase, cancels tasks, discards a phase, starts the next goal, switches the plan mode or a setting, or asks you a question"
     );
     let reason = clean(text(input, "reason").trim(), 2000, "A proposal reason")?;
     // #740: a question carries its own words; any other proposal its reason.
@@ -3867,6 +3869,14 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
             json!({"phase":phase})
         }
         "question" => question_change(input)?,
+        "switch-setting" => {
+            // #752: a switch card names one owner setting the lead may propose
+            // and the value Allow sets.
+            let setting = text(input, "setting");
+            ensure!(SWITCHES.contains(&setting), "A switch proposal names one of: {}", SWITCHES.join(", "));
+            let value = input["value"].as_bool().context("A switch proposal names its value, true or false")?;
+            json!({"setting":setting,"value":value})
+        }
         _ => Value::Null,
     };
     ensure!(change.to_string().len() <= 64 * 1024, "A proposal's change has at most 64 KiB");
@@ -3891,7 +3901,7 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
     // parse, an unknown member or phase) is refused here, not left as a card
     // the owner cannot allow. A next goal and a question apply nothing; a
     // swap is checked by the swap itself when it runs.
-    if matches!(kind.as_str(), "add-member" | "remove-member" | "add-to-phase" | "cancel-tasks" | "discard-phase" | "switch-plan-mode") {
+    if matches!(kind.as_str(), "add-member" | "remove-member" | "add-to-phase" | "cancel-tasks" | "discard-phase" | "switch-plan-mode" | "switch-setting") {
         let mut trial = team.clone();
         let mut ignored = Vec::new();
         run_proposal(&mut trial, &kind, &member, &change, &mode, "", "", &BTreeSet::new(), &mut ignored)
@@ -4039,9 +4049,25 @@ fn run_proposal(team: &mut Team, kind: &str, member: &Value, change: &Value, mod
             ));
             json!({"status":"switched","plan_mode":mode})
         }
+        "switch-setting" => switch_setting(team, change, id, reason, events)?,
         _ => bail!("A next-goal proposal is accepted with hgs team next-goal"),
     };
     Ok(result)
+}
+
+/// #752: the owner settings a lead may propose to switch, each a flag.
+pub(crate) const SWITCHES: [&str; 1] = ["build_broker"];
+
+/// #752: Allow of a switch card sets the one setting it names.
+pub(crate) fn switch_setting(team: &mut Team, change: &Value, id: &str, reason: &str, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    let setting = change["setting"].as_str().unwrap_or_default();
+    let value = change["value"].as_bool().context("The switch proposal carries its value")?;
+    match setting {
+        "build_broker" => team.settings.build_broker = value,
+        other => bail!("{other} is not a setting a switch card sets"),
+    }
+    events.push(Event::new("setting_switched", json!({"by":"You","setting":setting,"value":value,"proposal":id,"reason":reason})));
+    Ok(json!({"status":"switched","setting":setting,"value":value}))
 }
 
 /// #630 N7: the stage runs given to `member` go back to Waiting when its

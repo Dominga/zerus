@@ -66,7 +66,7 @@ pub(crate) const BUILTIN: &[Template] = &[
         summary: "cargo build --locked in your folder (optional package and toolchain)",
         program: "cargo",
         args: &["+{toolchain}", "build", "--locked", "--package={package}"],
-        params: &[optional("toolchain", Kind::Identifier), optional("package", Kind::Identifier)],
+        params: &[optional("toolchain", Kind::Identifier), optional("package", Kind::Identifier), optional("files", Kind::Paths)],
         timeout_secs: 1800,
     },
     Template {
@@ -83,6 +83,8 @@ pub(crate) const BUILTIN: &[Template] = &[
             optional("filters", Kind::Identifiers),
             optional("skips", Kind::Identifiers),
             optional("manifest", Kind::Paths),
+            // #752: the files this member changes, for the build broker.
+            optional("files", Kind::Paths),
         ],
         timeout_secs: 1800,
     },
@@ -91,7 +93,7 @@ pub(crate) const BUILTIN: &[Template] = &[
         summary: "cargo clippy --locked --all-targets -- -D warnings (an optional package and toolchain)",
         program: "cargo",
         args: &["+{toolchain}", "clippy", "--locked", "--all-targets", "--package={package}", "--", "-D", "warnings"],
-        params: &[optional("toolchain", Kind::Identifier), optional("package", Kind::Identifier)],
+        params: &[optional("toolchain", Kind::Identifier), optional("package", Kind::Identifier), optional("files", Kind::Paths)],
         timeout_secs: 1800,
     },
     Template {
@@ -99,7 +101,7 @@ pub(crate) const BUILTIN: &[Template] = &[
         summary: "cmake configure of tray/ into .ci-build/gui (Ninja, Release)",
         program: "cmake",
         args: &["-S", "tray", "-B", ".ci-build/gui", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release"],
-        params: &[],
+        params: &[optional("files", Kind::Paths)],
         timeout_secs: 600,
     },
     Template {
@@ -107,7 +109,7 @@ pub(crate) const BUILTIN: &[Template] = &[
         summary: "cmake --build .ci-build/gui (default targets, or the given ones)",
         program: "cmake",
         args: &["--build", ".ci-build/gui"],
-        params: &[optional("targets", Kind::Identifiers)],
+        params: &[optional("targets", Kind::Identifiers), optional("files", Kind::Paths)],
         timeout_secs: 3600,
     },
     Template {
@@ -121,6 +123,7 @@ pub(crate) const BUILTIN: &[Template] = &[
             optional("suites", Kind::Identifiers),
             optional("functions", Kind::Identifiers),
             optional("shots", Kind::Identifier),
+            optional("files", Kind::Paths),
         ],
         timeout_secs: 1800,
     },

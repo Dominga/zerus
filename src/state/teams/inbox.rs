@@ -135,6 +135,33 @@ fn all_items(team: &Team) -> Vec<Item> {
         return Vec::new();
     }
     let mut items: Vec<Item> = Vec::new();
+    // #752: two or more members in one folder build each other's half-done
+    // edits; the lead proposes the build broker once (a switch card), and a
+    // card the owner denied is not proposed again.
+    let proposed = team.proposals.iter().any(|proposal| proposal["kind"] == "switch-setting" && proposal["change"]["setting"] == "build_broker");
+    if active && !team.settings.build_broker && !proposed {
+        if let Some((folder, members)) = super::broker::shared_folders(team).into_iter().next() {
+            let names: Vec<String> = members.iter().map(|id| team.name_of(id)).collect();
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "build_broker",
+                key: "build_broker".into(),
+                task: None,
+                member: names.join(", "),
+                since: 0.0,
+                summary: summary(&format!("{} work in one folder: propose the build broker", names.join(", "))),
+                command: format!(
+                    "{} | hgs team propose --json",
+                    json!({"request_id":PLACEHOLDER,"team":team.id,"kind":"switch-setting","setting":"build_broker","value":true,
+                        "reason":format!("{} share {folder}; their builds compile each other's half-done edits", names.join(", "))})
+                ),
+                detail: "With the build broker each member builds its own snapshot of the folder (its own changed files, the rest at HEAD) \
+                         in its own build folder, one build at a time; a failure in another member's file is told as theirs. \
+                         The owner's Allow on your switch card turns it on (hgs guide team-propose)."
+                    .into(),
+            });
+        }
+    }
     // C9: the team's own items, once each, not once per task.
     // F1.4: a member whose launch failed (the folder check) is an item.
     for member in team

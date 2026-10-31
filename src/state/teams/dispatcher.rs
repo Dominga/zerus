@@ -6597,6 +6597,12 @@ fn run_outcome(team: &Team, member: &Member, folder: &Path, request: &Value) -> 
         let env: Vec<(&str, String)> = if temp.is_empty() { Vec::new() } else { ["TEMP", "TMP", "TMPDIR"].map(|key| (key, temp.clone())).to_vec() };
         return Ok(super::templates::execute(&plan, &stage_folder, timeout, &env));
     }
+    // #752: with the owner's build_broker a build runs in the member's own
+    // snapshot of the shared folder, one at a time per build folder.
+    if let Some(config) = super::broker::applies(team, template, folder) {
+        let shared = member_folder_path(team, member)?;
+        return super::broker::run(team, member, Path::new(&shared), template, &args, &config, timeout);
+    }
     let plan = super::templates::plan(template, &args, folder)?;
     if template == "git-merge-lead" {
         let mine = member_folder_path(team, member)?;

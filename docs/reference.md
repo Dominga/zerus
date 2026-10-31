@@ -1847,6 +1847,55 @@ Rust tests that set no state folder, or inherit one outside their temporary
 and build folders, use one per test process beside the test binary
 (`target/<profile>/deps/hgs-test-state/<pid>`), never the person's.
 
+### Build broker (members sharing one folder)
+
+Several members may work in one folder: a game project where a worktree per
+member would copy hundreds of GB of assets. Without the broker their builds
+run in the one build folder and compile each other's half-written files.
+
+The owner turns it on with the team setting `build_broker` (off by default,
+owner-only). The lead's inbox names it once when two or more members (the lead
+not counted) share a folder, with the switch card to propose:
+`{"kind":"switch-setting","setting":"build_broker","value":true,"reason":"..."}`
+piped to `hgs team propose --json`; the owner's Allow sets it, a Deny's reason
+reaches the lead, and a card already proposed is not proposed again. Off,
+builds run as before.
+
+On, a build template of a member runs in that member's snapshot,
+`.zerus-team/runs/broker-<member>/tree` below the shared folder:
+
+- The member names the files it changes in its build requests,
+  `"args":{"files":["Source/Game/Unit.cpp"]}`. They stay its own edits until
+  the file is clean again (committed or undone).
+- The snapshot holds the folder's tracked files. The member's own changed
+  files come from the working copy. A file another member is changing (or
+  anyone's uncommitted change) is taken at HEAD, so its half-written state
+  never reaches this build.
+- Files up to `copy_limit_mb` (4 MB) are copies. Larger files are hard links,
+  and the project's asset folders are one link each (a junction on Windows),
+  so a 300 GB project costs no second copy. Only files whose source changed
+  are written again, so an unchanged file keeps its time and the build stays
+  incremental. The shared compiler cache (`[build_cache]`) serves it as usual.
+- Builds of one build folder run one at a time: the folder's lock is the
+  queue. A request whose tree, template and arguments match a finished build
+  is served by that build's result, and one that matches a build still running
+  waits for it, so an unchanged tree is built once. The newest 64 results are
+  kept in `.zerus-team/runs/broker-results.json`.
+- A failure in a file another member is changing is told to the asker as that
+  member's, with the files named, and the member hears it in its session. The
+  asker waits and builds again; it never edits the other member's files.
+
+`.zerus/tests.toml` configures it:
+
+```toml
+[build_broker]
+enabled = true                 # false: the project vetoes the broker
+templates = ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test"]
+assets = ["Content"]           # folders linked whole, never copied
+link = ["ThirdParty"]          # untracked folders the build needs, linked
+copy_limit_mb = 4              # larger files are hard links
+```
+
 <a id="activity"></a>
 
 ## Activity, messages and native controls

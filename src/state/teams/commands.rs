@@ -1640,6 +1640,12 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
             })?;
             json!({"status":"switched","plan_mode":mode})
         }
+        "switch-setting" => {
+            // #752: the owner's Allow sets the one setting the card names.
+            let change = team.proposals[at]["change"].clone();
+            let asked = team.proposals[at]["reason"].as_str().unwrap_or_default().to_owned();
+            store.mutate(None, &team_id, None, |team, events| super::ops::switch_setting(team, &change, &id, &asked, events))?
+        }
         other => bail!("Unknown proposal kind {other}"),
     };
     store.mutate(None, &team_id, None, |team, events| {

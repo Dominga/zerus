@@ -140,7 +140,7 @@ fn a_pinned_pending_task_waits_for_a_stuck_or_stopped_member() {
     let mut dev = session("codex/x/dev", "r1", true);
     // Stuck: the wait says so with the member id, role and cause.
     t.members.iter_mut().find(|member| member.id == "dev").unwrap().stuck =
-        Some(MemberStuck { at: at - 15.0 * 60.0, reason: "no_progress".into(), phase: "tool".into(), ..Default::default() });
+        Some(MemberStuck { at: at - 15.0 * 60.0, reason: "no_progress".into(), phase: "tool".into(), since: Some(at - 15.0 * 60.0) });
     let found = steps(&t, &[lead.clone(), dev.clone()], at);
     let reason = found
         .iter()
@@ -149,7 +149,7 @@ fn a_pinned_pending_task_waits_for_a_stuck_or_stopped_member() {
             _ => None,
         })
         .expect("the pinned task waits");
-    assert!(reason.contains("dev (Backend)") && reason.contains("stuck for 15 min"), "{reason}");
+    assert!(reason.contains("dev (Backend)") && reason.contains("no progress for 15 min"), "{reason}");
     // Not live: the wait names a stopped session, and a live member clears it.
     t.members.iter_mut().find(|member| member.id == "dev").unwrap().stuck = None;
     dev.live = false;
@@ -398,4 +398,94 @@ fn a_dsh_member_with_fresh_native_tool_events_is_not_silent() {
     assert!(saved.task(id).unwrap().attempts.last().unwrap().told_lead.is_empty());
     let after = steps(&saved, &[lead, dev], at);
     assert!(!after.iter().any(|step| matches!(step, Step::Silent { .. } | Step::CheckSilent { .. })), "{after:?}");
+}
+
+/// #761 (owner, 2026-10-31, team 6d0aabee): h-data (dsh) had just reported
+/// #238 and had #256 queued (pinned), but its listing still said "working"
+/// with a stale last_event_at, and with no open attempt Zerus marked it stuck
+/// from the listing alone ("stuck for 0 min"). A report is progress; past the
+/// bound the session is read once, and only a read that sees work without
+/// progress marks it, with the real minutes.
+#[test]
+fn a_dsh_member_that_just_reported_is_not_stuck_from_its_stale_listing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+    let at = crate::state::now();
+    let mut t = team();
+    t.status = TeamStatus::Running;
+    t.members.iter_mut().find(|member| member.id == "dev").unwrap().agent = "dsh".into();
+    let ids: Vec<u32> = t.tasks.iter().filter(|task| task.assignee == "dev").map(|task| task.id).collect();
+    let (reported, queued) = (ids[0], ids[1]);
+    {
+        let task = t.task_mut(reported).unwrap();
+        task.status = TaskStatus::InReview;
+        task.attempts.push(Attempt { n: 1, id: "A238".into(), member: "dev".into(), state: AttemptState::Reported, sent_at: at - 3600.0,
+            delivered_at: Some(at - 3600.0), turn_ended_at: Some(at - 60.0),
+            report: Some(Report { text: "done".into(), at: at - 60.0, ..Default::default() }), ..Default::default() });
+    }
+    {
+        let task = t.task_mut(queued).unwrap();
+        task.status = TaskStatus::Pending;
+        task.pinned = true;
+    }
+    store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+    let lead = session("claude/x/lead", "r0", true);
+    // The recorded listing: phase working, busy, its last event 25 minutes old.
+    let mut dev = session("codex/x/dev", "r1", false);
+    dev.agent = "dsh".into();
+    dev.activity = "busy".into();
+    dev.phase = "working".into();
+    dev.last_event_at = Some(at - 25.0 * 60.0);
+    let found = steps(&t, &[lead.clone(), dev.clone()], at);
+    assert!(!found.iter().any(|step| matches!(step, Step::MarkStuck { .. } | Step::CheckStuck { .. })), "a report a minute ago is progress: {found:?}");
+    assert!(!found.iter().any(|step| matches!(step, Step::WaitOnMember { .. })), "#256 waits for nobody stuck: {found:?}");
+    // Fifteen minutes after the report the listing alone never marks it: the
+    // session is read once.
+    let later = at + 14.0 * 60.0;
+    let found = steps(&t, &[lead.clone(), dev.clone()], later);
+    assert!(!found.iter().any(|step| matches!(step, Step::MarkStuck { .. })), "{found:?}");
+    let check = found.iter().find(|step| matches!(step, Step::CheckStuck { .. })).cloned().expect("one read first");
+    // The read finds the session idle: nothing is marked, and the next read is
+    // a minute away.
+    set_fake_hgs(Some(Box::new(|_, args: &[&str], _| match args.first().copied() {
+        Some("inspect") => Ok(fake_output(0, &json!({"run_id":"r1","activity":"idle","phase":"idle","events":[]}).to_string(), "")),
+        other => panic!("only an inspect: {other:?}"),
+    })));
+    run_step(&mut store, &t, &check, "").unwrap();
+    let saved = store.load(&t.id).unwrap().unwrap();
+    let member = saved.member("dev").unwrap();
+    assert!(member.stuck.is_none() && member.stuck_read_at.is_some(), "{member:?}");
+    // A read ten seconds ago: no second read this minute, and #256 waits for
+    // nobody stuck.
+    let mut throttled = saved.clone();
+    throttled.members.iter_mut().find(|member| member.id == "dev").unwrap().stuck_read_at = Some(later - 10.0);
+    let found = steps(&throttled, &[lead.clone(), dev.clone()], later);
+    assert!(!found.iter().any(|step| matches!(step, Step::CheckStuck { .. } | Step::MarkStuck { .. } | Step::WaitOnMember { .. })), "{found:?}");
+    // A read that sees work without progress past the bound marks it, since
+    // its last progress (the report), and the wait says the real minutes.
+    let old = at - 25.0 * 60.0;
+    set_fake_hgs(Some(Box::new(move |_, args: &[&str], _| match args.first().copied() {
+        Some("inspect") => Ok(fake_output(0, &json!({"run_id":"r1","activity":"busy","phase":"working","events":[{"at":old}]}).to_string(), "")),
+        other => panic!("only an inspect: {other:?}"),
+    })));
+    let Step::CheckStuck { member, limit, reason, .. } = check else { unreachable!() };
+    // The read runs on the real clock: its last progress is 15 minutes back.
+    let progress = at - 15.0 * 60.0;
+    run_step(&mut store, &saved, &Step::CheckStuck { member, last: progress, limit, reason }, "").unwrap();
+    set_fake_hgs(None);
+    let marked = store.load(&t.id).unwrap().unwrap();
+    let stuck = marked.member("dev").unwrap().stuck.clone().expect("marked by the read");
+    assert_eq!(stuck.since, Some(progress));
+    let feed = store.events(&t.id, None, 20).unwrap().to_string();
+    assert!(feed.contains("member_stuck") && feed.contains("\"minutes\":"), "{feed}");
+    let now = crate::state::now();
+    let wait = steps(&marked, &[lead, dev], now)
+        .into_iter()
+        .find_map(|step| match step {
+            Step::WaitOnMember { reason, .. } => Some(reason),
+            _ => None,
+        })
+        .expect("#256 waits for the stuck member");
+    let minutes = ((now - progress) / 60.0).max(1.0).round() as u64;
+    assert!(wait.contains(&format!("no progress for {minutes} min (phase working)")) && !wait.contains("0 min"), "{wait}");
 }

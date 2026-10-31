@@ -490,6 +490,13 @@ pub(crate) struct Member {
     /// reason and the phase it was in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stuck: Option<MemberStuck>,
+    /// #761: a DeepSeek member with no open attempt is read before it is
+    /// called stuck (its listing keeps "working" after the turn ends): when the
+    /// worker last read it, and the newest native event that read found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stuck_read_at: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_at: Option<f64>,
     /// #728: the lead or the owner asked to interrupt and resume a stuck
     /// member; the dispatcher runs the session commands and clears this.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

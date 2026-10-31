@@ -1,3 +1,5 @@
+#include <QTimer>
+#include <utility>
 #include "TeamController.h"
 #include "HgsClient.h"
 #include "SlowEventLog.h"
@@ -55,7 +57,10 @@ void TeamController::refreshInbox()
 void TeamController::readWatched()
 {
     if (m_watch.isEmpty()) return;
-    if (!m_statusRequest) m_statusRequest = m_client->requestTeam({}, QStringLiteral("status"), {{"team", m_watch}, {"include_cancelled", true}});
+    // A read asked for while one is in flight is made once that one answers:
+    // the answer in flight may predate the change this read is for.
+    if (m_statusRequest) m_statusAgain = true;
+    else m_statusRequest = m_client->requestTeam({}, QStringLiteral("status"), {{"team", m_watch}, {"include_cancelled", true}});
     if (!m_feedRequest) m_feedRequest = m_client->requestTeam({}, QStringLiteral("events"), {{"team", m_watch}});
     if (!m_inboxRequest) refreshInbox();
 }
@@ -91,7 +96,7 @@ void TeamController::watch(const QString &team)
     m_watch = team;
     m_watched = {}; m_lastStatus = {}; m_watchedShape.clear(); m_inboxShape.clear();
     m_feed.clear(); m_feedCursor = QJsonValue();
-    m_statusRequest = m_feedRequest = m_olderRequest = 0;
+    m_statusRequest = m_feedRequest = m_olderRequest = 0; m_statusAgain = false;
     m_inbox.clear(); m_lastInbox = {}; m_inboxRequest = 0;
     emit watchedChanged(); emit feedChanged(); emit inboxChanged();
     readWatched();
@@ -270,6 +275,7 @@ void TeamController::received(quint64 request, const QString &operation, const Q
         if (changed) emit teamsChanged();
     } else if (request == m_statusRequest) {
         m_statusRequest = 0;
+        if (std::exchange(m_statusAgain, false)) QTimer::singleShot(0, this, &TeamController::readWatched);
         const auto team = Teams::parse(result);
         if (team.id != m_watch || (result == m_lastStatus && m_watched.id == m_watch)) return;
         m_lastStatus = result;
@@ -319,7 +325,7 @@ void TeamController::failed(quint64 request, const QString &operation, const QSt
         // No teams yet (or an hgs without them): nothing to show.
         if (m_available || !m_teams.isEmpty()) { m_teams.clear(); m_lastList = {}; m_listShapes.clear(); m_listOrder.clear(); emit teamsChanged(); }
         m_available = false;
-    } else if (request == m_statusRequest) m_statusRequest = 0;
+    } else if (request == m_statusRequest) { m_statusRequest = 0; m_statusAgain = false; }
     else if (request == m_inboxRequest) m_inboxRequest = 0;
     else if (request == m_feedRequest) m_feedRequest = 0;
     else if (request == m_olderRequest) m_olderRequest = 0;

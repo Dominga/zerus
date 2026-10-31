@@ -103,6 +103,8 @@ private:
     QTimer m_poll;
     bool m_active = false, m_available = false, m_showCancelled = false;
     quint64 m_listRequest = 0, m_statusRequest = 0, m_feedRequest = 0, m_olderRequest = 0;
+    // A status read was asked for while one was in flight.
+    bool m_statusAgain = false;
     QList<Teams::Team> m_teams;
     // The last answers, so an unchanged poll changes nothing on screen.
     QJsonObject m_lastList, m_lastStatus;

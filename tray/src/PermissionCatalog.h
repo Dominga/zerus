@@ -22,6 +22,7 @@ struct Control {
     QString label;
     QString description;
     QList<Option> options;
+    QStringList conflictsWith;
 };
 
 // One row of a selector. `value` is what the caller persists: a legacy

@@ -402,12 +402,14 @@ fn codex_catalog(_config: &Config, home: &Path) -> Value {
     if help.contains("--approve-for-me") {
         // Only the enabling switch is real. Leaving the control out inherits
         // the native setting; there is no fabricated disable flag.
-        controls.push(control(
+        let mut automatic = control(
             "approve_for_me",
             "Approve for me",
-            Some("Route approval requests through automatic review using the workspace-write sandbox. Leave unset to inherit the native setting."),
+            Some("Automatic review with workspace-write. Leave Approval policy and Sandbox inherited; their explicit switches conflict with this option."),
             vec![option("on", "Approve for me", Some("Pass --approve-for-me."))],
-        ));
+        );
+        automatic["conflicts_with"] = json!(["approval", "sandbox"]);
+        controls.push(automatic);
     }
     available("codex-help", version("codex", home), controls)
 }
@@ -829,11 +831,11 @@ pub(super) fn validate_selection(provider: &str, catalog: &Value, selection: &BT
     }
     if provider == "codex"
         && selection.get("approve_for_me").map(String::as_str) == Some("on")
-        && selection.get("sandbox").is_some_and(|sandbox| sandbox != "workspace-write")
+        && (selection.contains_key("approval") || selection.contains_key("sandbox"))
     {
         return Err(Error::new(
             1,
-            "Codex --approve-for-me uses the workspace-write sandbox; choose workspace-write or leave the sandbox inherited.",
+            "Codex --approve-for-me cannot be combined with explicit Approval policy or Sandbox switches. Choose Use Codex settings for both controls, or leave Approve for me inherited.",
         ));
     }
     Ok(())
@@ -1073,25 +1075,25 @@ mod tests {
     }
 
     #[test]
-    fn codex_approve_for_me_rejects_a_conflicting_sandbox() {
+    fn codex_approve_for_me_rejects_explicit_approval_and_sandbox() {
         let catalog = available(
             "codex-help",
             None,
             vec![
-                control("approval", "Approval", None, vec![option("on-request", "on-request", None)]),
+                control("approval", "Approval", None, vec![option("on-request", "on-request", None), option("never", "never", None)]),
                 control("sandbox", "Sandbox", None, vec![option("read-only", "read-only", None), option("workspace-write", "workspace-write", None)]),
                 control("approve_for_me", "Approve for me", None, vec![option("on", "on", None)]),
             ],
         );
-        let mut selection = BTreeMap::from([
-            ("approve_for_me".to_owned(), "on".to_owned()),
-            ("sandbox".to_owned(), "read-only".to_owned()),
-        ]);
-        assert!(validate_selection("codex", &catalog, &selection).is_err());
-        selection.insert("sandbox".into(), "workspace-write".into());
+        let mut selection = BTreeMap::from([("approve_for_me".to_owned(), "on".to_owned())]);
         assert!(validate_selection("codex", &catalog, &selection).is_ok());
-        let args = args_for("codex", &selection);
-        assert_eq!(args, ["-s", "workspace-write", "--approve-for-me"]);
+        assert_eq!(args_for("codex", &selection), ["--approve-for-me"]);
+        for (key, value) in [("approval", "on-request"), ("approval", "never"), ("sandbox", "read-only"), ("sandbox", "workspace-write")] {
+            selection.insert(key.into(), value.into());
+            let error = validate_selection("codex", &catalog, &selection).unwrap_err();
+            assert!(error.message.contains("cannot be combined"), "{}", error.message);
+            selection.remove(key);
+        }
         selection.insert("approve_for_me".into(), "off".into());
         assert!(validate_selection("codex", &catalog, &selection).is_err());
     }

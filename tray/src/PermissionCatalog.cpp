@@ -128,6 +128,10 @@ Catalog parse(const QJsonObject &profile)
             control.label = object.value(QStringLiteral("label")).toString();
             if (control.label.isEmpty()) control.label = control.id;
             control.description = object.value(QStringLiteral("description")).toString();
+            for (const auto &entry : object.value(QStringLiteral("conflicts_with")).toArray()) {
+                const auto id = entry.toString();
+                if (validControlId(id)) control.conflictsWith.append(id);
+            }
             for (const auto &entry : object.value(QStringLiteral("options")).toArray()) {
                 const auto source = entry.toObject();
                 Option option;
@@ -200,6 +204,8 @@ Catalog parse(const QJsonObject &profile)
     }
     catalog.unknownKeys.removeDuplicates();
     catalog.unavailableControls.removeDuplicates();
+    if (catalog.available && catalog.selectedValid && !catalog.selected.isEmpty())
+        catalog.selectedValid = selectionProblem(catalog, catalog.selected).isEmpty();
     return catalog;
 }
 
@@ -446,6 +452,15 @@ QString selectionProblem(const Catalog &catalog, const QMap<QString, QString> &s
         if (!control) return translated("Unknown setting “%1” must be removed.").arg(it.key());
         if (!findOption(*control, it.value()))
             return translated("“%1” is no longer offered for %2.").arg(it.value()).arg(control->label);
+    }
+    for (const auto &control : catalog.controls) {
+        if (!selection.contains(control.id)) continue;
+        for (const auto &id : control.conflictsWith) {
+            if (!selection.contains(id)) continue;
+            const auto *other = findControl(catalog, id);
+            return translated("%1 cannot be combined with %2. Choose “%3” for one of them.")
+                .arg(control.label, other ? other->label : id, harnessSettingsLabel(catalog));
+        }
     }
     return {};
 }

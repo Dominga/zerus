@@ -3941,7 +3941,10 @@ bypass flag, Kimi `--auto`/Never Ask, DeepSeek `danger-full-access`). Other
 choices are native controls: Claude has `mode`; Codex has `approval`, `sandbox`
 and the enabling `approve_for_me` switch; Kimi has `mode` and the independent
 `plan` switch; DeepSeek has `preset`. Codex combinations are validated (for
-example `approve_for_me` requires the workspace-write sandbox). Missing native
+example `approve_for_me` cannot accompany an explicit `approval` or `sandbox`,
+even `workspace-write`; leave both on **Use Codex settings**). Controls can
+publish `conflicts_with` control IDs so the shared editor rejects such
+combinations before saving. Missing native
 keys mean "inherit", and an empty native selection normalizes to provider.
 Kimi's Always Ask has no forcing flag, so it is shown when inherited but is not
 offered as a fabricated option. DeepSeek's Auto is current-session-only and is

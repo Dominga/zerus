@@ -32,6 +32,7 @@
 #include "AccountsPage.h"
 #include "NewSessionDialog.h"
 #include "PermissionCatalog.h"
+#include "PermissionCatalogDialog.h"
 #include <QJsonArray>
 #include <QMap>
 
@@ -731,6 +732,24 @@ void TestAccountsPage::permissionCatalogDecodeEdgeCases()
     const auto oversized=PermissionCatalog::parse(QJsonObject{{"permission_mode",
         "native:{\"mode\":\""+QString(1100,'x')+"\"}"}});
     QVERIFY(oversized.malformed);QVERIFY(!oversized.selectedValid);
+    const auto codex=PermissionCatalog::parse(QJsonObject{{"provider","codex"},{"permission_mode","native:{\"approve_for_me\":\"on\",\"sandbox\":\"workspace-write\"}"},
+        {"permission_catalog",QJsonObject{{"status","available"},{"controls",QJsonArray{
+            QJsonObject{{"id","approval"},{"label","Approval policy"},{"options",QJsonArray{QJsonObject{{"value","on-request"},{"label","on-request"}}}}},
+            QJsonObject{{"id","sandbox"},{"label","Sandbox"},{"options",QJsonArray{QJsonObject{{"value","workspace-write"},{"label","workspace-write"}}}}},
+            QJsonObject{{"id","approve_for_me"},{"label","Approve for me"},{"conflicts_with",QJsonArray{"approval","sandbox"}},
+                {"options",QJsonArray{QJsonObject{{"value","on"},{"label","On"}}}}}
+        }}}}});
+    QVERIFY(!codex.selectedValid);
+    for(const auto &id:QStringList{"approval","sandbox"}){
+        const auto value=id=="approval"?QString("on-request"):QString("workspace-write");
+        QMap<QString,QString> selection{{"approve_for_me","on"},{id,value}};
+        PermissionCatalogDialog editor(codex,selection,"Fixture");
+        auto *save=editor.findChild<QPushButton *>("nativePermissionSave");QVERIFY(save&&!save->isEnabled());
+        QVERIFY(editor.findChild<QLabel *>("nativePermissionWarning")->text().contains("cannot be combined"));
+        auto *choice=editor.findChild<QComboBox *>("nativePermission_"+id);QVERIFY(choice);
+        choice->setCurrentIndex(0);QVERIFY(save->isEnabled());
+        QCOMPARE(editor.mode(),QString("native:{\"approve_for_me\":\"on\"}"));
+    }
 }
 
 void TestAccountsPage::renameAndDetailsStayBoundToSelectedProfile()

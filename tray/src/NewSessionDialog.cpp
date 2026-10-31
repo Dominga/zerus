@@ -1275,6 +1275,10 @@ void NewSessionDialog::updatePermissions()
     const QSignalBlocker blocker(m_permissions);
     m_permissions->clear();m_permissions->addItem(tr("Use Zerus account settings"),QString());
     m_permissions->setItemData(0,tr("Use the permission selection saved for this account in Zerus. Current setting: %1.").arg(PermissionCatalog::summary(catalog)),Qt::ToolTipRole);
+    if(catalog.nativeSaved&&catalog.available&&!catalog.selectedValid){
+        m_permissions->setItemData(0,true,Qt::UserRole+3);
+        m_permissions->setItemData(0,PermissionCatalog::selectionProblem(catalog,catalog.selected),Qt::ToolTipRole);
+    }
     if(supported){
         for(const auto &choice:PermissionCatalog::sessionChoices(catalog,m_permissionSelection)){
             m_permissions->addItem(choice.label,choice.value);

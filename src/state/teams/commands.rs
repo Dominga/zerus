@@ -3939,6 +3939,11 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 ask["team"] = json!(team.id);
                 value["profile"] = profile_view(&ask)?;
             }
+            // #756: with the build broker on, each member's build state for
+            // task nodes and member cards; the Builds tab reads the rest.
+            if team.settings.build_broker {
+                value["build_states"] = super::broker::builds_view(&team, now())["members"].clone();
+            }
             Ok(value)
         }
         "inbox" => {
@@ -3964,6 +3969,11 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         }
         "spans" => spans_view(input),
         "profile" => profile_view(input),
+        // #756: the build broker's state per shared folder, for the Builds tab.
+        "builds" => {
+            let team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
+            Ok(super::broker::builds_view(&team, super::super::now()))
+        }
         "current" => current(input),
         "escalate" => escalate(input),
         op if MUTATIONS.contains(&op) => {

@@ -411,6 +411,19 @@ struct LeftRunning {
     QString member, role, host, session, runId, conversationId;
 };
 
+// #756: a member's build through the build broker: building (in its own
+// snapshot) since `since`, or waiting with `ahead` builds before it.
+struct BuildState {
+    QString state, templateName;
+    double since = 0;
+    int ahead = 0;
+    bool snapshot = false;
+    bool building() const { return state == QLatin1String("building"); }
+    bool waiting() const { return state == QLatin1String("waiting"); }
+    // "building (snapshot) 2:10", "waiting for a build, 1 ahead".
+    QString text(double now) const;
+};
+
 struct Team {
     QString id, name, status, project, folder, lead;
     // D1: settings.evidence_folders, where report evidence may be previewed.
@@ -536,6 +549,10 @@ struct Team {
     bool freeMode() const { return planMode == QLatin1String("free"); }
     // U31: idle members may take independent tasks of the next draft phase.
     bool workAhead = false;
+    // #756: the build broker (owner setting, off by default) and, while it
+    // is on, each member's build state by member id, from team status.
+    bool buildBroker = false;
+    QHash<QString, BuildState> buildStates;
     QList<int> stuckScope;
     // The settings as stored, so a change sends them back whole.
     QJsonObject settingsJson;

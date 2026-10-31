@@ -64,6 +64,58 @@ QString statusName(const QString &status);
 
 }   // namespace TeamTests
 
+// #756: the Builds tab, `hgs team builds`: for each folder two or more
+// members share, per build folder the running build against its usual time,
+// the queue (with requests that wait for the same tree), the cache's hit rate
+// and the recent builds, a failure naming the member whose file broke it; and
+// who changes what in that folder.
+namespace TeamBuilds {
+
+struct Running {
+    QString member, templateName;
+    double started = 0, seconds = 0, usualMs = 0;
+    bool snapshot = true;
+};
+struct Waiting {
+    QString member, templateName, coalescedWith;
+    double since = 0, seconds = 0;
+};
+// A member and the files: a blame, a change list or an overlap.
+struct Files {
+    QString who;
+    QStringList files;
+};
+struct Done {
+    QString member, templateName, by, error;
+    double at = 0;
+    qint64 ms = 0;
+    int exit = -1;
+    bool hit = false, timedOut = false;
+    QList<Files> blamed;
+    bool failed() const { return !hit && exit != 0; }
+};
+struct BuildFolder {
+    QString name;
+    QList<Running> running;
+    QList<Waiting> queue;
+    double usualMs = 0, hitRate = -1;    // -1: nothing finished yet
+    QList<Done> timeline;
+};
+struct Folder {
+    QString folder;
+    QStringList members;
+    QList<BuildFolder> builds;
+    QList<Files> changes;               // member -> its changed files
+    QList<Files> overlaps;              // file -> the members changing it
+};
+struct State {
+    bool enabled = false;
+    QList<Folder> folders;
+    static State parse(const QJsonObject &result);
+};
+
+}   // namespace TeamBuilds
+
 class TeamTestsView : public QWidget {
 public:
     TeamTestsView(TeamController *teams, QWidget *parent = nullptr);
@@ -78,6 +130,10 @@ public:
     const QList<TeamTests::Run> &runs() const { return m_runs; }
     const QList<TeamTests::Pending> &pending() const { return m_pending; }
     std::function<void(int task)> openTask;
+    // #756: "tests" or "builds".
+    QString tab() const { return m_tab; }
+    void setTab(const QString &tab);
+    const TeamBuilds::State &builds() const { return m_builds; }
 protected:
     void showEvent(QShowEvent *event) override;
     void hideEvent(QHideEvent *event) override;
@@ -91,6 +147,19 @@ private:
     QWidget *suiteRow(const QString &suite);
     QWidget *historyRow(const TeamTests::Run &run);
     QWidget *taskLink(int task);
+    // #756: the Builds tab.
+    void readBuilds();
+    void renderBuilds(QVBoxLayout *v);
+    QWidget *changesStrip(const TeamBuilds::Folder &folder);
+    QWidget *buildRunningRow(const TeamBuilds::Running &item);
+    QWidget *buildQueueRow(const TeamBuilds::Waiting &item, int ahead);
+    QWidget *buildDoneRow(const TeamBuilds::Done &item);
+    QString who(const QString &member) const;
+    QString m_tab = QStringLiteral("tests");
+    TeamBuilds::State m_builds;
+    QByteArray m_buildsShape;
+    bool m_buildsLoading = false, m_buildsRead = false;
+    QString m_buildsError;
     TeamController *m_teams;
     Teams::Team m_team;
     QString m_teamId, m_open, m_error;

@@ -876,6 +876,10 @@ elif a[:2]==['team','test']:
   json.dump(queue+[item],open(__file__+'.testqueue','w'))
   print(json.dumps({'status':'queued','suite':body.get('suite'),'request':item}))
  else:print('hgs: Unknown test action',file=sys.stderr);sys.exit(1)
+elif a[:2]==['team','builds']:
+ # #756: `.builds` holds the build broker's answer.
+ import os
+ print(open(__file__+'.builds').read() if os.path.exists(__file__+'.builds') else json.dumps({'enabled':False,'folders':[],'members':{}}))
 elif a[:2]==['team','decide-proposal']:
  # U57: the receipt names the stored decision; `.proposalrefuse` refuses it,
  # `.proposalstatus` names an earlier decision (a replay).
@@ -941,7 +945,7 @@ inline void TeamsUiFixture::setUp()
     QFile::remove(script() + ".proposalstatus");
     QFile::remove(script() + ".waiting");
     QFile::remove(script() + ".waitingrefuse");
-    for (const char *suffix : {".testqueue", ".testresults", ".testrefuse"}) QFile::remove(script() + QLatin1String(suffix));
+    for (const char *suffix : {".testqueue", ".testresults", ".testrefuse", ".builds"}) QFile::remove(script() + QLatin1String(suffix));
     // Decisions and Apply change the fake catalog: each test starts from the fixture.
     QVERIFY(FakeCli::replace(script() + ".catalog", QJsonDocument(catalog()).toJson(QJsonDocument::Compact)));
     setTeam(team());

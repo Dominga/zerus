@@ -51,7 +51,7 @@ private:
     QJsonObject m_settings;
     QList<Teams::Team::Intake> m_intakes;
     bool m_dark = true;
-    QCheckBox *m_branch = nullptr, *m_restart = nullptr, *m_land = nullptr;
+    QCheckBox *m_branch = nullptr, *m_restart = nullptr, *m_land = nullptr, *m_broker = nullptr;
     QList<MemberModels> m_members;
     QLineEdit *m_template = nullptr, *m_base = nullptr, *m_label = nullptr, *m_key = nullptr;
     QLabel *m_problem = nullptr, *m_keyNote = nullptr;

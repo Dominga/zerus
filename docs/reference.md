@@ -1896,6 +1896,19 @@ link = ["ThirdParty"]          # untracked folders the build needs, linked
 copy_limit_mb = 4              # larger files are hard links
 ```
 
+`hgs team builds --json` (`{"team": ...}`) reads the broker's state for the
+desktop's Builds tab inside Tests: for each folder two or more members share,
+per build folder (`target`, `.ci-build/gui`) the running build with its usual
+time (the median of recent green builds), the queue with each request's wait
+and the member whose identical tree it waits for, the cache's hit rate and the
+recent builds (a failure lists the members whose files broke it); each
+member's changed files and the files two members change; and `members`, each
+member's `building` or `waiting` state with `ahead`. With the broker on, `hgs
+team status` carries that `members` map as `build_states`, so task nodes and
+member cards show "building (snapshot) 2:10" or "waiting for a build, 1 ahead".
+The switch card (`switch-setting`) records `shared`, the folders and members
+it is for.
+
 <a id="activity"></a>
 
 ## Activity, messages and native controls

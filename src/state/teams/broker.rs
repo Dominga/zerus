@@ -502,6 +502,8 @@ pub(crate) fn run(team: &Team, member: &Member, shared: &Path, template: &str, a
         }
     }
     let dir = member_dir(shared, &member.id);
+    // #756: who waits, since when and for what, for the Builds tab.
+    let waiting = Waiting::start(shared, &member.id, template);
     let _queue = queue(&dir, timeout)?;
     let snapshot = sync(shared, &member.id, &edits, &others, config)?;
     let key = request_key(&snapshot.hash, template, &plain);
@@ -509,10 +511,16 @@ pub(crate) fn run(team: &Team, member: &Member, shared: &Path, template: &str, a
     let building = shared.join(".zerus-team").join("runs").join("broker-building");
     let marker = building.join(&key);
     let until = Instant::now() + timeout;
+    if marker.exists() {
+        waiting.coalesced(fs::read(&marker).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()).and_then(|value| value["member"].as_str().map(str::to_owned)));
+    }
     while marker.exists() && Instant::now() < until && cached(shared, &key).is_none() {
         std::thread::sleep(Duration::from_millis(500));
     }
+    drop(waiting);
     if let Some(entry) = cached(shared, &key) {
+        // #756: a result served for an unchanged tree counts as a cache hit.
+        remember(shared, &key, json!({"member":member.id,"template":template,"at":super::super::now(),"hit":true,"by":entry["member"],"outcome":entry["outcome"]}));
         let mut outcome = outcome_of(&entry["outcome"]);
         outcome.tail = format!(
             "{}\nBuild broker: the same tree was built by {} at {:.0}; this is its result.",
@@ -523,13 +531,14 @@ pub(crate) fn run(team: &Team, member: &Member, shared: &Path, template: &str, a
         return Ok(outcome);
     }
     fs::create_dir_all(&building)?;
-    fs::write(&marker, member.id.as_bytes())?;
+    fs::write(&marker, json!({"member":member.id,"template":template,"started":super::super::now()}).to_string())?;
     let built = (|| -> anyhow::Result<super::templates::Outcome> {
         let plan = super::templates::plan(template, &plain, &snapshot.tree)?;
         Ok(super::templates::execute(&plan, &snapshot.tree, timeout, &[]))
     })();
     let _ = fs::remove_file(&marker);
     let mut outcome = built?;
+    let mut blamed: Vec<Value> = Vec::new();
     let note = format!(
         "Build broker: built {} in {} ({} files written, {} linked){}",
         template,
@@ -541,6 +550,7 @@ pub(crate) fn run(team: &Team, member: &Member, shared: &Path, template: &str, a
     if outcome.exit != Some(0) {
         let failing = failing_files(&outcome.tail, &snapshot.tree);
         if let Some((line, by_member)) = blame(&failing, &snapshot.others, team) {
+            blamed = by_member.iter().map(|(owner, paths)| json!({"member":owner,"files":paths})).collect();
             outcome.tail = format!("{}\n{line}", outcome.tail.trim_end());
             outcome.error = "the build failed in another member's files".into();
             for (owner, paths) in by_member {
@@ -556,8 +566,140 @@ pub(crate) fn run(team: &Team, member: &Member, shared: &Path, template: &str, a
         }
     }
     outcome.tail = format!("{}\n{note}", outcome.tail.trim_end());
-    remember(shared, &key, json!({"member":member.id,"at":super::super::now(),"outcome":outcome_value(&outcome)}));
+    remember(shared, &key, json!({"member":member.id,"template":template,"at":super::super::now(),"hit":false,"blamed":blamed,"outcome":outcome_value(&outcome)}));
     Ok(outcome)
+}
+
+/// #756: a member waiting for its build folder, or for the same tree another
+/// member builds; the file goes when it stops waiting.
+struct Waiting {
+    path: PathBuf,
+    entry: Value,
+}
+
+impl Waiting {
+    fn start(shared: &Path, member: &str, template: &str) -> Self {
+        let dir = shared.join(".zerus-team").join("runs").join("broker-waiting");
+        let _ = fs::create_dir_all(&dir);
+        let waiting = Waiting { path: dir.join(format!("{member}.json")), entry: json!({"member":member,"template":template,"since":super::super::now()}) };
+        let _ = fs::write(&waiting.path, waiting.entry.to_string());
+        waiting
+    }
+    fn coalesced(&self, with: Option<String>) {
+        let mut entry = self.entry.clone();
+        entry["coalesced_with"] = json!(with);
+        let _ = fs::write(&self.path, entry.to_string());
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// The build folder a template builds in: cargo's target or the Qt build.
+pub(crate) fn build_folder(template: &str) -> &'static str {
+    if template.starts_with("cargo") {
+        "target"
+    } else {
+        ".ci-build/gui"
+    }
+}
+
+fn read_dir_json(dir: &Path) -> Vec<Value> {
+    let Ok(entries) = fs::read_dir(dir) else { return Vec::new() };
+    entries
+        .flatten()
+        .take(200)
+        .filter_map(|entry| fs::read(entry.path()).ok())
+        .filter_map(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .filter(Value::is_object)
+        .collect()
+}
+
+/// #756: what the Builds tab shows for each folder two or more members
+/// share: per build folder the running build against its usual time, the
+/// queue (with the requests that wait for the same tree), the cache's hit
+/// rate and the recent builds; each member's changed files and the files two
+/// members change; and each member's build state for nodes and cards.
+pub(crate) fn builds_view(team: &Team, now: f64) -> Value {
+    let mut folders = Vec::new();
+    let mut states = serde_json::Map::new();
+    for (folder, members) in shared_folders(team) {
+        let shared = Path::new(&folder);
+        let runs = shared.join(".zerus-team").join("runs");
+        let results: Vec<Value> = fs::read(results_path(shared)).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
+        let running = read_dir_json(&runs.join("broker-building"));
+        let waiting = read_dir_json(&runs.join("broker-waiting"));
+        let mut groups = Vec::new();
+        for name in ["target", ".ci-build/gui"] {
+            let ours = |entry: &&Value| build_folder(entry["template"].as_str().unwrap_or("qt-build")) == name;
+            let finished: Vec<&Value> = results.iter().filter(ours).collect();
+            let mut built: Vec<f64> = finished
+                .iter()
+                .filter(|entry| entry["hit"] != true && entry["outcome"]["exit"] == 0)
+                .filter_map(|entry| entry["outcome"]["ms"].as_f64())
+                .collect();
+            built.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let usual = built.get(built.len() / 2).copied();
+            let hits = finished.iter().filter(|entry| entry["hit"] == true).count();
+            let now_running: Vec<Value> = running
+                .iter()
+                .filter(ours)
+                .map(|entry| {
+                    let started = entry["started"].as_f64().unwrap_or(now);
+                    json!({"member":entry["member"],"template":entry["template"],"started":started,"seconds":(now - started).max(0.0),
+                        "usual_ms":usual,"snapshot":true})
+                })
+                .collect();
+            let mut queue: Vec<Value> = waiting
+                .iter()
+                .filter(ours)
+                .map(|entry| {
+                    let since = entry["since"].as_f64().unwrap_or(now);
+                    json!({"member":entry["member"],"template":entry["template"],"since":since,"seconds":(now - since).max(0.0),
+                        "coalesced_with":entry["coalesced_with"]})
+                })
+                .collect();
+            queue.sort_by(|a, b| a["since"].as_f64().partial_cmp(&b["since"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
+            for entry in &now_running {
+                if let Some(member) = entry["member"].as_str() {
+                    states.insert(member.to_owned(), json!({"state":"building","snapshot":true,"template":entry["template"],"since":entry["started"]}));
+                }
+            }
+            for (ahead, entry) in queue.iter().enumerate() {
+                if let Some(member) = entry["member"].as_str() {
+                    states.entry(member.to_owned()).or_insert_with(|| json!({"state":"waiting","template":entry["template"],"since":entry["since"],"ahead":ahead + now_running.len()}));
+                }
+            }
+            let timeline: Vec<Value> = finished
+                .iter()
+                .rev()
+                .take(20)
+                .map(|entry| json!({"member":entry["member"],"template":entry["template"],"at":entry["at"],"hit":entry["hit"] == true,"by":entry["by"],
+                    "ms":entry["outcome"]["ms"],"exit":entry["outcome"]["exit"],"timed_out":entry["outcome"]["timed_out"],
+                    "error":entry["outcome"]["error"],"blamed":entry["blamed"]}))
+                .collect();
+            if now_running.is_empty() && queue.is_empty() && timeline.is_empty() {
+                continue;
+            }
+            let rate = if finished.is_empty() { Value::Null } else { json!(hits as f64 / finished.len() as f64) };
+            groups.push(json!({"name":name,"running":now_running,"queue":queue,"usual_ms":usual,"hit_rate":rate,"timeline":timeline}));
+        }
+        let mut changes = Vec::new();
+        let mut by_file: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for member in &members {
+            let files = edits_of(shared, member);
+            for file in &files {
+                by_file.entry(file.clone()).or_default().push(member.clone());
+            }
+            changes.push(json!({"member":member,"files":files}));
+        }
+        let overlaps: Vec<Value> = by_file.into_iter().filter(|(_, who)| who.len() >= 2).map(|(file, who)| json!({"file":file,"members":who})).collect();
+        folders.push(json!({"folder":folder,"members":members,"build_folders":groups,"changes":changes,"overlaps":overlaps}));
+    }
+    json!({"team":team.id,"enabled":team.settings.build_broker,"folders":folders,"members":states})
 }
 
 #[cfg(test)]

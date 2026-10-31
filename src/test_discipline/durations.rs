@@ -252,6 +252,7 @@ mod tests {
             rules: Vec::new(),
             groups: BTreeMap::from([("--bin hgs".to_owned(), "src/main.rs".to_owned())]),
             seconds: 0.0,
+            platforms: Vec::new(),
         }
     }
 

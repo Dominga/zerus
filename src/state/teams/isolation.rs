@@ -235,9 +235,20 @@ pub(crate) fn prepare(template: &str, program: &str, folder: &Path, person: &Per
     if !config.templates.iter().any(|id| id == template) {
         return None;
     }
+    Some(build(config, note, template, program, folder, person))
+}
+
+/// #732: a remote test runner's run, always a test: the same isolation by
+/// construction for the checkout of the exact commit it was sent.
+pub(crate) fn prepare_suite(program: &str, folder: &Path, person: &Person) -> Run {
+    let (config, note) = config(folder);
+    build(config, note, "remote-test", program, folder, person)
+}
+
+fn build(config: Config, note: Option<String>, template: &str, program: &str, folder: &Path, person: &Person) -> Run {
     let watch = Watch::new(&config, person, program);
     if !config.enabled {
-        return Some(Run { folder: PathBuf::new(), env: Vec::new(), remove: Vec::new(), note, watch });
+        return Run { folder: PathBuf::new(), env: Vec::new(), remove: Vec::new(), note, watch };
     }
     let runs = folder.join(".zerus-team").join("runs");
     prune(&runs);
@@ -276,7 +287,7 @@ pub(crate) fn prepare(template: &str, program: &str, folder: &Path, person: &Per
     }
     let mut watch = watch;
     watch.trace = Some(run_folder.clone());
-    Some(Run { folder: run_folder, env, remove: config.remove.clone(), note, watch })
+    Run { folder: run_folder, env, remove: config.remove.clone(), note, watch }
 }
 
 /// Keeps the newest `KEEP_RUNS - 1` run folders, so the new one makes `KEEP_RUNS`.

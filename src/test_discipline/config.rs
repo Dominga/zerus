@@ -474,6 +474,16 @@ fn is_auto(value: &ReuseBy) -> bool {
 }
 
 impl Provider {
+    /// #732: the platform classes its suites run on (windows, linux, macos,
+    /// android): its `platforms`, and android for a Gradle provider that names
+    /// none. Empty runs anywhere, so here.
+    pub fn platform_classes(&self) -> Vec<String> {
+        if self.platforms.is_empty() && self.kind == Kind::Gradle {
+            return vec!["android".to_owned()];
+        }
+        self.platforms.iter().map(|platform| platform.to_ascii_lowercase()).collect()
+    }
+
     /// #718: what this provider's unchanged result is reused by.
     pub fn reuse_by(&self) -> ReuseBy {
         match (self.reuse, self.kind) {

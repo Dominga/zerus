@@ -116,6 +116,9 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
         "durations" => record_durations(&options),
         "coverage" => compare_coverage(&options),
         "tools" => missing_tools(&options),
+        // #732: this computer as a test runner; the scheduler calls it as
+        // hgs @alias test runner --json, with the request on stdin.
+        "runner" => test_runner(),
         "-h" | "--help" | "help" => {
             println!("{USAGE}");
             Ok(0)
@@ -412,6 +415,17 @@ fn record_durations(options: &Options) -> Result<i32> {
     write_json(&path, &durations)?;
     print(options, json!({"recorded": count, "file": config.map.durations}), &format!("Recorded {count} time(s) in {}.\n", config.map.durations));
     Ok(0)
+}
+
+/// #732: one request of a scheduler on another computer: `have` or `run`.
+fn test_runner() -> Result<i32> {
+    use std::io::Read;
+    let mut text = String::new();
+    std::io::stdin().read_to_string(&mut text).map_err(|error| fail(format!("Cannot read the request: {error}")))?;
+    let input: Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|error| fail(format!("The runner request is not JSON: {error}")))?;
+    let answer = crate::state::teams::test_runners::serve(&input, &crate::state::teams::isolation::Person::current());
+    println!("{answer}");
+    Ok(if answer.get("error").is_some() { 1 } else { 0 })
 }
 
 /// #742: the tools the project needs on this computer, offered to the owner

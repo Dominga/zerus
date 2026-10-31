@@ -202,6 +202,7 @@ impl ProviderMap {
             rules: Vec::new(),
             groups: BTreeMap::new(),
             seconds: 0.0,
+            platforms: Vec::new(),
         }
     }
 }

@@ -96,7 +96,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] wait begin|ack|finish|cancel|list --json   explicit independent-agent waits (JSON stdin)
        hgs [@host] team OPERATION --json   agent teams: plan, run, report and decide tasks (JSON stdin)
        hgs run --json [--wait] | --list --json   a build Zerus tracks as this session's work (JSON stdin)
-       hgs test config|map|affected|durations|coverage …   the project's tests (.zerus/tests.toml; hgs guide tests)
+       hgs test config|map|affected|durations|coverage|tools …   the project's tests (.zerus/tests.toml; hgs guide tests)
+       hgs test runner --json   a test runner's side (test-runner-v1): the queue's suite of an exact commit, isolated
        hgs [@host] terminal <session> --json scoped terminal screen/input; draft/submit_draft for the composer draft
        hgs [@host] AGENT DIRECTORY --new -n TAG -d --launch-id UUID
        hgs [@host] session-action <session> --json scoped native lifecycle action
@@ -660,6 +661,11 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
         // U62: the project's tests, from .zerus/tests.toml and its map.
         "test" => {
             if !target.is_empty() && !config.is_self(&target) {
+                // #732: a test runner is reached through hgs's own SSH; every
+                // other test command reads the project in this folder.
+                if args.first().is_some_and(|action| action == "runner") && !dry {
+                    return remote(&config, &target, command, args, dry);
+                }
                 return Err(Error::new(2, "hgs test reads the project in this folder; omit @host"));
             }
             if dry {
@@ -1199,7 +1205,7 @@ fn remote(
             all.extend_from_slice(&args[1..]);all
         }
         "archives" | "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "git-diff" | "repository" | "dirs" | "project" | "archive" | "rename"
-        | "send" | "send-now" | "send-cancel" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "team" | "guide" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "notifications" | "speech" | "analytics" | "voice" | "hooks" | "--help" => {
+        | "send" | "send-now" | "send-cancel" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "team" | "guide" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "notifications" | "speech" | "analytics" | "voice" | "hooks" | "test" | "--help" => {
             flags = vec![
                 "-o".into(),
                 "BatchMode=yes".into(),
@@ -1294,6 +1300,9 @@ fn remote(
     } else if command == "watch" {
         // An older peer would read an unknown command as an agent launch.
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF '{}'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to stream events (watch-v1)' >&2; exit 1; fi",zerus_watch_protocol::HELP_MARKER,platform::join(&remote_args)))
+    } else if command == "test" {
+        // #732: a test runner without this hgs would read it as an agent launch.
+        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'test-runner-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to run tests (test-runner-v1)' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "guide" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] guide'; then exec ~/.local/bin/hgs {}; else echo 'hgs: the selected computer has no agent guide; check hgs @host -h' >&2; exit 1; fi",platform::join(&remote_args)))
     } else { format!("~/.local/bin/hgs {}", platform::remote_join(&remote_args)) };

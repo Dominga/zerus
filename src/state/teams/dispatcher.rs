@@ -1861,6 +1861,8 @@ pub(crate) fn hand_off_text_with(
         text += &format!("\nDepends on: {}\n", deps.join(", "));
     }
     text += &dependencies_text(team, task, report_host);
+    // Owner 2026-10-31: the hand-out says the task's time estimate.
+    text += &super::estimates::prompt_line(team, task);
     if let Some(previous) = task.attempts.iter().rev().find(|a| a.n < attempt.n && a.state == AttemptState::Rejected) {
         // U36: a stage returned it (no lead step): its findings, not a decision.
         let returned = task.pipeline_run.as_ref().and_then(|run| {

@@ -4,15 +4,15 @@ Plan phase 1; new work is a phase (extend: phase_title, tasks). barrier holds
 tasks behind earlier phases; pinned keeps its member. "review" drafts wait for
 you; "auto" drafts start at their first hand-out. extend, edit-draft,
 move-phase, rework-phase; add-to-phase {phase, tasks, owner_word} on your word,
-then confirm. A check's exit decides.
+then confirm. A check's exit decides. Every task gets an estimate. Every task gets an estimate.
 
-Pipelines (U36): per task "pipeline":"code" (review, test), "docs", "check"
+Pipelines: a task "pipeline":"code" (review, test), "docs", "check"
 or "none", else the role's or template's default. A stage verdict passes or
 returns the task; after 3 rounds you decide. skip-stage/send-back override;
 a test holds the folder.
 
-Profile: {"team":"ID","phase":N} | hgs team profile --json: the top three losses
-and lanes by roles[]; tokens per accepted task, unknown, never zero.
+Profile: {"team":"ID","phase":N} | hgs team profile --json: top three losses,
+roles[]; tokens per accepted task, unknown, never zero.
 
 Tests: plan only needed ones, speed first (hgs guide team-tests);
 integration runs the phase's range; full run pre-release, owner's say.
@@ -22,11 +22,11 @@ until its first hand-out. Start it ahead when members are idle and its tasks
 are independent: {"team":"ID","phase":N} | hgs team start-ahead --json.
 Review drafts need the owner; Work ahead is for review drafts.
 
-Plan modes (U59): standard (a release) or free (a stream: extend adds to the
+Plan modes: standard (a release) or free (a stream: extend adds to the
 open phase, the owner closes it); the owner picks, else standard.
 
 Members:
-- U57: a change or a question for the owner is a proposal, never only
+- A change or a question for the owner is a proposal, never only
   prose: hgs guide team-propose.
 - Routine: hgs guide team-run; shapes: hgs guide team-safe. A question is not
   a report: answer with hgs team reply; "hold":true rejects; release gives a
@@ -38,6 +38,6 @@ Members:
   {"owner_word":{"text":"plan approved"}} with approve/approve-phase.
 - Sub-lead: hgs team sub-lead {"member":"qalead","sub":true}; reports-to
   {member, parent} sets who it reviews.
-- Cancel empty tasks first; when all are decided, extend or team finish.
-  The owner may finish too; its stop is final.
+- Cancel empty tasks first; when all are decided, extend or team finish;
+  the owner's stop is final.
 Sub-teams: hgs guide team-tree.

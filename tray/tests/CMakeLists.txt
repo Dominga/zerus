@@ -7,11 +7,11 @@ target_link_libraries(test_ui_language PRIVATE Qt6::Test Qt6::Widgets hgs-transl
 
 # support/FakeCli.h starts fixture scripts as fake executables on every platform.
 set(ZERUS_TEST_SUPPORT "${CMAKE_CURRENT_SOURCE_DIR}/support")
+find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
 if(WIN32)
     # Windows cannot start scripts: a native shim runs Python fixtures with their
     # command line unchanged and replaces /bin/sh in process tests (TestHelper.cpp).
     # 3.9: fixtures use str.removeprefix.
-    find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
     add_executable(zerus-test-helper support/TestHelper.cpp)
     # A static runtime: copies of the helper run from temporary directories.
     set_target_properties(zerus-test-helper PROPERTIES MSVC_RUNTIME_LIBRARY MultiThreaded)
@@ -161,10 +161,26 @@ endif()
 # property replaces this default and must keep QT_QPA_PLATFORM=offscreen.
 function(zerus_add_test name)
     set(results)
+    set(sampler "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/ci/qt-hang-sampler.py" --name "${name}")
     if(ZERUS_QT_RESULTS_DIR)
         set(results -o "${ZERUS_QT_RESULTS_DIR}/${name}.xml,junitxml" -o -,txt)
+        list(APPEND sampler --log "${ZERUS_QT_RESULTS_DIR}/${name}-hang.log")
     endif()
-    add_test(NAME ${name} COMMAND ${ARGN} ${results})
+    set(command ${ARGN})
+    list(GET command 0 target)
+    list(REMOVE_AT command 0)
+    set(launcher)
+    set(executable)
+    if(TARGET ${target})
+        set(executable $<TARGET_FILE:${target}>)
+    else()
+        set(launcher ${target})
+        list(GET command 0 separator)
+        if(separator STREQUAL "--")
+            list(REMOVE_AT command 0)
+        endif()
+    endif()
+    add_test(NAME ${name} COMMAND ${launcher} ${sampler} -- ${executable} ${command} ${results})
     set_tests_properties(${name} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endfunction()
 
@@ -268,9 +284,16 @@ add_executable(test_jsonparse test_jsonparse.cpp)
 target_include_directories(test_jsonparse PRIVATE ../src)
 target_link_libraries(test_jsonparse PRIVATE Qt6::Test Qt6::Gui hgs-tray-core)
 zerus_add_test(jsonparse test_jsonparse)
+# WhiteWh fork, #744: path checks on a worker, bounded, never on the GUI thread.
+add_executable(test_pathprobe test_pathprobe.cpp)
+target_include_directories(test_pathprobe PRIVATE ../src)
+target_link_libraries(test_pathprobe PRIVATE Qt6::Test hgs-tray-core)
+zerus_add_test(pathprobe test_pathprobe)
 add_executable(test_settings test_settings.cpp)
 target_include_directories(test_settings PRIVATE ../src)
 target_link_libraries(test_settings PRIVATE Qt6::Test Qt6::Gui hgs-tray-core)
+# #729: the check that no direct QSettings write is left reads the sources.
+target_compile_definitions(test_settings PRIVATE ZERUS_TRAY_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/../src")
 zerus_add_test(settings test_settings)
 add_executable(test_sloweventlog test_sloweventlog.cpp)
 target_include_directories(test_sloweventlog PRIVATE ../src)
@@ -721,12 +744,19 @@ target_include_directories(test_teams PRIVATE ../src)
 target_link_libraries(test_teams PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
 zerus_add_test(teams test_teams)
 set_tests_properties(teams PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
-# WhiteWh fork: agent teams M3–M6 (task card, planning, New team, catalog, designer, workspace).
-add_executable(test_teamsui test_teamsui.cpp)
-target_include_directories(test_teamsui PRIVATE ../src)
-target_link_libraries(test_teamsui PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui hgs-speech)
-zerus_add_test(teamsui test_teamsui)
-set_tests_properties(teamsui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# WhiteWh fork: agent teams in the desktop, one suite per area (#713, U62): the
+# Graph, Board and Layers views; member cards and the task card; the plan and its
+# phases; New team and the designer; the catalog and pipelines; settings and
+# accounts; the profile and heat; what waits (permissions, the waiting page,
+# proposals, the coordinator); the Tests view (#719). They share
+# support/TeamsUiFixture.h.
+foreach(area workspace members plan newteam catalog settings profile waiting tests)
+    add_executable(test_teamsui_${area} test_teamsui_${area}.cpp)
+    target_include_directories(test_teamsui_${area} PRIVATE ../src)
+    target_link_libraries(test_teamsui_${area} PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui hgs-speech)
+    zerus_add_test(teamsui_${area} test_teamsui_${area})
+    set_tests_properties(teamsui_${area} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endforeach()
 # WhiteWh fork: Claude desktop app sessions continued in Zerus.
 add_executable(test_claudeappsessions test_claudeappsessions.cpp)
 target_include_directories(test_claudeappsessions PRIVATE ../src)

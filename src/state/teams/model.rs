@@ -1278,6 +1278,14 @@ pub(crate) struct Task {
     /// another member with the same role.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,
+    /// Owner 2026-10-31: the lead's time estimate in minutes. Absent until the
+    /// lead sets one; a task without one shows Zerus' own estimate from the
+    /// per-computer history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate_minutes: Option<f64>,
+    /// `history`, `role`, `lead` or `none`: where the estimate came from.
+    #[serde(default, skip_serializing_if = "no_estimate_source")]
+    pub estimate_source: String,
     /// U27: the visual lane this task is drawn in, set by the lead or the owner;
     /// it changes nothing about hand-out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2327,4 +2335,9 @@ mod tests {
         assert_eq!(attempt.open_question().map(|q| q.id.as_str()), Some("q2"));
         assert!(!attempt.questions[0].open());
     }
+}
+
+/// An estimate source of "none" is the default and is not stored.
+fn no_estimate_source(source: &str) -> bool {
+    source.is_empty() || source == "none"
 }

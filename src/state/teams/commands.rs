@@ -566,6 +566,9 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
     strip_stage_facts(&mut value);
     // C7: the plan-health block, with the members starving on the plan now.
     let now = super::super::now();
+    // Owner 2026-10-31: every task carries its time estimate and, while it
+    // runs, the time spent against it; accepted tasks refresh the history.
+    super::estimates::fill_status(&mut value, team, now);
     let mut validation = plan::validate(team, &BTreeSet::new());
     validation.health.starved = plan::starved(team, now);
     for starving in &validation.health.starved {
@@ -2353,10 +2356,20 @@ fn spans_view(input: &Value) -> anyhow::Result<Value> {
         None => (Vec::new(), false),
     };
     let holders = spans::holders(&team, now);
+    // Owner 2026-10-31: each timeline carries the task's estimate and, while it
+    // runs, the time spent against it.
+    let history = super::estimates::load();
     let tasks: Vec<Value> = chosen
         .iter()
         .map(|task| {
             let mut value = spans::spans(&team, task, &journal, &holders, now);
+            let estimate = super::estimates::estimate_from(&history, &team, task);
+            value["estimate_minutes"] = estimate.minutes.map_or(Value::Null, |minutes| json!(minutes));
+            value["estimate_source"] = json!(estimate.source);
+            value["estimate_text"] = json!(estimate.text());
+            if let Some(spent) = super::estimates::spent_minutes(task, now) {
+                value["estimate_spent_minutes"] = json!(spent.round());
+            }
             if cut {
                 let mut unknown: BTreeSet<String> = serde_json::from_value(value["unknown"].clone()).unwrap_or_default();
                 unknown.insert("events".into());

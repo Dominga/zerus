@@ -159,6 +159,13 @@ mod tests {
         assert!(tests.contains("hgs test tools") && tests.contains("work without it"), "{tests}");
     }
 
+    /// Owner 2026-10-31: the lead protocol says every task gets a time estimate.
+    #[test]
+    fn the_lead_protocol_says_every_task_gets_an_estimate() {
+        let lead = TOPICS.iter().find(|(name, _)| *name == "team-lead").unwrap().1;
+        assert!(lead.contains("Every task gets an estimate"), "{lead}");
+    }
+
     #[test]
     fn topics_and_arguments_are_exact() {
         assert!(dispatch(&[]).is_ok());

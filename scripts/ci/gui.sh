@@ -70,5 +70,11 @@ rm -rf artifacts/test-results/qt-functions
 mkdir -p artifacts/test-results/qt-functions
 cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
 jobs=${ZERUS_TEST_JOBS:-$(( cpus < 8 ? cpus : 8 ))}
-ctest --test-dir "$gui_build" --parallel "$jobs" --timeout 240 --output-on-failure \
+# ZERUS_QT_RETRY=N runs a failed suite up to N times in all (the project's
+# [retries] flaky policy); unset, a failure fails at once.
+retry=()
+if [ -n "${ZERUS_QT_RETRY:-}" ]; then
+    retry=(--repeat "until-pass:${ZERUS_QT_RETRY}")
+fi
+ctest --test-dir "$gui_build" --parallel "$jobs" --timeout 240 --output-on-failure ${retry[@]+"${retry[@]}"} \
     --output-junit "$PWD/artifacts/test-results/qt.xml" 2>&1 | tee artifacts/test-results/qt.log

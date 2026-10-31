@@ -134,6 +134,10 @@ jobs:
           path: ${{ runner.temp }}/Qt
           key: ${{ steps.qt-cache.outputs.cache-primary-key }}
       - name: Offscreen Qt suites
+        # .zerus/tests.toml [retries] flaky = 1: a failed suite runs once more;
+        # the log names every suite that needed it.
+        env:
+          ZERUS_QT_RETRY: "2"
         run: bash scripts/ci/gui.sh test </dev/null
       - name: Portable zip from the tested executables
         run: |

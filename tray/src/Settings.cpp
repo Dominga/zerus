@@ -300,8 +300,21 @@ std::mutex s_janitor;
 
 }
 
-void set(const QString &key, const QVariant &value) { enqueue({key, value, false}); }
-void remove(const QString &key) { enqueue({key, {}, true}); }
+// Tests write at once and directly (ZERUS_SETTINGS_SYNC=1, set by the tests'
+// isolation), as before the queue: a queued write would land in the next test
+// function and leak into it. The suite that tests the queue turns it off.
+static bool synchronous() { return qEnvironmentVariableIntValue("ZERUS_SETTINGS_SYNC") == 1; }
+
+void set(const QString &key, const QVariant &value)
+{
+    if (synchronous()) { QSettings().setValue(key, value); return; }
+    enqueue({key, value, false});
+}
+void remove(const QString &key)
+{
+    if (synchronous()) { QSettings().remove(key); return; }
+    enqueue({key, {}, true});
+}
 
 bool setNow(const QString &key, const QVariant &value) { return now({key, value, false}); }
 bool removeNow(const QString &key) { return now({key, {}, true}); }

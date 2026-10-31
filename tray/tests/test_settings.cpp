@@ -29,6 +29,8 @@ class TestSettings : public QObject {
 private slots:
     void initTestCase()
     {
+        // This suite tests the queued writer itself (#694, #729).
+        qputenv("ZERUS_SETTINGS_SYNC", "0");
         QVERIFY(m_settings.isValid());
         QCoreApplication::setOrganizationName(QStringLiteral("hgs-tests"));
         QCoreApplication::setApplicationName(QStringLiteral("settings"));

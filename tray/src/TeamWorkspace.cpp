@@ -4155,8 +4155,12 @@ void TeamWorkspace::keepScroll(QScrollArea *area, const QString &key)
         QObject::connect(bar, &QScrollBar::rangeChanged, bar, [bar, want, restored](int, int max) {
             if (*restored || max <= 0) return;
             bar->setValue(qMin(want, max));
-            *restored = true;
+            // #739: a view built in slices grows in steps; keep the kept place
+            // until it fits, or until the owner scrolls first.
+            if (max >= want) *restored = true;
         });
+        QObject::connect(bar, &QScrollBar::actionTriggered, bar, [restored](int) { *restored = true; });
+        QObject::connect(bar, &QScrollBar::sliderPressed, bar, [restored] { *restored = true; });
         QObject::connect(bar, &QScrollBar::valueChanged, area, [this, area, key, vertical, restored](int value) {
             if (!*restored || !area->isVisible()) return;
             QPoint &place = m_scroll[key];

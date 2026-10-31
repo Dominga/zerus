@@ -33,8 +33,17 @@ void moveTemporaryFiles()
     // Only the user's own %TEMP% moves: a TEMP someone chose (a sandbox's, a
     // script's) stays, since a lower-integrity sandbox cannot write a folder a
     // normal process created in the build tree.
-    const QString system = QDir::cleanPath(QString::fromLocal8Bit(qgetenv("LOCALAPPDATA")) + QStringLiteral("/Temp"));
-    const QString current = QDir::cleanPath(QString::fromLocal8Bit(qgetenv("TEMP")));
+    // Canonical paths: a CI runner's TEMP is an 8.3 short name (RUNNER~1)
+    // while LOCALAPPDATA is the long one, so plain strings never match.
+    const auto canonical = [](const QString &path) {
+        const std::wstring wide = QDir::toNativeSeparators(path).toStdWString();
+        wchar_t buffer[MAX_PATH * 4];
+        const DWORD size = GetLongPathNameW(wide.c_str(), buffer, DWORD(std::size(buffer)));
+        const QString found = size > 0 && size < std::size(buffer) ? QString::fromWCharArray(buffer, int(size)) : path;
+        return QDir::cleanPath(QDir::fromNativeSeparators(found));
+    };
+    const QString system = canonical(QString::fromLocal8Bit(qgetenv("LOCALAPPDATA")) + QStringLiteral("/Temp"));
+    const QString current = canonical(QString::fromLocal8Bit(qgetenv("TEMP")));
     if (!current.isEmpty() && current.compare(system, Qt::CaseInsensitive) != 0) return;
     const QString dir = QFileInfo(QStringLiteral(ZERUS_TEST_HELPER)).absolutePath() + QStringLiteral("/tmp");
     if (!QDir().mkpath(dir)) return;
@@ -69,6 +78,10 @@ void isolateSettings()
     // 2026-10-30). A test that sets its own home still does.
     if (qEnvironmentVariableIsEmpty("HGS_TRAY_HOME"))
         qputenv("HGS_TRAY_HOME", QDir::toNativeSeparators(directory.path).toLocal8Bit());
+    // Settings::set writes at once in tests, so no queued write lands in the
+    // next test function; test_settings, which tests the queue, turns it off.
+    if (qEnvironmentVariableIsEmpty("ZERUS_SETTINGS_SYNC"))
+        qputenv("ZERUS_SETTINGS_SYNC", "1");
     // ZERUS_FIXTURE_POOL=0 starts every fixture in a Python process of its own.
     if (qgetenv("ZERUS_FIXTURE_POOL") != "0")
         qputenv("ZERUS_FIXTURE_POOL", QByteArray::number(QCoreApplication::applicationPid()));

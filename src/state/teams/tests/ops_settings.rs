@@ -487,15 +487,15 @@ fn a_failed_change_does_not_spend_the_owners_word() {
         json!({"roster_word":true,"owner_word_event":11,"owner_word_change":change,
             "owner_word_checked":{"text":"add a Backend and its tasks","at":1.0,"event":11}})
     };
-    // A failed change: the task ids skip a number, so nothing is added and
-    // the word stays unspent.
+    // A failed change: a dependency on a task that does not exist, so nothing
+    // is added and the word stays unspent.
     let mut bad = word("the request to add to a running phase");
     bad["phase"] = json!(1);
-    bad["tasks"] = json!([{"id":9,"title":"Bad","assignee":"dev"}]);
+    bad["tasks"] = json!([{"id":9,"title":"Bad","assignee":"dev","deps":[{"task":42}]}]);
     let error = apply(&mut team, "add-to-phase", &bad, &Actor::Member("lead".into()), &none, &mut events)
         .unwrap_err()
         .to_string();
-    assert!(error.contains("New tasks are numbered from"), "{error}");
+    assert!(error.contains("neither in the plan nor among the new tasks"), "{error}");
     assert_eq!(team.owner_word_used(11), None, "the failed change spent the word");
     // The same word still pays for the valid change.
     let mut good = word("the request to add to a running phase");

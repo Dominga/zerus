@@ -242,6 +242,18 @@ impl Store {
     /// Applies one change to a team in one transaction: checks the expected
     /// revision, bumps it and appends the change's feed entries. A request id
     /// makes it idempotent; the dispatcher's own changes pass none.
+    /// #754: the receipt stored under a request id, whatever its input.
+    pub(crate) fn stored_receipt(&self, id: &str) -> anyhow::Result<Option<Value>> {
+        let stored: Option<String> = self
+            .db
+            .query_row("SELECT receipt FROM operations WHERE id=?1", params![id], |row| row.get(0))
+            .optional()?;
+        Ok(match stored {
+            Some(text) => Some(serde_json::from_str(&text)?),
+            None => None,
+        })
+    }
+
     pub(crate) fn mutate(
         &mut self,
         request: Option<(&str, &Value)>,

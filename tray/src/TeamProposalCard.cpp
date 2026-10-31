@@ -8,6 +8,7 @@
 #include <QPointer>
 #include <QRadioButton>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QTimer>
 #include <QScopedValueRollback>
 #include <algorithm>
@@ -49,6 +50,8 @@ TeamProposalCards::TeamProposalCards(QWidget *parent) : QWidget(parent)
     m_inner = new QWidget; m_inner->setObjectName("teamProposalCardsList");
     m_layout = new QVBoxLayout(m_inner); m_layout->setContentsMargins(10, 6, 10, 6); m_layout->setSpacing(6);
     m_scroll->setWidget(m_inner);
+    // #754: once the cards are laid out, a refused one shows its answers.
+    connect(m_scroll->verticalScrollBar(), &QScrollBar::rangeChanged, this, [this] { reveal(); });
     outer->addWidget(m_scroll);
     setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     if (parent) parent->installEventFilter(this);
@@ -147,9 +150,20 @@ void TeamProposalCards::render()
     for (const auto &view : std::as_const(m_staleViews)) m_layout->addWidget(cardFor(view, true));
     setVisible(m_layout->count() > 0);
     fit();
+    if (!m_reveal.isEmpty()) QTimer::singleShot(0, this, [this] { reveal(); });
     if (focused.isEmpty()) return;
     for (auto *edit : findChildren<QLineEdit *>("teamProposalDenyReason"))
         if (edit->property("proposal") == focused) { edit->setFocus(Qt::OtherFocusReason); edit->end(false); }
+}
+
+void TeamProposalCards::reveal()
+{
+    // #754: a refused card grew by its reason; in the lead's chat the cards
+    // are short, so its answers scroll into view until the owner answers.
+    if (m_reveal.isEmpty()) return;
+    for (auto *card : findChildren<QFrame *>("teamProposalCard"))
+        if (card->property("proposal") == m_reveal)
+            if (auto *allow = card->findChild<QPushButton *>("teamProposalAllow")) m_scroll->ensureWidgetVisible(allow, 0, 6);
 }
 
 QWidget *TeamProposalCards::cardFor(const View &view, bool gone)
@@ -341,6 +355,7 @@ void TeamProposalCards::answer(const View &view, bool allow)
 {
     if (!decide || m_sending.contains(view.id) || m_asking) return;
     const QString id = view.id;
+    m_reveal.clear();
     const bool asked = allow && !ask(view);
     QPointer<TeamProposalCards> guard(this);
     if (!guard) return;
@@ -369,10 +384,17 @@ void TeamProposalCards::answer(const View &view, bool allow)
         if (!guard) return;
         auto *self = guard.data();
         if (!ok) {
+            // #754: a refusal always says why on the card, in the server's
+            // words (p11's "The plan changed since the warning" was shown as
+            // "The proposal changed" and the owner's Allow looked like nothing);
+            // the card stays open to answer again.
             self->m_sending.remove(id);
-            self->m_notices.insert(id, message.contains(QLatin1String("changed"))
-                                           ? tr("The proposal changed; nothing was applied. Read the card again and answer.")
-                                           : message);
+            QString why = message.trimmed();
+            while (why.startsWith(QLatin1String("hgs: "))) why = why.mid(5).trimmed();
+            if (why.isEmpty()) why = tr("Zerus gave no reason");
+            self->m_notices.insert(id, allow ? tr("Allow was refused, nothing was applied: %1").arg(why)
+                                             : tr("Deny was refused, nothing was decided: %1").arg(why));
+            self->m_reveal = id;
         } else if (const QString wanted = allow ? QStringLiteral("accepted") : QStringLiteral("rejected");
                    (message == "accepted" || message == "rejected") && message != wanted) {
             // A replay returns the stored decision: it was decided before.

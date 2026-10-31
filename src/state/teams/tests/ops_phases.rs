@@ -877,16 +877,17 @@ fn extend_ids_continue_and_validate_dependencies_assignees_and_cycles() {
     let mut team = running_team();
     let mut events = Vec::new();
     let none = BTreeSet::new();
+    // #754: a number given twice is refused; any other numbering is renumbered.
     let error = extend(
         &mut team,
-        &json!({"tasks":[{"id":4,"title":"Skip","assignee":"dev"}]}),
+        &json!({"tasks":[{"id":4,"title":"Skip","assignee":"dev"},{"id":4,"title":"Again","assignee":"dev"}]}),
         &Actor::Human,
         &none,
         &mut events,
     )
     .unwrap_err()
     .to_string();
-    assert_eq!(error, "New tasks are numbered from #3");
+    assert_eq!(error, "Task #4 is given twice among the new tasks");
     let error = extend(
         &mut team,
         &json!({"tasks":[{"id":3,"title":"A","assignee":"dev","deps":[{"task":9}]}]}),
@@ -896,7 +897,7 @@ fn extend_ids_continue_and_validate_dependencies_assignees_and_cycles() {
     )
     .unwrap_err()
     .to_string();
-    assert!(error.contains("depends on missing #9"), "{error}");
+    assert!(error.contains("Task #3 depends on #9, which is neither in the plan nor among the new tasks"), "{error}");
     let error = extend(
         &mut team,
         &json!({"tasks":[{"id":3,"title":"A","assignee":"ghost"}]}),

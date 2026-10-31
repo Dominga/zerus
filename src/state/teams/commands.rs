@@ -1578,29 +1578,37 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
         "add-to-phase" => {
             let phase = change["phase"].as_u64().context("The add-to-phase proposal carries its phase")?;
             let tasks = change["tasks"].clone();
-            let value = json!({"team":team_id,"request_id":operation_request,"by":"human","phase":phase,"tasks":tasks});
-            let first = store.mutate(Some((&operation_request, &value)), &team_id, None, |team, events| {
-                super::ops::apply(team, "add-to-phase", &value, &Actor::Human, &BTreeSet::new(), events)
-            })?;
-            // The first step answers a running phase with a warning and its
-            // pending id; the owner's Allow is the confirmation, so it is
-            // applied at once (the receipt names it "pending").
-            match first["confirm"].as_str().or_else(|| first["pending"].as_str()).filter(|confirm| !confirm.is_empty()) {
-                Some(confirm) => {
-                    // Its own request id, derived from the stored one, so a
-                    // replayed decision replays this step too.
-                    use sha2::{Digest, Sha256};
-                    let digest = Sha256::digest(format!("{operation_request}:confirm").as_bytes());
-                    let mut bytes = [0u8; 16];
-                    bytes.copy_from_slice(&digest[..16]);
-                    let confirm_request = uuid::Builder::from_random_bytes(bytes).into_uuid().to_string();
-                    let value = json!({"team":team_id,"request_id":confirm_request,"by":"human","phase":phase,
-                        "tasks":change["tasks"],"confirm":confirm,"confirmation":"add"});
-                    store.mutate(Some((&confirm_request, &value)), &team_id, None, |team, events| {
+            // The confirmation's own request id, derived from the stored one: a
+            // decision interrupted after it applied replays its receipt.
+            use sha2::{Digest, Sha256};
+            let digest = Sha256::digest(format!("{operation_request}:confirm").as_bytes());
+            let mut bytes = [0u8; 16];
+            bytes.copy_from_slice(&digest[..16]);
+            let confirm_request = uuid::Builder::from_random_bytes(bytes).into_uuid().to_string();
+            match store.stored_receipt(&confirm_request)? {
+                Some(receipt) => receipt,
+                None => {
+                    // The first step answers a running phase with a warning and
+                    // its pending id; the owner's Allow is the confirmation, so
+                    // it is applied at once. #754: an earlier Allow's warning is
+                    // asked again (it changed nothing), so a retry never meets an
+                    // expired addition; a direct addition replays its receipt.
+                    let value = json!({"team":team_id,"request_id":operation_request,"by":"human","phase":phase,"tasks":tasks});
+                    let warned = store.stored_receipt(&operation_request)?.is_some_and(|receipt| receipt["status"] == "warning");
+                    let first = store.mutate((!warned).then_some((operation_request.as_str(), &value)), &team_id, None, |team, events| {
                         super::ops::apply(team, "add-to-phase", &value, &Actor::Human, &BTreeSet::new(), events)
-                    })?
+                    })?;
+                    match first["confirm"].as_str().or_else(|| first["pending"].as_str()).filter(|confirm| !confirm.is_empty()) {
+                        Some(confirm) => {
+                            let value = json!({"team":team_id,"request_id":confirm_request,"by":"human","phase":phase,
+                                "tasks":change["tasks"],"confirm":confirm,"confirmation":"add"});
+                            store.mutate(Some((&confirm_request, &value)), &team_id, None, |team, events| {
+                                super::ops::apply(team, "add-to-phase", &value, &Actor::Human, &BTreeSet::new(), events)
+                            })?
+                        }
+                        None => first,
+                    }
                 }
-                None => first,
             }
         }
         "cancel-tasks" => {

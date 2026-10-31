@@ -65,11 +65,13 @@ TeamWaitingAnswer::TeamWaitingAnswer(TeamController *teams, const Item &item, bo
                 }
                 QJsonObject body = input;
                 body.insert("team", guard->m_item.team);
-                guard->m_sending = true;
+                guard->m_sending = true; guard->render();
                 guard->m_teams->act(QStringLiteral("decide-proposal"), body, [guard, done](bool ok, const QString &message) {
-                    if (guard) guard->m_sending = false;
                     done(ok, message);
-                    if (guard && ok) guard->finish();
+                    if (!guard) return;
+                    guard->m_sending = false;
+                    // #754: a refusal keeps the card, its reason and its buttons.
+                    if (ok) guard->finish(); else guard->render();
                 });
             });
         };

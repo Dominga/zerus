@@ -31,6 +31,9 @@ class TestMapCoverage(unittest.TestCase):
     def test_the_weekly_workflow_measures_both_providers_and_only_reports_gaps(self):
         text = WORKFLOW.read_text(encoding='utf-8')
         self.assertIn("cron: '23 2 * * 0'", text)
+        # The monthly report of tests without unique coverage.
+        self.assertIn("cron: '47 3 1 * *'", text)
+        self.assertIn('without unique coverage', SCRIPT.read_text(encoding='utf-8'))
         self.assertIn('test-map-coverage.py rust --out artifacts/coverage', text)
         self.assertIn('test-map-coverage.py tray --build build-coverage --out artifacts/coverage', text)
         self.assertNotIn('--fail-on-gaps', text)

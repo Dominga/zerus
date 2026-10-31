@@ -5674,6 +5674,41 @@ enforced: a team without a configuration keeps today's flow.
   file the map does not give the target is a gap. The weekly
   `test-map-coverage.yml` workflow measures every Rust module and Qt binary.
 
+#### Reused results, flaky suites and budgets (#718)
+
+What the test queue makes of its results, by the project's thresholds:
+
+- Reuse. A suite's input hash is what its map names now: the content hashes
+  of its targets' files (`reuse = "inputs"`, the default of most kinds), or a
+  Qt test binary's own bytes and its data files (`"binary"`, ctest's default;
+  the sources it compiles count once they are built). Rust is never reused
+  (`"never"`, cargo's default: it runs in seconds when filtered). An unforced
+  request whose inputs match the suite's last green measured run records a
+  `reused` result from that run, due for re-measuring; a reused result is never
+  the source of another.
+- Full run. When `[reuse] full_after` results were reused since the last full
+  run, or a reused measurement is older than `max_age_days`, the lead's inbox
+  and the owner's Waiting for you show the proposal with its estimate from the
+  recorded times. `{"team":ID,"action":"full-done"} | hgs team test --json`
+  records the run and counts again from it.
+- Flaky. A plain failure is retried `[retries] flaky` times; a pass on a retry
+  is `flaky` (its result keeps the hidden failure's excerpt), recorded in the
+  suite's history and quarantined for `quarantine_days` (shown to the lead and
+  the owner until it expires). Every `episodes` episodes become one lead item
+  to file a task; dismissing it (`"action":"dismiss","kind":"flaky","suite":S`)
+  counts newer episodes only. A crash (an abnormal exit code, a sanitizer,
+  heap corruption or segmentation report) is never retried.
+- Budgets. A run slower than its recorded time by more than `[budgets]
+  grow_percent` is flagged `slower` on its result and the lead's card; one over
+  its time budget (`budget_minutes`, else `suite_minutes`) is flagged and a lead
+  item; a suite whose test lines pass its size budget (`budget_lines`, else
+  `suite_lines`) is a lead item when it is submitted.
+- Reports. Every report records the test lines and test functions its change
+  adds and removes against the lead's commit (the project's test globs and the
+  Rust files with tests), on the lead's card.
+- Coverage. `hgs test coverage` also names the targets without unique coverage;
+  the monthly run of `test-map-coverage.yml` reports them.
+
 #### Missing tools (#742)
 
 A tool the tests or builds need and this computer lacks is offered to the
@@ -5709,7 +5744,8 @@ The file's fields: `version = 1`; `[map]` `file`, `durations`, `unmapped`
 (`report` or `all`), `ignore` (never hides a file the map knows, such as a text
 a module compiles in); `[full]` `where` (`here`, `ci`, `runner`), `policy`
 (`owner`, `standing`, `anyone`), `target`; `[retries]` `flaky`,
-`quarantine_days`; `[budgets]` `grow_percent`, `suite_minutes`; `[isolation]`
+`quarantine_days`, `episodes`; `[budgets]` `grow_percent`, `suite_minutes`,
+`suite_lines`; `[reuse]` `full_after`, `max_age_days`; `[isolation]`
 `enabled` and the keys under "Test isolation"; `[build_cache]`; `[merge_queue]`
 `enabled`; `[resources.NAME]` `cpu`, `ram_mb`, `gpu`, `exclusive`; and each
 `[[provider]]`: `name`, `kind` (`cargo`, `ctest`, `pytest`, `unittest`,
@@ -5717,7 +5753,8 @@ a module compiles in); `[full]` `where` (`here`, `ci`, `runner`), `policy`
 `affected` (`build`, `paths`, `all`), `[[provider.paths]]` (`files` with
 `targets` or `mentions`), `command` (`{targets}`, `{manifest}`, `{build_dir}`),
 `manifest`, `widen` (`none`, `dependants`, `transitive`), `build_dir`,
-`resources`, `platforms`, `budget_minutes`, `disabled`.
+`resources`, `platforms`, `budget_minutes`, `budget_lines`, `reuse` (`auto`,
+`inputs`, `binary`, `never`), `disabled`.
 
 #### What the team enforces (U62)
 

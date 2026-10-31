@@ -69,6 +69,8 @@ QString TeamWaitingPage::kindLabel(const QString &kind)
     if (kind == "task_waits_owner") return tr("Held task");
     if (kind == "team_finished") return tr("All decided");
     if (kind == "tool_missing") return tr("Tool");
+    if (kind == "test_full_run") return tr("Full test run");
+    if (kind == "test_quarantine") return tr("Flaky tests");
     return kind;
 }
 
@@ -82,6 +84,8 @@ QString TeamWaitingPage::kindIcon(const QString &kind)
     if (kind == "task_waits_owner") return QStringLiteral("clock");
     if (kind == "team_finished") return QStringLiteral("check-circle");
     if (kind == "tool_missing") return QStringLiteral("terminal");
+    if (kind == "test_full_run") return QStringLiteral("refresh");
+    if (kind == "test_quarantine") return QStringLiteral("attention");
     return QStringLiteral("warning");
 }
 

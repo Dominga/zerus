@@ -7,6 +7,8 @@ name: Test map coverage
 on:
   schedule:
     - cron: '23 2 * * 0'
+    # #718: the monthly run's summary names tests without unique coverage.
+    - cron: '47 3 1 * *'
   workflow_dispatch:
 
 permissions:

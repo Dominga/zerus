@@ -483,9 +483,11 @@ fn compare_coverage(options: &Options) -> Result<i32> {
     let files = map::project_files(&options.root).map_err(|error| fail(format!("{error:#}")))?;
     let mut comparisons = Vec::new();
     let mut text = String::new();
+    let mut covered = std::collections::BTreeMap::new();
     for (target, file) in &reports {
         let report = std::fs::read_to_string(file).map_err(|error| fail(format!("Cannot read {file}: {error}")))?;
         let report = coverage::read_report(&report);
+        covered.insert(target.clone(), coverage::covered_files(&options.root, &report));
         let comparison = coverage::compare(&options.root, config, &map, &provider, target, &report, &files).map_err(|error| fail(format!("{error:#}")))?;
         text.push_str(&format!("{target}: {} covered file(s), {} gap(s), {} mapped but unused\n", comparison.covered, comparison.gaps.len(), comparison.unused.len()));
         for gap in &comparison.gaps {
@@ -497,6 +499,11 @@ fn compare_coverage(options: &Options) -> Result<i32> {
         comparisons.push(comparison);
     }
     let gaps: usize = comparisons.iter().map(|comparison| comparison.gaps.len()).sum();
-    print(options, json!({"gaps": gaps, "targets": comparisons}), &text);
+    // #718: tests that cover nothing another test does not (the monthly report).
+    let redundant = coverage::without_unique_coverage(&covered);
+    if !redundant.is_empty() {
+        text.push_str(&format!("Without unique coverage (every file they run, another target runs too): {}\n", redundant.join(", ")));
+    }
+    print(options, json!({"gaps": gaps, "targets": comparisons, "without_unique_coverage": redundant}), &text);
     Ok(if fail_on_gaps && gaps > 0 { 1 } else { 0 })
 }

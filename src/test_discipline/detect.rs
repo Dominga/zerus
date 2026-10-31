@@ -78,6 +78,8 @@ fn provider(name: String, kind: Kind, root: &str, sources: Vec<String>, tests: V
         resources: String::new(),
         platforms: Vec::new(),
         budget_minutes: 0.0,
+        budget_lines: 0,
+        reuse: Default::default(),
         disabled: false,
     }
 }

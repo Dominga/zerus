@@ -2674,6 +2674,18 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
             (head, branch)
         }
     };
+    // #718: the test lines and functions the change adds and removes, against
+    // the lead's commit; the project's test globs say what a test file is.
+    let test_delta = if folder_head.is_empty() || team.folder.is_empty() {
+        None
+    } else {
+        let folder = team.member(&by_member).and_then(|member| super::dispatcher::member_folder_path(team, member).ok()).unwrap_or_default();
+        let base = super::dispatcher::git_at(&team.folder, &["rev-parse", "HEAD"]).unwrap_or_default();
+        match crate::test_discipline::load(std::path::Path::new(&team.folder), None) {
+            Ok(loaded) if !base.is_empty() && loaded.active() => super::test_results::report_delta(&folder, &base, &loaded.config),
+            _ => None,
+        }
+    };
     // C1: the lead reports its own task and accepts it in one step; nobody
     // else accepts on a report.
     let accept = input["accept"].as_bool() == Some(true);
@@ -2705,7 +2717,7 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
         };
         let attempt = task.attempts.iter_mut().find(|a| a.id == open_id).unwrap();
         attempt.state = AttemptState::Reported;
-        attempt.report = Some(Report { text: body, at: now(), structured: structured.clone(), unstructured: structured.is_none(), captured, ..Default::default() });
+        attempt.report = Some(Report { text: body, at: now(), structured: structured.clone(), unstructured: structured.is_none(), captured, tests: test_delta.clone(), ..Default::default() });
         attempt.folder_head = folder_head.clone();
         attempt.folder_branch = folder_branch.clone();
         attempt.no_report = false;

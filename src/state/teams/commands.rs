@@ -2498,27 +2498,75 @@ fn test_command(input: &Value) -> anyhow::Result<Value> {
             } else {
                 text(input, "commit").to_owned()
             };
-            let mut hash = sha2::Sha256::new();
-            use sha2::Digest;
-            hash.update(request.suite.as_bytes());
-            hash.update(request.commit.as_bytes());
-            for target in &request.targets {
-                hash.update(target.as_bytes());
-            }
-            request.input_hash = format!("{:x}", hash.finalize());
-            if !request.forced {
-                if let Some(found) = database.reused(&request.suite, &request.commit, &request.input_hash)? {
-                    return Ok(json!({"status":"reused","record":found,"suite":request.suite}));
+            // #718: the suite's inputs as the map names them now: source hashes,
+            // or the Qt test binary and its data; a provider never reused (Rust
+            // by default) has none and always runs.
+            let loaded = crate::test_discipline::load(&project, Some(&team_id)).map_err(|error| anyhow::anyhow!("{error}"))?;
+            let policy = super::test_results::Policy::of(&loaded.config);
+            let provider = loaded.config.providers.iter().find(|provider| provider.name == suite).cloned();
+            let section = provider.as_ref().and_then(|_| super::test_results::section(&project, &loaded.config, suite));
+            let inputs = match (&provider, &section) {
+                (Some(provider), Some(section)) => super::test_results::input_hash(&project, provider, section, &request.targets),
+                _ => None,
+            };
+            request.input_hash = inputs.clone().unwrap_or_default();
+            let now = super::super::now();
+            let mut records = Vec::new();
+            let mut reused = None;
+            if let (false, Some(hash)) = (request.forced, inputs.as_ref()) {
+                if let Some(source) = database.last_green(&team_id, &request.suite, hash)? {
+                    reused = Some(database.write_reused(&request, &source, now)?);
                 }
             }
-            database.enqueue(&request)?;
+            if let Some(record) = &reused {
+                records.push(record.clone());
+            } else {
+                database.enqueue(&request)?;
+            }
+            // #718: a suite over its size budget in test lines is a lead item.
+            let size = match (&provider, &section) {
+                (Some(provider), Some(section)) => {
+                    let budget = super::test_results::lines_budget(&loaded.config, provider);
+                    let lines = super::test_results::test_lines(&project, section);
+                    (budget > 0 && lines > budget as usize).then_some((lines, budget))
+                }
+                _ => None,
+            };
+            if reused.is_none() && action == "force" {
+                let queued = database.queued(&team_id)?;
+                let chosen = test_queue::schedule(&queued, &classes, &load);
+                records = test_queue::run_due(&database, &project, &chosen, now, &policy)?;
+            }
+            let estimate = super::test_results::full_estimate(&project, &loaded.config);
+            if !records.is_empty() || size.is_some() {
+                let mut store = Store::open(true)?;
+                store.mutate(None, &team_id, None, |team, events| {
+                    super::test_results::apply(team, &records, &database, &policy, now, estimate)?;
+                    if let Some((lines, budget)) = size {
+                        super::test_results::raise(team, "size_budget", suite, now, format!(
+                            "{suite} has {lines} test lines, over its size budget of {budget}: split it by area or raise budget_lines in .zerus/tests.toml."
+                        ), 0);
+                    }
+                    for record in &records {
+                        events.push(Event::new("test_result", json!({"suite":record.suite,"status":record.status,"record":record.id,"asked_by":record.asked_by})));
+                    }
+                    Ok(Value::Null)
+                })?;
+            }
+            if let Some(record) = reused {
+                return Ok(json!({"status":"reused","record":record,"suite":request.suite}));
+            }
             if action == "submit" {
                 return Ok(json!({"status":"queued","request":request,"suite":request.suite}));
             }
-            let queued = database.queued(&team_id)?;
-            let chosen = test_queue::schedule(&queued, &classes, &load);
-            let records = test_queue::run_due(&database, &project, &chosen, super::super::now())?;
             Ok(json!({"status":"ran","suite":request.suite,"results":records}))
+        }
+        // #718: the lead's or owner's answer to a test item, or a full run done.
+        "dismiss" | "full-done" => {
+            let mut store = Store::open(true)?;
+            let caller = actor(&team, "test", input)?;
+            ensure!(matches!(caller, Actor::Human) || caller.is_lead(&team), "Only the lead or you settle test items");
+            store.mutate(None, &team_id, None, |team, _| super::test_results::settle(team, action, input, super::super::now()))
         }
         "results" => {
             let limit = input["limit"].as_u64().map_or(20, |n| n as usize);
@@ -2527,7 +2575,7 @@ fn test_command(input: &Value) -> anyhow::Result<Value> {
             let next = records.last().map(|record| record.at);
             Ok(json!({"status":"ok","items":records,"next_cursor":next}))
         }
-        other => anyhow::bail!("Unknown test action {other}; use submit, force or results"),
+        other => anyhow::bail!("Unknown test action {other}; use submit, force, results, dismiss or full-done"),
     }
 }
 

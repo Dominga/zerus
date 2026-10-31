@@ -142,6 +142,27 @@ pub fn compare(root: &Path, config: &TestsConfig, map: &TestMap, provider: &str,
     Ok(comparison)
 }
 
+/// The project files a report's run executed, relative to the project.
+pub fn covered_files(root: &Path, report: &BTreeMap<String, bool>) -> BTreeSet<String> {
+    report.iter().filter(|(_, hit)| **hit).filter_map(|(path, _)| project_relative(root, path)).collect()
+}
+
+/// #718, monthly: the targets whose covered files are all covered by other
+/// targets too - no unique coverage, so candidates to merge or drop.
+pub fn without_unique_coverage(covered: &BTreeMap<String, BTreeSet<String>>) -> Vec<String> {
+    let mut counts: BTreeMap<&String, usize> = BTreeMap::new();
+    for files in covered.values() {
+        for file in files {
+            *counts.entry(file).or_default() += 1;
+        }
+    }
+    covered
+        .iter()
+        .filter(|(_, files)| !files.is_empty() && files.iter().all(|file| counts.get(file).copied().unwrap_or(0) > 1))
+        .map(|(target, _)| target.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +178,19 @@ mod tests {
         assert_eq!(read_report(xml), BTreeMap::from([("D:\\p\\gui\\A.cpp".into(), true), ("D:\\p\\gui\\B.cpp".into(), false)]));
         let json = r#"{"data":[{"files":[{"filename":"/p/src/a.rs","summary":{"lines":{"covered":4}}},{"filename":"/p/src/c.rs","summary":{"lines":{"covered":0}}}]}]}"#;
         assert_eq!(read_report(json), BTreeMap::from([("/p/src/a.rs".into(), true), ("/p/src/c.rs".into(), false)]));
+    }
+
+    #[test]
+    fn tests_without_unique_coverage_are_named() {
+        let set = |files: &[&str]| files.iter().map(|file| (*file).to_owned()).collect::<BTreeSet<String>>();
+        let covered = BTreeMap::from([
+            ("a".to_owned(), set(&["x.rs", "y.rs"])),
+            ("b".to_owned(), set(&["x.rs"])),
+            ("c".to_owned(), set(&["y.rs", "z.rs"])),
+            ("d".to_owned(), set(&[])),
+        ]);
+        // a's files are b's and c's too, b's are a's; c alone covers z.rs.
+        assert_eq!(without_unique_coverage(&covered), vec!["a", "b"]);
     }
 
     #[test]

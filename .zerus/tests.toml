@@ -22,12 +22,26 @@ where = "ci"
 policy = "owner"
 target = "fork-windows.yml"
 
+# One automatic retry of a plain failure (never of a crash): a pass on it is
+# flaky, quarantined for two weeks; three episodes become a lead item (#718).
 [retries]
 flaky = 1
 quarantine_days = 14
+episodes = 3
 
+# A suite growing more than half over its recorded time is flagged; every
+# suite has a time budget (minutes) and a size budget (test lines, about a
+# fifth over today's; the larger providers set their own below).
 [budgets]
 grow_percent = 50
+suite_minutes = 30
+suite_lines = 30000
+
+# Unchanged inputs reuse the last green result (Rust never); 30 reused results,
+# or one reused measurement older than a week, propose a full run (#718).
+[reuse]
+full_after = 30
+max_age_days = 7
 
 # Test isolation (#720): each test run in its own folders; read by
 # state::teams::isolation, which checks these keys.
@@ -97,6 +111,7 @@ kind = "cargo"
 sources = ["src/**", "build.rs", "Cargo.toml", "Cargo.lock", ".cargo/**"]
 widen = "dependants"
 command = "cargo test --locked {targets}"
+budget_lines = 210000
 
 [[provider.paths]]
 files = ["crates/replica/**"]
@@ -120,6 +135,37 @@ root = "crates/replica-ffi"
 sources = ["crates/replica-ffi/**"]
 command = "cargo test --locked --target-dir ../../target/replica-ffi {targets}"
 
+# The desktop's storage crates.
+[[provider]]
+name = "content-search"
+kind = "cargo"
+root = "crates/content-search"
+sources = ["crates/content-search/**"]
+
+[[provider]]
+name = "desktop-catalog"
+kind = "cargo"
+root = "crates/desktop-catalog"
+sources = ["crates/desktop-catalog/**"]
+
+[[provider]]
+name = "desktop-ledger"
+kind = "cargo"
+root = "crates/desktop-ledger"
+sources = ["crates/desktop-ledger/**"]
+
+[[provider]]
+name = "desktop-migration"
+kind = "cargo"
+root = "crates/desktop-migration"
+sources = ["crates/desktop-migration/**"]
+
+[[provider]]
+name = "desktop-read-policy"
+kind = "cargo"
+root = "crates/desktop-read-policy"
+sources = ["crates/desktop-read-policy/**"]
+
 [[provider]]
 name = "watch-protocol"
 kind = "cargo"
@@ -130,6 +176,7 @@ sources = ["crates/watch-protocol/**"]
 # test binary uses. The build folder is this checkout's; the owner may move it.
 [[provider]]
 name = "tray"
+budget_lines = 86000
 kind = "ctest"
 build_dir = ".ci-build/gui"
 sources = ["tray/**"]
@@ -150,6 +197,7 @@ resources = "gui"
 # integration tests that start target/debug/hgs run for every CLI change.
 [[provider]]
 name = "python"
+budget_lines = 75000
 kind = "unittest"
 root = "tests"
 sources = [
@@ -172,6 +220,7 @@ targets = ["tests/test_ci_security.py", "tests/test_ci_profiles.py", "tests/test
 
 [[provider]]
 name = "client-core"
+budget_lines = 80000
 kind = "cargo"
 root = "client/core"
 sources = ["client/core/**", "client/fixtures/**"]
@@ -179,6 +228,7 @@ command = "cargo test --locked --target-dir ../../target/client-core {targets}"
 
 [[provider]]
 name = "client-tauri"
+budget_lines = 63000
 kind = "cargo"
 root = "client/src-tauri"
 sources = ["client/src-tauri/**"]

@@ -78,6 +78,8 @@ class ShortcutRouter;
 class SessionsWindow : public QWidget {
     Q_OBJECT
 public:
+    // U34: the folder a DeepSeek sandbox creation error names, or empty.
+    static QString sandboxFolderOf(const QString &error);
     explicit SessionsWindow(const QString &hgsPath, QWidget *parent = nullptr);
     void setFleet(const FleetState &fleet);
     // The same listings as the last setFleet, refreshed by FleetState::refreshListing:
@@ -552,6 +554,8 @@ private:
     QLabel *m_creationTitle=nullptr;
     QPlainTextEdit *m_creationText=nullptr;
     QPushButton *m_creationContinue=nullptr,*m_creationCheck=nullptr,*m_creationStop=nullptr,*m_creationEdit=nullptr;
+    // The owner's one-click fix for a DeepSeek folder the sandbox cannot use (U34).
+    QPushButton *m_creationFixAccess=nullptr;
     bool m_admittingCreation=false;
     QHash<QString,QString> m_creationNotices;
     // Launches a listing reported ended, oldest first, with their launch intent.

@@ -4,6 +4,7 @@
 class TestSessionsWindow : public SessionsWindowFixture {
     Q_OBJECT
 private slots:
+    void sandboxFolderErrorNamesItsFolder();
     void localWindowsLaunchJoinsTheFolderInAnyCase();
     void launchLogDistinguishesASecondLaunch();
     void nativeLaunchStaysInWorkspace_data();
@@ -612,6 +613,17 @@ void TestSessionsWindow::aConfirmingCreationReadsItsComputerUntilListed()
                 || window.findChild<SessionCreationController *>()->operation(id).value("state") == "bound");
     QTest::qWait(2500); const auto settled = reads.size(); QTest::qWait(2500);
     QCOMPARE(reads.size(), settled);
+}
+
+// U34: the creation panel's Fix folder rights button reads the folder from
+// the DeepSeek sandbox error, and only from that error.
+void TestSessionsWindow::sandboxFolderErrorNamesItsFolder()
+{
+    const QString error=QStringLiteral("hgs: the DeepSeek sandbox needs full control of D:\\Work\\Game Project (missing WRITE_OWNER); fix it for this folder with:\n"
+        "  icacls \"D:\\Work\\Game Project\" /grant *S-1-5-21-1-2-3-1001:(OI)(CI)F");
+    QCOMPARE(SessionsWindow::sandboxFolderOf(error),QStringLiteral("D:\\Work\\Game Project"));
+    QVERIFY(SessionsWindow::sandboxFolderOf(QStringLiteral("hgs: the folder does not exist")).isEmpty());
+    QVERIFY(SessionsWindow::sandboxFolderOf(QStringLiteral("the DeepSeek sandbox needs full control of ")).isEmpty());
 }
 
 QTEST_MAIN(TestSessionsWindow)

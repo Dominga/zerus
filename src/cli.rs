@@ -128,6 +128,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs presence set --json        desktop idle/lock time from JSON stdin (written by the tray)
        hgs subagents-confirm get|set --json   ask before an agent starts subagents on this computer (JSON stdin for set)
        hgs session-upload-block get|set --json   block DeepSeek's session-log upload on this computer (JSON stdin for set)
+       hgs sandbox-folder grant DIRECTORY --json   give this user the folder rights the DeepSeek sandbox needs
        hgs swarm preference get --json   shared phone notification timing
        hgs swarm preference set mobile_delivery VALUE --json   immediate|away|away_5|away_10|away_15|away_30
        hgs machine check <alias> | ssh <alias> [--directory PATH] | setup <alias> [--source <checkout>]
@@ -296,6 +297,39 @@ fn setting_command(local: bool, command: &str, args: &[String], dry: bool) -> Re
         return Err(Error::new(1, format!("hgs {command} does not support --dry-run")));
     }
     state_command(command, args)
+}
+/// The owner's one-click fix for a DeepSeek session that cannot start: give
+/// this user inheritable full control of one folder, the grant the sandbox
+/// needs (U34). Only this user's own rights change, and only when the check
+/// says the sandbox lacks them; the result is checked again before it is told.
+fn sandbox_folder(args: &[String]) -> Result<i32> {
+    if args.first().map(String::as_str) != Some("grant") {
+        return Err(Error::new(1, "usage: hgs sandbox-folder grant DIRECTORY --json"));
+    }
+    let path = require(args, 1, "Missing folder")?;
+    let folder = Path::new(path);
+    if !folder.is_absolute() || !folder.is_dir() {
+        return Err(Error::new(1, format!("{path} is not an existing absolute folder")));
+    }
+    #[cfg(windows)]
+    {
+        let fail = |error: std::io::Error| Error::new(1, format!("Could not change the rights of {path}: {error}"));
+        if crate::platform::sandbox_folder_problem(folder).map_err(fail)?.is_none() {
+            println!("{}", serde_json::json!({"status":"ok","path":path}));
+            return Ok(0);
+        }
+        crate::platform::grant_full_control(folder).map_err(fail)?;
+        if let Some(problem) = crate::platform::sandbox_folder_problem(folder).map_err(fail)? {
+            return Err(Error::new(1, format!("The grant did not take: {problem}")));
+        }
+        println!("{}", serde_json::json!({"status":"granted","path":path}));
+        Ok(0)
+    }
+    #[cfg(not(windows))]
+    {
+        println!("{}", serde_json::json!({"status":"ok","path":path}));
+        Ok(0)
+    }
 }
 fn has(args: &[String], arg: &str) -> bool {
     args.iter().any(|a| a == arg)
@@ -691,6 +725,15 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
         }
         setting if kept_setting(setting) => {
             return setting_command(target.is_empty() || config.is_self(&target), setting, args, dry);
+        }
+        "sandbox-folder" => {
+            if !(target.is_empty() || config.is_self(&target)) {
+                return Err(Error::new(1, "hgs sandbox-folder changes a folder's rights on the computer it runs on; run it there"));
+            }
+            if dry {
+                return Err(Error::new(1, "hgs sandbox-folder does not support --dry-run"));
+            }
+            return sandbox_folder(args);
         }
         _ => {}
     }

@@ -138,6 +138,7 @@
 #include <QListWidget>
 #include <QMenu>
 #include <QMessageBox>
+#include <QProcess>
 #include <QPainter>
 #include <QPushButton>
 #include <QScrollBar>
@@ -1977,9 +1978,12 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     auto *creationHide=new QPushButton(tr("Hide status"));creationHide->setObjectName("creationHide");
     auto *creationReturn=new QPushButton(tr("Return to filters"));creationReturn->setObjectName("creationReturnToFilters");
     m_creationEdit=new QPushButton(tr("Edit choices…"));m_creationEdit->setObjectName("creationEdit");
+    m_creationFixAccess=new QPushButton(tr("Fix folder rights"));m_creationFixAccess->setObjectName("creationFixAccess");
+    m_creationFixAccess->setToolTip(tr("Give your Windows user full control of this folder, which the DeepSeek sandbox needs"));m_creationFixAccess->hide();
     creationActions->addWidget(m_creationContinue,0,0);creationActions->addWidget(m_creationCheck,0,1);
     creationActions->addWidget(m_creationStop,1,0,1,2);creationActions->addWidget(m_creationEdit,2,0);creationActions->addWidget(creationHide,2,1);
-    creationActions->addWidget(creationReturn,3,0,1,2);creationLayout->addLayout(creationActions);m_detailStack->addWidget(m_creationPanel);
+    creationActions->addWidget(creationReturn,3,0,1,2);creationActions->addWidget(m_creationFixAccess,4,0,1,2);
+    creationLayout->addLayout(creationActions);m_detailStack->addWidget(m_creationPanel);
     connect(m_creationEdit,&QPushButton::clicked,this,[this]{
         if(!m_creations->canEdit(m_selectedCreation))return;const auto plan=m_creations->operation(m_selectedCreation);
         showNewSession(plan["cmd"].toString(),plan["group"].toString(),plan["host"].toString(),{},{},plan["account"].toString(),plan);
@@ -1989,6 +1993,26 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         m_listStack->setCurrentIndex(m_searchResults->active()?1:0);rebuild();
     });
     connect(m_creationContinue,&QPushButton::clicked,this,[this]{m_creations->resume(m_selectedCreation);});
+    connect(m_creationFixAccess,&QPushButton::clicked,this,[this]{
+        const auto id=m_selectedCreation;const auto folder=sandboxFolderOf(m_creations->operation(id)["error"].toString());
+        if(folder.isEmpty())return;
+        if(QMessageBox::question(this,tr("Fix folder rights"),
+            tr("Give your Windows user full control of\n%1\n\nThe DeepSeek sandbox needs it to start a session there. Only your own access to this folder changes.").arg(folder))!=QMessageBox::Yes)return;
+        m_creationFixAccess->setEnabled(false);m_creationFixAccess->setText(tr("Fixing folder rights…"));
+        auto *process=new QProcess(this);
+        connect(process,&QProcess::finished,this,[this,process,id](int code,QProcess::ExitStatus status){
+            process->deleteLater();
+            const auto error=QString::fromUtf8(process->readAllStandardError()).trimmed();
+            if(status!=QProcess::NormalExit||code!=0){
+                m_creationFixAccess->setEnabled(true);m_creationFixAccess->setText(tr("Fix folder rights"));
+                showNotice(tr("The folder rights were not changed: %1").arg(error.isEmpty()?tr("unknown error"):error),true);return;
+            }
+            m_creationFixAccess->setText(tr("Folder rights fixed"));
+            showNotice(tr("Folder rights fixed; starting the session again."),false);
+            if(SessionCreationController::canResume(m_creations->operation(id)))m_creations->resume(id);else m_creations->check(id);
+        });
+        process->start(m_client.executable(),{QStringLiteral("sandbox-folder"),QStringLiteral("grant"),folder,QStringLiteral("--json")});
+    });
     connect(m_creationCheck,&QPushButton::clicked,this,[this]{m_creations->check(m_selectedCreation);emit refreshRequested();});
     connect(m_creationStop,&QPushButton::clicked,this,[this]{m_creations->stop(m_selectedCreation);});
     connect(creationHide,&QPushButton::clicked,this,[this]{m_creations->hide(m_selectedCreation);});
@@ -4610,6 +4634,15 @@ void SessionsWindow::selectCreation(const QString &id)
     }
     renderCreation();
 }
+// U34: the folder a "the DeepSeek sandbox needs full control of FOLDER (missing
+// ...)" creation error names; empty for any other error.
+QString SessionsWindow::sandboxFolderOf(const QString &error)
+{
+    static const QString lead=QStringLiteral("the DeepSeek sandbox needs full control of ");
+    const int at=error.indexOf(lead);if(at<0)return {};
+    const int start=at+lead.size();const int end=error.indexOf(QStringLiteral(" (missing "),start);
+    return end>start?error.mid(start,end-start).trimmed():QString();
+}
 void SessionsWindow::renderCreation()
 {
     const auto operation=m_creations->operation(m_selectedCreation);
@@ -4632,6 +4665,11 @@ void SessionsWindow::renderCreation()
     }
     m_creationContinue->setVisible(SessionCreationController::canResume(operation));
     m_creationEdit->setVisible(m_creations->canEdit(m_selectedCreation));
+    {
+        const bool fixable=operation["host"].toString().isEmpty()&&!sandboxFolderOf(operation["error"].toString()).isEmpty();
+        if(!fixable){m_creationFixAccess->setEnabled(true);m_creationFixAccess->setText(tr("Fix folder rights"));}
+        m_creationFixAccess->setVisible(fixable);
+    }
     const auto state=operation["state"].toString();
     m_creationCheck->setVisible(state=="unknown"||state=="recover"||state=="confirming");
     m_creationStop->setVisible(!operation["launch_dispatched"].toBool()&&state!="stopped"&&state!="failed"&&state!="storage_error");

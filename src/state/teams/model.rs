@@ -2107,6 +2107,11 @@ impl Team {
     }
 }
 
+/// An estimate source of "none" is the default and is not stored.
+fn no_estimate_source(source: &str) -> bool {
+    source.is_empty() || source == "none"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2405,7 +2410,3 @@ mod tests {
     }
 }
 
-/// An estimate source of "none" is the default and is not stored.
-fn no_estimate_source(source: &str) -> bool {
-    source.is_empty() || source == "none"
-}

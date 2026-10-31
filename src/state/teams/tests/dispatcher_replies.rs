@@ -1,5 +1,4 @@
 use super::*;
-use super::support::*;
 
 /// #628: a DeepSeek member whose newest native event is 25 minutes old is
 /// still silent, and the lead hears it once.

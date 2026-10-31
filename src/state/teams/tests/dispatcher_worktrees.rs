@@ -1,5 +1,4 @@
 use super::*;
-use super::support::*;
 
 #[test]
 fn a_sandboxed_agent_gets_a_clone_folder() {

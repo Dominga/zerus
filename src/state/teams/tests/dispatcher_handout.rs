@@ -1,5 +1,4 @@
 use super::*;
-use super::support::*;
 
 #[test]
 fn the_dispatcher_hands_out_the_task_with_the_most_dependants_first() {

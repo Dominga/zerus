@@ -1,5 +1,4 @@
 use super::*;
-use super::support::*;
 
 #[test]
 fn an_old_catalog_keeps_the_hand_off_text_unchanged() {

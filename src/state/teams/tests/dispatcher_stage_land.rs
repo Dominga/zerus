@@ -1,5 +1,4 @@
 use super::*;
-use super::support::*;
 
 #[test]
 fn a_command_stage_runs_in_the_stage_folder_and_its_exit_code_decides() {

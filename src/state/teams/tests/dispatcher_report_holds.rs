@@ -1,5 +1,4 @@
 use super::*;
-use super::support::*;
 
 #[test]
 fn a_captured_report_holds_its_member_from_new_work() {

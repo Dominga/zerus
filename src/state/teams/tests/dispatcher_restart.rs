@@ -1,4 +1,3 @@
-use super::super::ops::{self, Actor};
 use super::*;
 use super::support::*;
 

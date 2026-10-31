@@ -1,5 +1,4 @@
 use super::*;
-use super::support::*;
 
 #[test]
 fn a_profile_launch_puts_the_mode_after_the_separator() {

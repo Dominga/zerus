@@ -6,7 +6,8 @@ agents (Claude Code, Codex, DeepSeek Harness, Kimi, OpenCode), on different
 models and on different computers. You are the owner: nothing runs until you
 approve a plan, and every decision that needs you is waiting in one place.
 
-This guide is the English original. It describes teams as they are today.
+This guide is the English original. It describes teams as they are today. A
+[Russian translation](ru/teams-guide.md) is available.
 
 ## What a team is
 

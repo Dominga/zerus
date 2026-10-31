@@ -241,7 +241,8 @@ void TestTeamsUiWorkspace::workspaceShowsGraphBoardAndFocus()
     TeamPanel panel(&controller);
     TeamWorkspace workspace(&controller, &panel);
     workspace.setLive(live);
-    workspace.resize(1300, 820); workspace.show();
+    // #719: Tests is a fifth view; its words need 100 px more.
+    workspace.resize(1400, 820); workspace.show();
     controller.refresh();
     panel.showTeam("team-1");
     workspace.showTeam("team-1");
@@ -2002,7 +2003,8 @@ void TestTeamsUiWorkspace::aNarrowToolbarKeepsOnlyItsIcons()
     TeamWorkspace workspace(&controller, &panel);
     workspace.setLive(prototypeLive);
     darkPalette(); workspace.setTheme(true);
-    workspace.resize(1440, 900); workspace.show();
+    // #719: Tests is a fifth view; its words need 100 px more.
+    workspace.resize(1540, 900); workspace.show();
     controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceFilter"));
     const auto segment = [&](const char *group, const char *value) -> QPushButton * {
@@ -2029,7 +2031,7 @@ void TestTeamsUiWorkspace::aNarrowToolbarKeepsOnlyItsIcons()
     QTRY_COMPARE(segment("teamWorkspaceView", "graph")->text(), QStringLiteral("Graph"));
     auto *split = workspace.findChild<QSplitter *>("teamWorkspaceSplit");
     QVERIFY(split);
-    split->setSizes({430, 1010});
+    split->setSizes({430, 1110});
     QTRY_VERIFY(segment("teamWorkspaceView", "graph")->text().isEmpty());
     QVERIFY(!segment("teamWorkspaceView", "graph")->icon().isNull());
     QCOMPARE(segment("teamWorkspaceView", "graph")->toolTip(), QStringLiteral("Graph"));

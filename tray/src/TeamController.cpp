@@ -10,7 +10,8 @@ int pollInterval = 3000;
 // waiting list's every 30 s, the profile and heat reads).
 bool readOnly(const QString &operation)
 {
-    static const QStringList reads{"waiting", "profile", "spans", "status", "events", "inbox", "list"};
+    // #719: `test` reads the test database; a submit changes no team state.
+    static const QStringList reads{"waiting", "profile", "spans", "status", "events", "inbox", "list", "test"};
     return reads.contains(operation);
 }
 }

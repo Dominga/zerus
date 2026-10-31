@@ -2455,7 +2455,8 @@ fn affected_targets(project: &std::path::Path, team: &str, suite: &str) -> anyho
     Ok(selection.runs.iter().filter(|run| run.provider == suite).flat_map(|run| run.targets.clone()).collect())
 }
 
-/// #717: `hgs team test submit|force|results` on the team's test database.
+/// #717: `hgs team test submit|force|results` on the team's test database;
+/// #719: `queue` lists what waits and what runs now.
 fn test_command(input: &Value) -> anyhow::Result<Value> {
     use super::test_queue::{self, Load, TestStore};
     let team_id = text(input, "team").to_owned();
@@ -2492,7 +2493,10 @@ fn test_command(input: &Value) -> anyhow::Result<Value> {
             request.team = team_id.clone();
             request.task = input["task"].as_u64().and_then(|id| u32::try_from(id).ok());
             request.asked_by = if asked_by.is_empty() { "You".to_owned() } else { asked_by };
-            request.forced = action == "force";
+            // #719: the desktop's Force run queues the suite as forced: the worker
+            // runs it first at its next tick, never a reused result, and no
+            // desktop call waits for the run.
+            request.forced = action == "force" || input["forced"].as_bool() == Some(true);
             request.commit = if text(input, "commit").is_empty() {
                 super::dispatcher::git_at(&project.to_string_lossy(), &["rev-parse", "HEAD"]).unwrap_or_default()
             } else {
@@ -2523,11 +2527,14 @@ fn test_command(input: &Value) -> anyhow::Result<Value> {
         "results" => {
             let limit = input["limit"].as_u64().map_or(20, |n| n as usize);
             let before = input["before"].as_f64();
-            let records = database.results(Some(&team_id), before, limit)?;
+            // #719: a task's drawer reads its own runs; the profiler its window.
+            let task = input["task"].as_u64().and_then(|id| u32::try_from(id).ok());
+            let records = database.results(Some(&team_id), before, limit, task, input["from"].as_f64())?;
             let next = records.last().map(|record| record.at);
             Ok(json!({"status":"ok","items":records,"next_cursor":next}))
         }
-        other => anyhow::bail!("Unknown test action {other}; use submit, force or results"),
+        "queue" => Ok(json!({"status":"ok","items":database.pending(&team_id)?})),
+        other => anyhow::bail!("Unknown test action {other}; use submit, force, queue or results"),
     }
 }
 

@@ -129,6 +129,7 @@ Model Model::build(const Teams::Team &team, const QJsonObject &profile, const QJ
     QHash<QString, QList<std::pair<double, double>>> busy;
     QHash<QString, QList<Span>> spans, waits;
     QHash<int, std::pair<double, double>> extents, worked;
+    QHash<int, double> busySeconds;
     QList<std::pair<double, double>> open;
     double low = model.from > 0 ? model.from : 1e300, high = model.to > 0 ? model.to : 0;
     for (const auto &value : timelines) {
@@ -136,6 +137,7 @@ Model Model::build(const Teams::Team &team, const QJsonObject &profile, const QJ
         const int task = timeline.value("task").toInt();
         ++model.tasks;
         double first = 1e300, last = 0;
+        bool running = false;
         const auto add = [&](const QJsonObject &raw, const QString &forcedKind) {
             if (raw.value("from").isNull() || !raw.contains("from")) return;
             Span span;
@@ -148,6 +150,8 @@ Model Model::build(const Teams::Team &team, const QJsonObject &profile, const QJ
             if (span.to <= span.from) return;
             first = std::min(first, span.from); last = std::max(last, span.to);
             if (Busy.contains(span.kind)) {
+                // #746: the work itself, as the estimate counts it (no question waits).
+                if (span.kind == QLatin1String("work") || span.kind == QLatin1String("rework")) { busySeconds[task] += span.seconds(); running = running || span.running; }
                 auto &at = worked[task];
                 at = at.second > 0 ? std::pair{std::min(at.first, span.from), std::max(at.second, span.to)} : std::pair{span.from, span.to};
             }
@@ -163,6 +167,12 @@ Model Model::build(const Teams::Team &team, const QJsonObject &profile, const QJ
         for (const auto &span : timeline.value("spans").toArray()) add(span.toObject(), {});
         for (const auto &build : timeline.value("overlay").toArray()) add(build.toObject(), QStringLiteral("build"));
         if (last > 0) { extents.insert(task, {first, last}); open << std::pair{first, last}; low = std::min(low, first); high = std::max(high, last); }
+        // #746: the estimate #745 puts on each timeline.
+        if (timeline.contains("estimate_source")) {
+            Estimate row; row.task = task; row.running = running; row.worked = busySeconds.value(task);
+            row.estimate = timeline.value("estimate_minutes").isDouble() ? timeline.value("estimate_minutes").toDouble() : -1;
+            if (row.estimate > 0 || row.worked > 0) model.estimates << row;
+        }
     }
     if (high > 0) { model.from = low; model.to = high; }
     open = unite(open);
@@ -906,8 +916,63 @@ QWidget *TeamProfileView::timePage()
     lh->addStretch(1);
     if (m_model.truncated) lh->addWidget(label(tr("Only the first %1 tasks are drawn").arg(Cache::MaxSpanPages * Cache::SpanPage), c.warn, 11, false, "teamProfileTruncated"));
     v->addWidget(legend);
+    if (auto *estimates = estimatesCard()) v->addWidget(estimates);
     v->addStretch(0);
     return page;
+}
+
+// Owner 2026-10-31 (#746): each task's estimate against its working time, the
+// largest overrun first; at most EstimateRows rows, the rest counted.
+QWidget *TeamProfileView::estimatesCard()
+{
+    if (m_model.estimates.isEmpty()) return nullptr;
+    const Colors c = colorsFor(m_dark);
+    auto rows = m_model.estimates;
+    const auto over = [](const Model::Estimate &row) { return row.estimate > 0 ? row.worked / 60 - row.estimate : -1e9; };
+    std::stable_sort(rows.begin(), rows.end(), [&](const Model::Estimate &a, const Model::Estimate &b) { return over(a) > over(b); });
+    auto *card = new QFrame; card->setObjectName("teamProfileEstimates");
+    card->setStyleSheet(QStringLiteral("QFrame#teamProfileEstimates{background:%1;border:1px solid %2;border-radius:9px;}")
+                            .arg(c.surface.name(QColor::HexArgb), c.border.name(QColor::HexArgb)));
+    auto *v = new QVBoxLayout(card); v->setContentsMargins(12, 10, 12, 10); v->setSpacing(4);
+    int known = 0, past = 0;
+    for (const auto &row : rows) if (row.estimate > 0 && row.worked > 0) { ++known; if (row.worked / 60 > row.estimate) ++past; }
+    auto *head = row(10);
+    head->addWidget(label(tr("ESTIMATE AND ACTUAL"), c.muted, 11, true));
+    if (known) head->addWidget(label(tr("%1 of %2 over the estimate").arg(past).arg(known), past ? c.warn : c.text2, 11, false, "teamProfileEstimatesSummary"));
+    head->addStretch(1);
+    v->addLayout(head);
+    auto *grid = new QGridLayout; grid->setHorizontalSpacing(14); grid->setVerticalSpacing(3);
+    int line = 0;
+    for (const auto &column : {tr("TASK"), tr("ESTIMATE"), tr("ACTUAL"), tr("DIFFERENCE")}) grid->addWidget(label(column, c.muted, 10, true), 0, line++);
+    line = 1;
+    for (const auto &row : rows) {
+        if (line > EstimateRows) break;
+        const qint64 worked = qRound64(row.worked / 60);
+        auto *task = new QPushButton(QStringLiteral("#%1 %2").arg(row.task).arg(m_model.titles.value(row.task)));
+        task->setObjectName("teamProfileEstimateTask"); task->setProperty("task", row.task); task->setFlat(true); task->setCursor(Qt::PointingHandCursor);
+        task->setStyleSheet(QStringLiteral("QPushButton{color:%1;border:none;padding:0;text-align:left;}").arg(c.fg.name()));
+        task->setMaximumWidth(360);
+        task->setText(task->fontMetrics().elidedText(task->text(), Qt::ElideRight, 350));
+        QObject::connect(task, &QPushButton::clicked, this, [this, id = row.task] { pick(id); if (openTask) openTask(id); });
+        grid->addWidget(task, line, 0);
+        grid->addWidget(label(row.estimate > 0 ? tr("~%1 min").arg(qRound64(row.estimate)) : tr("no estimate yet"), c.text2, 12, false, "teamProfileEstimateValue"), line, 1);
+        grid->addWidget(label(row.worked > 0 ? (row.running ? tr("%1 min so far").arg(worked) : tr("%1 min").arg(worked)) : tr("not started"),
+                              c.text2, 12, false, "teamProfileEstimateActual"), line, 2);
+        QString diff; QColor tone = c.muted;
+        if (row.estimate > 0 && row.worked > 0) {
+            const qint64 delta = worked - qRound64(row.estimate);
+            diff = delta > 0 ? tr("%1 min over").arg(delta) : delta < 0 ? tr("%1 min under").arg(-delta) : tr("on the estimate");
+            tone = delta > 0 ? c.warn : c.text2;
+        }
+        auto *d = label(diff, tone, 12, false, "teamProfileEstimateDiff"); d->setProperty("task", row.task);
+        grid->addWidget(d, line, 3);
+        ++line;
+    }
+    grid->setColumnStretch(4, 1);
+    v->addLayout(grid);
+    if (rows.size() > EstimateRows)
+        v->addWidget(label(tr("%1 more tasks, the largest overruns first").arg(rows.size() - EstimateRows), c.muted, 11, false, "teamProfileEstimatesMore"));
+    return card;
 }
 
 QWidget *TeamProfileView::tokensPage()

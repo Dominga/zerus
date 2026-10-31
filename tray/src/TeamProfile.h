@@ -53,6 +53,10 @@ struct Model {
     qint64 plannedSeconds = 0, realSeconds = 0;
     QHash<int, QString> titles;               // task id -> title
     QHash<int, QString> assignees;
+    // Owner 2026-10-31 (#746): each task's estimate (-1: none) against its
+    // working time (work and rework) in the scope.
+    struct Estimate { int task = 0; double estimate = -1, worked = 0; bool running = false; };
+    QList<Estimate> estimates;
     bool truncated = false;                   // spans past the page bound
     int tasks = 0;
     static Model build(const Teams::Team &team, const QJsonObject &profile, const QJsonArray &timelines, double now,
@@ -137,6 +141,10 @@ private:
     void renderLosses();
     QWidget *summaryTiles();
     QWidget *timePage();
+    QWidget *estimatesCard();
+public:
+    static constexpr int EstimateRows = 30;
+private:
     QWidget *tokensPage();
     QWidget *membersPage();
     QWidget *comparePage();

@@ -78,6 +78,30 @@ static QJsonObject timingTeam()
     return t;
 }
 
+// Owner 2026-10-31 (#746): the timing team with #745's estimates: #1 done
+// within its estimate, #2 running past it, #3 running within it (until the
+// clock passes 45 minutes), #4 not started, #5 with none yet and #8 done past
+// it. The other tasks come from an older hgs: no estimate fields.
+static QJsonObject estimateTeam()
+{
+    auto t = timingTeam();
+    const QHash<int, std::pair<double, QString>> estimates{
+        {1, {15, "history"}}, {2, {40, "role"}}, {3, {45, "lead"}}, {4, {30, "history"}}, {5, {-1, "none"}}, {8, {60, "history"}}};
+    auto tasks = t["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto task = tasks[i].toObject();
+        const int id = task["id"].toInt();
+        if (!estimates.contains(id)) continue;
+        const auto [minutes, source] = estimates.value(id);
+        task["estimate_minutes"] = minutes > 0 ? QJsonValue(minutes) : QJsonValue();
+        task["estimate_source"] = source;
+        task["estimate_text"] = minutes > 0 ? QStringLiteral("%1 min").arg(minutes) : QStringLiteral("no estimate yet");
+        tasks[i] = task;
+    }
+    t["tasks"] = tasks;
+    return t;
+}
+
 // U58: the phased team with a cancelled task in phase 2 and an approved phase 4
 // whose two tasks were cancelled (copies the lead made under new ids).
 static QJsonObject cancelledTeam()
@@ -212,6 +236,7 @@ private slots:
     void graphNodesCarryTheActivityLabel();
     void cancelledWorkIsHiddenUntilShown();
     void workingTimeFollowsTheActivityLabel();
+    void everyNodeShowsItsEstimateAndTheTimeAgainstIt();
     void boardScrollsInsteadOfSqueezingColumns();
     void planningBoardScrollsInsteadOfSqueezingColumns();
     void boardColumnsKeepTheirScroll();
@@ -1387,6 +1412,147 @@ void TestTeamsUiWorkspace::workingTimeFollowsTheActivityLabel()
     QVERIFY(!old.task(2)->timing.known);
     QVERIFY(TeamUi::workedLabel(*old.task(2), now).isEmpty());
     QVERIFY(TeamUi::workedTip(*old.task(2), now).isEmpty());
+}
+
+// Owner 2026-10-31 (#746): every task node in Graph, Board and Layers, and the
+// task card, shows the estimate ("~30 min"), a running or done task its time
+// against it ("12 of ~45 min"), past it in the warning color, and "no
+// estimate yet" without one; an older hgs keeps the plain working time. The
+// running times tick against the estimate.
+void TestTeamsUiWorkspace::everyNodeShowsItsEstimateAndTheTimeAgainstIt()
+{
+    double now = 9000;
+    TeamUi::workedClock() = [&now] { return now; };
+    const auto restore = qScopeGuard([] { TeamUi::workedClock() = [] { return double(QDateTime::currentSecsSinceEpoch()); }; });
+    const auto tick = [] { QVERIFY(QMetaObject::invokeMethod(&TeamUi::workedTicker(), "timeout")); };
+    setTeam(estimateTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    const LiveLookup live = [](const Member &m) { Live l; l.known = true; if (m.id == "blocked") l.offline = true; l.working = m.id == "backend"; return l; };
+    panel.setLive(live); workspace.setLive(live);
+    darkPalette(); workspace.setTheme(true);
+    workspace.resize(1900, 820); workspace.show();
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    // The text itself.
+    QCOMPARE(TeamUi::estimateTime(45, true, 12 * 60, true).text, QStringLiteral("12 of ~45 min"));
+    QVERIFY(!TeamUi::estimateTime(45, true, 12 * 60, true).over);
+    QVERIFY(TeamUi::estimateTime(45, true, 46 * 60, true).over);
+    QCOMPARE(TeamUi::estimateTime(45, true, 0, false).text, QStringLiteral("~45 min"));
+    QCOMPARE(TeamUi::estimateTime(-1, true, 0, false).text, QStringLiteral("no estimate yet"));
+    QCOMPARE(TeamUi::estimateTime(-1, true, 5 * 60, true).text, QStringLiteral("5 min, no estimate yet"));
+    QCOMPARE(TeamUi::estimateTime(-1, false, 12 * 60, true).text, QStringLiteral("12m"));   // an older hgs
+    const auto graph = [&] { return dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamPhaseGraph")); };
+    QTRY_VERIFY(graph() && graph()->nodeRect(1).width() > 0);
+    const auto node = [&](TeamUi::TaskView *view, int id) { for (const auto &n : view->nodes) if (n.id == id) return n; return TeamUi::TaskView::Node{}; };
+    QCOMPARE(node(graph(), 1).worked, QStringLiteral("10 of ~15 min"));
+    QCOMPARE(node(graph(), 2).worked, QStringLiteral("65 of ~40 min"));
+    QVERIFY(node(graph(), 2).timeOver);
+    QCOMPARE(node(graph(), 3).worked, QStringLiteral("12 of ~45 min"));
+    QVERIFY(!node(graph(), 3).timeOver);
+    QCOMPARE(node(graph(), 4).worked, QStringLiteral("~30 min"));
+    QCOMPARE(node(graph(), 5).worked, QStringLiteral("no estimate yet"));
+    QCOMPARE(node(graph(), 8).worked, QStringLiteral("75 of ~60 min"));
+    QVERIFY(node(graph(), 8).timeOver);
+    QCOMPARE(node(graph(), 11).worked, QStringLiteral("1m"));   // no estimate fields: as before
+    QVERIFY2(node(graph(), 3).tooltip.contains("Estimate ~45 min, from the lead's plan"), qPrintable(node(graph(), 3).tooltip));
+    QVERIFY(node(graph(), 2).tooltip.contains("Estimate ~40 min, from this role's solved tasks"));
+    QVERIFY(node(graph(), 5).tooltip.contains("No estimate yet: it fills in after this role's first solved task"));
+    // No dots as separators in the new texts.
+    for (int id : {1, 2, 3, 4, 5, 8}) QVERIFY(!node(graph(), id).worked.contains(QStringLiteral(" · ")));
+    const auto shoot = [&](const QString &name) {
+        if (shotsWanted()) {
+            shot(&workspace, name + "-dark");
+            lightPalette(); workspace.setTheme(false); workspace.render(); QTest::qWait(200);
+            lightShot(&workspace, name + "-light");
+            darkPalette(); workspace.setTheme(true); workspace.render(); QTest::qWait(150);
+        }
+    };
+    shoot("u746-graph");
+    // A tick: #3 passes its 45 minutes and turns to the warning color in place.
+    QPointer<TeamUi::TaskView> ticked = graph();
+    now = 12000; tick();
+    QVERIFY(ticked);
+    QCOMPARE(node(ticked, 3).worked, QStringLiteral("62 of ~45 min"));
+    QVERIFY(node(ticked, 3).timeOver);
+    QCOMPARE(node(ticked, 4).worked, QStringLiteral("~30 min"));
+    now = 9000; tick();
+    const auto view = [&](const char *segment) {
+        for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>())
+            if (b->property("segment") == segment) { b->click(); break; }
+    };
+    const QColor warn = TeamUi::colorsFor(true).warn, muted = TeamUi::colorsFor(true).text3;
+    // The Board.
+    view("board");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceBoard"));
+    const auto worked = [&](int id) -> QLabel * {
+        for (auto *frame : workspace.findChildren<QFrame *>("teamBoardCard"))
+            if (frame->property("task").toInt() == id) return frame->findChild<QLabel *>("teamBoardWorked");
+        return nullptr;
+    };
+    QTRY_VERIFY(worked(3));
+    QCOMPARE(worked(3)->text(), QStringLiteral("12 of ~45 min"));
+    QCOMPARE(worked(3)->palette().color(QPalette::WindowText), muted);
+    QCOMPARE(worked(2)->text(), QStringLiteral("65 of ~40 min"));
+    QCOMPARE(worked(2)->palette().color(QPalette::WindowText), warn);
+    QCOMPARE(worked(4)->text(), QStringLiteral("~30 min"));
+    QVERIFY(worked(2)->toolTip().contains("Estimate ~40 min"));
+    // A running time keeps the room it grows to.
+    // As many digits as the larger of its minutes and the estimate.
+    QVERIFY(worked(3)->minimumWidth() >= worked(3)->fontMetrics().horizontalAdvance(QStringLiteral("88 of ~45 min")));
+    QPointer<QLabel> running = worked(3);
+    now = 12000; tick();
+    QVERIFY(running);
+    QCOMPARE(running->text(), QStringLiteral("62 of ~45 min"));
+    QCOMPARE(running->palette().color(QPalette::WindowText), warn);
+    now = 9000; tick();
+    view("graph"); view("board");   // rebuilt at 9000
+    QTRY_VERIFY(worked(3) && worked(3)->text() == QStringLiteral("12 of ~45 min"));
+    shoot("u746-board");
+    // The Layers.
+    view("layers");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceLayers") && !workspace.findChildren<QFrame *>("teamLayerRow").isEmpty());
+    const auto layer = [&](int id) -> QLabel * {
+        for (auto *row : workspace.findChildren<QFrame *>("teamLayerRow"))
+            if (row->property("task").toInt() == id) return row->findChild<QLabel *>("teamLayerWorked");
+        return nullptr;
+    };
+    QTRY_VERIFY(layer(2));
+    QCOMPARE(layer(2)->text(), QStringLiteral("65 of ~40 min"));
+    QCOMPARE(layer(5)->text(), QStringLiteral("no estimate yet"));
+    QCOMPARE(layer(8)->text(), QStringLiteral("75 of ~60 min"));
+    shoot("u746-layers");
+    // The task card.
+    TeamTaskCard card;
+    card.resize(420, 640); card.show();
+    const auto team = parse(estimateTeam());
+    const auto estimate = [&] { auto *found = card.findChild<QLabel *>("teamTaskEstimate"); return found ? found->text() : QStringLiteral("<none>"); };
+    card.setTask(team, 3, live, true);
+    QCOMPARE(estimate(), QStringLiteral("12 of ~45 min"));
+    QVERIFY(card.findChild<QLabel *>("teamTaskEstimate")->toolTip().contains("the lead's plan"));
+    card.setTask(team, 4, live, true);
+    QCOMPARE(estimate(), QStringLiteral("~30 min"));
+    card.setTask(team, 5, live, true);
+    QCOMPARE(estimate(), QStringLiteral("no estimate yet"));
+    card.setTask(team, 11, live, true);
+    QCOMPARE(estimate(), QStringLiteral("<none>"));   // an older hgs: no row
+    card.setTask(team, 2, live, true);
+    QCOMPARE(estimate(), QStringLiteral("65 of ~40 min"));
+    QCOMPARE(card.findChild<QLabel *>("teamTaskEstimate")->palette().color(QPalette::WindowText), warn);
+    if (shotsWanted()) {
+        shot(&card, "u746-task-card-dark");
+        lightPalette(); card.setTask(team, 2, live, false); QTest::qWait(150);
+        lightShot(&card, "u746-task-card-light");
+        darkPalette();
+    }
+    // The spent minutes change every minute; the views never rebuild for them.
+    auto a = estimateTeam(), b = estimateTeam();
+    auto tasks = b["tasks"].toArray(); auto three = tasks[2].toObject(); three["estimate_spent_minutes"] = 13; tasks[2] = three; b["tasks"] = tasks;
+    QCOMPARE(Teams::visibleShape(a), Teams::visibleShape(b));
 }
 
 // U33: the Board scrolls sideways instead of squeezing its columns. At 700 px

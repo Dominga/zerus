@@ -334,6 +334,63 @@ inline int workedRoom(const QFontMetrics &metrics, double runningSince)
     return runningSince > 0 ? metrics.horizontalAdvance(QStringLiteral("88h 88m")) : 0;
 }
 
+// Owner 2026-10-31 (#746): a task's time against its estimate, in minutes:
+// "~45 min" before it works, "32 of ~45 min" while it works and after,
+// "no estimate yet" without one; `over` once the time spent passed the
+// estimate. An older hgs sends no estimate: the plain working time (U37).
+struct TaskTime { QString text; bool over = false; };
+inline TaskTime estimateTime(double estimate, bool known, qint64 spentSeconds, bool spent)
+{
+    const auto tr = [](const char *text) { return QCoreApplication::translate("TeamPanel", text); };
+    if (!known) return {spent ? workedText(spentSeconds) : QString(), false};
+    const qint64 minutes = (spentSeconds + 30) / 60;
+    if (estimate > 0) {
+        const qint64 wanted = qRound64(estimate);
+        if (!spent) return {tr("~%1 min").arg(wanted), false};
+        return {tr("%1 of ~%2 min").arg(minutes).arg(wanted), minutes > wanted};
+    }
+    return {spent ? tr("%1 min, no estimate yet").arg(minutes) : tr("no estimate yet"), false};
+}
+
+// The time a task has spent: the running attempt's, else its work, else
+// what hgs counted for the open attempt.
+inline TaskTime taskTime(const Task &task, double now)
+{
+    const auto &timing = task.timing;
+    qint64 seconds = 0;
+    bool spent = true;
+    if (timing.runningSince > 0) seconds = qint64(qMax(0.0, now - timing.runningSince));
+    else if (timing.worked > 0) seconds = timing.worked;
+    else if (task.estimateSpent >= 0) seconds = qint64(task.estimateSpent * 60);
+    else spent = false;
+    return estimateTime(task.estimateMinutes, task.estimateKnown(), seconds, spent);
+}
+
+// The room a running time against its estimate grows to: as many digits as
+// the larger of its minutes and the estimate, so "9 of ~45" becoming "10 of
+// ~45" moves nothing and a narrow node keeps its activity label.
+inline int estimateRoom(const QFontMetrics &metrics, double estimate, bool known, double runningSince)
+{
+    if (runningSince <= 0) return 0;
+    if (!known) return workedRoom(metrics, runningSince);
+    const qint64 minutes = qMax<qint64>(qint64(qMax(0.0, workedClock()() - runningSince) / 60) + 1, qRound64(qMax(estimate, 0.0)));
+    const QString widest = QString(QString::number(minutes).size(), QLatin1Char('8'));
+    const auto tr = [](const char *text) { return QCoreApplication::translate("TeamPanel", text); };
+    return metrics.horizontalAdvance(estimate > 0 ? tr("%1 of ~%2 min").arg(widest).arg(qRound64(estimate))
+                                                  : tr("%1 min, no estimate yet").arg(widest));
+}
+
+// The tooltip's line: the estimate and where it comes from.
+inline QString estimateTip(const Task &task)
+{
+    if (!task.estimateKnown()) return {};
+    const auto tr = [](const char *text) { return QCoreApplication::translate("TeamPanel", text); };
+    if (task.estimateMinutes <= 0) return tr("No estimate yet: it fills in after this role's first solved task");
+    const QString from = task.estimateSource == "lead" ? tr("the lead's plan")
+                         : task.estimateSource == "role" ? tr("this role's solved tasks") : tr("the team's solved tasks");
+    return tr("Estimate ~%1 min, from %2").arg(qRound64(task.estimateMinutes)).arg(from);
+}
+
 // The tooltip: the total, each attempt's work and waits, the task's waits
 // named separately, and what an older team never recorded.
 inline QString workedTip(const Task &task, double now)
@@ -769,6 +826,9 @@ public:
         // U37: the working time after the activity label; a running one
         // ticks from `runningSince` on the shared minute timer.
         QString worked; double runningSince = 0;
+        // #746: the estimate the time is measured against (known: hgs sent
+        // one, or "none"); over it, the time takes the warning color.
+        double estimate = -1; bool estimateKnown = false, timeOver = false;
         // U38: the heat tint's fill and the loss at the second line's end
         // (it takes the working time's place).
         QColor heatFill, heatColor; QString heat; };
@@ -807,9 +867,9 @@ public:
         bool changed = false;
         for (auto &n : nodes) {
             if (n.runningSince <= 0) continue;
-            const QString text = workedText(qint64(qMax(0.0, now - n.runningSince)));
-            changed = changed || text != n.worked;
-            n.worked = text;
+            const auto time = estimateTime(n.estimate, n.estimateKnown, qint64(qMax(0.0, now - n.runningSince)), true);
+            changed = changed || time.text != n.worked || time.over != n.timeOver;
+            n.worked = time.text; n.timeOver = time.over;
         }
         if (changed) update();
     }
@@ -1330,7 +1390,7 @@ protected:
         // long label is elided first.
         QFont metaFont = font(); metaFont.setPixelSize(11);
         const QFontMetrics metaMetrics(metaFont);
-        const double timeRoom = n.worked.isEmpty() ? 0.0 : qMax(metaMetrics.horizontalAdvance(n.worked), workedRoom(metaMetrics, n.runningSince)) + 6;
+        const double timeRoom = n.worked.isEmpty() ? 0.0 : qMax(metaMetrics.horizontalAdvance(n.worked), estimateRoom(metaMetrics, n.estimate, n.estimateKnown, n.runningSince)) + 6;
         // U38: the loss sits at the line's end, bold in its heat color; the
         // texts before it keep to the room left of it.
         double end = r.right() - 8;
@@ -1354,12 +1414,12 @@ protected:
         if (!n.worked.isEmpty()) {
             // U37: the working time right after it, in the same color and size;
             // a running one keeps the room it grows to.
-            QFont meta = font(); meta.setPixelSize(11); p.setFont(meta); p.setPen(m_c.text3);
+            QFont meta = font(); meta.setPixelSize(11); p.setFont(meta); p.setPen(n.timeOver ? m_c.warn : m_c.text3);
             const QFontMetrics metrics(meta);
             const double w = qMax(0.0, end - right);
             const QString shown = metrics.elidedText(n.worked, Qt::ElideRight, int(w));
             p.drawText(QRectF(right, line2, w, lineH), Qt::AlignLeft | Qt::AlignVCenter, shown);
-            right += qMin(w, double(qMax(metrics.horizontalAdvance(shown), workedRoom(metrics, n.runningSince)))) + 6;
+            right += qMin(w, double(qMax(metrics.horizontalAdvance(shown), estimateRoom(metrics, n.estimate, n.estimateKnown, n.runningSince)))) + 6;
         }
         if (!n.problemText.isEmpty()) {
             QFont meta = font(); meta.setPixelSize(11); p.setFont(meta); p.setPen(n.tone);
@@ -1524,7 +1584,7 @@ protected:
         const int statusW = qMin(int(width() - 150), QFontMetrics(meta).horizontalAdvance(n.statusText) + 2);
         p.drawText(QRectF(26, r.top() + 19, statusW, 16), Qt::AlignLeft | Qt::AlignVCenter, n.statusText);
         double left = 26 + statusW + 8;
-        const double timeRoom = n.worked.isEmpty() ? 0.0 : qMax(QFontMetrics(meta).horizontalAdvance(n.worked), workedRoom(QFontMetrics(meta), n.runningSince)) + 6;
+        const double timeRoom = n.worked.isEmpty() ? 0.0 : qMax(QFontMetrics(meta).horizontalAdvance(n.worked), estimateRoom(QFontMetrics(meta), n.estimate, n.estimateKnown, n.runningSince)) + 6;
         if (!n.activity.isEmpty()) {
             // The same small activity label as the graph, muted, before the deps;
             // the working time after it keeps its room (U37).
@@ -1536,7 +1596,7 @@ protected:
         }
         if (!n.worked.isEmpty()) {
             // U37: the working time right after it, as on the graph.
-            p.setPen(m_c.text3);
+            p.setPen(n.timeOver ? m_c.warn : m_c.text3);
             const double w = qMax(0.0, width() - 112 - left);
             p.drawText(QRectF(left, r.top() + 19, w, 16), Qt::AlignLeft | Qt::AlignVCenter,
                        QFontMetrics(meta).elidedText(n.worked, Qt::ElideRight, int(w)));

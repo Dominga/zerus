@@ -4,6 +4,7 @@
 #include "SubagentRequest.h"
 #include "TeamAttentionNotices.h"
 
+#include <QSpinBox>
 #include <QPointer>
 #include "HgsClient.h"
 #include "TeamController.h"
@@ -1893,7 +1894,10 @@ void TeamWorkspace::graphNodes(TaskView *view, const Team &team, const QList<int
         // The owner's activity label; a problem text wins over it.
         if (!unassigned && !node.problem) node.activity = activityLabel(*task, assignee ? live(*assignee) : Live{});
         // U37: the working time after it; the tooltip breaks it down.
-        node.worked = workedLabel(*task, now); node.runningSince = task->timing.runningSince;
+        // #746: against its estimate, over it in the warning color.
+        const auto time = taskTime(*task, now);
+        node.worked = time.text; node.timeOver = time.over; node.runningSince = task->timing.runningSince;
+        node.estimate = task->estimateMinutes; node.estimateKnown = task->estimateKnown();
         // Spec 1.4: the dots under the model tile while its agent really runs
         // this task.
         node.working = assignee && task->status == "in_progress" && !node.problem && assignee->state != "paused"
@@ -1907,6 +1911,7 @@ void TeamWorkspace::graphNodes(TaskView *view, const Team &team, const QList<int
         if (!mark.tooltip.isEmpty() && mark.tooltip != status.text) tip += QLatin1Char('\n') + mark.tooltip;
         if (node.late) tip += QLatin1Char('\n') + addedLateTip(*task);
         if (const QString worked = workedTip(*task, now); !worked.isEmpty()) tip += QLatin1Char('\n') + worked;
+        if (const QString estimate = estimateTip(*task); !estimate.isEmpty()) tip += QLatin1Char('\n') + estimate;
         node.tooltip = tip;
         // U38: the heat tint, its loss and top loss.
         if (heatOn) applyHeat(node, *heatOn, *task, c);
@@ -1955,7 +1960,17 @@ static QWidget *tickingBoard(QWidget *board)
         for (auto *label : board->findChildren<QLabel *>()) {
             if (label->objectName() != QLatin1String("teamBoardWorked") && label->objectName() != QLatin1String("teamLayerWorked")) continue;
             const double since = label->property("runningSince").toDouble();
-            if (since > 0) label->setText(workedText(qint64(qMax(0.0, now - since))));
+            if (since <= 0) continue;
+            // #746: against the estimate the label was built with.
+            const auto time = estimateTime(label->property("estimate").toDouble(), label->property("estimateKnown").toBool(),
+                                           qint64(qMax(0.0, now - since)), true);
+            label->setText(time.text);
+            if (time.over != label->property("over").toBool()) {
+                label->setProperty("over", time.over);
+                QPalette pal = label->palette();
+                pal.setColor(QPalette::WindowText, colorsFor(label->property("dark").toBool()).warn);
+                if (time.over) label->setPalette(pal);
+            }
         }
     });
     return board;
@@ -1963,15 +1978,25 @@ static QWidget *tickingBoard(QWidget *board)
 
 // U37: a task's working time right after its activity label, in the same color
 // and size; a running one keeps the room it grows to and ticks with its view.
-static void addWorked(QHBoxLayout *row, const Task &task, double now, const QColor &color, const char *name)
+static QLabel *workedWidget(const Task &task, double now, const Colors &c, const char *name)
 {
-    const QString worked = workedLabel(task, now);
-    if (worked.isEmpty()) return;
-    auto *w = label(worked, color, 11, false, name);
+    // #746: the time against the estimate; over it, the warning color.
+    const auto time = taskTime(task, now);
+    if (time.text.isEmpty()) return nullptr;
+    auto *w = label(time.text, time.over ? c.warn : c.text3, 11, false, name);
     w->setProperty("runningSince", task.timing.runningSince);
-    if (task.timing.runningSince > 0) w->setMinimumWidth(workedRoom(w->fontMetrics(), task.timing.runningSince));
-    w->setToolTip(workedTip(task, now));
-    row->addWidget(w);
+    w->setProperty("estimate", task.estimateMinutes); w->setProperty("estimateKnown", task.estimateKnown());
+    w->setProperty("over", time.over); w->setProperty("dark", c.dark);
+    if (task.timing.runningSince > 0) w->setMinimumWidth(estimateRoom(w->fontMetrics(), task.estimateMinutes, task.estimateKnown(), task.timing.runningSince));
+    QStringList tip{workedTip(task, now), estimateTip(task)};
+    tip.removeAll(QString());
+    w->setToolTip(tip.join(QLatin1Char('\n')));
+    return w;
+}
+
+static void addWorked(QHBoxLayout *row, const Task &task, double now, const Colors &c, const char *name)
+{
+    if (auto *w = workedWidget(task, now, c, name)) row->addWidget(w);
 }
 
 QWidget *TeamWorkspace::board(const Team &team)
@@ -2032,13 +2057,7 @@ QWidget *TeamWorkspace::board(const Team &team)
             }
             // U37: the working time right after it, in the same color and size;
             // a running one keeps the room it grows to and ticks with the board.
-            else if (const QString worked = workedLabel(task, now); !worked.isEmpty()) {
-                auto *w = label(worked, c.text3, 11, false, "teamBoardWorked");
-                w->setProperty("runningSince", task.timing.runningSince);
-                if (task.timing.runningSince > 0) w->setMinimumWidth(workedRoom(w->fontMetrics(), task.timing.runningSince));
-                w->setToolTip(workedTip(task, now));
-                r->addWidget(w);
-            }
+            else if (auto *w = workedWidget(task, now, c, "teamBoardWorked")) r->addWidget(w);
             const auto mark = phaseMark(team, task);
             auto *state = new StatusMark(s.text, toneColor(c, mark.tone != Tone::Neutral ? mark.tone : s.tone),
                                          mark.kind.isEmpty() ? kindOfTask(task, s) : mark.kind, 0, Qt::AlignLeft, nullptr, mark.tooltip);
@@ -2948,7 +2967,7 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
                     if (lost) r2->addWidget(a, 1); else r2->addWidget(a);
                 }
             }
-            if (!lost) addWorked(r2, *task, workedClock()(), c.text3, "teamBoardWorked");
+            if (!lost) addWorked(r2, *task, workedClock()(), c, "teamBoardWorked");
             r2->addStretch(1);
             if (problem) {
                 auto *why = elided(problemText(team, task->id), toneColor(c, problemsByTask.value(task->id)), 11); why->setObjectName("teamBoardProblem");
@@ -3036,7 +3055,7 @@ QWidget *TeamWorkspace::layerRows(const Team &team, const QList<int> &ids)
             // The same small activity label as the graph and the board.
             auto *a = label(activity, c.text3, 11); a->setObjectName("teamLayerActivity"); a->setProperty("liveTask", id); h->addWidget(a);
         }
-        addWorked(h, *task, workedClock()(), c.text3, "teamLayerWorked");
+        addWorked(h, *task, workedClock()(), c, "teamLayerWorked");
         const QString role = team.assigneeRole(*task, tr("You"));
         // U36: the stage chip line.
         if (auto *stages = stageLineWidget(team, *task, c)) { stages->setMaximumWidth(260); h->addWidget(stages, 2); }
@@ -3789,6 +3808,18 @@ void TeamWorkspace::addLateDialog(const Team &team, int phase)
     for (const auto &member : team.members) if (!member.lead && member.state != "removed") assignee->addItem(team.roleOf(member.id), member.id);
     if (const auto *lead = team.member(team.lead)) assignee->addItem(team.roleOf(lead->id), lead->id);
     v->addWidget(assignee);
+    // Owner 2026-10-31 (#746): the estimate in minutes; From experience (0)
+    // leaves it to the team's solved tasks.
+    v->addWidget(label(tr("Estimate"), c.muted, 11));
+    auto *estimate = new QSpinBox; estimate->setObjectName("teamAddLateEstimate");
+    estimate->setRange(0, 1440); estimate->setSuffix(tr(" min")); estimate->setSingleStep(5);
+    estimate->setSpecialValueText(tr("From experience"));
+    estimate->setToolTip(tr("Your estimate in minutes; From experience uses the median of this role's solved tasks"));
+    v->addWidget(estimate);
+    const auto withEstimate = [estimate](QJsonObject task) {
+        if (estimate->value() > 0) task.insert("estimate_minutes", estimate->value());
+        return task;
+    };
     // The warning and the confirmation appear once Zerus answered the request.
     auto *warning = label(QString(), c.warn, 12, false, "teamAddLateWarning"); warning->setWordWrap(true); warning->hide();
     warning->setStyleSheet(QStringLiteral("QLabel{color:%1;background:%2;border:1px solid %3;border-radius:8px;padding:8px;}")
@@ -3810,10 +3841,10 @@ void TeamWorkspace::addLateDialog(const Team &team, int phase)
         next->hide(); add->show(); add->setEnabled(false);
         QObject::connect(title, &QLineEdit::textChanged, dialog, [add, title] { add->setEnabled(!title->text().trimmed().isEmpty()); });
         int top = 0; for (const auto &task : team.tasks) top = qMax(top, task.id);
-        QObject::connect(add, &QPushButton::clicked, dialog, [this, dialog, title, description, assignee, error, add, id = team.id, taskId = top + 1] {
+        QObject::connect(add, &QPushButton::clicked, dialog, [this, dialog, title, description, assignee, error, add, withEstimate, id = team.id, taskId = top + 1] {
             add->setEnabled(false);
-            const QJsonObject task{{"id", taskId}, {"title", title->text().trimmed()}, {"description", description->toPlainText().trimmed()},
-                                   {"assignee", assignee->currentData().toString()}};
+            const QJsonObject task = withEstimate({{"id", taskId}, {"title", title->text().trimmed()}, {"description", description->toPlainText().trimmed()},
+                                                   {"assignee", assignee->currentData().toString()}});
             m_teams->call(QStringLiteral("extend"), {{"team", id}, {"tasks", QJsonArray{task}}},
                 [guard = QPointer<QDialog>(dialog), error, add](bool ok, const QJsonObject &, const QString &message) {
                     if (!guard) return;
@@ -3833,10 +3864,10 @@ void TeamWorkspace::addLateDialog(const Team &team, int phase)
     auto pending = std::make_shared<QString>();
     int nextId = 0; for (const auto &task : team.tasks) nextId = qMax(nextId, task.id);
     QObject::connect(next, &QPushButton::clicked, dialog, [this, dialog, title, description, assignee, warning, confirm, error, next, add, pending,
-                                                            id = team.id, phase, taskId = nextId + 1] {
+                                                            withEstimate, id = team.id, phase, taskId = nextId + 1] {
         next->setEnabled(false);
-        const QJsonObject task{{"id", taskId}, {"title", title->text().trimmed()}, {"description", description->toPlainText().trimmed()},
-                               {"assignee", assignee->currentData().toString()}};
+        const QJsonObject task = withEstimate({{"id", taskId}, {"title", title->text().trimmed()}, {"description", description->toPlainText().trimmed()},
+                                               {"assignee", assignee->currentData().toString()}});
         m_teams->call(QStringLiteral("add-to-phase"), {{"team", id}, {"phase", phase}, {"tasks", QJsonArray{task}}},
             [guard = QPointer<QDialog>(dialog), title, description, assignee, warning, confirm, error, next, add, pending](bool ok, const QJsonObject &result, const QString &message) {
                 if (!guard) return;

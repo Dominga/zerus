@@ -388,6 +388,18 @@ void TeamTaskCard::rebuild()
     for (const auto &t : m_team.tasks) for (const auto &d : t.deps) if (d.task == task->id) blocks << t.id;
     linkRow(tr("Depends on"), deps, soft);
     linkRow(tr("Blocks"), blocks, {});
+    // Owner 2026-10-31 (#746): the estimate and, once it works, the time
+    // spent against it; over it in the warning color.
+    if (task->estimateKnown()) {
+        auto *r = row(6);
+        auto *caption = label(tr("Estimate"), c.muted, 11); caption->setFixedWidth(84); r->addWidget(caption);
+        const auto time = taskTime(*task, workedClock()());
+        auto *value = label(time.text, time.over ? c.warn : c.text2, 12, false, "teamTaskEstimate");
+        value->setProperty("over", time.over);
+        value->setToolTip(estimateTip(*task));
+        r->addWidget(value, 1);
+        v->addLayout(r);
+    }
     if (assignee) {
         auto *r = row(6);
         auto *caption = label(tr("Assignee"), c.muted, 11); caption->setFixedWidth(84); r->addWidget(caption);

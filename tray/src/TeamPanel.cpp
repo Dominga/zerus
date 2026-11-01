@@ -197,6 +197,10 @@ bool TeamPanel::confirm(const QString &name, const QString &title, const QString
     if (findChild<QMessageBox *>(name)) return false;
     QMessageBox dialog(QMessageBox::Warning, title, text, QMessageBox::NoButton, this);
     dialog.setObjectName(name); dialog.setTextFormat(Qt::PlainText);
+    // The box takes the panel's sheet (light, transparent buttons in the dark
+    // theme) but not its background, so it gets the panel's own colours.
+    const auto c = colorsFor(m_dark);
+    dialog.setStyleSheet(QStringLiteral("QMessageBox{background:%1;}QMessageBox QLabel{color:%2;}").arg(c.card.name(), c.fg.name()));
     auto *ok = dialog.addButton(action, QMessageBox::DestructiveRole);
     auto *cancel = dialog.addButton(QMessageBox::Cancel);
     dialog.setDefaultButton(cancel); dialog.setEscapeButton(cancel);

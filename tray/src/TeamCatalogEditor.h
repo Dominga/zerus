@@ -78,6 +78,10 @@ private:
     enum class Tab { Roles, Templates, Routing, Rules, Pipelines };
     bool draftMode() const;
     void load();
+    // A newer saved catalog (the designer applied, another window saved)
+    // while this editor has unsaved edits: the edits move onto it. An item
+    // edited here keeps the edit; every other item is the newer one's.
+    void rebase();
     void rebuildLists();
     void rebuildEditor();
     void updateHeader();
@@ -120,6 +124,8 @@ private:
     // The catalog the editors show: the saved one with manual edits, or the
     // draft view (the saved one with every proposal over it), read only.
     Teams::Catalog m_catalog;
+    // The saved catalog m_catalog's edits started from (rebase()).
+    Teams::Catalog m_loaded;
     bool m_dirty = false, m_dark = true, m_showDraft = false, m_designerWorking = false, m_readOnly = false;
     Tab m_tab = Tab::Roles;
     QString m_applied;

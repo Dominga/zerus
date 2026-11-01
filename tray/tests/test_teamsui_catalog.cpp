@@ -129,6 +129,7 @@ private slots:
     void catalogApplySaysUndecidedChangesAreDropped();
     void planningRulesAreEditedSavedResetAndProposed();
     void catalogEditorMarksManualEdits();
+    void unsavedEditsMoveOntoANewerCatalog();
     void catalogRoleModelsAndContextAreSaved();
     void catalogPipelinesAreEditedAndSaved();
     void catalogPipelineProposalsHavePlates();
@@ -477,6 +478,50 @@ void TestTeamsUiCatalog::catalogEditorMarksManualEdits()
     QTRY_VERIFY(editor.findChild<QLabel *>("teamCatalogStatus")->text().contains("1 unsaved change"));
     QVERIFY(editor.findChild<QPushButton *>("teamCatalogSave")->isEnabled());
     shot(&editor, "d1-manual-edits");
+}
+
+// The owner, 2026-11-01: the designer applied v6 while the catalog had a hand
+// edit; Save then sent v5 and was refused ("The catalog changed"), and the
+// editor never showed v6. A newer catalog now takes the edits along: the
+// edited role keeps the edit, the rest is the newer version's, and Save
+// writes on it.
+void TestTeamsUiCatalog::unsavedEditsMoveOntoANewerCatalog()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamCatalogEditor editor(&controller);
+    editor.resize(1000, 760); editor.show();
+    auto *roles = editor.findChild<QListWidget *>("teamCatalogRoles");
+    QTRY_COMPARE(roles->count(), 3);
+    roles->setCurrentRow(1);
+    auto *name = editor.findChild<QLineEdit *>("teamRoleName");
+    name->setText("Backend API"); emit name->editingFinished();
+    QTRY_VERIFY(editor.findChild<QLabel *>("teamCatalogStatus")->text().contains("1 unsaved change"));
+    // Version 4 arrives: the tester changed and a role was added.
+    auto next = catalog();
+    auto body = next["catalog"].toObject();
+    body["version"] = 4;
+    auto list = body["roles"].toArray();
+    auto tester = list[2].toObject(); tester["model"] = "kimi-k3"; list[2] = tester;
+    list.append(QJsonObject{{"id", "ue"}, {"name", "UE World"}, {"agent", "claude"}, {"prompt", "Build levels."}});
+    body["roles"] = list; next["catalog"] = body;
+    next["draft"] = QJsonObject{{"base", 4}, {"proposals", QJsonArray{}}};
+    QVERIFY(FakeCli::replace(script() + ".catalog", QJsonDocument(next).toJson(QJsonDocument::Compact)));
+    controller.refreshCatalog();
+    QTRY_COMPARE(roles->count(), 4);
+    QVERIFY(editor.findChild<QLabel *>("teamCatalogStatus")->text().contains("1 unsaved change"));
+    auto *save = editor.findChild<QPushButton *>("teamCatalogSave");
+    QVERIFY(save->isEnabled());
+    save->click();
+    QTRY_COMPARE(calls(script(), "catalog set").size(), 1);
+    const auto input = calls(script(), "catalog set").first();
+    QCOMPARE(input["version"].toInt(), 4);
+    QStringList saved;
+    for (const auto &value : input["catalog"].toObject()["roles"].toArray()) {
+        const auto role = value.toObject();
+        saved << role["name"].toString() + "/" + role["model"].toString();
+    }
+    QCOMPARE(saved, (QStringList{"Lead/", "Backend API/", "Tester/kimi-k3", "UE World/"}));
 }
 
 // U45/U46: a role's models (model and effort) and its context before a task

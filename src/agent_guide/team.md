@@ -2,7 +2,7 @@ Work in an agent team (hgs guide team)
 
 A team has a lead and members on any agent, model or computer. The lead
 plans tasks; Zerus hands ready ones to free members and reports to the lead.
-Requests need a lowercase canonical UUID (uuidgen); reuse it to retry.
+Requests use canonical lowercase UUIDs; reuse one to retry.
 
 Lead, from your own session:
   {"request_id":"UUID","name":"Checkout","goal":"...","folder":"DIR"} |
@@ -17,7 +17,8 @@ Lead, from your own session:
   {"team":"ID"} | hgs team inbox --json    reports, questions, your tasks
   Reports arrive as [Zerus team messages; decide each:
     {"request_id":"UUID","team":"ID","task":N} | hgs team accept --json
-    add "reason" to reject (it returns); "hold":true keeps it back:
+    reject needs "reason"; rework keeps its member, "fresh":true tries a peer.
+    "hold":true keeps it back:
     {"request_id":"UUID","team":"ID","task":N} | hgs team release --json
     gives it out; hgs team hold --json holds a pending task.
   reassign, retry, cancel take the same fields; a free peer of the same

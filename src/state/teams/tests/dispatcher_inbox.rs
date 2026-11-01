@@ -10,6 +10,8 @@ fn keep_assignees_keeps_a_task_with_its_planned_member() {
     // dev works on #1; #2, also dev's, would go to the free dev2.
     team.task_mut(1).unwrap().attempts.push(Attempt { n: 1, member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
     team.task_mut(1).unwrap().status = TaskStatus::InProgress;
+    team.task_mut(1).unwrap().output = vec!["src/one.rs".into()];
+    team.task_mut(2).unwrap().output = vec!["src/two.rs".into()];
     let moved = |team: &Team| steps(team, &seen, 1.0).iter().any(|step| matches!(step, Step::Rebalance { .. }));
     // Off (the default), the free same-role member takes it, as today.
     assert!(moved(&team));

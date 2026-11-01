@@ -1684,6 +1684,29 @@ that attempt is not counted as a failed member. Once the preset's rounds run
 out, the lead's decision is the last word: a rejection reaches the next
 hand-out with its reason, not the returned stage it followed.
 
+A non-final `hgs team reject` defaults to rework: the task keeps its assignee
+and the next attempt goes to that member as soon as it can take it. The member
+is reserved while the returned task is open, including a hold or an undecided
+report; no other task or stage is handed or rebalanced to it. A member with an
+open approval, a usage limit or a stopped session keeps the rework without a
+time limit. The lead's inbox shows `#N waits for its member, N min`; an explicit
+`hgs team reassign` moves it. With `"fresh":true`, reject uses the previous
+retry policy, preferring a free member of the same role that did not fail the
+task, subject to existing assignee pins. `"hold":true` still holds a returned
+task until release, and `"final":true` ends it.
+
+Tasks may declare `"output":["src/api.rs","src/protocol/"]`: repository-relative
+files or directories, with a directory covering all paths beneath it. Plan,
+extend, add-to-phase and edit-draft `tasks_update` normalize separators, remove
+redundant `.` components and duplicate paths, and retain this field in task
+status. A task has at most 128 paths, each at most 1024 characters and together
+at most 32 KiB. Absolute paths, parent (`..`) components, colons and control
+characters are refused; `.` covers the repository. Existing tasks without
+output remain valid. Rebalance keeps a queued task with its original member
+when its output overlaps that member's task in progress (equal paths or
+containment by path components). It also keeps a task without output whenever
+that member has work in progress. `src/api` does not overlap `src/apis`.
+
 A stage member may ask the lead with `hgs team ask` (its question belongs to the
 stage run and the lead answers it with `hgs team reply`), and the stage hand-off
 names that route, `hgs team current` and the rule that a reply in its turn is

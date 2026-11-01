@@ -295,12 +295,36 @@ fn clean_lane(lane: &mut super::model::Lane, task: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Output is lexical repository scope, never a filesystem read. Keep it
+/// bounded and portable, including when this computer edits another OS's plan.
+fn clean_output(paths: &mut Vec<String>) -> anyhow::Result<()> {
+    ensure!(paths.len() <= 128, "A task output has at most 128 paths");
+    ensure!(paths.iter().map(String::len).sum::<usize>() <= 32_768, "A task output is too long");
+    let mut seen = BTreeSet::new();
+    for path in paths.iter_mut() {
+        ensure!(path.chars().count() <= 1024, "An output path is too long");
+        ensure!(!path.chars().any(char::is_control), "An output path contains control characters");
+        let normalized = path.trim().replace('\\', "/");
+        ensure!(!normalized.is_empty() && !normalized.starts_with('/') && !normalized.contains(':'),
+            "An output path must be repository-relative");
+        let mut parts = Vec::new();
+        for part in normalized.split('/') {
+            ensure!(part != "..", "An output path cannot contain parent components");
+            if !part.is_empty() && part != "." { parts.push(part); }
+        }
+        *path = if parts.is_empty() { ".".into() } else { parts.join("/") };
+    }
+    paths.retain(|path| seen.insert(path.clone()));
+    Ok(())
+}
+
 fn parse_task(value: &Value) -> anyhow::Result<Task> {
     let mut task: Task = serde_json::from_value(value.clone()).context("Invalid task")?;
     ensure!(task.id > 0, "Task numbers start at 1");
     task.title = clean_text(&task.title, 200, "A task title")?;
     ensure!(!task.title.trim().is_empty(), "Task #{} needs a title", task.id);
     task.description = clean_text(&task.description, 20_000, "A task description")?;
+    clean_output(&mut task.output)?;
     // U58: a task for a role keeps the role's text clean too.
     task.role = clean_text(&task.role, 60, "A task role")?;
     // C5: a check carries its exact command and expected exit code; a plan
@@ -348,6 +372,7 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
     // sets the computed phase afterwards.
     task.phase = 1;
     task.attempts.clear();
+    task.rework_since = None;
     task.hold = None;
     task.decided_by = None;
     // U36: the plan names a preset; Zerus snapshots it when the task is
@@ -2422,6 +2447,16 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
             }
             fields.push("criteria");
         }
+        if let Some(value) = value.get("output") {
+            let old = task.output.clone();
+            let mut output: Vec<String> = serde_json::from_value(value.clone()).context("output is a list of repository-relative paths")?;
+            clean_output(&mut output)?;
+            task.output = output;
+            if old != task.output {
+                changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"output","from":old,"to":task.output}));
+            }
+            fields.push("output");
+        }
         if let Some(value) = value.get("deps") {
             let old: Vec<String> = task.deps.iter().map(|dep| format!("#{}", dep.task)).collect();
             task.deps = serde_json::from_value(value.clone()).context("Invalid dependencies")?;
@@ -4442,6 +4477,7 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     ensure!(accept || !reason.is_empty(), "A rejection needs a reason");
     // A5: a rejection may keep the task for a member that is not ready for it.
     let hold = !accept && input["hold"].as_bool() == Some(true);
+    let fresh = !accept && input["fresh"].as_bool() == Some(true);
     ensure!(!(hold && input["final"].as_bool() == Some(true)), "A final rejection cannot be held");
     let label = actor.label(team);
     let worked_ahead = team.task(id).is_some_and(|task| task.attempts.iter().rev().find(|a| a.state == AttemptState::Reported).is_some_and(|a| a.worked_ahead));
@@ -4490,6 +4526,7 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     let filed_before = task.status == TaskStatus::Accepted && task.decided_by == Some(Decider::Lead);
     mark_decided(task);
     if accept {
+        task.rework_since = None;
         revoke(task, "accepted without this attempt");
         task.status = TaskStatus::Accepted;
     } else {
@@ -4507,6 +4544,7 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
         } else {
             TaskStatus::Pending
         };
+        task.rework_since = if !fresh && task.status == TaskStatus::Pending { Some(now()) } else { None };
         if hold {
             task.hold = Some(Hold { by: label.clone(), at: now(), reason: reason.clone() });
         }
@@ -5270,6 +5308,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
                     .tasks
                     .iter()
                     .filter(|task| task.assignee == id && matches!(task.status, TaskStatus::Draft | TaskStatus::Pending | TaskStatus::Assigned))
+                    .filter(|task| !task.rework())
                     .map(|task| task.id)
                     .collect();
                 for (index, task_id) in movable.iter().enumerate() {

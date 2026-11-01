@@ -2133,6 +2133,12 @@ FeedLine feedLine(const Team &team, const QJsonObject &event)
         const QString to = d.value("to").toString();
         t = tr("Report to %1 · %2%3").arg(to.isEmpty() ? tr("Lead") : to, ref, attempt);
     }
+    else if (k == "interim_report") {
+        const QString text = d.value("text").toString();
+        t = text.isEmpty() ? tr("Interim report · %1%2").arg(ref, attempt)
+                           : tr("Interim report · %1%2: “%3”").arg(ref, attempt, text);
+        line.tone = Tone::Active;
+    }
     else if (k == "report_replaced") t = tr("Replaced the captured reply · %1%2").arg(ref, attempt);
     else if (k == "question_asked") {
         const QString text = d.value("text").toString();

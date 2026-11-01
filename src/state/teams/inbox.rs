@@ -17,8 +17,8 @@ const SUMMARY_CHARS: usize = 300;
 /// message never names it twice.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Item {
-    /// `report`, `question`, `permission`, `lead_task`, `stalled`, `budget`
-    /// or `task_waits` (spec 0: U45, U46, U48).
+    /// `report`, `question`, `permission`, `lead_task`, `stalled`, `budget`,
+    /// `interim_report` or `task_waits` (spec 0: U45, U46, U48).
     pub kind: &'static str,
     pub key: String,
     pub task: Option<u32>,
@@ -718,6 +718,24 @@ fn all_items(team: &Team) -> Vec<Item> {
                         detail: String::new(),
                     });
                 }
+            }
+        }
+        // Owner (2026-11-01): an interim report (progress or a question) keeps
+        // its attempt open; the lead reads it here, the owner only in the feed.
+        if task.status == TaskStatus::InProgress {
+            for attempt in &task.attempts {
+                let Some(interim) = &attempt.interim else { continue };
+                items.push(Item {
+                    subagents: Value::Null,
+                    kind: "interim_report",
+                    key: format!("interim:{}:{}", attempt.id, interim.at),
+                    task: Some(task.id),
+                    member: team.name_of(&attempt.member),
+                    since: interim.at,
+                    summary: summary(&format!("Interim: {}", interim.text)),
+                    command: format!("{} | hgs team status --json", json!({"request_id":PLACEHOLDER,"team":team.id})),
+                    detail: interim.text.clone(),
+                });
             }
         }
         // The lead's own task: handed out without a message, reported and

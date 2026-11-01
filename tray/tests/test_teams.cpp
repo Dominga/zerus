@@ -1784,6 +1784,9 @@ void TestTeams::subLeadsFormTheMemberTree()
     QCOMPARE(line("handed_out", {{"by", "Lead"}, {"task", 2}, {"to", "Tester"}}).by, QStringLiteral("Lead"));
     QVERIFY(line("reported", {{"by", "Tester"}, {"to", "QA lead"}, {"task", 2}}).text.startsWith(QStringLiteral("Report to QA lead")));
     QVERIFY(line("reported", {{"by", "Tester"}, {"task", 2}}).text.startsWith(QStringLiteral("Report to Lead")));
+    const auto interim = line("interim_report", {{"by", "Tester"}, {"task", 2}, {"attempt", 1}, {"text", "Half the API is in"}});
+    QCOMPARE(interim.by, QStringLiteral("Tester"));
+    QVERIFY2(interim.text.contains(QStringLiteral("Interim report")) && interim.text.contains(QStringLiteral("Half the API is in")), qPrintable(interim.text));
     QCOMPARE(line("accepted", {{"by", "QA lead"}, {"task", 2}}).by, QStringLiteral("QA lead"));
     // Its status: reviewing a report's work, else coordinating its reports.
     Team running = team;

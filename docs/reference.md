@@ -5879,8 +5879,10 @@ folder are decided at once as before.
   before; without one the merge records it as "not run here: SUITE runs on
   PLATFORMS; no runner of that class" and decides on the suites that ran. The
   merge view, the feed and the merge log name both the suites that ran and the
-  ones not run here. On Windows each queued command reaches `cmd /D /S /C` as
-  one unescaped string, so a provider command that quotes its folder
+  ones not run here; such a merge does not advance the queue's tested range, so
+  the phase build checks that range and names the suites the queue could not
+  run. On Windows each queued command reaches `cmd /D /S /C` as one unescaped
+  string, so a provider command that quotes its folder
   (`cd /d "tests" && ...`) runs as written; Linux and macOS keep `sh -c`.
 - Every kept merge moves `merge_tested` and the bounded `merge_log`; a phase
   build then checks only `hgs test affected MERGE_TESTED..HEAD`.

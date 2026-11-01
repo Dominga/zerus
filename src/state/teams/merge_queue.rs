@@ -268,11 +268,17 @@ pub(crate) fn step(
                 .map(|record| record.excerpt.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"))
                 .unwrap_or_default();
             let rolled = roll_back(&team.folder, &entry);
+            let mut not_run = entry.not_run.clone();
+            for message in pending_not_run(team) {
+                push_not_run(&mut not_run, &message);
+            }
+            let note = not_run_note(&not_run);
+            let note = if note.is_empty() { String::new() } else { format!("\n{note}") };
             return_to_author(
                 team,
                 id,
                 &format!(
-                    "The merge queue merged this into the lead branch, and its affected tests failed on the merged commit: {}. {rolled}\n{excerpt}",
+                    "The merge queue merged this into the lead branch, and its affected tests failed on the merged commit: {}. {rolled}\n{excerpt}{note}",
                     failed.join("; ")
                 ),
                 events,
@@ -350,16 +356,39 @@ pub(crate) fn step(
 }
 
 /// The merge stays: the range is tested, and the task is accepted as the
-/// accept that queued it asked.
+/// accept that queued it asked. A suite not run here keeps the tested range at
+/// the last fully tested merge and is named in the accept reason.
 fn keep(team: &mut Team, id: u32, entry: &MergeEntry, suites: Vec<String>, now: f64, events: &mut Vec<Event>) -> anyhow::Result<()> {
+    // Pending not-run suites from earlier merges stay pending unless this
+    // merge ran them; the current merge's own not-run suites join them.
+    let mut remaining = Vec::new();
+    for message in &entry.not_run {
+        push_not_run(&mut remaining, message);
+    }
+    for message in pending_not_run(team) {
+        if suites.iter().any(|ran| ran.as_str() == not_run_suite(&message)) {
+            continue;
+        }
+        push_not_run(&mut remaining, &message);
+    }
     if !entry.merged.is_empty() {
-        team.merge_tested = entry.merged.clone();
-        team.merge_log.push(MergeLog { task: id, prev: entry.prev.clone(), merged: entry.merged.clone(), at: now, suites, not_run: entry.not_run.clone() });
+        if remaining.is_empty() {
+            team.merge_tested = entry.merged.clone();
+        }
+        team.merge_log.push(MergeLog { task: id, prev: entry.prev.clone(), merged: entry.merged.clone(), at: now, suites, not_run: remaining.clone() });
         let extra = team.merge_log.len().saturating_sub(50);
         team.merge_log.drain(0..extra);
     }
+    let mut reason = entry.reason.clone();
+    let note = not_run_note(&remaining);
+    if !note.is_empty() {
+        if !reason.is_empty() {
+            reason.push(' ');
+        }
+        reason.push_str(&note);
+    }
     let actor = if entry.by_owner { super::ops::Actor::Human } else { super::ops::Actor::Member(team.lead.clone()) };
-    let input = json!({"task":id,"reason":entry.reason,"merged":true});
+    let input = json!({"task":id,"reason":reason,"merged":true});
     super::ops::apply(team, "accept", &input, &actor, &Default::default(), events)?;
     Ok(())
 }
@@ -394,10 +423,74 @@ pub(crate) fn return_to_author(team: &mut Team, id: u32, reason: &str, events: &
     events.push(Event::new("merge_returned", json!({"task":id,"reason":task.decision_reason})));
 }
 
-/// What a phase integration still has to check: the lead-branch range after
-/// the queue's last tested merge (None when the queue tested nothing).
-pub(crate) fn untested_since(team: &Team) -> Option<String> {
-    (!team.merge_tested.is_empty()).then(|| team.merge_tested.clone())
+/// A not-run message names its suite: "not run here: SUITE runs on ...".
+fn not_run_suite(message: &str) -> &str {
+    message.strip_prefix("not run here: ").and_then(|rest| rest.split(" runs on ").next()).unwrap_or_default()
+}
+
+fn push_not_run(list: &mut Vec<String>, message: &str) {
+    let suite = not_run_suite(message);
+    if !list.iter().any(|existing| not_run_suite(existing) == suite) {
+        list.push(message.to_owned());
+    }
+}
+
+/// A sentence naming the not-run suites for the accept reason and the failure.
+fn not_run_note(messages: &[String]) -> String {
+    if messages.is_empty() {
+        return String::new();
+    }
+    let listed: Vec<&str> = messages.iter().map(|message| message.strip_prefix("not run here: ").unwrap_or(message.as_str())).collect();
+    format!("Not run here: {}.", listed.join("; "))
+}
+
+/// The not-run suites since the last fully tested merge: every merge log entry
+/// after the last one whose suites all ran.
+fn pending_not_run(team: &Team) -> Vec<String> {
+    let last = team.merge_log.iter().rposition(|entry| entry.not_run.is_empty());
+    let entries = match last {
+        Some(at) => &team.merge_log[at + 1..],
+        None => team.merge_log.as_slice(),
+    };
+    let mut found = Vec::new();
+    for entry in entries {
+        for message in &entry.not_run {
+            push_not_run(&mut found, message);
+        }
+    }
+    found
+}
+
+/// What a phase integration still has to check: the last fully tested merge and
+/// the suites not run since it (None when everything selected was tested).
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct Untested {
+    pub since: String,
+    pub not_run: Vec<String>,
+}
+
+impl Untested {
+    /// The suites named by the not-run messages.
+    pub(crate) fn suites(&self) -> Vec<String> {
+        let mut found = Vec::new();
+        for message in &self.not_run {
+            let suite = not_run_suite(message);
+            if !suite.is_empty() && !found.iter().any(|existing: &String| existing.as_str() == suite) {
+                found.push(suite.to_owned());
+            }
+        }
+        found
+    }
+}
+
+pub(crate) fn untested_since(team: &Team) -> Option<Untested> {
+    let last = team.merge_log.iter().rposition(|entry| entry.not_run.is_empty());
+    let since = last.map(|at| team.merge_log[at].merged.clone()).unwrap_or_else(|| team.merge_tested.clone());
+    let not_run = pending_not_run(team);
+    if since.is_empty() && not_run.is_empty() {
+        return None;
+    }
+    Some(Untested { since, not_run })
 }
 
 /// A queued or tested entry, for status.

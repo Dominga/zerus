@@ -1589,9 +1589,12 @@ fn merge_queue_tick(store: &mut Store, team_id: &str, now: f64) -> anyhow::Resul
             }
         }
     }
+    // A configuration that cannot be read leaves the runners unknown: skip the
+    // tick rather than record a suite with a runner as not run here.
+    let Ok(config) = crate::config::Config::load() else { return Ok(()) };
+    let runners = super::test_runners::configured(&config);
     change(store, team_id, |team, events| {
         let host = super::test_runners::host_classes();
-        let runners = crate::config::Config::load().map(|config| super::test_runners::configured(&config)).unwrap_or_default();
         super::merge_queue::step(team, &database, now, events, &host, &runners).map(|_| ())
     })
 }

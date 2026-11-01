@@ -21,14 +21,25 @@ fn write(dir: &Path, file: &str, text: &str) {
     std::fs::write(dir.join(file), text).unwrap();
 }
 
-/// Two more providers: a POSIX-only suite (like the real python provider) and
-/// one for this test's "here" class. Both use the same check as `unit`.
-fn platform_providers() -> String {
+/// A command provider that fails when `fail.txt` exists, in `platforms`.
+fn provider(name: &str, platforms: &[&str]) -> String {
     let check = if cfg!(windows) { "if exist fail.txt (exit /b 1) else (exit /b 0)" } else { "test ! -f fail.txt" };
-    format!(
-        "\n[[provider]]\nname = \"python\"\nkind = \"command\"\ncommand = '{check}'\nsources = [\"**\"]\naffected = \"all\"\nplatforms = [\"linux\", \"macos\"]\n\
-         \n[[provider]]\nname = \"here\"\nkind = \"command\"\ncommand = '{check}'\nsources = [\"**\"]\naffected = \"all\"\nplatforms = [\"windows\"]\n"
-    )
+    let platforms = if platforms.is_empty() {
+        String::new()
+    } else {
+        format!("platforms = [{}]\n", platforms.iter().map(|platform| format!("\"{platform}\"")).collect::<Vec<_>>().join(", "))
+    };
+    format!("[[provider]]\nname = \"{name}\"\nkind = \"command\"\ncommand = '{check}'\nsources = [\"**\"]\naffected = \"all\"\n{platforms}")
+}
+
+fn unit_provider() -> String {
+    provider("unit", &[])
+}
+
+/// A POSIX-only suite (like the real python provider) and one for this test's
+/// "here" class, beside the unit suite.
+fn platform_providers() -> String {
+    format!("{}{}", provider("python", &["linux", "macos"]), provider("here", &["windows"]))
 }
 
 /// A lead checkout with the queue on and a suite that fails when `fail.txt`
@@ -40,19 +51,22 @@ struct Repo {
 }
 
 fn repo() -> Repo {
-    repo_with("")
+    repo_providers(&unit_provider())
 }
 
 /// `repo` with extra `[[provider]]` tables in the project file.
 fn repo_with(extra: &str) -> Repo {
+    repo_providers(&format!("{}{}", unit_provider(), extra))
+}
+
+fn repo_providers(providers: &str) -> Repo {
     let dir = tempfile::tempdir().unwrap();
     let lead = dir.path().join("lead");
     let member = dir.path().join("member");
     std::fs::create_dir_all(lead.join(".zerus")).unwrap();
-    let check = if cfg!(windows) { "if exist fail.txt (exit /b 1) else (exit /b 0)" } else { "test ! -f fail.txt" };
     std::fs::write(
         lead.join(".zerus/tests.toml"),
-        format!("version = 1\n[merge_queue]\nenabled = true\n[[provider]]\nname = \"unit\"\nkind = \"command\"\ncommand = '{check}'\nsources = [\"**\"]\naffected = \"all\"\n{extra}"),
+        format!("version = 1\n[merge_queue]\nenabled = true\n{providers}"),
     )
     .unwrap();
     run_git(&lead, &["init", "-q"]);
@@ -159,6 +173,7 @@ fn a_suite_of_another_platform_with_no_runner_is_recorded_not_run() {
     run_git(&repo.member, &["add", "."]);
     run_git(&repo.member, &["commit", "-q", "-m", "work"]);
     let mut team = team(&repo);
+    team.merge_tested = "abc1234".into();
     accept(&mut team);
     let database = database(&repo);
     let mut events = Vec::new();
@@ -184,6 +199,43 @@ fn a_suite_of_another_platform_with_no_runner_is_recorded_not_run() {
     ran.sort();
     assert_eq!(ran, vec!["here", "unit"]);
     assert_eq!(team.merge_log[0].not_run, entry.not_run);
+    // Python did not run, so the tested range stays where it was and the
+    // accept reason names the suite.
+    assert_eq!(team.merge_tested, "abc1234");
+    assert!(task.decision_reason.contains("Not run here:") && task.decision_reason.contains("python"), "{}", task.decision_reason);
+    let untested = untested_since(&team).expect("the not-run suite is untested");
+    assert_eq!(untested.since, "abc1234");
+    assert_eq!(untested.suites(), vec!["python"]);
+}
+
+#[test]
+fn a_merge_of_only_not_run_suites_does_not_advance_the_tested_range() {
+    let repo = repo_providers(&provider("python", &["linux", "macos"]));
+    write(&repo.member, "b.txt", "work\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "work"]);
+    let mut team = team(&repo);
+    team.merge_tested = "abc1234".into();
+    accept(&mut team);
+    let database = database(&repo);
+    let mut events = Vec::new();
+    let host = vec!["windows".to_owned()];
+    assert!(step(&mut team, &database, 100.0, &mut events, &host, &[]).unwrap());
+    let task = team.task(1).unwrap();
+    assert_eq!(task.status, TaskStatus::Accepted);
+    assert_eq!(team.merge_tested, "abc1234", "zero suites run is not a tested range");
+    assert!(team.merge_log[0].suites.is_empty());
+    assert!(team.merge_log[0].not_run.iter().any(|message| message.contains("python")), "{:?}", team.merge_log[0].not_run);
+    assert!(task.decision_reason.contains("Not run here:") && task.decision_reason.contains("python"), "{}", task.decision_reason);
+    let untested = untested_since(&team).expect("python was not run");
+    assert_eq!(untested.since, "abc1234");
+    assert_eq!(untested.suites(), vec!["python"]);
+    // The phase build checks the range and names the suite the queue could not run.
+    team.plan_mode = PlanMode::Free;
+    let added = ops::apply(&mut team, "integrate-build", &json!({}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    let build = team.task(added["task"].as_u64().unwrap() as u32).unwrap();
+    assert!(build.description.contains("hgs test affected abc1234..HEAD"), "{}", build.description);
+    assert!(build.description.contains("did not run python"), "{}", build.description);
 }
 
 #[test]
@@ -271,6 +323,28 @@ fn a_fast_forward_merge_with_failing_tests_is_rolled_back_and_returned() {
     assert!(task.decision_reason.contains("affected tests failed on the merged commit: unit failed") && task.decision_reason.contains("rolled back"), "{}", task.decision_reason);
     assert_eq!(task.attempts[0].state, AttemptState::Rejected);
     assert!(events.iter().any(|event| event.kind == "merge_returned"));
+    assert!(team.merge_tested.is_empty());
+}
+
+#[test]
+fn a_failed_merge_names_the_suites_not_run_here() {
+    let repo = repo_with(&platform_providers());
+    write(&repo.member, "fail.txt", "breaks the suite\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "breaks"]);
+    let mut team = team(&repo);
+    accept(&mut team);
+    let database = database(&repo);
+    let mut events = Vec::new();
+    let host = vec!["windows".to_owned()];
+    assert!(step(&mut team, &database, 100.0, &mut events, &host, &[]).unwrap());
+    let queued = database.queued("t1").unwrap();
+    run_due(&database, &repo.lead, &queued, 101.0, &Default::default()).unwrap();
+    step(&mut team, &database, 102.0, &mut events, &host, &[]).unwrap();
+    let task = team.task(1).unwrap();
+    assert_eq!(task.status, TaskStatus::Pending);
+    assert!(task.decision_reason.contains("affected tests failed"), "{}", task.decision_reason);
+    assert!(task.decision_reason.contains("Not run here:") && task.decision_reason.contains("python"), "{}", task.decision_reason);
     assert!(team.merge_tested.is_empty());
 }
 

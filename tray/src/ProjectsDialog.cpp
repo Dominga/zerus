@@ -469,7 +469,7 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     // Iron rules: the project's, as the session inspector edits them, with
     // their count and what they are for.
     m_rulesBlock=new CollapsibleBlock(QStringLiteral("projects/ironRules"),tr("Iron rules"));m_rulesBlock->setObjectName("projectRulesBlock");
-    auto *rulesHint=new QLabel(tr("Sent at the start of every message to this project’s agents."));rulesHint->setObjectName("projectRulesHint");
+    auto *rulesHint=new QLabel(tr("Sent at session start and with every team task."));rulesHint->setObjectName("projectRulesHint");
     // Right after the count, as the prototype has it.
     if(auto *head=qobject_cast<QBoxLayout *>(m_rulesBlock->trailing()->parent()))head->insertWidget(1,rulesHint);
     else m_rulesBlock->trailing()->addWidget(rulesHint);

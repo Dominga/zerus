@@ -223,6 +223,10 @@ if a[:1]==['worktrees']:
  print(json.dumps({'state':'ok','path':p,'selected_root':p,'common_dir':p+'/.git','sampled_at':time.time(),
   'worktrees':[{'path':p,'kind':'main','branch':'main','available':True},
                {'path':p+'/.worktrees/backend','kind':'linked','branch':'team/checkout-v2/backend','available':True}]}))
+elif a==['--help']:print('iron-rules-v1')
+elif a[:2]==['rules','get']:
+ print(json.dumps({'rules':['Use pnpm for web and cargo for services.',
+                            'Never log card numbers or provider tokens.'], 'revision':1, 'migrated':True}))
 elif a[:2]==['project','ls']:print('[]')
 else:print('{}')
 )PY"));
@@ -328,8 +332,9 @@ else:print('{}')
     QCOMPARE(sessions->item(7,3)->data(Qt::UserRole+1).toString(),QString("paused"));
     // Iron rules: their count and what they are for.
     auto *rules=dialog.findChild<QWidget *>("projectRulesBlock");
-    QCOMPARE(rules->findChild<QLabel *>("collapsibleNote")->text(),QString("2"));
-    QVERIFY(dialog.findChild<QLabel *>("projectRulesHint")->text().startsWith("Sent at the start of every message"));
+    // The authoritative Rust rules arrive asynchronously.
+    QTRY_COMPARE(rules->findChild<QLabel *>("collapsibleNote")->text(),QString("2"));
+    QVERIFY(dialog.findChild<QLabel *>("projectRulesHint")->text().startsWith("Sent at session start and with every team task"));
     // The first folder selected, as the prototype shows the page.
     selectFolder(table,"D:\\work\\orbit");
     PageShots::shot(dialog,true,"pm-projects-dark");
@@ -1170,8 +1175,10 @@ void TestProjectsDialog::legacyImportReportsAliasesItCannotAdd()
     // One alias this Windows computer takes, one it does not (a relative path).
     const auto hgs = directory.filePath("hgs");
     QVERIFY(FakeCli::install(hgs, R"PY(#!/usr/bin/env python3
-import json
-open(__file__ + ".calls", "a").write("call\n")
+import json,sys
+# Count catalog imports, excluding independent iron-rules capability probes.
+if sys.argv[1:3] == ["project", "ls"]:
+ open(__file__ + ".calls", "a").write("call\n")
 print(json.dumps([{"name": "DCB", "dir": "D:\\Work\\DCB", "src": "local", "exists": True},
                   {"name": "Loose", "dir": "work\\loose", "src": "local", "exists": False}]))
 )PY"));

@@ -1,6 +1,6 @@
 use super::super::ops::{self, Actor};
-use super::*;
 use super::support::*;
+use super::*;
 
 #[test]
 fn a_task_block_without_a_template_keeps_the_standard_task_text() {
@@ -200,4 +200,92 @@ fn a_member_without_a_report_is_marked_after_its_turn_ends() {
     team.task_mut(1).unwrap().attempts[0].report_ready_at = Some(100.0);
     assert!(!steps(&team, &[idle.clone()], 210.0).contains(&Step::NoReport { task: 1 }));
     assert!(steps(&team, &[idle], 221.0).contains(&Step::NoReport { task: 1 }));
+}
+#[test]
+fn real_task_delivery_carries_four_rule_levels_locally_and_remotely() {
+    for remote in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            crate::state::iron_rules::run("set", &json!({"by":"human","scope":"project","project":"p1","expected_revision":0,
+                "request_id":"11111111-1111-4111-8111-111111111111","rules":["Project requirement"]})).unwrap();
+            let mut t = team();
+            t.project_id = "p1".into();
+            t.settings.iron_rules = vec!["Team addition".into()];
+            let m = t.members.iter_mut().find(|m| m.id == "dev").unwrap();
+            m.iron_rules = vec!["Member addition".into()];
+            let session = m.session.as_mut().unwrap();
+            session.conversation_id = "c1".into();
+            if remote {
+                session.host = "peer".into();
+            } else {
+                crate::state::storage::atomic(&crate::state::storage::record_path(&session.name), &json!({"version":1,"agent":"codex",
+                "name":session.name,"run_id":"r1","conversation_id":"c1","iron_rules":["Session addition"]}).to_string()).unwrap();
+            }
+            let mut store = Store::open(true).unwrap();
+            stored(&mut store, &t);
+            let captured = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+            let sent = captured.clone();
+            set_fake_hgs(Some(Box::new(move |_, args, input| {
+                if args == ["--help"] {
+                    return Ok(fake_output(0, "iron-rules-v1", ""));
+                }
+                if args.first() == Some(&"rules") {
+                    return Ok(fake_output(0, &json!({"scope":"session","name":"codex/x/dev","run_id":"r1","conversation_id":"c1",
+                    "rules":["Session addition"],"effective_rules":"Session addition","start_delivery_supported":true}).to_string(), ""));
+                }
+                assert_eq!(args.first(), Some(&"send"));
+                *sent.borrow_mut() = input.unwrap()["text"].as_str().unwrap().to_owned();
+                Ok(fake_output(0, r#"{"status":"submitted"}"#, ""))
+            })));
+            if remote {
+                let value = crate::state::iron_rules::run("get", &json!({"scope":"session","host":"peer","name":"codex/x/dev","expected_run_id":"r1","expected_conversation_id":"c1"})).unwrap();
+                assert_eq!(value["start_delivery_supported"], false);
+                assert!(value["effective_rules"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Member addition"));
+                assert!(store
+                    .rules_session("another-peer", "codex/x/dev", "r1", "c1", "")
+                    .unwrap()
+                    .is_none());
+            }
+            let result = run_step(
+                &mut store,
+                &t,
+                &Step::HandOut {
+                    task: 1,
+                    member: "dev".into(),
+                },
+                "",
+            );
+            set_fake_hgs(None);
+            result.unwrap();
+            let text = captured.borrow();
+            let mut previous = 0;
+            for rule in [
+                "Project requirement",
+                "Team addition",
+                "Member addition",
+                "Session addition",
+            ] {
+                assert_eq!(text.matches(rule).count(), 1, "{text}");
+                let at = text.find(rule).unwrap();
+                assert!(at >= previous);
+                previous = at;
+            }
+            assert_eq!(
+                store
+                    .load(&t.id)
+                    .unwrap()
+                    .unwrap()
+                    .task(1)
+                    .unwrap()
+                    .attempts
+                    .last()
+                    .unwrap()
+                    .state,
+                AttemptState::Delivered
+            );
+        });
+    }
 }

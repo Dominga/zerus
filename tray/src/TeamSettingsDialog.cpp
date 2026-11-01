@@ -1,4 +1,5 @@
 #include "TeamSettingsDialog.h"
+#include "IronRulesEditor.h"
 #include "TeamController.h"
 #include "TeamWidgets.h"
 #include <QApplication>
@@ -48,6 +49,18 @@ TeamSettingsDialog::TeamSettingsDialog(TeamController *teams, const Teams::Team 
     scroll->viewport()->setAutoFillBackground(false);
     auto *body = new QWidget; body->setObjectName("teamSettingsBody"); body->setAutoFillBackground(false);
     auto *v = new QVBoxLayout(body); v->setContentsMargins(0, 0, 6, 0); v->setSpacing(8);
+    v->addWidget(label(tr("Team iron rules"), c.text2, 12, true));
+    v->addWidget(note(tr("Mandatory additions to project rules. Only you, or the lead quoting your verified word, may change them."), c.muted));
+    m_rules = IronRules::editor(IronRules::list(m_settings.value("iron_rules")), body);
+    m_rules->setObjectName("teamIronRules"); v->addWidget(m_rules);
+    connect(m_rules, &QPlainTextEdit::textChanged, this, [this] { if (m_save) update(); });
+    for (const auto &member : team.members) {
+        if (member.state == "removed") continue;
+        v->addWidget(label(tr("%1: member iron rules").arg(team.roleOf(member.id)), c.text2, 12, true));
+        auto *field = IronRules::editor(member.ironRules, body); field->setProperty("member", member.id); v->addWidget(field);
+        m_ruleMembers.append({member.id, member.ironRules, field});
+        connect(field, &QPlainTextEdit::textChanged, this, [this] { if (m_save) update(); });
+    }
     // U48: each hand-out starts the task's own branch in the member's folder.
     v->addWidget(label(tr("Branches"), c.text2, 12, true));
     const QString branchTemplate = m_settings.value("branch_per_task").toObject().value("template").toString();
@@ -202,6 +215,8 @@ TeamSettingsDialog::TeamSettingsDialog(TeamController *teams, const Teams::Team 
 QJsonObject TeamSettingsDialog::changes() const
 {
     QJsonObject out;
+    const auto rules = QJsonArray::fromStringList(IronRules::lines(m_rules->toPlainText()));
+    if (rules != m_settings.value("iron_rules").toArray()) out.insert("iron_rules", rules);
     const QString before = m_settings.value("branch_per_task").toObject().value("template").toString();
     const QString after = m_branch->isChecked() ? m_template->text().trimmed() : QString();
     if (after != before) out.insert("branch_per_task", after.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(QJsonObject{{"template", after}}));
@@ -223,6 +238,16 @@ QJsonArray TeamSettingsDialog::memberChanges() const
     QJsonArray out;
     for (const auto &member : m_members)
         if (member.now != member.before) out.append(QJsonObject{{"id", member.id}, {"models", Teams::modelChoicesJson(member.now)}});
+    for (const auto &member : m_ruleMembers) {
+        const auto rules = IronRules::lines(member.field->toPlainText());
+        if (rules != member.before) {
+            bool merged = false;
+            for (int i = 0; i < out.size(); ++i) if (out[i].toObject().value("id") == member.id) {
+                auto item = out[i].toObject(); item.insert("iron_rules", QJsonArray::fromStringList(rules)); out[i] = item; merged = true; break;
+            }
+            if (!merged) out.append(QJsonObject{{"id", member.id}, {"iron_rules", QJsonArray::fromStringList(rules)}});
+        }
+    }
     return out;
 }
 
@@ -255,6 +280,9 @@ void TeamSettingsDialog::showMemberModels(int index)
 
 QString TeamSettingsDialog::problem() const
 {
+    auto issue = IronRules::problem(m_rules->toPlainText()); if (!issue.isEmpty()) return issue;
+    for (const auto &member : m_ruleMembers) { issue = IronRules::problem(member.field->toPlainText()); if (!issue.isEmpty()) return issue; }
+
     if (!m_branch->isChecked()) return {};
     const QString name = m_template->text().trimmed();
     if (!name.contains(QLatin1String("{id}"))) return tr("The branch name needs {id}, so each task gets its own branch");

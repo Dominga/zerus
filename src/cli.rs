@@ -95,6 +95,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] graph snapshot --json   bounded saved relationship metadata (partial coverage)
        hgs [@host] wait begin|ack|finish|cancel|list --json   explicit independent-agent waits (JSON stdin)
        hgs [@host] team OPERATION --json   agent teams: plan, run, report and decide tasks (JSON stdin)
+       hgs [@host] rules get|set|migrate --json   owner-managed iron rules, iron-rules-v1 (JSON stdin)
        hgs run --json [--wait] | --list --json   a build Zerus tracks as this session's work (JSON stdin)
        hgs test config|map|affected|durations|coverage|tools …   the project's tests (.zerus/tests.toml; hgs guide tests)
        hgs test runner --json   a test runner's side (test-runner-v1): the queue's suite of an exact commit, isolated
@@ -231,7 +232,7 @@ fn local_sessions() -> Result<()> {
 // Repository preparation owns only its checkout and receipt. Like the existing
 // configuration/control commands, it does not require or enable a session host.
 fn needs_local_sessions(command: &str) -> bool {
-    !matches!(command, "ls" | "watch" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "analytics" | "graph" | "wait" | "team" | "mobile" | "hooks" | "repository")
+    !matches!(command, "ls" | "watch" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "analytics" | "graph" | "wait" | "team" | "rules" | "mobile" | "hooks" | "repository")
 }
 
 /// Fails unless this process may run what the processes of a session run:
@@ -861,7 +862,8 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
             state_command(command, &args)
         }
         "inspect" | "processes" | "worktrees" | "git-status" | "git-diff" | "repository" | "dirs" | "send" | "send-now" | "send-cancel" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "read" | "notifications"
-        | "attachment" | "file-read" | "recovery" | "voice" | "schedules" | "graph" | "wait" | "team" | "switch-account" => {
+        | "attachment" | "file-read" | "recovery" | "voice" | "schedules" | "graph" | "wait" | "team" | "rules" | "switch-account" => {
+            if command == "rules" && dry { return Err(Error::new(1,"Rules operations do not support --dry-run")); }
             if command == "repository" && dry { return Err(Error::new(1,"Repository operations do not support --dry-run")); }
             if command == "wait" && dry { return Err(Error::new(1,"Wait operations do not support --dry-run")); }
             if command == "team" && dry { return Err(Error::new(1,"Team operations do not support --dry-run")); }
@@ -1164,6 +1166,11 @@ fn peer_json_archives(config: &Config, peer: &str, archives: bool) -> Value {
     value.insert("sessions".into(), json!([]));
     Value::Object(value)
 }
+#[cfg(test)]
+thread_local! {
+    static REMOTE_DRY_PLAN: std::cell::RefCell<Option<(Vec<String>, String)>> = const { std::cell::RefCell::new(None) };
+}
+
 fn remote(
     config: &Config,
     target: &str,
@@ -1248,7 +1255,7 @@ fn remote(
             all.extend_from_slice(&args[1..]);all
         }
         "archives" | "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "git-diff" | "repository" | "dirs" | "project" | "archive" | "rename"
-        | "send" | "send-now" | "send-cancel" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "team" | "guide" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "notifications" | "speech" | "analytics" | "voice" | "hooks" | "test" | "--help" => {
+        | "send" | "send-now" | "send-cancel" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "team" | "rules" | "guide" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "notifications" | "speech" | "analytics" | "voice" | "hooks" | "test" | "--help" => {
             flags = vec![
                 "-o".into(),
                 "BatchMode=yes".into(),
@@ -1331,6 +1338,8 @@ fn remote(
         // Probe the same installed executable without consuming JSON stdin.
         // These probes are POSIX scripts; a fish login shell runs them under sh.
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] wait'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to track waits' >&2; exit 1; fi",platform::join(&remote_args)))
+    } else if command == "rules" {
+        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'iron-rules-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to use iron rules' >&2; exit 1; fi", platform::join(&remote_args)))
     } else if command == "team" {
         // WhiteWh fork: the same probe as wait, for peers without agent teams.
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] team OPERATION'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to use agent teams' >&2; exit 1; fi",platform::join(&remote_args)))
@@ -1355,6 +1364,8 @@ fn remote(
                 println!("tab {title} color={}", platform::tab_color(config, target));
             }
         }
+        #[cfg(test)]
+        REMOTE_DRY_PLAN.with(|plan| *plan.borrow_mut() = Some((flags.clone(), remote.clone())));
         println!("ssh {} {target} {remote}", platform::join(&flags));
         return Ok(0);
     }
@@ -2790,6 +2801,25 @@ fn launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_rules_are_forwarded_without_a_terminal_or_launch_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config { home:String::new(),dir:dir.path().into(),state:dir.path().join("state"),selves:vec!["self".into()],
+            peers:vec!["peer".into()],base_peers:vec![],peers_from_environment:false,machines:Default::default(),tab:false,tab_colors:String::new() };
+        for windows in [false,true] {
+            crate::windows_peer::record(&config,"peer",windows).unwrap();
+            for op in ["get","set","migrate"] {
+                assert_eq!(remote(&config,"peer","rules",&[op.into(),"--json".into()],true).unwrap(),0);
+                let (flags,line) = REMOTE_DRY_PLAN.with(|plan| plan.borrow_mut().take().unwrap());
+                assert!(flags.iter().any(|flag|flag=="BatchMode=yes"));
+                assert!(!flags.iter().any(|flag|flag=="-t"));
+                assert!(line.contains("iron-rules-v1") && line.contains("rules") && line.contains(op),"{line}");
+                assert!(!line.contains("--client") && !line.contains("__state"),"{line}");
+                assert_eq!(crate::peer_channel::routed("rules", &[op.into(),"--json".into()]),Some(true));
+            }
+        }
+    }
 
     #[test]
     fn repository_preparation_does_not_admit_session_commands_on_control_consoles() {

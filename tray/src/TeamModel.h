@@ -74,6 +74,7 @@ struct PermissionAnswer {
 struct Member {
     QString id, role, agent, model, computer, state, error;
     QString account, effort, permissions, folder, directory, prompt;
+    QStringList ironRules;
     // U54: the account its session really runs on (team status's
     // session_account), which may differ from the configured `account`.
     QString sessionAccount;
@@ -448,6 +449,7 @@ struct BuildState {
 
 struct Team {
     QString id, name, status, project, folder, lead;
+    QString projectId;
     // D1: settings.evidence_folders, where report evidence may be previewed.
     QStringList evidenceFolders;
     qint64 revision = 0;

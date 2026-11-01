@@ -1002,7 +1002,7 @@ void TeamNewTab::startPlanning()
             if (!value.isEmpty()) lead.insert(QLatin1String(key), value);
     }
     if (const auto *role = m_teams->catalog().role("lead")) lead.insert("prompt", role->prompt);
-    QJsonObject input{{"action", "start"}, {"folder", m_folder->text().trimmed()}, {"lead", lead}};
+    QJsonObject input{{"project", m_project}, {"project_id", property("ironRulesProjectId").toString()}, {"action", "start"}, {"folder", m_folder->text().trimmed()}, {"lead", lead}};
     if (!m_name->text().trimmed().isEmpty()) input.insert("name", m_name->text().trimmed());
     if (m_teams->catalog().templ(m_template)) input.insert("template", m_template);
     m_starting = true; m_startError->hide();

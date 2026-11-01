@@ -1266,7 +1266,11 @@ pub(super) fn hook() -> Result<i32> {
     let event = stdin_json()?;
     let mut started = false;
     let mut hint = None;
-    let code = track(name, token, event, &mut started, &mut hint)?;
+    let conversation = string(&event, "session_id").to_owned();
+    let mut rules_proof = None;
+    let code = track(name.clone(), token.clone(), event, &mut started, &mut hint,
+        &mut rules_proof,
+    )?;
     // The project's task commands, in the agent's context from its first turn on
     // (docs/superpowers/specs/2026-10-13-project-task-queue-design.md); only a
     // start this run recorded as its own conversation's, never a nested CLI's.
@@ -1274,8 +1278,23 @@ pub(super) fn hook() -> Result<i32> {
         .then(|| nonempty_env("HGS_AGENT").and_then(|agent| crate::tasks::session_context(&agent)))
         .flatten();
     if let Some(context) = start_context(hint, tasks) {
+        if context.encode_utf16().count() > super::iron_rules::MAX_START_CONTEXT { rules_proof = None; }
         let stdout = io::stdout();
         agent_hint::output(&mut stdout.lock(), &context)?;
+        // A failed stdout write must never establish startup delivery.
+        if let Some((project, digest)) = rules_proof {
+            let _guard = lock(None)?;
+            if let Some(mut record) = read_run(&name, &token)? {
+                if string(&record, "conversation_id") == conversation {
+                    record["iron_rules_start_supported"] = json!(true);
+                    record["iron_rules_start_project"] = json!(project);
+                    record["iron_rules_start_digest"] = json!(digest);
+                    record["iron_rules_start_run"] = json!(token);
+                    record["iron_rules_start_conversation"] = json!(conversation);
+                    write(&mut record)?;
+                }
+            }
+        }
     }
     Ok(code)
 }
@@ -1285,14 +1304,42 @@ pub(super) fn hook() -> Result<i32> {
 fn start_context(hint: Option<String>, tasks: Option<Value>) -> Option<String> {
     let tasks = tasks.and_then(|context| context["hookSpecificOutput"]["additionalContext"].as_str().map(str::to_owned));
     let parts: Vec<String> = hint.into_iter().chain(tasks).collect();
-    (!parts.is_empty()).then(|| parts.join("
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
 
-"))
+fn clear_rules_proof(record: &mut Value, event: &Value) -> bool {
+    if string(event,"hook_event_name") != "SessionStart" || !string(event,"agent_id").is_empty() { return false; }
+    record["iron_rules_start_supported"] = json!(false);
+    for key in ["iron_rules_start_project","iron_rules_start_digest","iron_rules_start_run","iron_rules_start_conversation"] {
+        record.as_object_mut().unwrap().remove(key);
+    }
+    true
+}
+
+fn startup_rules(record: &Value, event: &Value) -> Option<(String,String)> {
+    match iron_rules_start(record,event) {
+        Ok(Some((project,text))) if text.encode_utf16().count() <= super::iron_rules::MAX_START_RULES => Some((project,text)),
+        Ok(_) => None,
+        Err(error) => { eprintln!("hgs: {error}; iron rules keep per-send delivery"); None }
+    }
+}
+
+fn iron_rules_start(record: &Value, event: &Value) -> Result<Option<(String, String)>> {
+    if string(record, "agent") != "claude"
+        || string(event, "hook_event_name") != "SessionStart"
+        || !string(event, "agent_id").is_empty()
+    {
+        return Ok(None);
+    }
+    let context = super::iron_rules::record_context(record)
+        .map_err(|error| format!("Iron rules could not be read: {error}"))?;
+    Ok(Some(context))
 }
 
 /// Records one hook event of the session `name`'s run `token`; `started` says
 /// that it was the start of the run's own conversation.
-fn track(name: String, token: String, mut event: Value, started: &mut bool, hint_out: &mut Option<String>) -> Result<i32> {
+fn track(name: String, token: String, mut event: Value, started: &mut bool, hint_out: &mut Option<String>,
+    rules_proof: &mut Option<(String, String)>) -> Result<i32> {
     if nonempty_env("HGS_AGENT").as_deref() == Some("claude") {
         if let std::borrow::Cow::Owned(prompt) = journal::pasted_text(string(&event, "prompt")) {
             event["prompt"] = json!(prompt);
@@ -1322,6 +1369,8 @@ fn track(name: String, token: String, mut event: Value, started: &mut bool, hint
     if !matches(&record, panes.get(string(&record, "name"))) {
         return Ok(0);
     }
+    // Invalidate before any later work can fail, including rules resolution.
+    if clear_rules_proof(&mut record, &event) { write(&mut record)?; }
     if let Some(scoped) = external_agents::route(&mut record, &event) {
         processes::observe(&mut record, &scoped);
         journal::update_activity(&mut record, &scoped);
@@ -1489,7 +1538,16 @@ fn track(name: String, token: String, mut event: Value, started: &mut bool, hint
         *started = true;
     }
     // The caller writes it, with the task commands, as one JSON object.
-    *hint_out = hint.map(str::to_owned);
+    let rules = startup_rules(&record, &event);
+    *rules_proof = rules
+        .as_ref()
+        .map(|(project, text)| (project.clone(), teams::store::digest(&json!(text))));
+    let parts: Vec<_> = hint.map(str::to_owned)
+        .into_iter()
+        .chain(rules.map(|(_, text)| text))
+        .filter(|text| !text.is_empty())
+        .collect();
+    *hint_out = (!parts.is_empty()).then(|| parts.join("\n\n"));
     Ok(0)
 }
 
@@ -1497,6 +1555,64 @@ fn track(name: String, token: String, mut event: Value, started: &mut bool, hint
 mod tests {
     use super::windows::{self as forms, CLAUDE_EXEC_FORM};
     use super::*;
+
+    #[test]
+    fn failed_or_oversized_start_rules_leave_hint_tasks_and_no_old_proof() {
+        let dir=tempfile::tempdir().unwrap();
+        super::super::with_test_state_root(dir.path(),|| {
+            let mut record=json!({"agent":"claude","name":"claude/x/one","run_id":"r1","conversation_id":"c1",
+                "iron_rules_start_supported":true,"iron_rules_start_digest":"old","iron_rules_start_run":"old-run","iron_rules":["Own"]});
+            let event=json!({"hook_event_name":"SessionStart","source":"compact"});
+            assert!(clear_rules_proof(&mut record,&event));
+            // A malformed authoritative list forces a real resolution error.
+            record["iron_rules"]=json!([5]);
+            assert!(startup_rules(&record,&event).is_none());
+            assert_eq!(record["iron_rules_start_supported"],false); assert!(record.get("iron_rules_start_run").is_none());
+            let context=start_context(Some("Agent hint".into()),crate::tasks::session_context("claude")).unwrap();
+            assert!(context.contains("Agent hint") && context.contains("Zerus tasks"));
+            record["iron_rules"]=json!((0..20).map(|_|"\u{1f600}".repeat(150)).collect::<Vec<_>>());
+            assert!(startup_rules(&record,&event).is_none(),"UTF-16 expansion must keep the fallback");
+            record["iron_rules"]=json!(["Small"]);
+            assert!(startup_rules(&record,&event).is_some());
+        });
+    }
+
+    #[test]
+    fn iron_rules_follow_claude_start_resume_clear_and_compact_but_not_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        super::super::with_test_state_root(dir.path(), || {
+            let record = json!({"agent":"claude","name":"claude/example/one","iron_rules":["Session requirement"]});
+            for source in ["startup", "resume", "clear", "compact"] {
+                let (_, text) = iron_rules_start(
+                    &record,
+                    &json!({"hook_event_name":"SessionStart","source":source}),
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(text.matches("Session requirement").count(), 1);
+                let mut out = Vec::new();
+                agent_hint::output(&mut out, &start_context(Some(text), None).unwrap()).unwrap();
+                let value: Value = serde_json::from_slice(&out).unwrap();
+                assert_eq!(value["hookSpecificOutput"]["hookEventName"], "SessionStart");
+            }
+            for event in [
+                json!({"hook_event_name":"UserPromptSubmit"}),
+                json!({"hook_event_name":"PreToolUse"}),
+                json!({"hook_event_name":"SessionStart","agent_id":"child"}),
+            ] {
+                assert!(iron_rules_start(&record, &event).unwrap().is_none());
+            }
+            for agent in ["codex", "kimi", "dsh", "opencode"] {
+                let mut record = record.clone();
+                record["agent"] = json!(agent);
+                assert!(
+                    iron_rules_start(&record, &json!({"hook_event_name":"SessionStart"}))
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        });
+    }
 
     #[test]
     fn session_start_writes_one_json_object_with_the_hint_and_the_task_commands() {

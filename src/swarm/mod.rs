@@ -13,6 +13,7 @@ mod model;
 mod replica;
 mod service;
 mod store;
+pub(crate) use store::read_snapshot as read_catalog_snapshot;
 mod transport;
 
 use crate::{cli, config::Config};

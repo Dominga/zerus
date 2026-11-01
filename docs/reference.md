@@ -6032,3 +6032,83 @@ its place only if it can fail for the change; lint and screenshots ride on the
 integration's and the test's own run. A split keeps every test, counted before
 and after; a repeat becomes a case of a table test, and a test that guards
 nothing is removed with the reason in the report.
+
+### Iron rules
+
+Iron rules are stored by Rust at four cumulative levels: project, team, member,
+and session. A lower level adds requirements and cannot cancel a higher level.
+Each level allows at most 20 nonempty rules of 300 characters each. Team settings
+use `settings.iron_rules`; members use `iron_rules` in their plan or
+`members_update`. These fields default to empty for old records. `project_id`
+is the stable project identity; the legacy team `project` remains its label.
+Give teams a stable `project_id`; an old label resolves only when unique.
+
+Only the owner changes rules. A lead may change its team's rules, its project
+rules or a member session's rules with a verified, unused `owner_word` from the
+owner's recent message in that lead session (the same journal verification as
+phase approvals). Merely writing `by: human` from an agent does not authorize it.
+A member cannot edit any level. A settings or plan update that changes rules
+passes this gate too. The GUI edits project/session rules in Iron rules, team
+rules in Team settings and member additions in the member editor.
+
+`hgs [@host] rules get|set|migrate --json` is additive (`iron-rules-v1` in help).
+Input is one JSON object on stdin. Project input names `scope: "project"` and
+`project: "STABLE_ID"`. Session input names `scope: "session"`, `name`,
+`expected_run_id` and `expected_conversation_id`; all identities must match the
+current binding. Get returns `rules` and `revision`. Writes add a canonical
+`request_id`, `expected_revision` from get, and a bounded `rules` array. Owner
+writes use `by: "human"`; a lead also supplies `team` and `owner_word`.
+Project requests are replay-safe; session requests replay the last exact write,
+while stale revisions or replaced identities are refused. Project rows and
+request receipts live in `HGS_STATE_DIR/iron-rules.sqlite3`; session additions
+remain in the exact native binding; team/member additions remain in the team.
+Migration imports the GUI's `workspace/ironRules` once per project and computer.
+It never overwrites an existing Rust row, including an intentionally empty list.
+The GUI retains its old value as a backup until and after a confirmed receipt;
+a failed import remains retryable. Old CLIs retain the legacy per-send fallback.
+
+Rules accompany every team task, including a pipeline stage, regardless of the
+catalog's prompt order or disabled rules block. Claude Code receives all levels
+through root SessionStart `additionalContext` on startup, resume, clear and
+compact, combined with the hint/task commands in one JSON response. Ordinary
+messages omit the wrapper only after startup delivered the current effective
+rules for the selected project. Changed rules, a missing or mismatched project,
+or missing startup proof keep the fallback until the next successful start.
+The current Codex, DeepSeek, Kimi and OpenCode adapters retain per-send delivery;
+they have no equivalent verified startup/resume/clear/compact delivery path in
+this integration. SessionStart never injects rules into subagents or ordinary
+message hooks. Team terminal startup introductions also carry inherited rules.
+Remote task delivery reads the exact remote session's own rules before sending;
+an unreadable new peer refuses delivery rather than omitting its rules.
+
+For a remote session, the lead-local read-only resolver accepts `host` with the
+exact session identities in `rules get`. It joins indexed local team membership
+with the remote binding's own rules. Remote team Claude sessions retain per-send
+delivery: their host cannot independently restore the lead's team/member rules
+at startup. GUI project rules belong to this GUI computer's Rust project store;
+session writes go to the selected session's host. No rules synchronization or
+remote startup contract is implied by this resolver.
+
+Iron-rules compatibility and failure handling:
+- Use the public `hgs @host rules ... --json` route; forwarding probes
+  `iron-rules-v1` and never requests a terminal or agent launch. Windows uses
+  the guarded peer channel or a guarded SSH command.
+- A startup proof belongs to the exact run and conversation and is invalidated
+  at every root SessionStart before resolution. Resolution errors are logged
+  without losing the ordinary hint/task context; they keep per-send delivery.
+- Claude Code's [hook output limit](https://code.claude.com/docs/en/hooks#json-output)
+  is 10,000 characters per context string. Zerus accepts startup proof only for
+  at most 6000 UTF-16 units of rules and 8000 units of combined context. Larger
+  lists retain the per-send fallback. All remote sessions retain this fallback,
+  including non-team Claude; local project rules remain mandatory even if the
+  peer has a different row under the same project identity.
+- A failed GUI migration keeps sending the legacy project rules and retries
+  migration later. It does not authorize dropping session or inherited rules.
+- For an ambiguous legacy project label, delivery fails closed and the team's
+  inbox shows an iron-rules blocker. The owner resolves it with
+  `hgs team settings --json`, giving the team's exact `team`, a stable
+  `project_id`, `by: "human"` and a canonical `request_id`. A lead cannot change
+  this association by claiming to be the owner.
+- An older hgs that rewrites a team record does not preserve unknown
+  `iron_rules`/`project_id` fields. Keep team writers on a rules-aware hgs;
+  additive deserialization alone cannot protect these fields from old writers.

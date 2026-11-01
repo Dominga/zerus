@@ -97,7 +97,7 @@ pub fn routed(command: &str, args: &[String]) -> Option<bool> {
     match command {
         "ls" | "archives" | "inspect" | "worktrees" | "git-status" | "git-diff" | "dirs" | "project" | "analytics" => Some(false),
         "account" if matches!(args.first().map(String::as_str), Some("ls" | "inspect")) => Some(false),
-        "terminal" | "send" | "settings" | "effort" | "history" if json => Some(true),
+        "terminal" | "send" | "settings" | "effort" | "history" | "rules" if json => Some(true),
         _ => None,
     }
 }
@@ -119,6 +119,13 @@ pub fn request(config: &Config, alias: &str, args: &[String], stdin: Option<Vec<
     }
     if failed_recently(config, alias, None) {
         return None;
+    }
+    if args.first().is_some_and(|arg| arg == "rules") {
+        match request(config, alias, &["--help".into()], None)? {
+            Ok(answer) if answer.code == 0 && String::from_utf8_lossy(&answer.stdout).contains("iron-rules-v1") => {},
+            Ok(_) => return Some(Err("Update the selected computer to use iron rules".into())),
+            Err(error) => return Some(Err(error)),
+        }
     }
     let name = pipe_name(config, alias).ok()?;
     let mut stream = connect(config, &name, alias)?;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ProcessRunner.h"
+#include "IronRules.h"
 
 #include <QHash>
 #include <QByteArray>
@@ -351,7 +352,8 @@ public:
     quint64 requestSendMessage(const QString &host, const QString &name, const QString &text,
                                const QList<MessageAttachment> &attachments,
                                const QString &expectedRunId, const QString &expectedConversationId = {}, const QString &agentId = {}, const QString &compactionId = {},
-                               bool holdWhenUnconfirmed = false);
+                               bool holdWhenUnconfirmed = false, const QString &rulesProject = {});
+    IronRules::Transport rulesTransport();
     // U35: `hgs [@host] send-cancel <session> --json` for a message hgs still
     // holds; heldCancelFinished answers with its receipt ("cancelled") or why not.
     quint64 requestCancelHeld(const QString &host, const QString &name, const QString &requestId);

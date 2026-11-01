@@ -581,6 +581,27 @@ void runHgsParsed(const QString &hgs, const QStringList &args, int timeoutMs, QO
 
 } // namespace
 
+IronRules::Transport HgsClient::rulesTransport()
+{
+    return [guard = QPointer<HgsClient>(this)](const QString &host, const QString &op, const QJsonObject &input, IronRules::Reply done) {
+        if (!guard) { done({}, QObject::tr("The connection closed.")); return; }
+        auto payload = input; payload.insert("by", "human");
+        const bool remoteRead = op == "get" && input.value("scope") == "session" && !host.isEmpty();
+        if (remoteRead) payload.insert("host", host);
+        const QString destination = remoteRead || input.value("scope") == "project" ? QString() : host;
+        QStringList args{"rules", op, "--json"};
+        if (!destination.isEmpty()) args.prepend('@' + destination);
+        QStringList help{"--help"}; if (!destination.isEmpty()) help.prepend('@' + destination);
+        runHgs(guard->m_hgs, help, 15000, guard, [guard, args, payload, done](const QByteArray &help) {
+            if (!guard) return;
+            if (!help.contains("iron-rules-v1")) { done({{"unsupported", true}}, {}); return; }
+            runHgsParsed(guard->m_hgs, args, 30000, guard, parseObject,
+                [done](const ObjectReply &reply) { done(reply.object, reply.ok() ? QString() : QObject::tr("Invalid iron rules response.")); },
+                [done](const QString &, const QString &error) { done({}, error); }, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+        }, [done](const QString &, const QString &error) { done({}, error); });
+    };
+}
+
 quint64 HgsClient::requestModelServer(const QStringList &args, const QByteArray &input, int timeoutMs)
 {
     const quint64 request = ++m_modelServerRequest;
@@ -2210,7 +2231,7 @@ quint64 HgsClient::requestAnswerQuestion(const QString &host, const QString &nam
 quint64 HgsClient::requestSendMessage(const QString &host, const QString &name, const QString &text,
                                      const QList<MessageAttachment> &attachments,
                                      const QString &expectedRunId, const QString &expectedConversationId, const QString &agentId, const QString &compactionId,
-                                     bool holdWhenUnconfirmed)
+                                     bool holdWhenUnconfirmed, const QString &rulesProject)
 {
     const quint64 request = ++m_messageRequest;
     const QString key = host + QLatin1Char('\n') + name + '\n' + agentId;
@@ -2271,6 +2292,11 @@ quint64 HgsClient::requestSendMessage(const QString &host, const QString &name, 
     if (!compactionId.isEmpty()) message["expected_compaction_id"] = compactionId;
     // U35: only for an hgs whose inspection reports input_hold_supported.
     if (holdWhenUnconfirmed) message["queue_when_unconfirmed"] = true;
+    m_messagesInFlight.insert(key);
+    auto deliver = [=](const QString &prepared, const QString &error) mutable {
+        if (!error.isEmpty()) { m_messagesInFlight.remove(key); reject(error); return; }
+        if (prepared.toUtf8().size() > MaximumMessageBytes) { m_messagesInFlight.remove(key); reject(tr("The message and iron rules exceed 64 KiB.")); return; }
+        message["text"] = prepared;
     const auto payload = QJsonDocument(message).toJson(QJsonDocument::Compact);
     QStringList args{QStringLiteral("send"), name, QStringLiteral("--json")};
     if (!host.isEmpty()) args.prepend(QLatin1Char('@') + host);
@@ -2350,7 +2376,6 @@ quint64 HgsClient::requestSendMessage(const QString &host, const QString &name, 
             });
             process->deleteLater();
         });
-    m_messagesInFlight.insert(key);
     timer->start(host.isEmpty() ? 15000 : 45000);
     // Return the request ID before native startup can reenter the event loop.
     QTimer::singleShot(0, process, [process, timer, reported, timeout] {
@@ -2358,6 +2383,9 @@ quint64 HgsClient::requestSendMessage(const QString &host, const QString &name, 
         if (timer->remainingTime() <= 0) { timeout(); process->deleteLater(); return; }
         process->start();
     });
+    };
+    if (!rulesProject.isNull() && agentId.isEmpty()) IronRules::prepare(rulesTransport(), host, rulesProject, name, expectedRunId, expectedConversationId, text, deliver);
+    else deliver(text, {});
     return request;
 }
 

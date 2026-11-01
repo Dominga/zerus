@@ -577,7 +577,7 @@ void TeamNewDialog::create()
                          {"max_members", m_maxMembers->value()}};
     if (t && !t->phaseApproval.isEmpty()) settings.insert("phase_approval", t->phaseApproval);
     QJsonObject input{{"name", m_name->text().trimmed()}, {"goal", m_goal->toPlainText().trimmed()}, {"folder", m_folder->text().trimmed()},
-                      {"project", m_project}, {"template", t ? t->id : QString()}, {"lead", lead}, {"members", members}, {"tasks", tasks},
+                      {"project", m_project}, {"project_id", property("ironRulesProjectId").toString()}, {"template", t ? t->id : QString()}, {"lead", lead}, {"members", members}, {"tasks", tasks},
                       {"start", true}, {"settings", settings}};
     m_create->setEnabled(false);
     m_summary->setText(tr("Creating the team…"));

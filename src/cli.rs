@@ -192,7 +192,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
   -c ID    resume this exact conversation UUID; --resume=ID is also accepted
   -n tag   separate session <cmd>/<project>/<tag>
   --account ID   use a named native agent profile for this session
-  --permissions auto|bypass   this session's native permission mode instead of the account's (auto: claude only)
+  --permissions provider|bypass|native:<json>   this session's discovered native permission selection instead of the account's
   --local-model NAME   this session's model of a local Ollama account (claude)
   --model-server NAME   this session runs on a model server's API (needs --model MODEL; a new session)
   --model PROVIDER/MODEL   OpenCode native model for a new session
@@ -2123,7 +2123,7 @@ impl LaunchOptions {
                 }
                 "--permissions" => {
                     options.permissions =
-                        Some(require(args, i + 1, "--permissions needs auto or bypass")?.into());
+                        Some(require(args, i + 1, "--permissions needs provider, bypass or native:<json>")?.into());
                     i += 1;
                 }
                 "--local-model" => {
@@ -2293,9 +2293,9 @@ fn launch(
     // This launch's own mode becomes the agent's native flag, which the
     // account default then leaves alone.
     if let Some(mode) = options.permissions.as_deref() {
-        if crate::accounts::permission_args(&command_name, mode).is_empty() {
-            return Err(Error::new(1, format!("--permissions {mode} is not available for {command_name}")));
-        }
+        // Syntax and static shortcuts only. Fresh native options are checked
+        // once when the launch actually builds its flags.
+        crate::accounts::validate_permission_mode(&command_name, mode)?;
         if crate::accounts::explicit_permissions(&command_name, &options.extra) {
             return Err(Error::new(1, "choose --permissions or the agent's own permission flags, not both"));
         }
@@ -2352,10 +2352,11 @@ fn launch(
                 format!("/{}", options.tag)
             }
         );
-        state::dsh::launch(
+        state::dsh::launch_with_permissions(
             &name,
             &directory,
             options.launch_id.as_deref(),
+            options.permissions.as_deref(),
             options.dry,
             options.new_only,
         )
@@ -2568,10 +2569,18 @@ fn launch(
             resume.extend(options.extra.clone());
         }
     }
+    let tracked_permissions = matches!(command_name.as_str(), "claude" | "codex" | "kimi")
+        && env::var("HGS_TRACKING").as_deref() != Ok("0");
     if let Some(mode) = options.permissions.as_deref() {
-        crate::accounts::apply_permissions(&command_name, mode, &mut base);
-        if !resume.is_empty() {
-            crate::accounts::apply_permissions(&command_name, mode, &mut resume);
+        // A tracked agent receives the symbolic choice through
+        // HGS_PERMISSION_MODE; the lifecycle applies and revalidates it on every
+        // resume. Untracked and dry-run launches still need concrete argv.
+        if !tracked_permissions || options.dry {
+            let values = crate::accounts::permission_args(&command_name, mode)?;
+            crate::accounts::apply_permission_values(&command_name, &values, &mut base);
+            if !resume.is_empty() {
+                crate::accounts::apply_permission_values(&command_name, &values, &mut resume);
+            }
         }
     }
     // Capture the account defaults in the new conversation's launch recipe.
@@ -2681,7 +2690,13 @@ fn launch(
         if options.dry {
             state_args.push("--dry-run".into());
         }
+        if let Some(mode) = options.permissions.as_deref() {
+            env::set_var("HGS_PERMISSION_MODE", mode);
+        }
         let rc = state_command("resume", &state_args)?;
+        if options.permissions.is_some() {
+            env::remove_var("HGS_PERMISSION_MODE");
+        }
         return if rc == 0 && !options.detached && !options.dry {
             attach(config, &session, client, false)
         } else {
@@ -2718,6 +2733,9 @@ fn launch(
     if matches!(command_name.as_str(), "claude" | "codex" | "kimi")
         && env::var("HGS_TRACKING").as_deref() != Ok("0")
     {
+        if let Some(mode) = options.permissions.as_deref() {
+            spec.env.push(format!("HGS_PERMISSION_MODE={mode}"));
+        }
         spec.env.extend([
             format!("HGS_SESSION={session}"),
             format!("HGS_AGENT={command_name}"),

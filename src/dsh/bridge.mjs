@@ -13,6 +13,23 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 export const name = 'hgs-native-dsh';
 export const inject = ['sessionController', 'agents', 'goals', 'llm', 'agentDefaultModel', 'sessionQuery', 'userQuestions', 'workspaceRegistry', 'subagents', 'permissionPresets', 'approval', 'commands', 'sessions'];
 
+// Whether a create/resume call may finish an explicit permission preset on an
+// already-live agent. Ordinary ensures and retries never switch a live
+// session; only a pending initial-setup recovery may, and only while idle.
+// An implicit account default leaves a live native choice untouched. Exported
+// for the synthetic compatibility test.
+export function presetGate({ preset, live, recovery, running, explicit, current }) {
+  if (preset === undefined) return { apply: false, applied: false, refuse: false };
+  if (!live) return { apply: true, applied: true, refuse: false };
+  if (current === preset) return { apply: false, applied: true, refuse: false };
+  if (recovery === true) {
+    if (running === true) return { apply: false, applied: false, refuse: true };
+    return { apply: true, applied: true, refuse: false };
+  }
+  if (explicit === true) return { apply: false, applied: false, refuse: false };
+  return { apply: false, applied: true, refuse: false };
+}
+
 // A session folder is a full path on this platform: on Windows with a drive
 // or a UNC share, since a rooted `\x` there still depends on the current drive.
 function absoluteFolder(folder) {
@@ -136,15 +153,37 @@ export function apply(ctx, config) {
       return { workspaceId: workspace.id, path: workspace.path, sessionIds: [...workspace.sessionIds] };
     } finally { observation[Symbol.dispose](); }
   }
+  // Configured presets only: Auto is current-session-only and can never be a
+  // launch/account default. The resident host keeps one fixed preset table.
+  const presetOptions = () => {
+    try { return ctx.permissionPresets.catalog().defaultOptions ?? []; } catch { return []; }
+  };
+  function checkPreset(name) {
+    if (name === undefined || name === null) return;
+    if (typeof name !== 'string' || !name || Buffer.byteLength(name, 'utf8') > 128
+        || name.trim() !== name || /[\u0000-\u001f\u007f]/.test(name))
+      throw new Error('Invalid native permission preset');
+    if (!presetOptions().some(option => option.value === name))
+      throw new Error('The selected permission preset is not offered by the running DeepSeek host');
+  }
+  function applyPreset(agent, name) {
+    if (name === undefined || name === null) return;
+    checkPreset(name);
+    ctx.permissionPresets.apply(agent.session, name,
+      policy => ctx.approval.setPolicy(agent, policy));
+  }
   function applyPermissions(agent, mode) {
     if (mode === 'bypass') ctx.permissionPresets.apply(agent.session, 'danger-full-access',
       policy => ctx.approval.setPolicy(agent, policy));
   }
   function checkPermissions(mode) {
     if (mode !== undefined && !['provider', 'bypass'].includes(mode)) throw new Error('Unknown account permission mode');
+    if (mode === 'bypass' && !presetOptions().some(option => option.value === 'danger-full-access'))
+      throw new Error('The running DeepSeek host does not offer the danger-full-access preset');
   }
-  async function resume(sessionId, permissionMode) {
+  async function resume(sessionId, permissionMode, permissionPreset) {
     checkPermissions(permissionMode);
+    checkPreset(permissionPreset);
     const live = ctx.agents.get(sessionId);
     if (live) return live;
     if (opening.has(sessionId)) return opening.get(sessionId);
@@ -156,6 +195,7 @@ export function apply(ctx, config) {
         const { provider, model } = ctx.agentDefaultModel.currentSelection();
         const handle = await ctx.agents.resume({ resumeSessionId: sessionId, agentOptions: { provider, model }, setup: composition.setup });
         applyPermissions(handle.agent, permissionMode);
+        applyPreset(handle.agent, permissionPreset);
         owned.set(sessionId, handle);
         await publishWorkspace(sessionId);
         return handle.agent;
@@ -456,7 +496,7 @@ export function apply(ctx, config) {
     const p = request.params ?? {};
     switch (request.method) {
       case 'ping': return { protocol: 1, version: '0.2.1-rc.2', generation, accountPermissions: true, sessionActions: true, sessionRows: true, fileAttachments: true,
-        nativeOperations: ['fork', 'history-search', 'schedules'], schedule: Boolean(scheduleService()) };
+        nativeOperations: ['fork', 'history-search', 'schedules', 'permission-preset', 'permissions'], schedule: Boolean(scheduleService()) };
       case 'list': {
         const list = await api.list({}, new AbortController().signal);
         const status = await accountStatus();
@@ -561,8 +601,16 @@ export function apply(ctx, config) {
       }
       case 'workspace': return publishWorkspace(p.sessionId);
       case 'catalog': return api.modelCatalog();
+      case 'permissions': {
+        // Read-only sanitized snapshot of the configured preset table; Auto is
+        // intentionally excluded because it cannot be an account/launch default.
+        return { generation, options: presetOptions().map(option => ({
+          value: option.value, label: option.name ?? option.value,
+          ...(option.description ? { description: option.description } : {}) })) };
+      }
       case 'create': {
         checkPermissions(p.permissionMode);
+        checkPreset(p.permissionPreset);
         // WhiteWh fork: a full folder on this platform (on Windows, a drive or UNC share).
         if (typeof p.cwd !== 'string' || !absoluteFolder(p.cwd) || !(await fs.stat(p.cwd)).isDirectory()) throw new Error('Choose an existing absolute folder');
         const sessionId = p.sessionId;
@@ -572,14 +620,35 @@ export function apply(ctx, config) {
           try {if (observation.header.cwd !== p.cwd) throw new Error('Native session belongs to another folder');}
           finally {observation[Symbol.dispose]();}
           await publishWorkspace(sessionId);
-          return {sessionId,generation};
+          // An ordinary ensure or retry never switches a live agent's preset:
+          // that is deferred live-session work. Only an explicit pending
+          // initial-setup recovery may finish the exact requested preset, and
+          // only while the native turn is idle.
+          let presetApplied;
+          if (p.permissionPreset !== undefined) {
+            const live = ctx.agents.get(sessionId);
+            let current = null;
+            try { current = ctx.permissionPresets.current(live.session); } catch {}
+            const recovery = p.permissionRecovery === true;
+            const row = recovery ? await summaryOf(sessionId) : null;
+            if (recovery && !row) throw new Error('Wait for the native turn before finishing permission setup');
+            const gate = presetGate({
+              preset: p.permissionPreset, live: true, recovery,
+              running: row?.running === true, explicit: p.permissionExplicit === true, current,
+            });
+            if (gate.refuse) throw new Error('Wait for the native turn before finishing permission setup');
+            if (gate.apply) applyPreset(live, p.permissionPreset);
+            presetApplied = gate.applied;
+          }
+          return {sessionId,generation,...(presetApplied === undefined ? {} : {presetApplied})};
         }
         try {
           const observation = await ctx.sessionQuery.observeSession(sessionId);
           try {
             if (observation.header.cwd !== p.cwd) throw new Error('Native session belongs to another folder');
           } finally { observation[Symbol.dispose](); }
-          await resume(sessionId, p.permissionMode); return { sessionId, generation };
+          await resume(sessionId, p.permissionMode, p.permissionPreset);
+          return { sessionId, generation, ...(p.permissionPreset === undefined ? {} : {presetApplied:true}) };
         } catch (error) {
           if (error?.code !== 'SESSION_QUERY_SESSION_NOT_FOUND') throw error;
         }
@@ -588,10 +657,11 @@ export function apply(ctx, config) {
         const handle = await ctx.agents.create({ sessionId, agentOptions: { provider, model },
           meta: { cwd: p.cwd, agentPreset: composition.agentPreset }, setup: composition.setup });
         applyPermissions(handle.agent, p.permissionMode);
+        applyPreset(handle.agent, p.permissionPreset);
         owned.set(sessionId, handle);
         await publishWorkspace(sessionId);
         if (p.title) await api.rename({ sessionId, title: p.title });
-        return { sessionId, generation };
+        return { sessionId, generation, ...(p.permissionPreset === undefined ? {} : {presetApplied:true}) };
       }
       case 'session-action': {
         let changed = false;
@@ -607,8 +677,9 @@ export function apply(ctx, config) {
           if (p.action === 'resume') {
             if (live || opening.has(p.sessionId)) throw new Error('This session is already running or opening');
             checkPermissions(p.permissionMode);
+            checkPreset(p.permissionPreset);
             changed = true;
-            await resume(p.sessionId,p.permissionMode);
+            await resume(p.sessionId,p.permissionMode,p.permissionPreset);
           } else if (p.action === 'rename') {
             if (typeof p.title !== 'string' || !p.title || p.title.length > 512) throw new Error('Invalid scoped title');
             changed = true; await api.rename({sessionId:p.sessionId,title:p.title});
@@ -620,7 +691,7 @@ export function apply(ctx, config) {
           return answer('completed');
         } catch (error) { return answer(changed ? 'uncertain' : 'failed',String(error?.message ?? error)); }
       }
-      case 'resume': await resume(p.sessionId, p.permissionMode); return { generation };
+      case 'resume': await resume(p.sessionId, p.permissionMode, p.permissionPreset); return { generation };
       case 'pause': {
         // Closing the owned handle drains exactly this agent and its children;
         // other sessions and the shared native host remain alive.

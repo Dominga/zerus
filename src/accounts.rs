@@ -4,6 +4,7 @@ mod model_defaults;
 mod claude;
 mod claude_settings;
 mod mcp_servers;
+mod permission_catalog;
 mod permission_status;
 mod install;
 mod deepseek;
@@ -80,9 +81,10 @@ fn decode(bytes: &[u8]) -> Result<Catalog> {
         }
     }
     for (id, mode) in &catalog.permission_modes {
-        if (!native_id(id) && !catalog.profiles.contains_key(id)) || !["provider", "auto", "bypass"].contains(&mode.as_str()) {
+        if !native_id(id) && !catalog.profiles.contains_key(id) {
             return Err(Error::new(1,"Invalid account permission mode."));
         }
+        permission_catalog::check_stored_mode(mode)?;
     }
     for (provider, id) in &catalog.defaults {
         if !["codex", "claude", "kimi"].contains(&provider.as_str())
@@ -346,11 +348,18 @@ fn list(config: &Config) -> Result<Value> {
         };
         rows.push(row);
     }
+    let providers: BTreeSet<String> = rows
+        .iter()
+        .filter_map(|row| row["provider"].as_str())
+        .filter(|provider| ["claude", "codex", "kimi", "dsh"].contains(provider))
+        .map(str::to_owned)
+        .collect();
+    let mut catalogs = permission_catalog::Cache::prefetch(config, &providers);
     for row in &mut rows {
         let provider = row["provider"].as_str().unwrap_or("").to_owned();
         row["is_default"] = json!(row["id"].as_str() == Some(catalog.defaults.get(&provider).map(String::as_str).unwrap_or(&format!("native-{provider}"))));
         let mode = catalog.permission_modes.get(row["id"].as_str().unwrap_or("")).map(String::as_str).unwrap_or("provider");
-        permission_status::describe(config, row, mode);
+        permission_status::describe(config, row, mode, &mut catalogs);
         row["permission_modes"] = json!(permission_modes(&provider));
         model_defaults::describe(row, &catalog);
     }
@@ -408,14 +417,31 @@ pub fn permission_modes(provider: &str) -> &'static [&'static str] {
         _ => &[],
     }
 }
-/// The native switches for a mode; empty where Zerus cannot set it at launch.
-pub fn permission_args(provider: &str, mode: &str) -> &'static [&'static str] {
-    match (provider, mode) {
-        ("claude", "auto") => &["--permission-mode", "auto"],
-        ("claude", "bypass") => &["--permission-mode", "bypassPermissions"],
-        ("codex", "bypass") => &["--dangerously-bypass-approvals-and-sandbox"],
-        ("kimi", "bypass") => &["--auto"],
-        _ => &[],
+/// Validate a requested mode before any slow discovery. Fresh native options
+/// are checked by `permission_args` at launch or by `validate_for_account` on a
+/// write.
+pub fn validate_permission_mode(provider: &str, mode: &str) -> Result<()> {
+    permission_catalog::check_mode(provider, mode)
+}
+
+/// Canonical stored form for account writes and launch binding overrides.
+pub fn normalize_permission_mode(mode: &str) -> Result<String> {
+    permission_catalog::normalize_mode(mode)
+}
+
+/// The native switches for a mode. `provider` and `bypass` are static fallbacks;
+/// a native selection is validated against freshly discovered options first.
+pub fn permission_args(provider: &str, mode: &str) -> Result<Vec<String>> {
+    match mode {
+        "provider" => Ok(Vec::new()),
+        "bypass" => Ok(permission_catalog::bypass_args(provider)),
+        "auto" if provider == "claude" => Ok(vec!["--permission-mode".into(), "auto".into()]),
+        "auto" => Err(Error::new(1, "Auto is available only for Claude accounts.")),
+        _ => {
+            let config = Config::load()?;
+            let home = native_home(&config, provider);
+            permission_catalog::args(&config, provider, mode, &home)
+        }
     }
 }
 /// Whether the agent's own arguments, before any `--`, already choose a mode.
@@ -423,20 +449,33 @@ pub fn explicit_permissions(provider: &str, argv: &[String]) -> bool {
     let at = argv.iter().position(|arg|arg=="--").unwrap_or(argv.len());
     let explicit: &[&str] = match provider {
         "claude" => &["--permission-mode", "--dangerously-skip-permissions"],
-        "codex" => &["--ask-for-approval", "-a", "--sandbox", "-s", "--full-auto", "--yolo", "--dangerously-bypass-approvals-and-sandbox"],
+        "codex" => &["--ask-for-approval", "-a", "--sandbox", "-s", "--full-auto", "--yolo", "--approve-for-me", "--dangerously-bypass-approvals-and-sandbox"],
         "kimi" => &["--auto", "--yolo", "-y", "--plan"],
         _ => &[],
     };
     argv[..at].iter().any(|v|explicit.contains(&v.split('=').next().unwrap_or("")))
 }
-/// Append native switches only to the spawned argv; saved resume recipes stay
-/// unchanged so returning to provider settings takes effect on the next start.
-pub fn apply_permissions(provider: &str, mode: &str, argv: &mut Vec<String>) {
-    let values = permission_args(provider, mode);
+/// Append already-resolved native switches only to the spawned argv; saved
+/// resume recipes stay unchanged so returning to provider settings takes effect
+/// on the next start.
+pub fn apply_permission_values(provider: &str, values: &[String], argv: &mut Vec<String>) {
     // An explicit per-launch mode takes precedence over the account default.
     if values.is_empty() || argv.is_empty() || explicit_permissions(provider, argv) { return; }
     let at = argv.iter().position(|arg|arg=="--").unwrap_or(argv.len());
-    argv.splice(at..at,values.iter().map(|v|(*v).to_owned()));
+    argv.splice(at..at, values.iter().cloned());
+}
+/// Append native switches only to the spawned argv; saved resume recipes stay
+/// unchanged so returning to provider settings takes effect on the next start.
+#[cfg(test)]
+pub fn apply_permissions(provider: &str, mode: &str, argv: &mut Vec<String>) -> Result<()> {
+    // Explicit native flags or an empty argv need no account-mode resolution;
+    // a stale or unavailable account default must not block them.
+    if argv.is_empty() || explicit_permissions(provider, argv) {
+        return Ok(());
+    }
+    let values = permission_args(provider, mode)?;
+    apply_permission_values(provider, &values, argv);
+    Ok(())
 }
 
 pub fn prepare_claude_settings() -> Result<()> {
@@ -696,14 +735,27 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             if !dry {save(config,&catalog)?;}println!("{}",list(config)?);
         },
         "permissions"=>{
-            let mode=arg(args,"--mode").ok_or_else(||Error::new(1,"Choose provider, auto or bypass permission mode."))?;
-            if !["provider","auto","bypass"].contains(&mode) {return Err(Error::new(1,"Choose provider, auto or bypass permission mode."));}
-            let _lock=locked(config)?;let bytes=read(config)?;check_revision(&bytes,args)?;let mut catalog=decode(&bytes)?;
-            if !native_id(id) && !catalog.profiles.contains_key(id) {return Err(Error::new(1,"Account profile does not exist."));}
+            let mode=arg(args,"--mode").ok_or_else(||Error::new(1,"Choose provider, bypass or a native permission selection."))?;
+            // Probe and validate outside the account lock. The lock is taken
+            // only for the revision-checked write below.
+            let bytes=read(config)?;check_revision(&bytes,args)?;let original=bytes.clone();let snapshot=decode(&bytes)?;
+            if !native_id(id) && !snapshot.profiles.contains_key(id) {return Err(Error::new(1,"Account profile does not exist."));}
             if id=="native-opencode" && mode!="provider" {return Err(Error::new(1,"OpenCode permissions are managed in its native configuration"));}
-            let provider=if native_id(id) {id.trim_start_matches("native-").to_owned()} else {catalog.profiles[id].provider.clone()};
-            if mode!="provider" && !permission_modes(&provider).contains(&mode) {return Err(Error::new(1,"Auto permission mode is available only for Claude accounts."));}
-            if mode=="provider" {catalog.permission_modes.remove(id);} else {catalog.permission_modes.insert(id.into(),mode.into());}
+            let provider=if native_id(id) {id.trim_start_matches("native-").to_owned()} else {snapshot.profiles[id].provider.clone()};
+            validate_permission_mode(&provider,mode)?;
+            let home=if native_id(id) {native_home(config,&provider)} else {profile_home(config,id)};
+            permission_catalog::validate_for_account(config,&provider,&home,mode)?;
+            let normalized=normalize_permission_mode(mode)?;
+            let _lock=locked(config)?;let bytes=read(config)?;check_revision(&bytes,args)?;
+            if bytes != original {return Err(Error::new(1,"Account catalog changed while its permission options were checked; retry."));}
+            let mut catalog=decode(&bytes)?;
+            if !native_id(id) && !catalog.profiles.contains_key(id) {return Err(Error::new(1,"Account profile does not exist."));}
+            let current_provider=if native_id(id) {id.trim_start_matches("native-").to_owned()} else {catalog.profiles[id].provider.clone()};
+            if current_provider != provider {return Err(Error::new(1,"Account changed while its permission options were checked; retry."));}
+            let current_home=if native_id(id) {native_home(config,&current_provider)} else {profile_home(config,id)};
+            if current_home != home {return Err(Error::new(1,"Account changed while its permission options were checked; retry."));}
+            if normalized=="provider" {catalog.permission_modes.remove(id);}
+            else {catalog.permission_modes.insert(id.into(),normalized);}
             if !dry {save(config,&catalog)?;}println!("{}",list(config)?);
         },
         "rename"=>{
@@ -1255,10 +1307,10 @@ mod permission_tests {
     fn account_defaults_respect_explicit_launch_mode_and_prompt_delimiter() {
         for (provider, flag) in [("claude","--permission-mode"),("codex","--sandbox"),("kimi","--yolo")] {
             let mut explicit=vec![provider.into(),format!("{flag}=explicit")];let original=explicit.clone();
-            apply_permissions(provider,"bypass",&mut explicit);assert_eq!(explicit,original);
-            let mut prompt=vec![provider.into(),"--".into(),flag.into()];apply_permissions(provider,"bypass",&mut prompt);
+            apply_permissions(provider,"bypass",&mut explicit).unwrap();assert_eq!(explicit,original);
+            let mut prompt=vec![provider.into(),"--".into(),flag.into()];apply_permissions(provider,"bypass",&mut prompt).unwrap();
             assert!(prompt.iter().position(|s|s=="--").unwrap()>1);assert_eq!(prompt.last().unwrap(),flag);
-            let saved=prompt.clone();apply_permissions(provider,"bypass",&mut prompt);assert_eq!(prompt,saved);
+            let saved=prompt.clone();apply_permissions(provider,"bypass",&mut prompt).unwrap();assert_eq!(prompt,saved);
         }
     }
     #[test]
@@ -1292,11 +1344,22 @@ mod permission_tests {
         assert_eq!(claude::project_key("/home/example/a\\b", false), "/home/example/a\\b");
     }
     #[test]
+    fn explicit_agent_flags_win_before_account_discovery() {
+        let mut argv = vec!["claude".into(), "--permission-mode".into(), "plan".into(), "--".into(), "task".into()];
+        let original = argv.clone();
+        apply_permissions("claude", "native:{\"mode\":\"not-installed\"}", &mut argv).unwrap();
+        assert_eq!(argv, original);
+        let mut empty: Vec<String> = Vec::new();
+        apply_permissions("claude", "native:{\"mode\":\"not-installed\"}", &mut empty).unwrap();
+        assert!(empty.is_empty());
+    }
+
+    #[test]
     fn auto_mode_is_claude_only() {
-        let mut claude=vec!["claude".to_owned(),"--".into(),"task".into()];apply_permissions("claude","auto",&mut claude);
+        let mut claude=vec!["claude".to_owned(),"--".into(),"task".into()];apply_permissions("claude","auto",&mut claude).unwrap();
         assert_eq!(claude,["claude","--permission-mode","auto","--","task"]);
         for provider in ["codex","kimi","dsh","opencode"] {
-            let mut argv=vec![provider.to_owned()];apply_permissions(provider,"auto",&mut argv);assert_eq!(argv,[provider]);
+            let mut argv=vec![provider.to_owned()];assert!(apply_permissions(provider,"auto",&mut argv).is_err());assert_eq!(argv,[provider]);
             assert!(!permission_modes(provider).contains(&"auto"));
         }
         assert!(permission_modes("opencode").is_empty());

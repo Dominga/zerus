@@ -100,6 +100,13 @@ pub(super) fn carry_fresh_start(previous: &Value, record: &mut Value) {
     if earlier.len() > CLEARED_CONVERSATIONS { earlier.drain(..earlier.len() - CLEARED_CONVERSATIONS); }
     if !earlier.is_empty() { record["cleared_conversations"] = json!(earlier); }
     if let Some(anchor) = previous.get("journal_name") { record["journal_name"] = anchor.clone(); }
+    // A fresh conversation keeps the session's explicit per-launch permission
+    // choice; account defaults stay dynamic because they never create this field.
+    if let Some(mode) = previous.get("permission_override")
+        .filter(|value| value.as_str().is_some_and(|mode| !mode.is_empty()))
+    {
+        record["permission_override"] = mode.clone();
+    }
 }
 
 // Earlier conversations of this session's Activity, oldest first. Only
@@ -785,11 +792,12 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         assert!(!available(&pending,true));assert!(!resumed(&pending,true));assert!(!resumed(&pending,false));
     }
     #[test] fn fresh_starts_continue_the_activity_timeline_like_a_clear() {
-        let previous=json!({"run_id":"old-run","conversation_id":"second","cleared_conversations":["first"],"journal_name":"anchor"});
+        let previous=json!({"run_id":"old-run","conversation_id":"second","cleared_conversations":["first"],"journal_name":"anchor","permission_override":"native:{\"mode\":\"acceptEdits\"}"});
         let mut record=json!({"run_id":"run","conversation_id":null});
         carry_fresh_start(&previous,&mut record);
         assert_eq!(earlier_conversations(&record),json!(["first","second"]));
         assert_eq!(record["journal_name"],"anchor");
+        assert_eq!(record["permission_override"],"native:{\"mode\":\"acceptEdits\"}");
         observe_start(&mut record,&json!({"session_id":"third","source":"startup"}));
         record["conversation_id"]=json!("third");
         assert!(record["fresh_from"].is_null());

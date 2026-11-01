@@ -1,6 +1,7 @@
 //! Official DeepSeek Harness backend. Native host lifetime is independent of
 //! Zerus, tmux, and individual sessions. HGS stores bindings, not credentials.
 use super::*;
+use crate::config::Config;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
@@ -10,7 +11,7 @@ use std::process::{Command, Stdio};
 use std::os::unix::net::UnixStream;
 use std::{
     fs::OpenOptions,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Seek},
     time::{Duration, Instant},
 };
 
@@ -27,6 +28,7 @@ fn compatible_adapter(ping: &Value) -> bool {
 }
 const BRIDGE: &str = include_str!("../dsh/bridge.mjs");
 const COMMAND_GUARD: &str = include_str!("../dsh/command-guard.mjs");
+const CONFIG_PRESETS: &str = include_str!("../dsh/config-presets.mjs");
 fn bindings() -> PathBuf {
     root().join("dsh/bindings")
 }
@@ -104,6 +106,399 @@ pub(crate) fn account_models(home: &Path) -> Value {
         Err(error) => json!({"models":[],"truncated":false,"reason":error}),
     }
 }
+/// One configured permission preset the installed harness actually offers.
+/// Only display metadata is kept; the native configuration never leaves the
+/// bounded discovery helper.
+#[derive(Clone, Debug, PartialEq)]
+struct CatalogPreset {
+    value: String,
+    label: String,
+    description: Option<String>,
+}
+
+const CATALOG_OPTIONS_LIMIT: usize = 64;
+/// Account listings ask repeatedly; discovery runs a bounded local command, so
+/// one answer serves this long. Launches validate against a fresh catalog.
+const CATALOG_CACHE_SECONDS: f64 = 15.0;
+static CATALOG_CACHE: std::sync::Mutex<Option<(String, f64, Value)>> = std::sync::Mutex::new(None);
+
+fn display_text(value: &str, limit: usize) -> String {
+    let cleaned: String = value.chars().filter(|c| !c.is_control()).collect();
+    let trimmed = cleaned.trim();
+    if trimmed.chars().count() <= limit {
+        return trimmed.to_owned();
+    }
+    let mut clipped: String = trimmed.chars().take(limit.saturating_sub(3)).collect();
+    clipped.push_str("...");
+    clipped
+}
+
+fn valid_preset_name(name: &str) -> bool {
+    // Native keys are arbitrary configured strings; the /permission command
+    // takes the whole trimmed remainder. Keep the value bounded, untrimmed
+    // edges unselectable (the native handler trims) and control-free.
+    !name.is_empty()
+        && name.len() <= 128
+        && name.trim() == name
+        && !name.chars().any(char::is_control)
+}
+
+fn valid_control_id(id: &str) -> bool {
+    if id.is_empty() || id.len() > 64 {
+        return false;
+    }
+    let mut chars = id.chars();
+    let Some(first) = chars.next() else { return false };
+    first.is_ascii_lowercase()
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+fn presets_from_options(options: &Value) -> Result<Vec<CatalogPreset>> {
+    let options = options
+        .as_array()
+        .ok_or("The DeepSeek Harness did not report permission presets")?;
+    if options.is_empty() {
+        return Err("The DeepSeek Harness reported no selectable permission presets".into());
+    }
+    if options.len() > CATALOG_OPTIONS_LIMIT {
+        return Err("The DeepSeek Harness reported too many permission presets".into());
+    }
+    let mut presets = Vec::new();
+    for option in options {
+        let name = option["value"]
+            .as_str()
+            .or_else(|| option["name"].as_str())
+            .ok_or("The DeepSeek Harness reported an invalid permission preset")?;
+        if !valid_preset_name(name) {
+            return Err("The DeepSeek Harness reported a permission preset this session cannot select".into());
+        }
+        if presets.iter().any(|preset: &CatalogPreset| preset.value == name) {
+            continue;
+        }
+        let label = option["label"].as_str().unwrap_or(name);
+        let description = option["description"].as_str().filter(|text| !text.trim().is_empty());
+        presets.push(CatalogPreset {
+            value: name.to_owned(),
+            label: display_text(label, 80),
+            description: description.map(|text| display_text(text, 240)),
+        });
+    }
+    if presets.len() > CATALOG_OPTIONS_LIMIT {
+        return Err("The DeepSeek Harness reported too many permission presets".into());
+    }
+    Ok(presets)
+}
+
+fn catalog_options(presets: &[CatalogPreset]) -> Vec<Value> {
+    presets
+        .iter()
+        .map(|preset| {
+            let mut option = json!({"value":preset.value,"label":preset.label});
+            if let Some(description) = &preset.description {
+                option["description"] = json!(description);
+            }
+            option
+        })
+        .collect()
+}
+
+fn available_catalog(
+    presets: &[CatalogPreset],
+    default: Option<String>,
+    version: Option<String>,
+    source: &str,
+) -> Value {
+    let default = default.filter(|name| presets.iter().any(|preset| &preset.value == name));
+    let mut control = json!({"id":"preset","label":"Permission preset","kind":"select","scope":"launch",
+        "options":catalog_options(presets)});
+    if let Some(name) = &default {
+        control["default"] = json!(name);
+    }
+    let mut catalog = json!({"status":"available","source":source,"session_supported":true,
+        "selected":default.as_ref().map(|name| json!({"preset":name})).unwrap_or_else(|| json!({})),
+        "controls":[control]});
+    if let Some(version) = version {
+        catalog["version"] = json!(version);
+    }
+    catalog
+}
+
+/// No native discovery: the backend keeps its Default/Bypass shortcuts, so the
+/// catalog carries no synthesized native options.
+fn unavailable_catalog(reason: &str, version: Option<String>) -> Value {
+    let mut catalog = json!({"status":"unavailable","status_reason":display_text(reason, 240),
+        "source":"dsh-profile","session_supported":true,"selected":{},"controls":[]});
+    if let Some(version) = version {
+        catalog["version"] = json!(version);
+    }
+    catalog
+}
+
+fn dsh_home(config: &Config) -> PathBuf {
+    nonempty_env("DSH_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(&config.home).join(".dsh"))
+}
+
+fn package_is_dsh(directory: &Path) -> bool {
+    fs::read_to_string(directory.join("package.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .is_some_and(|value| value["name"] == "@deepseek-ai/dsh")
+}
+
+fn package_root_from(path: &Path) -> Option<PathBuf> {
+    let mut directory = path.parent()?;
+    for _ in 0..6 {
+        if package_is_dsh(directory) {
+            return Some(directory.to_owned());
+        }
+        directory = directory.parent()?;
+    }
+    None
+}
+
+/// The installed package of the same `dsh` the host launch resolves. The
+/// account listing runs in a different shell than an agent, so never consult
+/// another PATH entry.
+fn dsh_package_root() -> Option<PathBuf> {
+    if let Ok(command) = dsh_command() {
+        if let Some(first) = command.get_args().next() {
+            let script = PathBuf::from(first.to_os_string());
+            if script.is_file() {
+                if let Some(root) = package_root_from(&script) {
+                    return Some(root);
+                }
+            }
+        }
+    }
+    let path = std::env::var_os("PATH")?;
+    for directory in std::env::split_paths(&path) {
+        let candidate = directory.join("dsh");
+        if !candidate.is_file() {
+            continue;
+        }
+        let Ok(real) = fs::canonicalize(&candidate) else { continue };
+        if let Some(root) = package_root_from(&real) {
+            return Some(root);
+        }
+    }
+    None
+}
+
+fn installed_version() -> Option<String> {
+    let root = dsh_package_root()?;
+    let value: Value = serde_json::from_slice(&fs::read(root.join("package.json")).ok()?).ok()?;
+    let version = value["version"].as_str()?;
+    (version.len() <= 64
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '-' | '_')))
+    .then(|| version.to_owned())
+}
+
+fn node_program() -> PathBuf {
+    if let Ok(command) = dsh_command() {
+        let program = command.get_program();
+        let name = Path::new(program).file_name().and_then(|name| name.to_str()).unwrap_or("");
+        if name.eq_ignore_ascii_case("node") || name.eq_ignore_ascii_case("node.exe") {
+            return PathBuf::from(program.to_os_string());
+        }
+    }
+    PathBuf::from("node")
+}
+
+/// One bounded native helper process through the maintained runner: private
+/// bounded input, a hard deadline and the child's whole process group. No
+/// reader thread or unbounded wait outlives the call.
+fn bounded_output(
+    mut command: Command,
+    input: Option<&[u8]>,
+    limit: usize,
+    timeout: Duration,
+) -> Result<(bool, Vec<u8>)> {
+    let input = match input {
+        Some(bytes) => {
+            // A regular file already holding the request: a helper that never
+            // reads stdin cannot block this process the way a pipe writer would.
+            let mut file = tempfile::tempfile().map_err(|e| e.to_string())?;
+            file.write_all(bytes).map_err(|e| e.to_string())?;
+            file.seek(std::io::SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+            Stdio::from(file)
+        }
+        None => Stdio::null(),
+    };
+    let deadline = Instant::now() + timeout;
+    let (status, stdout, _stderr) = crate::platform::run_bounded_stdin(
+        &mut command,
+        input,
+        [limit, 16 * 1024],
+        deadline,
+        &|| false,
+    )
+    .map_err(|error| match error {
+        crate::platform::RunError::TooLarge => {
+            "Native permission discovery returned too much data".to_owned()
+        }
+        crate::platform::RunError::Stopped => "Native permission discovery timed out".to_owned(),
+        crate::platform::RunError::Spawn(error) => {
+            format!("Native permission discovery could not start: {error}")
+        }
+        _ => "Native permission discovery failed".to_owned(),
+    })?;
+    Ok((status.success(), stdout))
+}
+
+fn node_json(script: &str, request: &Value, timeout: Duration, limit: usize) -> Result<Value> {
+    let mut command = Command::new(node_program());
+    command.args(["--input-type=module", "-e", script]);
+    let input = request.to_string();
+    let (_, output) = bounded_output(command, Some(input.as_bytes()), limit, timeout)?;
+    let value: Value = serde_json::from_slice(&output)
+        .map_err(|_| "Native permission helper returned an invalid answer".to_owned())?;
+    if value["ok"] == true {
+        return Ok(value);
+    }
+    let reason = string(&value, "reason");
+    Err(if reason.is_empty() { "unknown".to_owned() } else { reason.to_owned() })
+}
+
+fn composed_config_dump(home_dir: &Path) -> Result<Vec<u8>> {
+    // The first host launch composes the hgs profile from the shipped web
+    // profile (--from-default-profile). Before that profile exists, discover
+    // the same shipped table instead of reporting a missing profile.
+    let profile = if home_dir.join("profiles/hgs/package.json").is_file() {
+        "hgs"
+    } else {
+        "web"
+    };
+    let mut command = dsh_command()
+        .map_err(|_| "Install the official DeepSeek Harness to read its permission presets".to_owned())?;
+    command
+        .args(["--profile", profile, "--dump-config"])
+        .env("DSH_HOME", home_dir)
+        .current_dir(home())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let (success, output) = bounded_output(command, None, 256 * 1024, Duration::from_secs(3))?;
+    if !success {
+        return Err("The DeepSeek Harness could not report its configured permission presets".into());
+    }
+    Ok(output)
+}
+
+/// The composed profile's configured presets. `--dump-config` exits without
+/// starting a host or creating a session; only the preset row is parsed.
+fn composed_presets(config: &Config) -> Result<(Vec<CatalogPreset>, Option<String>)> {
+    let home_dir = dsh_home(config);
+    let root = dsh_package_root();
+    let dump = composed_config_dump(&home_dir)?;
+    let text = String::from_utf8(dump)
+        .map_err(|_| "The DeepSeek Harness reported unreadable permission presets".to_owned())?;
+    let mut request = json!({"dump":text});
+    if let Some(root) = root.as_deref() {
+        request["packageRoot"] = json!(root.to_string_lossy().into_owned());
+    }
+    let value = node_json(CONFIG_PRESETS, &request, Duration::from_secs(2), 64 * 1024)?;
+    let presets = presets_from_options(&value["presets"])?;
+    let default = value["default"].as_str().map(str::to_owned);
+    Ok((presets, default))
+}
+
+fn permissions_compat_json(
+    url: &str,
+    session: Option<&str>,
+    operation: &str,
+    preset: Option<&str>,
+    pending: bool,
+    explicit: bool,
+) -> Result<Value> {
+    let script = concat!(
+        include_str!("../dsh/account-client.mjs"),
+        "\n",
+        include_str!("../dsh/permissions-compat.mjs")
+    );
+    let mut request = json!({"url":url,"operation":operation,"pending":pending,"explicit":explicit});
+    if let Some(session) = session {
+        request["sessionId"] = json!(session);
+    }
+    if let Some(preset) = preset {
+        request["preset"] = json!(preset);
+    }
+    node_json(script, &request, Duration::from_secs(30), 64 * 1024)
+}
+
+/// The running host's authenticated catalog, read through its own launch
+/// token. Never starts a host; an absent host fails and the caller falls back.
+fn runtime_presets(record: &Value) -> Result<(Vec<CatalogPreset>, Option<String>)> {
+    let home_dir = Path::new(string(record, "agent_home"));
+    let url = account_ui_url(home_dir)?;
+    let value = permissions_compat_json(&url, None, "catalog", None, false, false)?;
+    let presets = presets_from_options(&value["options"])?;
+    let default = value["default"].as_str().map(str::to_owned);
+    Ok((presets, default))
+}
+
+/// Fresh validation before a launch: the running host's actual catalog first,
+/// the composed profile when the host cannot answer yet.
+fn fresh_presets(record: &Value) -> Result<Vec<CatalogPreset>> {
+    if let Ok((presets, _)) = runtime_presets(record) {
+        return Ok(presets);
+    }
+    let config = Config::load().map_err(|e| e.message)?;
+    composed_presets(&config).map(|(presets, _)| presets)
+}
+
+fn permission_apply_error(reason: &str, preset: bool) -> String {
+    if preset {
+        match reason {
+            "preset" => "The selected permission preset is no longer offered by DeepSeek; choose another preset before resuming.".into(),
+            "busy" => "This DeepSeek session is already running; its permission preset applies at its next start or explicit resume. Stop it first.".into(),
+            "state" => "The DeepSeek session is not running yet; resume it to apply the permission preset.".into(),
+            "command" => "The running DeepSeek host does not expose its permission command; use Native UI or resume after its next ordinary start.".into(),
+            _ => "DeepSeek did not confirm the permission preset. Resume this session to finish setup; no message was sent.".into(),
+        }
+    } else {
+        match reason {
+            "preset" => "The running DeepSeek host does not offer the full-access preset that Bypass uses; choose Default or a native preset.".into(),
+            "busy" => "This DeepSeek session is already running; its permission mode applies at its next start or explicit resume. Stop it first.".into(),
+            "state" => "The DeepSeek session is not running yet; resume it to finish permission setup.".into(),
+            _ => "DeepSeek did not confirm bypass permissions. Resume this session to finish setup; no message was sent.".into(),
+        }
+    }
+}
+
+/// The account row's sanitized permission catalog. Discovery reads the same
+/// resolved harness release the host launch uses, never starts a host, starts
+/// no session and runs no shell in an agent's environment.
+pub(crate) fn permission_catalog(config: &Config) -> Result<Value> {
+    let key = dsh_home(config).display().to_string();
+    if let Ok(cache) = CATALOG_CACHE.lock() {
+        if let Some((cached, at, value)) = cache.as_ref() {
+            if cached == &key && now() - *at < CATALOG_CACHE_SECONDS {
+                return Ok(value.clone());
+            }
+        }
+    }
+    let version = installed_version();
+    let value = match composed_presets(config) {
+        Ok((presets, default)) => available_catalog(&presets, default, version, "dsh-profile"),
+        Err(_) => {
+            let reason = if dsh_command().is_err() {
+                "Install the official DeepSeek Harness to read its permission presets."
+            } else {
+                "Could not read the configured permission presets from the installed DeepSeek Harness."
+            };
+            unavailable_catalog(reason, version)
+        }
+    };
+    if let Ok(mut cache) = CATALOG_CACHE.lock() {
+        *cache = Some((key, now(), value.clone()));
+    }
+    Ok(value)
+}
+
 /// H3: the host serving a member's dsh session: its pid and when it started
 /// (the pid file's time), for team status. Read only.
 pub(crate) fn host_of(name: &str) -> Option<Value> {
@@ -487,83 +882,266 @@ pub(crate) fn native_ui_url(name: &str) -> Result<String> {    let record = if n
     Ok(url)
 }
 
+#[derive(Clone, Debug, PartialEq)]
+enum PermissionSelection {
+    Provider,
+    Bypass,
+    Preset(String),
+}
+
+impl PermissionSelection {
+    fn legacy_mode(&self) -> &'static str {
+        match self {
+            Self::Bypass => "bypass",
+            _ => "provider",
+        }
+    }
+
+    fn preset(&self) -> Option<&str> {
+        match self {
+            Self::Preset(name) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Stored record form: the common native selection map (canonical compact
+    /// JSON) or one of the preserved shortcuts.
+    fn canonical(&self) -> String {
+        match self {
+            Self::Provider => "provider".into(),
+            Self::Bypass => "bypass".into(),
+            Self::Preset(name) => format!(
+                "native:{{\"preset\":{}}}",
+                serde_json::to_string(name).unwrap_or_else(|_| "\"\"".into())
+            ),
+        }
+    }
+}
+
+fn decode_permission_selection(raw: &str) -> Result<PermissionSelection> {
+    let value = raw;
+    match value {
+        "" | "provider" => return Ok(PermissionSelection::Provider),
+        "bypass" => return Ok(PermissionSelection::Bypass),
+        "auto" => {
+            return Err("Auto permission mode is not available for DeepSeek sessions; choose Default, Bypass or a native preset".into())
+        }
+        _ => {}
+    }
+    if let Some(rest) = value.strip_prefix("native:") {
+        if rest.len() > 1024 {
+            return Err("The native permission selection is too large".into());
+        }
+        let map: Value = serde_json::from_str(rest)
+            .map_err(|_| "The native permission selection is not valid JSON".to_owned())?;
+        let object = map
+            .as_object()
+            .ok_or("The native permission selection must be a JSON object")?;
+        let mut preset = None;
+        for (control, selected) in object {
+            if !valid_control_id(control) {
+                return Err("The native permission selection has an invalid control ID".into());
+            }
+            if control != "preset" {
+                return Err(format!(
+                    "The native permission selection uses an unsupported control \"{control}\""
+                ));
+            }
+            let name = selected
+                .as_str()
+                .ok_or("The native permission preset must be a string")?;
+            if name.len() > 128 || name.trim() != name || name.chars().any(char::is_control) {
+                return Err("The native permission preset is invalid".into());
+            }
+            preset = Some(name.to_owned());
+        }
+        return Ok(match preset.filter(|name| !name.is_empty()) {
+            Some(name) => PermissionSelection::Preset(name),
+            None => PermissionSelection::Provider,
+        });
+    }
+    // A caller may pass a decoded control value; a bare key is accepted only
+    // when it still looks like a preset, and the fresh catalog confirms it.
+    if valid_preset_name(value) {
+        return Ok(PermissionSelection::Preset(value.to_owned()));
+    }
+    Err("Choose Default, Bypass or a native DeepSeek permission preset".into())
+}
+
+fn effective_selection(record: &Value, config: &Config) -> Result<PermissionSelection> {
+    if let Some(override_value) = record["permission_override"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        return decode_permission_selection(override_value);
+    }
+    let mode = crate::accounts::permission_mode(config, "native-dsh", "dsh").map_err(|e| e.message)?;
+    decode_permission_selection(&mode)
+}
+
 struct PermissionPlan {
     mode: String,
+    preset: Option<String>,
+    native_preset: bool,
     legacy_url: Option<String>,
     needs_setup: bool,
     generation: Value,
 }
 
-fn legacy_permissions(record: &Value, url: &str, operation: &str) -> Result<Value> {
-    let mut child = crate::platform::spawn(
-        Command::new("node")
-            .args([
-                "--input-type=module",
-                "-e",
-                concat!(
-                    include_str!("../dsh/account-client.mjs"),
-                    "\n",
-                    include_str!("../dsh/permissions-compat.mjs")
-                ),
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null()),
-    )
-    .map_err(|e| e.to_string())?;
-    child.stdin.take().ok_or("Could not prepare native permissions")?
-        .write_all(json!({"url":url,"sessionId":record["conversation_id"],"operation":operation,
-            "pending":record["permissions_pending"] == true}).to_string().as_bytes())
-        .map_err(|e| e.to_string())?;
-    let output = child.wait_with_output().map_err(|e| e.to_string())?;
-    let result: Value = serde_json::from_slice(&output.stdout).unwrap_or(Value::Null);
-    if !output.status.success() || result["ok"] != true {
-        return Err(if operation == "check" {
-            "Could not verify bypass permissions on the running DeepSeek host. Check its Native UI; no new session was created."
-        } else {
-            "DeepSeek did not confirm bypass permissions. Resume this session to finish setup; no message was sent."
-        }.into());
-    }
-    Ok(result)
-}
-
 // Extend legacy residents through their authenticated native API, without
 // reloading their bridge (which would dispose its owned live agents).
 fn permission_plan(record: &Value) -> Result<PermissionPlan> {
-    let config = crate::config::Config::load().map_err(|e|e.message)?;
-    let mode = crate::accounts::permission_mode(&config,"native-dsh","dsh").map_err(|e|e.message)?;
+    let config = crate::config::Config::load().map_err(|e| e.message)?;
+    let selection = effective_selection(record, &config)?;
     let ping = rpc(record, "ping", json!({}))?;
-    let mut plan = PermissionPlan { mode, legacy_url: None, needs_setup: false, generation: ping["generation"].clone() };
-    if plan.mode == "bypass" && (ping["accountPermissions"] != true || record["permissions_pending"] == true) {
-        let url = account_ui_url(Path::new(string(record, "agent_home")))?;
-        let checked = legacy_permissions(record, &url, "check")?;
-        plan.needs_setup = checked["needs_setup"].as_bool().ok_or("Invalid native permissions response")?;
-        plan.legacy_url = Some(url);
+    let mut plan = PermissionPlan {
+        mode: selection.legacy_mode().to_owned(),
+        preset: selection.preset().map(str::to_owned),
+        native_preset: supports(&ping, "permission-preset"),
+        legacy_url: None,
+        needs_setup: false,
+        generation: ping["generation"].clone(),
+    };
+    match &selection {
+        PermissionSelection::Provider => {}
+        PermissionSelection::Bypass => {
+            if ping["accountPermissions"] != true || record["permissions_pending"] == true {
+                let url = account_ui_url(Path::new(string(record, "agent_home")))?;
+                let checked = permissions_compat_json(
+                    &url,
+                    Some(string(record, "conversation_id")),
+                    "check",
+                    None,
+                    record["permissions_pending"] == true,
+                    false,
+                )
+                .map_err(|reason| permission_apply_error(&reason, false))?;
+                plan.needs_setup = checked["needs_setup"]
+                    .as_bool()
+                    .ok_or("Invalid native permissions response")?;
+                plan.legacy_url = Some(url);
+            }
+        }
+        PermissionSelection::Preset(name) => {
+            // Fresh actual catalog: the running host first, then its composed
+            // profile. A withdrawn preset fails explicitly; never a fallback.
+            let presets = fresh_presets(record).map_err(|_| {
+                format!("Could not verify the permission preset \"{name}\" against the running DeepSeek host; choose Default or Bypass")
+            })?;
+            if !presets.iter().any(|preset| &preset.value == name) {
+                return Err(format!(
+                    "The permission preset \"{name}\" is no longer offered by the DeepSeek host; choose another preset before launching"
+                ));
+            }
+            plan.needs_setup = true;
+            if !plan.native_preset {
+                plan.legacy_url = Some(account_ui_url(Path::new(string(record, "agent_home")))?);
+            }
+        }
     }
     Ok(plan)
 }
 
-fn create_session(record: &mut Value) -> Result<()> {
+fn create_session(record: &mut Value, explicit: bool) -> Result<()> {
     // Deterministic capability/account checks precede persistence; identities
     // still precede native creation so an uncertain reply cannot duplicate it.
     let plan = permission_plan(record)?;
     if rpc(record, "ping", json!({}))?["generation"] != plan.generation {
         return Err("DeepSeek host changed before session creation; retry opening the session".into());
     }
-    if plan.needs_setup { record["permissions_pending"] = json!(true); }
+    let was_pending = record["permissions_pending"] == true;
+    if plan.needs_setup {
+        record["permissions_pending"] = json!(true);
+    }
     save(record)?;
-    rpc(record, "create", json!({"sessionId":record["conversation_id"],"cwd":record["cwd"],
-        "title":string(record,"name").rsplit('/').next(),"permissionMode":plan.mode}))?;
-    if let Some(url) = plan.legacy_url.filter(|_| plan.needs_setup) {
-        if rpc(record, "ping", json!({}))?["generation"] != plan.generation {
-            return Err("DeepSeek host changed before permission setup; resume the session".into());
-        }
-        legacy_permissions(record, &url, "apply")?;
-        if rpc(record, "ping", json!({}))?["generation"] != plan.generation {
-            return Err("DeepSeek host changed during permission setup; resume the session".into());
+    let mut params = json!({"sessionId":record["conversation_id"],"cwd":record["cwd"],
+        "title":string(record,"name").rsplit('/').next(),"permissionMode":plan.mode});
+    if plan.native_preset {
+        if let Some(preset) = &plan.preset {
+            params["permissionPreset"] = json!(preset);
+            // Only an explicit pending-recovery launch may touch a live agent.
+            if was_pending {
+                params["permissionRecovery"] = json!(true);
+            }
+            if explicit {
+                params["permissionExplicit"] = json!(true);
+            }
         }
     }
-    record.as_object_mut().ok_or("Invalid DeepSeek binding")?.remove("permissions_pending");
+    let answer = rpc(record, "create", params)?;
+    if plan.native_preset && plan.preset.is_some() && answer["presetApplied"] != true {
+        if was_pending {
+            return Err("DeepSeek is already running but did not confirm the permission preset; resume to finish setup".into());
+        }
+        // The agent was already live and this was an ordinary ensure, not a
+        // pending initial-setup recovery. Clear the mark this create added;
+        // only an explicit request is an error, an implicit account default
+        // leaves the live native choice untouched.
+        if let Some(object) = record.as_object_mut() {
+            object.remove("permissions_pending");
+        }
+        save(record)?;
+        if explicit {
+            return Err("This DeepSeek session is already running; its permission preset applies at its next start or explicit resume. Stop it first.".into());
+        }
+    }
+    if !plan.native_preset {
+        if let Some(preset) = plan.preset.as_deref() {
+            let url = plan.legacy_url.as_deref().ok_or(
+                "Could not verify native permissions on the running DeepSeek host; retry opening the session",
+            )?;
+            if rpc(record, "ping", json!({}))?["generation"] != plan.generation {
+                return Err("DeepSeek host changed before permission setup; resume the session".into());
+            }
+            if let Err(reason) = permissions_compat_json(
+                url,
+                Some(string(record, "conversation_id")),
+                "apply-preset",
+                Some(preset),
+                was_pending,
+                explicit,
+            ) {
+                if reason == "busy" && !was_pending {
+                    if let Some(object) = record.as_object_mut() {
+                        object.remove("permissions_pending");
+                    }
+                    save(record)?;
+                    if explicit {
+                        return Err("This DeepSeek session is already running; its permission preset applies at its next start or explicit resume. Stop it first.".into());
+                    }
+                } else {
+                    return Err(permission_apply_error(&reason, true));
+                }
+            }
+            if rpc(record, "ping", json!({}))?["generation"] != plan.generation {
+                return Err("DeepSeek host changed during permission setup; resume the session".into());
+            }
+        } else if let Some(url) = plan
+            .legacy_url
+            .as_deref()
+            .filter(|_| plan.needs_setup && plan.mode == "bypass")
+        {
+            if rpc(record, "ping", json!({}))?["generation"] != plan.generation {
+                return Err("DeepSeek host changed before permission setup; resume the session".into());
+            }
+            permissions_compat_json(
+                url,
+                Some(string(record, "conversation_id")),
+                "apply",
+                None,
+                true,
+                explicit,
+            )
+            .map_err(|reason| permission_apply_error(&reason, false))?;
+            if rpc(record, "ping", json!({}))?["generation"] != plan.generation {
+                return Err("DeepSeek host changed during permission setup; resume the session".into());
+            }
+        }
+    }
+    record
+        .as_object_mut()
+        .ok_or("Invalid DeepSeek binding")?
+        .remove("permissions_pending");
     save(record)
 }
 
@@ -585,16 +1163,38 @@ fn ensure_sandbox_folder(_: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn launch(
+/// A per-launch permission selection. `permissions` accepts the preserved
+/// shortcuts (`provider`, `bypass`), a legacy `auto` (rejected for DeepSeek) or
+/// a `native:` control map. `None` keeps a binding's own override and otherwise
+/// falls back to the account default.
+pub(crate) fn launch_with_permissions(
     name: &str,
     cwd: &str,
     launch_id: Option<&str>,
+    permissions: Option<&str>,
     dry: bool,
     new_only: bool,
 ) -> Result<()> {
+    let selection = permissions.map(decode_permission_selection).transpose()?;
+    let override_value = selection.as_ref().map(PermissionSelection::canonical);
     if dry {
         println!("Create official dsh session {name} in {cwd}");
         return Ok(());
+    }
+    // Verify a native preset against the installed harness before creating a
+    // binding or starting a host. If discovery is unavailable here, the fresh
+    // running-host check in create_session still decides; Provider and Bypass
+    // never probe, so their fallback keeps working without discovery.
+    if let Some(PermissionSelection::Preset(preset)) = &selection {
+        if let Ok(config) = Config::load() {
+            if let Ok((presets, _)) = composed_presets(&config) {
+                if !presets.iter().any(|option| &option.value == preset) {
+                    return Err(format!(
+                        "The permission preset \"{preset}\" is not offered by the installed DeepSeek Harness; choose another preset"
+                    ));
+                }
+            }
+        }
     }
     let _guard = lock(Some(&root().join("dsh/bindings.lock")))?;
     if exists(name) {
@@ -602,9 +1202,12 @@ pub(crate) fn launch(
             return Err("This DeepSeek session name already exists".into());
         }
         let mut record = binding(name)?;
+        if let Some(value) = &override_value {
+            record["permission_override"] = json!(value);
+        }
         let block_stale = ensure_host(&record)?;
         mark_upload_may_be_active(&mut record, block_stale);
-        create_session(&mut record)?;
+        create_session(&mut record, permissions.is_some())?;
         record["paused"] = json!(false);
         record["run_id"] = json!(uuid::Uuid::new_v4().to_string());
         // U22/N8: the verification reads records written after this launch,
@@ -618,9 +1221,12 @@ pub(crate) fn launch(
     let mut record = json!({"backend":"dsh","name":name,"agent":"dsh","agent_home":native_home(),"cwd":cwd,
         "conversation_id":format!("session-{}",uuid::Uuid::new_v4()),"run_id":uuid::Uuid::new_v4().to_string(),
         "created":now(),"launch_id":launch_id,"paused":false});
+    if let Some(value) = &override_value {
+        record["permission_override"] = json!(value);
+    }
     let block_stale = ensure_host(&record)?;
     mark_upload_may_be_active(&mut record, block_stale);
-    create_session(&mut record)?;
+    create_session(&mut record, permissions.is_some())?;
     // U22/N8: a new session's store appears with this launch; remember where it
     // is and count only what comes after it.
     mark_upload_start(&mut record);
@@ -629,6 +1235,17 @@ pub(crate) fn launch(
         crate::swarm::infer_new_session(&config, name, &cwd);
     }
     Ok(())
+}
+
+#[allow(dead_code)] // Kept for callers on the previous launch signature.
+pub(crate) fn launch(
+    name: &str,
+    cwd: &str,
+    launch_id: Option<&str>,
+    dry: bool,
+    new_only: bool,
+) -> Result<()> {
+    launch_with_permissions(name, cwd, launch_id, None, dry, new_only)
 }
 
 /// U22: how often an unmarked session's own records are read again.
@@ -1264,9 +1881,15 @@ pub(super) fn fork(
         return Err("DeepSeek fork acknowledgement did not match; check Native UI".into());
     }
     let run = uuid::Uuid::new_v4().to_string();
-    save(&json!({"backend":"dsh","name":target,"agent":"dsh","agent_home":record["agent_home"],"cwd":record["cwd"],
+    let mut forked = json!({"backend":"dsh","name":target,"agent":"dsh","agent_home":record["agent_home"],"cwd":record["cwd"],
         "conversation_id":child,"run_id":run,"created":now(),"launch_id":null,"paused":false,
-        "fork_parent_id":record["conversation_id"],"fork_source_name":name}))?;
+        "fork_parent_id":record["conversation_id"],"fork_source_name":name});
+    // The native fork keeps the source's permission state; carry the explicit
+    // launch override so a later resume does not silently replace it.
+    if let Some(value) = record.get("permission_override") {
+        forked["permission_override"] = value.clone();
+    }
+    save(&forked)?;
     let _ = fs::remove_file(&pending);
     match scope {
         Some(scope) => scope.result(&target, &run, child, None),
@@ -1638,17 +2261,68 @@ pub(super) fn session_action(name: &str, action: &str, new_name: Option<&str>, s
     if ping["generation"]!=inspected["generation"] || !inspected["lifecycleActions"].as_array().is_some_and(|values|values.iter().any(|value|value==action)) {
         return Err("This action is unavailable for the exact native DeepSeek handle".into());
     }
-    let mode=crate::accounts::permission_mode(&crate::config::Config::load().map_err(|e|e.message)?,"native-dsh","dsh").map_err(|e|e.message)?;
+    // A resume applies the binding's explicit override before its account
+    // default; a fresh native preset is validated against the running host.
+    let resume_selection = if action == "resume" {
+        let config = crate::config::Config::load().map_err(|e| e.message)?;
+        Some(effective_selection(&record, &config)?)
+    } else {
+        None
+    };
+    if let Some(PermissionSelection::Preset(preset)) = &resume_selection {
+        let presets = fresh_presets(&record).map_err(|_| {
+            format!("Could not verify the permission preset \"{preset}\" against the running DeepSeek host; choose Default or Bypass")
+        })?;
+        if !presets.iter().any(|option| &option.value == preset) {
+            return Err(format!("The permission preset \"{preset}\" is no longer offered by the DeepSeek host; choose another preset before resuming"));
+        }
+    }
+    let native_preset = supports(&ping, "permission-preset");
+    let mode = resume_selection.as_ref().map(PermissionSelection::legacy_mode).unwrap_or("provider");
+    let mut params = json!({"sessionId":record["conversation_id"],"generation":inspected["generation"],
+        "action":action,"title":new_name.map(|name|name.rsplit('/').next().unwrap()),"permissionMode":mode});
+    if let Some(PermissionSelection::Preset(preset)) = &resume_selection {
+        if native_preset { params["permissionPreset"] = json!(preset); }
+    }
+    let was_pending = record["permissions_pending"] == true;
     scope.changing();
-    let answer=rpc(&record,"session-action",json!({"sessionId":record["conversation_id"],"generation":inspected["generation"],
-        "action":action,"title":new_name.map(|name|name.rsplit('/').next().unwrap()),"permissionMode":mode}))?;
+    let answer=rpc(&record,"session-action",params)?;
     if answer["sessionId"]!=record["conversation_id"] || answer["action"]!=action {return Err("DeepSeek lifecycle acknowledgement did not match".into());}
     if answer["generation"]!=inspected["generation"] {return Err("DeepSeek host changed during lifecycle handoff".into());}
     if answer["status"]=="failed" {scope.unchanged();return Err(string(&answer,"error").into());}
-    if answer["status"]!="completed" {return Err("DeepSeek lifecycle handoff was not confirmed".into());}
+    if answer["status"]!="completed" {
+        // A preset handoff that may have changed the native handle stays
+        // pending, so the next explicit launch/resume verifies and finishes it.
+        if answer["status"]=="uncertain"
+            && matches!(resume_selection.as_ref(), Some(PermissionSelection::Preset(_))) {
+            record["permissions_pending"]=json!(true);
+            save(&record)?;
+        }
+        return Err("DeepSeek lifecycle handoff was not confirmed".into());
+    }
     match action {
         "pause"=>record["paused"]=json!(true),
-        "resume"=>{record["paused"]=json!(false);record["run_id"]=json!(uuid::Uuid::new_v4().to_string());record.as_object_mut().unwrap().remove("permissions_pending");},
+        "resume"=>{
+            record["paused"]=json!(false);
+            record["run_id"]=json!(uuid::Uuid::new_v4().to_string());
+            record.as_object_mut().unwrap().remove("permissions_pending");
+            // An older resident cannot take the preset in its resume call;
+            // finish the explicit resume through its authenticated API. The
+            // durable intent is saved first so an uncertain answer is retried
+            // by the next explicit resume, never blindly replayed.
+            if let Some(PermissionSelection::Preset(preset)) = &resume_selection {
+                if !native_preset {
+                    record["permissions_pending"]=json!(true);
+                    save(&record)?;
+                    let url=account_ui_url(Path::new(string(&record,"agent_home")))?;
+                    if let Err(reason)=permissions_compat_json(&url,Some(string(&record,"conversation_id")),
+                        "apply-preset",Some(preset.as_str()),was_pending,true) {
+                        return Err(permission_apply_error(&reason,true));
+                    }
+                    record.as_object_mut().unwrap().remove("permissions_pending");
+                }
+            }
+        },
         "rename"=>{notifications::anchor(&mut record);record["name"]=json!(new_name.unwrap());recovery::rename_job(name,new_name.unwrap(),string(&record,"run_id"))?;},
         "forget"=>{archive::remove_synced(&binding_path(name))?;return Ok(());},
         _=>unreachable!(),
@@ -1897,7 +2571,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                 mark_upload_may_be_active(&mut record, block_stale);
             }
             if command == "resume" {
-                create_session(&mut record)?;
+                create_session(&mut record, false)?;
                 // N17/U22/N8: a resume is verified from the records written
                 // after it, starting at the store's length at it.
                 mark_upload_start(&mut record);
@@ -2132,6 +2806,550 @@ mod windows_tests {
         let value: Value = serde_json::from_str(&response).unwrap();
         assert_eq!(value["value"]["method"], "ping");
         assert!(node.0.wait().unwrap().success());
+    }
+}
+
+#[cfg(test)]
+mod permission_catalog_tests {
+    use super::*;
+
+    #[test]
+    fn permission_selections_decode_and_canonicalize() {
+        assert_eq!(decode_permission_selection("").unwrap(), PermissionSelection::Provider);
+        assert_eq!(decode_permission_selection("provider").unwrap(), PermissionSelection::Provider);
+        assert_eq!(decode_permission_selection("bypass").unwrap(), PermissionSelection::Bypass);
+        assert!(decode_permission_selection("auto").is_err());
+        assert_eq!(decode_permission_selection("native:{}").unwrap(), PermissionSelection::Provider);
+        assert_eq!(decode_permission_selection("native:{\"preset\":\"\"}").unwrap(), PermissionSelection::Provider);
+        assert_eq!(
+            decode_permission_selection("native:{\"preset\":\"Review workspace\"}").unwrap(),
+            PermissionSelection::Preset("Review workspace".into())
+        );
+        assert_eq!(
+            decode_permission_selection("workspace-write").unwrap(),
+            PermissionSelection::Preset("workspace-write".into())
+        );
+        assert_eq!(
+            PermissionSelection::Preset("Review workspace".into()).canonical(),
+            "native:{\"preset\":\"Review workspace\"}"
+        );
+        for bad in [
+            "native:[]",
+            "native:{\"other\":\"x\"}",
+            "native:{\"preset\":1}",
+            "native:{\"preset\":\" Review\"}",
+            "native:not-json",
+            "two words\n",
+        ] {
+            assert!(decode_permission_selection(bad).is_err(), "{bad:?}");
+        }
+        let oversized = format!("native:{{\"preset\":\"{}\"}}", "x".repeat(1025));
+        assert!(decode_permission_selection(&oversized).is_err());
+    }
+
+    #[test]
+    fn custom_native_preset_names_are_preserved_as_raw_option_values() {
+        let options = json!([
+            {"value":"read-only","name":"Read only"},
+            {"value":"Review workspace","name":"Review workspace","description":"Ask before writing"},
+            {"value":"Проверка (strict)!","name":"Проверка"}
+        ]);
+        let presets = presets_from_options(&options).unwrap();
+        assert_eq!(presets[1].value, "Review workspace");
+        assert_eq!(presets[2].value, "Проверка (strict)!");
+        let catalog = available_catalog(
+            &presets,
+            Some("Review workspace".into()),
+            Some("0.2.1-rc.2".into()),
+            "dsh-profile",
+        );
+        assert_eq!(catalog["controls"][0]["id"], "preset");
+        assert_eq!(catalog["controls"][0]["options"][1]["value"], "Review workspace");
+        assert_eq!(catalog["controls"][0]["default"], "Review workspace");
+        assert_eq!(catalog["selected"], json!({"preset":"Review workspace"}));
+        assert_eq!(catalog["session_supported"], true);
+        // Provider and Bypass stay separate shortcuts, never native options.
+        assert!(!catalog["controls"][0]["options"].as_array().unwrap().iter()
+            .any(|option| option["value"] == "provider" || option["value"] == "bypass"));
+    }
+
+    #[test]
+    fn unavailable_catalog_synthesizes_no_native_options() {
+        let catalog = unavailable_catalog("The DeepSeek host did not answer", None);
+        assert_eq!(catalog["status"], "unavailable");
+        assert_eq!(catalog["controls"], json!([]));
+        assert_eq!(catalog["selected"], json!({}));
+        assert!(catalog["status_reason"].as_str().unwrap().contains("DeepSeek"));
+    }
+
+    #[test]
+    fn preset_values_are_bounded_and_trimmed() {
+        for value in ["", " leading", "trailing ", "line\nbreak", &"x".repeat(129)] {
+            assert!(!valid_preset_name(value), "{value:?}");
+        }
+        assert!(valid_preset_name("Review workspace"));
+        assert!(valid_preset_name("Проверка (strict)!"));
+        assert!(valid_preset_name("a.b_c-d"));
+    }
+
+    #[test]
+    fn too_many_presets_are_an_explicit_error_not_a_truncation() {
+        let options = json!((0..65).map(|index| json!({"value":format!("preset-{index}")})).collect::<Vec<_>>());
+        assert!(presets_from_options(&options).is_err());
+    }
+
+    #[test]
+    fn display_metadata_is_bounded_without_dropping_choices() {
+        assert_eq!(display_text(" short ", 20), "short");
+        assert_eq!(display_text("one\ntwo", 20), "onetwo");
+        let clipped = display_text(&"x".repeat(20), 10);
+        assert_eq!(clipped.chars().count(), 10);
+        assert!(clipped.ends_with("..."));
+    }
+}
+
+#[cfg(test)]
+mod permissions_compat_tests {
+    use super::*;
+    use std::io::{BufRead, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    const TEST_SESSION: &str = "session-00000000-0000-4000-8000-000000000000";
+
+    #[derive(Clone)]
+    struct CompatState {
+        catalog: Vec<(String, String)>,
+        current: String,
+        running: bool,
+        available: bool,
+        list_calls: usize,
+        projection_calls: usize,
+        execute_calls: usize,
+        executed: Vec<String>,
+    }
+
+    impl Default for CompatState {
+        fn default() -> Self {
+            Self {
+                catalog: vec![("danger-full-access".into(), "Full access".into())],
+                current: "workspace-write".into(),
+                running: false,
+                available: true,
+                list_calls: 0,
+                projection_calls: 0,
+                execute_calls: 0,
+                executed: Vec::new(),
+            }
+        }
+    }
+
+    fn node_available() -> bool {
+        Command::new("node").arg("--version").output().is_ok()
+    }
+
+    fn write_compat_response(
+        socket: &mut TcpStream,
+        status: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) {
+        let mut response = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n",
+            body.len()
+        );
+        for (name, value) in headers {
+            response.push_str(&format!("{name}: {value}\r\n"));
+        }
+        response.push_str("\r\n");
+        response.push_str(body);
+        let _ = socket.write_all(response.as_bytes());
+        let _ = socket.flush();
+    }
+
+    fn handle_compat_request(socket: &mut TcpStream, state: &Arc<Mutex<CompatState>>) {
+        let Ok(clone) = socket.try_clone() else { return };
+        let mut reader = BufReader::new(clone);
+        let mut request_line = String::new();
+        if reader.read_line(&mut request_line).is_err() {
+            return;
+        }
+        let mut content_length = 0usize;
+        loop {
+            let mut header = String::new();
+            if reader.read_line(&mut header).is_err() {
+                return;
+            }
+            if header == "\r\n" || header == "\n" || header.is_empty() {
+                break;
+            }
+            let lower = header.to_ascii_lowercase();
+            if let Some(value) = lower.strip_prefix("content-length:") {
+                content_length = value.trim().parse().unwrap_or(0);
+            }
+        }
+        let mut body = vec![0u8; content_length];
+        if content_length > 0 && reader.read_exact(&mut body).is_err() {
+            return;
+        }
+        let method = request_line.split_whitespace().next().unwrap_or("");
+        let path = request_line.split_whitespace().nth(1).unwrap_or("");
+        if method == "GET" && path.starts_with("/?token=") {
+            write_compat_response(
+                socket,
+                "303 See Other",
+                &[("Location", "/"), ("Set-Cookie", "hgs=test; Path=/")],
+                "",
+            );
+            return;
+        }
+        let value = {
+            let mut state = state.lock().unwrap();
+            match path {
+                "/api/permissionPresets/catalog" => json!({
+                    "defaultOptions": state.catalog.iter()
+                        .map(|(value, label)| json!({"value":value,"name":label}))
+                        .collect::<Vec<_>>(),
+                    "defaultPreset": "workspace-write"
+                }),
+                "/api/session/projections" => {
+                    state.projection_calls += 1;
+                    json!({"values":{"permissions":{"currentValue":state.current}}})
+                }
+                "/api/session/list" => {
+                    state.list_calls += 1;
+                    json!({"items":[{"sessionId":TEST_SESSION,"agentAvailable":state.available,"running":state.running}]})
+                }
+                "/api/commands/list" => {
+                    json!([{"name":"permission","definitionId":"@deepseek-ai/dsh-permission-presets"}])
+                }
+                "/api/commands/execute" => {
+                    state.execute_calls += 1;
+                    let request: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                    let line = request["payload"]["args"]["line"].as_str().unwrap_or("").to_owned();
+                    state.executed.push(line.clone());
+                    if let Some(target) = line.strip_prefix("/permission ") {
+                        state.current = target.to_owned();
+                    }
+                    json!({"result":{"kind":"success"}})
+                }
+                _ => Value::Null,
+            }
+        };
+        let payload = json!({"result":{"ok":true,"value":value}}).to_string();
+        write_compat_response(
+            socket,
+            "200 OK",
+            &[("Content-Type", "application/json")],
+            &payload,
+        );
+    }
+
+    fn compat_server(
+        state: CompatState,
+    ) -> (String, Arc<Mutex<CompatState>>, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let shared = Arc::new(Mutex::new(state));
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_state = shared.clone();
+        let server_stop = stop.clone();
+        let handle = std::thread::spawn(move || {
+            while !server_stop.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut socket, _)) => {
+                        // Windows accepted sockets inherit the listener's
+                        // nonblocking mode; the fixture must block for headers.
+                        let _ = socket.set_nonblocking(false);
+                        handle_compat_request(&mut socket, &server_state);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    // Windows accept can report a client reset; the fixture
+                    // must keep serving later requests instead of exiting.
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+        });
+        (
+            format!("http://{address}/?token=test"),
+            shared,
+            stop,
+            handle,
+        )
+    }
+
+    fn stop_server(stop: &AtomicBool, server: std::thread::JoinHandle<()>) {
+        stop.store(true, Ordering::Relaxed);
+        let _ = server.join();
+    }
+
+    #[test]
+    fn legacy_bypass_check_and_apply_work_without_a_preset() {
+        if !node_available() {
+            return;
+        }
+        let (url, shared, stop, server) = compat_server(CompatState::default());
+        let checked = permissions_compat_json(&url, Some(TEST_SESSION), "check", None, false, false).unwrap();
+        assert_eq!(checked["needs_setup"], json!(false));
+        let applied = permissions_compat_json(&url, Some(TEST_SESSION), "apply", None, false, false).unwrap();
+        assert_eq!(applied["ok"], json!(true));
+        let state = shared.lock().unwrap();
+        assert_eq!(state.executed, vec!["/permission danger-full-access".to_owned()]);
+        assert_eq!(state.execute_calls, 1);
+        drop(state);
+        stop_server(&stop, server);
+    }
+
+    #[test]
+    fn preset_apply_keeps_custom_names_and_never_replays_a_confirmed_change() {
+        if !node_available() {
+            return;
+        }
+        let mut initial = CompatState::default();
+        initial.catalog.push(("Review workspace".into(), "Review workspace".into()));
+        initial.current = "read-only".into();
+        let (url, shared, stop, server) = compat_server(initial);
+        let checked = permissions_compat_json(
+            &url,
+            Some(TEST_SESSION),
+            "check-preset",
+            Some("Review workspace"),
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(checked["needs_setup"], json!(false));
+        permissions_compat_json(
+            &url,
+            Some(TEST_SESSION),
+            "apply-preset",
+            Some("Review workspace"),
+            false,
+            true,
+        )
+        .unwrap();
+        // The durable projection already holds the preset; a second pass reads
+        // it and executes nothing.
+        permissions_compat_json(
+            &url,
+            Some(TEST_SESSION),
+            "apply-preset",
+            Some("Review workspace"),
+            false,
+            true,
+        )
+        .unwrap();
+        let state = shared.lock().unwrap();
+        assert_eq!(state.executed, vec!["/permission Review workspace".to_owned()]);
+        assert_eq!(state.execute_calls, 1);
+        assert_eq!(state.list_calls, 2);
+        assert!(state.projection_calls >= 3);
+        drop(state);
+        stop_server(&stop, server);
+    }
+
+    #[test]
+    fn a_running_session_refuses_a_preset_change() {
+        if !node_available() {
+            return;
+        }
+        let mut initial = CompatState::default();
+        initial.catalog.push(("Review workspace".into(), "Review workspace".into()));
+        initial.current = "read-only".into();
+        initial.running = true;
+        let (url, shared, stop, server) = compat_server(initial);
+        let error = permissions_compat_json(
+            &url,
+            Some(TEST_SESSION),
+            "apply-preset",
+            Some("Review workspace"),
+            false,
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(error, "busy");
+        let state = shared.lock().unwrap();
+        assert_eq!(state.execute_calls, 0);
+        drop(state);
+        stop_server(&stop, server);
+    }
+
+    #[test]
+    fn an_implicit_default_preserves_a_running_session() {
+        if !node_available() {
+            return;
+        }
+        let mut initial = CompatState::default();
+        initial.catalog.push(("Review workspace".into(), "Review workspace".into()));
+        initial.current = "read-only".into();
+        initial.running = true;
+        let (url, shared, stop, server) = compat_server(initial);
+        let applied = permissions_compat_json(
+            &url,
+            Some(TEST_SESSION),
+            "apply-preset",
+            Some("Review workspace"),
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(applied["skipped"], json!(true));
+        let state = shared.lock().unwrap();
+        assert_eq!(state.execute_calls, 0);
+        assert_eq!(state.list_calls, 1);
+        drop(state);
+        stop_server(&stop, server);
+    }
+
+    #[test]
+    fn an_already_applied_target_skips_the_liveness_lookup() {
+        if !node_available() {
+            return;
+        }
+        let mut initial = CompatState::default();
+        initial.current = "danger-full-access".into();
+        initial.running = true;
+        let (url, shared, stop, server) = compat_server(initial);
+        let applied = permissions_compat_json(&url, Some(TEST_SESSION), "apply", None, false, false).unwrap();
+        assert_eq!(applied["ok"], json!(true));
+        let state = shared.lock().unwrap();
+        assert_eq!(state.list_calls, 0);
+        assert_eq!(state.execute_calls, 0);
+        drop(state);
+        stop_server(&stop, server);
+    }
+
+    #[test]
+    fn unknown_presets_and_oversized_catalogs_fail_explicitly() {
+        if !node_available() {
+            return;
+        }
+        let mut initial = CompatState::default();
+        initial.catalog = (0..65)
+            .map(|index| (format!("preset-{index}"), format!("Preset {index}")))
+            .collect();
+        let (url, _, stop, server) = compat_server(initial);
+        assert_eq!(
+            permissions_compat_json(&url, Some(TEST_SESSION), "catalog", None, false, false).unwrap_err(),
+            "oversized"
+        );
+        stop_server(&stop, server);
+        let (url, _, stop, server) = compat_server(CompatState::default());
+        assert_eq!(
+            permissions_compat_json(&url, Some(TEST_SESSION), "apply-preset", Some("gone"), false, true)
+                .unwrap_err(),
+            "preset"
+        );
+        stop_server(&stop, server);
+    }
+
+    #[test]
+    fn bridge_gate_never_switches_an_ordinary_live_ensure() {
+        if !node_available() {
+            return;
+        }
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/dsh/bridge.mjs");
+        let url = format!("file:///{}", path.to_string_lossy().replace('\\', "/"));
+        let script = "const m=await import(process.env.HGS_BRIDGE_URL);process.stdout.write(JSON.stringify({\
+            ordinary:m.presetGate({preset:'x',live:true,recovery:false,running:false,explicit:false,current:'y'}),\
+            explicitLive:m.presetGate({preset:'x',live:true,recovery:false,running:false,explicit:true,current:'y'}),\
+            same:m.presetGate({preset:'x',live:true,recovery:false,running:false,explicit:true,current:'x'}),\
+            recovery:m.presetGate({preset:'x',live:true,recovery:true,running:false,explicit:false,current:'y'}),\
+            busy:m.presetGate({preset:'x',live:true,recovery:true,running:true,explicit:false,current:'y'}),\
+            fresh:m.presetGate({preset:'x',live:false,recovery:false,running:false,explicit:false,current:null}),\
+            none:m.presetGate({preset:undefined,live:true,recovery:true,running:false,explicit:false,current:'y'})}));";
+        let output = Command::new("node")
+            .args(["--input-type=module", "-e", script])
+            .env("HGS_BRIDGE_URL", url)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["ordinary"]["applied"], json!(true));
+        assert_eq!(value["ordinary"]["apply"], json!(false));
+        assert_eq!(value["explicitLive"]["applied"], json!(false));
+        assert_eq!(value["same"]["applied"], json!(true));
+        assert_eq!(value["same"]["apply"], json!(false));
+        assert_eq!(value["recovery"]["apply"], json!(true));
+        assert_eq!(value["busy"]["refuse"], json!(true));
+        assert_eq!(value["fresh"]["apply"], json!(true));
+        assert_eq!(value["none"]["apply"], json!(false));
+    }
+
+    #[test]
+    fn a_helper_that_closes_stdout_then_sleeps_is_bounded_and_orphan_free() {
+        if !node_available() {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let pid_path = directory.path().join("helper.pid");
+        // The helper closes its output, starts a grandchild, then keeps running.
+        // The maintained runner must end at its deadline and kill the group.
+        let script = "const fs=require('fs'),{spawn}=require('child_process');\
+            const g=spawn(process.execPath,['-e','setTimeout(()=>{},60000)'],{stdio:'ignore'});\
+            fs.writeFileSync(process.argv[1],String(process.pid)+' '+String(g.pid));\
+            try{fs.closeSync(1)}catch{};setTimeout(()=>{},60000);";
+        let mut command = Command::new("node");
+        command.args(["-e", script, pid_path.to_string_lossy().as_ref()]);
+        let started = Instant::now();
+        let error = bounded_output(command, None, 1024, Duration::from_millis(2000)).unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let pids = std::fs::read_to_string(&pid_path).unwrap();
+        let pids: Vec<u32> = pids
+            .split_whitespace()
+            .filter_map(|pid| pid.parse().ok())
+            .collect();
+        assert_eq!(pids.len(), 2);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline
+            && pids.iter().any(|pid| crate::platform::process_alive(*pid))
+        {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        for pid in pids {
+            assert!(!crate::platform::process_alive(pid), "helper {pid} was left running");
+        }
+    }
+
+    #[test]
+    fn a_helper_that_never_reads_its_bounded_input_stays_bounded() {
+        if !node_available() {
+            return;
+        }
+        let mut command = Command::new("node");
+        command.args(["-e", "setTimeout(()=>{},60000)"]);
+        let input = vec![b'x'; 512 * 1024];
+        let started = Instant::now();
+        let error = bounded_output(command, Some(&input), 1024, Duration::from_millis(300))
+            .unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn composed_preset_helper_preserves_custom_names() {
+        if !node_available() {
+            return;
+        }
+        let Some(root) = dsh_package_root() else { return };
+        let dump = "- id: permission\n  name: '@deepseek-ai/dsh-permission-presets'\n  config:\n    presets:\n      read-only:\n        sandbox: read-only\n        approval: ask\n      Review workspace:\n        sandbox: workspace-write\n        approval: ask\n        description: Ask before writing\n      \"Проверка (strict)!\":\n        sandbox: danger-full-access\n        approval: never\n    defaultPreset: Review workspace\n- id: other\n  name: '@deepseek-ai/dsh-plugin-manager'\n  disabled: !!js '!ctx.get(''profileContext'')'\n";
+        let Ok(value) = node_json(
+            CONFIG_PRESETS,
+            &json!({"dump":dump,"packageRoot":root.to_string_lossy().into_owned()}),
+            Duration::from_secs(10),
+            64 * 1024,
+        ) else {
+            return;
+        };
+        let presets = presets_from_options(&value["presets"]).unwrap();
+        assert!(presets.iter().any(|preset| preset.value == "Review workspace"));
+        assert!(presets.iter().any(|preset| preset.value == "Проверка (strict)!"));
+        assert_eq!(value["default"], json!("Review workspace"));
     }
 }
 

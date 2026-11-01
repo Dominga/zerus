@@ -4006,22 +4006,61 @@ headers. A server that the profile added, changed or removed keeps its own state
 the profile's `.hgs-inherited-mcp.json` records only digests of what was inherited.
 Provider sign-in, hooks and other settings are not shared this way.
 
-**Permissions → Change…** sets provider defaults, Auto (Claude accounts only) or
-bypass for future launches and resume on that host. Explicit launch flags take
-precedence. Current agents continue unchanged; account labels describe launch
-settings, not every running session's effective permissions. Auto maps to Claude
-`--permission-mode auto`. Bypass maps to Codex full access without sandbox,
-Claude `bypassPermissions`, Kimi Never Ask/`--auto` and DeepSeek's native
-`danger-full-access`. The CLI is `hgs [@host] account permissions ID --mode
-provider|auto|bypass`; `account ls` lists each account's `permission_modes`.
-Permissions do not accompany copied sign-in credentials.
+**Permissions → Change…** reads the installed harness's own permission catalog
+on the selected computer. It never uses a version table: Claude choices come
+from the resolved executable's `--help` (`--permission-mode`), Codex from
+`--help` (`--ask-for-approval` and `--sandbox` plus `--approve-for-me`), Kimi from
+`--help` (`--yolo`, `--auto`, and the separate `--plan`), and DeepSeek from the
+composed `dsh` profile's `@deepseek-ai/dsh-permission-presets` table. The row
+carries `permission_catalog {status, status_reason, source, version?,
+session_supported, selected, controls[]}` and a separate `permission_current
+{source: "provider"|"zerus", values, detail}`. `permission_current` describes
+launch settings, never a running session.
 
-**New session → Permissions** chooses one session's mode instead of the account
-default: Auto for Claude, or Bypass for Claude, Codex and Kimi. It becomes that
-agent's own launch flag (`hgs <agent> … --permissions auto|bypass`), so the
-session keeps it when resumed while the account default stays unchanged. It
-cannot be combined with the agent's own permission flags after `--`. The choice
-is offered only by computers whose `hgs` lists the mode.
+**Use <harness> settings** (for example, **Use Codex settings** or **Use dsh
+settings**) leaves the native setting in charge. **Bypass**
+remains the common shortcut (Claude `bypassPermissions`, Codex the dangerous
+bypass flag, Kimi `--auto`/Never Ask, DeepSeek `danger-full-access`). Other
+choices are native controls: Claude has `mode`; Codex has `approval`, `sandbox`
+and the enabling `approve_for_me` switch; Kimi has `mode` and the independent
+`plan` switch; DeepSeek has `preset`. Codex combinations are validated (for
+example `approve_for_me` cannot accompany an explicit `approval` or `sandbox`,
+even `workspace-write`; leave both on **Use Codex settings**). Controls can
+publish `conflicts_with` control IDs so the shared editor rejects such
+combinations before saving. Missing native
+keys mean "inherit", and an empty native selection normalizes to provider.
+Kimi's Always Ask has no forcing flag, so it is shown when inherited but is not
+offered as a fabricated option. DeepSeek's Auto is current-session-only and is
+never offered as an account or launch default.
+
+The stored override is `provider`, `bypass`, legacy Claude `auto`, or
+`native:<canonical compact JSON object<string,string>>` (at most 1 KiB, keys
+`^[a-z][a-z0-9_]*$`). Decoding validates syntax only, so a saved choice survives
+a version change; a write or launch revalidates it against fresh options. A
+withdrawn native value is shown unchanged and fails with an actionable error;
+provider and bypass launch without discovery. The CLI is `hgs [@host] account
+permissions ID --mode provider|bypass|native:<json>`; `account ls` keeps the
+legacy `permission_modes` array and adds the catalog. Discovery uses bounded,
+read-only probe operations (at most 4 seconds for help and 1 second for the
+optional version; DeepSeek's composed-profile read is separately bounded),
+deduplicated per provider and executable, and never starts an agent, host or
+session. If discovery fails, the row is
+`unavailable` with a reason; **Use <harness> settings** and **Bypass** remain
+available.
+
+**New session → Permissions → Use Zerus account settings** inherits the selection
+saved for the account in Zerus. **Use <harness> settings** instead uses the
+harness's own settings, ignoring that Zerus account selection. A discovered
+native selection can also override the account for one session. It becomes
+`hgs <agent> … --permissions <selection>`, is
+stored as a symbolic launch override (so resume revalidates it), and cannot be
+combined with the agent's own permission flags. A per-launch `provider` choice
+suppresses the account default even though it adds no native flag. The account
+default stays dynamic on resume; an explicit per-launch choice does not.
+Resume `--fresh`, clear-context replacement and native forks keep that explicit
+per-launch choice, because they continue the same session's settings with a new
+conversation; a brand-new session uses the account default. Permissions do not
+accompany copied sign-in credentials.
 Resident legacy DeepSeek bridges also support this mode through the official
 authenticated web API, without restarting the host or changing other sessions.
 Capability checks precede new binding creation. If permission setup is not
@@ -4920,7 +4959,12 @@ each start first asks that `hgs.exe` for `session-host status`, before the tray
 icon appears; once local sessions are enabled, the app then runs the stable CLI
 instead, after `session-host install` when that `hgs.exe` differs from the staged
 one and is at least as new. A small *Starting Zerus…* note shows while these
-checks take longer than half a second. Settings are in
+checks take longer than half a second. An explicit `--hgs` or `hgs=` skips
+automatic staging: before testing such a local build, run its
+`hgs.exe session-host install` so the stable CLI used by native sessions and
+hooks matches the GUI's CLI. Staging preserves running hosts and agents. This
+also ensures the session lifecycle can read saved `native:` permission choices.
+Settings are in
 `%APPDATA%\hgdev\hgs-tray.ini`, with drafts beside it, and one instance runs per
 user. When the local box reports `local_sessions: false`, the app offers remote
 machines only: in New session, Overview, the tray menu, Accounts, Projects and

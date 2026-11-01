@@ -1114,7 +1114,7 @@ mod tests {
         assert_eq!(args[at + 1 + DESIGNER_CLAUDE_RULES.len()], "--", "{args:?}");
         let agent_at = args.iter().position(|arg| arg == "--").unwrap() + 1;
         let mut argv: Vec<String> = std::iter::once("claude".to_owned()).chain(args[agent_at..].iter().cloned()).collect();
-        crate::accounts::apply_permissions("claude", "bypass", &mut argv);
+        crate::accounts::apply_permissions("claude", "bypass", &mut argv).unwrap();
         let delimiter = argv.iter().position(|arg| arg == "--").unwrap();
         assert_eq!(&argv[delimiter..], ["--", "brief"], "{argv:?}");
         assert!(argv[..delimiter].iter().any(|arg| arg == "--permission-mode"), "{argv:?}");

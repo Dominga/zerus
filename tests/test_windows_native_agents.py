@@ -1103,6 +1103,32 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
         (folder / "config.toml").write_text(
             config.replace('env_key = "OPENAI_API_KEY"', 'env_key = "FIXTURE_API_KEY"'), encoding="utf-8")
 
+    def test_permission_combinations_match_the_native_argument_parser(self):
+        # Completion parses the real installed CLI arguments and exits without
+        # starting an agent, requesting a model or setting up a Windows sandbox.
+        cases = [
+            ({}, [], True),
+            ({"approve_for_me": "on"}, ["--approve-for-me"], True),
+            ({"approval": "on-request", "sandbox": "workspace-write"},
+             ["-a", "on-request", "-s", "workspace-write"], True),
+        ]
+        for key, flag, value in (("approval", "-a", "on-request"), ("approval", "-a", "never"),
+                                 ("sandbox", "-s", "workspace-write"), ("sandbox", "-s", "read-only")):
+            cases.append(({"approve_for_me": "on", key: value}, ["--approve-for-me", flag, value], False))
+        for selection, flags, valid in cases:
+            with self.subTest(selection=selection):
+                native = subprocess.run([str(self.BINARY), *flags, "completion", "bash"], env=self.env,
+                                        capture_output=True, encoding="utf-8", errors="replace", timeout=30,
+                                        creationflags=host.HIDDEN, stdin=subprocess.DEVNULL)
+                self.assertEqual(native.returncode, 0 if valid else 2, native.stderr)
+                mode = "native:" + json.dumps(selection, separators=(",", ":"))
+                planned = self.hgs("codex", str(self.project), "--dry-run", "-d", "--permissions", mode,
+                                   rc=0 if valid else 1)
+                if not valid:
+                    self.assertIn("cannot be combined", planned.stderr)
+                elif selection.get("approve_for_me"):
+                    self.assertIn("codex --approve-for-me", planned.stdout)
+
     def transcript_rows(self, conversation_id):
         # After a switch the conversation lives in the new account's store; the
         # old account keeps only its own copy of the same rows.

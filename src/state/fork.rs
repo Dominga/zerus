@@ -48,6 +48,15 @@ pub(super) fn wait_for_chooser(output: &mut Value, reason: &str) {
     }
 }
 
+/// The session's explicit per-launch permission choice, if any. Account
+/// defaults are deliberately absent from this field.
+fn permission_override(record: &Value) -> Option<String> {
+    record["permission_override"]
+        .as_str()
+        .filter(|mode| !mode.is_empty())
+        .map(str::to_owned)
+}
+
 fn fork_argv(record: &Value, new_id: Option<&str>) -> Result<Vec<String>> {
     let agent = string(record, "agent");
     let mut argv = recipes::resume_argv(
@@ -270,6 +279,11 @@ pub(super) fn start_scoped(
     for key in ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME"] {
         environment.insert(key, String::new());
     }
+    // A fork keeps the parent's explicit per-launch permission choice; the
+    // account default remains dynamic when no override was stored.
+    if let Some(mode) = permission_override(&record) {
+        environment.insert("HGS_PERMISSION_MODE", mode);
+    }
     environment.insert(home_var(agent)?, string(&record, "agent_home").into());
     let spec = backend::LaunchSpec {
         name: target.clone(),
@@ -345,6 +359,14 @@ mod tests {
         assert_eq!(output, summary(&stale, true));
         assert_eq!(output["fork_reason"], "Wait for a confirmed conversation before forking");
     }
+    #[test]
+    fn forks_keep_only_explicit_permission_overrides() {
+        let record = json!({"permission_override":"native:{\"mode\":\"acceptEdits\"}"});
+        assert_eq!(permission_override(&record).as_deref(), Some("native:{\"mode\":\"acceptEdits\"}"));
+        assert_eq!(permission_override(&json!({})), None);
+        assert_eq!(permission_override(&json!({"permission_override":""})), None);
+    }
+
     #[test]
     fn forks_use_exact_parent_and_preserve_safe_launch_options() {
         let record = |agent, base| json!({"agent":agent,"base":base,"conversation_id":"parent"});

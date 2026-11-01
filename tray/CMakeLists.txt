@@ -208,6 +208,7 @@ target_include_directories(hgs-qrcodegen PUBLIC vendor/qrcodegen)
 add_library(hgs-tray-ui STATIC src/SessionOrganization.cpp src/SessionList.cpp src/DashboardPage.cpp
     src/AnalyticsSettings.cpp
     src/MachineFilter.cpp src/ProjectFilter.cpp src/AccountFilter.cpp src/SessionSearch.cpp src/MachinesPage.cpp src/AccountsPage.cpp
+    src/PermissionCatalog.cpp src/PermissionCatalogDialog.cpp
     src/ComposerToolbar.cpp src/AccountSwitch.cpp src/MessageComposer.cpp src/QuestionCard.cpp src/DirectoryDialog.cpp
     src/RepositoryClone.cpp src/CloneRepositoryDialog.cpp src/NewSessionDialog.cpp src/ProjectsDialog.cpp src/WorktreesDialog.cpp src/SwarmDialog.cpp src/SwarmConflictReview.cpp
     src/ProcessView.cpp src/TaskRow.cpp src/TasksView.cpp src/TaskDialogs.cpp src/TaskInspector.cpp src/TrayMenu.cpp src/IconFactory.cpp src/Shortcuts.cpp src/DownloadCacheSettings.cpp src/GoToDialog.cpp

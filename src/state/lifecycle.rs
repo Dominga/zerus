@@ -125,6 +125,8 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     let fresh = nonempty_env("HGS_FRESH").as_deref() == Some("1");
     // `resume --fresh` names the exact stopped run it replaces.
     let replaces = nonempty_env("HGS_FRESH_REPLACES");
+    let requested_permission = nonempty_env("HGS_PERMISSION_MODE");
+    std::env::remove_var("HGS_PERMISSION_MODE");
     std::env::remove_var("HGS_REQUESTED_ID");
     std::env::remove_var("HGS_FRESH");
     std::env::remove_var("HGS_FRESH_REPLACES");
@@ -151,6 +153,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     let token = nonempty_env("HGS_RUN_ID").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let pane = backend::current().own_pane()?;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let permission_override: Option<String>;
     {
         let _guard = lock(None)?;
         let actual_name = backend::current()
@@ -248,6 +251,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
                 "fork_parent_id",
                 "fork_source_name",
                 "cleared_conversations",
+                "permission_override",
             ] {
                 if let Some(value) = previous.get(key) {
                     record[key] = value.clone();
@@ -269,6 +273,18 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         } else if let Some(previous) = replaced.as_ref().filter(|_| replaces.is_some()) {
             clear_context::carry_fresh_start(previous, &mut record);
         }
+        // A per-launch choice is symbolic and durable: resume revalidates this
+        // mode instead of trusting stale concrete flags. Account defaults stay
+        // dynamic because they never create this field.
+        if let Some(mode) = requested_permission.as_deref() {
+            let normalized = crate::accounts::normalize_permission_mode(mode).map_err(|e| e.message)?;
+            crate::accounts::validate_permission_mode(&agent, &normalized).map_err(|e| e.message)?;
+            record["permission_override"] = json!(normalized);
+        }
+        permission_override = record["permission_override"]
+            .as_str()
+            .filter(|mode| !mode.is_empty())
+            .map(str::to_owned);
         backend::current().set_run_marker(&name, &token)?;
         if let Some(owner)=super::worktree_lifecycle::for_folder(std::path::Path::new(string(&record,"launch_dir"))) {
             record["worktree_owner"]=owner;
@@ -288,9 +304,25 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     std::env::set_var("HGS_STATE_DIR", absolute_root()?);
     std::env::remove_var("HGS_EXPECTED_ID");
     let config = crate::config::Config::load().map_err(|e|e.message)?;
-    let permission_mode = crate::accounts::permission_mode(&config,
-        &nonempty_env("HGS_ACCOUNT_ID").unwrap_or_default(), &agent).map_err(|e|e.message)?;
-    for argv in [&mut base, &mut first] { crate::accounts::apply_permissions(&agent, &permission_mode, argv); }
+    let permission_mode = match permission_override.as_deref() {
+        Some(mode) => mode.to_owned(),
+        None => crate::accounts::permission_mode(&config,
+            &nonempty_env("HGS_ACCOUNT_ID").unwrap_or_default(), &agent).map_err(|e|e.message)?,
+    };
+    // Explicit native flags in the agent's own argv always win. Do not resolve
+    // an account default (or a possibly unavailable saved native mode) at all
+    // when every argv already decides its own permissions.
+    let needs_account_mode = [&base, &first]
+        .iter()
+        .any(|argv| !argv.is_empty() && !crate::accounts::explicit_permissions(&agent, argv));
+    let permission_values = if needs_account_mode {
+        crate::accounts::permission_args(&agent, &permission_mode).map_err(|e|e.message)?
+    } else {
+        Vec::new()
+    };
+    for argv in [&mut base, &mut first] {
+        crate::accounts::apply_permission_values(&agent, &permission_values, argv);
+    }
     // Claude Code reports its context window only to a status line command.
     // The saved base stays as launched; resume adds the settings again.
     if agent == "claude" {

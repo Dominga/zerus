@@ -1,4 +1,6 @@
 #include "AccountsPage.h"
+#include "PermissionCatalog.h"
+#include "PermissionCatalogDialog.h"
 #include "PageCards.h"
 #include <QStyle>
 #include "AccountUsage.h"
@@ -17,6 +19,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QFormLayout>
+#include <algorithm>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -74,28 +77,60 @@ private:
 };
 using IdentityBadges::providerName;
 bool setInZerus(const QJsonObject &p) {
-    return p["permission_mode"] == "bypass" || p["permission_mode"] == "auto";
+    const auto catalog = PermissionCatalog::parse(p);
+    return catalog.nativeSaved || catalog.savedMode == "bypass" || catalog.savedMode == "auto";
 }
-QString permissionMode(const QJsonObject &p) {
-    return setInZerus(p) ? p["permission_mode"].toString() : p["effective_permission_mode"].toString("unknown");
+QString permissionText(const QJsonObject &p) {
+    return PermissionCatalog::summary(PermissionCatalog::parse(p));
 }
-QString permissionLabel(const QString &mode) {
-    return mode == "bypass" ? QObject::tr("Bypass") : mode == "auto" ? QObject::tr("Auto")
-        : mode == "plan" ? QObject::tr("Plan") : mode == "mixed" ? QObject::tr("Varies") : QObject::tr("Default");
+bool permissionBypass(const QJsonObject &p) {
+    const auto catalog = PermissionCatalog::parse(p);
+    if (catalog.savedMode == "provider" && catalog.effectiveMode == "bypass") return true;
+    return PermissionCatalog::isBypass(catalog);
 }
-QString accountPermission(const QJsonObject &account) {
-    QString mode;
+QString accountPermissionText(const QJsonObject &account) {
+    QString text;
     for (const auto &value : account["members"].toArray()) {
-        const auto next = permissionMode(value.toObject());
-        if (!mode.isEmpty() && mode != next) return "mixed";
-        mode = next;
+        const auto next = permissionText(value.toObject());
+        if (!text.isEmpty() && text != next) return QObject::tr("Varies");
+        text = next;
     }
-    return mode;
+    return text.isEmpty() ? QObject::tr("Default") : text;
+}
+bool accountPermissionBypass(const QJsonObject &account) {
+    bool any = false;
+    for (const auto &value : account["members"].toArray()) {
+        if (!permissionBypass(value.toObject())) return false;
+        any = true;
+    }
+    return any;
 }
 QString permissionHint(const QJsonObject &p) {
-    const auto source = setInZerus(p) ? QObject::tr("Set in Zerus") : QObject::tr("From provider settings");
-    return source + "\n" + p["permission_detail"].toString(QObject::tr("Provider defaults have not been verified."))
-        + "\n" + QObject::tr("Applies to new and resumed sessions; a running session may use a different mode.");
+    const auto catalog = PermissionCatalog::parse(p);
+    const auto source = catalog.currentSource == "provider" ? QObject::tr("From provider settings")
+        : catalog.currentSource == "zerus" || setInZerus(p) ? QObject::tr("Set in Zerus")
+        : QObject::tr("From provider settings");
+    QString detail = catalog.currentDetail;
+    if (detail.isEmpty()) detail = catalog.legacyDetail;
+    if (!catalog.currentValues.isEmpty()) {
+        QStringList current;
+        for (const auto &control : catalog.controls)
+            if (catalog.currentValues.contains(control.id))
+                current << PermissionCatalog::optionLabel(catalog, control.id, catalog.currentValues.value(control.id));
+        for (auto it = catalog.currentValues.begin(); it != catalog.currentValues.end(); ++it)
+            if (!std::any_of(catalog.controls.cbegin(), catalog.controls.cend(),
+                    [&](const PermissionCatalog::Control &control) { return control.id == it.key(); }))
+                current << it.key() + QStringLiteral("=") + it.value();
+        if (!current.isEmpty()) detail = detail.isEmpty() ? QObject::tr("Current: %1").arg(current.join(", "))
+            : detail + "\n" + QObject::tr("Current: %1").arg(current.join(", "));
+    }
+    if (detail.isEmpty())
+        detail = catalog.present ? (catalog.statusReason.isEmpty() ? QObject::tr("Native permissions have not been verified.") : catalog.statusReason)
+            : QObject::tr("Provider defaults have not been verified.");
+    QStringList lines{source, detail};
+    if (catalog.present && !catalog.available) lines << QObject::tr("Native discovery failed; Default and Bypass are shown.");
+    lines << QObject::tr("Applies to new and resumed sessions; a running session may use a different mode.");
+    return lines.join('\n');
 }
 class AccountKeyDialog : public QDialog {
 public:
@@ -170,12 +205,13 @@ public:
         const QRect named(title.x(), title.y(), qMax(0, titleRight - title.x()), title.height());
         p->drawText(named, Qt::AlignVCenter, QFontMetrics(font).elidedText(profile["label"].toString(), Qt::ElideRight, named.width()));
         font.setPixelSize(11); font.setWeight(QFont::Normal); p->setFont(font); p->setPen(QColor(dark ? "#a1adbb" : "#647386"));
-        const auto mode = accountPermission(profile), caption = permissionLabel(mode);
+        const bool bypass = accountPermissionBypass(profile);
+        const auto caption = accountPermissionText(profile);
         const int badgeWidth = QFontMetrics(font).horizontalAdvance(caption) + 14;
         const QRect badge(r.right() - badgeWidth, r.y() + 24, badgeWidth, 18);
-        p->setPen(Qt::NoPen); p->setBrush(QColor(mode == "bypass" ? (dark ? "#572b35" : "#fbe3e7") : (dark ? "#2c3540" : "#e8edf2")));
+        p->setPen(Qt::NoPen); p->setBrush(QColor(bypass ? (dark ? "#572b35" : "#fbe3e7") : (dark ? "#2c3540" : "#e8edf2")));
         p->drawRoundedRect(badge, 4, 4);
-        p->setPen(QColor(mode == "bypass" ? (dark ? "#ffa0aa" : "#a7243b") : (dark ? "#bec8d3" : "#536270")));
+        p->setPen(QColor(bypass ? (dark ? "#ffa0aa" : "#a7243b") : (dark ? "#bec8d3" : "#536270")));
         p->drawText(badge, Qt::AlignCenter, caption);
         const auto machines = profile["machines"].toArray(); int x = r.x();
         const int tagsRight = badge.left() - 8;
@@ -665,11 +701,11 @@ void AccountsPage::render()
         QStringList permissionLines;
         for (const auto &member : p["members"].toArray()) {
             const auto m = member.toObject();
-            permissionLines << m["machine"].toString() + ": " + permissionLabel(permissionMode(m)) + "\n" + permissionHint(m);
+            permissionLines << m["machine"].toString() + ": " + permissionText(m) + "\n" + permissionHint(m);
         }
         item->setToolTip(permissionLines.join("\n\n"));
         const auto text = p["label"].toString() + "\n" + providerName(p["provider"].toString()) + " / " + machines.join(", ")
-            + "\nPermissions: " + permissionLabel(accountPermission(p));
+            + "\nPermissions: " + accountPermissionText(p);
         if (item->text() != text) { item->setText(text); item->setData(Qt::AccessibleTextRole, text); }
         if (item->data(Qt::UserRole).toJsonObject() != p) item->setData(Qt::UserRole, p);
         if (item->data(Qt::UserRole + 1).toString() != state) item->setData(Qt::UserRole + 1, state);
@@ -715,11 +751,11 @@ void AccountsPage::selectionChanged()
     m_default->setEnabled(has && idle && online(p["host"].toString()) && !p["is_default"].toBool());
     m_default->setText((p["is_default"].toBool()?tr("Default on %1"):tr("Make default on %1")).arg(p["machine"].toString()));
     m_default->setToolTip(tr("Use this account for new %1 sessions on %2 when no account is specified. Existing sessions keep their account.").arg(providerName(p["provider"].toString()),p["machine"].toString()));
-    const auto mode = permissionMode(p);
+    const auto permissionState = PermissionCatalog::parse(p);
     m_permissionState->setVisible(has); m_permissions->setVisible(has);
-    m_permissionState->setText(tr("Permissions on %1: %2").arg(p["machine"].toString(), permissionLabel(mode)));
+    m_permissionState->setText(tr("Permissions on %1: %2").arg(p["machine"].toString(), PermissionCatalog::summary(permissionState)));
     m_permissionState->setToolTip(permissionHint(p));
-    m_permissionState->setStyleSheet(mode == "bypass" ? QString("color:%1;font-weight:600;").arg(m_dark ? "#ffa0aa" : "#a7243b") : QString());
+    m_permissionState->setStyleSheet(permissionBypass(p) ? QString("color:%1;font-weight:600;").arg(m_dark ? "#ffa0aa" : "#a7243b") : QString());
     m_permissions->setToolTip(tr("Change permission defaults on %1").arg(p["machine"].toString()));
     const bool modelSupported = has && p["model_defaults_supported"].toBool();
     m_modelDefaults->setVisible(modelSupported); m_modelState->setVisible(modelSupported);
@@ -1264,37 +1300,162 @@ void AccountsPage::useSavedProfile(const QJsonObject &p)
 void AccountsPage::permissions()
 {
     const auto p = selected(); if (p.isEmpty() || !online(p["host"].toString())) return;
-    QDialog dialog(this); dialog.setObjectName("accountPermissionsDialog"); dialog.setWindowTitle(tr("Account permissions")); dialog.setMinimumWidth(480);
+    const auto catalog = PermissionCatalog::parse(p);
+    const auto host = p["host"].toString(), machine = p["machine"].toString(), provider = p["provider"].toString();
+    const auto revision = m_catalogs[host]["revision"].toString();
+    const QString savedMode = p["permission_mode"].toString("provider");
+
+    QDialog dialog(this); dialog.setObjectName("accountPermissionsDialog"); dialog.setWindowTitle(tr("Account permissions")); dialog.setMinimumWidth(520);
     auto *layout = new QVBoxLayout(&dialog);layout->setContentsMargins(18,18,18,18);layout->setSpacing(12);layout->setSizeConstraint(QLayout::SetMinimumSize);
-    layout->addWidget(label(tr("%1 on %2").arg(selectedAccount()["label"].toString(),p["machine"].toString())));
+    layout->addWidget(label(tr("%1 on %2").arg(selectedAccount()["label"].toString(),machine)));
     auto *mode = new QComboBox; mode->setObjectName("accountPermissionMode");
-    mode->addItem(tr("Default (provider settings)"),"provider");
-    // Older computers list no modes and support only provider and bypass.
-    if (p["permission_modes"].toArray().contains(QJsonValue("auto"))) mode->addItem(tr("Auto"),"auto");
-    mode->addItem(tr("Bypass permissions"),"bypass");mode->setSizeAdjustPolicy(QComboBox::AdjustToContents);
-    mode->setCurrentIndex(qMax(0, mode->findData(p["permission_mode"].toString("provider"))));layout->addWidget(mode);
-    const auto provider = p["provider"].toString();
+    mode->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    for (const auto &choice : PermissionCatalog::accountChoices(catalog)) {
+        mode->addItem(choice.label, choice.value);
+        const int row = mode->count()-1;
+        mode->setItemData(row, choice.tooltip, Qt::ToolTipRole);
+        mode->setItemData(row, choice.bypass, Qt::UserRole+1);
+        mode->setItemData(row, choice.unavailable, Qt::UserRole+2);
+        mode->setItemData(row, choice.editor, Qt::UserRole+3);
+    }
+    QString initial = savedMode.isEmpty() ? QStringLiteral("provider") : savedMode;
+    if (savedMode == "provider" || savedMode == "bypass" || savedMode == "auto") initial = savedMode;
+    else if (catalog.nativeSaved) {
+        if (catalog.malformed || catalog.selected.isEmpty()) initial = savedMode;
+        else initial = PermissionCatalog::nativeValue(catalog.selected);
+    }
+    int current = mode->findData(initial);
+    if (current < 0 && !initial.isEmpty()) {
+        // Keep a saved selector visible even when this computer no longer
+        // offers or can decode it; Save starts disabled until it is corrected.
+        mode->addItem(tr("Unavailable: %1").arg(initial), initial);
+        current = mode->count()-1;
+        mode->setItemData(current, true, Qt::UserRole+2);
+        mode->setItemData(current, tr("This saved choice is not offered by the current harness."), Qt::ToolTipRole);
+    }
+    { const QSignalBlocker blocker(mode); mode->setCurrentIndex(qMax(0, current)); }
+    layout->addWidget(mode);
+
     auto *explanation = label(); explanation->setObjectName("permissionExplanation"); layout->addWidget(explanation);
-    const auto explain = [=] {
-        explanation->setText(mode->currentData() == "provider"
-            ? tr("Inherit %1 settings on %2. %3").arg(providerName(provider), p["machine"].toString(),
-                setInZerus(p) ? QString() : p["permission_detail"].toString())
-            : mode->currentData() == "auto" ? tr("Claude's Auto mode decides which tool calls still need your approval.")
-            : provider == "kimi" ? tr("Run tools and answer questions automatically (Never Ask).")
-            : provider == "codex" || provider == "dsh" ? tr("Full access without approval prompts or a sandbox.")
-            : tr("Run tools without permission prompts."));
-    };
-    connect(mode, &QComboBox::currentIndexChanged, &dialog, explain); explain();
+    auto *source = label(PermissionCatalog::sourceNote(catalog, machine)); source->setObjectName("permissionSourceNote"); source->setStyleSheet(QStringLiteral("color:#647386;")); layout->addWidget(source);
     auto *scope = label(tr("New and resumed sessions only. Running sessions keep their mode.")); scope->setObjectName("muted"); layout->addWidget(scope);
+    auto *error = label(); error->setObjectName("permissionSaveError"); error->setStyleSheet(QStringLiteral("color:#b91c1c;")); error->hide(); layout->addWidget(error);
+
+    const auto unavailableRow = [&] {
+        const int index = mode->currentIndex();
+        return index >= 0 && mode->itemData(index, Qt::UserRole+2).toBool();
+    };
+    QMap<QString, QString> editorSelection = catalog.selected;
+    int beforeEditor = mode->currentIndex();
+    const auto explain = [&] {
+        const int index = mode->currentIndex();
+        const auto value = mode->currentData().toString();
+        if (value == "__editor__" || mode->itemData(index, Qt::UserRole+3).toBool()) {
+            explanation->setText(tr("Choose each native permission option for this account."));
+            return;
+        }
+        if (value == "provider") {
+            explanation->setText(tr("Inherit %1 settings on %2. %3").arg(providerName(provider)).arg(machine)
+                .arg(setInZerus(p) ? QString() : (catalog.currentDetail.isEmpty() ? catalog.legacyDetail : catalog.currentDetail)));
+            return;
+        }
+        if (value == "bypass") {
+            explanation->setText(provider == "kimi" ? tr("Run tools and answer questions automatically (Never Ask).")
+                : provider == "codex" || provider == "dsh" ? tr("Full access without approval prompts or a sandbox.")
+                : tr("Run tools without permission prompts."));
+            return;
+        }
+        if (mode->itemData(index, Qt::UserRole+2).toBool()) {
+            explanation->setText(tr("This saved choice is not offered by the current harness. Choose another option."));
+            return;
+        }
+        QMap<QString, QString> selection;
+        if (PermissionCatalog::decodeNative(value, &selection)) {
+            for (const auto &control : catalog.controls) {
+                if (!selection.contains(control.id)) continue;
+                const PermissionCatalog::Option *option = nullptr;
+                for (const auto &candidate : control.options) if (candidate.value == selection.value(control.id)) option = &candidate;
+                if (option && !option->description.isEmpty()) { explanation->setText(option->description); return; }
+                if (option) { explanation->setText(option->label); return; }
+                if (!control.description.isEmpty()) { explanation->setText(control.description); return; }
+            }
+        }
+        explanation->setText(tr("Use this native %1 option.").arg(providerName(provider)));
+    };
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save|QDialogButtonBox::Cancel); layout->addWidget(buttons);
-    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
-    const auto revision = m_catalogs[p["host"].toString()]["revision"].toString();
+    auto *save = buttons->button(QDialogButtonBox::Save), *cancel = buttons->button(QDialogButtonBox::Cancel);
+    save->setObjectName("accountPermissionSave");
+    bool saved = false, openingEditor = false;
+    quint64 pending = 0;
+    connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    const auto updateSave = [&] { save->setEnabled(!pending && !unavailableRow()); };
+    const auto openEditor = [&]() -> bool {
+        if (openingEditor) return false;
+        openingEditor = true;
+        PermissionCatalogDialog editor(catalog, editorSelection, tr("%1 on %2").arg(selectedAccount()["label"].toString(), machine), &dialog);
+        const bool accepted = editor.exec() == QDialog::Accepted;
+        openingEditor = false;
+        if (!accepted) return false;
+        editorSelection = editor.selection();
+        const auto value = editor.mode();
+        int index = -1;
+        for (int row = 0; row < mode->count(); ++row) if (mode->itemData(row, Qt::UserRole+3).toBool()) { index = row; break; }
+        if (editorSelection.isEmpty()) {
+            index = mode->findData(QStringLiteral("provider"));
+        } else if (index >= 0) {
+            const QSignalBlocker blocker(mode);
+            mode->setItemText(index, tr("Native permission settings… (%1)").arg(PermissionCatalog::summary(catalog, editorSelection)));
+            mode->setItemData(index, value, Qt::UserRole);
+            mode->setItemData(index, false, Qt::UserRole+2);
+            mode->setCurrentIndex(index);
+        } else {
+            mode->addItem(tr("Native permission settings… (%1)").arg(PermissionCatalog::summary(catalog, editorSelection)), value);
+            index = mode->count()-1;
+            mode->setItemData(index, true, Qt::UserRole+3);
+            mode->setItemData(index, false, Qt::UserRole+2);
+            { const QSignalBlocker blocker(mode); mode->setCurrentIndex(index); }
+        }
+        if (index >= 0) beforeEditor = index;
+        explain(); updateSave(); dialog.adjustSize();
+        return true;
+    };
+    connect(mode,&QComboBox::currentIndexChanged,&dialog,[&](int index){
+        if (!mode->itemData(index, Qt::UserRole+3).toBool()) beforeEditor = index;
+        error->hide(); explain(); updateSave();
+    });
+    connect(mode,&QComboBox::activated,&dialog,[&](int index){
+        if (!mode->itemData(index, Qt::UserRole+3).toBool()) return;
+        const int previous = beforeEditor;
+        if (!openEditor()) { const QSignalBlocker blocker(mode); mode->setCurrentIndex(previous); explain(); updateSave(); }
+    });
+    connect(save,&QPushButton::clicked,&dialog,[&]{
+        if (unavailableRow() || mode->currentData().toString() == "__editor__") { openEditor(); return; }
+        const auto value = mode->currentData().toString();
+        if (value.isEmpty() || value == "__editor__") return;
+        if (value == savedMode) { saved = true; dialog.accept(); return; }
+        error->hide();
+        pending = m_client.requestAccounts(host, {"permissions", p["id"].toString(), "--mode", value, "--revision", revision});
+        m_requests[pending] = {host, QStringLiteral("permissions")};
+        selectionChanged();
+        save->setText(tr("Saving…")); save->setEnabled(false); cancel->setEnabled(false);
+    });
+    connect(&m_client,&HgsClient::accountsReady,&dialog,[&](quint64 id,const QString &,const QJsonObject &){
+        if (!pending || id != pending) return;
+        pending = 0; saved = true; dialog.accept();
+    });
+    connect(&m_client,&HgsClient::accountsFailed,&dialog,[&](quint64 id,const QString &,const QString &text){
+        if (!pending || id != pending) return;
+        pending = 0; error->setText(text); error->show();
+        save->setText(tr("Save")); save->setEnabled(!unavailableRow()); cancel->setEnabled(true); dialog.adjustSize();
+    });
+    connect(mode,&QComboBox::currentIndexChanged,&dialog,[&dialog]{QTimer::singleShot(0,&dialog,[&dialog]{dialog.adjustSize();});});
     dialog.ensurePolished();mode->setMinimumHeight(mode->sizeHint().height());
     for(auto *button:buttons->buttons())button->setMinimumSize(button->sizeHint());
-    connect(mode,&QComboBox::currentIndexChanged,&dialog,[&dialog]{QTimer::singleShot(0,&dialog,[&dialog]{dialog.adjustSize();});});
-    dialog.adjustSize();
-    if(dialog.exec()!=QDialog::Accepted || mode->currentData().toString() == p["permission_mode"].toString("provider"))return;
-    request(p["host"].toString(),{"permissions",p["id"].toString(),"--mode",mode->currentData().toString(),"--revision",revision});
+    explain(); updateSave(); dialog.adjustSize();
+    if(dialog.exec()!=QDialog::Accepted || saved) return;
+    const auto value = mode->currentData().toString();
+    if (value.isEmpty() || value == "__editor__" || value == savedMode) return;
+    request(host,{"permissions",p["id"].toString(),"--mode",value,"--revision",revision});
 }
 
 void AccountsPage::modelDefaults()

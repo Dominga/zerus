@@ -1432,6 +1432,19 @@ Git checkout, otherwise the changed files its report names. A `hold` preset
 implementer's next task in that folder waits; a `checkout` preset tests a
 detached checkout of the attempt's commits instead and frees it.
 
+### Reports and interim reports
+
+A member reports with `hgs team report --json` (`task`, `attempt`, `text`): the
+attempt becomes reported and the task `submitted`, then its pipeline's first
+stage starts. `"interim":true` records progress on the same open attempt
+instead: the attempt stays open and the task stays `in_progress`, the member
+keeps its work, and no stage starts. The lead reads the interim text in its
+inbox and in the task's feed (`interim_report`); Waiting for you does not show
+it, so the owner sees it only in the feed. A newer interim report replaces the
+previous one on the attempt. A question is not a report: it goes through
+`hgs team ask` (the lead answers it with `hgs team reply`), never
+`hgs team report`.
+
 ### Free planning: the plan mode and the open phase
 
 A team plans in `standard` mode (the default) or `free` mode. `hgs team status`

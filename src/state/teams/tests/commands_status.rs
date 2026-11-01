@@ -472,6 +472,7 @@ fn current_names_the_live_attempt_and_its_report_command() {
     assert_eq!((report["team"].as_str(), report["task"].as_u64()), (Some("t"), Some(1)));
     assert_eq!(report["attempt"], "00000000-0000-4000-8000-000000000001");
     assert_eq!(report["text"], "...");
+    assert_eq!(report["interim"], false);
     assert!(canonical_uuid(report["request_id"].as_str().unwrap()));
     // Every call offers a fresh request id.
     assert_ne!(current_view(&team, "dev").unwrap()["report"]["request_id"], report["request_id"]);

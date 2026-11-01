@@ -1339,6 +1339,10 @@ pub(crate) struct Attempt {
     pub check: Option<CheckResult>,
     #[serde(default)]
     pub report: Option<Report>,
+    /// An interim report on this open attempt (progress or a question, not a
+    /// delivery): the task stays In progress and nothing enters review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interim: Option<Report>,
     /// Questions this attempt asked the lead, oldest first (A3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub questions: Vec<Question>,

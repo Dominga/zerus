@@ -92,6 +92,54 @@ fn a_sandboxed_write_queues_in_the_members_folder_not_the_process_directory() {
     crate::state::teams::templates::settings_override(None);
 }
 
+/// Owner (2026-11-01): an interim report is progress or a question, not a
+/// delivery. The attempt stays open, the task In progress and no stage starts;
+/// the lead sees it in its inbox, the owner only in the feed.
+#[test]
+fn an_interim_report_keeps_the_attempt_open_and_does_not_reach_the_owner() {
+    use crate::state::teams::model::{Member, MemberState, TaskStatus};
+    let (mut team, attempt, _) = review_team();
+    let attempt_id = attempt.clone();
+    team.members.push(Member { id: "rev".into(), role: "Reviewer".into(), agent: "claude".into(), state: MemberState::Active, ..Default::default() });
+    team.task_mut(1).unwrap().pipeline_run = super::super::pipeline::resolve(
+        &super::super::catalog::builtin(),
+        &team,
+        &crate::state::teams::model::Task { pipeline: "code".into(), ..team.task(1).unwrap().clone() },
+    );
+    with_review_team(&team, || {
+        let value = call("report", json!({"task":1,"attempt":attempt,"text":"Half the API is in","interim":true})).unwrap();
+        assert_eq!((value["status"].as_str(), value["attempt"].as_u64()), (Some("interim"), Some(1)), "{value}");
+        let saved = stored();
+        let task = saved.task(1).unwrap();
+        assert_eq!(task.status, TaskStatus::InProgress, "no review and no stage");
+        assert!(!task.status.in_stage(), "no stage starts: {task:?}");
+        let open = task.attempts.iter().find(|candidate| candidate.id == attempt_id).unwrap();
+        assert_eq!(open.state, AttemptState::Delivered, "the attempt stays open");
+        assert!(open.report.is_none(), "an interim report is not a delivery");
+        assert_eq!(open.interim.as_ref().map(|report| report.text.as_str()), Some("Half the API is in"));
+        // The lead's inbox has it; the owner's Waiting for you does not.
+        let lead = super::super::inbox::items(&saved);
+        let item = lead.iter().find(|item| item.kind == "interim_report").expect("the lead sees the interim report");
+        assert!(item.summary.contains("Half the API is in") && item.task == Some(1), "{item:?}");
+        let waiting = crate::state::teams::owner_waiting::items(&[saved.clone()], crate::state::now());
+        assert!(!waiting.iter().any(|item| item["title"].as_str().unwrap_or_default().contains("Half the API is in")), "{waiting:#?}");
+        // The feed names it for the lead and the owner.
+        let page = Store::open(false).unwrap().events("rv", None, 20).unwrap();
+        assert!(
+            page["items"].as_array().unwrap().iter().any(|event| event["kind"] == "interim_report"
+                && event["detail"]["task"] == 1
+                && event["detail"]["text"] == "Half the API is in"),
+            "{page}"
+        );
+        // A final report closes the attempt and clears its interim item.
+        let final_report = call("report", json!({"task":1,"attempt":attempt,"text":"Done"})).unwrap();
+        assert_eq!(final_report["status"], "in_review", "{final_report}");
+        let after = stored();
+        assert!(!super::super::inbox::items(&after).iter().any(|item| item.kind == "interim_report"));
+        assert!(after.task(1).unwrap().attempts.iter().all(|attempt| attempt.interim.is_none()));
+    });
+}
+
 #[test]
 fn a_pipeline_runs_through_hgs_team() {
     use crate::state::teams::model::{Member, MemberState, TaskStatus};

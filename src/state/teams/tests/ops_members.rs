@@ -46,6 +46,28 @@ fn a_sub_lead_takes_reports_only_while_it_is_one_and_never_in_a_cycle() {
 }
 
 #[test]
+fn a_sub_leads_member_interim_report_goes_to_the_sub_lead() {
+    let mut team = team_with_sub_lead();
+    let none = BTreeSet::new();
+    let mut events = Vec::new();
+    let tested = hand_out(&mut team, 2);
+    apply(
+        &mut team,
+        "report",
+        &json!({"task":2,"attempt":tested,"text":"Half the suite","interim":true}),
+        &Actor::Member("qa".into()),
+        &none,
+        &mut events,
+    )
+    .unwrap();
+    let theirs: Vec<_> = super::super::inbox::items_for(&team, "qalead").into_iter().filter(|item| item.kind == "interim_report").collect();
+    assert_eq!(theirs.len(), 1, "{theirs:?}");
+    assert_eq!(theirs[0].task, Some(2));
+    assert!(super::super::inbox::items(&team).iter().all(|item| item.kind != "interim_report"));
+    assert_eq!(events.iter().rev().find(|event| event.kind == "interim_report").unwrap().payload["to"], "QA lead");
+}
+
+#[test]
 fn a_sub_lead_answers_and_decides_its_reports_work_and_the_lead_hears_only_its_own() {
     let mut team = team_with_sub_lead();
     let none = BTreeSet::new();

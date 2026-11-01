@@ -71,6 +71,26 @@ fn a_stage_member_whose_turn_ends_without_a_verdict_is_told_to_the_lead() {
 /// running waits for Background work or a Zerus build, which is not a stall;
 /// it is not reported silent while that work runs.
 #[test]
+fn an_interim_report_on_a_stage_attempt_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut t = staged(&dir.path().display().to_string());
+    let run = super::super::pipeline::give_stage(&mut t, 1, "rev").unwrap();
+    let mut events = Vec::new();
+    let error = super::super::ops::apply(
+        &mut t,
+        "report",
+        &json!({"task":1,"attempt":run,"text":"Half the review","interim":true}),
+        &super::super::ops::Actor::Member("rev".into()),
+        &BTreeSet::new(),
+        &mut events,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("verdict") && error.contains("interim"), "{error}");
+    assert!(t.task(1).unwrap().pipeline_run.as_ref().and_then(|pipeline| pipeline.open_run()).is_some(), "the stage stays open");
+}
+
+#[test]
 fn a_stage_member_with_background_work_is_not_reported_silent() {
     let dir = tempfile::tempdir().unwrap();
     let mut t = staged(&dir.path().display().to_string());

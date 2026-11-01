@@ -2713,6 +2713,7 @@ fn revoke(task: &mut Task, why: &str) -> Option<u32> {
     super::pipeline::revoke_runs(task, why);
     let attempt = task.open_attempt_mut()?;
     attempt.state = AttemptState::Revoked;
+    attempt.interim = None;
     attempt.error = why.to_owned();
     Some(attempt.n)
 }
@@ -3071,6 +3072,8 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
         }
     }
     ensure!(!body.is_empty() || check.is_some(), "A report needs text");
+    let interim = input["interim"].as_bool() == Some(true);
+    let accept = input["accept"].as_bool() == Some(true);
     let check_task = team.task(id).is_some_and(Task::is_check);
     ensure!(!check_task || check.is_some(), "A check task's report needs \"check\":{{\"exit\":N,\"tail\":\"...\"}}");
     ensure!(!check.is_some() || check_task, "Task #{id} is not a check: drop \"check\" from its report");
@@ -3082,6 +3085,44 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
     };
     let label = actor.label(team);
     let team_lead = team.lead.clone();
+    // Owner (2026-11-01): an interim report is progress or a question, not a
+    // delivery: the attempt stays open, the task In progress and no stage runs.
+    if interim {
+        ensure!(!captured, "A captured reply is not an interim report");
+        ensure!(!accept, "An interim report cannot accept a task");
+        ensure!(!check_task, "A check task decides on its report; it cannot be interim");
+        let (n, member, title) = {
+            let task = team.task_mut(id).context("Unknown task")?;
+            ensure!(task.status == TaskStatus::InProgress, "An interim report belongs to a task In progress");
+            let attempt = task
+                .attempts
+                .iter()
+                .find(|attempt| attempt.id == attempt_id && attempt.state.open())
+                .with_context(|| format!("Task #{id} has no open attempt {attempt_id}"))?;
+            ensure!(by_member.is_empty() || attempt.member == by_member, "This attempt belongs to another member");
+            let (n, member) = (attempt.n, attempt.member.clone());
+            let attempt = task.attempts.iter_mut().find(|attempt| attempt.id == attempt_id).expect("the attempt was found");
+            attempt.interim = Some(Report { text: body.clone(), at: now(), structured: structured.clone(), unstructured: structured.is_none(), ..Default::default() });
+            // An interim report is the member working again: clear the whole
+            // capture gate as WorkResumed does, so the next tick does not fire
+            // No report for the old turn.
+            attempt.turn_ended_at = None;
+            attempt.turn_reply.clear();
+            attempt.report_ready_at = None;
+            attempt.blocked_since = None;
+            attempt.no_report = false;
+            (n, member, task.title.clone())
+        };
+        let role = team.role_of(&member);
+        let reviewer = team.reviewer_of(&member);
+        let to = if reviewer.is_empty() { String::new() } else { team.role_of(&reviewer) };
+        let event_text = if body.chars().count() > 2000 { format!("{}...", body.chars().take(2000).collect::<String>()) } else { body.clone() };
+        events.push(Event::new(
+            "interim_report",
+            json!({"by":role,"to":to,"task":id,"title":title,"attempt":n,"text":event_text}),
+        ));
+        return Ok(json!({"status":"interim","task":id,"attempt":n}));
+    }
     // #684 N1: the attempt records its folder's HEAD and branch at the report,
     // so a later stage checks that commit and never reads HEAD at its start.
     let (folder_head, folder_branch) = if by_member.is_empty() {
@@ -3112,7 +3153,6 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
     };
     // C1: the lead reports its own task and accepts it in one step; nobody
     // else accepts on a report.
-    let accept = input["accept"].as_bool() == Some(true);
     if accept {
         ensure!(!by_member.is_empty() && by_member == team_lead, "Only the lead accepts its own task on its report");
     }
@@ -3142,6 +3182,7 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
         let attempt = task.attempts.iter_mut().find(|a| a.id == open_id).unwrap();
         attempt.state = AttemptState::Reported;
         attempt.report = Some(Report { text: body, at: now(), structured: structured.clone(), unstructured: structured.is_none(), captured, tests: test_delta.clone(), ..Default::default() });
+        attempt.interim = None;
         attempt.folder_head = folder_head.clone();
         attempt.folder_branch = folder_branch.clone();
         attempt.no_report = false;
@@ -3217,6 +3258,7 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
         }
         let was_captured = std::mem::take(&mut report.captured);
         attempt.no_report = false;
+        attempt.interim = None;
         // The lead hears the real report as a report, not as the captured one;
         // U36: a stage still reading it tells the lead after the last stage.
         if member != team_lead && task.status == TaskStatus::Submitted {
@@ -3283,6 +3325,7 @@ fn decide_check(team: &mut Team, id: u32, n: u32, events: &mut Vec<Event>) -> an
         // keeps its check result.
         if let Some(attempt) = task.attempts.iter_mut().rev().find(|attempt| attempt.state == AttemptState::Reported) {
             attempt.state = AttemptState::Rejected;
+            attempt.interim = None;
         }
         revoke(task, "check failed");
         task.status = TaskStatus::Pending;
@@ -4552,6 +4595,7 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     } else {
         if let Some(attempt) = task.attempts.iter_mut().rev().find(|a| a.state == AttemptState::Reported) {
             attempt.state = AttemptState::Rejected;
+            attempt.interim = None;
         }
         revoke(task, "rejected");
         task.status = if input["final"].as_bool() == Some(true) {

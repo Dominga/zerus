@@ -2,6 +2,84 @@ use super::*;
 use super::support::*;
 
 #[test]
+fn an_interim_report_needs_an_open_attempt_of_its_own_member() {
+    use crate::state::teams::model::Member;
+    let mut team = running_team();
+    let attempt = hand_out(&mut team, 1);
+    team.members.push(Member { id: "qa".into(), role: "Tester".into(), agent: "kimi".into(), ..Default::default() });
+    let none = BTreeSet::new();
+    let mut events = Vec::new();
+    let error = apply(
+        &mut team,
+        "report",
+        &json!({"task":1,"attempt":attempt,"text":"Half","interim":true}),
+        &Actor::Member("qa".into()),
+        &none,
+        &mut events,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("belongs to another member"), "{error}");
+    // A final report closes the attempt; an interim no longer applies.
+    apply(&mut team, "report", &json!({"task":1,"attempt":attempt,"text":"Done"}), &Actor::Member("dev".into()), &none, &mut events).unwrap();
+    let error = apply(
+        &mut team,
+        "report",
+        &json!({"task":1,"attempt":attempt,"text":"More","interim":true}),
+        &Actor::Member("dev".into()),
+        &none,
+        &mut events,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("In progress") || error.contains("no open attempt"), "{error}");
+    assert!(team.task(1).unwrap().attempts.iter().all(|attempt| attempt.interim.is_none()));
+}
+
+#[test]
+fn a_retried_attempt_drops_its_interim_report_and_item() {
+    let mut team = running_team();
+    let attempt = hand_out(&mut team, 1);
+    let none = BTreeSet::new();
+    let mut events = Vec::new();
+    apply(
+        &mut team,
+        "report",
+        &json!({"task":1,"attempt":attempt,"text":"Half","interim":true}),
+        &Actor::Member("dev".into()),
+        &none,
+        &mut events,
+    )
+    .unwrap();
+    assert!(crate::state::teams::inbox::items(&team).iter().any(|item| item.kind == "interim_report"));
+    apply(&mut team, "retry", &json!({"task":1,"by":"human"}), &Actor::Human, &none, &mut events).unwrap();
+    assert!(team.task(1).unwrap().attempts.iter().all(|attempt| attempt.interim.is_none()));
+    assert!(!crate::state::teams::inbox::items(&team).iter().any(|item| item.kind == "interim_report"));
+}
+
+#[test]
+fn an_interim_event_text_is_capped_but_the_report_keeps_it_all() {
+    let mut team = running_team();
+    let attempt = hand_out(&mut team, 1);
+    let none = BTreeSet::new();
+    let mut events = Vec::new();
+    let long = "x".repeat(5000);
+    apply(
+        &mut team,
+        "report",
+        &json!({"task":1,"attempt":attempt,"text":long,"interim":true}),
+        &Actor::Member("dev".into()),
+        &none,
+        &mut events,
+    )
+    .unwrap();
+    let event = events.iter().rev().find(|event| event.kind == "interim_report").unwrap();
+    let shown = event.payload["text"].as_str().unwrap();
+    assert!(shown.chars().count() <= 2003 && shown.ends_with("..."), "{}", shown.chars().count());
+    assert_eq!(team.task(1).unwrap().attempts[0].interim.as_ref().unwrap().text.chars().count(), 5000);
+}
+
+#[test]
 fn task_output_is_normalized_bounded_and_preserved_through_task_operations() {
     let (base, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
     let none = BTreeSet::new();

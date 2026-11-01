@@ -2405,7 +2405,8 @@ pub(crate) fn current_view(team: &Team, member: &str) -> anyhow::Result<Value> {
             "team": team.id,
             "task": task.id,
             "attempt": attempt.id,
-            "text": "..."
+            "text": "...",
+            "interim": false
         }
     }))
 }

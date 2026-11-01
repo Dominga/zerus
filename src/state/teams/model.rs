@@ -743,6 +743,10 @@ pub(crate) struct MergeEntry {
     /// The test queue's requests of its affected set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requests: Vec<String>,
+    /// Suites whose declared platforms exclude this computer, with no test
+    /// runner of their class: the merge decides on the suites that ran.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_run: Vec<String>,
     /// Why it waits (the lead's folder has uncommitted changes).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
@@ -757,6 +761,9 @@ pub(crate) struct MergeLog {
     pub at: f64,
     #[serde(default)]
     pub suites: Vec<String>,
+    /// Suites of another platform that had no runner here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_run: Vec<String>,
 }
 
 /// #718: a flaky suite's quarantine, shown to the lead and the owner until
@@ -1337,6 +1344,10 @@ pub(crate) struct Attempt {
     pub check: Option<CheckResult>,
     #[serde(default)]
     pub report: Option<Report>,
+    /// An interim report on this open attempt (progress or a question, not a
+    /// delivery): the task stays In progress and nothing enters review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interim: Option<Report>,
     /// Questions this attempt asked the lead, oldest first (A3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub questions: Vec<Question>,

@@ -382,6 +382,10 @@ pub(crate) fn stage_report(team: &mut Team, input: &Value, actor: &Actor, events
         ensure!(input.get("verdict").is_none(), "A verdict reports a stage: name the stage's attempt id");
         return Ok(None);
     };
+    ensure!(
+        input["interim"].as_bool() != Some(true),
+        "A stage member's report is a verdict; an interim report is for an open task attempt"
+    );
     let caller = match actor {
         Actor::Member(member) if !member.is_empty() => member.clone(),
         _ => bail!("A stage's verdict comes from its member; the lead or you skip a stage or send the task back"),
@@ -446,6 +450,7 @@ fn returned(team: &mut Team, id: u32, run: &StageRun, by: &str, findings: Vec<St
     // Back to the implementer as a new attempt, without the lead.
     if let Some(attempt) = task.attempts.iter_mut().rev().find(|attempt| attempt.state == AttemptState::Reported) {
         attempt.state = AttemptState::Rejected;
+        attempt.interim = None;
         // #630 C2: the implementer keeps the task for this return.
         attempt.pipeline_return = true;
     }
@@ -779,6 +784,7 @@ pub(crate) fn send_back(team: &mut Team, input: &Value, actor: &Actor, events: &
     let attempt = reported_attempt(task);
     if let Some(found) = task.attempts.iter_mut().rev().find(|found| found.state == AttemptState::Reported) {
         found.state = AttemptState::Rejected;
+        found.interim = None;
         // #630 C2: a send-back also keeps the task for its implementer.
         found.pipeline_return = true;
     }

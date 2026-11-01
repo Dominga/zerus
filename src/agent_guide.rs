@@ -119,6 +119,14 @@ mod tests {
         assert!(custom.contains("keep_assignees (off)"));
     }
 
+    /// Owner (2026-11-01): a member's question goes through `hgs team ask`,
+    /// never a report.
+    #[test]
+    fn the_member_page_sends_a_question_through_team_ask() {
+        let team = TOPICS.iter().find(|(name, _)| *name == "team").unwrap().1;
+        assert!(team.contains("A question goes through hgs team ask, never a report"), "{team}");
+    }
+
     /// U38: the lead protocol names the profile, the top three losses and the
     /// per-role numbers, and says unknown is never zero.
     #[test]

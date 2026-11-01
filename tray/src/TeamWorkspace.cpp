@@ -1500,7 +1500,8 @@ QWidget *TeamWorkspace::inboxStrip(const Team &team, const QList<InboxItem> &ite
     const auto kindOf = [](const InboxItem &item) {
         return item.kind == "report" ? tr("report") : item.kind == "question" ? tr("question")
              : item.kind == "permission" ? tr("permission") : item.kind == "lead_task" ? tr("lead task")
-             : item.kind == "stalled" ? tr("stalled") : item.kind == "budget" ? tr("budget") : item.kind;
+             : item.kind == "stalled" ? tr("stalled") : item.kind == "budget" ? tr("budget")
+             : item.kind == "interim_report" ? tr("interim") : item.kind;
     };
     auto *head = row(6);
     auto *toggle = new QToolButton; toggle->setIcon(workspaceIcon(m_inboxOpen ? "chevron-down" : "chevron-right", c.fg)); toggle->setAutoRaise(true);

@@ -2142,12 +2142,28 @@ fn add_build_task(team: &mut Team, phase: u32, by: &str, events: &mut Vec<Event>
     let id = team.tasks.iter().map(|task| task.id).max().unwrap_or(0) + 1;
     let assignee = if team.member(&team.lead).is_some() { team.lead.clone() } else { String::new() };
     // U62 (#760): the merge queue tested its merged range already; the build
-    // checks only what came after.
+    // checks only what came after. A suite the queue could not run here is
+    // named, so the build checks it too.
     let description = match super::merge_queue::untested_since(team) {
-        Some(tested) => format!(
-            "Integrate the accepted work and run the build. The merge queue tested the lead branch up to {tested}: \
-             check only what came after it (hgs test affected {tested}..HEAD)."
-        ),
+        Some(untested) => {
+            let mut text = if untested.since.is_empty() {
+                "Integrate the accepted work and run the build.".to_owned()
+            } else {
+                format!(
+                    "Integrate the accepted work and run the build. The merge queue tested the lead branch up to {}: \
+                     check only what came after it (hgs test affected {}..HEAD).",
+                    untested.since, untested.since
+                )
+            };
+            let suites = untested.suites();
+            if !suites.is_empty() {
+                text.push_str(&format!(
+                    " The merge queue did not run {} here: check them too.",
+                    suites.join(", ")
+                ));
+            }
+            text
+        }
         None => "Integrate the accepted work and run the build.".into(),
     };
     team.tasks.push(Task {

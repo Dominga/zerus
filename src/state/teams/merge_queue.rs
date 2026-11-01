@@ -910,8 +910,12 @@ fn record_untested_range(team: &mut Team, id: u32, entry: &MergeEntry, _events: 
         return;
     }
     let previous = team.task(id).and_then(|task| task.untested_merge.as_ref()).cloned();
-    let prev = previous.filter(|range| ancestry_at(&team.folder, &range.merged, &entry.merged) == Ancestry::Yes)
-        .map(|range| range.prev).unwrap_or_else(|| entry.prev.clone());
+    // Only a definite non-ancestor permits replacing the older start. A Git
+    // read failure must preserve it while extending the end to this merge.
+    let prev = previous
+        .filter(|range| ancestry_at(&team.folder, &range.merged, &entry.merged) != Ancestry::No)
+        .map(|range| range.prev)
+        .unwrap_or_else(|| entry.prev.clone());
     if let Some(task) = team.task_mut(id) {
         task.untested_merge = Some(MergeRange { task: id, prev, merged: entry.merged.clone() });
     }

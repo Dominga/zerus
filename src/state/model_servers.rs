@@ -1164,6 +1164,13 @@ fn picker_settings(config: &Config, server: &Server, model: &str) -> Option<Path
     Some(path)
 }
 
+/// The model ids `server` lists, within `timeout`; empty when it cannot be read.
+pub(crate) fn model_names(config: &Config, server: &Server, timeout: Duration) -> Vec<String> {
+    api_models_within(config, server, timeout)
+        .map(|models| models.iter().filter_map(|model| model["name"].as_str().map(str::to_owned)).collect())
+        .unwrap_or_default()
+}
+
 /// `api_models` with its own time bound, for a launch that must not wait long.
 fn api_models_within(config: &Config, server: &Server, timeout: Duration) -> std::result::Result<Vec<Value>, Failure> {
     let url = models_url(server);

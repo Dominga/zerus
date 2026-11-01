@@ -18,7 +18,7 @@ const SUMMARY_CHARS: usize = 300;
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Item {
     /// `report`, `question`, `permission`, `lead_task`, `stalled`, `budget`,
-    /// `interim_report` or `task_waits` (spec 0: U45, U46, U48).
+    /// `interim_report`, `merge_waiting` or `task_waits` (spec 0: U45, U46, U48).
     pub kind: &'static str,
     pub key: String,
     pub task: Option<u32>,
@@ -143,6 +143,41 @@ fn all_items(team: &Team) -> Vec<Item> {
             subagents:Value::Null });
     }
 
+    // A queued merge that failed and was rolled back waits for the lead to fix
+    // the runner/tests map or to retry it.
+    if active {
+        for task in &team.tasks {
+            let Some(entry) = task.merge.as_ref().filter(|entry| {
+                entry.state == "queued"
+                    && !entry.note.is_empty()
+                    && entry.note != "the lead's folder has uncommitted changes"
+                    && !entry.note.starts_with("the lead's folder has uncommitted changes")
+            }) else { continue };
+            let next = if entry.note.contains("could not be rolled back") || entry.note.contains("lead branch moved") {
+                "The lead branch moved and the merge could not be rolled back; revert it, then retry or reject."
+            } else if entry.note.contains("test runners could not be read") {
+                "Fix the runner or machine config, then accept or retry the merge."
+            } else if entry.note.contains("affected tests could not be selected") {
+                "Fix the tests map, then accept or retry the merge."
+            } else {
+                "Fix the cause, then accept or retry the merge."
+            };
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "merge_waiting",
+                key: format!("merge_waiting:{}:{}", task.id, entry.commit),
+                task: Some(task.id),
+                member: team.name_of(&entry.author),
+                since: entry.at,
+                summary: summary(&format!("#{} merge waits: {}", task.id, entry.note)),
+                command: format!(
+                    "{} | hgs team retry --json",
+                    json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id})
+                ),
+                detail: format!("{} {next}", entry.note),
+            });
+        }
+    }
     // A rework keeps its member indefinitely. Show the wait even when that
     // member has an approval or usage limit rather than a stored task wait.
     for task in team.tasks.iter().filter(|task| active && task.rework() && task.status == TaskStatus::Pending

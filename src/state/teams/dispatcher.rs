@@ -1598,14 +1598,28 @@ fn merge_queue_tick(store: &mut Store, team_id: &str, now: f64) -> anyhow::Resul
                 return Ok(());
             }
         }
+        // Every result is in; the merge decides without reading the host's
+        // classes or the machine config.
+        return change(store, team_id, |team, events| {
+            super::merge_queue::step(team, &database, now, events, &[], &[]).map(|_| ())
+        });
     }
-    // A configuration that cannot be read leaves the runners unknown: skip the
-    // tick rather than record a suite with a runner as not run here.
-    let Ok(config) = crate::config::Config::load() else { return Ok(()) };
-    let runners = super::test_runners::configured(&config);
+    // A queued merge (including one rolled back for a retry) merges now. Host
+    // classes and the machine config are read after a merge completes, never on
+    // a tick that only waits for test results.
+    let has_queued = team
+        .tasks
+        .iter()
+        .any(|task| task.merge.as_ref().is_some_and(|entry| matches!(entry.state.as_str(), "queued" | "waiting" | "reverting")));
+    if !has_queued {
+        return Ok(());
+    }
     change(store, team_id, |team, events| {
-        let host = super::test_runners::host_classes();
-        super::merge_queue::step(team, &database, now, events, &host, &runners).map(|_| ())
+        super::merge_queue::step_with(team, &database, now, events, || {
+            let config = crate::config::Config::load().map_err(|error| anyhow::anyhow!("{error}"))?;
+            Ok((super::test_runners::host_classes(), super::test_runners::configured(&config)))
+        })
+        .map(|_| ())
     })
 }
 
@@ -4763,6 +4777,9 @@ fn fail_context(store: &mut Store, team_id: &str, task_id: u32, member_id: &str,
     change(store, team_id, |team, events| {
         let Some(task) = team.task_mut(task_id) else { return Ok(()) };
         let Some(wait) = task.waits.as_mut().filter(|wait| wait.state == "waiting") else { return Ok(()) };
+        // model.rs: only an explicit fresh rejection may bypass shared Output:
+        // an automatic preparation refusal never keeps the exemption.
+        task.fresh_retry = false;
         let n = task.attempts.len() as u32 + 1;
         wait.state = if step.result == "uncertain" { "uncertain".into() } else { "refused".into() };
         wait.reason = step.reason.clone();

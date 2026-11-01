@@ -67,9 +67,7 @@ fn a_stage_member_whose_turn_ends_without_a_verdict_is_told_to_the_lead() {
     assert!(page["items"].as_array().unwrap().iter().any(|event| event["kind"] == "stage_silent"), "{page}");
 }
 
-/// The owner (2026-11-01): a reviewer whose turn ended with the tests still
-/// running waits for Background work or a Zerus build, which is not a stall;
-/// it is not reported silent while that work runs.
+/// An interim report is for an open task attempt; a stage takes a verdict.
 #[test]
 fn an_interim_report_on_a_stage_attempt_is_refused() {
     let dir = tempfile::tempdir().unwrap();
@@ -90,6 +88,9 @@ fn an_interim_report_on_a_stage_attempt_is_refused() {
     assert!(t.task(1).unwrap().pipeline_run.as_ref().and_then(|pipeline| pipeline.open_run()).is_some(), "the stage stays open");
 }
 
+/// The owner (2026-11-01): a reviewer whose turn ended with the tests still
+/// running waits for Background work or a Zerus build, which is not a stall;
+/// it is not reported silent while that work runs.
 #[test]
 fn a_stage_member_with_background_work_is_not_reported_silent() {
     let dir = tempfile::tempdir().unwrap();

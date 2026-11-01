@@ -750,6 +750,19 @@ pub(crate) struct MergeEntry {
     /// Why it waits (the lead's folder has uncommitted changes).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
+    /// A queued retry's lead-branch HEAD and tests-map fingerprint when the
+    /// merge failed: a later tick retries only when one changed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub wait_head: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub wait_map: String,
+    /// The lead's accept or retry asked to resume this queued retry even when
+    /// neither fingerprint changed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retry: bool,
+    /// Consecutive test-selection failures; the second returns the task.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub selection_failed: u32,
 }
 
 /// U62 (#760): one merge the queue kept, with the range it tested.
@@ -764,6 +777,17 @@ pub(crate) struct MergeLog {
     /// Suites of another platform that had no runner here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub not_run: Vec<String>,
+}
+
+/// U62 (#760): a suite whose range is still open because this computer cannot
+/// run it. It stays persisted while the bounded merge log may no longer name it.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct OpenNotRun {
+    /// The commit its open range starts at (the branch before its first
+    /// not-run merge).
+    pub since: String,
+    /// The merge queue's not-run message, naming the suite and its platforms.
+    pub message: String,
 }
 
 /// #718: a flaky suite's quarantine, shown to the lead and the owner until
@@ -2031,6 +2055,15 @@ pub(crate) struct Team {
     /// queue tested; a phase integration checks only what came after it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub merge_tested: String,
+    /// U62 (#760): the newest merged commit each suite ran on. A suite this
+    /// computer cannot run keeps its own range open without holding the tested
+    /// point of the suites that did run. Bounded.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub merge_tested_suites: std::collections::BTreeMap<String, String>,
+    /// U62 (#760): suites whose ranges are still open because no runner here
+    /// could run them; kept separate from the bounded merge log.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub merge_not_run: std::collections::BTreeMap<String, OpenNotRun>,
     /// U62 (#760): the merges the queue kept, newest last (bounded).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub merge_log: Vec<MergeLog>,

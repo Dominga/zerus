@@ -2,6 +2,46 @@ use super::*;
 use super::support::*;
 
 #[test]
+fn a_complete_testing_merge_does_not_read_the_machine_config() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let team = Team {
+            id: "t".into(),
+            name: "T".into(),
+            lead: "lead".into(),
+            status: TeamStatus::Running,
+            members: vec![Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), state: MemberState::Active, ..Default::default() }],
+            tasks: vec![Task {
+                id: 1,
+                title: "Work".into(),
+                assignee: "dev".into(),
+                status: TaskStatus::Submitted,
+                attempts: vec![Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Reported, ..Default::default() }],
+                merge: Some(MergeEntry { state: "testing".into(), author: "dev".into(), by: "Lead".into(), ..Default::default() }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
+        let broken = dir.path().join("broken-config");
+        std::fs::create_dir_all(broken.join("config")).unwrap();
+        let old = std::env::var("HGS_CONFIG_DIR").ok();
+        let _env = crate::state::ENV_LOCK.lock().unwrap();
+        std::env::set_var("HGS_CONFIG_DIR", &broken);
+        let result = super::merge_queue_tick(&mut store, "t", 1.0);
+        match &old {
+            Some(value) => std::env::set_var("HGS_CONFIG_DIR", value),
+            None => std::env::remove_var("HGS_CONFIG_DIR"),
+        }
+        result.unwrap();
+        let saved = store.load("t").unwrap().unwrap();
+        assert_eq!(saved.task(1).unwrap().status, TaskStatus::Accepted, "the completed test decides without the machine config");
+        assert!(saved.task(1).unwrap().merge.is_none());
+    });
+}
+
+#[test]
 fn a_merge_never_runs_the_repository_own_hook() {
     // U21, attempt 2: a clone member owns its .git and can leave a hook
     // there; the hardened route must never run it. (A hook only runs when

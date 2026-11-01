@@ -686,18 +686,26 @@ fn verify_scan(
     // `hgs rename` anchors the session's journal to the name it had when the
     // journal began (`journal_name`): events.sqlite3 keeps the owner's
     // "plan approved" under "work-7c91e747" while the team records the name
-    // `hgs ls` shows, "Worker". The earlier name is the same journal, so both
-    // are read; the conversation filter below still rejects another session.
-    let mut statement = if earlier.is_empty() {
+    // `hgs ls` shows, "Worker". The earlier name is only meaningful for the
+    // same conversation: without one, read the current name alone. The
+    // conversation filter stays in SQL, on the events_session index.
+    let use_earlier = !earlier.is_empty() && !conversation.is_empty();
+    let mut statement = if conversation.is_empty() {
         db.prepare("SELECT seq, conversation, payload FROM events WHERE name = ?1 ORDER BY seq DESC LIMIT 200")
+    } else if use_earlier {
+        db.prepare(
+            "SELECT seq, conversation, payload FROM events WHERE name IN (?1, ?2) AND conversation = ?3 ORDER BY seq DESC LIMIT 200",
+        )
     } else {
-        db.prepare("SELECT seq, conversation, payload FROM events WHERE name = ?1 OR name = ?2 ORDER BY seq DESC LIMIT 200")
+        db.prepare("SELECT seq, conversation, payload FROM events WHERE name = ?1 AND conversation = ?2 ORDER BY seq DESC LIMIT 200")
     }
     .context("The session events cannot be read")?;
-    let rows = if earlier.is_empty() {
+    let rows = if conversation.is_empty() {
         statement.query_map([name], event_row).context("The session events cannot be read")?
+    } else if use_earlier {
+        statement.query_map([name, earlier, conversation], event_row).context("The session events cannot be read")?
     } else {
-        statement.query_map([name, earlier], event_row).context("The session events cannot be read")?
+        statement.query_map([name, conversation], event_row).context("The session events cannot be read")?
     };
     for row in rows {
         let (seq, event_conversation, payload) = row.context("The session events cannot be read")?;
@@ -923,6 +931,32 @@ mod tests {
         // A lead on another computer cannot be checked here.
         let team = Team { lead: "lead".into(), ..Default::default() };
         assert!(verify(&team, &serde_json::json!({"text":"plan approved"}), None, 2000.0).is_err());
+    }
+
+    /// Owner (2026-11-01): the earlier journal name is read only with a
+    /// conversation id, and the conversation filter is in SQL before the 200
+    /// row limit, so newer events of another conversation cannot hide it.
+    #[test]
+    fn the_owner_word_scan_bounds_the_conversation_and_the_earlier_name() {
+        let db = database();
+        add(&db, "claude/x/work-7c91e747", "c1", prompt(2000.0, "plan approved"));
+        assert!(
+            verify_approval(&db, "claude/x/Worker", "", "claude/x/work-7c91e747", "plan approved", None, 2010.0).is_err(),
+            "no conversation, no earlier name"
+        );
+        assert!(
+            verify_approval(&db, "claude/x/Worker", "c1", "claude/x/work-7c91e747", "plan approved", None, 2010.0).is_ok(),
+            "the same conversation finds it"
+        );
+        let db = database();
+        add(&db, "claude/x/Worker", "c1", prompt(2000.0, "plan approved"));
+        for i in 0..200 {
+            add(&db, "claude/x/Worker", "other", prompt(3000.0 + i as f64, "not the owner"));
+        }
+        assert!(
+            verify_approval(&db, "claude/x/Worker", "c1", "", "plan approved", None, 2010.0).is_ok(),
+            "the conversation is filtered before the 200 row limit"
+        );
     }
 
     fn roster_rule(all: &[&str]) -> WordRule {

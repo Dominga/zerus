@@ -2,6 +2,49 @@ use super::*;
 use super::support::*;
 
 #[test]
+fn task_output_is_normalized_bounded_and_preserved_through_task_operations() {
+    let (base, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+    let none = BTreeSet::new();
+    let mut events = Vec::new();
+    let mut team = base.clone();
+    apply(&mut team, "plan", &json!({"tasks":[{"id":1,"title":"API","assignee":"lead",
+        "output":["./src\\api//", "src/api", "docs/./api.md"]}]}), &Actor::Human, &none, &mut events).unwrap();
+    assert_eq!(team.task(1).unwrap().output, vec!["src/api", "docs/api.md"]);
+    apply(&mut team, "approve", &json!({}), &Actor::Human, &none, &mut events).unwrap();
+    apply(&mut team, "extend", &json!({"tasks":[{"id":2,"title":"Docs","assignee":"lead","output":["docs\\new.md"]}]}),
+        &Actor::Human, &none, &mut events).unwrap();
+    assert_eq!(team.task(2).unwrap().output, vec!["docs/new.md"]);
+    apply(&mut team, "edit-draft", &json!({"phase":2,"tasks_update":[{"id":2,"output":["./docs//guide/"]}]}),
+        &Actor::Human, &none, &mut events).unwrap();
+    assert_eq!(team.task(2).unwrap().output, vec!["docs/guide"]);
+    assert!(team.phases[0].changes.iter().any(|change| change["field"] == "output"));
+    let warning = apply(&mut team, "add-to-phase", &json!({"phase":1,"tasks":[{"id":3,"title":"Follow-up","assignee":"lead","output":["src\\follow.rs"]}]}),
+        &Actor::Human, &none, &mut events).unwrap();
+    apply(&mut team, "add-to-phase", &json!({"phase":1,"confirm":warning["pending"],"confirmation":"add"}),
+        &Actor::Human, &none, &mut events).unwrap();
+    assert_eq!(team.task(3).unwrap().output, vec!["src/follow.rs"]);
+    let saved: Team = serde_json::from_value(serde_json::to_value(&team).unwrap()).unwrap();
+    assert_eq!(saved.task(3).unwrap().output, vec!["src/follow.rs"]);
+    let status = crate::state::teams::commands::view_with_cancelled(&saved, &[], Some(&[]), true);
+    assert_eq!(status["tasks"].as_array().unwrap().iter().find(|task| task["id"] == 3).unwrap()["output"], json!(["src/follow.rs"]));
+    let old: Task = serde_json::from_value(json!({"id":9,"title":"Legacy"})).unwrap();
+    assert!(old.output.is_empty());
+    for invalid in [
+        json!(["/absolute"]), json!(["C:\\absolute"]), json!(["../outside"]), json!(["src/../outside"]),
+        json!(["\\\\server\\share"]), json!([""]), json!(["line\nbreak"]), json!(["tab\tpath"]),
+        json!(["x".repeat(1025)]), json!(vec!["src/api"; 129]), json!(vec!["x".repeat(1024); 33]),
+        json!("src/api"), json!([42]),
+    ] {
+        let mut creating = base.clone();
+        assert!(apply(&mut creating, "plan", &json!({"tasks":[{"id":1,"title":"Invalid","assignee":"lead","output":invalid}]}),
+            &Actor::Human, &none, &mut Vec::new()).is_err(), "plan accepted {invalid}");
+        let mut editing = team.clone();
+        assert!(apply(&mut editing, "edit-draft", &json!({"phase":2,"tasks_update":[{"id":2,"output":invalid}]}),
+            &Actor::Human, &none, &mut Vec::new()).is_err(), "edit accepted {invalid}");
+    }
+}
+
+#[test]
 fn only_you_approve_and_errors_block_it() {
     let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
     let mut events = Vec::new();

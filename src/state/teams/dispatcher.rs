@@ -829,7 +829,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     // assignee with keep_assignees) and who is stuck, stopped or offline says so
     // in its waits, so the lead sees why it never starts (N4).
     for task in &team.tasks {
-        if task.status != TaskStatus::Pending || task.assignee.is_empty() || !team.keeps_assignee(task) {
+        if task.status != TaskStatus::Pending || task.assignee.is_empty() || !team.requires_assignee(task) {
             continue;
         }
         if task.waits.as_ref().is_some_and(|wait| wait.waits_for != "member") {
@@ -1163,7 +1163,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         }
         let Some(session) = member.session.as_ref() else { continue };
         let Some(found) = seen.iter().find(|seen| seen.host == session.host && seen.name == session.name) else { continue };
-        let has_work = busy.contains(member.id.as_str())
+        let has_work = busy.contains(member.id.as_str()) || team.reserved_for_rework(&member.id, None)
             || ready_ids.iter().any(|id| team.task(*id).is_some_and(|task| task.assignee == member.id));
         // U49: a draining member is idle on purpose; its episode ends quietly.
         if !staging_open || owner_wait || has_work || member.draining || !(found.free && found.live) {
@@ -1239,10 +1239,15 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     let refused_recently = |member: &Member| {
         team.tasks.iter().flat_map(|t| &t.attempts).any(|a| a.member == member.id && a.state == AttemptState::Refused && now - a.sent_at < REFUSAL_PAUSE)
     };
-    let available = |member: &Member, busy: &BTreeSet<&str>| {
+    let outputs = InProgressOutputs::new(team);
+    let own_rework = |member: &Member, task: Option<u32>| {
+        task.and_then(|id| team.task(id)).is_some_and(|task| task.rework() && task.assignee == member.id)
+    };
+    let available = |member: &Member, busy: &BTreeSet<&str>, task: Option<u32>| {
         !matches!(member.state, MemberState::Removed | MemberState::Paused)
-            && !member.draining
+            && (!member.draining || own_rework(member, task))
             && !busy.contains(member.id.as_str())
+            && !team.reserved_for_rework(&member.id, task)
             && member.session.is_some()
             && !member.needs_settings()
             && !refused_recently(member)
@@ -1267,7 +1272,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     // before new tasks: it finishes work already done.
     if team.status == TeamStatus::Running {
         for (task, candidates) in super::stages::waiting(team) {
-            if let Some(member) = candidates.iter().filter_map(|id| team.member(id)).find(|member| available(member, &busy)) {
+            if let Some(member) = candidates.iter().filter_map(|id| team.member(id)).find(|member| available(member, &busy, Some(task))) {
                 busy.insert(member.id.as_str());
                 steps.push(Step::StageOut { task, member: member.id.clone() });
             }
@@ -1332,6 +1337,15 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         if task.waits.is_some() {
             continue;
         }
+        // Rework waits for this exact member, including a native approval,
+        // usage limit or stopped session; none of these selects a peer.
+        if task.rework() && !team.member(&task.assignee).is_some_and(|member| {
+            member.limited.is_none() && session_of(member, seen).is_some_and(|found| {
+                found.live && found.free && !found.asking && found.limited.is_none()
+            })
+        }) {
+            continue;
+        }
         // U45: a task with models or for a role goes to a member that can run
         // one of its models, switched first when it must be.
         if super::models::applies(team, task) {
@@ -1342,7 +1356,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 let member = team.member(&pending.member);
                 let found = member.and_then(|member| session_of(member, seen));
                 if let (Some(member), Some(_)) = (member, found.filter(|found| super::models::confirmed(pending, &found.model, &found.effort))) {
-                    if switching.contains(member.id.as_str()) && available(member, &BTreeSet::new()) && super::stages::held(team, &member.id).is_none() {
+                    if switching.contains(member.id.as_str()) && available(member, &BTreeSet::new(), Some(id)) && super::stages::held(team, &member.id).is_none() {
                         switching.remove(member.id.as_str());
                         steps.push(deliver(task, member));
                     }
@@ -1356,16 +1370,14 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 continue;
             }
             let failed = |m: &Member| {
-                !task.pinned
-                    && task
-                        .attempts
-                        .iter()
-                        .any(|a| a.member == m.id && matches!(a.state, AttemptState::Rejected | AttemptState::Refused) && !super::pipeline::pipeline_returned(a))
+                !team.requires_assignee(task) && task.failed_by(&m.id)
             };
+            let output_blocks = !task.requests_fresh_retry() && outputs.blocks(task);
             let candidates = super::models::candidates(team, task);
             let fits: Vec<(&Member, super::models::Fit)> = candidates
                 .iter()
-                .filter(|m| available(m, &busy) && !failed(m) && super::stages::held(team, &m.id).is_none())
+                .filter(|m| available(m, &busy, Some(id)) && !failed(m) && super::stages::held(team, &m.id).is_none())
+                .filter(|m| m.id == task.assignee || !output_blocks)
                 .filter_map(|m| {
                     let found = session_of(m, seen)?;
                     let current = if found.model.is_empty() { super::models::launch_model(m) } else { (found.model.as_str(), found.effort.as_str()) };
@@ -1388,7 +1400,8 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 None => {
                     // Start the first member that could run it once it is up.
                     if let Some(member) = candidates.iter().find(|m| {
-                        m.session.is_none() && m.state != MemberState::Paused && m.launch_id.is_empty() && m.error.is_empty()
+                        !team.reserved_for_rework(&m.id, Some(id)) && !failed(m) && (m.id == task.assignee || !output_blocks)
+                            && m.session.is_none() && m.state != MemberState::Paused && m.launch_id.is_empty() && m.error.is_empty()
                             && super::models::fit(m, task, super::models::launch_model(m)).is_some()
                     }) {
                         if launching.insert(member.id.clone()) {
@@ -1403,7 +1416,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         // C1: the lead's own task is handed out without a message; it goes to
         // the inbox and never waits for the lead to be idle.
         if member.id == team.lead {
-            if matches!(member.state, MemberState::Removed | MemberState::Paused) || busy.contains(member.id.as_str()) {
+            if matches!(member.state, MemberState::Removed | MemberState::Paused) || busy.contains(member.id.as_str()) || team.reserved_for_rework(&member.id, Some(id)) {
                 continue;
             }
             if member.session.is_none() {
@@ -1417,22 +1430,18 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             continue;
         }
         // Members with one role do the same work: a ready task goes to a free
-        // one when its assignee is busy, and a retry to one that did not fail
-        // it (a fresh context). The lead's or your choice stays.
+        // one when its assignee is busy. Only an explicit fresh rejection
+        // prefers a member that did not fail it; rework keeps its member.
         // U36: a test holding the assignee's folder keeps its next task back;
         // a free member with the same role may take it.
         let held = super::stages::held(team, &member.id).is_some();
-        if !team.keeps_assignee(task) {
-            let failed = |m: &Member| {
-            task.attempts
-                .iter()
-                .any(|a| a.member == m.id && matches!(a.state, AttemptState::Rejected | AttemptState::Refused) && !super::pipeline::pipeline_returned(a))
-        };
-            let assignee_fits = available(member, &busy) && !failed(member) && !held;
+        if !team.requires_assignee(task) && (task.requests_fresh_retry() || !outputs.blocks(task)) {
+            let failed = |m: &Member| task.failed_by(&m.id);
+            let assignee_fits = available(member, &busy, Some(id)) && !failed(member) && !held;
             if !assignee_fits {
                 let role = team.role_of(&member.id);
                 if let Some(peer) = team.members.iter().find(|m| {
-                    m.id != member.id && m.id != team.lead && team.role_of(&m.id) == role && available(m, &busy) && !failed(m)
+                    m.id != member.id && m.id != team.lead && team.role_of(&m.id) == role && available(m, &busy, Some(id)) && !failed(m)
                         && super::stages::held(team, &m.id).is_none()
                 }) {
                     busy.insert(peer.id.as_str());
@@ -1441,7 +1450,8 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 }
             }
         }
-        if matches!(member.state, MemberState::Removed | MemberState::Paused) || member.draining || busy.contains(member.id.as_str()) || held {
+        if matches!(member.state, MemberState::Removed | MemberState::Paused) || (member.draining && !own_rework(member, Some(id))) || busy.contains(member.id.as_str()) || held
+            || team.reserved_for_rework(&member.id, Some(id)) {
             continue;
         }
         if member.session.is_none() {
@@ -1471,7 +1481,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     };
     if !ahead.is_empty() {
         for member in &team.members {
-            if !available(member, &busy) || busy.contains(member.id.as_str()) {
+            if !available(member, &busy, None) || busy.contains(member.id.as_str()) {
                 continue;
             }
             if let Some(task) = ahead.iter().filter_map(|id| team.task(*id)).find(|task| task.assignee == member.id) {
@@ -1522,7 +1532,7 @@ fn drained(team: &Team, member: &str) -> bool {
             .and_then(PipelineRun::open_run)
             .is_some_and(|run| run.state == StageState::Delivered && run.member == member)
     });
-    let work = team.tasks.iter().any(|task| task.assignee == member && task_owes(task));
+    let work = team.tasks.iter().any(|task| task.assignee == member && (task_owes(task) || task.rework()));
     !open_attempt && !open_stage && !work && team.reports_of(member).is_empty()
 }
 
@@ -3910,6 +3920,10 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
     // call and no extra event.
     let team = store.load(team_id)?.with_context(|| format!("Unknown team {team_id}"))?;
     let member = team.member(member_id).cloned().with_context(|| format!("Unknown member {member_id}"))?;
+    anyhow::ensure!(!team.reserved_for_rework(member_id, Some(task_id)), "member reserved for rework");
+    if let Some(task) = team.task(task_id).filter(|task| task.assignee != member_id && !task.assignee.is_empty()) {
+        anyhow::ensure!(!team.rebalance_blocked(task), "task must stay with its member");
+    }
     // U48 (spec 1, step 2): the task's branch, confirmed before the hand-out;
     // a refused or unconfirmed one leaves the task waiting. A confirmed one
     // waits on the task for the attempt that hands it out.
@@ -3967,6 +3981,7 @@ fn hand_out_now(
             }
         }
         anyhow::ensure!(can_hand_out(team, task_id), "no longer ready");
+        anyhow::ensure!(!team.reserved_for_rework(member_id, Some(task_id)), "member reserved for rework");
         // U61: the first hand-out of an auto-accepted draft fixes it by Auto in
         // this same change, so its reports need no owner approval.
         super::ops::accept_phase_on_hand_out(team, task_id, events);
@@ -4005,7 +4020,7 @@ fn hand_out_now(
         let session = team.member(member_id).and_then(|m| m.session.clone()).context("no session")?;
         let member_host = team.member(member_id).map(|m| m.computer.clone()).unwrap_or_default();
         let roles = from.map(|from| (team.role_of(from), team.role_of(member_id)));
-        let keeps = team.task(task_id).is_some_and(|task| team.keeps_assignee(task));
+        let keeps = team.task(task_id).is_some_and(|task| team.rebalance_blocked(task));
         let task = team.task_mut(task_id).context("unknown task")?;
         // Given to a free member with the same role, unless the lead or you
         // chose the assignee in the meantime.
@@ -4018,6 +4033,7 @@ fn hand_out_now(
         };
         anyhow::ensure!(task.assignee == member_id, "reassigned");
         let n = task.attempts.len() as u32 + 1;
+        task.fresh_retry = false;
         task.attempts.push(Attempt {
             n,
             id: attempt_id.clone(),
@@ -4573,7 +4589,7 @@ fn record_context_start(
     change(store, team_id, |team, events| {
         anyhow::ensure!(can_hand_out(team, task_id), "no longer ready");
         let roles = from.map(|from| (team.role_of(from), team.role_of(member_id)));
-        let keeps = team.task(task_id).is_some_and(|task| team.keeps_assignee(task));
+        let keeps = team.task(task_id).is_some_and(|task| team.rebalance_blocked(task));
         let task = team.task_mut(task_id).context("unknown task")?;
         let rebalanced = match from {
             Some(from) if task.assignee == from && !keeps => {
@@ -4612,7 +4628,7 @@ fn record_waits(
     change(store, team_id, |team, events| {
         anyhow::ensure!(can_hand_out(team, task_id), "no longer ready");
         let roles = from.map(|from| (team.role_of(from), team.role_of(member_id)));
-        let keeps = team.task(task_id).is_some_and(|task| team.keeps_assignee(task));
+        let keeps = team.task(task_id).is_some_and(|task| team.rebalance_blocked(task));
         let task = team.task_mut(task_id).context("unknown task")?;
         let rebalanced = match from {
             Some(from) if task.assignee == from && !keeps => {
@@ -4623,6 +4639,7 @@ fn record_waits(
         };
         anyhow::ensure!(task.assignee == member_id, "reassigned");
         let n = task.attempts.len() as u32 + 1;
+        task.fresh_retry = false;
         task.attempts.push(Attempt {
             n,
             id: uuid::Uuid::new_v4().to_string(),

@@ -135,6 +135,33 @@ fn all_items(team: &Team) -> Vec<Item> {
         return Vec::new();
     }
     let mut items: Vec<Item> = Vec::new();
+    // A rework keeps its member indefinitely. Show the wait even when that
+    // member has an approval or usage limit rather than a stored task wait.
+    for task in team.tasks.iter().filter(|task| active && task.rework() && task.status == TaskStatus::Pending
+        && task.hold.is_none() && task.waits.as_ref().is_none_or(|wait| wait.waits_for == "member")) {
+        let unavailable = team.member(&task.assignee).is_some_and(|member| {
+            matches!(member.state, MemberState::Removed | MemberState::Paused) || member.session.is_none()
+                || member.limited.is_some() || member.stuck.is_some() || member.seen.is_some_and(|seen| !seen.live)
+                || matches!(member.seen_phase.as_str(), "approval" | "question" | "input" | "error" | "working" | "tool" | "compacting")
+                || matches!(member.seen_activity.as_str(), "busy" | "attention" | "background")
+        });
+        if !unavailable { continue; }
+        let since = task.rework_since.unwrap();
+        let minutes = ((crate::state::now() - since) / 60.0).max(0.0).floor() as u64;
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "rework_waits",
+            key: format!("rework_waits:{}:{since}", task.id),
+            task: Some(task.id),
+            member: team.name_of(&task.assignee),
+            since,
+            summary: format!("#{} waits for its member, {minutes} min", task.id),
+            command: format!("{} | hgs team reassign --json",
+                json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id,"member":"MEMBER"})),
+            detail: format!("{} keeps this rework without a time limit. Wait for that member or explicitly reassign the task. {}",
+                team.name_of(&task.assignee), task.waits.as_ref().map(|wait| wait.reason.as_str()).unwrap_or_default()).trim_end().to_owned(),
+        });
+    }
     // #752: two or more members in one folder build each other's half-done
     // edits; the lead proposes the build broker once (a switch card), and a
     // card the owner denied is not proposed again.
@@ -190,6 +217,7 @@ fn all_items(team: &Team) -> Vec<Item> {
     // waits for nobody.
     for task in team.tasks.iter().filter(|_| active).filter(|task| task.status == TaskStatus::Pending) {
         let Some(wait) = task.waits.as_ref().filter(|wait| !wait.running()) else { continue };
+        if task.rework() && wait.waits_for == "member" { continue; }
         let attempt = task.attempts.iter().rev().find(|attempt| wait.attempt > 0 && attempt.n == wait.attempt);
         let member = match attempt {
             Some(attempt) => team.name_of(&attempt.member),

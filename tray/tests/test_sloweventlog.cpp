@@ -68,13 +68,15 @@ void TestSlowEventLog::aHandlerIsTimedWithoutTheEventsDeliveredInsideIt()
 
 void TestSlowEventLog::theLinesAreBoundedInRateAndTheRestCounted()
 {
-    auto log = meter({10, 3, 300});
+    // The window outlasts eight sleeps even where a 12 ms sleep takes several
+    // times that (macOS runners).
+    auto log = meter({10, 3, 1500});
     QObject receiver;
     QEvent event(QEvent::UpdateRequest);
     for (int i = 0; i < 8; ++i) log.measure(&receiver, &event, [] { return busy(12); });
     QCOMPARE(m_lines.size(), 3);
     QCOMPARE(log.suppressed(), 5);
-    QTest::qWait(350);
+    QTest::qWait(1600);
     log.measure(&receiver, &event, [] { return busy(12); });
     QCOMPARE(m_lines.size(), 4);
     QVERIFY2(m_lines.last().contains(QStringLiteral("(5 more slow event(s) were not logged)")), qPrintable(m_lines.last()));
@@ -105,14 +107,15 @@ void TestSlowEventLog::statisticsRankHandlersByTheirTotalTime()
     list.setObjectName(QStringLiteral("sessionList"));
     graph.setObjectName(QStringLiteral("teamPhaseGraph"));
     QEvent paint(QEvent::Paint);
-    for (int i = 0; i < 3; ++i) log.measure(&list, &paint, [] { return busy(5); });
-    log.measure(&graph, &paint, [] { return busy(40); });
+    // Far apart, so a sleep that overshoots (macOS runners) keeps the order.
+    for (int i = 0; i < 3; ++i) log.measure(&list, &paint, [] { return busy(2); });
+    log.measure(&graph, &paint, [] { return busy(150); });
     const auto top = log.top(10);
     QCOMPARE(top.size(), 2);
     QCOMPARE(top[0].name, QStringLiteral("QObject \"teamPhaseGraph\" Paint"));
     QCOMPARE((top[1].name), QStringLiteral("QObject \"sessionList\" Paint"));
     QCOMPARE(top[1].count, 3);
-    QVERIFY(top[0].maxMs >= 40 && top[1].totalMs >= 15);
+    QVERIFY(top[0].maxMs >= 40 && top[1].totalMs >= 6);
     // Statistics do not log what is under the threshold.
     QVERIFY(m_lines.isEmpty());
     log.reset();

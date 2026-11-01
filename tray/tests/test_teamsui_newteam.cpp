@@ -401,8 +401,12 @@ void TestTeamsUiNewteam::newTeamMaxMembersStepsUpAndDown()
     const QRect down = max->style()->subControlRect(QStyle::CC_SpinBox, &option, QStyle::SC_SpinBoxDown, max);
     auto *editor = max->findChild<QLineEdit *>();
     QVERIFY(editor && up.isValid() && down.isValid());
-    QVERIFY2(!up.intersects(editor->geometry()), qPrintable(QStringLiteral("up %1,%2 %3x%4 under the editor").arg(up.x()).arg(up.y()).arg(up.width()).arg(up.height())));
-    QVERIFY(!down.intersects(editor->geometry()));
+    // macOS' native stepper reports its rects over the editor's; its clicks
+    // below still step. Elsewhere an editor over a button eats its clicks.
+    if (max->style()->name().compare(QLatin1String("macos"), Qt::CaseInsensitive) != 0) {
+        QVERIFY2(!up.intersects(editor->geometry()), qPrintable(QStringLiteral("up %1,%2 %3x%4 under the editor").arg(up.x()).arg(up.y()).arg(up.width()).arg(up.height())));
+        QVERIFY(!down.intersects(editor->geometry()));
+    }
     QCOMPARE(max->style()->hitTestComplexControl(QStyle::CC_SpinBox, &option, up.center(), max), QStyle::SC_SpinBoxUp);
     QCOMPARE(max->style()->hitTestComplexControl(QStyle::CC_SpinBox, &option, down.center(), max), QStyle::SC_SpinBoxDown);
     QCOMPARE(max->value(), 6);

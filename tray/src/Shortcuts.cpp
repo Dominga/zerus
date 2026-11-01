@@ -220,10 +220,10 @@ static QString settingsKey(const QString &id) { return QStringLiteral("shortcuts
 QList<QKeySequence> ShortcutRegistry::keys(const QString &id) const
 {
     if (!Shortcuts::command(id)) return {};
-    QSettings settings;
-    if (!settings.contains(settingsKey(id))) return Shortcuts::defaults(id, m_platform);
+    // Through Settings: a chord just stored may still wait in its queue.
+    if (!Settings::contains(settingsKey(id))) return Shortcuts::defaults(id, m_platform);
     QList<QKeySequence> result;
-    for (const auto &chord : settings.value(settingsKey(id)).toStringList()) {
+    for (const auto &chord : Settings::value(settingsKey(id)).toStringList()) {
         const auto sequence = QKeySequence::fromString(chord, QKeySequence::PortableText);
         if (!sequence.isEmpty()) result.append(sequence);
     }

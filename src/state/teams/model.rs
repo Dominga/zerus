@@ -96,6 +96,8 @@ pub(crate) struct FullTestsGrant {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Settings {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub iron_rules: Vec<String>,
     /// Every dependency is hard, whatever the lead chose.
     #[serde(default)]
     pub all_hard: bool,
@@ -279,6 +281,7 @@ fn default_phase() -> u32 {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            iron_rules: Vec::new(),
             all_hard: false,
             folder_policy: FolderPolicy::default(),
             approval: Approval::default(),
@@ -371,6 +374,8 @@ pub(crate) struct PromptSnapshot {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Member {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub iron_rules: Vec<String>,
     /// Stable within the team, such as `backend`.
     pub id: String,
     #[serde(default)]
@@ -1969,6 +1974,9 @@ pub(crate) struct Team {
     pub goal: String,
     #[serde(default)]
     pub project: String,
+    /// Stable logical identity; the existing project field remains its label.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub project_id: String,
     #[serde(default)]
     pub folder: String,
     #[serde(default)]

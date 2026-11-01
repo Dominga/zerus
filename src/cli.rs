@@ -95,6 +95,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] graph snapshot --json   bounded saved relationship metadata (partial coverage)
        hgs [@host] wait begin|ack|finish|cancel|list --json   explicit independent-agent waits (JSON stdin)
        hgs [@host] team OPERATION --json   agent teams: plan, run, report and decide tasks (JSON stdin)
+       hgs [@host] rules get|set|migrate --json   owner-managed iron rules, iron-rules-v1 (JSON stdin)
        hgs run --json [--wait] | --list --json   a build Zerus tracks as this session's work (JSON stdin)
        hgs test config|map|affected|durations|coverage|tools …   the project's tests (.zerus/tests.toml; hgs guide tests)
        hgs test runner --json   a test runner's side (test-runner-v1): the queue's suite of an exact commit, isolated
@@ -231,7 +232,7 @@ fn local_sessions() -> Result<()> {
 // Repository preparation owns only its checkout and receipt. Like the existing
 // configuration/control commands, it does not require or enable a session host.
 fn needs_local_sessions(command: &str) -> bool {
-    !matches!(command, "ls" | "watch" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "analytics" | "graph" | "wait" | "team" | "mobile" | "hooks" | "repository")
+    !matches!(command, "ls" | "watch" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "analytics" | "graph" | "wait" | "team" | "rules" | "mobile" | "hooks" | "repository")
 }
 
 /// Fails unless this process may run what the processes of a session run:
@@ -861,7 +862,8 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
             state_command(command, &args)
         }
         "inspect" | "processes" | "worktrees" | "git-status" | "git-diff" | "repository" | "dirs" | "send" | "send-now" | "send-cancel" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "read" | "notifications"
-        | "attachment" | "file-read" | "recovery" | "voice" | "schedules" | "graph" | "wait" | "team" | "switch-account" => {
+        | "attachment" | "file-read" | "recovery" | "voice" | "schedules" | "graph" | "wait" | "team" | "rules" | "switch-account" => {
+            if command == "rules" && dry { return Err(Error::new(1,"Rules operations do not support --dry-run")); }
             if command == "repository" && dry { return Err(Error::new(1,"Repository operations do not support --dry-run")); }
             if command == "wait" && dry { return Err(Error::new(1,"Wait operations do not support --dry-run")); }
             if command == "team" && dry { return Err(Error::new(1,"Team operations do not support --dry-run")); }

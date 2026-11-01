@@ -1238,6 +1238,99 @@ fn expected_revision(op: &str, input: &Value) -> Option<u64> {
     }
 }
 
+fn rule_policy(team: &Team) -> Value {
+    let members: std::collections::BTreeMap<_, _> = team
+        .members
+        .iter()
+        .filter(|member| !member.iron_rules.is_empty())
+        .map(|member| (&member.id, &member.iron_rules))
+        .collect();
+    json!({"team":team.settings.iron_rules,"members":members})
+}
+
+fn rules_word(team: &Team, input: &Value, caller: &Actor) -> anyhow::Result<Option<OwnerWord>> {
+    if matches!(caller, Actor::Human) {
+        return Ok(None);
+    }
+    ensure!(
+        caller.is_lead(team),
+        "Only the owner or the lead on the owner's word changes iron rules"
+    );
+    let rule = super::owner_word::WordRule {
+        phrases: &["rules", "желез"],
+        verbs: &["change", "set", "add", "remove", "измен", "добав", "удал"],
+        names: vec![team.name.clone()],
+        expect: format!("change the iron rules for {}", team.name),
+        ..Default::default()
+    };
+    let word = super::owner_word::verify_roster(
+        team,
+        input
+            .get("owner_word")
+            .context("Iron rules need the owner's verified word")?,
+        &rule,
+        super::super::now(),
+    )?;
+    ensure!(
+        team.owner_word_used(word.event).is_none(),
+        "The owner's word was already used"
+    );
+    Ok(Some(word))
+}
+
+/// Project/session writes share the same proven caller and owner-word gate.
+pub(crate) fn authorize_external_rules(input: &Value) -> anyhow::Result<()> {
+    if super::super::owner_request(input, "iron rules").is_ok() {
+        return Ok(());
+    }
+    let id = text(input, "team");
+    ensure!(
+        !id.is_empty(),
+        "An agent changes rules only as a lead on the owner's verified word"
+    );
+    let mut store = Store::open(true)?;
+    let team = store.load(id)?.context("Unknown team")?;
+    let caller = actor(&team, "settings", input)?;
+    ensure!(
+        caller.is_lead(&team),
+        "Only the lead can act on the owner's word"
+    );
+    if text(input, "scope") == "project" {
+        ensure!(
+            team.project_id == text(input, "project") && !team.project_id.is_empty(),
+            "The project is not this team's project"
+        );
+    } else {
+        ensure!(
+            team.members
+                .iter()
+                .any(|member| member
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.name == text(input, "name")
+                        && session.run_id == text(input, "expected_run_id")
+                        && session.conversation_id == text(input, "expected_conversation_id"))),
+            "The exact session is not in this team"
+        );
+    }
+    store.mutate(
+        Some((text(input, "request_id"), input)),
+        id,
+        input["team_revision"].as_u64(),
+        |team, events| {
+            let word = rules_word(team, input, &caller)?
+                .context("The lead needs the owner's verified word")?;
+            team.record_owner_word(word.event, "the iron rules change");
+            events.push(Event::new(
+                "iron_rules_authorized",
+                json!({"event":word.event,"scope":input["scope"]}),
+            ));
+            Ok(json!({"status":"authorized"}))
+        },
+    )?;
+    Ok(())
+}
+
 /// U12/N4: one owner check for every path that can act as the owner. An agent
 /// session carries DSH_SESSION_ID, HGS_SESSION or HGS_RUN_ID and is refused.
 fn owner_caller(input: &Value, record: bool, dsh: bool, env: bool, run: bool) -> anyhow::Result<()> {
@@ -1280,6 +1373,7 @@ fn draft_start_in(store: &mut Store, request: &str, input: &Value, lead: Value) 
     }
     let mut lead: super::model::Member = serde_json::from_value(lead_value).context("Invalid lead")?;
     ensure!(lead.session.is_some() || !lead.agent.is_empty(), "A draft lead needs an agent or an existing session");
+    super::super::iron_rules::validate(&json!(lead.iron_rules))?;
     lead.id = "lead".into();
     // N6/spec 3: the draft's lead starts in the team's folder, never a worktree.
     lead.folder = MemberFolder::Shared;
@@ -1292,6 +1386,15 @@ fn draft_start_in(store: &mut Store, request: &str, input: &Value, lead: Value) 
         id: uuid::Uuid::new_v4().to_string(),
         name: if name.is_empty() { "New team".into() } else { name },
         folder,
+        project: text(input, "project").trim().chars().take(200).collect(),
+        project_id: {
+            let id = text(input, "project_id");
+            ensure!(
+                id.len() <= 200 && !id.chars().any(char::is_control),
+                "Invalid project identity"
+            );
+            id.to_owned()
+        },
         status: TeamStatus::Draft,
         lead: "lead".into(),
         draft: Some(super::model::Draft { revision: 1, ..Default::default() }),
@@ -1949,7 +2052,7 @@ fn create(input: &Value) -> anyhow::Result<Value> {
                 .context("Run this from the lead's session, or add \"by\":\"human\" to act as yourself")?;
         }
     }
-    let (team, events, child_id) = {
+    let (mut team, events, child_id) = {
         let mut child_id = uuid::Uuid::new_v4().to_string();
         if let Some((parent_id, task)) = &parent_link {
             // N25: reserve the parent link before the child exists. The request
@@ -1979,6 +2082,17 @@ fn create(input: &Value) -> anyhow::Result<Value> {
             }
         }
     };
+    if !team.settings.iron_rules.is_empty()
+        || team
+            .members
+            .iter()
+            .any(|member| !member.iron_rules.is_empty())
+    {
+        let caller = actor(&team, "settings", input)?;
+        if let Some(word) = rules_word(&team, input, &caller)? {
+            team.record_owner_word(word.event, "the initial iron rules");
+        }
+    }
     // Section 9.2: depth, children and tree sessions are checked at create.
     if let Some((parent_id, _)) = &parent_link {
         let check = (|| -> anyhow::Result<()> {
@@ -4178,7 +4292,15 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 && store.receipt(request, input)?.is_some();
             let mut receipt = match store.mutate(Some((request, input)), team_id, revision, |team, events| {
                 let actor = if parent_lead { Actor::ParentLead } else { actor(team, op, &filled)? };
-                ops::apply(team, op, &filled, &actor, &BTreeSet::new(), events)
+                let before = team.clone();
+                let result = ops::apply(team, op, &filled, &actor, &BTreeSet::new(), events)?;
+                if rule_policy(&before) != rule_policy(team) {
+                    if let Some(word) = rules_word(&before, input, &actor)? {
+                        team.record_owner_word(word.event, "the team's iron rules");
+                    }
+                    events.push(Event::new("iron_rules_changed", json!({"by":actor.label(team)})));
+                }
+                Ok(result)
             }) {
                 Ok(receipt) => receipt,
                 Err(error) if queues_instead(op) && read_only(&error) => {
@@ -4320,6 +4442,10 @@ mod commands_proposals;
 #[cfg(test)]
 #[path = "tests/commands_owner_word.rs"]
 mod commands_owner_word;
+
+#[cfg(test)]
+#[path = "tests/commands_iron_rules.rs"]
+mod commands_iron_rules;
 
 #[cfg(test)]
 #[path = "tests/commands_runs.rs"]

@@ -174,6 +174,7 @@ pub(crate) fn branch_name(template: &str, id: u32, member: &str, team8: &str) ->
 }
 
 fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
+    super::super::iron_rules::validate(&json!(settings.iron_rules))?;
     ensure!(
         settings.tests.as_ref().is_none_or(|tests| tests.is_object()),
         "The tests override is an object shaped like .zerus/tests.toml"
@@ -208,6 +209,7 @@ fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
 
 fn parse_member(value: &Value) -> anyhow::Result<Member> {
     let mut member: Member = serde_json::from_value(value.clone()).context("Invalid member")?;
+    member.iron_rules = super::super::iron_rules::validate(&json!(member.iron_rules))?;
     member.id = member_id(&member.id)?;
     member.role = clean_text(&member.role, 60, "A role")?;
     ensure!(!member.agent.is_empty(), "Member {} needs an agent", member.id);
@@ -484,6 +486,7 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
         name: name.clone(),
         goal: clean(text(input, "goal"), 20_000, "The goal")?,
         project: clean(text(input, "project"), 200, "The project")?,
+        project_id: clean(text(input, "project_id"), 200, "The project identity")?,
         folder: clean(text(input, "folder"), 4096, "The folder")?,
         template: clean(text(input, "template"), 120, "The template")?,
         status: TeamStatus::Planning,
@@ -822,13 +825,18 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
         // other field still changes only on a member without one. #581 N6: so
         // does its model list (U45), which only the next switch reads.
         let context_only = update.as_object().is_some_and(|fields| {
-            fields.keys().any(|key| key == "context_before_task" || key == "models")
-                && fields.keys().all(|key| key == "id" || key == "context_before_task" || key == "models")
+            fields.keys().any(|key| key == "context_before_task" || key == "models"|| key == "iron_rules")
+                && fields.keys().all(|key| {
+                    key == "id" || key == "context_before_task" || key == "models"|| key == "iron_rules"
+                })
         });
         ensure!(
             planning || member.session.is_none() || context_only,
             "A running team changes only members without a session"
         );
+        if let Some(rules) = update.get("iron_rules") {
+            member.iron_rules = super::super::iron_rules::validate(rules)?;
+        }
         if let Some(folder) = update.get("folder") {
             member.folder = serde_json::from_value(folder.clone()).context("A folder is shared, worktree or clone")?;
         }
@@ -882,6 +890,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
             merged[field] = value.clone();
         }
         let updated: Settings = serde_json::from_value(merged).context("Invalid settings")?;
+        super::super::iron_rules::validate(&json!(updated.iron_rules))?;
         validate_settings(&updated)?;
         ensure_lead_settings(&team.settings, &updated, actor, input["roster_word"].as_bool() == Some(true))?;
         // N13: only a sub-lead (and its parent lead) is refused auto; the owner

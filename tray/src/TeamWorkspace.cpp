@@ -1,3 +1,4 @@
+#include "IronRulesEditor.h"
 #include "Settings.h"
 #include "SlowEventLog.h"
 #include "TeamWorkspace.h"
@@ -3907,6 +3908,10 @@ void TeamWorkspace::memberMenu(const Team &team, const Member &member, const QPo
         if (ok && !text.trimmed().isEmpty() && sendMessage) sendMessage(host, session, text.trimmed());
     });
     message->setEnabled(!member.session.isEmpty());
+    menu.addAction(tr("Iron rules..."), this, [this, member] {
+        QStringList rules; if (!IronRules::edit(this, member.ironRules, rules)) return;
+        m_panel->act("settings", {{"members_update", QJsonArray{QJsonObject{{"id", member.id}, {"iron_rules", QJsonArray::fromStringList(rules)}}}}});
+    });
     if (!member.lead) {
         if (member.state == "paused") menu.addAction(tr("Resume member"), this, [this, id = member.id] { m_panel->act("resume-member", {{"member", id}}); });
         else menu.addAction(tr("Pause member"), this, [this, id = member.id] { m_panel->act("pause-member", {{"member", id}}); });

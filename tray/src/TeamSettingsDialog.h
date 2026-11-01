@@ -5,6 +5,7 @@
 #include "TeamModel.h"
 
 class QCheckBox;
+class QPlainTextEdit;
 class QComboBox;
 class QLabel;
 class QLineEdit;
@@ -47,6 +48,9 @@ private:
         TeamUi::FlowLayout *chips = nullptr;
     };
 
+    QPlainTextEdit *m_rules = nullptr;
+    struct MemberRules { QString id; QStringList before; QPlainTextEdit *field; };
+    QList<MemberRules> m_ruleMembers;
     TeamController *m_teams;
     QString m_team;
     QJsonObject m_settings;

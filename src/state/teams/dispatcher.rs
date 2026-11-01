@@ -1853,6 +1853,26 @@ pub(crate) fn hand_off_text_with(
     member_host: &str,
     extra: &str,
 ) -> String {
+    let rules = team
+        .member(&attempt.member)
+        .map(|member| super::super::iron_rules::for_team(team, member))
+        .transpose()
+        .map(|rules| rules.unwrap_or_default())
+        .unwrap_or_else(|error| {
+            format!("Iron rules unavailable: {error}. Ask the lead before working.\n")
+        });
+    hand_off_text_rules(team, task, attempt, report_host, member_host, extra, &rules)
+}
+
+fn hand_off_text_rules(
+    team: &Team,
+    task: &Task,
+    attempt: &Attempt,
+    report_host: &str,
+    member_host: &str,
+    extra: &str,
+    rules: &str,
+) -> String {
     // Spec 5.6: a member that reports to a sub-lead gets its tasks from it,
     // and its questions, report and blockers go there.
     let reviewer = team.reviewer_of(&attempt.member);
@@ -1877,27 +1897,32 @@ pub(crate) fn hand_off_text_with(
         text += &format!("Team goal: {}\n", team.goal);
     }
     let mut task_in_prompt = false;
+    let mut rules_in_prompt = false;
     if let Some(prompt) = team.member(&attempt.member).map(|m| m.prompt.trim()).filter(|p| !p.is_empty()) {
         // U25: the role's prompt blocks in its order, when the catalog has one.
         // N3: a member's own snapshot wins; an old member keeps today's live text.
         let snapshot = team.member(&attempt.member).and_then(|member| member.prompt_snapshot.clone());
         let (ordered, has_task) = if let Some(snapshot) = snapshot {
             let has_task = super::catalog::sends_task(&snapshot.prompt_order, &snapshot.prompt_off, &snapshot.task_template);
-            (super::catalog::prompt_order_text_snapshot(&snapshot, prompt, Some(task)), has_task)
+            (super::catalog::prompt_order_text_snapshot(&snapshot, prompt, Some(task), rules), has_task)
         } else {
             super::catalog::load().ok().and_then(|catalog| {
                 let role_name = team.role_of(&attempt.member);
                 let role = catalog.roles.iter().find(|role| role.id == role_name || role.name == role_name)?;
                 let has_task = super::catalog::sends_task(&role.prompt_order, &role.prompt_off, &role.task_template);
-                Some((super::catalog::prompt_order_text(role, prompt, Some(task), ""), has_task))
+                Some((super::catalog::prompt_order_text(role, prompt, Some(task), rules), has_task))
             }).unwrap_or((None, false))
         };
         task_in_prompt = has_task;
         if let Some(ordered) = ordered.filter(|text| !text.trim().is_empty()) {
+            rules_in_prompt = !rules.is_empty();
             text += &ordered;
         } else {
             text += &format!("Role: {prompt}\n");
         }
+    }
+    if !rules_in_prompt && !rules.is_empty() {
+        text += &format!("\n{rules}\n");
     }
     if !task_in_prompt {
         text += &format!("\nTask #{}: {}\n", task.id, task.title);
@@ -2182,6 +2207,18 @@ fn git_continuation(folder: &str, since: f64) -> String {
 /// goal, the members and tasks proposed so far, and how to plan. A lead
 /// swapped into a running team gets the short brief (H6).
 pub(crate) fn brief_text(team: &Team) -> String {
+    let rules = team
+        .member(&team.lead)
+        .map(|member| super::super::iron_rules::for_team(team, member))
+        .transpose()
+        .map(|rules| rules.unwrap_or_default())
+        .unwrap_or_else(|error| {
+            format!("Iron rules unavailable: {error}. Ask the owner before working.\n")
+        });
+    brief_text_rules(team, &rules)
+}
+
+fn brief_text_rules(team: &Team, rules: &str) -> String {
     // N6: a draft's lead gets the draft brief once: the protocol, the designer
     // guide and the draft id; nothing runs before the owner creates the team.
     if team.status == TeamStatus::Draft {
@@ -2243,28 +2280,37 @@ pub(crate) fn brief_text(team: &Team) -> String {
     if !team.folder.is_empty() {
         text += &format!("Folder: {}\n", team.folder);
     }
+    let mut rules_in_prompt = false;
     if let Some(prompt) = team.member(&team.lead).map(|m| m.prompt.trim()).filter(|p| !p.is_empty()) {
         let ordered = if let Some(snapshot) = team.member(&team.lead).and_then(|member| member.prompt_snapshot.clone()) {
-            super::catalog::prompt_order_text_snapshot(&snapshot, prompt, None)
+            super::catalog::prompt_order_text_snapshot(&snapshot, prompt, None, rules)
         } else {
             super::catalog::load().ok().and_then(|catalog| {
                 let role_name = team.role_of(&team.lead);
                 let role = catalog.roles.iter().find(|role| role.id == role_name || role.name == role_name)?;
-                super::catalog::prompt_order_text(role, prompt, None, "")
+                super::catalog::prompt_order_text(role, prompt, None, rules)
             })
         };
         if let Some(ordered) = ordered.filter(|text| !text.trim().is_empty()) {
+            rules_in_prompt = true;
             text += &ordered;
         } else {
             text += &format!("Your role: {prompt}\n");
         }
     }
+    if !rules_in_prompt && !rules.is_empty() {
+        text += &format!("\n{rules}\n");
+    }
     if !team.lead_protocol.trim().is_empty() {
-        text += &format!("\nTeam protocol:\n{}\n", team.lead_protocol.trim());
+            text += &format!("\nTeam protocol:\n{}\n", team.lead_protocol.trim());
     }
     if let Ok(catalog) = super::catalog::load() {
         if !catalog.planning_rules.trim().is_empty() {
-            text += &format!("\nPlanning rules (v{}):\n{}\n", catalog.version, catalog.planning_rules.trim());
+            text += &format!(
+        "\nPlanning rules (v{}):\n{}\n",
+                catalog.version,
+                catalog.planning_rules.trim()
+            );
         }
     }
     text += &format!(
@@ -3092,7 +3138,13 @@ pub(crate) fn launch_args(team: &Team, member: &Member, folder: &str) -> Vec<Str
                 member.role, team.name
             )
         };
-        args.push(intro);
+        let rules = super::super::iron_rules::for_team(team, member).unwrap_or_else(|error| {
+            format!("Iron rules unavailable: {error}. Ask the lead before working.\n")
+        });
+        args.push(if rules.is_empty() {
+            intro} else {
+            format!("[Zerus team startup]\n{rules}\n{intro}")
+        });
     }
     args
 }
@@ -3176,6 +3228,7 @@ fn switch_model(store: &mut Store, team: &Team, task_id: u32, member_id: &str, f
 }
 
 fn launch(team: &Team, member: &Member) -> anyhow::Result<()> {
+    super::super::iron_rules::for_team(team, member)?;
     let folder = member_folder(team, member)?;
     let args = launch_args(team, member, &folder);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -3966,6 +4019,23 @@ fn hand_out_now(
     preparation: Preparation,
 ) -> anyhow::Result<()> {
     let Preparation { steps: prepare, conversation, resume } = preparation;
+    let mut rules_team = store.load(team_id)?.context("Unknown team")?;
+    if let Some((run, id)) = &conversation {
+        if let Some(session) = rules_team
+            .members
+            .iter_mut()
+            .find(|member| member.id == member_id)
+            .and_then(|member| member.session.as_mut())
+        {
+            if session.run_id == *run {
+                session.conversation_id = id.clone();
+            }
+        }
+    }
+    let rules = super::super::iron_rules::for_team(
+        &rules_team,
+        rules_team.member(member_id).context("Unknown member")?,
+    )?;
     // Record the attempt before sending; a crash leaves it Unconfirmed.
     let attempt_id = uuid::Uuid::new_v4().to_string();
     let mut message = None;
@@ -4069,7 +4139,9 @@ fn hand_out_now(
                 }
             }
         }
-        message = Some((session, hand_off_text_with(team, task, task.attempts.last().unwrap(), host, &member_host, &extra)));
+        message = Some((session, hand_off_text_rules(team, task, task.attempts.last().unwrap(), host, &member_host, &extra,
+                &rules,
+            )));
         // D2: the finding goes with this one hand-out only.
         if !task.reopen_note.is_empty() {
             if let Some(task) = team.task_mut(task_id) {
@@ -4255,6 +4327,11 @@ fn stage_hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &st
     }
     // The folder, the checkout and the file states, outside the store's lock.
     let prepared = super::stages::prepare(&team, task_id)?;
+    let fresh = store.load(team_id)?.context("Unknown team")?;
+    let rules = super::super::iron_rules::for_team(
+        &fresh,
+        fresh.member(member_id).context("Unknown member")?,
+    )?;
     let mut message = None;
     let recorded = change(store, team_id, |team, events| {
         let run_id = super::pipeline::give_stage(team, task_id, member_id)?;
@@ -4267,7 +4344,12 @@ fn stage_hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &st
         let task = team.task(task_id).context("unknown task")?;
         let run = task.pipeline_run.as_ref().and_then(|run| run.open_run()).context("no open stage")?;
         let report_host = if member_host.is_empty() { String::new() } else { host.to_owned() };
-        message = Some((run_id.clone(), super::stages::hand_off_text(team, task, run, &prepared, &report_host)));
+        let mut text = super::stages::hand_off_text(team, task, run, &prepared, &report_host);
+        if !rules.is_empty() {
+            text.push_str("\n");
+            text.push_str(&rules);
+        }
+        message = Some((run_id.clone(), text));
         events.push(Event::new(
             "stage_handed_out",
             json!({"task":task_id,"stage":run.kind,"round":run.round,"to":team.role_of(member_id),"folder":prepared.folder,
@@ -5851,12 +5933,19 @@ pub(crate) fn same_repository(folder: &str, source: &str, deadline: Instant) -> 
 }
 
 fn send_brief(store: &mut Store, team_id: &str) -> anyhow::Result<()> {
+    let rules_team = store.load(team_id)?.context("Unknown team")?;
+    let rules = super::super::iron_rules::for_team(
+        &rules_team,
+        rules_team
+            .member(&rules_team.lead)
+            .context("Unknown lead")?,
+    )?;
     let brief_id = uuid::Uuid::new_v4().to_string();
     let mut message = None;
     change(store, team_id, |team, _| {
         anyhow::ensure!(team.brief == Notice::Pending, "already briefed");
         let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
-        message = Some((lead, brief_text(team)));
+        message = Some((lead, brief_text_rules(team, &rules)));
         team.brief = Notice::Sending;
         team.brief_id = brief_id.clone();
         Ok(())

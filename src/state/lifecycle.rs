@@ -218,6 +218,11 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
                     .ok_or_else(|| format!("{name}: missing saved {key}"))?
                     .clone();
             }
+            // Optional on old bindings; never make an existing resume depend
+            // on fields introduced by the rules feature.
+            for key in ["iron_rules", "iron_rules_revision"] {
+                if let Some(value) = previous.get(key) { record[key] = value.clone(); }
+            }
             // U60 (#658 N4): a resumed session keeps its model server.
             if let Some(model_server) = previous.get("model_server") {
                 record["model_server"] = model_server.clone();

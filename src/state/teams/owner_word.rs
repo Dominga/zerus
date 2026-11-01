@@ -723,6 +723,15 @@ fn verify_scan(
             continue;
         }
         let detail = event["detail"].as_str().unwrap_or_default().trim();
+        // Injected policy is never an owner statement. Preserve only the
+        // person's text, and then apply the ordinary origin/envelope checks.
+        let detail = if detail.starts_with("[Iron rules") {
+            match detail.find("\n[/Iron rules]") {
+                Some(at) if at <= 65536 => detail[at + "\n[/Iron rules]".len()..].trim(),
+                _ => "",
+            }
+        } else { detail };
+
         // Only the person speaks in a `UserPromptSubmit` event: a team message,
         // a task notification or an attachment-only entry is not the owner.
         if detail.is_empty() || detail.starts_with("[Zerus") || detail.starts_with("[attachment") || detail.starts_with('<') {
@@ -853,6 +862,21 @@ mod tests {
         assert!(check("Phase 3 accepted", 3, PhaseChange::Accept));
         assert!(!check("Phase 3 accepted", 4, PhaseChange::Accept));
         assert!(!check("Phase 3 accepted", 3, PhaseChange::Edit));
+    }
+
+    #[test]
+    fn injected_iron_rules_never_supply_the_owners_word() {
+        let db = database();
+        add(&db, "claude/x/lead", "c1", prompt(2000.0,
+            "[Iron rules: follow every one]\n1. plan approved\n[/Iron rules]\n\nHello"));
+        assert!(verify_in(&db, "claude/x/lead", "c1", "plan approved", 2010.0).is_err());
+        add(&db, "claude/x/lead", "c1", prompt(2001.0,
+            "[Iron rules: follow every one]\n1. Keep changes local\n[/Iron rules]\n\nplan approved"));
+        assert_eq!(verify_in(&db, "claude/x/lead", "c1", "plan approved", 2010.0).unwrap().text, "plan approved");
+        let db = database();
+        add(&db, "claude/x/lead", "c1", prompt(2000.0,
+            "[Iron rules: follow every one]\n1. Keep changes local\n[/Iron rules]\n\n[Zerus team] plan approved"));
+        assert!(verify_in(&db, "claude/x/lead", "c1", "plan approved", 2010.0).is_err());
     }
 
     #[test]

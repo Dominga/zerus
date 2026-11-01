@@ -118,6 +118,27 @@ impl Store {
                 CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY,digest TEXT NOT NULL,receipt TEXT NOT NULL,at REAL NOT NULL);",
             )?;
         }
+        if write {
+            // Build an indexed projection once; triggers keep it in the same
+            // transaction as every team write, including dispatcher mutations.
+            let exists: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='team_rule_members')",
+                [],
+                |row| row.get(0),
+            )?;
+            db.execute_batch("CREATE TABLE IF NOT EXISTS team_rule_members(team TEXT NOT NULL,member TEXT NOT NULL,host TEXT NOT NULL,name TEXT NOT NULL,run TEXT NOT NULL,conversation TEXT NOT NULL,launch TEXT NOT NULL,PRIMARY KEY(team,member));
+                CREATE INDEX IF NOT EXISTS team_rule_session ON team_rule_members(host,name,run,conversation);
+                CREATE INDEX IF NOT EXISTS team_rule_launch ON team_rule_members(launch);
+                CREATE TRIGGER IF NOT EXISTS team_rules_delete AFTER DELETE ON teams BEGIN DELETE FROM team_rule_members WHERE team=OLD.id; END;
+                CREATE TRIGGER IF NOT EXISTS team_rules_update AFTER UPDATE OF payload ON teams BEGIN
+                    DELETE FROM team_rule_members WHERE team=NEW.id;
+                    INSERT INTO team_rule_members SELECT NEW.id,json_extract(m.value,'$.id'),COALESCE(json_extract(m.value,'$.session.host'),''),COALESCE(json_extract(m.value,'$.session.name'),''),COALESCE(json_extract(m.value,'$.session.run_id'),''),COALESCE(json_extract(m.value,'$.session.conversation_id'),''),COALESCE(json_extract(m.value,'$.launch_id'),'') FROM json_each(NEW.payload,'$.members') m; END;
+                CREATE TRIGGER IF NOT EXISTS team_rules_insert AFTER INSERT ON teams BEGIN
+                    INSERT INTO team_rule_members SELECT NEW.id,json_extract(m.value,'$.id'),COALESCE(json_extract(m.value,'$.session.host'),''),COALESCE(json_extract(m.value,'$.session.name'),''),COALESCE(json_extract(m.value,'$.session.run_id'),''),COALESCE(json_extract(m.value,'$.session.conversation_id'),''),COALESCE(json_extract(m.value,'$.launch_id'),'') FROM json_each(NEW.payload,'$.members') m; END;")?;
+            if !exists {
+                db.execute_batch("INSERT OR IGNORE INTO team_rule_members SELECT t.id,json_extract(m.value,'$.id'),COALESCE(json_extract(m.value,'$.session.host'),''),COALESCE(json_extract(m.value,'$.session.name'),''),COALESCE(json_extract(m.value,'$.session.run_id'),''),COALESCE(json_extract(m.value,'$.session.conversation_id'),''),COALESCE(json_extract(m.value,'$.launch_id'),'') FROM teams t,json_each(t.payload,'$.members') m;")?;
+            }
+        }
         Ok(Self { db })
     }
 
@@ -127,12 +148,72 @@ impl Store {
         payload.map(|text| serde_json::from_str(&text).context("Invalid team record")).transpose()
     }
 
+    /// Startup reads at most two matching records, never the whole roster.
+    pub(crate) fn rules_member(&self, record: &Value) -> anyhow::Result<Option<(Team, String)>> {
+        self.rules_session(
+            "",
+            super::super::string(record, "name"),
+            super::super::string(record, "run_id"),
+            super::super::string(record, "conversation_id"),
+            super::super::string(record, "launch_id"),
+        )
+    }
+
+    pub(crate) fn rules_session(
+        &self,
+        host: &str,
+        name: &str,
+        run: &str,
+        conversation: &str,
+        launch: &str,
+    ) -> anyhow::Result<Option<(Team, String)>> {
+        let exists: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='team_rule_members')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(None);
+        }
+        let mut query = self.db.prepare("SELECT DISTINCT t.payload FROM teams t JOIN
+            (SELECT team FROM team_rule_members WHERE name=?1 AND run=?2 AND conversation=?3 AND name<>'' AND host=?5
+             UNION SELECT team FROM team_rule_members WHERE launch=?4 AND launch<>'' AND host=?5) m ON t.id=m.team
+            WHERE t.status IN ('draft','planning','running','paused') LIMIT 2")?;
+        let rows = query
+            .query_map(params![name, run, conversation, launch, host], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        anyhow::ensure!(
+            rows.len() <= 1,
+            "Session belongs to more than one active team"
+        );
+        let Some(payload) = rows.first() else {
+            return Ok(None);
+        };
+        let team: Team = serde_json::from_str(payload)?;
+        let member = team
+            .members
+            .iter()
+            .find(|member| {
+                member.session.as_ref().is_some_and(|session| {
+                    session.host == host
+                        && session.name == name
+                        && session.run_id == run
+                        && session.conversation_id == conversation
+                }) || (!launch.is_empty() && member.launch_id == launch)
+            })
+            .map(|member| member.id.clone());
+        Ok(member.map(|member| (team, member)))
+    }
+
     /// Every team, most recently changed first, at most `limit`.
     pub(crate) fn teams(&self, include_archived: bool, limit: i64) -> anyhow::Result<Vec<Team>> {
         let mut statement = self.db.prepare(
             "SELECT payload FROM teams WHERE ?1 OR status!='archived' ORDER BY updated DESC LIMIT ?2",
         )?;
-        let rows = statement.query_map(params![include_archived, limit], |row| row.get::<_, String>(0))?;
+        let rows = statement.query_map(params![include_archived, limit], |row| {
+            row.get::<_, String>(0)})?;
         rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
     }
 

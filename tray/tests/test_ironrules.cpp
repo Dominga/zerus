@@ -41,6 +41,55 @@ private slots:
         IronRules::setRules("zerus", many); QCOMPARE(IronRules::rules("zerus").size(), IronRules::MaxRules);
         IronRules::setRules("dcb", {}); QVERIFY(IronRules::rules("dcb").isEmpty());
     }
+    void importFailureKeepsTheLegacyRulesAndSuccessfulImportUsesRust()
+    {
+        IronRules::setRules("legacy", {"Keep this rule"});
+        bool fail = true; int imports = 0; QJsonObject last;
+        IronRules::Transport send = [&](const QString &, const QString &op, const QJsonObject &input, IronRules::Reply done) {
+            if (op == "get") { done({{"rules", QJsonArray{}}, {"revision", 0}}, {}); return; }
+            ++imports; last = input;
+            if (fail) done({}, "Import failed");
+            else done({{"rules", input.value("rules")}, {"revision", 1}, {"migrated", true}}, {});
+        };
+        QString error; QJsonObject result;
+        IronRules::loadProject(send, {}, "legacy", [&](const auto &v, const auto &e) { result = v; error = e; });
+        QCOMPARE(error, QString("Import failed")); QCOMPARE(IronRules::rules("legacy"), QStringList{"Keep this rule"});
+        fail = false;
+        IronRules::loadProject(send, {}, "legacy", [&](const auto &v, const auto &e) { result = v; error = e; });
+        QVERIFY(error.isEmpty()); QCOMPARE(imports, 2); QCOMPARE(result.value("rules").toArray(), QJsonArray{"Keep this rule"});
+        QCOMPARE(last.value("project").toString(), QString("legacy"));
+        QCOMPARE(IronRules::rules("legacy"), QStringList{"Keep this rule"});
+    }
+    void startupImportsEveryProjectSequentiallyAndKeepsTheBackup()
+    {
+        IronRules::setRules("one", {"First project rule"}); IronRules::setRules("two", {"Second project rule"});
+        QStringList imported;
+        IronRules::Transport send = [&](const QString &, const QString &op, const QJsonObject &input, IronRules::Reply done) {
+            if (op == "get") done({{"rules", QJsonArray{}}, {"revision", 0}}, {});
+            else { imported << input.value("project").toString(); done({{"migrated", true}}, {}); }
+        };
+        IronRules::migrateLegacy(send, this, [](const QString &) { QFAIL("Import should succeed"); });
+        QTRY_COMPARE(imported.size(), 2); QCOMPARE(imported, QStringList({"one", "two"}));
+        QCOMPARE(IronRules::rules("one"), QStringList{"First project rule"});
+        QCOMPARE(IronRules::rules("two"), QStringList{"Second project rule"});
+    }
+    void sessionPanelUsesExactIdentityAndKeepsDraftOnWriteFailure()
+    {
+        IronRulesPanel panel; QJsonObject request;
+        panel.setBackend([&](const QString &, const QString &op, const QJsonObject &input, IronRules::Reply done) {
+            if (op == "set") { request = input; done({}, "Identity changed"); return; }
+            done({{"rules", QJsonArray{}}, {"revision", 4}, {"migrated", true}}, {});
+        });
+        panel.setContext("peer", "claude/x/one", "r1", "c1"); panel.setProject("p1", "Project"); panel.show();
+        panel.findChild<QComboBox *>("ironRulesScope")->setCurrentIndex(1);
+        auto *field = panel.findChild<QLineEdit *>("ironRuleField"); field->setText("Own addition");
+        panel.findChild<QPushButton *>("addIronRule")->click();
+        QCOMPARE(request.value("scope").toString(), QString("session"));
+        QCOMPARE(request.value("expected_run_id").toString(), QString("r1"));
+        QCOMPARE(request.value("expected_conversation_id").toString(), QString("c1"));
+        QCOMPARE(field->text(), QString("Own addition")); QVERIFY(panel.rules().isEmpty());
+        QCOMPARE(panel.findChild<QLabel *>("ironRulesError")->text(), QString("Identity changed"));
+    }
     void panelAddsAndRemovesRules()
     {
         IronRulesPanel panel; int reported = -1; panel.changed = [&](int count) { reported = count; };

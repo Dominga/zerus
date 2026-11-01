@@ -404,7 +404,7 @@ Team parse(const QJsonObject &v)
 {
     Team team;
     team.id = str(v, "id"); team.name = str(v, "name"); team.status = str(v, "status");
-    team.project = str(v, "project"); team.folder = str(v, "folder"); team.lead = str(v, "lead");
+    team.project = str(v, "project"); team.projectId = str(v, "project_id"); team.folder = str(v, "folder"); team.lead = str(v, "lead");
     // G1: the parent task this team came from and its sub-teams.
     if (v.value("parent").isObject()) {
         const auto parent = v.value("parent").toObject();
@@ -442,6 +442,7 @@ Team parse(const QJsonObject &v)
         member.account = str(m, "account"); member.effort = str(m, "effort"); member.permissions = str(m, "permissions");
         member.sessionAccountKnown = m.contains("session_account"); member.sessionAccount = str(m, "session_account");
         member.folder = str(m, "folder"); member.directory = str(m, "directory"); member.prompt = str(m, "prompt");
+        for (const auto &rule : m.value("iron_rules").toArray()) member.ironRules << rule.toString();
         const auto session = m.value("session").toObject();
         member.host = str(session, "host"); member.session = str(session, "name");
         member.runId = str(session, "run_id"); member.conversationId = str(session, "conversation_id");
@@ -1052,6 +1053,7 @@ QJsonObject Member::json() const
 {
     QJsonObject o{{"id", id}, {"role", role}, {"agent", agent}, {"account", account}, {"model", model}, {"effort", effort},
                   {"permissions", permissions}, {"computer", computer}, {"directory", directory}, {"prompt", prompt}};
+    if (!ironRules.isEmpty()) o.insert("iron_rules", QJsonArray::fromStringList(ironRules));
     if (!folder.isEmpty()) o.insert("folder", folder);
     if (!parent.isEmpty()) o.insert("parent", parent);
     if (sub) o.insert("sub", true);

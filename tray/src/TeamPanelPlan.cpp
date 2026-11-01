@@ -1,3 +1,4 @@
+#include "IronRulesEditor.h"
 // WhiteWh fork: agent teams. The Team tab while a team plans (design S4):
 // editable members and tasks, dependencies dragged on the graph, plan errors,
 // and the pinned footer with Approve & Run, Send back to lead and Discard plan.
@@ -131,6 +132,11 @@ QWidget *TeamPanel::planMembers(const Team &team, bool narrow)
                 if (!ok) return;
                 Team edited = team;
                 for (auto &m : edited.members) if (m.id == id) m.prompt = text.trimmed();
+                savePlan(edited);
+            });
+            menu->addAction(tr("Iron rules..."), this, [this, team, member] {
+                QStringList rules; if (!IronRules::edit(this, member.ironRules, rules)) return;
+                Team edited = team; for (auto &m : edited.members) if (m.id == member.id) m.ironRules = rules;
                 savePlan(edited);
             });
             auto *worktree = menu->addAction(tr("Own worktree"));

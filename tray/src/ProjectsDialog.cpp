@@ -473,7 +473,7 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     // Right after the count, as the prototype has it.
     if(auto *head=qobject_cast<QBoxLayout *>(m_rulesBlock->trailing()->parent()))head->insertWidget(1,rulesHint);
     else m_rulesBlock->trailing()->addWidget(rulesHint);
-    m_rules=new IronRulesPanel;m_rules->setObjectName("projectIronRules");m_rulesBlock->body()->addWidget(m_rules);inCard(m_rulesBlock,QStringLiteral("projectRulesCard"));
+    m_rules=new IronRulesPanel;m_rules->setBackend(m_client->rulesTransport());m_rules->setObjectName("projectIronRules");m_rulesBlock->body()->addWidget(m_rules);inCard(m_rulesBlock,QStringLiteral("projectRulesCard"));
     // The block's header names them and counts them.
     for(const char *name:{"inspectorPanelTitle","ironRulesCount"})if(auto *own=m_rules->findChild<QLabel *>(name))own->hide();
     m_rules->changed=[this](int count){m_rulesBlock->setNote(QString::number(count));};

@@ -459,7 +459,9 @@ pub(crate) fn models_for(role_name: &str) -> Vec<super::model::ModelChoice> {
 }
 
 /// Renders the member's snapshot in the role's order.
-pub(crate) fn prompt_order_text_snapshot(snapshot: &super::model::PromptSnapshot, member_prompt: &str, task: Option<&Task>) -> Option<String> {
+pub(crate) fn prompt_order_text_snapshot(snapshot: &super::model::PromptSnapshot, member_prompt: &str, task: Option<&Task>,
+    rules: &str,
+) -> Option<String> {
     let role = Role {
         prompt_order: snapshot.prompt_order.clone(),
         prompt_off: snapshot.prompt_off.clone(),
@@ -468,7 +470,7 @@ pub(crate) fn prompt_order_text_snapshot(snapshot: &super::model::PromptSnapshot
         notes: snapshot.notes.clone(),
         ..Default::default()
     };
-    prompt_order_text(&role, member_prompt, task, "")
+    prompt_order_text(&role, member_prompt, task, rules)
 }
 
 /// C1: the role's own task block replaces the standard "Task #N" block only
@@ -486,12 +488,17 @@ pub(crate) fn prompt_order_text(role: &Role, member_prompt: &str, task: Option<&
         return None;
     }
     let mut text = String::new();
-    for key in &role.prompt_order {
-        if role.prompt_off.contains(key) {
+    let mut order = role.prompt_order.clone();
+    if !project_rules.trim().is_empty() && !order.iter().any(|key| key == "rules") {
+        order.insert(0, "rules".into());
+    }
+    for key in &order {
+        if role.prompt_off.contains(key) && key != "rules" {
             continue;
         }
         let block = match key.as_str() {
-            "rules" => (!project_rules.trim().is_empty()).then(|| format!("Project rules:\n{}\n", project_rules.trim())),
+            "rules" => {
+                (!project_rules.trim().is_empty()).then(|| format!("{}\n", project_rules.trim()))}
             "role" => (!member_prompt.trim().is_empty()).then(|| format!("Role: {}\n", member_prompt.trim())),
             "protocol" => (!role.protocol_extra.trim().is_empty()).then(|| format!("Team protocol extra:\n{}\n", role.protocol_extra.trim())),
             "task" => task.filter(|_| !role.task_template.trim().is_empty()).map(|task| {
@@ -1215,7 +1222,7 @@ mod tests {
         };
         role.notes.insert("note1".into(), "Read the docs first".into());
         let task = Task { id: 7, title: "API".into(), description: "The endpoint".into(), criteria: vec!["Fast".into(), "Safe".into()], ..Default::default() };
-        let text = prompt_order_text(&role, &role.prompt, Some(&task), "Use tabs").unwrap();
+        let text = prompt_order_text(&role, &role.prompt, Some(&task), "Project rules:\nUse tabs").unwrap();
         assert!(text.starts_with("Project rules:\nUse tabs\nRole: Write the code\n"), "{text}");
         assert!(text.contains("Team protocol extra:\nReport each step"), "{text}");
         assert!(text.contains("Do #7 API: The endpoint. Criteria: Fast; Safe"), "{text}");

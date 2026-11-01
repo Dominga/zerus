@@ -1274,7 +1274,9 @@ else:print('{}')
     QTRY_COMPARE(rows().size(), 1);
     QVERIFY(held->isVisible());
     QCOMPARE(held->findChild<QLabel *>("heldInputText")->text(), QStringLiteral("Queued until %1 takes your previous message").arg(agent));
-    QCOMPARE(input->toPlainText(), QString());
+    // The held row can be read before the send's own messageSent callback;
+    // wait for the callback, which is what clears the composer.
+    QTRY_COMPARE(input->toPlainText(), QString());
     QTRY_VERIFY(inComposer(held));
     // No quick-ask chips here either.
     QVERIFY(conversation.findChildren<QPushButton *>("teamConversationAsk").isEmpty());
@@ -1293,6 +1295,7 @@ else:print('{}')
     // Held again, then delivered by hgs: the line clears on the next read.
     sendButton->click();
     QTRY_COMPARE(sends().size(), 2);
+    QTRY_COMPARE(input->toPlainText(), QString());
     QTRY_COMPARE(rows().size(), 1);
     QVERIFY(FakeCli::replace(program + ".held", "[]"));
     QTRY_VERIFY(rows().isEmpty());

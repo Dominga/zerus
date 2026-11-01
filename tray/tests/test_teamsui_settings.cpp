@@ -817,6 +817,9 @@ void TestTeamsUiSettings::teamSettingsPausesAndPhaseAcceptance()
         QTRY_COMPARE(calls(script(), "settings").size(), 1);
         QCOMPARE(calls(script(), "settings").first()["settings"].toObject(),
                  (QJsonObject{{"lead_removes_own_pause", true}, {"phase_acceptance", "owner"}}));
+        // The save callback accepts the dialog: let it finish before the
+        // controller is destroyed, so no late reply can outlive the test.
+        QTRY_VERIFY(!dialog.isVisible());
     }
     auto set = team();
     set["settings"] = QJsonObject{{"lead_removes_own_pause", true}, {"phase_acceptance", "owner"}};

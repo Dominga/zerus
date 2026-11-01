@@ -23,6 +23,9 @@ struct Server {
     bool hasKey = false;
     int upMinutes = 0;
     QStringList status, up, down, logs;   // argv templates
+    // Each model's context window in tokens (hgs passes it to the session's
+    // agent). Settings does not edit it; a save keeps it as it was.
+    QJsonObject contexts;
     // Without control commands the server is read only: its models come from
     // the API's model list, with no Up, Down or Logs.
     bool readOnly() const { return status.isEmpty() && up.isEmpty() && down.isEmpty() && logs.isEmpty(); }

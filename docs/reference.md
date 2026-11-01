@@ -4262,6 +4262,19 @@ from the tmux start command, from the session's environment listing and from
 `--dry-run` (which prints `NAME=***` for a secret). Only the agent's own
 environment inherits it.
 
+A server may carry `contexts`, each model's context window in tokens as the
+server runs it (`{"coder": 262144}`; 4096 to 10,000,000, at most 500 models).
+Settings keeps it on save without editing it. A session on such a model tells
+its agent the window: Claude Code gets `CLAUDE_CODE_MAX_CONTEXT_TOKENS` (it
+otherwise assumes 200k for a model it does not know, and compacts there), Codex
+`-c model_context_window=N`. Change the value when the server's engine changes
+the window. A Claude Code launch also reads the server's model list (5 s at
+most) into a settings file of that launch, passed with `--settings`: its
+`/model` picker offers the server's models, the session's own first, instead
+of the cloud models that answer nothing behind this server (Claude Code's own
+gateway discovery keeps only `claude`/`anthropic` IDs). An unreadable list
+leaves the picker as it is; the session still starts.
+
 A session records its model server and model. `hgs resume` applies those
 settings again; when the server is no longer configured the resume is refused
 with a message naming it instead of falling back to the cloud account.

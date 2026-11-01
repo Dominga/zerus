@@ -478,7 +478,11 @@ void TestModelServers::apiAddressCopiesAndNewSessionStartsTheChosenAgent()
 // the key is sent once and never shown again; Up and Down have no Test here.
 void TestModelServers::settingsAddEditTestAndRemoveWithoutShowingTheKey()
 {
-    setServers(QJsonArray{server("lab-gpu", "https://gpu-a.lan.example:8000/v1", "openai", "gpu-a", true, true)});
+    // The owner, 2026-11-02: each model's context window rides with the
+    // server; Settings does not edit it, and its save keeps it.
+    auto gpu = server("lab-gpu", "https://gpu-a.lan.example:8000/v1", "openai", "gpu-a", true, true);
+    gpu["contexts"] = QJsonObject{{"small", 131072}};
+    setServers(QJsonArray{gpu});
     setStatus(fourStatuses());
     HgsClient client(FakeCli::program(script()));
     ModelServers::Controller servers(&client);
@@ -548,6 +552,7 @@ void TestModelServers::settingsAddEditTestAndRemoveWithoutShowingTheKey()
     QCOMPARE(saved["was"].toString(), QStringLiteral("lab-gpu")); QVERIFY(!saved.contains("key"));
     QCOMPARE(saved["base_url"].toString(), QStringLiteral("https://gpu-b.lan.example:8000/v1"));
     QCOMPARE(saved["down"].toArray(), (QJsonArray{"model-ctl", "down", "{model}"}));
+    QCOMPARE(saved["contexts"].toObject(), (QJsonObject{{"small", 131072}}));
     QTRY_COMPARE(servers.server("lab-gpu")->baseUrl, QStringLiteral("https://gpu-b.lan.example:8000/v1"));
     // Add a server with a key: sent once; after saving it is never shown again.
     settings.findChild<QPushButton *>("modelServerAdd")->click();

@@ -34,6 +34,10 @@ const MAX_MODELS: usize = 500;
 const MAX_LINES: usize = 2000;
 const MAX_MODEL_CHARS: usize = 200;
 const MAX_KEY: usize = 8192;
+const MIN_CONTEXT: u64 = 4096;
+const MAX_CONTEXT: u64 = 10_000_000;
+/// How long a Claude launch waits for the server's model list (its /model picker).
+const PICKER_SECS: u64 = 5;
 
 /// One configured server. The key is never shown by `list`.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -59,6 +63,11 @@ pub(crate) struct Server {
     /// The time limit of a detached up: 30 minutes when unset.
     #[serde(skip_serializing_if = "is_zero")]
     pub up_minutes: u32,
+    /// The owner, 2026-11-02: each model's context window in tokens, as the
+    /// server runs it. A session on that model tells its agent the window, so
+    /// it compacts at the server's limit instead of an assumed one.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub contexts: std::collections::BTreeMap<String, u64>,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -227,6 +236,15 @@ pub(crate) fn checked(server: Server) -> Result<Server> {
             return Err(Error::new(1, format!("The {field} command names the model with {{model}}")));
         }
     }
+    if server.contexts.len() > MAX_MODELS {
+        return Err(Error::new(1, "At most 500 model context windows"));
+    }
+    for (model, tokens) in &server.contexts {
+        checked_model(model).map_err(|_| Error::new(1, format!("The context window of {model} names no valid model")))?;
+        if !(MIN_CONTEXT..=MAX_CONTEXT).contains(tokens) {
+            return Err(Error::new(1, format!("The context window of {model} is 4096 to 10000000 tokens")));
+        }
+    }
     let minutes = if server.up_minutes == 0 { 30 } else { server.up_minutes };
     if !(1..=240).contains(&minutes) {
         return Err(Error::new(1, "The up time limit is 1 to 240 minutes"));
@@ -252,6 +270,7 @@ pub(crate) fn public(server: &Server) -> Value {
         "up_minutes": server.up_minutes,
         // U60 (#656): the argv templates Settings edits; never the key.
         "argv": {"status": server.status, "up": server.up, "down": server.down, "logs": server.logs},
+        "contexts": server.contexts,
     })
 }
 
@@ -581,23 +600,13 @@ fn parse_status(text: &str) -> Parsed {
 /// small client below; https runs the system curl, whose TLS is the system's,
 /// so hgs needs no TLS crate and the agents speak TLS themselves anyway.
 fn api_models(config: &Config, server: &Server) -> std::result::Result<Vec<Value>, Failure> {
-    let url = models_url(server);
-    let (code, body) = if url.starts_with("https://") {
-        curl_get(config, server, &url)?
-    } else {
-        http_get(&url, server, http_timeout())?
-    };
-    if !(200..300).contains(&code) {
-        return Err(http_failure(code, &body));
-    }
-    let value: Value = serde_json::from_str(&body).map_err(|_| Failure::Refused("The model list is not JSON".into()))?;
-    let data = value["data"].as_array().or_else(|| value["models"].as_array()).ok_or_else(|| Failure::Refused("The model list has no data array".into()))?;
-    let mut models = Vec::new();
-    for model in data.iter().take(MAX_MODELS) {
-        let Some(name) = model["id"].as_str().or_else(|| model["name"].as_str()).filter(|name| !name.is_empty() && !name.starts_with('-')) else { continue };
-        models.push(json!({"name": name, "state": "available"}));
-    }
-    Ok(models)
+    Ok(api_models_within(config, server, http_timeout())?
+        .into_iter()
+        .map(|mut model| {
+            model["state"] = json!("available");
+            model
+        })
+        .collect())
 }
 
 /// What the system curl did. `Missing` (no curl on this computer) and
@@ -1059,6 +1068,18 @@ pub(crate) fn session_settings(config: &Config, server_name: &str, agent: &str, 
             }
             settings.env.push("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1".into());
             settings.env.push("API_TIMEOUT_MS=1800000".into());
+            // Claude Code assumes 200k for a model it does not know; the
+            // server's own window replaces that (CLAUDE_CODE_MAX_CONTEXT_TOKENS
+            // applies to an ID without claude- and [1m]).
+            if let Some(tokens) = server.contexts.get(&model) {
+                settings.env.push(format!("CLAUDE_CODE_MAX_CONTEXT_TOKENS={tokens}"));
+            }
+            // Its gateway discovery keeps only claude/anthropic IDs, so /model
+            // would offer this one model: the server's list goes to a settings
+            // file of this launch (the global configuration stays as it is).
+            if let Some(path) = picker_settings(config, &server, &model) {
+                settings.args.extend(["--settings".to_owned(), path.to_string_lossy().into_owned()]);
+            }
             settings.secrets.push(format!("ANTHROPIC_AUTH_TOKEN={key}"));
         }
         "codex" => {
@@ -1087,6 +1108,9 @@ pub(crate) fn session_settings(config: &Config, server_name: &str, agent: &str, 
                 "--model".to_owned(),
                 model.clone(),
             ]);
+            if let Some(tokens) = server.contexts.get(&model) {
+                settings.args.extend(["-c".to_owned(), format!("model_context_window={tokens}")]);
+            }
             settings.secrets.push(format!("HGS_MODEL_SERVER_KEY={key}"));
         }
         "opencode" => {
@@ -1095,6 +1119,71 @@ pub(crate) fn session_settings(config: &Config, server_name: &str, agent: &str, 
         other => return Err(Error::new(1, format!("A model server session starts claude or codex, not {other}"))),
     }
     Ok(settings)
+}
+
+/// The settings file a Claude launch on `server` passes with `--settings`: its
+/// /model picker lists the server's models, the session's own first, and only
+/// them (the cloud models answer nothing behind this server). Named by its
+/// content, so launches with the same list share one file. None when the list
+/// cannot be read within PICKER_SECS: the session still starts on its model.
+fn picker_settings(config: &Config, server: &Server, model: &str) -> Option<PathBuf> {
+    let started = std::time::Instant::now();
+    let mut names: Vec<String> = api_models_within(config, server, Duration::from_secs(PICKER_SECS))
+        .ok()?
+        .iter()
+        .filter_map(|entry| entry["name"].as_str().map(str::to_owned))
+        .filter(|name| checked_model(name).is_ok())
+        .collect();
+    if started.elapsed() > Duration::from_secs(PICKER_SECS) {
+        return None;
+    }
+    names.retain(|name| name != model);
+    names.insert(0, model.to_owned());
+    let options: Vec<Value> = names
+        .iter()
+        .map(|name| {
+            let mut row = json!({"model": name, "description": format!("{} model server", server.name)});
+            if let Some(tokens) = server.contexts.get(name) {
+                row["description"] = json!(format!("{} model server, {}k context", server.name, tokens / 1000));
+            }
+            row
+        })
+        .collect();
+    let text = json!({"modelPicker": {"options": options, "replaceBuiltInOptions": true}}).to_string();
+    let digest = {
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(text.as_bytes());
+        hash.iter().take(8).map(|byte| format!("{byte:02x}")).collect::<String>()
+    };
+    let dir = config.state.join("model-servers");
+    platform::private_dir(&dir).ok()?;
+    let path = dir.join(format!("picker-{digest}.json"));
+    if !path.exists() {
+        storage::atomic_private(&path, &text).ok()?;
+    }
+    Some(path)
+}
+
+/// `api_models` with its own time bound, for a launch that must not wait long.
+fn api_models_within(config: &Config, server: &Server, timeout: Duration) -> std::result::Result<Vec<Value>, Failure> {
+    let url = models_url(server);
+    let (code, body) = if url.starts_with("https://") {
+        curl_get(config, server, &url)?
+    } else {
+        http_get(&url, server, timeout.min(http_timeout()))?
+    };
+    if !(200..300).contains(&code) {
+        return Err(http_failure(code, &body));
+    }
+    let value: Value = serde_json::from_str(&body).map_err(|_| Failure::Refused("The model list is not JSON".into()))?;
+    let data = value["data"].as_array().or_else(|| value["models"].as_array()).ok_or_else(|| Failure::Refused("The model list has no data array".into()))?;
+    Ok(data
+        .iter()
+        .take(MAX_MODELS)
+        .filter_map(|model| model["id"].as_str().or_else(|| model["name"].as_str()))
+        .filter(|name| !name.is_empty() && !name.starts_with('-'))
+        .map(|name| json!({"name": name}))
+        .collect())
 }
 
 /// The installed Codex's version from `codex --version` (warnings may come
@@ -1803,6 +1892,61 @@ mod tests {
         save(&config, &[anthropic]).unwrap();
         let claude = session_settings(&config, "lab", "claude", "small").unwrap();
         assert!(claude.env.iter().any(|line| line == "ANTHROPIC_BASE_URL=http://127.0.0.1:8080"), "{:?}", claude.env);
+    }
+
+    /// The owner, 2026-11-02: a Claude session on GB10 offered one model in
+    /// /model and assumed a 200k window. The server's models fill the picker of
+    /// that launch, and a model's configured window reaches the agent.
+    #[test]
+    fn a_claude_launch_lists_the_servers_models_and_each_agent_gets_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let body = r#"{"data":[{"id":"coder"},{"id":"small"},{"id":"-rf"}]}"#;
+            write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let mut server = server();
+        server.kind = "anthropic".into();
+        server.base_url = format!("http://127.0.0.1:{port}");
+        server.contexts.insert("small".into(), 131072);
+        save(&config, &[checked(server.clone()).unwrap()]).unwrap();
+        let claude = session_settings(&config, "lab", "claude", "small").unwrap();
+        handle.join().unwrap();
+        assert!(claude.env.contains(&"CLAUDE_CODE_MAX_CONTEXT_TOKENS=131072".to_owned()), "{:?}", claude.env);
+        assert_eq!(claude.args[0], "--settings", "{:?}", claude.args);
+        let picker: Value = serde_json::from_str(&std::fs::read_to_string(&claude.args[1]).unwrap()).unwrap();
+        let models: Vec<&str> = picker["modelPicker"]["options"].as_array().unwrap().iter().map(|row| row["model"].as_str().unwrap()).collect();
+        assert_eq!(models, ["small", "coder"], "the session's model first; a dash name is never offered");
+        assert_eq!(picker["modelPicker"]["replaceBuiltInOptions"], true);
+        // Codex takes the window as its own setting; a model without one sets nothing.
+        let mut codex_server = server.clone();
+        codex_server.kind = "openai".into();
+        save(&config, &[checked(codex_server).unwrap()]).unwrap();
+        let codex = session_settings(&config, "lab", "codex", "small").unwrap();
+        assert!(codex.args.windows(2).any(|pair| pair == ["-c", "model_context_window=131072"]), "{:?}", codex.args);
+        assert!(!session_settings(&config, "lab", "codex", "coder").unwrap().args.iter().any(|arg| arg.contains("model_context_window")));
+        // An unreachable list leaves only the picker out: the session still starts.
+        set_http_timeout(Some(Duration::from_millis(300)));
+        let mut gone = server.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        gone.base_url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        drop(listener);
+        save(&config, &[checked(gone).unwrap()]).unwrap();
+        let claude = session_settings(&config, "lab", "claude", "small").unwrap();
+        set_http_timeout(None);
+        assert!(!claude.args.iter().any(|arg| arg == "--settings"), "{:?}", claude.args);
+        // A window outside the bounds, or for no valid model, is refused.
+        let mut bad = server.clone();
+        bad.contexts.insert("small".into(), 12);
+        assert!(checked(bad).unwrap_err().message.contains("4096 to 10000000"));
+        let mut bad = server;
+        bad.contexts.insert("-rf".into(), 131072);
+        assert!(checked(bad).is_err());
     }
 
     #[test]

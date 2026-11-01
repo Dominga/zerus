@@ -2497,6 +2497,29 @@ fn launch(
     if command_name == "codex" {
         base.extend(model_server_args.iter().cloned());
     }
+    // The owner, 2026-11-02: Claude's args (the /model picker's --settings file)
+    // reached no command line, so its picker offered one model. They apply to a
+    // start and to a resume alike. A Claude account whose own settings point at
+    // a gateway (GB10) gets the gateway's models the same way.
+    if command_name == "claude" {
+        if options.model_server.is_none() {
+            let home = account_environment
+                .iter()
+                .find_map(|line| line.strip_prefix("CLAUDE_CONFIG_DIR="))
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(&config.home).join(".claude"));
+            if let Some(server) = crate::state::model_servers::account_gateway(&home) {
+                let model = options.model.clone().unwrap_or_default();
+                if let Some(path) = crate::state::model_servers::picker_settings(config, &server, &model) {
+                    model_server_args.extend(["--settings".to_owned(), path.to_string_lossy().into_owned()]);
+                }
+            }
+        }
+        base.extend(model_server_args.iter().cloned());
+        if !resume.is_empty() {
+            resume.extend(model_server_args.iter().cloned());
+        }
+    }
     let launcher = Path::new(&directory).join(format!("run_{command_name}.sh"));
     if !options.bare && !directory.is_empty() && platform::executable(&launcher) {
         base[0] = launcher.to_string_lossy().into_owned();

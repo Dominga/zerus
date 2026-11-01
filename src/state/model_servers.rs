@@ -1126,7 +1126,7 @@ pub(crate) fn session_settings(config: &Config, server_name: &str, agent: &str, 
 /// them (the cloud models answer nothing behind this server). Named by its
 /// content, so launches with the same list share one file. None when the list
 /// cannot be read within PICKER_SECS: the session still starts on its model.
-fn picker_settings(config: &Config, server: &Server, model: &str) -> Option<PathBuf> {
+pub(crate) fn picker_settings(config: &Config, server: &Server, model: &str) -> Option<PathBuf> {
     let started = std::time::Instant::now();
     let mut names: Vec<String> = api_models_within(config, server, Duration::from_secs(PICKER_SECS))
         .ok()?
@@ -1137,8 +1137,14 @@ fn picker_settings(config: &Config, server: &Server, model: &str) -> Option<Path
     if started.elapsed() > Duration::from_secs(PICKER_SECS) {
         return None;
     }
-    names.retain(|name| name != model);
-    names.insert(0, model.to_owned());
+    // The session's model first; an account launch names none.
+    if !model.is_empty() {
+        names.retain(|name| name != model);
+        names.insert(0, model.to_owned());
+    }
+    if names.is_empty() {
+        return None;
+    }
     let options: Vec<Value> = names
         .iter()
         .map(|name| {
@@ -1162,6 +1168,17 @@ fn picker_settings(config: &Config, server: &Server, model: &str) -> Option<Path
         storage::atomic_private(&path, &text).ok()?;
     }
     Some(path)
+}
+
+/// The gateway a Claude account's own settings point Claude Code at
+/// (`env.ANTHROPIC_BASE_URL` in `<home>/settings.json`, as the GB10 account
+/// has), with its token; None for an account that talks to Anthropic.
+pub(crate) fn account_gateway(home: &Path) -> Option<Server> {
+    let settings: Value = serde_json::from_slice(&std::fs::read(home.join("settings.json")).ok()?).ok()?;
+    let env = &settings["env"];
+    let base_url = env["ANTHROPIC_BASE_URL"].as_str().filter(|url| !url.is_empty())?;
+    let key = env["ANTHROPIC_AUTH_TOKEN"].as_str().or_else(|| env["ANTHROPIC_API_KEY"].as_str()).unwrap_or_default();
+    checked(Server { name: "gateway".into(), base_url: base_url.into(), kind: "anthropic".into(), key: key.into(), ..Default::default() }).ok()
 }
 
 /// The model ids `server` lists, within `timeout`; empty when it cannot be read.
@@ -1954,6 +1971,38 @@ mod tests {
         let mut bad = server;
         bad.contexts.insert("-rf".into(), 131072);
         assert!(checked(bad).is_err());
+    }
+
+    /// The owner, 2026-11-02: the GB10 account (its settings point Claude
+    /// Code at a gateway) gets the gateway's models in /model; an account
+    /// that talks to Anthropic gets nothing from here.
+    #[test]
+    fn a_gateway_accounts_launch_lists_the_gateways_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let body = r#"{"data":[{"id":"coder"},{"id":"small"}]}"#;
+            write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let home = dir.path().join("account");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("settings.json"), json!({"env":{"ANTHROPIC_BASE_URL":format!("http://127.0.0.1:{port}"),"ANTHROPIC_AUTH_TOKEN":"sk-x"}}).to_string()).unwrap();
+        let server = account_gateway(&home).unwrap();
+        assert_eq!((server.kind.as_str(), server.key.as_str()), ("anthropic", "sk-x"));
+        let path = picker_settings(&config, &server, "").unwrap();
+        handle.join().unwrap();
+        let picker: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let models: Vec<&str> = picker["modelPicker"]["options"].as_array().unwrap().iter().map(|row| row["model"].as_str().unwrap()).collect();
+        assert_eq!(models, ["coder", "small"], "no empty row for a launch that names no model");
+        let plain = dir.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::write(plain.join("settings.json"), r#"{"model":"opus"}"#).unwrap();
+        assert!(account_gateway(&plain).is_none());
     }
 
     #[test]

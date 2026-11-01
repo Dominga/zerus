@@ -262,18 +262,7 @@ fn gateway_server(record: &Value) -> Option<super::model_servers::Server> {
         let config = crate::config::Config::load().ok()?;
         return super::model_servers::load(&config).ok()?.into_iter().find(|server| server.name == name);
     }
-    let settings: Value = serde_json::from_slice(&fs::read(agent_home(record).join("settings.json")).ok()?).ok()?;
-    let env = &settings["env"];
-    let base_url = env["ANTHROPIC_BASE_URL"].as_str().filter(|url| !url.is_empty())?;
-    let key = env["ANTHROPIC_AUTH_TOKEN"].as_str().or_else(|| env["ANTHROPIC_API_KEY"].as_str()).unwrap_or_default();
-    super::model_servers::checked(super::model_servers::Server {
-        name: "account-gateway".into(),
-        base_url: base_url.into(),
-        kind: "anthropic".into(),
-        key: key.into(),
-        ..Default::default()
-    })
-    .ok()
+    super::model_servers::account_gateway(&agent_home(record))
 }
 
 /// Claude Code caches its account's signed model catalog for the /model picker.

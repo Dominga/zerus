@@ -5873,10 +5873,15 @@ folder are decided at once as before.
   test queue (forced, never reused) on the merged commit. All green keeps the
   merge and accepts the task; any failure resets the lead branch to `prev`
   (only while it is still the merge) and sends the task back with the failed
-  suites, their records and the end of the failing log. On Windows each queued
-  command reaches `cmd /D /S /C` as one unescaped string, so a provider command
-  that quotes its folder (`cd /d "tests" && ...`) runs as written; Linux and
-  macOS keep `sh -c`.
+  suites, their records and the end of the failing log. A selected suite whose
+  declared platforms exclude this computer is not queued here: with a
+  configured test runner of its class it is dispatched there and waited for as
+  before; without one the merge records it as "not run here: SUITE runs on
+  PLATFORMS; no runner of that class" and decides on the suites that ran. The
+  merge view, the feed and the merge log name both the suites that ran and the
+  ones not run here. On Windows each queued command reaches `cmd /D /S /C` as
+  one unescaped string, so a provider command that quotes its folder
+  (`cd /d "tests" && ...`) runs as written; Linux and macOS keep `sh -c`.
 - Every kept merge moves `merge_tested` and the bounded `merge_log`; a phase
   build then checks only `hgs test affected MERGE_TESTED..HEAD`.
 - With the queue on, every hand-out tells the member to merge the lead branch
@@ -5895,6 +5900,10 @@ provider without them is `android`), carried by every queued request.
   Any other goes only to an enabled runner of its class; with none, or with
   every such runner unreachable, it stays queued with the reason (`hgs team
   test --json` action `queue` shows it) and never runs on another platform.
+  The merge queue does not wait for such a suite when no runner of its class is
+  configured: it records it as not run here (see the merge queue above) and
+  decides on the suites that ran; a suite of this computer's class always runs
+  here.
 - The scheduler reaches a runner only through hgs's own SSH transport:
   `hgs @ALIAS test runner --json` (BatchMode, connect timeout, the Windows peer
   channel; the peer needs this hgs, marker `test-runner-v1`). It first asks

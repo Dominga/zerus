@@ -143,9 +143,28 @@ pub(crate) fn merge(lead: &str, entry: &MergeEntry, message: &str) -> Merged {
     }
 }
 
+/// The requests a merge queues, and the suites of another platform it records
+/// as not run here because no test runner of their class exists.
+#[derive(Debug, Default)]
+pub(crate) struct Affected {
+    pub requests: Vec<Request>,
+    pub not_run: Vec<String>,
+}
+
 /// The task's affected tests on the merged range, as test queue requests: the
-/// project's map over `prev..merged`, each run's command in its folder.
-pub(crate) fn affected_requests(team: &Team, id: u32, prev: &str, merged: &str, now: f64) -> anyhow::Result<Vec<Request>> {
+/// project's map over `prev..merged`, each run's command in its folder. A suite
+/// whose declared platforms exclude this computer is queued only when a
+/// configured test runner of its class exists; otherwise it is named as not run
+/// here and the merge decides on the suites that did run.
+pub(crate) fn affected_requests(
+    team: &Team,
+    id: u32,
+    prev: &str,
+    merged: &str,
+    now: f64,
+    host: &[String],
+    runners: &[super::test_runners::Runner],
+) -> anyhow::Result<Affected> {
     use crate::test_discipline::{affected, config, durations, map};
     let lead = Path::new(&team.folder);
     let loaded = config::load(lead, team.settings.tests.as_ref())?;
@@ -153,7 +172,7 @@ pub(crate) fn affected_requests(team: &Team, id: u32, prev: &str, merged: &str, 
     let changed = git_text(&team.folder, &["diff", "--name-only", "--no-renames", prev, merged]).unwrap_or_default();
     let files: Vec<String> = changed.lines().map(str::to_owned).filter(|line| !line.is_empty()).collect();
     if files.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Affected::default());
     }
     let committed = std::fs::read_to_string(lead.join(&config.map.file)).ok().and_then(|text| serde_json::from_str::<map::TestMap>(&text).ok());
     let touched: std::collections::BTreeSet<String> = config
@@ -167,8 +186,16 @@ pub(crate) fn affected_requests(team: &Team, id: u32, prev: &str, merged: &str, 
     let durations = durations::Durations::read(&lead.join(&config.map.durations)).unwrap_or_default();
     let selection = affected::select(lead, config, &test_map, &durations, &files, &Default::default(), false);
     let mut requests = Vec::new();
+    let mut not_run = Vec::new();
     for run in &selection.runs {
         let Some(provider) = config.providers.iter().find(|provider| provider.name == run.provider) else { continue };
+        let platforms = provider.platform_classes();
+        if !super::test_runners::runs_here(&platforms, host)
+            && !runners.iter().any(|runner| platforms.contains(&runner.platform))
+        {
+            not_run.push(format!("not run here: {} runs on {}; no runner of that class", run.provider, platforms.join(" or ")));
+            continue;
+        }
         let command = if run.cwd == "." {
             run.command.clone()
         } else if cfg!(windows) {
@@ -199,16 +226,25 @@ pub(crate) fn affected_requests(team: &Team, id: u32, prev: &str, merged: &str, 
             budget_minutes: budget,
             resources: provider.resources.clone(),
             command,
-            platforms: provider.platform_classes(),
+            platforms,
         });
     }
-    Ok(requests)
+    Ok(Affected { requests, not_run })
 }
 
 /// One step of the queue for a team: the merge under test decides when all its
-/// results are in; else the oldest queued entry merges. True when it changed
-/// something.
-pub(crate) fn step(team: &mut Team, database: &TestStore, now: f64, events: &mut Vec<Event>) -> anyhow::Result<bool> {
+/// results are in; else the oldest queued entry merges. `host` is this
+/// computer's test classes and `runners` the owner's configured test runners;
+/// a suite of another class without a runner is recorded as not run here. True
+/// when it changed something.
+pub(crate) fn step(
+    team: &mut Team,
+    database: &TestStore,
+    now: f64,
+    events: &mut Vec<Event>,
+    host: &[String],
+    runners: &[super::test_runners::Runner],
+) -> anyhow::Result<bool> {
     if let Some(id) = team.tasks.iter().find(|task| task.merge.as_ref().is_some_and(|entry| entry.state == "testing")).map(|task| task.id) {
         let entry = team.task(id).and_then(|task| task.merge.clone()).unwrap_or_default();
         let mut results = Vec::new();
@@ -285,20 +321,28 @@ pub(crate) fn step(team: &mut Team, database: &TestStore, now: f64, events: &mut
             Ok(true)
         }
         Merged::Done { prev, merged } => {
-            let requests = if prev == merged { Vec::new() } else { affected_requests(team, id, &prev, &merged, now).unwrap_or_default() };
-            for request in &requests {
+            let affected = if prev == merged {
+                Affected::default()
+            } else {
+                affected_requests(team, id, &prev, &merged, now, host, runners).unwrap_or_default()
+            };
+            for request in &affected.requests {
                 database.enqueue(request)?;
             }
-            events.push(Event::new("merged", json!({"task":id,"prev":prev,"merged":merged,"tests":requests.len()})));
-            if requests.is_empty() {
-                let entry = MergeEntry { prev, merged, ..entry };
+            events.push(Event::new("merged", json!({"task":id,"prev":prev,"merged":merged,"tests":affected.requests.len(),"not_run":affected.not_run.clone()})));
+            if !affected.not_run.is_empty() {
+                events.push(Event::new("merge_not_run", json!({"task":id,"suites":affected.not_run.clone()})));
+            }
+            if affected.requests.is_empty() {
+                let entry = MergeEntry { prev, merged, not_run: affected.not_run, ..entry };
                 keep(team, id, &entry, Vec::new(), now, events)?;
             } else if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
                 found.state = "testing".into();
                 found.prev = prev;
                 found.merged = merged;
                 found.note.clear();
-                found.requests = requests.iter().map(|request| request.id.clone()).collect();
+                found.requests = affected.requests.iter().map(|request| request.id.clone()).collect();
+                found.not_run = affected.not_run;
             }
             Ok(true)
         }
@@ -310,7 +354,7 @@ pub(crate) fn step(team: &mut Team, database: &TestStore, now: f64, events: &mut
 fn keep(team: &mut Team, id: u32, entry: &MergeEntry, suites: Vec<String>, now: f64, events: &mut Vec<Event>) -> anyhow::Result<()> {
     if !entry.merged.is_empty() {
         team.merge_tested = entry.merged.clone();
-        team.merge_log.push(MergeLog { task: id, prev: entry.prev.clone(), merged: entry.merged.clone(), at: now, suites });
+        team.merge_log.push(MergeLog { task: id, prev: entry.prev.clone(), merged: entry.merged.clone(), at: now, suites, not_run: entry.not_run.clone() });
         let extra = team.merge_log.len().saturating_sub(50);
         team.merge_log.drain(0..extra);
     }
@@ -358,7 +402,12 @@ pub(crate) fn untested_since(team: &Team) -> Option<String> {
 
 /// A queued or tested entry, for status.
 pub(crate) fn view(task: &Task) -> Option<Value> {
-    task.merge.as_ref().map(|entry| json!({"state":entry.state,"author":entry.author,"commit":entry.commit,"merged":entry.merged,"tests":entry.requests.len(),"note":entry.note}))
+    let entry = task.merge.as_ref()?;
+    let mut value = json!({"state":entry.state,"author":entry.author,"commit":entry.commit,"merged":entry.merged,"tests":entry.requests.len(),"note":entry.note});
+    if !entry.not_run.is_empty() {
+        value["not_run"] = json!(entry.not_run.clone());
+    }
+    Some(value)
 }
 
 #[cfg(test)]

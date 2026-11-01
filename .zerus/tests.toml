@@ -208,6 +208,8 @@ sources = [
 tests = ["tests/test_*.py"]
 # Real agents and hosts on this computer: never chosen automatically.
 manual = ["tests/test_dsh_native.py"]
+# The suite is POSIX-only (os.uname() and friends); the fork's Windows CI runs only cargo tests.
+platforms = ["linux", "macos"]
 
 [[provider.paths]]
 files = ["src/**", "Cargo.toml", "Cargo.lock", "build.rs"]

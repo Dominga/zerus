@@ -2,6 +2,7 @@ use super::*;
 use crate::state::teams::model::{Attempt, Member, MemberState, PlanMode, Report, TeamStatus};
 use crate::state::teams::ops::{self, Actor};
 use crate::state::teams::test_queue::run_due;
+use crate::state::teams::test_runners::Runner;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
@@ -20,6 +21,16 @@ fn write(dir: &Path, file: &str, text: &str) {
     std::fs::write(dir.join(file), text).unwrap();
 }
 
+/// Two more providers: a POSIX-only suite (like the real python provider) and
+/// one for this test's "here" class. Both use the same check as `unit`.
+fn platform_providers() -> String {
+    let check = if cfg!(windows) { "if exist fail.txt (exit /b 1) else (exit /b 0)" } else { "test ! -f fail.txt" };
+    format!(
+        "\n[[provider]]\nname = \"python\"\nkind = \"command\"\ncommand = '{check}'\nsources = [\"**\"]\naffected = \"all\"\nplatforms = [\"linux\", \"macos\"]\n\
+         \n[[provider]]\nname = \"here\"\nkind = \"command\"\ncommand = '{check}'\nsources = [\"**\"]\naffected = \"all\"\nplatforms = [\"windows\"]\n"
+    )
+}
+
 /// A lead checkout with the queue on and a suite that fails when `fail.txt`
 /// exists, and a member worktree on its own branch.
 struct Repo {
@@ -29,6 +40,11 @@ struct Repo {
 }
 
 fn repo() -> Repo {
+    repo_with("")
+}
+
+/// `repo` with extra `[[provider]]` tables in the project file.
+fn repo_with(extra: &str) -> Repo {
     let dir = tempfile::tempdir().unwrap();
     let lead = dir.path().join("lead");
     let member = dir.path().join("member");
@@ -36,7 +52,7 @@ fn repo() -> Repo {
     let check = if cfg!(windows) { "if exist fail.txt (exit /b 1) else (exit /b 0)" } else { "test ! -f fail.txt" };
     std::fs::write(
         lead.join(".zerus/tests.toml"),
-        format!("version = 1\n[merge_queue]\nenabled = true\n[[provider]]\nname = \"unit\"\nkind = \"command\"\ncommand = '{check}'\nsources = [\"**\"]\naffected = \"all\"\n"),
+        format!("version = 1\n[merge_queue]\nenabled = true\n[[provider]]\nname = \"unit\"\nkind = \"command\"\ncommand = '{check}'\nsources = [\"**\"]\naffected = \"all\"\n{extra}"),
     )
     .unwrap();
     run_git(&lead, &["init", "-q"]);
@@ -100,13 +116,19 @@ fn database(repo: &Repo) -> TestStore {
     TestStore::open_at(&repo.lead.parent().unwrap().join("tests.sqlite3"), false).unwrap()
 }
 
+/// The queue's step for a computer whose classes are `host` and whose
+/// configured runners are `runners`.
+fn step_here(team: &mut Team, database: &TestStore, now: f64, events: &mut Vec<Event>) -> anyhow::Result<bool> {
+    step(team, database, now, events, &["windows".to_owned()], &[])
+}
+
 /// The queue's step, the test queue's run of what it enqueued, and its step again.
 fn settle(team: &mut Team, database: &TestStore, lead: &Path) -> Vec<Event> {
     let mut events = Vec::new();
-    assert!(step(team, database, 100.0, &mut events).unwrap());
+    assert!(step_here(team, database, 100.0, &mut events).unwrap());
     let queued = database.queued(&team.id).unwrap();
     run_due(database, lead, &queued, 101.0, &Default::default()).unwrap();
-    step(team, database, 102.0, &mut events).unwrap();
+    step_here(team, database, 102.0, &mut events).unwrap();
     events
 }
 
@@ -131,6 +153,68 @@ fn an_accept_queues_the_reported_commit_and_leaves_the_task_undecided() {
 }
 
 #[test]
+fn a_suite_of_another_platform_with_no_runner_is_recorded_not_run() {
+    let repo = repo_with(&platform_providers());
+    write(&repo.member, "b.txt", "work\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "work"]);
+    let mut team = team(&repo);
+    accept(&mut team);
+    let database = database(&repo);
+    let mut events = Vec::new();
+    let host = vec!["windows".to_owned()];
+    assert!(step(&mut team, &database, 100.0, &mut events, &host, &[]).unwrap());
+    let entry = team.task(1).unwrap().merge.clone().unwrap();
+    assert_eq!(entry.state, "testing");
+    let named = entry.not_run.join(" ");
+    assert!(named.contains("python runs on linux or macos") && named.contains("no runner of that class"), "{:?}", entry.not_run);
+    // The lead sees it on the task's merge view and in the feed.
+    assert_eq!(view(team.task(1).unwrap()).unwrap()["not_run"], json!(entry.not_run.clone()));
+    assert!(events.iter().any(|event| event.kind == "merge_not_run" && event.payload["suites"] == json!(entry.not_run.clone())), "{events:?}");
+    // Only the suites that run here are queued; python is not waited for.
+    let queued = database.queued("t1").unwrap();
+    let suites: Vec<&str> = queued.iter().map(|request| request.suite.as_str()).collect();
+    assert!(suites.contains(&"unit") && suites.contains(&"here") && !suites.contains(&"python"), "{suites:?}");
+    assert!(!step(&mut team, &database, 100.5, &mut events, &host, &[]).unwrap(), "it waits for the suites that ran");
+    run_due(&database, &repo.lead, &queued, 101.0, &Default::default()).unwrap();
+    step(&mut team, &database, 102.0, &mut events, &host, &[]).unwrap();
+    let task = team.task(1).unwrap();
+    assert_eq!(task.status, TaskStatus::Accepted);
+    let mut ran = team.merge_log[0].suites.clone();
+    ran.sort();
+    assert_eq!(ran, vec!["here", "unit"]);
+    assert_eq!(team.merge_log[0].not_run, entry.not_run);
+}
+
+#[test]
+fn a_suite_of_another_platform_with_a_runner_is_queued_and_waited_for() {
+    let repo = repo_with(&platform_providers());
+    write(&repo.member, "b.txt", "work\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "work"]);
+    let mut team = team(&repo);
+    accept(&mut team);
+    let database = database(&repo);
+    let mut events = Vec::new();
+    let host = vec!["windows".to_owned()];
+    let runners = vec![Runner { alias: "box".into(), platform: "linux".into() }];
+    assert!(step(&mut team, &database, 100.0, &mut events, &host, &runners).unwrap());
+    let entry = team.task(1).unwrap().merge.clone().unwrap();
+    assert_eq!(entry.state, "testing");
+    assert!(entry.not_run.is_empty(), "a runner of the class keeps the suite");
+    let queued = database.queued("t1").unwrap();
+    let python = queued.iter().find(|request| request.suite == "python").expect("python is queued for its runner");
+    assert!(python.platforms.contains(&"linux".to_owned()), "{:?}", python.platforms);
+    // It waits for the runner's result like any queued suite.
+    assert!(!step(&mut team, &database, 100.5, &mut events, &host, &runners).unwrap());
+    run_due(&database, &repo.lead, &queued, 101.0, &Default::default()).unwrap();
+    step(&mut team, &database, 102.0, &mut events, &host, &runners).unwrap();
+    assert_eq!(team.task(1).unwrap().status, TaskStatus::Accepted);
+    assert!(team.merge_log[0].suites.iter().any(|suite| suite == "python"));
+    assert!(team.merge_log[0].not_run.is_empty());
+}
+
+#[test]
 fn a_merged_report_whose_affected_tests_pass_is_kept_and_accepted() {
     let repo = repo();
     write(&repo.member, "b.txt", "work\n");
@@ -145,7 +229,7 @@ fn a_merged_report_whose_affected_tests_pass_is_kept_and_accepted() {
     accept(&mut team);
     let database = database(&repo);
     let mut events = Vec::new();
-    assert!(step(&mut team, &database, 100.0, &mut events).unwrap());
+    assert!(step_here(&mut team, &database, 100.0, &mut events).unwrap());
     let entry = team.task(1).unwrap().merge.clone().unwrap();
     assert_eq!(entry.state, "testing");
     assert_eq!(entry.prev, before);
@@ -157,9 +241,9 @@ fn a_merged_report_whose_affected_tests_pass_is_kept_and_accepted() {
     assert_eq!(queued.len(), 1);
     assert_eq!((queued[0].suite.as_str(), queued[0].commit.as_str(), queued[0].task, queued[0].forced), ("unit", entry.merged.as_str(), Some(1), true));
     // Nothing decides before the result.
-    assert!(!step(&mut team, &database, 100.5, &mut events).unwrap());
+    assert!(!step_here(&mut team, &database, 100.5, &mut events).unwrap());
     run_due(&database, &repo.lead, &queued, 101.0, &Default::default()).unwrap();
-    assert!(step(&mut team, &database, 102.0, &mut events).unwrap());
+    assert!(step_here(&mut team, &database, 102.0, &mut events).unwrap());
     let task = team.task(1).unwrap();
     assert_eq!(task.status, TaskStatus::Accepted);
     assert!(task.merge.is_none());
@@ -202,7 +286,7 @@ fn a_conflict_goes_back_to_its_author_with_the_files() {
     accept(&mut team);
     let database = database(&repo);
     let mut events = Vec::new();
-    assert!(step(&mut team, &database, 100.0, &mut events).unwrap());
+    assert!(step_here(&mut team, &database, 100.0, &mut events).unwrap());
     assert_eq!(head(&repo), before);
     assert!(!repo.lead.join(".git/MERGE_HEAD").exists(), "the merge was aborted");
     let task = team.task(1).unwrap();
@@ -224,12 +308,12 @@ fn a_dirty_lead_folder_makes_the_merge_wait() {
     accept(&mut team);
     let database = database(&repo);
     let mut events = Vec::new();
-    assert!(step(&mut team, &database, 100.0, &mut events).unwrap());
+    assert!(step_here(&mut team, &database, 100.0, &mut events).unwrap());
     let entry = team.task(1).unwrap().merge.clone().unwrap();
     assert_eq!((entry.state.as_str(), entry.note.as_str()), ("queued", "the lead's folder has uncommitted changes"));
     assert_eq!(head(&repo), before);
     // The same wait again changes nothing.
-    assert!(!step(&mut team, &database, 101.0, &mut events).unwrap());
+    assert!(!step_here(&mut team, &database, 101.0, &mut events).unwrap());
 }
 
 #[test]

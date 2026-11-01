@@ -1678,6 +1678,8 @@ pub(crate) fn work_ahead_tasks(team: &Team) -> Vec<u32> {
                 && task.kind == TaskKind::Task
                 && task.hold.is_none()
                 && task.waits.is_none()
+                // U63: nothing works ahead behind a phase awaiting the owner's acceptance.
+                && plan::acceptance_block(team, task.phase).is_none()
                 && task.deps.iter().all(|dep| plan::satisfied(team, dep.task, DependencyKind::Hard))
                 && files(&format!("{} {}", task.title, task.description)).is_disjoint(&running_files)
         })
@@ -3231,7 +3233,14 @@ fn check_folder_branch(team: &Team, member: &Member, folder: &str) -> anyhow::Re
 
 /// One change to a team outside any request: the dispatcher's own record.
 fn change(store: &mut Store, team: &str, change: impl FnOnce(&mut Team, &mut Vec<Event>) -> anyhow::Result<()>) -> anyhow::Result<()> {
-    store.mutate(None, team, None, |team, events| change(team, events).map(|()| Value::Null))?;
+    store.mutate(None, team, None, |team, events| {
+        change(team, events)?;
+        // U63 (owner, 2026-10-31): a stage that decided a phase's last task
+        // here (not through ops::apply) lets the phase wait for the owner's
+        // acceptance at once.
+        super::ops::settle_acceptance(team, events);
+        Ok(Value::Null)
+    })?;
     Ok(())
 }
 

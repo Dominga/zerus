@@ -189,6 +189,13 @@ pub(crate) struct Settings {
     /// U56: the lead may interrupt or relaunch a stuck member; the owner sets it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lead_restarts_stuck: bool,
+    /// U63 (owner, 2026-10-31): the lead removes its own phase pause by
+    /// itself; off by default, when it needs the owner's word.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lead_removes_own_pause: bool,
+    /// U63: who accepts a new phase; the lead by default.
+    #[serde(default, skip_serializing_if = "PhaseAcceptance::is_lead")]
+    pub phase_acceptance: PhaseAcceptance,
     /// #752: members sharing one folder build their own snapshots through the
     /// build broker (broker.rs); off by default, the owner sets it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -299,6 +306,8 @@ impl Default for Settings {
             restart_crashed: false,
             stuck_minutes: 0,
             lead_restarts_stuck: false,
+            lead_removes_own_pause: false,
+            phase_acceptance: PhaseAcceptance::Lead,
             build_broker: false,
             keep_assignees: false,
             full_tests: FullTests::default(),
@@ -1743,6 +1752,13 @@ pub(crate) enum PhaseState {
     /// U25: accepted while an earlier phase still runs; it starts (becomes
     /// approved) once every earlier phase is finished.
     Queued,
+    /// U63 (owner, 2026-10-31): a phase that requires the owner's acceptance
+    /// has every task decided and waits for that acceptance; no later phase
+    /// starts meanwhile.
+    AwaitingAcceptance,
+    /// U63: the owner accepted the phase. Only a phase that required the
+    /// owner's acceptance reaches it; any other finished phase stays approved.
+    Done,
 }
 
 impl PhaseState {
@@ -1751,10 +1767,43 @@ impl PhaseState {
     pub(crate) fn is_draft(self) -> bool {
         matches!(self, Self::Draft | Self::Rejected)
     }
-    /// Accepted: running, finished or queued behind an earlier phase.
+    /// Accepted: running, finished or queued behind an earlier phase (U63:
+    /// or awaiting the owner's acceptance, or accepted by the owner).
     pub(crate) fn is_accepted(self) -> bool {
-        matches!(self, Self::Approved | Self::Queued)
+        matches!(self, Self::Approved | Self::Queued | Self::AwaitingAcceptance | Self::Done)
     }
+}
+
+/// U63 (owner, 2026-10-31): who accepts a phase once its tasks are decided:
+/// the lead's decisions on the tasks (as before), or the owner's acceptance
+/// of the whole phase.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PhaseAcceptance {
+    #[default]
+    Lead,
+    Owner,
+}
+
+impl PhaseAcceptance {
+    pub(crate) fn is_lead(&self) -> bool {
+        *self == Self::Lead
+    }
+}
+
+/// U63 (owner, 2026-10-31): an accepted phase held before its work starts;
+/// its tasks are not handed out until the pause is removed.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct PhasePause {
+    /// The actor label: "You" or the lead's.
+    pub by: String,
+    /// The owner paused it, so only the owner removes the pause.
+    #[serde(default)]
+    pub owner: bool,
+    #[serde(default)]
+    pub at: f64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
 }
 
 /// U25: the owner's send-back of a draft phase.
@@ -1826,6 +1875,20 @@ pub(crate) struct Phase {
     /// U25: the owner's latest send-back; kept after the rework for the note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rejection: Option<PhaseRejection>,
+    /// U63 (owner, 2026-10-31): the pause that holds this accepted phase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause: Option<PhasePause>,
+    /// U63: whether the owner accepts this phase when its tasks are decided.
+    #[serde(default, skip_serializing_if = "PhaseAcceptance::is_lead")]
+    pub acceptance: PhaseAcceptance,
+    /// U63: the owner sent the phase back at its acceptance; the lead reworks
+    /// it in the same phase, and it waits for the acceptance again once the
+    /// added work is decided.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub acceptance_rework: bool,
+    /// U63: when the phase began to wait for the owner's acceptance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awaiting_since: Option<f64>,
 }
 
 impl Phase {

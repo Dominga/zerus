@@ -1015,6 +1015,9 @@ reasons come from the team store:
 | The task was submitted | `Waiting for Lead to review #4` |
 | A lead's members work | `Waiting for reports: Backend #2, Frontend #3` |
 | A draft phase waits | `Waiting for you to approve phase 2 · Next` |
+| A phase waits for the owner's acceptance (U63) | `Waiting for you to accept phase 2 · Checkout` |
+| The task's phase is paused (U63) | `Waiting for you to remove the pause of phase 3 (#6)` (or `the lead`) |
+| A phase before it waits for the acceptance (U63) | `Waiting for the owner to accept phase 2 (#6)` |
 | Every task is decided | `Waiting for you: all tasks are decided` |
 | The team is paused, the plan is drafted | `Waiting for you to resume the team`, `Waiting for you to approve the plan` |
 
@@ -1560,6 +1563,37 @@ turning its `draft` tasks `pending`; a second hand-out does not accept it again.
 A review draft keeps the owner's approval, and `settings.work_ahead` keeps its
 meaning for review drafts: starting an auto draft ahead is the lead's decision,
 not a change of the review rules.
+
+### Changing, pausing and accepting a phase
+
+An approved or queued phase whose work has not started (no task has a
+delivered attempt) is changed in place and stays accepted, with its number,
+its place and its task ids: `edit-draft`, `extend` with `"phase"` and
+`move-phase` work on it. The owner does it directly; the lead only with
+`owner_word`, the owner's sentence naming the phase and the change. A draft
+stays the lead's own. `return-to-draft` (the owner, or the lead on the
+owner's word) is for a phase that must be approved again; it also keeps the
+phase's number, place and task ids. Discarding or moving a draft renumbers
+only the drafts after the last accepted phase.
+
+`pause-phase` `{"phase":N,"reason":"..."}` holds such a phase: its tasks are
+not handed out, and it keeps its place, so a later barrier or queued phase
+waits for it. The owner pauses, and the lead may pause on its own;
+`unpause-phase` removes the pause. Only the owner removes the owner's pause;
+the lead removes its own pause on the owner's word, or by itself when the
+owner set `lead_removes_own_pause` (off by default).
+
+A phase may require the owner's acceptance (`acceptance: "owner"`; new
+phases take `settings.phase_acceptance`, `lead` by default). Once its tasks
+are decided it is `awaiting_acceptance` and no later phase starts, urgent
+ones included. Waiting for you shows "Phase N is ready for your acceptance"
+with its tasks by outcome, its tests and its time; `accept-phase` makes it
+`done`, and `send-back-phase` `{"comment":"..."}` returns it to the lead, who
+adds the rework to the same phase with `extend`. The lead accepts a phase,
+or changes whether one needs the owner's acceptance (`phase-acceptance`),
+only on the owner's word. The feed records `phase_paused`, `phase_unpaused`,
+`phase_acceptance_changed`, `phase_awaiting_acceptance`,
+`phase_owner_accepted` and `phase_acceptance_sent_back`.
 
 ### A model per task, a task for a role, and the context before one
 

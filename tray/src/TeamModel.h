@@ -365,9 +365,23 @@ struct PhaseChange {
     QString kind;     // added, removed, changed, moved
     int task = 0;
     QString title, from, to;
+    // U63: recorded after the phase was accepted (the lead edited it while
+    // its work had not started); queued and running headers count only these.
+    bool accepted = false;
     bool added() const { return kind == "added"; }
     bool removed() const { return kind == "removed"; }
 };
+
+// U63 (owner, 2026-10-31): a pause on an accepted phase whose work has not
+// started; it does not start until the pause is removed. `owner` when the
+// owner paused it, else the lead ("by" is the server's name for who).
+struct PhasePause {
+    bool on = false;
+    QString by, reason;
+    bool owner = false;
+    double at = 0;
+};
+PhasePause readPhasePause(const QJsonValue &value);
 
 struct Phase {
     int n = 0;
@@ -394,6 +408,14 @@ struct Phase {
     // U61: a draft Auto accepts at its first hand-out; until then the lead
     // edits it. The lead may let idle members start it early (start_ahead).
     bool startAhead = false;
+    // U63: the pause on an accepted phase, and "owner" when the owner accepts
+    // the phase once its tasks are decided (absent or "lead" otherwise). The
+    // state then reads awaiting_acceptance, and done once he accepted it.
+    PhasePause pause;
+    QString acceptance;
+    bool ownerAccepts() const { return acceptance == QLatin1String("owner"); }
+    bool awaitingAcceptance() const { return state == QLatin1String("awaiting_acceptance"); }
+    bool accepted() const { return state == QLatin1String("approved") || state == QLatin1String("queued"); }
     bool autoDraft() const { return draft() && approval == "auto"; }
     bool acceptedByAuto() const { return (state == "approved" || state == "queued") && decidedBy == "Auto"; }
 };
@@ -492,9 +514,11 @@ struct Team {
     struct PhaseSummary {
         int n = 0;
         QString title, status, healthLine;   // status: done|in_work|approved|draft|paused
-        QString state;   // U25: planned|draft|rejected|queued|running|done (empty: older hgs)
+        QString state;   // U25: planned|draft|rejected|queued|running|done (empty: older hgs); U63: awaiting_acceptance
         int done = 0, total = 0;
         bool barrier = false;
+        PhasePause pause;    // U63: a paused phase reads "queued" with a pause
+        QString acceptance;  // U63: "owner" or "lead"
     };
     QList<PhaseSummary> phaseSummary;
     // G9 (spec 10.1): status.phases_health - the plan health of each phase,

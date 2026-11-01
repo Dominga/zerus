@@ -10,10 +10,12 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|integrate-build|start-ahead|full-tests|test|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|integrate-build|start-ahead|full-tests|test|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "move-task", "add-to-phase", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
+    // U63 (owner, 2026-10-31): a phase's pause and the owner's acceptance.
+    "pause-phase", "unpause-phase", "phase-acceptance", "accept-phase", "send-back-phase",
     "rework-phase", "reports-to", "sub-lead", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
     "archive", "report", "ask", "reply", "hold", "release", "accept", "reject", "skip-stage", "send-back", "reassign", "take-over", "cancel",
     "retry", "check", "expect", "swap-member", "use-last-reply", "relaunch", "add-member", "scale", "drain", "pause-member", "resume-member", "remove-member", "settings", "finding",
@@ -348,10 +350,15 @@ fn check_phase_change_word(
     }
     let Some(word) = input.get("owner_word").filter(|word| word.is_object()) else { return Ok(()) };
     let phase = input["phase"].as_u64().and_then(|phase| u32::try_from(phase).ok()).filter(|phase| *phase > 0).context("A phase number is required")?;
-    let (change, what) = if op == "discard-phase" {
-        (super::owner_word::PhaseChange::Discard, format!("the discard of phase {phase}"))
-    } else {
-        (super::owner_word::PhaseChange::ToDraft, format!("the return of phase {phase} to a draft"))
+    use super::owner_word::PhaseChange;
+    let (change, what) = match op {
+        "discard-phase" => (PhaseChange::Discard, format!("the discard of phase {phase}")),
+        "return-to-draft" => (PhaseChange::ToDraft, format!("the return of phase {phase} to a draft")),
+        // U63 (owner, 2026-10-31): the lead's change of an accepted phase.
+        "unpause-phase" => (PhaseChange::Unpause, format!("the removal of the pause of phase {phase}")),
+        "phase-acceptance" => (PhaseChange::Acceptance, format!("who accepts phase {phase}")),
+        "accept-phase" => (PhaseChange::Accept, format!("the acceptance of phase {phase}")),
+        _ => (PhaseChange::Edit, format!("the change of phase {phase}")),
     };
     let verified = verify(team, word, phase, change, super::super::now())?;
     if let Some(used) = team.owner_word_used(verified.event) {
@@ -378,6 +385,8 @@ fn starts_worker(op: &str) -> bool {
             | "draft"
             // U58: a task moved into the running phase is ready to hand out.
             | "move-task"
+            // U63: a removed pause or the owner's acceptance lets work start.
+            | "unpause-phase" | "accept-phase" | "phase-acceptance" | "move-phase"
     )
 }
 
@@ -1069,7 +1078,9 @@ fn summary(team: &Team, include_cancelled: bool) -> Value {
         .filter(|p| include_cancelled || !cancelled.contains(&p.n))
         .map(|p| json!({"n":p.n,"order":p.order,"title":p.title,"barrier":p.barrier,
             "state":if cancelled.contains(&p.n) { json!("cancelled") } else { json!(p.state) },"tasks":p.tasks,
-            "note":p.note,"rejection":p.rejection}))
+            "note":p.note,"rejection":p.rejection,
+            // U63: the phase's pause and who accepts it.
+            "pause":p.pause,"acceptance":p.acceptance}))
         .collect();
     json!({
         "id":team.id,"name":team.name,"status":team.status,"project":team.project,"folder":team.folder,
@@ -4155,7 +4166,14 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             // U42 (#587): the lead discards an accepted phase, or returns one to
             // a draft, on the owner's word naming the phase and the change; the
             // CLI checks it here as it does for an approval.
-            if matches!(op, "discard-phase" | "return-to-draft") && !parent_lead {
+            // U63 (owner, 2026-10-31): so does the lead's edit, addition or
+            // move of an accepted phase, the removal of its own pause, who
+            // accepts a phase, and the owner's acceptance of one.
+            let phase_change = matches!(
+                op,
+                "discard-phase" | "return-to-draft" | "edit-draft" | "move-phase" | "unpause-phase" | "phase-acceptance" | "accept-phase"
+            ) || (op == "extend" && input.get("phase").is_some());
+            if phase_change && !parent_lead {
                 let team = store.load(team_id)?.context("Unknown team")?;
                 let caller = actor(&team, op, &filled)?;
                 check_phase_change_word(&team, op, input, &mut filled, &caller, super::owner_word::verify_phase_change)?;

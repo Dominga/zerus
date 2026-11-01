@@ -2066,11 +2066,15 @@ inline QList<TaskView::PhaseBand> phaseBands(const Team &team, const std::functi
             if (!blocked.isEmpty()) { band.blocked = approveBlockedShort(team, group.n); band.blockedTip = blocked; }
         }
         if (const auto *record = team.phase(group.n)) {
-            band.changes = record->changes.size();
+            // U63: an accepted phase counts only the lead's edits made after
+            // it was accepted; a draft counts every change.
+            const bool acceptedOnly = !(record->draft() || record->rejected());
             // The lead's changes as a diff (added +, removed −, changed ~,
             // moved →); the G5 strip that listed them went with G9.
             const auto line = [](const char *text) { return QCoreApplication::translate("TeamPanel", text); };
             for (const auto &change : record->changes) {
+                if (acceptedOnly && !change.accepted) continue;
+                ++band.changes;
                 if (change.kind == "moved") band.changeLines << line("→ moved from phase %1 to phase %2").arg(change.from, change.to);
                 else if (change.added()) band.changeLines << line("+ #%1 %2").arg(change.task).arg(change.title);
                 else if (change.removed()) band.changeLines << line("− #%1 %2").arg(change.task).arg(change.title);

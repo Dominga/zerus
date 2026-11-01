@@ -120,6 +120,10 @@ private slots:
     void phaseBandsStackWithStatusDecisionAndHealth();
     void aQueuedPhaseCanBeDiscarded();
     void aQueuedPhaseCanReturnToDraft();
+    void anAcceptedPhaseIsEditedInPlace();
+    void anAcceptedPhaseIsPausedAndUnpaused();
+    void aPhaseRequiresTheOwnersAcceptance();
+    void anAwaitingPhaseIsAcceptedOrSentBack();
     void draftReorderSendsMovePhase();
     void phaseRetriesReuseTheRequestId();
     void malformedPhasesFallBack();
@@ -2574,6 +2578,294 @@ void TestTeamsUiPlan::phaseScrollDecisions()
     }
     darkPalette();
     Settings::remove("workspace/skin");
+}
+
+// U63 (owner, 2026-10-31): a running team whose phase 4 (Review) is accepted
+// and has not started, or with `awaiting` waits for the owner's acceptance
+// with its task decided; draft phase 5 follows. Phase 4 carries one change
+// the lead made before it was accepted and one after.
+static QJsonObject acceptedPhaseTeam(bool awaiting = false)
+{
+    auto t = phasedTeam();
+    t["status"] = "running";
+    t["pending_phase"] = QJsonValue();
+    t["pending_phases"] = QJsonArray{5};
+    QJsonObject four{{"n", 4}, {"title", "Review"}, {"barrier", true}, {"state", awaiting ? "awaiting_acceptance" : "approved"}, {"tasks", QJsonArray{6}},
+                     {"changes", QJsonArray{QJsonObject{{"kind", "added"}, {"task", 6}, {"title", "Release notes"}},
+                                            QJsonObject{{"kind", "changed"}, {"task", 6}, {"title", "Release notes"}, {"from", "backend"}, {"to", "tester"},
+                                                        {"accepted", true}}}}};
+    if (awaiting) four["acceptance"] = "owner";
+    t["phases"] = QJsonArray{
+        QJsonObject{{"n", 2}, {"title", "QA fixes"}, {"barrier", true}, {"state", "approved"}, {"tasks", QJsonArray{3, 4}}},
+        QJsonObject{{"n", 3}, {"title", "Polish"}, {"state", "approved"}, {"tasks", QJsonArray{5}}},
+        four,
+        QJsonObject{{"n", 5}, {"title", "Docs"}, {"state", "draft"}, {"tasks", QJsonArray{7}}}};
+    t["tasks"] = QJsonArray{
+        QJsonObject{{"id", 1}, {"phase", 1}, {"title", "Requirements"}, {"assignee", "lead"}, {"status", "accepted"},
+                    {"attempts", QJsonArray{QJsonObject{{"n", 1}, {"id", "a1"}, {"member", "lead"}, {"state", "reported"}}}}},
+        QJsonObject{{"id", 2}, {"phase", 1}, {"title", "Checkout design"}, {"assignee", "backend"}, {"status", "accepted"}},
+        QJsonObject{{"id", 3}, {"phase", 2}, {"title", "Address form UI"}, {"assignee", "backend"}, {"status", "accepted"},
+                    {"attempts", QJsonArray{QJsonObject{{"n", 1}, {"id", "a3"}, {"member", "backend"}, {"state", "reported"}}}}},
+        QJsonObject{{"id", 4}, {"phase", 2}, {"title", "Unit tests"}, {"assignee", "tester"}, {"status", "accepted"}},
+        QJsonObject{{"id", 5}, {"phase", 3}, {"title", "Code review"}, {"assignee", "backend"}, {"status", "in_progress"},
+                    {"attempts", QJsonArray{QJsonObject{{"n", 1}, {"id", "a5"}, {"member", "backend"}, {"state", "delivered"}}}}},
+        QJsonObject{{"id", 6}, {"phase", 4}, {"title", "Release notes"}, {"assignee", "backend"}, {"status", awaiting ? "accepted" : "pending"}},
+        QJsonObject{{"id", 7}, {"phase", 5}, {"title", "Screenshots"}, {"assignee", "tester"}, {"status", "draft"}}};
+    t["phase_summary"] = QJsonArray{
+        QJsonObject{{"n", 1}, {"title", QString()}, {"status", "done"}, {"state", "done"}, {"done", 2}, {"total", 2}, {"health_line", ""}},
+        QJsonObject{{"n", 2}, {"title", "QA fixes"}, {"status", "done"}, {"state", "done"}, {"done", 2}, {"total", 2}, {"barrier", true}, {"health_line", ""}},
+        QJsonObject{{"n", 3}, {"title", "Polish"}, {"status", "in_work"}, {"state", "running"}, {"done", 0}, {"total", 1}, {"health_line", ""}},
+        QJsonObject{{"n", 4}, {"title", "Review"}, {"status", "approved"}, {"state", awaiting ? "awaiting_acceptance" : "queued"},
+                    {"acceptance", awaiting ? "owner" : "lead"}, {"done", awaiting ? 1 : 0}, {"total", 1}, {"barrier", true}, {"health_line", ""}},
+        QJsonObject{{"n", 5}, {"title", "Docs"}, {"status", "draft"}, {"state", "draft"}, {"done", 0}, {"total", 1}, {"health_line", ""}}};
+    return t;
+}
+
+// U63: an accepted phase that has not started is edited in place from its
+// menu: the title and its pending tasks' titles, only what changed, with the
+// revision. A refusal stays in the dialog with the store's reason. Its badge
+// counts only the lead's changes since it was accepted, and it moves among
+// the movable phases.
+void TestTeamsUiPlan::anAcceptedPhaseIsEditedInPlace()
+{
+    const auto t = acceptedPhaseTeam();
+    setTeam(t);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1300, 1000); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QTRY_COMPARE(workspace.findChildren<QFrame *>("teamPhaseScroll").size(), 5);
+    const auto state = [&](int n) { auto *f = phaseScrollOf(&workspace, n); return f ? f->property("state").toString() : QString(); };
+    QTRY_COMPARE(state(4), QStringLiteral("queued"));
+    auto *changes = phaseScrollOf(&workspace, 4)->findChild<QLabel *>("teamPhaseChanges");
+    QVERIFY(changes);
+    QCOMPARE(changes->text(), QStringLiteral("1 change from the lead"));
+    const auto fromMenu = [&](int phase, const char *action) {
+        chooseMenuAction(action);
+        phaseScrollOf(&workspace, phase)->findChild<QToolButton *>("teamPhaseMore")->click();
+        WAIT_SETTLED();
+    };
+    // Phases 2 and 3 have started: phase 4 is the first movable one.
+    fromMenu(4, "teamPhaseMoveUp");
+    QCOMPARE(calls(script(), "move-phase").size(), 0);
+    fromMenu(4, "teamPhaseMoveDown");
+    WAIT_COMPARE(calls(script(), "move-phase").size(), 1);
+    auto moved = calls(script(), "move-phase").first();
+    QCOMPARE(moved["phase"].toInt(), 4);
+    QCOMPARE(moved["to"].toInt(), 5);
+    QCOMPARE(moved["position"].toString(), QStringLiteral("after"));
+    // The draft after it moves before the accepted phase.
+    fromMenu(5, "teamPhaseMoveUp");
+    WAIT_COMPARE(calls(script(), "move-phase").size(), 2);
+    moved = calls(script(), "move-phase")[1];
+    QCOMPARE(moved["phase"].toInt(), 5);
+    QCOMPARE(moved["to"].toInt(), 4);
+    QCOMPARE(moved["position"].toString(), QStringLiteral("before"));
+    // Edit phase…: the store refuses first, then takes it.
+    { QFile refuse(script() + ".editrefuse"); QVERIFY(refuse.open(QIODevice::WriteOnly)); refuse.write("hgs: Phase 4 has started; it can no longer change"); }
+    fromMenu(4, "teamPhaseEdit");
+    QDialog *dialog = nullptr;
+    QTRY_VERIFY((dialog = workspace.findChild<QDialog *>("teamEditPhaseDialog")) && dialog->isVisible());
+    QCOMPARE(dialog->property("phase").toInt(), 4);
+    auto *title = dialog->findChild<QLineEdit *>("teamEditPhaseTitle");
+    QCOMPARE(title->text(), QStringLiteral("Review"));
+    QLineEdit *task = nullptr;
+    for (auto *edit : dialog->findChildren<QLineEdit *>("teamEditPhaseTask")) if (edit->property("task").toInt() == 6) task = edit;
+    QVERIFY(task && task->isEnabled());
+    QCOMPARE(task->property("original").toString(), QStringLiteral("Release notes"));
+    title->setText("Review and notes");
+    task->setText("Release notes for 2.0");
+    auto *save = dialog->findChild<QPushButton *>("teamEditPhaseSave");
+    save->click();
+    QTRY_COMPARE(calls(script(), "edit-draft").size(), 1);
+    auto *error = dialog->findChild<QLabel *>("teamEditPhaseError");
+    QTRY_VERIFY(error->isVisible());
+    QVERIFY(error->text().contains(QStringLiteral("can no longer change")));
+    QVERIFY(workspace.findChild<QDialog *>("teamEditPhaseDialog"));
+    const auto sent = calls(script(), "edit-draft").first();
+    QCOMPARE(sent["team"].toString(), QStringLiteral("team-1"));
+    QCOMPARE(sent["phase"].toInt(), 4);
+    QCOMPARE(sent["revision"].toInt(), t["revision"].toInt());
+    QCOMPARE(sent["title"].toString(), QStringLiteral("Review and notes"));
+    const auto updates = sent["tasks_update"].toArray();
+    QCOMPARE(updates.size(), 1);
+    QCOMPARE(updates[0].toObject()["id"].toInt(), 6);
+    QCOMPARE(updates[0].toObject()["title"].toString(), QStringLiteral("Release notes for 2.0"));
+    QFile::remove(script() + ".editrefuse");
+    QTRY_VERIFY(save->isEnabled());
+    save->click();
+    QTRY_COMPARE(calls(script(), "edit-draft").size(), 2);
+    QTRY_VERIFY(!workspace.findChild<QDialog *>("teamEditPhaseDialog"));
+    // Return to draft… and Discard phase… stay in the menu.
+    armConfirm(&panel, true);
+    fromMenu(4, "teamPhaseReturnToDraft");
+    QCOMPARE(calls(script(), "return-to-draft").size(), 0);
+}
+
+// U63: Pause phase… asks for an optional reason and sends pause-phase; a
+// paused phase says who paused it and why, and its menu removes the pause.
+void TestTeamsUiPlan::anAcceptedPhaseIsPausedAndUnpaused()
+{
+    auto t = acceptedPhaseTeam();
+    setTeam(t);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1300, 1000); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QTRY_COMPARE(workspace.findChildren<QFrame *>("teamPhaseScroll").size(), 5);
+    QTRY_COMPARE(phaseScrollOf(&workspace, 4)->property("state").toString(), QStringLiteral("queued"));
+    QVERIFY(!phaseScrollOf(&workspace, 4)->findChild<QLabel *>("teamPhasePaused"));
+    const auto fromMenu = [&](int phase, const char *action) {
+        chooseMenuAction(action);
+        phaseScrollOf(&workspace, phase)->findChild<QToolButton *>("teamPhaseMore")->click();
+        WAIT_SETTLED();
+    };
+    fromMenu(4, "teamPhasePause");
+    QDialog *dialog = nullptr;
+    QTRY_VERIFY((dialog = workspace.findChild<QDialog *>("teamPausePhaseDialog")) && dialog->isVisible());
+    dialog->findChild<QLineEdit *>("teamPausePhaseReason")->setText("Wait for the API keys");
+    dialog->findChild<QPushButton *>("teamPausePhaseConfirm")->click();
+    QTRY_COMPARE(calls(script(), "pause-phase").size(), 1);
+    auto sent = calls(script(), "pause-phase").first();
+    QCOMPARE(sent["team"].toString(), QStringLiteral("team-1"));
+    QCOMPARE(sent["phase"].toInt(), 4);
+    QCOMPARE(sent["reason"].toString(), QStringLiteral("Wait for the API keys"));
+    QTRY_VERIFY(!workspace.findChild<QDialog *>("teamPausePhaseDialog"));
+    // The lead paused it: the header says so with the reason.
+    const QJsonObject pause{{"by", "Lead"}, {"owner", false}, {"at", 1800.0}, {"reason", "Waits for the API review"}};
+    auto phases = t["phases"].toArray();
+    auto four = phases[2].toObject(); four["pause"] = pause; phases[2] = four; t["phases"] = phases;
+    auto summary = t["phase_summary"].toArray();
+    auto line = summary[3].toObject(); line["pause"] = pause; summary[3] = line; t["phase_summary"] = summary;
+    setTeam(t);
+    QTRY_VERIFY(([&] {
+        controller.refresh();
+        auto *frame = phaseScrollOf(&workspace, 4);
+        return frame && frame->findChild<QLabel *>("teamPhasePaused") != nullptr;
+    })());
+    auto *note = phaseScrollOf(&workspace, 4)->findChild<QLabel *>("teamPhasePaused");
+    QCOMPARE(note->text(), QStringLiteral("Paused by the lead: Waits for the API review"));
+    QVERIFY(note->toolTip().contains(QStringLiteral("it will not start until the pause is removed")));
+    QVERIFY(phaseScrollOf(&workspace, 4)->findChild<QLabel *>("teamPhasePauseIcon"));
+    QCOMPARE(phaseScrollOf(&workspace, 4)->property("state").toString(), QStringLiteral("queued"));
+    // A paused phase offers Remove pause instead of Pause phase….
+    fromMenu(4, "teamPhasePause");
+    QVERIFY(!workspace.findChild<QDialog *>("teamPausePhaseDialog"));
+    fromMenu(4, "teamPhaseUnpause");
+    WAIT_COMPARE(calls(script(), "unpause-phase").size(), 1);
+    sent = calls(script(), "unpause-phase").first();
+    QCOMPARE(sent["team"].toString(), QStringLiteral("team-1"));
+    QCOMPARE(sent["phase"].toInt(), 4);
+    QCOMPARE(calls(script(), "pause-phase").size(), 1);
+}
+
+// U63: Requires owner acceptance in the menu of an accepted phase and of a
+// draft sends phase-acceptance with the toggled value.
+void TestTeamsUiPlan::aPhaseRequiresTheOwnersAcceptance()
+{
+    auto t = acceptedPhaseTeam();
+    setTeam(t);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1300, 1000); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QTRY_COMPARE(workspace.findChildren<QFrame *>("teamPhaseScroll").size(), 5);
+    const auto fromMenu = [&](int phase, const char *action) {
+        chooseMenuAction(action);
+        phaseScrollOf(&workspace, phase)->findChild<QToolButton *>("teamPhaseMore")->click();
+        WAIT_SETTLED();
+    };
+    fromMenu(4, "teamPhaseRequiresAcceptance");
+    WAIT_COMPARE(calls(script(), "phase-acceptance").size(), 1);
+    auto sent = calls(script(), "phase-acceptance").first();
+    QCOMPARE(sent["team"].toString(), QStringLiteral("team-1"));
+    QCOMPARE(sent["phase"].toInt(), 4);
+    QCOMPARE(sent["acceptance"].toString(), QStringLiteral("owner"));
+    fromMenu(5, "teamPhaseRequiresAcceptance");
+    WAIT_COMPARE(calls(script(), "phase-acceptance").size(), 2);
+    sent = calls(script(), "phase-acceptance")[1];
+    QCOMPARE(sent["phase"].toInt(), 5);
+    QCOMPARE(sent["acceptance"].toString(), QStringLiteral("owner"));
+    // Once the store has it, the same item takes it back.
+    auto phases = t["phases"].toArray();
+    auto four = phases[2].toObject(); four["acceptance"] = "owner"; phases[2] = four; t["phases"] = phases;
+    setTeam(t);
+    QTRY_VERIFY(([&] {
+        controller.refresh();
+        const auto *watched = controller.watched();
+        return watched && watched->phase(4) && watched->phase(4)->ownerAccepts();
+    })());
+    WAIT_SETTLED();
+    fromMenu(4, "teamPhaseRequiresAcceptance");
+    WAIT_COMPARE(calls(script(), "phase-acceptance").size(), 3);
+    sent = calls(script(), "phase-acceptance")[2];
+    QCOMPARE(sent["phase"].toInt(), 4);
+    QCOMPARE(sent["acceptance"].toString(), QStringLiteral("lead"));
+}
+
+// U63: a phase whose tasks are decided waits for the owner's acceptance:
+// its badge says so, Accept phase sends accept-phase and Send back… asks for
+// the comment the lead reworks it with.
+void TestTeamsUiPlan::anAwaitingPhaseIsAcceptedOrSentBack()
+{
+    setTeam(acceptedPhaseTeam(true));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1300, 1000); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QTRY_COMPARE(workspace.findChildren<QFrame *>("teamPhaseScroll").size(), 5);
+    QTRY_COMPARE(phaseScrollOf(&workspace, 4)->property("state").toString(), QStringLiteral("awaiting_acceptance"));
+    auto *badge = dynamic_cast<TeamUi::PhaseBadge *>(phaseScrollOf(&workspace, 4)->findChild<QWidget *>("teamPhaseBadge"));
+    QVERIFY(badge);
+    QCOMPARE(badge->text(), QStringLiteral("Awaiting your acceptance"));
+    QVERIFY(!phaseScrollOf(&workspace, 4)->findChild<QToolButton *>("teamPhaseMore"));
+    // Send back…: a comment first.
+    QVERIFY(phaseAction(&workspace, 4, "teamPhaseSendBackOwner"));
+    phaseAction(&workspace, 4, "teamPhaseSendBackOwner")->click();
+    QDialog *dialog = nullptr;
+    QTRY_VERIFY((dialog = workspace.findChild<QDialog *>("teamPhaseSendBackDialog")) && dialog->isVisible());
+    auto *confirm = dialog->findChild<QPushButton *>("teamPhaseSendBackConfirm");
+    QVERIFY(!confirm->isEnabled());
+    dialog->findChild<QPlainTextEdit *>("teamPhaseSendBackText")->setPlainText("The release notes miss the migration steps");
+    QVERIFY(confirm->isEnabled());
+    confirm->click();
+    QTRY_COMPARE(calls(script(), "send-back-phase").size(), 1);
+    auto sent = calls(script(), "send-back-phase").first();
+    QCOMPARE(sent["team"].toString(), QStringLiteral("team-1"));
+    QCOMPARE(sent["phase"].toInt(), 4);
+    QCOMPARE(sent["comment"].toString(), QStringLiteral("The release notes miss the migration steps"));
+    QTRY_VERIFY(!workspace.findChild<QDialog *>("teamPhaseSendBackDialog"));
+    // Accept phase.
+    QTRY_VERIFY(phaseAction(&workspace, 4, "teamPhaseAcceptOwner") && phaseAction(&workspace, 4, "teamPhaseAcceptOwner")->isEnabled());
+    phaseAction(&workspace, 4, "teamPhaseAcceptOwner")->click();
+    QTRY_COMPARE(calls(script(), "accept-phase").size(), 1);
+    sent = calls(script(), "accept-phase").first();
+    QCOMPARE(sent["team"].toString(), QStringLiteral("team-1"));
+    QCOMPARE(sent["phase"].toInt(), 4);
+    // Sent once: the header holds the decision until the store takes it.
+    WAIT_SETTLED();
+    if (auto *accept = phaseAction(&workspace, 4, "teamPhaseAcceptOwner")) QVERIFY(!accept->isEnabled());
+    QCOMPARE(calls(script(), "accept-phase").size(), 1);
 }
 
 QTEST_MAIN(TestTeamsUiPlan)

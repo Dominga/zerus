@@ -890,7 +890,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-pub(crate) const OWNER_SETTINGS: [&str; 19] = [
+pub(crate) const OWNER_SETTINGS: [&str; 21] = [
     "approval",
     "phase_approval",
     "max_members",
@@ -917,6 +917,10 @@ pub(crate) const OWNER_SETTINGS: [&str; 19] = [
     "tests",
     // U62: only the owner says who may start a full test run.
     "full_tests",
+    // U63 (owner, 2026-10-31): only the owner lets the lead remove its own
+    // phase pause, and sets who accepts new phases.
+    "lead_removes_own_pause",
+    "phase_acceptance",
 ];
 
 fn ensure_lead_settings(old: &Settings, new: &Settings, actor: &Actor, on_word: bool) -> anyhow::Result<()> {
@@ -969,7 +973,20 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
                 .and_then(|phase| u32::try_from(phase).ok())
                 .filter(|phase| *phase > 0)
                 .context("A phase number is required")?;
-            Some(editable_phase(team, n)?)
+            // U63 (owner, 2026-10-31): a phase the owner sent back at its
+            // acceptance takes the lead's rework tasks; any other accepted
+            // phase takes the lead's tasks only on the owner's word.
+            let at = match team.phases.iter().position(|phase| phase.n == n && phase.acceptance_rework && phase.state == PhaseState::Approved) {
+                Some(at) => at,
+                None => {
+                    let at = editable_phase(team, n)?;
+                    if !team.phases[at].state.is_draft() {
+                        ensure_owner_or_word(team, actor, input, n, "adds tasks to an accepted phase")?;
+                    }
+                    at
+                }
+            };
+            Some(at)
         }
     };
     // D2: an urgent phase runs at once: no approval under review, no barrier,
@@ -1075,6 +1092,14 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
             record_change(&mut team.phases[at], json!({"kind":"added","task":id,"title":title}));
         }
         team.phases[at].tasks.extend(ids.iter().copied());
+        // U63: the rework the owner asked for at the acceptance is in; the
+        // phase waits for the acceptance again once it is decided.
+        if team.phases[at].acceptance_rework {
+            team.phases[at].acceptance_rework = false;
+            if let Some(rejection) = team.phases[at].rejection.as_mut() {
+                rejection.reworked_at = Some(now());
+            }
+        }
         events.push(Event::new("phase_edited", json!({"by":by,"phase":n,"diff":{"added":ids}})));
         return Ok(json!({"status":"edited","phase":n,"tasks":ids,"validation":validation,"renumbered":renumbered_json(&renumbered)}));
     }
@@ -1105,6 +1130,12 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
         reason: String::new(),
         note: String::new(),
         rejection: None,
+        pause: None,
+        // U63: a new phase takes the team's default; the lead changes it
+        // only on the owner's word (phase-acceptance).
+        acceptance: if urgent { PhaseAcceptance::Lead } else { team.settings.phase_acceptance },
+        acceptance_rework: false,
+        awaiting_since: None,
     });
     events.push(Event::new(
         "phase_added",
@@ -1583,6 +1614,8 @@ fn earlier_open(team: &Team, at: usize) -> bool {
     let target = record.order();
     let order_of = |n: u32| team.phases.iter().find(|phase| phase.n == n).map_or(n, |phase| phase.order());
     team.tasks.iter().any(|task| task.phase != record.n && order_of(task.phase) < target && !task.status.finished())
+        // U63: a phase before it waits for the owner's acceptance.
+        || plan::acceptance_block(team, record.n).is_some()
 }
 
 /// Accepts the draft at `at`: its Draft tasks become Pending, and the phase
@@ -1624,10 +1657,223 @@ fn started_tasks(team: &Team, at: usize) -> Vec<String> {
         .collect()
 }
 
+/// U63 (owner, 2026-10-31): the lead changes an accepted phase - edits it,
+/// adds to it, moves it, removes its own pause without the owner's setting,
+/// sets who accepts a phase or accepts one - only on the owner's verified
+/// word naming the phase and the change; the CLI checks the sentence and
+/// passes it as "owner_word_checked", as for a return to a draft.
+fn ensure_owner_or_word(team: &Team, actor: &Actor, input: &Value, n: u32, what: &str) -> anyhow::Result<()> {
+    if matches!(actor, Actor::Human) {
+        return Ok(());
+    }
+    ensure!(actor.is_lead(team), "Only the lead or you change phase {n}");
+    ensure!(
+        verified_word(input)?.is_some(),
+        "The lead {what} only on the owner's word: pass \"owner_word\" with the owner's sentence naming phase {n} and the change"
+    );
+    Ok(())
+}
+
+/// U63: a phase move-phase may move: a draft, or an approved or queued phase
+/// whose work has not started.
+fn movable_phase(team: &Team, n: u32) -> anyhow::Result<usize> {
+    let at = team.phases.iter().position(|phase| phase.n == n).with_context(|| format!("Unknown phase {n}"))?;
+    let phase = &team.phases[at];
+    if phase.state.is_draft() {
+        return Ok(at);
+    }
+    ensure!(
+        matches!(phase.state, PhaseState::Approved | PhaseState::Queued),
+        "Phase {n} is done or discarded; only a draft or an accepted phase that has not started moves"
+    );
+    ensure!(phase_untouched(team, phase), "Phase {n} has started; only a phase with no delivered attempt moves");
+    Ok(at)
+}
+
+/// The longest pause reason.
+const PAUSE_REASON: usize = 500;
+
+/// U63 (owner, 2026-10-31): holds an accepted phase whose work has not
+/// started; its tasks are not handed out until the pause is removed, and it
+/// keeps its place, so later barrier and queued phases wait for it. The owner
+/// pauses, and the lead may pause on its own.
+fn pause_phase(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you pause a phase");
+    ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
+    let n = phase_number(input)?;
+    let at = team.phases.iter().position(|phase| phase.n == n).with_context(|| format!("Unknown phase {n}"))?;
+    let phase = &team.phases[at];
+    ensure!(
+        matches!(phase.state, PhaseState::Approved | PhaseState::Queued),
+        "Phase {n} is not approved or queued; only an accepted phase pauses"
+    );
+    ensure!(phase.pause.is_none(), "Phase {n} is already paused");
+    let started = started_tasks(team, at);
+    ensure!(started.is_empty(), "Phase {n} has started work ({}): only a phase whose work has not started pauses", started.join(", "));
+    let reason = clean(text(input, "reason").trim(), PAUSE_REASON, "A pause reason")?;
+    let by = actor.label(team);
+    let owner = matches!(actor, Actor::Human);
+    let pause = PhasePause { by: by.clone(), owner, at: now(), reason: reason.clone() };
+    let title = team.phases[at].title.clone();
+    team.phases[at].pause = Some(pause.clone());
+    events.push(Event::new("phase_paused", json!({"by":by,"phase":n,"title":title,"reason":reason,"owner":owner})));
+    Ok(json!({"status":"phase_paused","phase":n,"pause":pause}))
+}
+
+/// U63: removes a phase's pause. The owner's pause only the owner removes;
+/// the lead removes its own pause by itself when the owner set
+/// lead_removes_own_pause, else on the owner's word (the default).
+fn unpause_phase(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you remove a phase's pause");
+    ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
+    let n = phase_number(input)?;
+    let at = team.phases.iter().position(|phase| phase.n == n).with_context(|| format!("Unknown phase {n}"))?;
+    let pause = team.phases[at].pause.clone().with_context(|| format!("Phase {n} is not paused"))?;
+    let owner_word = verified_word(input)?;
+    if !matches!(actor, Actor::Human) {
+        ensure!(!pause.owner, "The owner paused phase {n}; only the owner removes that pause");
+        ensure!(
+            team.settings.lead_removes_own_pause || owner_word.is_some(),
+            "The lead removes its pause of phase {n} only on the owner's word: pass \"owner_word\" with the owner's sentence naming phase {n} (the owner may set lead_removes_own_pause)"
+        );
+    }
+    let by = actor.label(team);
+    team.phases[at].pause = None;
+    let title = team.phases[at].title.clone();
+    events.push(Event::new(
+        "phase_unpaused",
+        json!({"by":by,"phase":n,"title":title,"paused_by":pause.by,"reason":pause.reason,"owner_word":owner_word}),
+    ));
+    Ok(json!({"status":"phase_unpaused","phase":n}))
+}
+
+/// U63: sets whether the owner accepts a phase once its tasks are decided.
+/// The owner sets it; the lead only on the owner's word. A finished phase
+/// keeps its acceptance; one that waits for it and is switched to the lead's
+/// is finished as before.
+fn set_phase_acceptance(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you set who accepts a phase");
+    ensure!(
+        matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
+        "Only a planning, running or paused team changes a phase"
+    );
+    let n = phase_number(input)?;
+    let acceptance: PhaseAcceptance =
+        serde_json::from_value(input["acceptance"].clone()).context("acceptance is \"owner\" or \"lead\"")?;
+    let at = team.phases.iter().position(|phase| phase.n == n).with_context(|| format!("Unknown phase {n}"))?;
+    ensure_owner_or_word(team, actor, input, n, "changes who accepts a phase")?;
+    let phase = &team.phases[at];
+    ensure!(
+        !matches!(phase.state, PhaseState::Discarded | PhaseState::Done),
+        "Phase {n} is done or discarded"
+    );
+    let finished = !phase.tasks.is_empty() && team.tasks.iter().filter(|task| task.phase == n).all(|task| task.status.finished());
+    ensure!(
+        phase.state == PhaseState::AwaitingAcceptance || phase.state.is_draft() || !finished,
+        "Phase {n} is finished; its acceptance no longer changes"
+    );
+    let from = phase.acceptance;
+    let by = actor.label(team);
+    let owner_word = verified_word(input)?;
+    let record = &mut team.phases[at];
+    record.acceptance = acceptance;
+    if acceptance.is_lead() {
+        record.acceptance_rework = false;
+        if record.state == PhaseState::AwaitingAcceptance {
+            record.state = PhaseState::Approved;
+            record.awaiting_since = None;
+        }
+    }
+    if from != acceptance {
+        record_change(record, json!({"kind":"changed","field":"acceptance","from":from,"to":acceptance}));
+        events.push(Event::new("phase_acceptance_changed", json!({"by":by,"phase":n,"from":from,"to":acceptance,"owner_word":owner_word})));
+    }
+    Ok(json!({"status":"phase_acceptance_set","phase":n,"acceptance":acceptance}))
+}
+
+/// The tasks of phase `n` by outcome, for the acceptance's summary.
+pub(crate) fn phase_outcome(team: &Team, n: u32) -> Value {
+    let count = |status: TaskStatus| team.tasks.iter().filter(|task| task.phase == n && task.status == status).count();
+    json!({"accepted":count(TaskStatus::Accepted),"rejected":count(TaskStatus::Rejected),"cancelled":count(TaskStatus::Cancelled)})
+}
+
+/// U63: an approved phase that requires the owner's acceptance and has every
+/// task decided waits for it (AwaitingAcceptance), once, with a feed event.
+pub(crate) fn settle_acceptance(team: &mut Team, events: &mut Vec<Event>) {
+    if !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
+        return;
+    }
+    let ready: Vec<usize> = (0..team.phases.len())
+        .filter(|at| team.phases[*at].state == PhaseState::Approved && plan::awaits_acceptance(team, &team.phases[*at]))
+        .collect();
+    for at in ready {
+        let n = team.phases[at].n;
+        let outcome = phase_outcome(team, n);
+        let record = &mut team.phases[at];
+        record.state = PhaseState::AwaitingAcceptance;
+        record.awaiting_since = Some(now());
+        events.push(Event::new(
+            "phase_awaiting_acceptance",
+            json!({"phase":n,"title":record.title,"accepted":outcome["accepted"],"rejected":outcome["rejected"],"cancelled":outcome["cancelled"]}),
+        ));
+    }
+}
+
+/// U63: the owner accepts a phase that waits for the acceptance; the lead
+/// does it on the owner's word naming the phase. The phase is Done, and the
+/// phases after it may start.
+fn accept_phase_as_owner(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only you accept a phase; the lead does it on your word");
+    ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
+    let n = phase_number(input)?;
+    let at = team.phases.iter().position(|phase| phase.n == n).with_context(|| format!("Unknown phase {n}"))?;
+    ensure!(plan::awaits_acceptance(team, &team.phases[at]), "Phase {n} is not waiting for the owner's acceptance");
+    ensure_owner_or_word(team, actor, input, n, "accepts a phase")?;
+    let by = actor.label(team);
+    let owner_word = verified_word(input)?;
+    let outcome = phase_outcome(team, n);
+    let record = &mut team.phases[at];
+    record.state = PhaseState::Done;
+    record.awaiting_since = None;
+    record.acceptance_rework = false;
+    let title = record.title.clone();
+    events.push(Event::new(
+        "phase_owner_accepted",
+        json!({"by":by,"phase":n,"title":title,"outcome":outcome,"owner_word":owner_word}),
+    ));
+    Ok(json!({"status":"phase_accepted","phase":n}))
+}
+
+/// U63: the owner sends a phase that waits for the acceptance back to the
+/// lead with a comment. The lead reworks it in the same phase: it adds the
+/// tasks (extend with "phase"), and the phase waits for the acceptance again
+/// once they are decided. No later phase starts meanwhile.
+fn send_back_at_acceptance(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human), "Only you send a phase back at its acceptance");
+    ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
+    let n = phase_number(input)?;
+    let at = team.phases.iter().position(|phase| phase.n == n).with_context(|| format!("Unknown phase {n}"))?;
+    ensure!(plan::awaits_acceptance(team, &team.phases[at]), "Phase {n} is not waiting for your acceptance");
+    let comment = clean(text(input, "comment").trim(), REJECT_COMMENT, "A comment")?;
+    ensure!(!comment.is_empty(), "Say what the lead should change in this phase");
+    let by = actor.label(team);
+    let record = &mut team.phases[at];
+    record.state = PhaseState::Approved;
+    record.awaiting_since = None;
+    record.acceptance_rework = true;
+    record.rejection = Some(PhaseRejection { comment: comment.clone(), by: by.clone(), at: now(), reworked_at: None });
+    record.note = format!("Sent back at your acceptance: \u{201c}{comment}\u{201d}");
+    let title = record.title.clone();
+    events.push(Event::new("phase_acceptance_sent_back", json!({"by":by,"phase":n,"title":title,"comment":comment})));
+    Ok(json!({"status":"phase_sent_back","phase":n}))
+}
+
 /// U42 (#587): an approved or queued phase whose work has not started goes
 /// back to a draft that waits for the owner's approval again: you do it, or
-/// the lead on your word naming the phase. Its tasks return to Draft and the
-/// drafts are numbered after the accepted phases again.
+/// the lead on your word naming the phase. Its tasks return to Draft.
+/// U63 (owner, 2026-10-31): the phase keeps its place, its number and its
+/// task ids; only the approval is undone. To change an accepted phase that
+/// has not started, edit it in place (edit-draft, U58) instead.
 fn return_to_draft(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     let owner_word = verified_word(input)?;
     ensure!(owner_word.is_none() || actor.is_lead(team), "Only the lead acts on the owner's word");
@@ -1664,6 +1910,8 @@ fn return_to_draft(team: &mut Team, input: &Value, actor: &Actor, events: &mut V
     let record = &mut team.phases[at];
     let from = record.state;
     record.state = PhaseState::Draft;
+    // U63: a draft is not handed out anyway; its pause ends with the approval.
+    record.pause = None;
     record.decided_by.clear();
     record.decided_at = None;
     record.owner_word = None;
@@ -1672,11 +1920,9 @@ fn return_to_draft(team: &mut Team, input: &Value, actor: &Actor, events: &mut V
         "phase_returned_to_draft",
         json!({"by":label,"phase":n,"title":title,"tasks":tasks,"from":from,"owner_word":owner_word}),
     ));
-    // A draft is numbered after every accepted phase (F285).
-    let renumbering = renumbered(team, &label, events);
-    let now_n = renumbering["phases"].as_array().into_iter().flatten().find(|moved| moved["from"] == n).and_then(|moved| moved["to"].as_u64()).map_or(n, |to| to as u32);
-    let ids = team.phases.iter().find(|phase| phase.n == now_n).map(|phase| phase.tasks.clone()).unwrap_or_default();
-    Ok(json!({"status":"phase_returned_to_draft","phase":now_n,"from_phase":n,"tasks":ids,"renumbered":renumbering}))
+    // U63 (owner, 2026-10-31): nothing is renumbered; "from_phase" and an
+    // empty "renumbered" stay for callers that read them.
+    Ok(json!({"status":"phase_returned_to_draft","phase":n,"from_phase":n,"tasks":tasks,"renumbered":{"phases":[],"tasks":[]}}))
 }
 
 /// The phase number of a request.
@@ -1948,7 +2194,13 @@ fn phases_done(team: &Team) -> BTreeSet<u32> {
         return BTreeSet::new();
     }
     let mut numbers: BTreeSet<u32> = team.tasks.iter().map(|task| task.phase).collect();
-    numbers.retain(|n| *n == 1 || team.phases.iter().any(|phase| phase.n == *n && phase.state.is_accepted()));
+    // U63: a phase that requires the owner's acceptance is done once accepted.
+    numbers.retain(|n| {
+        *n == 1
+            || team.phases.iter().any(|phase| {
+                phase.n == *n && phase.state.is_accepted() && (phase.acceptance.is_lead() || phase.state == PhaseState::Done)
+            })
+    });
     numbers.retain(|n| team.tasks.iter().filter(|task| task.phase == *n).all(|task| task.status.finished()));
     numbers
 }
@@ -1967,7 +2219,8 @@ fn advance_phases(team: &mut Team, done_before: &BTreeSet<u32>, events: &mut Vec
     let mut order: Vec<usize> = (0..team.phases.len()).filter(|at| team.phases[*at].state == PhaseState::Queued).collect();
     order.sort_by_key(|at| (team.phases[*at].order(), team.phases[*at].n));
     for at in order {
-        if earlier_open(team, at) {
+        // U63: a paused phase keeps its place and holds the ones after it.
+        if earlier_open(team, at) || team.phases[at].pause.is_some() {
             return;
         }
         let record = &mut team.phases[at];
@@ -1985,19 +2238,32 @@ fn normalize_orders(team: &mut Team) {
     }
 }
 
-/// F285: drafts stay contiguous after the last approved phase. Their phase
-/// numbers and the ids of their tasks follow the highest live numbers outside
-/// the drafts; dependencies inside the drafts are rewritten, dependencies on
-/// approved work stay. Returns the old -> new mappings.
+/// F285: the drafts after the last accepted phase stay contiguous. Their
+/// phase numbers and the ids of their tasks follow the highest live numbers
+/// outside them; dependencies inside them are rewritten, dependencies on other
+/// work stay. U63 (owner, 2026-10-31): a draft between accepted phases (one
+/// returned to a draft) keeps its place, number and task ids, and the phases
+/// keep their display order. Returns the old -> new mappings.
 fn renumber_drafts(team: &mut Team) -> Value {
-    let drafts: Vec<u32> = team.phases.iter().filter(|phase| phase.state.is_draft()).map(|phase| phase.n).collect();
+    team.phases.sort_by_key(|phase| (phase.order(), phase.n));
+    let last_accepted = team.phases.iter().filter(|phase| phase.state.is_accepted()).map(|phase| phase.order()).max().unwrap_or(1);
+    let drafts: Vec<u32> =
+        team.phases.iter().filter(|phase| phase.state.is_draft() && phase.order() > last_accepted).map(|phase| phase.n).collect();
     if drafts.is_empty() {
         return json!({"phases":[],"tasks":[]});
     }
-    let last_approved = team.phases.iter().filter(|phase| phase.state.is_accepted()).map(|phase| phase.n).max().unwrap_or(1);
+    let last_number = team
+        .phases
+        .iter()
+        .map(|phase| phase.n)
+        .filter(|n| !drafts.contains(n))
+        .chain(team.tasks.iter().map(|task| task.phase).filter(|n| !drafts.contains(n)))
+        .max()
+        .unwrap_or(1)
+        .max(1);
     let base = team.tasks.iter().filter(|task| !drafts.contains(&task.phase)).map(|task| task.id).max().unwrap_or(0);
     let phase_map: Vec<(u32, u32)> =
-        drafts.iter().enumerate().map(|(index, old)| (*old, last_approved + 1 + index as u32)).collect();
+        drafts.iter().enumerate().map(|(index, old)| (*old, last_number + 1 + index as u32)).collect();
     let mut task_map: Vec<(u32, u32)> = Vec::new();
     let mut next = base + 1;
     for old in &drafts {
@@ -2035,8 +2301,8 @@ fn renumber_drafts(team: &mut Team) -> Value {
             }
         }
     }
-    // The display order is the phase number order now.
-    team.phases.sort_by_key(|phase| phase.n);
+    // The phases stay in their display order; the renumbered drafts are the
+    // last ones, so their new numbers follow it too.
     normalize_orders(team);
     // F11: the numbers a caller may still hold are stale from this revision.
     if phase_map.iter().any(|(from, to)| from != to) || task_map.iter().any(|(from, to)| from != to) {
@@ -2064,7 +2330,12 @@ fn renumbered(team: &mut Team, by: &str, events: &mut Vec<Event>) -> Value {
 const PHASE_CHANGES: usize = 50;
 
 /// Records one edit of a draft phase, keeping the newest changes only (F10).
-fn record_change(phase: &mut Phase, change: Value) {
+fn record_change(phase: &mut Phase, mut change: Value) {
+    // U63 (owner, 2026-10-31): an edit of an accepted phase is marked, so the
+    // owner sees the lead's changes after the approval too.
+    if phase.state.is_accepted() {
+        change["accepted"] = json!(true);
+    }
     phase.changes.push(change);
     if phase.changes.len() > PHASE_CHANGES {
         let drop = phase.changes.len() - PHASE_CHANGES;
@@ -2080,17 +2351,6 @@ fn brief(value: &str) -> String {
     } else {
         short
     }
-}
-
-/// The draft phase numbered `n` and its index.
-fn draft_phase(team: &Team, n: u32) -> anyhow::Result<usize> {
-    let at = team.phases.iter().position(|phase| phase.n == n).with_context(|| format!("Unknown phase {n}"))?;
-    // U25: the lead reworks a phase the owner sent back with the same edits.
-    ensure!(
-        team.phases[at].state.is_draft(),
-        "Phase {n} is approved or discarded; only a draft phase can change"
-    );
-    Ok(at)
 }
 
 /// U58: the phase numbered `n` and its index while it can still change: a
@@ -2126,6 +2386,9 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
         .context("A phase number is required")?;
     let mut proposed = team.clone();
     let at = editable_phase(&proposed, n)?;
+    if !proposed.phases[at].state.is_draft() {
+        ensure_owner_or_word(team, actor, input, n, "edits an accepted phase")?;
+    }
     let by = actor.label(team);
     let mut diff = json!({"updated":[],"removed":[]});
     let mut changes: Vec<Value> = Vec::new();
@@ -2324,7 +2587,8 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
     let validation = plan::validate(&proposed, offline);
     ensure!(validation.errors.is_empty(), "Fix {} plan error(s) to edit: {}", validation.errors.len(), errors_text(&validation.errors));
     *team = proposed;
-    events.push(Event::new("phase_edited", json!({"by":by,"phase":n,"diff":diff})));
+    let owner_word = verified_word(input)?;
+    events.push(Event::new("phase_edited", json!({"by":by,"phase":n,"diff":diff,"owner_word":owner_word})));
     Ok(json!({"status":"draft_edited","phase":n,"diff":diff,"validation":validation}))
 }
 
@@ -2356,14 +2620,32 @@ fn move_phase(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Ev
     ensure!(position.is_empty() || position == "before" || position == "after", "position is before or after");
     ensure!(n != to, "Phase {n} is already next to itself");
     let mut proposed = team.clone();
-    let at = draft_phase(&proposed, n)?;
-    draft_phase(&proposed, to)?;
+    // U63 (owner, 2026-10-31): an accepted phase whose work has not started
+    // moves too: the owner moves it, the lead on the owner's word.
+    let at = movable_phase(&proposed, n)?;
+    let to_at = movable_phase(&proposed, to)?;
+    if !proposed.phases[at].state.is_draft() || !proposed.phases[to_at].state.is_draft() {
+        ensure_owner_or_word(team, actor, input, n, "moves an accepted phase")?;
+    }
+    proposed.phases.sort_by_key(|phase| (phase.order(), phase.n));
+    let at = proposed.phases.iter().position(|phase| phase.n == n).context("Unknown phase")?;
     let before: Vec<u32> = proposed.phases.iter().map(|phase| phase.n).collect();
     let old_position = before.iter().position(|phase| *phase == n).map(|index| index as u32 + 1).unwrap_or(0);
     let phase = proposed.phases.remove(at);
     let index = proposed.phases.iter().position(|phase| phase.n == to).context("Unknown phase")?;
     let placement = if position == "after" { index + 1 } else { index };
     proposed.phases.insert(placement, phase);
+    // The array is the new display order; renumbering follows the orders.
+    normalize_orders(&mut proposed);
+    // U63: an accepted phase that now has open work before it queues behind
+    // it, and the barrier follows the order (barrier_blockers reads it).
+    let (low, high) = (at.min(placement), at.max(placement));
+    for index in low..=high {
+        let record = &proposed.phases[index];
+        if record.state == PhaseState::Approved && phase_untouched(&proposed, record) && earlier_open(&proposed, index) {
+            proposed.phases[index].state = PhaseState::Queued;
+        }
+    }
     let moved_order: Vec<u32> = proposed.phases.iter().map(|phase| phase.n).collect();
     // The feed says when the other drafts were renumbered too (F10).
     let reordered = moved_order != before;
@@ -2458,6 +2740,11 @@ fn finish(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     ensure!(!summary.is_empty(), "A summary is required");
     let open = team.tasks.iter().filter(|task| !task.status.finished()).count();
     ensure!(open == 0, "{open} task(s) are not decided: decide or cancel them first");
+    // U63: a phase that waits for the owner's acceptance (or its rework) is
+    // not over yet.
+    if let Some(phase) = team.phases.iter().find(|phase| plan::awaits_acceptance(team, phase) || phase.acceptance_rework) {
+        bail!("Phase {} waits for the owner's acceptance: the owner accepts it or sends it back first", phase.n);
+    }
     // D2: a critical finding that is still open blocks a finish; the owner may
     // force it.
     let critical = team.findings.iter().any(|finding| finding.severity == "critical" && finding.unresolved());
@@ -4542,6 +4829,12 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         "approve-phase" => decide_phase(team, input, actor, true, offline, events),
         "discard-phase" => decide_phase(team, input, actor, false, offline, events),
         "return-to-draft" => return_to_draft(team, input, actor, events),
+        // U63 (owner, 2026-10-31): a phase's pause and the owner's acceptance.
+        "pause-phase" => pause_phase(team, input, actor, events),
+        "unpause-phase" => unpause_phase(team, input, actor, events),
+        "phase-acceptance" => set_phase_acceptance(team, input, actor, events),
+        "accept-phase" => accept_phase_as_owner(team, input, actor, events),
+        "send-back-phase" => send_back_at_acceptance(team, input, actor, events),
         "reject-phase" | "undo-reject-phase" | "rework-phase" => send_back(team, op, input, actor, events),
         "settings" => settings(team, input, actor, events),
         "finding" => finding(team, input, actor, offline, events),
@@ -5044,6 +5337,9 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
     // U25: auto-accept takes every error-free draft, then a queued phase whose
     // earlier work ended starts.
     auto_accept(team, offline, events);
+    // U63: a phase that requires the owner's acceptance and has every task
+    // decided waits for it before any later phase starts.
+    settle_acceptance(team, events);
     advance_phases(team, &done_before, events);
     // A running team with every task decided waits for the lead: it hears once
     // and hears again only after new work is decided.
@@ -5077,6 +5373,10 @@ mod ops_members;
 #[cfg(test)]
 #[path = "tests/ops_phases.rs"]
 mod ops_phases;
+
+#[cfg(test)]
+#[path = "tests/ops_phase_control.rs"]
+mod ops_phase_control;
 
 #[cfg(test)]
 #[path = "tests/ops_tasks.rs"]

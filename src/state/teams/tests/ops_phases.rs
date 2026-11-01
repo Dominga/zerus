@@ -565,7 +565,8 @@ fn an_accepted_phase_is_discarded_until_its_work_starts() {
 
 /// U42 (#587): an accepted phase with no started work returns to a draft:
 /// by you, or by the lead on your word; its tasks go back to Draft and it
-/// waits for approval again, numbered after the accepted phases.
+/// waits for approval again. U63 (owner, 2026-10-31): it keeps its place,
+/// its number and its task ids.
 #[test]
 fn an_accepted_phase_returns_to_a_draft_until_its_work_starts() {
     let mut team = running_team();
@@ -591,26 +592,28 @@ fn an_accepted_phase_returns_to_a_draft_until_its_work_starts() {
     started.task_mut(3).unwrap().status = TaskStatus::InProgress;
     let error = apply(&mut started, "return-to-draft", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
     assert!(error.contains("has started work (#3)"), "{error}");
-    // You return the queued phase 2: it becomes the draft after phase 3,
-    // its task Draft again, with a feed event.
+    // You return the queued phase 2: it stays phase 2 before phase 3 with
+    // its task #3, Draft again, with a feed event and nothing renumbered.
     events.clear();
     let returned = apply(&mut team, "return-to-draft", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
-    assert_eq!((returned["status"].as_str(), returned["from_phase"].as_u64(), returned["phase"].as_u64()), (Some("phase_returned_to_draft"), Some(2), Some(4)));
+    assert_eq!((returned["status"].as_str(), returned["from_phase"].as_u64(), returned["phase"].as_u64()), (Some("phase_returned_to_draft"), Some(2), Some(2)));
+    assert_eq!(returned["tasks"], json!([3]));
+    assert_eq!(team.phases.iter().map(|phase| (phase.n, phase.order(), phase.tasks.clone())).collect::<Vec<_>>(), vec![(2, 2, vec![3]), (3, 3, vec![4])]);
     let draft = team.phases.iter().find(|phase| phase.state == PhaseState::Draft).unwrap();
-    assert_eq!((draft.n, draft.decided_at, draft.decided_by.as_str()), (4, None, ""));
-    let ids = draft.tasks.clone();
-    assert!(ids.iter().all(|id| team.task(*id).unwrap().status == TaskStatus::Draft), "{ids:?}");
+    assert_eq!((draft.n, draft.decided_at, draft.decided_by.as_str()), (2, None, ""));
+    assert_eq!(team.task(3).unwrap().status, TaskStatus::Draft);
+    assert!(!events.iter().any(|event| event.kind == "phase_renumbered"));
     let event = events.iter().find(|event| event.kind == "phase_returned_to_draft").unwrap();
     assert_eq!((event.payload["by"].as_str(), event.payload["phase"].as_u64(), event.payload["from"].as_str()), (Some("You"), Some(2), Some("queued")));
     // It waits for your approval again, as any draft.
-    let approved = apply(&mut team, "approve-phase", &json!({"phase":4}), &Actor::Human, &none, &mut events).unwrap();
-    assert_eq!(approved["status"], "phase_approved");
+    let approved = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
+    assert_eq!((approved["status"].as_str(), approved["tasks"].clone()), (Some("phase_approved"), json!([3])));
     // The lead on your word (the CLI's checked sentence) returns a queued one.
-    let word = json!({"phase":4,"owner_word_checked":{"text":"return phase 4 to draft","at":1.0,"event":9},
-        "owner_word_event":9,"owner_word_change":"the return of phase 4 to a draft"});
+    let word = json!({"phase":3,"owner_word_checked":{"text":"return phase 3 to draft","at":1.0,"event":9},
+        "owner_word_event":9,"owner_word_change":"the return of phase 3 to a draft"});
     let returned = apply(&mut team, "return-to-draft", &word, &Actor::Member("lead".into()), &none, &mut events).unwrap();
-    assert_eq!(returned["status"], "phase_returned_to_draft");
-    assert_eq!(events.last().map(|event| event.payload["owner_word"]["text"].clone()), Some(json!("return phase 4 to draft")));
+    assert_eq!((returned["status"].as_str(), returned["phase"].as_u64()), (Some("phase_returned_to_draft"), Some(3)));
+    assert_eq!(events.last().map(|event| event.payload["owner_word"]["text"].clone()), Some(json!("return phase 3 to draft")));
     // A draft does not return again.
     let n = team.phases.iter().find(|phase| phase.state == PhaseState::Draft).unwrap().n;
     let error = apply(&mut team, "return-to-draft", &json!({"phase":n}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
@@ -1354,7 +1357,9 @@ fn a_queued_phase_with_nothing_started_edits_like_a_draft() {
     apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
     assert_eq!(team.phases[0].state, PhaseState::Queued);
     // extend adds Pending tasks to the queued phase, with no new phase.
-    let added = extend(&mut team, &json!({"phase":2,"tasks":[{"id":4,"title":"E","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+    // U63: the owner changes an accepted phase directly (the lead on the
+    // owner's word, ops_phase_control).
+    let added = extend(&mut team, &json!({"phase":2,"tasks":[{"id":4,"title":"E","assignee":"dev"}]}), &Actor::Human, &none, &mut events).unwrap();
     assert_eq!((added["status"].as_str(), added["phase"].as_u64()), (Some("edited"), Some(2)));
     assert_eq!(team.phases.len(), 1);
     assert_eq!((team.task(4).unwrap().phase, team.task(4).unwrap().status), (2, TaskStatus::Pending));
@@ -1363,7 +1368,7 @@ fn a_queued_phase_with_nothing_started_edits_like_a_draft() {
         &mut team,
         "edit-draft",
         &json!({"phase":2,"tasks_update":[{"id":3,"title":"D2"}],"tasks_remove":[4]}),
-        &Actor::Member("lead".into()),
+        &Actor::Human,
         &none,
         &mut events,
     )
@@ -1498,15 +1503,16 @@ fn an_approved_phase_edits_until_its_work_starts() {
     }
     apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
     // U58: an approved phase whose work has not started is edited like a
-    // draft; move-phase stays the drafts' own operation.
+    // draft. U63: it moves too (ops_phase_control), next to a phase that
+    // exists.
     let edited = apply(&mut team, "edit-draft", &json!({"phase":2,"title":"Later"}), &Actor::Human, &none, &mut events).unwrap();
     assert_eq!(edited["status"], "draft_edited");
-    let added = extend(&mut team, &json!({"phase":2,"tasks":[{"id":4,"title":"More","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+    let added = extend(&mut team, &json!({"phase":2,"tasks":[{"id":4,"title":"More","assignee":"dev"}]}), &Actor::Human, &none, &mut events).unwrap();
     assert_eq!((added["status"].as_str(), added["phase"].as_u64()), (Some("edited"), Some(2)));
     let error = apply(&mut team, "move-phase", &json!({"phase":2,"to":3,"position":"before"}), &Actor::Human, &none, &mut events)
         .unwrap_err()
         .to_string();
-    assert_eq!(error, "Phase 2 is approved or discarded; only a draft phase can change");
+    assert_eq!(error, "Unknown phase 3");
     // Once a task of the phase has started, the phase no longer changes.
     team.task_mut(3).unwrap().attempts.push(Attempt { member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
     let error = apply(&mut team, "edit-draft", &json!({"phase":2,"title":"Later"}), &Actor::Human, &none, &mut events)

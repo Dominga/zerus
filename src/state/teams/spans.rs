@@ -11,7 +11,13 @@ use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The journal entries a timeline reads; the rest is in the team file.
-pub(crate) const EVENT_KINDS: &[&str] = &["question_forwarded", "permission_answered", "stop_told", "held", "released"];
+pub(crate) const EVENT_KINDS: &[&str] = &[
+    "question_forwarded", "permission_answered", "stop_told", "held", "released",
+    // U63 (owner, 2026-10-31): a phase's pause, and the owner's acceptance a
+    // later phase waits for.
+    "phase_paused", "phase_unpaused", "phase_returned_to_draft",
+    "phase_awaiting_acceptance", "phase_owner_accepted", "phase_acceptance_sent_back", "phase_acceptance_changed",
+];
 /// One read of the journal holds at most this many entries; past it the
 /// timelines say the events were cut.
 pub(crate) const EVENT_LIMIT: i64 = 5000;
@@ -168,6 +174,50 @@ fn holds(task: &Task, journal: &[Journal], live: bool, now: f64) -> Vec<Candidat
         (Some((at, by)), Some(_)) if live => list.push(Candidate::new("hold", at, now, HOLD, true).with("by", by)),
         (None, Some(hold)) if live => list.push(Candidate::new("hold", hold.at, now, HOLD, true).with("by", json!(hold.by))),
         _ => {}
+    }
+    list
+}
+
+/// U63 (owner, 2026-10-31): the task's waits that are the owner's or the
+/// lead's call on a phase: its own phase paused ("phase_pause"), or a phase
+/// before it waiting for the owner's acceptance ("owner_acceptance").
+fn phase_waits(team: &Team, task: &Task, journal: &[Journal], live: bool, now: f64) -> Vec<Candidate> {
+    let mut list = Vec::new();
+    let order_of = |n: u32| team.phases.iter().find(|phase| phase.n == n).map_or(n, |phase| phase.order());
+    let mine = order_of(task.phase);
+    let mut paused: Option<(f64, Value)> = None;
+    let mut awaiting: BTreeMap<u64, f64> = BTreeMap::new();
+    for entry in journal {
+        let Some(phase) = entry.detail["phase"].as_u64() else { continue };
+        let own = phase == u64::from(task.phase);
+        let before = u32::try_from(phase).is_ok_and(|n| n != task.phase && order_of(n) < mine);
+        match entry.kind.as_str() {
+            "phase_paused" if own && paused.is_none() => paused = Some((entry.at, entry.detail["by"].clone())),
+            "phase_unpaused" | "phase_returned_to_draft" if own => {
+                if let Some((at, by)) = paused.take() {
+                    list.push(Candidate::new("phase_pause", at, entry.at, HOLD, false).with("by", by));
+                }
+            }
+            "phase_awaiting_acceptance" if before => {
+                awaiting.entry(phase).or_insert(entry.at);
+            }
+            "phase_owner_accepted" | "phase_acceptance_sent_back" | "phase_acceptance_changed" if before => {
+                if let Some(at) = awaiting.remove(&phase) {
+                    list.push(Candidate::new("owner_acceptance", at, entry.at, HOLD, false).with("phase", json!(phase)));
+                }
+            }
+            _ => {}
+        }
+    }
+    if live {
+        if let Some((at, by)) = paused.filter(|_| super::plan::phase_pause(team, task.phase).is_some()) {
+            list.push(Candidate::new("phase_pause", at, now, HOLD, true).with("by", by));
+        }
+        if let Some(held) = super::plan::acceptance_block(team, task.phase) {
+            if let Some(at) = awaiting.get(&u64::from(held)) {
+                list.push(Candidate::new("owner_acceptance", *at, now, HOLD, true).with("phase", json!(held)));
+            }
+        }
     }
     list
 }
@@ -400,6 +450,7 @@ pub(crate) fn spans(team: &Team, task: &Task, journal: &[Journal], holders: &[Ho
         }
     }
     lane.extend(holds(task, journal, live, now));
+    lane.extend(phase_waits(team, task, journal, live, now));
     lane.retain(|candidate| candidate.to > candidate.from);
     let first_moment = lane.iter().map(|candidate| candidate.from).reduce(f64::min);
     let start = match opened {

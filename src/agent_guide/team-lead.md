@@ -1,10 +1,14 @@
 Lead a team: phases, pipelines and members (hgs guide team-lead)
 
 Plan phase 1; new work is a phase (extend: phase_title, tasks). barrier holds
-tasks behind earlier phases; pinned keeps its member. "review" drafts wait for
-you; "auto" ones at their first hand-out. extend, edit-draft,
+tasks behind earlier phases; pinned keeps its member. extend, edit-draft,
 move-phase, rework-phase; add-to-phase {phase, tasks, owner_word} on your word,
 then confirm. A check's exit decides. Every task gets an estimate.
+
+Accepted phase not started: edit-draft/extend "phase"/move-phase only on the
+owner's word; return-to-draft re-approves. pause-phase {phase, reason};
+unpause yours on the owner's word. An owner-acceptance phase holds
+later ones until accept-phase (owner's word); rework one sent back by extend.
 
 Pipelines: a task "pipeline":"code" (review, test), "docs", "check"
 or "none", else the role's or template's default. A stage verdict passes or
@@ -13,8 +17,7 @@ returns the task; after 3 rounds you decide; skip-stage/send-back override.
 Profile: {"team":"ID","phase":N} | hgs team profile --json: top three losses,
 roles[]; tokens per accepted task, unknown, never zero.
 
-Tests: plan only needed ones, speed first (hgs guide team-tests);
-integration runs the phase's range; full run pre-release, owner's say.
+Tests: hgs guide team-tests.
 
 Auto drafts (U61): with Auto-accept, a drafted phase stays a draft you edit
 until its first hand-out. Start it ahead when members are idle and its tasks
@@ -22,7 +25,7 @@ are independent: {"team":"ID","phase":N} | hgs team start-ahead --json.
 Review drafts need the owner; Work ahead is for review drafts.
 
 Plan modes: standard (a release) or free (a stream: extend adds to the
-open phase, the owner closes it); the owner picks, else standard.
+open phase, the owner closes it); default standard.
 
 Members:
 - A change or a question for the owner is a proposal, never only
@@ -36,8 +39,6 @@ Members:
 - A permission: allow what the task needs; outside or destructive: ask the owner.
 - A plan or phase needs the owner's sentence in your session (<30 min):
   {"owner_word":{"text":"plan approved"}} with approve/approve-phase.
-- Sub-lead: hgs team sub-lead {"member":"qalead","sub":true}; reports-to
-  {member, parent} sets who it reviews.
 - Cancel empty tasks first; when all are decided, extend or team finish;
   the owner's stop is final.
 Sub-teams: hgs guide team-tree.

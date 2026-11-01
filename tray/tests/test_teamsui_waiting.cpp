@@ -180,6 +180,7 @@ private slots:
     void waitingAdditionCancelDeclinesIt();
     void waitingBannerAnswersInPlaceAndWithdrawsTheNotice();
     void aWaitingReadThatChangesNothingRedrawsNothing();
+    void aPhaseIsAcceptedOrSentBackFromWaitingForYou();
 };
 
 // N32 of #499: Zerus started in the tray has no Sessions window, yet a team's
@@ -1990,6 +1991,79 @@ void TestTeamsUiWaiting::waitingAdditionCancelDeclinesIt()
     QVERIFY(!sent.contains("confirmation"));
     QTRY_VERIFY(!row(addition));
     QCOMPARE(answered, QStringList{addition});
+}
+
+// U63 (owner, 2026-10-31): a phase that waits for the owner's acceptance is
+// answered in its row: how it ended, Send back with a comment (required) or
+// Accept phase. The team is read first; the item leaves once answered.
+void TestTeamsUiWaiting::aPhaseIsAcceptedOrSentBackFromWaitingForYou()
+{
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    auto team = answerTeam();
+    auto phases = team["phases"].toArray();
+    auto first = phases[0].toObject(); first["state"] = "awaiting_acceptance"; first["acceptance"] = "owner"; phases[0] = first;
+    team["phases"] = phases;
+    setTeam(team);
+    auto item = waitingItem("1", "phase_acceptance", "accept_phase", "Phase 1 is ready for your acceptance", now - 60);
+    item["phase"] = 1;
+    item["summary"] = QJsonObject{{"accepted", 3}, {"rejected", 1}, {"cancelled", 0}, {"tests", "tests pass"}, {"minutes", 42}};
+    QVERIFY(writeWaiting(script() + ".waiting", QJsonArray{item}));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamWaitingPage page(&controller);
+    QStringList answered;
+    page.answered = [&](const TeamWaitingPage::Item &done) { answered << done.id; };
+    darkPalette(); page.setDark(true);
+    page.resize(900, 700); page.show();
+    const QString id = "team-1/phase_acceptance/1";
+    const auto row = [&]() -> QFrame * {
+        for (auto *frame : page.findChildren<QFrame *>("teamWaitingRow")) if (frame->property("itemId") == id) return frame;
+        return nullptr;
+    };
+    QTRY_VERIFY(row());
+    QCOMPARE(row()->findChild<QLabel *>("teamWaitingKind")->text(), QStringLiteral("Phase acceptance"));
+    QCOMPARE(TeamWaitingPage::parse(item).summary.text(), QStringLiteral("3 accepted, 1 rejected, 0 cancelled; tests pass; 42 min"));
+    row()->findChild<QPushButton *>("teamWaitingAnswerToggle")->click();
+    QTRY_VERIFY(row() && row()->findChild<QFrame *>("teamWaitingAcceptance"));
+    QCOMPARE(row()->findChild<QLabel *>("teamWaitingAcceptanceSummary")->text(), QStringLiteral("3 accepted, 1 rejected, 0 cancelled; tests pass; 42 min"));
+    // Send back wants a comment.
+    auto *sendBack = row()->findChild<QPushButton *>("teamWaitingSendBack");
+    QVERIFY(!sendBack->isEnabled());
+    row()->findChild<QLineEdit *>("teamWaitingSendBackComment")->setText("Add the migration steps to the notes");
+    QVERIFY(sendBack->isEnabled());
+    sendBack->click();
+    QTRY_COMPARE(calls(script(), "send-back-phase").size(), 1);
+    auto sent = calls(script(), "send-back-phase").first();
+    QCOMPARE(sent["team"].toString(), QStringLiteral("team-1"));
+    QCOMPARE(sent["phase"].toInt(), 1);
+    QCOMPARE(sent["comment"].toString(), QStringLiteral("Add the migration steps to the notes"));
+    QTRY_VERIFY(!row());
+    QCOMPARE(answered, QStringList{id});
+    QCOMPARE(calls(script(), "accept-phase").size(), 0);
+    // The lead reworked it and it waits again: Accept phase.
+    page.refresh();
+    QTRY_VERIFY(row());
+    row()->findChild<QPushButton *>("teamWaitingAnswerToggle")->click();
+    QTRY_VERIFY(row() && row()->findChild<QPushButton *>("teamWaitingAcceptPhase") && row()->findChild<QPushButton *>("teamWaitingAcceptPhase")->isEnabled());
+    row()->findChild<QPushButton *>("teamWaitingAcceptPhase")->click();
+    QTRY_COMPARE(calls(script(), "accept-phase").size(), 1);
+    sent = calls(script(), "accept-phase").first();
+    QCOMPARE(sent["team"].toString(), QStringLiteral("team-1"));
+    QCOMPARE(sent["phase"].toInt(), 1);
+    QTRY_VERIFY(!row());
+    QCOMPARE(answered, (QStringList{id, id}));
+    // A phase accepted meanwhile sends nothing.
+    first["state"] = "done"; phases[0] = first; team["phases"] = phases;
+    setTeam(team);
+    page.refresh();
+    QTRY_VERIFY(row());
+    row()->findChild<QPushButton *>("teamWaitingAnswerToggle")->click();
+    QTRY_VERIFY(([&] {
+        auto *notice = row() ? row()->findChild<QLabel *>("teamWaitingAnswerNotice") : nullptr;
+        return notice && notice->text().contains(QStringLiteral("nothing was sent"));
+    })());
+    QVERIFY(!row()->findChild<QPushButton *>("teamWaitingAcceptPhase"));
+    QCOMPARE(calls(script(), "accept-phase").size(), 1);
 }
 
 // #724: the banner answers in its row too; an item answered there leaves the

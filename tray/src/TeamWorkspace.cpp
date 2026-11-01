@@ -44,6 +44,7 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <algorithm>
 #include <cmath>
 #include <memory>
 
@@ -1238,6 +1239,254 @@ void TeamWorkspace::movePhase(const Team &team, int phase, int to, const QString
                  [this](bool ok, const QString &message) { if (!ok) m_error = message; scheduleRender(); });
 }
 
+// U63: the pause on a phase, from its record, else from its phase_summary line.
+static PhasePause phasePauseOf(const Team &team, int phase)
+{
+    if (const auto *record = team.phase(phase); record && record->pause.on) return record->pause;
+    if (const auto *summary = team.phaseSummaryOf(phase); summary && summary->pause.on) return summary->pause;
+    return {};
+}
+
+// U63 (owner, 2026-10-31): editing an accepted phase keeps its place. It may
+// change while none of its work has started: a refused attempt never reached
+// its member and does not count.
+bool TeamWorkspace::acceptedUnstarted(const Team &team, int phase)
+{
+    const auto *record = team.phase(phase);
+    if (!record || !record->accepted()) return false;
+    for (int id : team.tasksOfPhase(phase))
+        if (const auto *task = team.task(id); task && taskStarted(*task)) return false;
+    return true;
+}
+
+QList<int> TeamWorkspace::movablePhases(const Team &team)
+{
+    QList<int> out;
+    if (team.status == "done" || team.status == "stopped" || team.status == "archived") return out;
+    for (const auto &phase : team.phases)
+        if (phase.draft() || acceptedUnstarted(team, phase.n)) out << phase.n;
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+// F10, U63: Move earlier and Move later among the movable phases.
+void TeamWorkspace::addPhaseMoves(QMenu *menu, const QString &id, int phase)
+{
+    const auto *current = currentTeam(id);
+    const auto movable = current ? movablePhases(*current) : QList<int>();
+    const int position = movable.indexOf(phase);
+    auto *earlier = menu->addAction(tr("Move earlier")); earlier->setObjectName("teamPhaseMoveUp"); earlier->setEnabled(position > 0);
+    auto *later = menu->addAction(tr("Move later")); later->setObjectName("teamPhaseMoveDown"); later->setEnabled(position >= 0 && position + 1 < movable.size());
+    QObject::connect(earlier, &QAction::triggered, this, [this, id, phase] {
+        const auto *t = currentTeam(id); if (!t) return;
+        const auto list = movablePhases(*t); const int at = list.indexOf(phase);
+        if (at > 0) movePhase(*t, phase, list.value(at - 1), QStringLiteral("before"));
+    });
+    QObject::connect(later, &QAction::triggered, this, [this, id, phase] {
+        const auto *t = currentTeam(id); if (!t) return;
+        const auto list = movablePhases(*t); const int at = list.indexOf(phase);
+        if (at >= 0 && at + 1 < list.size()) movePhase(*t, phase, list.value(at + 1), QStringLiteral("after"));
+    });
+}
+
+// U63: whether the phase waits for the owner's acceptance once its tasks are
+// decided; the store refuses it for a phase already done.
+void TeamWorkspace::addPhaseAcceptance(QMenu *menu, const QString &id, int phase)
+{
+    const auto *current = currentTeam(id);
+    const auto *record = current ? current->phase(phase) : nullptr;
+    auto *owner = menu->addAction(tr("Requires owner acceptance")); owner->setObjectName("teamPhaseRequiresAcceptance");
+    owner->setCheckable(true); owner->setChecked(record && record->ownerAccepts());
+    owner->setEnabled(record != nullptr);
+    QObject::connect(owner, &QAction::triggered, this, [this, id, phase](bool on) {
+        m_error.clear();
+        m_panel->act("phase-acceptance", {{"team", id}, {"phase", phase}, {"acceptance", on ? QStringLiteral("owner") : QStringLiteral("lead")}},
+                     [this](bool ok, const QString &message) { if (!ok) m_error = message; scheduleRender(); });
+    });
+}
+
+// U63: the phase's title and its not-started tasks' titles, edited in place;
+// Save sends only what changed, with the revision the dialog was opened at.
+// A refusal stays in the dialog with the store's reason.
+void TeamWorkspace::editPhaseDialog(const Team &team, int phase)
+{
+    if (auto *open = findChild<QDialog *>("teamEditPhaseDialog")) { open->raise(); open->activateWindow(); return; }
+    const Colors c = colorsFor(m_dark);
+    const auto *record = team.phase(phase);
+    const QString before = record ? record->title : QString();
+    auto *dialog = new QDialog(this);
+    dialog->setObjectName("teamEditPhaseDialog"); dialog->setProperty("phase", phase);
+    dialog->setStyleSheet(dialogSheet(c));
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(tr("Edit phase %1").arg(phase));
+    dialog->resize(520, 420);
+    auto *v = new QVBoxLayout(dialog);
+    auto *intro = label(tr("Phase %1 stays accepted and keeps its place. Only tasks whose work has not started change here.").arg(phase), c.text2, 12);
+    intro->setWordWrap(true); v->addWidget(intro);
+    v->addWidget(label(tr("Phase title"), c.muted, 11));
+    auto *title = new QLineEdit(before); title->setObjectName("teamEditPhaseTitle"); title->setMaxLength(120);
+    v->addWidget(title);
+    v->addWidget(label(tr("Tasks"), c.muted, 11));
+    QList<QLineEdit *> edits;
+    for (int id : team.tasksOfPhase(phase)) {
+        const auto *task = team.task(id);
+        if (!task) continue;
+        auto *line = row(6);
+        line->addWidget(label(QStringLiteral("#%1").arg(id), c.muted, 11));
+        auto *edit = new QLineEdit(task->title); edit->setObjectName("teamEditPhaseTask");
+        edit->setProperty("task", id); edit->setProperty("original", task->title); edit->setMaxLength(200);
+        const bool editable = task->status == "pending" || task->status == "draft";
+        edit->setEnabled(editable);
+        if (!editable) edit->setToolTip(tr("Only a pending task changes here"));
+        line->addWidget(edit, 1);
+        v->addLayout(line);
+        edits << edit;
+    }
+    v->addStretch();
+    auto *error = label(QString(), c.danger, 11, false, "teamEditPhaseError"); error->setWordWrap(true); error->hide();
+    v->addWidget(error);
+    auto *buttons = new QDialogButtonBox;
+    auto *save = buttons->addButton(tr("Save"), QDialogButtonBox::AcceptRole); save->setObjectName("teamEditPhaseSave");
+    buttons->addButton(QDialogButtonBox::Cancel);
+    v->addWidget(buttons);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+    QObject::connect(save, &QPushButton::clicked, dialog, [this, dialog, title, edits, error, save, before, phase, id = team.id, revision = team.revision] {
+        QJsonObject input{{"team", id}, {"phase", phase}, {"revision", revision}};
+        const QString newTitle = title->text().trimmed();
+        if (!newTitle.isEmpty() && newTitle != before) input.insert("title", newTitle);
+        QJsonArray updates;
+        for (auto *edit : edits) {
+            if (!edit->isEnabled()) continue;
+            const QString text = edit->text().trimmed();
+            if (text.isEmpty() || text == edit->property("original").toString()) continue;
+            updates.append(QJsonObject{{"id", edit->property("task").toInt()}, {"title", text}});
+        }
+        if (!updates.isEmpty()) input.insert("tasks_update", updates);
+        // Nothing changed: nothing to send.
+        if (!input.contains("title") && updates.isEmpty()) { dialog->accept(); return; }
+        save->setEnabled(false); error->hide();
+        m_teams->call(QStringLiteral("edit-draft"), input,
+            [self = QPointer<TeamWorkspace>(this), guard = QPointer<QDialog>(dialog), error, save](bool ok, const QJsonObject &, const QString &message) {
+                if (!guard) {
+                    if (!ok && self) { self->m_error = message; self->scheduleRender(); }
+                    return;
+                }
+                if (!ok) { error->setText(message); error->show(); save->setEnabled(true); return; }
+                guard->accept();
+                if (self) self->scheduleRender();
+            });
+    });
+    dialog->show();
+}
+
+// U63: a pause keeps an accepted phase from starting until it is removed; the
+// reason is optional and the lead reads it.
+void TeamWorkspace::pausePhaseDialog(const Team &team, int phase)
+{
+    if (auto *open = findChild<QDialog *>("teamPausePhaseDialog")) { open->raise(); open->activateWindow(); return; }
+    const Colors c = colorsFor(m_dark);
+    auto *dialog = new QDialog(this);
+    dialog->setObjectName("teamPausePhaseDialog"); dialog->setProperty("phase", phase);
+    dialog->setStyleSheet(dialogSheet(c));
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(tr("Pause phase %1").arg(phase));
+    dialog->resize(460, 200);
+    auto *v = new QVBoxLayout(dialog);
+    auto *intro = label(tr("Phase %1 stays accepted but does not start until the pause is removed.").arg(phase), c.text2, 12);
+    intro->setWordWrap(true); v->addWidget(intro);
+    v->addWidget(label(tr("Reason (optional)"), c.muted, 11));
+    auto *reason = new QLineEdit; reason->setObjectName("teamPausePhaseReason"); reason->setMaxLength(400);
+    reason->setPlaceholderText(tr("Why it waits, for the lead"));
+    v->addWidget(reason);
+    auto *error = label(QString(), c.danger, 11, false, "teamPausePhaseError"); error->setWordWrap(true); error->hide();
+    v->addWidget(error);
+    auto *buttons = new QDialogButtonBox;
+    auto *confirm = buttons->addButton(tr("Pause phase"), QDialogButtonBox::AcceptRole); confirm->setObjectName("teamPausePhaseConfirm");
+    buttons->addButton(QDialogButtonBox::Cancel);
+    v->addWidget(buttons);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+    QObject::connect(confirm, &QPushButton::clicked, dialog, [this, dialog, reason, error, confirm, phase, id = team.id] {
+        confirm->setEnabled(false); error->hide();
+        m_teams->call(QStringLiteral("pause-phase"), {{"team", id}, {"phase", phase}, {"reason", reason->text().trimmed()}},
+            [self = QPointer<TeamWorkspace>(this), guard = QPointer<QDialog>(dialog), error, confirm](bool ok, const QJsonObject &, const QString &message) {
+                if (!guard) {
+                    if (!ok && self) { self->m_error = message; self->scheduleRender(); }
+                    return;
+                }
+                if (!ok) { error->setText(message); error->show(); confirm->setEnabled(true); return; }
+                guard->accept();
+                if (self) self->scheduleRender();
+            });
+    });
+    dialog->show();
+}
+
+void TeamWorkspace::unpausePhase(const QString &id, int phase)
+{
+    m_error.clear();
+    m_panel->act("unpause-phase", {{"team", id}, {"phase", phase}},
+                 [this](bool ok, const QString &message) { if (!ok) m_error = message; scheduleRender(); });
+}
+
+// U63: the owner accepts a phase that waits for his acceptance; it becomes Done.
+bool TeamWorkspace::acceptOwnerPhase(const QString &id, int phase)
+{
+    const auto *team = currentTeam(id);
+    if (!team || m_phaseAct || phaseDecided(*team, phase)) return false;
+    const QString key = markPhaseDecided(*team, phase);
+    m_panel->act("accept-phase", {{"team", id}, {"phase", phase}}, [this, key](bool ok, const QString &message) { phaseSent(key, ok, message); });
+    scheduleRender();
+    return true;
+}
+
+// U63: the phase goes back to the lead for rework in the same phase, with the
+// owner's comment (required, at most 4000 characters).
+void TeamWorkspace::sendBackPhaseDialog(const Team &team, int phase)
+{
+    if (auto *open = findChild<QDialog *>("teamPhaseSendBackDialog")) { open->raise(); open->activateWindow(); return; }
+    const Colors c = colorsFor(m_dark);
+    auto *dialog = new QDialog(this);
+    dialog->setObjectName("teamPhaseSendBackDialog"); dialog->setProperty("phase", phase);
+    dialog->setStyleSheet(dialogSheet(c));
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(tr("Send phase %1 back").arg(phase));
+    dialog->resize(500, 300);
+    auto *v = new QVBoxLayout(dialog);
+    auto *intro = label(tr("The lead reworks phase %1 with your comment; it stays the same phase and waits for your acceptance again.").arg(phase), c.text2, 12);
+    intro->setWordWrap(true); v->addWidget(intro);
+    auto *text = new QPlainTextEdit; text->setObjectName("teamPhaseSendBackText");
+    text->setPlaceholderText(tr("What should the lead rework?"));
+    v->addWidget(text, 1);
+    auto *error = label(QString(), c.danger, 11, false, "teamPhaseSendBackError"); error->setWordWrap(true); error->hide();
+    v->addWidget(error);
+    auto *buttons = new QDialogButtonBox;
+    auto *confirm = buttons->addButton(tr("Send back"), QDialogButtonBox::AcceptRole); confirm->setObjectName("teamPhaseSendBackConfirm");
+    buttons->addButton(QDialogButtonBox::Cancel);
+    v->addWidget(buttons);
+    const auto validate = [text, confirm] {
+        const QString comment = text->toPlainText().trimmed();
+        confirm->setEnabled(!comment.isEmpty() && comment.size() <= 4000);
+    };
+    validate();
+    QObject::connect(text, &QPlainTextEdit::textChanged, dialog, validate);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+    QObject::connect(confirm, &QPushButton::clicked, dialog, [this, dialog, text, error, confirm, phase, id = team.id] {
+        const QString comment = text->toPlainText().trimmed();
+        if (comment.isEmpty() || comment.size() > 4000) return;
+        confirm->setEnabled(false); error->hide();
+        m_teams->call(QStringLiteral("send-back-phase"), {{"team", id}, {"phase", phase}, {"comment", comment}},
+            [self = QPointer<TeamWorkspace>(this), guard = QPointer<QDialog>(dialog), error, confirm](bool ok, const QJsonObject &, const QString &message) {
+                if (!guard) {
+                    if (!ok && self) { self->m_error = message; self->scheduleRender(); }
+                    return;
+                }
+                if (!ok) { error->setText(message); error->show(); confirm->setEnabled(true); return; }
+                guard->accept();
+                if (self) self->scheduleRender();
+            });
+    });
+    dialog->show();
+}
 QWidget *TeamWorkspace::inboxStrip(const Team &team, const QList<InboxItem> &items)
 {
     // Owner, 2026-10-28: the lead's inbox is a drawer at the bottom like the
@@ -1735,7 +1984,9 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
 void TeamWorkspace::linkDraft(const Team &team, int dependency, int taskId, bool add)
 {
     const auto *task = team.task(taskId);
-    if (!task || task->status != "draft") return;
+    if (!task) return;
+    // U63: a pending task of an accepted phase whose work has not started too.
+    if (task->status != "draft" && !(task->status == "pending" && acceptedUnstarted(team, task->phase))) return;
     QJsonArray deps;
     for (const auto &d : task->deps)
         if (d.task != dependency) deps.append(QJsonObject{{"task", d.task}, {"kind", d.soft ? "soft" : "hard"}});
@@ -2365,6 +2616,7 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
     else if (state == "running") { numberTone = c.accent; numberFill = alpha(c.accent, .10); }
     else if (state == "done") { numberTone = c.accentMuted; numberFill = alpha(c.accent, .10); }
     else if (state == "rejected") { numberTone = c.warn; numberFill = alpha(c.warn, .11); }
+    else if (state == "awaiting_acceptance") { numberTone = c.folder; numberFill = alpha(c.folder, .25); }
     h->addWidget(new PhaseNumber(group.n, numberTone, numberFill));
     const QString name = group.title.isEmpty() ? tr("Phase %1").arg(group.n) : tr("Phase %1 · %2").arg(group.n).arg(group.title);
     auto *title = new ShrinkLabel(name, 90); title->setObjectName("teamPhaseTitle");
@@ -2373,13 +2625,28 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
     title->setAttribute(Qt::WA_TransparentForMouseEvents);
     h->addWidget(title);
     const QString kind = state == "draft" || state == "planned" ? QStringLiteral("draft") : state == "running" ? QStringLiteral("running")
-                       : state == "done" ? QStringLiteral("accepted") : state == "rejected" ? QStringLiteral("rejected") : QStringLiteral("pending");
+                       : state == "done" ? QStringLiteral("accepted") : state == "rejected" ? QStringLiteral("rejected")
+                       : state == "awaiting_acceptance" ? QStringLiteral("submitted") : QStringLiteral("pending");
     auto *badge = freeOpen ? new PhaseBadge(state == "idle" ? tr("Open, idle") : tr("Open, running"), state == "idle" ? c.text2 : tone,
                                             state == "idle" ? QStringLiteral("delivered") : QStringLiteral("running"), false)
                            : new PhaseBadge(autoDraft ? autoDraftBadge() : phaseStateBadge(state), tone, kind, state == "draft" || state == "planned");
     badge->setObjectName("teamPhaseBadge"); badge->setProperty("state", state); badge->setProperty("auto", autoDraft);
     if (autoDraft) badge->setToolTip(autoDraftTip(record->startAhead));
     h->addWidget(badge);
+    // U63 (owner, 2026-10-31): a paused accepted phase does not start until
+    // the pause is removed; who paused it and why.
+    const PhasePause pause = freeOpen ? PhasePause{} : phasePauseOf(team, group.n);
+    QString pauseText, pauseTip;
+    if (pause.on) {
+        const QString who = pause.owner ? tr("Paused by you")
+                          : pause.by.isEmpty() || pause.by == QLatin1String("Lead") ? tr("Paused by the lead") : tr("Paused by %1").arg(pause.by);
+        pauseText = pause.reason.trimmed().isEmpty() ? who : tr("%1: %2").arg(who, pause.reason.trimmed());
+        pauseTip = tr("Approved; it will not start until the pause is removed") + QLatin1Char('\n') + pauseText;
+        auto *pauseIcon = new QLabel; pauseIcon->setObjectName("teamPhasePauseIcon");
+        pauseIcon->setPixmap(workspaceIcon("pause", c.warn).pixmap(12, 12)); pauseIcon->setToolTip(pauseTip);
+        pauseIcon->setAttribute(Qt::WA_TransparentForMouseEvents);
+        h->addWidget(pauseIcon);
+    }
     // U61: the lead let idle members start this auto draft early; a phase
     // Auto accepted at its first hand-out says so.
     if (autoDraft && record->startAhead) {
@@ -2431,11 +2698,19 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
             info->add(note, 1);
         }
     }
-    // F12 and F10: why a draft waits, and the lead's edits since you last saw it.
-    if (state == "draft" || state == "rejected") {
+    if (pause.on) {
+        auto *paused = label(pauseText, c.warn, 11, false, "teamPhasePaused");
+        paused->setToolTip(pauseTip); paused->setProperty("owner", pause.owner);
+        paused->setAttribute(Qt::WA_TransparentForMouseEvents);
+        info->add(paused, 4);
+    }
+    // F12 and F10: why a draft waits, and the lead's edits since you last saw
+    // it. U63: an accepted phase counts the lead's edits since it was accepted.
+    const bool draftLike = state == "draft" || state == "rejected";
+    if (draftLike || ((state == "queued" || state == "running") && !freeOpen)) {
         for (const auto &band : phaseBands(team, [](const PhaseGroup &) { return true; })) {
             if (band.n != group.n) continue;
-            if (!band.blocked.isEmpty()) {
+            if (draftLike && !band.blocked.isEmpty()) {
                 auto *waits = label(band.blocked, c.warn, 11, false, "teamPhaseWaiting");
                 waits->setToolTip(band.blockedTip.isEmpty() ? band.blocked : band.blockedTip);
                 info->add(waits, 3);
@@ -2510,23 +2785,11 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         QObject::connect(more, &QToolButton::clicked, this, [this, id = team.id, phase = group.n, more] {
             // The workspace rebuilds while a menu is open: the menu holds ids, not rows.
             auto *menu = new QMenu(this); menu->setObjectName("teamPhaseMenu"); menu->setAttribute(Qt::WA_DeleteOnClose);
-            const auto *current = currentTeam(id);
-            const auto drafts = current ? current->draftPhases() : QList<int>();
-            const int position = drafts.indexOf(phase);
-            auto *earlier = menu->addAction(tr("Move earlier")); earlier->setObjectName("teamPhaseMoveUp"); earlier->setEnabled(position > 0);
-            auto *later = menu->addAction(tr("Move later")); later->setObjectName("teamPhaseMoveDown"); later->setEnabled(position >= 0 && position + 1 < drafts.size());
+            // U63: among the drafts and the accepted phases that have not started.
+            addPhaseMoves(menu, id, phase);
+            addPhaseAcceptance(menu, id, phase);
             menu->addSeparator();
             auto *discard = menu->addAction(tr("Discard phase…")); discard->setObjectName("teamPhaseDiscard");
-            QObject::connect(earlier, &QAction::triggered, this, [this, id, phase] {
-                const auto *t = currentTeam(id); if (!t) return;
-                const auto list = t->draftPhases(); const int at = list.indexOf(phase);
-                if (at > 0) movePhase(*t, phase, list.value(at - 1), QStringLiteral("before"));
-            });
-            QObject::connect(later, &QAction::triggered, this, [this, id, phase] {
-                const auto *t = currentTeam(id); if (!t) return;
-                const auto list = t->draftPhases(); const int at = list.indexOf(phase);
-                if (at >= 0 && at + 1 < list.size()) movePhase(*t, phase, list.value(at + 1), QStringLiteral("after"));
-            });
             QObject::connect(discard, &QAction::triggered, this, [this, id, phase] { discardPhase(id, phase); });
             menu->popup(more->mapToGlobal(QPoint(0, more->height())));
         });
@@ -2552,6 +2815,19 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
             });
             h->addWidget(undo);
         }
+    } else if (state == "awaiting_acceptance" && team.status != "planning") {
+        // U63: every task is decided; the owner accepts the phase or sends it
+        // back to the lead with a comment.
+        auto *sendBack = button(tr("Send back…"), "teamPhaseSendBackOwner"); sendBack->setProperty("ghost", true); sendBack->setProperty("phase", group.n);
+        sendBack->setToolTip(tr("The lead reworks the phase with your comment"));
+        sendBack->setEnabled(!decided);
+        QObject::connect(sendBack, &QPushButton::clicked, this, [this, id = team.id, phase = group.n] { if (const auto *t = currentTeam(id)) sendBackPhaseDialog(*t, phase); });
+        h->addWidget(sendBack);
+        auto *accept = button(tr("Accept phase"), "teamPhaseAcceptOwner", true); accept->setProperty("phase", group.n);
+        accept->setToolTip(tr("Accept the phase's result; it becomes Done"));
+        accept->setEnabled(!decided);
+        QObject::connect(accept, &QPushButton::clicked, this, [this, id = team.id, phase = group.n] { acceptOwnerPhase(id, phase); });
+        h->addWidget(accept);
     } else if (state == "running" && (team.status == "running" || team.status == "paused")) {
         // U29: a running phase takes a task only on your word, after a warning.
         auto *add = button(tr("Add task…"), "teamPhaseAddLate"); add->setProperty("ghost", true); add->setProperty("phase", group.n);
@@ -2572,6 +2848,24 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         more->setIcon(workspaceIcon("more", c.muted)); more->setAutoRaise(true); more->setToolTip(tr("Phase actions"));
         QObject::connect(more, &QToolButton::clicked, this, [this, id = team.id, phase = group.n, more] {
             auto *menu = new QMenu(this); menu->setObjectName("teamPhaseMenu"); menu->setAttribute(Qt::WA_DeleteOnClose);
+            // U63 (owner, 2026-10-31): while its work has not started, an
+            // accepted phase is edited, moved and paused in place and stays
+            // accepted; the store refuses it once a task has started.
+            const auto *current = currentTeam(id);
+            const bool unstarted = current && acceptedUnstarted(*current, phase);
+            auto *edit = menu->addAction(tr("Edit phase…")); edit->setObjectName("teamPhaseEdit"); edit->setEnabled(unstarted);
+            QObject::connect(edit, &QAction::triggered, this, [this, id, phase] { if (const auto *t = currentTeam(id)) editPhaseDialog(*t, phase); });
+            addPhaseMoves(menu, id, phase);
+            menu->addSeparator();
+            if (current && phasePauseOf(*current, phase).on) {
+                auto *unpause = menu->addAction(tr("Remove pause")); unpause->setObjectName("teamPhaseUnpause");
+                QObject::connect(unpause, &QAction::triggered, this, [this, id, phase] { unpausePhase(id, phase); });
+            } else {
+                auto *pauseAction = menu->addAction(tr("Pause phase…")); pauseAction->setObjectName("teamPhasePause"); pauseAction->setEnabled(unstarted);
+                QObject::connect(pauseAction, &QAction::triggered, this, [this, id, phase] { if (const auto *t = currentTeam(id)) pausePhaseDialog(*t, phase); });
+            }
+            addPhaseAcceptance(menu, id, phase);
+            menu->addSeparator();
             // U42: back to a draft that waits for your approval again.
             auto *redraft = menu->addAction(tr("Return to draft…")); redraft->setObjectName("teamPhaseReturnToDraft");
             QObject::connect(redraft, &QAction::triggered, this, [this, id, phase] { returnPhaseToDraft(id, phase); });
@@ -2682,7 +2976,8 @@ QWidget *TeamWorkspace::laneSections(const Team &team, const PhaseGroup &group)
         header->setContextMenuPolicy(Qt::CustomContextMenu);
         QObject::connect(header, &QWidget::customContextMenuRequested, this, [this, id = team.id, phase = group.n, lane, label](const QPoint &at) {
             const auto *current = currentTeam(id);
-            if (!current || lane <= 0 || !(current->status == "planning" || (current->phase(phase) && current->phase(phase)->draft()))) return;
+            if (!current || lane <= 0 || !(current->status == "planning" || (current->phase(phase) && current->phase(phase)->draft())
+                                           || acceptedUnstarted(*current, phase))) return;
             QMenu menu; menu.setObjectName("teamLaneMenu");
             auto *rename = menu.addAction(tr("Rename lane…")); rename->setObjectName("teamLaneRename");
             auto *chosen = menu.exec(at);
@@ -2769,7 +3064,8 @@ void TeamWorkspace::laneMenu(const Team &team, int task, const QPoint &global)
     const auto *found = team.task(task);
     if (!found) return;
     const auto *record = team.phase(found->phase);
-    if (!(team.status == "planning" || (record && record->draft()))) return;
+    // U63: an accepted phase whose work has not started takes lanes too.
+    if (!(team.status == "planning" || (record && record->draft()) || acceptedUnstarted(team, found->phase))) return;
     QMenu menu; menu.setObjectName("teamTaskLaneMenu");
     const auto phaseTasks = team.tasksOfPhase(found->phase);
     const auto lanes = laneGroups(team, phaseTasks);
@@ -2837,8 +3133,11 @@ QWidget *TeamWorkspace::phaseGraph(const Team &team, const PhaseGroup &group, co
         view->editable = true;
         view->linked = [this](int dependency, int task) { if (const auto *t = planTeam(m_team)) m_panel->link(*t, dependency, task, true); };
         view->unlinked = [this](int dependency, int task) { if (const auto *t = planTeam(m_team)) m_panel->link(*t, dependency, task, false); };
-    } else if (ownerPhaseState(team, group) == "draft") {
-        for (int id : group.tasks) if (const auto *task = team.task(id); task && task->status == "draft") view->editableTasks.insert(id);
+    } else if (ownerPhaseState(team, group) == "draft" || acceptedUnstarted(team, group.n)) {
+        // U63: an accepted phase whose work has not started edits its pending tasks too.
+        const bool accepted = acceptedUnstarted(team, group.n);
+        for (int id : group.tasks)
+            if (const auto *task = team.task(id); task && (task->status == "draft" || (accepted && task->status == "pending"))) view->editableTasks.insert(id);
         view->linked = [this, id = team.id](int dependency, int task) { if (const auto *t = planTeam(id)) linkDraft(*t, dependency, task, true); };
         view->unlinked = [this, id = team.id](int dependency, int task) { if (const auto *t = planTeam(id)) linkDraft(*t, dependency, task, false); };
     }

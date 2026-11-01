@@ -20,6 +20,7 @@ inline QColor phaseStateColor(const Colors &c, const QString &state)
 {
     if (state == "draft" || state == "planned") return c.folder;
     if (state == "rejected") return c.warn;
+    if (state == "awaiting_acceptance") return c.folder;   // U63: waits for you, like a draft
     if (state == "running") return c.accent;
     if (state == "done") return c.accentMuted;
     return c.muted;
@@ -32,6 +33,7 @@ inline QString phaseStateBadge(const QString &state)
     if (state == "rejected") return QCoreApplication::translate("TeamPanel", "Sent back");
     if (state == "queued") return QCoreApplication::translate("TeamPanel", "Accepted · queued");
     if (state == "running") return QCoreApplication::translate("TeamPanel", "Running");
+    if (state == "awaiting_acceptance") return QCoreApplication::translate("TeamPanel", "Awaiting your acceptance");
     if (state == "done") return QCoreApplication::translate("TeamPanel", "Done");
     if (state == "paused") return QCoreApplication::translate("TeamPanel", "Paused");
     if (state == "cancelled") return QCoreApplication::translate("TeamPanel", "Cancelled");
@@ -72,6 +74,7 @@ protected:
         if (m_state == "draft") edge = m_c.folder;
         else if (m_state == "planned") edge = WorkspaceSkin::color(WorkspaceSkin::active(), m_c.dark, QStringLiteral("cardSelBorder"));
         else if (m_state == "rejected") edge = m_c.warn;
+        else if (m_state == "awaiting_acceptance") edge = m_c.folder;
         else if (m_state == "running") edge = blend(m_c.cardBorder, m_c.accent, .45);
         QPen pen(edge, 1); if (dashed) { pen.setStyle(Qt::CustomDashLine); pen.setDashPattern({4, 3}); }
         p.setPen(pen); p.setBrush(Qt::NoBrush); p.drawPath(shape);

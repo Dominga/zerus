@@ -1,4 +1,5 @@
 #include "Settings.h"
+#include "SettingsJson.h"
 #include "MachinesPage.h"
 #include <QScopedValueRollback>
 #include "HgsClient.h"
@@ -363,7 +364,7 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
         }
         m_operation = remove ? "remove" : "reset";
         // A removed machine leaves no kept overrides behind for a later one of its name.
-        if (remove) Settings::remove(otherTransportKey(target));
+        if (remove) SettingsJson::remove(otherTransportKey(target));
         m_request = m_client->requestMachines({m_operation, target, "--revision", revision}); updateControls();
     });
     connect(m_client, &HgsClient::machinesReady, this, [this](quint64 request, const QJsonObject &data) {
@@ -614,7 +615,7 @@ void MachinesPage::loadSelection() {
     // into their (hidden) fields, so switching the type back restores them.
     if (!local && !m_new) {
         // #709 L8: through the overlay, so a save still queued behind the lock reads back.
-        const auto other = QJsonDocument::fromJson(Settings::value(otherTransportKey(m_selected)).toByteArray()).object();
+        const auto other = SettingsJson::object(otherTransportKey(m_selected));
         if (m_transport->currentIndex() == 1) {
             m_hostname->setText(other.value("hostname").toString()); m_user->setText(other.value("user").toString());
             m_port->setValue(other.value("port").toInt()); m_key->setText(other.value("identity_file").toString());
@@ -858,8 +859,8 @@ void MachinesPage::rememberOtherTransport() {
         other["wsl"] = QJsonObject{{"distribution", m_wslDistribution->text().trimmed()}, {"user", m_wslUser->text().trimmed()}, {"hgs_path", m_wslHgs->text()}};
     }
     // #694: a GUI-thread write never waits on the settings file's lock.
-    if (other.isEmpty()) Settings::remove(otherTransportKey(alias()));
-    else Settings::set(otherTransportKey(alias()), QJsonDocument(other).toJson(QJsonDocument::Compact));
+    if (other.isEmpty()) SettingsJson::remove(otherTransportKey(alias()));
+    else SettingsJson::store(otherTransportKey(alias()), QJsonDocument(other));
 }
 void MachinesPage::save() {
     if (m_request || m_installing || (m_new && aliasExists())) return;

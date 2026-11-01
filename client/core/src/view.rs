@@ -1761,10 +1761,10 @@ mod tests {
         // U43: the host applies a team member's default mute, so a revision 0
         // preference already reads muted on this desktop; a recorded unmute wins.
         let team = row(&json!({"conversation_id": "c",
-            "notification_preferences": {"conversation_id": "c", "muted": true, "revision": 0, "suppressed": {}}}));
+            "notification_preferences": {"conversation_id": "c", "muted": true, "revision": 0, "suppressed": {"reply_id": null, "attention_signature": null, "optional_question_ids": [], "main_attention": null, "child_attention": {}}}}));
         assert!(team.muted);
         let chosen = row(&json!({"conversation_id": "c",
-            "notification_preferences": {"conversation_id": "c", "muted": false, "revision": 1, "suppressed": {}}}));
+            "notification_preferences": {"conversation_id": "c", "muted": false, "revision": 1, "suppressed": {"reply_id": null, "attention_signature": null, "optional_question_ids": [], "main_attention": null, "child_attention": {}}}}));
         assert!(!chosen.muted);
         let partial = row(&json!({"cmd": "dsh", "conversation_id": "c",
             "notification_preferences": {"conversation_id": "c", "muted": true}}));

@@ -49,6 +49,9 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <future>
+#include <memory>
+#include <thread>
 
 #ifdef Q_OS_WIN
 #include "ConsoleHost.h"

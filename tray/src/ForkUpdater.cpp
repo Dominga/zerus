@@ -310,9 +310,11 @@ QString ForkUpdater::sourceCommit(const QString &folder)
 {
     QFile file(QDir(folder).filePath(QStringLiteral("build-info.json")));
     if (!file.open(QIODevice::ReadOnly)) return {};
-    const QString commit = QJsonDocument::fromJson(file.read(feedLimit)).object().value("source_commit").toString();
-    static const QRegularExpression full(QStringLiteral("\\A[0-9a-f]{40}\\z"));
-    return full.match(commit).hasMatch() ? commit : QString();
+    // The constructor reads it on the GUI thread, which parses no JSON
+    // (JsonParse.h): the one field is matched in the bytes instead.
+    static const QRegularExpression field(QStringLiteral("\"source_commit\"\\s*:\\s*\"([0-9a-f]{40})\""));
+    const auto found = field.match(QString::fromUtf8(file.read(feedLimit)));
+    return found.hasMatch() ? found.captured(1) : QString();
 }
 
 bool ForkUpdater::linuxSourceInstall(const QString &executable, const QString &home)

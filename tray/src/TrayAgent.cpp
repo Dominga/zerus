@@ -424,6 +424,10 @@ QStringList TrayAgent::jsonSettings()
     // Mapping identities are direct children, rather than per-child groups.
     QSettings settings; settings.beginGroup(QStringLiteral("pathMappings"));
     for (const auto &key : settings.childKeys()) keys << QStringLiteral("pathMappings/") + key;
+    settings.endGroup();
+    // #650 N2: a machine's other connection type, one key per machine.
+    settings.beginGroup(QStringLiteral("machines/otherTransport"));
+    for (const auto &key : settings.childKeys()) keys << QStringLiteral("machines/otherTransport/") + key;
     return keys;
 }
 

@@ -995,11 +995,11 @@ class NativeWindowsClaude(NativeAgent, host.HostCase):
         self.deliver(name, MESSAGES[0])
         conversation = self.ready(name)["conversation_id"]
         self.second_account()
-        team = self.json("team", "create", input=json.dumps({
+        team = self.json("team", "create", "--json", input=json.dumps({
             "request_id": str(uuid.uuid4()), "name": "Swap", "by": "human",
             "lead": {"id": "lead", "role": "Lead", "agent": "claude",
                      "session": {"name": name, "host": ""}}}))
-        receipt = self.json("team", "swap-member", input=json.dumps({
+        receipt = self.json("team", "swap-member", "--json", input=json.dumps({
             "request_id": str(uuid.uuid4()), "team": team["team"], "by": "human",
             "from_account": "native-claude", "to_account": "second", "provider": "claude"}))
         self.assertEqual(receipt["status"], "swapped", receipt)
@@ -1009,7 +1009,7 @@ class NativeWindowsClaude(NativeAgent, host.HostCase):
         self.assertEqual((switched["name"], switched["conversation_id"], switched["account_id"]),
                          (name, conversation, "second"))
         # The roster reads the real account from the session.
-        status = self.json("team", "status", input=json.dumps({"team": team["team"], "by": "human"}))
+        status = self.json("team", "status", "--json", input=json.dumps({"team": team["team"], "by": "human"}))
         lead = next(member for member in status["members"] if member["id"] == "lead")
         self.assertEqual(lead["session_account"], "second", lead)
         # The moved lead still answers in that conversation.

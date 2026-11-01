@@ -1,4 +1,5 @@
 #include "Settings.h"
+#include "ChildProcess.h"
 #include "ConversationSource.h"
 #include "WslFileOpenDialog.h"
 #include "SettingsJson.h"
@@ -2011,6 +2012,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             showNotice(tr("Folder rights fixed; starting the session again."),false);
             if(SessionCreationController::canResume(m_creations->operation(id)))m_creations->resume(id);else m_creations->check(id);
         });
+        ChildProcess::inheritStdioOnly(*process);
         process->start(m_client.executable(),{QStringLiteral("sandbox-folder"),QStringLiteral("grant"),folder,QStringLiteral("--json")});
     });
     connect(m_creationCheck,&QPushButton::clicked,this,[this]{m_creations->check(m_selectedCreation);emit refreshRequested();});

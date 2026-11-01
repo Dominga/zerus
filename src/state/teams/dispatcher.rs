@@ -1607,7 +1607,10 @@ fn merge_queue_tick(store: &mut Store, team_id: &str, now: f64) -> anyhow::Resul
     // A queued merge (including one rolled back for a retry) merges now. Host
     // classes and the machine config are read after a merge completes, never on
     // a tick that only waits for test results.
-    let has_queued = team.tasks.iter().any(|task| task.merge.as_ref().is_some_and(|entry| entry.state == "queued"));
+    let has_queued = team
+        .tasks
+        .iter()
+        .any(|task| task.merge.as_ref().is_some_and(|entry| matches!(entry.state.as_str(), "queued" | "waiting" | "reverting")));
     if !has_queued {
         return Ok(());
     }

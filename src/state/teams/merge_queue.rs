@@ -165,6 +165,7 @@ pub(crate) fn affected_requests(
     id: u32,
     prev: &str,
     merged: &str,
+    run_at: &str,
     now: f64,
     host: &[String],
     runners: &[super::test_runners::Runner],
@@ -220,7 +221,7 @@ pub(crate) fn affected_requests(
             suite: run.provider.clone(),
             task: Some(id),
             targets: run.targets.clone(),
-            commit: merged.to_owned(),
+            commit: run_at.to_owned(),
             // Never reused: the merge queue measures the merged commit.
             input_hash: String::new(),
             asked_by: "merge queue".into(),
@@ -265,6 +266,19 @@ pub(crate) fn step_with<F>(
 where
     F: FnOnce() -> anyhow::Result<(Vec<String>, Vec<super::test_runners::Runner>)>,
 {
+    for task in &mut team.tasks {
+        if let Some(entry) = task.merge.as_mut() {
+            if entry.state == "waiting" || entry.state == "reverting" {
+                entry.state = "queued".into();
+                if entry.note.is_empty() {
+                    entry.note = "A saved waiting merge was requeued for the current rule".into();
+                }
+                entry.retry = false;
+                entry.requests.clear();
+                entry.not_run.clear();
+            }
+        }
+    }
     if let Some(id) = team.tasks.iter().find(|task| task.merge.as_ref().is_some_and(|entry| entry.state == "testing")).map(|task| task.id) {
         let entry = team.task(id).and_then(|task| task.merge.clone()).unwrap_or_default();
         let mut results = Vec::new();
@@ -317,41 +331,22 @@ where
     };
     let mut entry = team.task(id).and_then(|task| task.merge.clone()).unwrap_or_default();
     let (head, map) = retry_stamps(team);
+    if !entry.merged.is_empty() {
+        let reachable = ancestry(&team.folder, &entry.merged);
+        if reachable != Ancestry::No {
+            return resolve_reachable(team, database, id, entry, &head, reachable, now, events, affected_hosts);
+        }
+        // A hand reset or revert removed the merge: the commit can be merged again.
+        if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
+            found.note.clear();
+            found.merged.clear();
+            found.prev.clear();
+            found.retry = false;
+        }
+        entry = team.task(id).and_then(|task| task.merge.clone()).unwrap_or_default();
+    }
     if !entry.note.is_empty() && !entry.retry && !entry.wait_head.is_empty() && entry.wait_head == head && entry.wait_map == map {
         return Ok(false);
-    }
-    if !entry.note.is_empty() {
-        if !entry.merged.is_empty() && head != entry.merged {
-            match ancestry(&team.folder, &entry.merged) {
-                Ancestry::No => {
-                    // The lead reset by hand: the commit can be merged again.
-                    if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
-                        found.note.clear();
-                        found.merged.clear();
-                        found.prev.clear();
-                        found.retry = false;
-                    }
-                    entry = team.task(id).and_then(|task| task.merge.clone()).unwrap_or_default();
-                }
-                Ancestry::Yes => {
-                    let reason = format!(
-                        "The lead branch moved and the merge {} could not be rolled back; revert it before retrying",
-                        entry.merged
-                    );
-                    return_to_author(team, id, &reason, events);
-                    events.push(Event::new("merge_rollback_blocked", json!({"task":id,"reason":reason})));
-                    return Ok(true);
-                }
-                Ancestry::Unknown => {
-                    let reason = format!(
-                        "git could not tell whether the merge {} is in the lead branch; the merge waits: {}",
-                        entry.merged,
-                        git_text(&team.folder, &["rev-parse", "HEAD"]).unwrap_or_else(|| "HEAD was not read".into())
-                    );
-                    return Ok(set_queue_note(team, id, &reason, "merge_rollback_blocked", events));
-                }
-            }
-        }
     }
     if entry.retry {
         if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
@@ -403,7 +398,7 @@ where
                         return requeue_after_error(team, id, &prev, &merged, &reason, false, events);
                     }
                 };
-                match affected_requests(team, id, &prev, &merged, now, &host, &runners) {
+                match affected_requests(team, id, &prev, &merged, &merged, now, &host, &runners) {
                     Ok(affected) => affected,
                     Err(error) => {
                         let reason = format!("The affected tests could not be selected: {error}");
@@ -493,6 +488,101 @@ fn set_queue_note(team: &mut Team, id: u32, reason: &str, kind: &'static str, ev
         events.push(Event::new(kind, json!({"task":id,"reason":reason})));
     }
     true
+}
+
+/// An untested merge still reachable from HEAD: never merge it again. Try the
+/// rollback while HEAD is still that merge; once HEAD moved, run the recorded
+/// prev..merged tests on HEAD. A successful run keeps the merge normally; a
+/// selection error returns the task and records the open range.
+fn resolve_reachable<F>(
+    team: &mut Team,
+    database: &TestStore,
+    id: u32,
+    entry: MergeEntry,
+    head: &str,
+    reachable: Ancestry,
+    now: f64,
+    events: &mut Vec<Event>,
+    affected_hosts: F,
+) -> anyhow::Result<bool>
+where
+    F: FnOnce() -> anyhow::Result<(Vec<String>, Vec<super::test_runners::Runner>)>,
+{
+    if head == entry.merged {
+        return match roll_back(&team.folder, &entry) {
+            Rollback::Done => {
+                let head = git_text(&team.folder, &["rev-parse", "HEAD"]).unwrap_or_default();
+                let map = tests_stamp(team);
+                if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
+                    found.state = "queued".into();
+                    found.note = "The merge was rolled back after its tests could not be selected; retry after a change or the lead's action.".into();
+                    found.wait_head = head.clone();
+                    found.wait_map = map;
+                    found.retry = false;
+                    found.requests.clear();
+                    found.not_run.clear();
+                    found.prev = head;
+                    found.merged.clear();
+                }
+                events.push(Event::new("merge_requeued", json!({"task":id,"reason":"rolled back"})));
+                Ok(true)
+            }
+            Rollback::Failed(note) => {
+                let reason = format!("The merge could not be rolled back: {note}");
+                Ok(set_queue_note(team, id, &reason, "merge_rollback_blocked", events))
+            }
+        };
+    }
+    if reachable == Ancestry::Unknown {
+        let reason = format!("git could not tell whether the merge {} is in the lead branch; the merge waits: {head}", entry.merged);
+        return Ok(set_queue_note(team, id, &reason, "merge_rollback_blocked", events));
+    }
+    let (host, runners) = match affected_hosts() {
+        Ok(pair) => pair,
+        Err(error) => {
+            let reason = format!("The test runners could not be read: {error}; the merge waits on HEAD {head}");
+            return Ok(set_queue_note(team, id, &reason, "merge_rollback_blocked", events));
+        }
+    };
+    let affected = match affected_requests(team, id, &entry.prev, &entry.merged, head, now, &host, &runners) {
+        Ok(affected) => affected,
+        Err(error) => {
+            let reason = format!("The affected tests could not be selected: {error}");
+            return_to_author(team, id, &reason, events);
+            events.push(Event::new("merge_affected_failed", json!({"task":id,"reason":reason})));
+            return Ok(true);
+        }
+    };
+    for request in &affected.requests {
+        database.enqueue(request)?;
+    }
+    events.push(Event::new(
+        "merged",
+        json!({"task":id,"prev":entry.prev,"merged":entry.merged,"tests":affected.requests.len(),"not_run":affected.not_run.clone()}),
+    ));
+    if !affected.not_run.is_empty() {
+        events.push(Event::new("merge_not_run", json!({"task":id,"suites":affected.not_run.clone()})));
+    }
+    if affected.requests.is_empty() {
+        keep(
+            team,
+            id,
+            &MergeEntry { prev: entry.prev, merged: entry.merged, not_run: affected.not_run, ..entry },
+            Vec::new(),
+            now,
+            events,
+        )?;
+    } else if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
+        found.state = "testing".into();
+        found.note.clear();
+        found.retry = false;
+        found.wait_head.clear();
+        found.wait_map.clear();
+        found.selection_failed = 0;
+        found.requests = affected.requests.iter().map(|request| request.id.clone()).collect();
+        found.not_run = affected.not_run;
+    }
+    Ok(true)
 }
 
 /// A merge that could not select its tests never stays in the lead branch:
@@ -697,9 +787,32 @@ fn roll_back(lead: &str, entry: &MergeEntry) -> Rollback {
     }
 }
 
+/// Whether an entry still names a merge reachable from HEAD (or git cannot say).
+pub(crate) fn merge_still_reachable(team: &Team, id: u32) -> bool {
+    let Some(entry) = team.task(id).and_then(|task| task.merge.as_ref()) else { return false };
+    !entry.merged.is_empty() && ancestry(&team.folder, &entry.merged) != Ancestry::No
+}
+
+/// Keep a returned task's untested merge range open for the phase build.
+fn record_untested_range(team: &mut Team, id: u32, entry: &MergeEntry, events: &mut Vec<Event>) {
+    if entry.merged.is_empty() || entry.prev.is_empty() || ancestry(&team.folder, &entry.merged) == Ancestry::No {
+        return;
+    }
+    let suite = format!("merge-{id}");
+    let message = format!(
+        "not run here: {suite} runs on all; the merge of {} was not tested on {}",
+        entry.commit, entry.merged
+    );
+    team.merge_not_run.insert(suite, OpenNotRun { since: entry.prev.clone(), message });
+    guard_not_run(team, events);
+}
+
 /// The task goes back to its author with why: its report is rejected by Zerus
 /// and it waits to be handed out to the same member again.
 pub(crate) fn return_to_author(team: &mut Team, id: u32, reason: &str, events: &mut Vec<Event>) {
+    if let Some(entry) = team.task(id).and_then(|task| task.merge.clone()) {
+        record_untested_range(team, id, &entry, events);
+    }
     let Some(task) = team.task_mut(id) else { return };
     let author = task.merge.take().map(|entry| entry.author).unwrap_or_else(|| task.assignee.clone());
     if let Some(attempt) = task.attempts.iter_mut().rev().find(|attempt| attempt.state == AttemptState::Reported) {

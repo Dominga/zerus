@@ -147,7 +147,12 @@ fn all_items(team: &Team) -> Vec<Item> {
     // the runner/tests map or to retry it.
     if active {
         for task in &team.tasks {
-            let Some(entry) = task.merge.as_ref().filter(|entry| entry.state == "queued" && !entry.note.is_empty()) else { continue };
+            let Some(entry) = task.merge.as_ref().filter(|entry| {
+                entry.state == "queued"
+                    && !entry.note.is_empty()
+                    && entry.note != "the lead's folder has uncommitted changes"
+                    && !entry.note.starts_with("the lead's folder has uncommitted changes")
+            }) else { continue };
             let next = if entry.note.contains("could not be rolled back") || entry.note.contains("lead branch moved") {
                 "The lead branch moved and the merge could not be rolled back; revert it, then retry or reject."
             } else if entry.note.contains("test runners could not be read") {

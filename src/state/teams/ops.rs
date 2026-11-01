@@ -4582,6 +4582,9 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     // for the lead branch; the queue's own accept (merged) decides it.
     let merged = input["merged"].as_bool() == Some(true);
     let queue = if accept && !merged { super::merge_queue::entry(team, id, &label, human, &reason) } else { None };
+    if !accept && !merged && super::merge_queue::merge_still_reachable(team, id) {
+        bail!("Task #{id}: the merge is still in the lead branch; retry, or revert it by hand");
+    }
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!(task.decided_by == Some(Decider::Human) && task.status.finished()), "You already decided task #{id}");
     if task.merge.as_ref().is_some_and(|entry| entry.state == "testing") && !merged {
@@ -4807,13 +4810,16 @@ fn retry(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>)
     let assignee = team.task(id).map(|task| task.assignee.clone()).unwrap_or_default();
     ensure!(actor.reviews(team, &assignee), "Only the lead or you retry tasks");
     let label = actor.label(team);
+    let reachable = super::merge_queue::merge_still_reachable(team, id);
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!task.status.finished() && task.status != TaskStatus::Draft, "Task #{id} cannot be retried now");
     if task.merge.as_ref().is_some_and(|entry| entry.state == "testing") {
         bail!("Task #{id} is merged into the lead branch and its tests run; wait for the merge queue's result");
     }
-    if let Some(entry) = task.merge.as_mut().filter(|entry| entry.state == "queued" && !entry.note.is_empty()) {
-        entry.retry = true;
+    if reachable || task.merge.as_ref().is_some_and(|entry| entry.state == "queued" && !entry.note.is_empty()) {
+        if let Some(entry) = task.merge.as_mut() {
+            entry.retry = true;
+        }
         events.push(Event::new("merge_retry_requested", json!({"by":label,"task":id})));
         return Ok(json!({"status":"merge_retry","task":id}));
     }
@@ -4843,6 +4849,9 @@ fn cancel(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you cancel tasks");
     subteam_stop_choice(input, team.task(id).context("Unknown task")?)?;
     let label = actor.label(team);
+    if super::merge_queue::merge_still_reachable(team, id) {
+        bail!("Task #{id}: the merge is still in the lead branch; retry, or revert it by hand");
+    }
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!task.status.finished(), "Task #{id} is already decided");
     let merge_state = task.merge.as_ref().map(|entry| entry.state.clone());

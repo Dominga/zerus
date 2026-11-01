@@ -5929,17 +5929,22 @@ folder are decided at once as before.
   reaches `cmd /D /S /C` as one unescaped string, so a provider command that
   quotes its folder (`cd /d "tests" && ...`) runs as written; Linux and macOS
   keep `sh -c`.
-- A merge never stays in the lead branch untested. If selecting its tests or
-  reading the runner config fails after the merge and HEAD is still that merge,
-  the queue rolls it back at once and puts the entry back to `queued` with the
-  reason; it retries only when the lead branch HEAD or the tests map changed, or
-  when the lead accepts or retries it. A selection error that persists (the
-  second attempt) returns the task to its author. If the rollback itself is
-  impossible because HEAD moved, the lead inbox gets one item and the queue
-  stops until the lead acts; its retry resumes it. Only a `merge-base
-  --is-ancestor` exit of 1 means the merge is no longer reachable; an unreadable
-  answer keeps the entry with the reason. Reject or cancel only clears a queued
-  entry; a task whose tests are already running waits for their result.
+- A merge never stays in the lead branch untested. An entry whose `merged` is
+  reachable from HEAD is never merged again: the queue first tries the rollback
+  while HEAD is that merge; once HEAD moved it selects and runs the recorded
+  `prev..merged` tests on HEAD. Success keeps the merge normally; a test or
+  selection failure returns the task and leaves that range open as an
+  `merge_not_run`-style entry for the phase build. If selecting the tests or
+  reading the runner config fails while HEAD is still the merge, the queue rolls
+  it back at once and requeues it with the reason; a rolled-back entry retries
+  only when HEAD or the tests map changed, or when the lead accepts or retries
+  it. A second selection error on such a retry returns the task. Reject and
+  cancel are refused with "the merge is still in the lead branch; retry, or
+  revert it by hand" while the merge is reachable; once a reset or revert makes
+  it unreachable they clear the entry. Only a `merge-base --is-ancestor` exit of
+  1 means not reachable; an unreadable answer keeps the entry with its reason.
+  Saved `waiting` and `reverting` entries become `queued` with a note. A Busy
+  note is not a lead inbox item.
 - Each kept merge advances `merge_tested` for the suites that ran (or when
   nothing was selected), and the bounded per-suite points keep a suite not run
   here at its own last run. A phase build checks

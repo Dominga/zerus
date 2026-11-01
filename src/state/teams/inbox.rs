@@ -150,17 +150,14 @@ fn all_items(team: &Team) -> Vec<Item> {
             let Some(entry) = task.merge.as_ref().filter(|entry| {
                 entry.state == "queued"
                     && !entry.note.is_empty()
-                    && entry.note != "the lead's folder has uncommitted changes"
-                    && !entry.note.starts_with("the lead's folder has uncommitted changes")
+                    && entry.wait_reason != super::model::MergeWaitReason::Busy
             }) else { continue };
-            let next = if entry.note.contains("could not be rolled back") || entry.note.contains("lead branch moved") {
-                "The lead branch moved and the merge could not be rolled back; revert it, then retry or reject."
-            } else if entry.note.contains("test runners could not be read") {
-                "Fix the runner or machine config, then accept or retry the merge."
-            } else if entry.note.contains("affected tests could not be selected") {
-                "Fix the tests map, then accept or retry the merge."
-            } else {
-                "Fix the cause, then accept or retry the merge."
+            let next = match entry.wait_reason {
+                super::model::MergeWaitReason::Rollback => "The merge could not be rolled back; revert it, then retry or reject.",
+                super::model::MergeWaitReason::Runners => "Fix the runner or machine config, then accept or retry the merge.",
+                super::model::MergeWaitReason::Selection => "Fix the tests map, then accept or retry the merge.",
+                super::model::MergeWaitReason::Ancestry => "Check the lead branch and git access, then accept or retry the merge.",
+                _ => "Fix the cause, then accept or retry the merge.",
             };
             items.push(Item {
                 subagents: Value::Null,

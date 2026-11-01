@@ -718,6 +718,32 @@ pub(crate) struct TestAlert {
     pub dismissed: bool,
 }
 
+/// A queue wait is independent of its human-readable diagnostic.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MergeWaitReason {
+    Busy,
+    Runners,
+    Selection,
+    Rollback,
+    Ancestry,
+    #[default]
+    #[serde(other)]
+    Other,
+}
+
+impl MergeWaitReason {
+    fn is_other(&self) -> bool { *self == Self::Other }
+}
+
+/// One task's untested merged range, never a synthetic test suite.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct MergeRange {
+    pub task: u32,
+    pub prev: String,
+    pub merged: String,
+}
+
 /// U62 (#760): an accepted report in the merge queue: the commit its author
 /// reported, and, while its tests run, the lead branch before and after.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -750,6 +776,14 @@ pub(crate) struct MergeEntry {
     /// Why it waits (the lead's folder has uncommitted changes).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
+    #[serde(default, skip_serializing_if = "MergeWaitReason::is_other")]
+    pub wait_reason: MergeWaitReason,
+    /// Open ranges included in these requests, closed only after they pass.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tested_ranges: Vec<MergeRange>,
+    /// Original starts of not-run suites selected by an older open range.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub not_run_since: std::collections::BTreeMap<String, String>,
     /// A queued retry's lead-branch HEAD and tests-map fingerprint when the
     /// merge failed: a later tick retries only when one changed.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -1467,6 +1501,12 @@ pub(crate) struct Task {
     /// its affected tests on the merged commit; the task stays undecided.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge: Option<MergeEntry>,
+    /// At most one open range per task; repeated returns widen it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub untested_merge: Option<MergeRange>,
+    /// A phase build's exact named ranges, bounded to one batch of 500 tasks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub build_merge_ranges: Vec<MergeRange>,
     #[serde(default)]
     pub status: TaskStatus,
     /// Held back from the dispatcher until the lead releases it (A5).

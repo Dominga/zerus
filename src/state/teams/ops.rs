@@ -2157,6 +2157,8 @@ fn add_build_task(team: &mut Team, phase: u32, by: &str, events: &mut Vec<Event>
         !team.tasks.iter().any(|task| task.phase == phase && task.phase_build && !task.status.finished()),
         "Phase {phase} already has a build task"
     );
+    super::merge_queue::migrate_legacy_ranges(team);
+    let build_merge_ranges = super::merge_queue::open_merge_ranges(team);
     let id = team.tasks.iter().map(|task| task.id).max().unwrap_or(0) + 1;
     let assignee = if team.member(&team.lead).is_some() { team.lead.clone() } else { String::new() };
     // U62 (#760): the merge queue tested its merged range already; the build
@@ -2189,6 +2191,9 @@ fn add_build_task(team: &mut Team, phase: u32, by: &str, events: &mut Vec<Event>
                     text.push_str(&format!(" Their own ranges: {}; check each to HEAD.", ranges.join(", ")));
                 }
             }
+            for range in &untested.merges {
+                text.push_str(&format!(" Also check the untested merge of task #{}, range {}..{}.", range.task, range.prev, range.merged));
+            }
             text
         }
         None => "Integrate the accepted work and run the build.".into(),
@@ -2201,6 +2206,7 @@ fn add_build_task(team: &mut Team, phase: u32, by: &str, events: &mut Vec<Event>
         phase,
         status: TaskStatus::Pending,
         phase_build: true,
+        build_merge_ranges,
         ..Default::default()
     });
     if let Some(at) = team.phases.iter().position(|record| record.n == phase) {
@@ -4581,15 +4587,15 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     // U62 (#760): with the merge queue on, an accept queues the author's commit
     // for the lead branch; the queue's own accept (merged) decides it.
     let merged = input["merged"].as_bool() == Some(true);
+    if !merged && team.task(id).and_then(|task| task.merge.as_ref()).is_some_and(|entry| entry.state == "testing") {
+        bail!("Task #{id} is merged into the lead branch and its tests run; wait for the merge queue's result");
+    }
     let queue = if accept && !merged { super::merge_queue::entry(team, id, &label, human, &reason) } else { None };
     if !accept && !merged && super::merge_queue::merge_still_reachable(team, id) {
         bail!("Task #{id}: the merge is still in the lead branch; retry, or revert it by hand");
     }
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!(task.decided_by == Some(Decider::Human) && task.status.finished()), "You already decided task #{id}");
-    if task.merge.as_ref().is_some_and(|entry| entry.state == "testing") && !merged {
-        bail!("Task #{id} is merged into the lead branch and its tests run; wait for the merge queue's result");
-    }
     if accept && !merged {
         if let Some(entry) = task.merge.as_mut().filter(|entry| entry.state == "queued" && !entry.note.is_empty()) {
             entry.retry = true;
@@ -4659,6 +4665,8 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     // the phase stays open.
     let phase_build = team.task(id).is_some_and(|task| task.phase_build);
     if accept && phase_build {
+        let ranges = std::mem::take(&mut team.task_mut(id).unwrap().build_merge_ranges);
+        super::merge_queue::close_merge_ranges(team, &ranges);
         team.last_build_at = Some(now());
         team.free_accepted_since_build = 0;
         if let Some(n) = team.free_close_pending.take() {
@@ -4849,6 +4857,9 @@ fn cancel(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you cancel tasks");
     subteam_stop_choice(input, team.task(id).context("Unknown task")?)?;
     let label = actor.label(team);
+    if team.task(id).and_then(|task| task.merge.as_ref()).is_some_and(|entry| entry.state == "testing") {
+        bail!("Task #{id} is merged into the lead branch and its tests run; wait for the merge queue's result");
+    }
     if super::merge_queue::merge_still_reachable(team, id) {
         bail!("Task #{id}: the merge is still in the lead branch; retry, or revert it by hand");
     }

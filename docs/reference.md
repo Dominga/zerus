@@ -5873,7 +5873,10 @@ folder are decided at once as before.
   test queue (forced, never reused) on the merged commit. All green keeps the
   merge and accepts the task; any failure resets the lead branch to `prev`
   (only while it is still the merge) and sends the task back with the failed
-  suites, their records and the end of the failing log.
+  suites, their records and the end of the failing log. On Windows each queued
+  command reaches `cmd /D /S /C` as one unescaped string, so a provider command
+  that quotes its folder (`cd /d "tests" && ...`) runs as written; Linux and
+  macOS keep `sh -c`.
 - Every kept merge moves `merge_tested` and the bounded `merge_log`; a phase
   build then checks only `hgs test affected MERGE_TESTED..HEAD`.
 - With the queue on, every hand-out tells the member to merge the lead branch

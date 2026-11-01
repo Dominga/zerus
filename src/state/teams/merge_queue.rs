@@ -414,6 +414,7 @@ pub(crate) fn return_to_author(team: &mut Team, id: u32, reason: &str, events: &
     let author = task.merge.take().map(|entry| entry.author).unwrap_or_else(|| task.assignee.clone());
     if let Some(attempt) = task.attempts.iter_mut().rev().find(|attempt| attempt.state == AttemptState::Reported) {
         attempt.state = AttemptState::Rejected;
+        attempt.interim = None;
     }
     task.status = TaskStatus::Pending;
     task.assignee = author;

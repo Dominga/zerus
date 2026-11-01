@@ -131,6 +131,12 @@ fn an_interim_report_keeps_the_attempt_open_and_does_not_reach_the_owner() {
                 && event["detail"]["text"] == "Half the API is in"),
             "{page}"
         );
+        // A final report closes the attempt and clears its interim item.
+        let final_report = call("report", json!({"task":1,"attempt":attempt,"text":"Done"})).unwrap();
+        assert_eq!(final_report["status"], "in_review", "{final_report}");
+        let after = stored();
+        assert!(!super::super::inbox::items(&after).iter().any(|item| item.kind == "interim_report"));
+        assert!(after.task(1).unwrap().attempts.iter().all(|attempt| attempt.interim.is_none()));
     });
 }
 

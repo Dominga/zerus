@@ -2713,6 +2713,7 @@ fn revoke(task: &mut Task, why: &str) -> Option<u32> {
     super::pipeline::revoke_runs(task, why);
     let attempt = task.open_attempt_mut()?;
     attempt.state = AttemptState::Revoked;
+    attempt.interim = None;
     attempt.error = why.to_owned();
     Some(attempt.n)
 }
@@ -3102,15 +3103,23 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
             let (n, member) = (attempt.n, attempt.member.clone());
             let attempt = task.attempts.iter_mut().find(|attempt| attempt.id == attempt_id).expect("the attempt was found");
             attempt.interim = Some(Report { text: body.clone(), at: now(), structured: structured.clone(), unstructured: structured.is_none(), ..Default::default() });
+            // An interim report is the member working again: clear the whole
+            // capture gate as WorkResumed does, so the next tick does not fire
+            // No report for the old turn.
+            attempt.turn_ended_at = None;
+            attempt.turn_reply.clear();
+            attempt.report_ready_at = None;
+            attempt.blocked_since = None;
             attempt.no_report = false;
             (n, member, task.title.clone())
         };
         let role = team.role_of(&member);
         let reviewer = team.reviewer_of(&member);
         let to = if reviewer.is_empty() { String::new() } else { team.role_of(&reviewer) };
+        let event_text = if body.chars().count() > 2000 { format!("{}...", body.chars().take(2000).collect::<String>()) } else { body.clone() };
         events.push(Event::new(
             "interim_report",
-            json!({"by":role,"to":to,"task":id,"title":title,"attempt":n,"text":body}),
+            json!({"by":role,"to":to,"task":id,"title":title,"attempt":n,"text":event_text}),
         ));
         return Ok(json!({"status":"interim","task":id,"attempt":n}));
     }
@@ -3316,6 +3325,7 @@ fn decide_check(team: &mut Team, id: u32, n: u32, events: &mut Vec<Event>) -> an
         // keeps its check result.
         if let Some(attempt) = task.attempts.iter_mut().rev().find(|attempt| attempt.state == AttemptState::Reported) {
             attempt.state = AttemptState::Rejected;
+            attempt.interim = None;
         }
         revoke(task, "check failed");
         task.status = TaskStatus::Pending;
@@ -4585,6 +4595,7 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     } else {
         if let Some(attempt) = task.attempts.iter_mut().rev().find(|a| a.state == AttemptState::Reported) {
             attempt.state = AttemptState::Rejected;
+            attempt.interim = None;
         }
         revoke(task, "rejected");
         task.status = if input["final"].as_bool() == Some(true) {

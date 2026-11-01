@@ -4,18 +4,28 @@ use super::support::*;
 #[test]
 fn a_dispatcher_config_error_names_the_waiting_merge() {
     let dir = tempfile::tempdir().unwrap();
+    let lead = dir.path().join("lead");
+    let marker = dir.path().join("marker.txt");
+    assert!(diverged_repo(&lead, &marker), "git could not build the test repository");
+    let head = String::from_utf8(
+        std::process::Command::new("git").arg("-C").arg(&lead).args(["rev-parse", "HEAD"]).output().unwrap().stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
     crate::state::with_test_state_root(dir.path(), || {
         let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
         let team = Team {
             id: "t".into(),
             name: "T".into(),
             lead: "lead".into(),
+            folder: lead.display().to_string(),
             status: TeamStatus::Running,
             tasks: vec![Task {
                 id: 1,
                 title: "Work".into(),
                 status: TaskStatus::Submitted,
-                merge: Some(MergeEntry { state: "waiting".into(), author: "dev".into(), prev: "p".into(), merged: "m".into(), note: "old".into(), ..Default::default() }),
+                merge: Some(MergeEntry { state: "waiting".into(), author: "dev".into(), prev: head.clone(), merged: head.clone(), note: "old".into(), ..Default::default() }),
                 ..Default::default()
             }],
             ..Default::default()
@@ -33,7 +43,7 @@ fn a_dispatcher_config_error_names_the_waiting_merge() {
         }
         result.unwrap();
         let saved = store.load("t").unwrap().unwrap();
-        let entry = saved.task(1).unwrap().merge.as_ref().unwrap();
+        let entry = saved.task(1).unwrap().merge.as_ref().expect("the waiting merge stays");
         assert_eq!(entry.state, "waiting");
         assert!(entry.note.contains("test runners could not be read"), "{}", entry.note);
         let page = store.events("t", None, 20).unwrap();

@@ -5934,7 +5934,10 @@ folder are decided at once as before.
   task to its author; a runner or config error keeps the entry waiting with its
   reason and blocks later merges, and the lead's inbox names it. The lead's
   accept or retry resumes the merge; the queue retries by itself only when the
-  lead branch HEAD or the tests map changed.
+  lead branch HEAD or the tests map changed. A hand reset is detected: the task
+  goes back to its author without being tested; after a `git revert`, reject
+  with `"reverted":true`. A cancelled task's merge entry is rolled back or
+  cleared so it never blocks the queue.
 - Each kept merge advances `merge_tested` for the suites that ran (or when
   nothing was selected), and the bounded per-suite points keep a suite not run
   here at its own last run. A phase build checks

@@ -148,6 +148,13 @@ fn all_items(team: &Team) -> Vec<Item> {
     if active {
         for task in &team.tasks {
             let Some(entry) = task.merge.as_ref().filter(|entry| entry.state == "waiting") else { continue };
+            let next = if entry.note.contains("test runners could not be read") {
+                "Fix the runner or machine config, then accept or retry the merge."
+            } else if entry.note.contains("affected tests could not be selected") {
+                "Fix the tests map, then accept or retry the merge."
+            } else {
+                "Revert the merge by hand and reject with \"reverted\":true, or retry after fixing the branch."
+            };
             items.push(Item {
                 subagents: Value::Null,
                 kind: "merge_waiting",
@@ -160,7 +167,7 @@ fn all_items(team: &Team) -> Vec<Item> {
                     "{} | hgs team retry --json",
                     json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id})
                 ),
-                detail: format!("{} Fix the tests map or the runner, then accept or retry the merge.", entry.note),
+                detail: format!("{} {next}", entry.note),
             });
         }
     }

@@ -722,7 +722,8 @@ pub(crate) struct TestAlert {
 /// reported, and, while its tests run, the lead branch before and after.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct MergeEntry {
-    /// queued, testing or waiting (the tests could not be selected yet).
+    /// queued, testing, waiting or reverting (a rejected/cancelled merge the
+    /// queue must reset).
     pub state: String,
     pub author: String,
     pub commit: String,

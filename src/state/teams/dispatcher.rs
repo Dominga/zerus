@@ -1609,7 +1609,8 @@ fn merge_queue_tick(store: &mut Store, team_id: &str, now: f64) -> anyhow::Resul
     // merge completes, never on a tick that only waits for test results.
     let has_queued = team.tasks.iter().any(|task| task.merge.as_ref().is_some_and(|entry| entry.state == "queued"));
     let has_waiting = team.tasks.iter().any(|task| task.merge.as_ref().is_some_and(|entry| entry.state == "waiting"));
-    if !has_queued && !has_waiting {
+    let has_reverting = team.tasks.iter().any(|task| task.merge.as_ref().is_some_and(|entry| entry.state == "reverting"));
+    if !has_queued && !has_waiting && !has_reverting {
         return Ok(());
     }
     change(store, team_id, |team, events| {

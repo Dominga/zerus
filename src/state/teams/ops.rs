@@ -4582,16 +4582,38 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     // for the lead branch; the queue's own accept (merged) decides it.
     let merged = input["merged"].as_bool() == Some(true);
     let queue = if accept && !merged { super::merge_queue::entry(team, id, &label, human, &reason) } else { None };
+    let mut keep_merge = false;
     if !accept && !merged && team.task(id).and_then(|task| task.merge.as_ref()).is_some_and(|entry| entry.state == "waiting") {
-        ensure!(
-            super::merge_queue::rollback_waiting(team, id),
-            "Task #{id} has a waiting merge and the lead branch moved; revert it by hand before rejecting"
-        );
+        let reverted = input["reverted"].as_bool() == Some(true);
+        if reverted {
+            ensure!(
+                matches!(actor, Actor::Human) || actor.is_lead(team),
+                "Only the lead or you can confirm a reverted merge"
+            );
+        }
+        match super::merge_queue::waiting_merge_state(team, id) {
+            Some(super::merge_queue::WaitingMerge::Current) => {
+                ensure!(!reverted, "Task #{id}'s merge is still the lead branch HEAD; retry it or reset it before rejecting");
+                keep_merge = true;
+            }
+            Some(super::merge_queue::WaitingMerge::Gone) => {}
+            Some(super::merge_queue::WaitingMerge::Moved) if reverted => {}
+            Some(super::merge_queue::WaitingMerge::Moved) => {
+                bail!("Task #{id}'s merge is still in the lead branch; revert it and reject with \"reverted\":true")
+            }
+            None => {}
+        }
     }
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!(task.decided_by == Some(Decider::Human) && task.status.finished()), "You already decided task #{id}");
     if task.merge.as_ref().is_some_and(|entry| entry.state == "testing") && !merged {
         bail!("Task #{id} is merged into the lead branch and its tests run; wait for the merge queue's result");
+    }
+    if keep_merge {
+        if let Some(entry) = task.merge.as_mut() {
+            entry.state = "reverting".into();
+            entry.retry = false;
+        }
     }
     if accept && !merged {
         if let Some(entry) = task.merge.as_mut().filter(|entry| entry.state == "waiting") {
@@ -4620,8 +4642,11 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
         }
         return Ok(json!({"status":"merge_queued","task":id}));
     }
-    // A reject or a decision that skips the queue takes the task out of it.
-    task.merge = None;
+    // A reject or a decision that skips the queue takes the task out of it,
+    // unless the queue must first reset a reverted merge on its next tick.
+    if !keep_merge {
+        task.merge = None;
+    }
     let n = task.attempts.iter().rev().find(|a| a.state == AttemptState::Reported).map(|a| a.n);
     // N15: the lead's accept filed this report's findings already; the
     // owner's accept over it does not file them again.
@@ -4848,6 +4873,17 @@ fn cancel(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     let label = actor.label(team);
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!task.status.finished(), "Task #{id} is already decided");
+    let merge_state = task.merge.as_ref().map(|entry| entry.state.clone());
+    match merge_state.as_deref() {
+        Some("queued") => task.merge = None,
+        Some(state) if state != "reverting" => {
+            if let Some(entry) = task.merge.as_mut() {
+                entry.state = "reverting".into();
+                entry.retry = false;
+            }
+        }
+        _ => {}
+    }
     let revoked = revoke(task, "cancelled");
     let phase = task.phase;
     let phase_build = task.phase_build;

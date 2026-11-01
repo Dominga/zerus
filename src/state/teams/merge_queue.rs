@@ -265,6 +265,15 @@ pub(crate) fn step_with<F>(
 where
     F: FnOnce() -> anyhow::Result<(Vec<String>, Vec<super::test_runners::Runner>)>,
 {
+    if let Some(id) = team
+        .tasks
+        .iter()
+        .filter_map(|task| task.merge.as_ref().filter(|entry| entry.state == "reverting").map(|entry| (entry.at, task.id)))
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, id)| id)
+    {
+        return revert_entry(team, id, events);
+    }
     if let Some(id) = team.tasks.iter().find(|task| task.merge.as_ref().is_some_and(|entry| entry.state == "testing")).map(|task| task.id) {
         let entry = team.task(id).and_then(|task| task.merge.clone()).unwrap_or_default();
         let mut results = Vec::new();
@@ -399,6 +408,50 @@ where
     }
 }
 
+/// The queue tick resolves a rejected or cancelled merge: reset the lead branch
+/// when it is still the merge; clear the entry when the merge is already gone.
+fn revert_entry(team: &mut Team, id: u32, events: &mut Vec<Event>) -> anyhow::Result<bool> {
+    let entry = team.task(id).and_then(|task| task.merge.clone()).unwrap_or_default();
+    let clear = |team: &mut Team, events: &mut Vec<Event>, reason: &str| {
+        if let Some(task) = team.task_mut(id) {
+            task.merge = None;
+        }
+        events.push(Event::new("merge_reverted", json!({"task":id,"reason":reason})));
+    };
+    if entry.merged.is_empty() || !is_ancestor(&team.folder, &entry.merged) {
+        clear(team, events, "the merge was no longer in the lead branch");
+        return Ok(true);
+    }
+    let head = git_text(&team.folder, &["rev-parse", "HEAD"]).unwrap_or_default();
+    if head == entry.merged {
+        return match roll_back(&team.folder, &entry) {
+            Rollback::Done => {
+                clear(team, events, "the merge was rolled back");
+                Ok(true)
+            }
+            Rollback::Failed(note) => {
+                let reason = format!("The merge could not be rolled back: {note}");
+                if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
+                    found.note = reason.clone();
+                }
+                events.push(Event::new("merge_revert_failed", json!({"task":id,"reason":reason})));
+                Ok(true)
+            }
+        };
+    }
+    // The branch moved; a cancelled task no longer blocks the queue.
+    if team.task(id).is_some_and(|task| task.status == TaskStatus::Cancelled) {
+        clear(team, events, "the merge stays in the lead branch; the cancelled task no longer blocks the queue");
+        return Ok(true);
+    }
+    let reason = format!("The lead branch moved since; revert {} by hand and reject with \"reverted\":true", entry.merged);
+    if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
+        found.note = reason.clone();
+    }
+    events.push(Event::new("merge_revert_failed", json!({"task":id,"reason":reason})));
+    Ok(true)
+}
+
 /// A merge kept in the lead branch whose affected tests could not be selected:
 /// retry the selection from its recorded range without merging again. A broken
 /// test map rolls the merge back and returns the task; a runner error keeps the
@@ -415,6 +468,12 @@ where
     F: FnOnce() -> anyhow::Result<(Vec<String>, Vec<super::test_runners::Runner>)>,
 {
     let entry = team.task(id).and_then(|task| task.merge.clone()).unwrap_or_default();
+    if !is_ancestor(&team.folder, &entry.merged) {
+        let reason = "The merge is no longer in the lead branch; return it to its author.";
+        return_to_author(team, id, reason, events);
+        events.push(Event::new("merge_reverted", json!({"task":id,"reason":reason})));
+        return Ok(true);
+    }
     if entry.prev.is_empty() || entry.merged.is_empty() {
         return Ok(update_wait_note(team, id, "The waiting merge has no recorded range to retry", "merge_affected_failed", events));
     }
@@ -649,6 +708,38 @@ impl Rollback {
     }
 }
 
+/// Whether `commit` is reachable from the lead branch's HEAD.
+fn is_ancestor(folder: &str, commit: &str) -> bool {
+    !commit.is_empty() && git(folder, &["merge-base", "--is-ancestor", commit, "HEAD"]).exit == Some(0)
+}
+
+/// Where a waiting merge stands relative to the lead branch.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum WaitingMerge {
+    /// HEAD is the merge commit: it can still be rolled back.
+    Current,
+    /// HEAD moved but still contains the merge (a later commit or a revert).
+    Moved,
+    /// The merge is no longer reachable (reset by hand).
+    Gone,
+}
+
+/// The lead branch state a waiting merge is in, if it still waits.
+pub(crate) fn waiting_merge_state(team: &Team, id: u32) -> Option<WaitingMerge> {
+    let entry = team.task(id).and_then(|task| task.merge.clone()).filter(|entry| entry.state == "waiting")?;
+    let head = git_text(&team.folder, &["rev-parse", "HEAD"])?;
+    if head.is_empty() {
+        return None;
+    }
+    if head == entry.merged {
+        Some(WaitingMerge::Current)
+    } else if is_ancestor(&team.folder, &entry.merged) {
+        Some(WaitingMerge::Moved)
+    } else {
+        Some(WaitingMerge::Gone)
+    }
+}
+
 /// Resets the lead branch to before the merge, when it is still the merge.
 fn roll_back(lead: &str, entry: &MergeEntry) -> Rollback {
     match git_text(lead, &["rev-parse", "HEAD"]) {
@@ -669,6 +760,10 @@ pub(crate) fn rollback_waiting(team: &Team, id: u32) -> bool {
     let Some(entry) = team.task(id).and_then(|task| task.merge.clone()).filter(|entry| entry.state == "waiting") else {
         return true;
     };
+    // A hand reset already removed the merge: nothing to undo.
+    if !is_ancestor(&team.folder, &entry.merged) {
+        return true;
+    }
     matches!(roll_back(&team.folder, &entry), Rollback::Done)
 }
 

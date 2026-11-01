@@ -493,10 +493,12 @@ namespace {
 // that follows a timeout kill() must not reach onFailed() again (--selftest leaves
 // main() on the first failure).
 // Why a call failed, or empty when it succeeded.
-QString failureDetail(const QString &hgs, const ProcessRunner::Result &result)
+QString failureDetail(const QString &hgs, const ProcessRunner::Result &result, bool messageStartup = false)
 {
     if (result.outcome == ProcessRunner::Result::TimedOut)
         return QStringLiteral("timed out");
+    if (result.outcome == ProcessRunner::Result::FailedToStart && messageStartup)
+        return HgsClient::tr("Cannot start hgs: %1").arg(result.errorString);
     if (result.outcome == ProcessRunner::Result::FailedToStart)
         return QStringLiteral("cannot start '%1': %2").arg(hgs, result.errorString);
     // hgs всегда возвращает 0 для "спящего пира" — ненулевой код или CrashExit
@@ -511,12 +513,12 @@ QString failureDetail(const QString &hgs, const ProcessRunner::Result &result)
 void runHgsDirect(const QString &hgs, const QStringList &args, int timeoutMs, QObject *parent,
             const std::function<void(const QByteArray &)> &onFinished,
             const std::function<void(const QString &, const QString &)> &onFailed,
-            const QByteArray &input = {})
+            const QByteArray &input = {}, bool messageStartup = false)
 {
     auto request = processRequest(hgs, args); request.timeoutMs = timeoutMs;
     if (!input.isEmpty()) request.input = input;
-    ProcessRunner::run(std::move(request), parent, [hgs, args, onFinished, onFailed](const ProcessRunner::Result &result) {
-        if (const auto detail = failureDetail(hgs, result); !detail.isEmpty())
+    ProcessRunner::run(std::move(request), parent, [hgs, args, onFinished, onFailed, messageStartup](const ProcessRunner::Result &result) {
+        if (const auto detail = failureDetail(hgs, result, messageStartup); !detail.isEmpty())
             return onFailed(hgs + QLatin1Char(' ') + args.join(QLatin1Char(' ')), detail);
         onFinished(result.standardOutput);
     });
@@ -526,15 +528,15 @@ void runHgsDirect(const QString &hgs, const QStringList &args, int timeoutMs, QO
 // (ProcessRunner.h); done(value) or onFailed then runs on parent's thread.
 template <typename Parse, typename Done>
 void runHgsParsedDirect(const QString &hgs, const QStringList &args, int timeoutMs, QObject *parent, Parse parse, Done done,
-                        const std::function<void(const QString &, const QString &)> &onFailed, const QByteArray &input = {})
+                        const std::function<void(const QString &, const QString &)> &onFailed, const QByteArray &input = {}, bool messageStartup = false)
 {
     using Value = std::decay_t<std::invoke_result_t<Parse &, const QByteArray &>>;
     struct Reply { QString detail; Value value{}; };
     auto request = processRequest(hgs, args); request.timeoutMs = timeoutMs;
     if (!input.isEmpty()) request.input = input;
     ProcessRunner::run(std::move(request), parent,
-        [hgs, parse = std::move(parse)](ProcessRunner::Result result) mutable {
-            Reply reply; reply.detail = failureDetail(hgs, result);
+        [hgs, parse = std::move(parse), messageStartup](ProcessRunner::Result result) mutable {
+            Reply reply; reply.detail = failureDetail(hgs, result, messageStartup);
             if (reply.detail.isEmpty()) reply.value = parse(result.standardOutput);
             return reply;
         },
@@ -592,13 +594,14 @@ IronRules::Transport HgsClient::rulesTransport()
         QStringList args{"rules", op, "--json"};
         if (!destination.isEmpty()) args.prepend('@' + destination);
         QStringList help{"--help"}; if (!destination.isEmpty()) help.prepend('@' + destination);
-        runHgs(guard->m_hgs, help, 15000, guard, [guard, args, payload, done](const QByteArray &help) {
+        // Rules preparation is part of sending; preserve its startup error contract.
+        runHgsDirect(guard->m_hgs, help, 15000, guard, [guard, args, payload, done](const QByteArray &help) {
             if (!guard) return;
             if (!help.contains("iron-rules-v1")) { done({{"unsupported", true}}, {}); return; }
-            runHgsParsed(guard->m_hgs, args, 30000, guard, parseObject,
+            runHgsParsedDirect(guard->m_hgs, args, 30000, guard, parseObject,
                 [done](const ObjectReply &reply) { done(reply.object, reply.ok() ? QString() : QObject::tr("Invalid iron rules response.")); },
-                [done](const QString &, const QString &error) { done({}, error); }, QJsonDocument(payload).toJson(QJsonDocument::Compact));
-        }, [done](const QString &, const QString &error) { done({}, error); });
+                [done](const QString &, const QString &error) { done({}, error); }, QJsonDocument(payload).toJson(QJsonDocument::Compact), true);
+        }, [done](const QString &, const QString &error) { done({}, error); }, {}, true);
     };
 }
 

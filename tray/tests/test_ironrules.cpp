@@ -114,12 +114,16 @@ private slots:
     void panelAddsAndRemovesThroughTheActualRustCli()
     {
         QTemporaryDir isolated;
+        auto binary = qEnvironmentVariable("ZERUS_TEST_HGS");
+        if (binary.isEmpty()) {
 #ifdef Q_OS_WIN
-        const auto binary=QDir(QCoreApplication::applicationDirPath()).absoluteFilePath("../../../target/debug/hgs.exe");
+            binary = QDir(QCoreApplication::applicationDirPath()).absoluteFilePath("../../../target/debug/hgs.exe");
 #else
-        const auto binary=QDir(QCoreApplication::applicationDirPath()).absoluteFilePath("../../../target/debug/hgs");
+            binary = QDir(QCoreApplication::applicationDirPath()).absoluteFilePath("../../../target/debug/hgs");
 #endif
-        QVERIFY2(QFileInfo::exists(binary),qPrintable(binary));
+        }
+        if (!QFileInfo(binary).isFile() || !QFileInfo(binary).isExecutable())
+            QSKIP(qPrintable(QString("Rust CLI unavailable at %1; set ZERUS_TEST_HGS to a built hgs executable to run this integration test.").arg(binary)));
         IronRulesPanel panel;
         panel.setBackend([&](const QString &,const QString &op,QJsonObject input,IronRules::Reply done) {
             QProcess process; auto env=QProcessEnvironment::systemEnvironment();

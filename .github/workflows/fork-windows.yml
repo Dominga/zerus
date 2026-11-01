@@ -138,7 +138,11 @@ jobs:
         # the log names every suite that needed it.
         env:
           ZERUS_QT_RETRY: "2"
-        run: bash scripts/ci/gui.sh test </dev/null
+          # The Rust step built this CLI; do not depend on a debug build or Qt layout.
+          ZERUS_TEST_HGS: ${{ github.workspace }}/target/release/hgs.exe
+        run: |
+          test -f "$(cygpath -u "$ZERUS_TEST_HGS")"
+          bash scripts/ci/gui.sh test </dev/null
       - name: Portable zip from the tested executables
         run: |
           python scripts/package-windows.py --cli target/release/hgs.exe --gui .ci-build/gui/hgs-tray.exe \

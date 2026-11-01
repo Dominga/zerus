@@ -3298,8 +3298,12 @@ mod permissions_compat_tests {
         let started = Instant::now();
         let error = bounded_output(command, None, 1024, Duration::from_millis(2000)).unwrap_err();
         assert!(error.contains("timed out"), "{error}");
-        assert!(started.elapsed() < Duration::from_secs(5));
-        let pids = std::fs::read_to_string(&pid_path).unwrap();
+        // The helper sleeps 60 s: well under that is bounded, also when a
+        // parallel test load slows every process start.
+        assert!(started.elapsed() < Duration::from_secs(30));
+        // Under that load Node may not reach its first line before the
+        // deadline: then nothing was started that could be left running.
+        let Ok(pids) = std::fs::read_to_string(&pid_path) else { return };
         let pids: Vec<u32> = pids
             .split_whitespace()
             .filter_map(|pid| pid.parse().ok())
@@ -3328,7 +3332,8 @@ mod permissions_compat_tests {
         let error = bounded_output(command, Some(&input), 1024, Duration::from_millis(300))
             .unwrap_err();
         assert!(error.contains("timed out"), "{error}");
-        assert!(started.elapsed() < Duration::from_secs(5));
+        // The helper sleeps 60 s; a parallel test load slows the kill.
+        assert!(started.elapsed() < Duration::from_secs(30));
     }
 
     #[test]

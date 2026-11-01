@@ -5929,6 +5929,12 @@ folder are decided at once as before.
   reaches `cmd /D /S /C` as one unescaped string, so a provider command that
   quotes its folder (`cd /d "tests" && ...`) runs as written; Linux and macOS
   keep `sh -c`.
+- A merge whose affected tests cannot be selected waits instead of being kept:
+  a selection error (a broken tests map) rolls the merge back and returns the
+  task to its author; a runner or config error keeps the entry waiting with its
+  reason and blocks later merges, and the lead's inbox names it. The lead's
+  accept or retry resumes the merge; the queue retries by itself only when the
+  lead branch HEAD or the tests map changed.
 - Each kept merge advances `merge_tested` for the suites that ran (or when
   nothing was selected), and the bounded per-suite points keep a suite not run
   here at its own last run. A phase build checks

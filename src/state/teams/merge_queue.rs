@@ -12,6 +12,7 @@ use super::model::{AttemptState, Decider, MergeEntry, MergeLog, OpenNotRun, Task
 use super::store::Event;
 use super::test_queue::{Request, TestStore};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -286,7 +287,7 @@ where
                 .find(|record| !matches!(record.status.as_str(), "passed" | "flaky" | "reused"))
                 .map(|record| record.excerpt.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"))
                 .unwrap_or_default();
-            let rolled = roll_back(&team.folder, &entry);
+            let rolled = roll_back(&team.folder, &entry).note();
             let mut not_run = entry.not_run.clone();
             for message in pending_not_run(team) {
                 push_not_run(&mut not_run, &message);
@@ -366,15 +367,7 @@ where
                     Ok(pair) => pair,
                     Err(error) => {
                         let reason = format!("The test runners could not be read: {error}; the merge waits");
-                        if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
-                            found.state = "waiting".into();
-                            found.prev = prev;
-                            found.merged = merged;
-                            found.note = reason.clone();
-                            found.requests.clear();
-                            found.not_run.clear();
-                        }
-                        events.push(Event::new("merge_config_failed", json!({"task":id,"reason":reason})));
+                        update_wait_note(team, id, &reason, "merge_config_failed", events);
                         return Ok(true);
                     }
                 };
@@ -425,6 +418,15 @@ where
     if entry.prev.is_empty() || entry.merged.is_empty() {
         return Ok(update_wait_note(team, id, "The waiting merge has no recorded range to retry", "merge_affected_failed", events));
     }
+    let (head, map) = wait_stamps(team);
+    if !entry.retry && !entry.wait_head.is_empty() && entry.wait_head == head && entry.wait_map == map {
+        return Ok(false);
+    }
+    if entry.retry {
+        if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
+            found.retry = false;
+        }
+    }
     let (host, runners) = match affected_hosts() {
         Ok(pair) => pair,
         Err(error) => {
@@ -471,28 +473,53 @@ fn selection_failed(
     events: &mut Vec<Event>,
 ) -> anyhow::Result<bool> {
     let rolled = roll_back(&team.folder, &MergeEntry { prev: prev.to_owned(), merged: merged.to_owned(), ..Default::default() });
-    if rolled == "The merge was rolled back." {
-        let reason = format!("The affected tests could not be selected: {error}. {rolled}");
-        return_to_author(team, id, &reason, events);
-        events.push(Event::new("merge_affected_failed", json!({"task":id,"reason":reason})));
-        Ok(true)
-    } else {
-        let reason = format!("The affected tests could not be selected: {error}. {rolled}");
-        Ok(update_wait_note(team, id, &reason, "merge_affected_failed", events))
+    match rolled {
+        Rollback::Done => {
+            let reason = format!("The affected tests could not be selected: {error}. {}", Rollback::Done.note());
+            return_to_author(team, id, &reason, events);
+            events.push(Event::new("merge_affected_failed", json!({"task":id,"reason":reason})));
+            Ok(true)
+        }
+        Rollback::Failed(note) => {
+            let reason = format!("The affected tests could not be selected: {error}. {note}");
+            Ok(update_wait_note(team, id, &reason, "merge_affected_failed", events))
+        }
     }
+}
+
+/// A stable fingerprint of the project's tests map and the team's override.
+fn tests_stamp(team: &Team) -> String {
+    let text = std::fs::read_to_string(Path::new(&team.folder).join(".zerus/tests.toml")).unwrap_or_default();
+    let settings = team.settings.tests.as_ref().map(|value| value.to_string()).unwrap_or_default();
+    let mut digest = Sha256::new();
+    digest.update(text.as_bytes());
+    digest.update(settings.as_bytes());
+    format!("{:x}", digest.finalize())
+}
+
+/// The lead branch HEAD and tests-map fingerprint a waiting merge remembers.
+fn wait_stamps(team: &Team) -> (String, String) {
+    (git_text(&team.folder, &["rev-parse", "HEAD"]).unwrap_or_default(), tests_stamp(team))
 }
 
 /// Store the wait reason once: the same reason on a later tick changes nothing.
 fn update_wait_note(team: &mut Team, id: u32, reason: &str, kind: &'static str, events: &mut Vec<Event>) -> bool {
+    let (head, map) = wait_stamps(team);
     let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) else { return false };
-    if found.state == "waiting" && found.note == reason {
+    if found.state == "waiting" && found.note == reason && found.wait_head == head && found.wait_map == map {
         return false;
     }
+    let announce = found.state != "waiting" || found.note != reason;
     found.state = "waiting".into();
     found.note = reason.to_owned();
+    found.wait_head = head;
+    found.wait_map = map;
+    found.retry = false;
     found.requests.clear();
     found.not_run.clear();
-    events.push(Event::new(kind, json!({"task":id,"reason":reason})));
+    if announce {
+        events.push(Event::new(kind, json!({"task":id,"reason":reason})));
+    }
     true
 }
 
@@ -515,16 +542,27 @@ fn trim_tested_suites(team: &mut Team) {
     }
 }
 
-/// The same bound for the open not-run map, oldest commit first.
-fn trim_not_run(team: &mut Team) {
-    while team.merge_not_run.len() > MERGE_SUITES {
-        let oldest = team
-            .merge_not_run
-            .iter()
-            .min_by_key(|(_, open)| team.merge_log.iter().position(|entry| entry.merged == open.since || entry.prev == open.since).unwrap_or(0))
-            .map(|(suite, _)| suite.clone());
-        let Some(oldest) = oldest else { break };
-        team.merge_not_run.remove(&oldest);
+/// The same bound for the open not-run map, without losing a range: past the
+/// bound the tested point stays at the oldest open range and the feed says so.
+fn guard_not_run(team: &mut Team, events: &mut Vec<Event>) {
+    if team.merge_not_run.len() <= MERGE_SUITES {
+        return;
+    }
+    let oldest = team
+        .merge_not_run
+        .iter()
+        .min_by_key(|(_, open)| team.merge_log.iter().position(|entry| entry.merged == open.since || entry.prev == open.since).unwrap_or(0))
+        .map(|(_, open)| open.since.clone());
+    if let Some(oldest) = oldest {
+        if !oldest.is_empty() {
+            team.merge_tested = oldest.clone();
+        }
+        if team.merge_not_run.len() == MERGE_SUITES + 1 {
+            events.push(Event::new(
+                "merge_not_run_overflow",
+                json!({"open":team.merge_not_run.len(),"tested":oldest}),
+            ));
+        }
     }
 }
 
@@ -576,7 +614,7 @@ fn keep(team: &mut Team, id: u32, entry: &MergeEntry, suites: Vec<String>, now: 
             open.insert(suite.to_owned(), OpenNotRun { since, message: message.clone() });
         }
         team.merge_not_run = open;
-        trim_not_run(team);
+        guard_not_run(team, events);
         team.merge_log.push(MergeLog { task: id, prev: entry.prev.clone(), merged: entry.merged.clone(), at: now, suites, not_run: remaining.clone() });
         let extra = team.merge_log.len().saturating_sub(50);
         team.merge_log.drain(0..extra);
@@ -595,18 +633,43 @@ fn keep(team: &mut Team, id: u32, entry: &MergeEntry, suites: Vec<String>, now: 
     Ok(())
 }
 
+/// Whether the lead branch was reset to before the merge.
+#[derive(Debug, PartialEq)]
+enum Rollback {
+    Done,
+    Failed(String),
+}
+
+impl Rollback {
+    fn note(&self) -> String {
+        match self {
+            Self::Done => "The merge was rolled back.".into(),
+            Self::Failed(note) => note.clone(),
+        }
+    }
+}
+
 /// Resets the lead branch to before the merge, when it is still the merge.
-fn roll_back(lead: &str, entry: &MergeEntry) -> String {
+fn roll_back(lead: &str, entry: &MergeEntry) -> Rollback {
     match git_text(lead, &["rev-parse", "HEAD"]) {
         Some(head) if head == entry.merged && !entry.prev.is_empty() => {
             if git(lead, &["reset", "--hard", "--quiet", &entry.prev]).exit == Some(0) {
-                "The merge was rolled back.".into()
+                Rollback::Done
             } else {
-                format!("Rolling the merge back failed; revert {} by hand.", entry.merged)
+                Rollback::Failed(format!("Rolling the merge back failed; revert {} by hand.", entry.merged))
             }
         }
-        _ => format!("The lead branch moved since; revert {} by hand.", entry.merged),
+        _ => Rollback::Failed(format!("The lead branch moved since; revert {} by hand.", entry.merged)),
     }
+}
+
+/// A lead reject over a waiting merge: reset the lead branch when it is still
+/// that merge. False when the branch moved and only a manual revert is safe.
+pub(crate) fn rollback_waiting(team: &Team, id: u32) -> bool {
+    let Some(entry) = team.task(id).and_then(|task| task.merge.clone()).filter(|entry| entry.state == "waiting") else {
+        return true;
+    };
+    matches!(roll_back(&team.folder, &entry), Rollback::Done)
 }
 
 /// The task goes back to its author with why: its report is rejected by Zerus

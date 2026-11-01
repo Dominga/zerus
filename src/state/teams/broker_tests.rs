@@ -400,11 +400,13 @@ fn a_shared_build_waits_for_the_others_edits_then_runs_in_the_folder_itself() {
     assert!(unready(root, &team, &dev).is_empty());
     assert!(unready(root, &team, &dev2).is_empty(), "dev's own build marked dev ready");
     crate::state::teams::templates::settings_override(Some(templates.path().join("templates.json")));
-    let second = run(&team, &dev, root, "build", &json!({}), &config, Duration::from_secs(60)).unwrap();
+    // The readiness checks above passed; with no ready window the second build
+    // must not wait at all (a bounded, timing-independent assertion).
+    let immediate = Config { ready_wait: Duration::ZERO, ..config.clone() };
+    crate::state::teams::templates::settings_override(Some(templates.path().join("templates.json")));
+    let second = run(&team, &dev, root, "build", &json!({}), &immediate, Duration::from_secs(60)).unwrap();
     crate::state::teams::templates::settings_override(None);
-    // The ready delay is a bounded wait, not a test of machine speed: what
-    // matters is that no other member's unfinished changes are included.
-    assert!(!second.tail.contains("included unfinished changes"), "{}", second.tail);
+    assert!(!second.tail.contains("waited") && !second.tail.contains("unfinished"), "{}", second.tail);
     // A later write by dev2 makes it unready again.
     std::thread::sleep(Duration::from_millis(1100));
     fs::write(root.join("src").join("b.c"), "int b(void) { return 3; }\n").unwrap();

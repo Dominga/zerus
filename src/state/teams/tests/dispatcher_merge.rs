@@ -46,10 +46,7 @@ fn a_waiting_merge_is_resolved_before_a_later_queued_merge() {
     let dir = tempfile::tempdir().unwrap();
     let lead = dir.path().join("lead");
     let marker = dir.path().join("marker.txt");
-    if !diverged_repo(&lead, &marker) {
-        eprintln!("git could not build the test repository; the sandbox blocks it");
-        return;
-    }
+    assert!(diverged_repo(&lead, &marker), "git could not build the test repository");
     std::fs::create_dir_all(lead.join(".zerus")).unwrap();
     std::fs::write(
         lead.join(".zerus/tests.toml"),

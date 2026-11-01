@@ -333,6 +333,12 @@ fn a_waiting_merge_retries_without_merging_again_and_blocks_later_merges() {
     step_with(&mut team, &database, 100.0, &mut events, || Err(anyhow::anyhow!("boom"))).unwrap();
     let merged = head(&repo);
     assert_eq!(team.task(1).unwrap().merge.as_ref().unwrap().state, "waiting");
+    let host = vec!["windows".to_owned()];
+    // Neither HEAD nor the tests map changed: a tick does not retry by itself.
+    assert!(!step_with(&mut team, &database, 100.5, &mut events, || Ok((host.clone(), Vec::new()))).unwrap());
+    assert_eq!(team.task(1).unwrap().merge.as_ref().unwrap().state, "waiting");
+    // The lead's retry resumes it even though HEAD and the tests map are unchanged.
+    team.task_mut(1).unwrap().merge.as_mut().unwrap().retry = true;
     // A second accepted task queues behind the waiting one.
     write(&repo.member, "b.txt", "two\n");
     run_git(&repo.member, &["add", "."]);
@@ -359,7 +365,6 @@ fn a_waiting_merge_retries_without_merging_again_and_blocks_later_merges() {
     assert_eq!(team.task(2).unwrap().merge.as_ref().unwrap().state, "queued");
     // The retry selects the first merge's tests without merging it again and
     // does not let the second merge pass it.
-    let host = vec!["windows".to_owned()];
     step_with(&mut team, &database, 101.0, &mut events, || Ok((host.clone(), Vec::new()))).unwrap();
     let first = team.task(1).unwrap().merge.as_ref().unwrap();
     assert_eq!(first.state, "testing");
@@ -415,6 +420,58 @@ fn an_open_not_run_suite_outlives_the_bounded_merge_log() {
     let untested = untested_since(&team).expect("the open suite outlives the 50-entry log");
     assert_eq!(untested.suites(), vec!["python"]);
     assert_eq!(untested.per_suite, vec![("python".to_owned(), "base".to_owned())]);
+}
+
+#[test]
+fn an_open_range_overflow_holds_the_tested_point_and_says_so() {
+    let mut team = Team::default();
+    team.merge_tested = "newer".into();
+    for i in 0..65 {
+        team.merge_not_run.insert(
+            format!("suite{i:02}"),
+            crate::state::teams::model::OpenNotRun { since: format!("s{i}"), message: format!("not run here: suite{i:02}") },
+        );
+    }
+    let mut events = Vec::new();
+    super::guard_not_run(&mut team, &mut events);
+    assert_eq!(team.merge_not_run.len(), 65, "no open range is silently evicted");
+    assert_eq!(team.merge_tested, "s0");
+    assert!(events.iter().any(|event| event.kind == "merge_not_run_overflow"), "{events:?}");
+}
+
+#[test]
+fn a_lead_accept_or_retry_resumes_a_waiting_merge() {
+    let mut team = Team {
+        id: "t".into(),
+        name: "T".into(),
+        lead: "lead".into(),
+        status: TeamStatus::Running,
+        members: vec![Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() }],
+        tasks: vec![Task {
+            id: 1,
+            title: "Waiting".into(),
+            assignee: "dev".into(),
+            status: TaskStatus::Submitted,
+            attempts: vec![Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Reported, ..Default::default() }],
+            merge: Some(MergeEntry { state: "waiting".into(), author: "dev".into(), prev: "p".into(), merged: "m".into(), note: "The tests map is broken".into(), ..Default::default() }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let items = crate::state::teams::inbox::items_for(&team, "lead");
+    let item = items.iter().find(|item| item.kind == "merge_waiting").expect("the lead sees the waiting merge");
+    assert!(item.command.contains("hgs team retry --json"), "{}", item.command);
+    let mut events = Vec::new();
+    let accepted = ops::apply(&mut team, "accept", &json!({"task":1}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+    assert_eq!(accepted["status"], "merge_retry");
+    assert!(team.task(1).unwrap().merge.as_ref().unwrap().retry);
+    assert_eq!(team.task(1).unwrap().status, TaskStatus::Submitted);
+    team.task_mut(1).unwrap().merge.as_mut().unwrap().retry = false;
+    let retried = ops::apply(&mut team, "retry", &json!({"task":1}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+    assert_eq!(retried["status"], "merge_retry");
+    assert!(team.task(1).unwrap().merge.as_ref().unwrap().retry);
+    assert_eq!(team.task(1).unwrap().status, TaskStatus::Submitted);
+    assert!(events.iter().any(|event| event.kind == "merge_retry_requested"));
 }
 
 #[test]

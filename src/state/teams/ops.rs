@@ -4582,10 +4582,23 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     // for the lead branch; the queue's own accept (merged) decides it.
     let merged = input["merged"].as_bool() == Some(true);
     let queue = if accept && !merged { super::merge_queue::entry(team, id, &label, human, &reason) } else { None };
+    if !accept && !merged && team.task(id).and_then(|task| task.merge.as_ref()).is_some_and(|entry| entry.state == "waiting") {
+        ensure!(
+            super::merge_queue::rollback_waiting(team, id),
+            "Task #{id} has a waiting merge and the lead branch moved; revert it by hand before rejecting"
+        );
+    }
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!(task.decided_by == Some(Decider::Human) && task.status.finished()), "You already decided task #{id}");
     if task.merge.as_ref().is_some_and(|entry| entry.state == "testing") && !merged {
         bail!("Task #{id} is merged into the lead branch and its tests run; wait for the merge queue's result");
+    }
+    if accept && !merged {
+        if let Some(entry) = task.merge.as_mut().filter(|entry| entry.state == "waiting") {
+            entry.retry = true;
+            events.push(Event::new("merge_retry_requested", json!({"by":label,"task":id})));
+            return Ok(json!({"status":"merge_retry","task":id}));
+        }
     }
     // #538 N1: accepting over an open stage names why, as skip-stage does.
     ensure!(!accept || !task.status.in_stage() || !reason.is_empty(), "Accepting task #{id} in a stage needs a reason");
@@ -4802,6 +4815,11 @@ fn retry(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>)
     let label = actor.label(team);
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!task.status.finished() && task.status != TaskStatus::Draft, "Task #{id} cannot be retried now");
+    if let Some(entry) = task.merge.as_mut().filter(|entry| entry.state == "waiting") {
+        entry.retry = true;
+        events.push(Event::new("merge_retry_requested", json!({"by":label,"task":id})));
+        return Ok(json!({"status":"merge_retry","task":id}));
+    }
     let revoked = revoke(task, "retried");
     task.status = TaskStatus::Pending;
     // Spec 0: the lead or the owner retries a refused or unconfirmed step.

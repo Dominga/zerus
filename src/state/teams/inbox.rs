@@ -18,7 +18,7 @@ const SUMMARY_CHARS: usize = 300;
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Item {
     /// `report`, `question`, `permission`, `lead_task`, `stalled`, `budget`,
-    /// `interim_report` or `task_waits` (spec 0: U45, U46, U48).
+    /// `interim_report`, `merge_waiting` or `task_waits` (spec 0: U45, U46, U48).
     pub kind: &'static str,
     pub key: String,
     pub task: Option<u32>,
@@ -143,6 +143,27 @@ fn all_items(team: &Team) -> Vec<Item> {
             subagents:Value::Null });
     }
 
+    // A merge that waits for its tests or its test map: the lead can accept or
+    // retry it once the map or the runner is fixed.
+    if active {
+        for task in &team.tasks {
+            let Some(entry) = task.merge.as_ref().filter(|entry| entry.state == "waiting") else { continue };
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "merge_waiting",
+                key: format!("merge_waiting:{}:{}", task.id, entry.merged),
+                task: Some(task.id),
+                member: team.name_of(&entry.author),
+                since: entry.at,
+                summary: summary(&format!("#{} merge waits: {}", task.id, entry.note)),
+                command: format!(
+                    "{} | hgs team retry --json",
+                    json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id})
+                ),
+                detail: format!("{} Fix the tests map or the runner, then accept or retry the merge.", entry.note),
+            });
+        }
+    }
     // A rework keeps its member indefinitely. Show the wait even when that
     // member has an approval or usage limit rather than a stored task wait.
     for task in team.tasks.iter().filter(|task| active && task.rework() && task.status == TaskStatus::Pending

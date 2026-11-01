@@ -402,8 +402,8 @@ fn a_shared_build_waits_for_the_others_edits_then_runs_in_the_folder_itself() {
     crate::state::teams::templates::settings_override(Some(templates.path().join("templates.json")));
     // The readiness checks above passed; with no ready window the second build
     // must not wait at all (a bounded, timing-independent assertion). A dev-
-    // owned file makes it a new build with its own timeline entry.
-    fs::write(root.join("src").join("dev.txt"), "dev\n").unwrap();
+    // owned tracked file makes it a new build with its own timeline entry.
+    fs::write(root.join("a.txt"), "dev changed\n").unwrap();
     let immediate = Config { ready_wait: Duration::ZERO, ..config.clone() };
     crate::state::teams::templates::settings_override(Some(templates.path().join("templates.json")));
     let second = run(&team, &dev, root, "build", &json!({}), &immediate, Duration::from_secs(60)).unwrap();

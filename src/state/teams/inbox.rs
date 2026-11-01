@@ -143,22 +143,24 @@ fn all_items(team: &Team) -> Vec<Item> {
             subagents:Value::Null });
     }
 
-    // A merge that waits for its tests or its test map: the lead can accept or
-    // retry it once the map or the runner is fixed.
+    // A queued merge that failed and was rolled back waits for the lead to fix
+    // the runner/tests map or to retry it.
     if active {
         for task in &team.tasks {
-            let Some(entry) = task.merge.as_ref().filter(|entry| entry.state == "waiting") else { continue };
-            let next = if entry.note.contains("test runners could not be read") {
+            let Some(entry) = task.merge.as_ref().filter(|entry| entry.state == "queued" && !entry.note.is_empty()) else { continue };
+            let next = if entry.note.contains("could not be rolled back") || entry.note.contains("lead branch moved") {
+                "The lead branch moved and the merge could not be rolled back; revert it, then retry or reject."
+            } else if entry.note.contains("test runners could not be read") {
                 "Fix the runner or machine config, then accept or retry the merge."
             } else if entry.note.contains("affected tests could not be selected") {
                 "Fix the tests map, then accept or retry the merge."
             } else {
-                "Revert the merge by hand and reject with \"reverted\":true, or retry after fixing the branch."
+                "Fix the cause, then accept or retry the merge."
             };
             items.push(Item {
                 subagents: Value::Null,
                 kind: "merge_waiting",
-                key: format!("merge_waiting:{}:{}", task.id, entry.merged),
+                key: format!("merge_waiting:{}:{}", task.id, entry.commit),
                 task: Some(task.id),
                 member: team.name_of(&entry.author),
                 since: entry.at,

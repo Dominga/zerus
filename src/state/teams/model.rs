@@ -722,8 +722,7 @@ pub(crate) struct TestAlert {
 /// reported, and, while its tests run, the lead branch before and after.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct MergeEntry {
-    /// queued, testing, waiting or reverting (a rejected/cancelled merge the
-    /// queue must reset).
+    /// queued or testing.
     pub state: String,
     pub author: String,
     pub commit: String,
@@ -751,16 +750,19 @@ pub(crate) struct MergeEntry {
     /// Why it waits (the lead's folder has uncommitted changes).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
-    /// A waiting merge's lead-branch HEAD and tests-map fingerprint when it
-    /// started waiting: a later tick retries only when one changed.
+    /// A queued retry's lead-branch HEAD and tests-map fingerprint when the
+    /// merge failed: a later tick retries only when one changed.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub wait_head: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub wait_map: String,
-    /// The lead's accept or retry asked to resume this waiting merge even when
+    /// The lead's accept or retry asked to resume this queued retry even when
     /// neither fingerprint changed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub retry: bool,
+    /// Consecutive test-selection failures; the second returns the task.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub selection_failed: u32,
 }
 
 /// U62 (#760): one merge the queue kept, with the range it tested.

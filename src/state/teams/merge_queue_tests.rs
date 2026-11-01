@@ -269,8 +269,8 @@ fn a_not_run_suite_keeps_only_its_own_range_open() {
 }
 
 #[test]
-fn a_config_error_after_the_merge_keeps_it_waiting_with_the_reason() {
-    let repo = repo();
+fn a_config_error_rolls_back_and_requeues_the_merge() {
+    let repo = repo_with(&platform_providers());
     write(&repo.member, "b.txt", "work\n");
     run_git(&repo.member, &["add", "."]);
     run_git(&repo.member, &["commit", "-q", "-m", "work"]);
@@ -282,26 +282,39 @@ fn a_config_error_after_the_merge_keeps_it_waiting_with_the_reason() {
     step_with(&mut team, &database, 100.0, &mut events, || Err(anyhow::anyhow!("boom"))).unwrap();
     let task = team.task(1).unwrap();
     assert_eq!(task.status, TaskStatus::Submitted, "a runner error never accepts");
-    let entry = task.merge.as_ref().expect("the merge waits");
-    assert_eq!(entry.state, "waiting");
+    let entry = task.merge.as_ref().expect("the merge is requeued");
+    assert_eq!(entry.state, "queued");
     assert!(entry.note.contains("test runners could not be read: boom"), "{}", entry.note);
-    assert_ne!(head(&repo), before, "the merge is in the lead branch");
-    assert!(events.iter().any(|event| event.kind == "merge_config_failed"), "{events:?}");
-    // The same runner error on a later tick changes nothing and adds no event.
+    assert!(entry.note.contains("rolled back"), "{}", entry.note);
+    assert_eq!(head(&repo), before, "the merge was rolled back at once");
+    assert!(entry.merged.is_empty() && entry.requests.is_empty());
+    assert!(events.iter().any(|event| event.kind == "merge_requeued"), "{events:?}");
+    // Neither HEAD nor the tests map changed: no retry and no second event.
     assert!(!step_with(&mut team, &database, 101.0, &mut events, || Err(anyhow::anyhow!("boom"))).unwrap());
-    assert_eq!(events.iter().filter(|event| event.kind == "merge_config_failed").count(), 1, "{events:?}");
+    assert_eq!(events.iter().filter(|event| event.kind == "merge_requeued").count(), 1, "{events:?}");
+    // A changed tests map lets the retry run: this time it selects and tests.
+    std::fs::write(repo.lead.join(".zerus/tests.toml"), format!("{}\n# changed\n", std::fs::read_to_string(repo.lead.join(".zerus/tests.toml")).unwrap())).unwrap();
+    run_git(&repo.lead, &["add", ".zerus/tests.toml"]);
+    run_git(&repo.lead, &["commit", "-q", "-m", "change the tests map"]);
+    let host = vec!["windows".to_owned()];
+    step_with(&mut team, &database, 102.0, &mut events, || Ok((host.clone(), Vec::new()))).unwrap();
+    let first = team.task(1).unwrap().merge.as_ref().unwrap();
+    assert_eq!(first.state, "testing");
+    assert_ne!(head(&repo), before);
+    assert!(team.merge_tested.is_empty(), "the retried merge is not tested yet");
+    let queued = database.queued("t1").unwrap();
+    let suites: Vec<&str> = queued.iter().map(|request| request.suite.as_str()).collect();
+    assert!(suites.contains(&"unit") && !suites.contains(&"python"), "{suites:?}");
 }
 
 #[test]
-fn a_selection_error_rolls_the_merge_back_and_returns_the_task() {
+fn a_persistent_selection_error_returns_the_task() {
     let repo = repo();
     write(&repo.member, "b.txt", "work\n");
     run_git(&repo.member, &["add", "."]);
     run_git(&repo.member, &["commit", "-q", "-m", "work"]);
-    let before = head(&repo);
     let mut team = team(&repo);
     accept(&mut team);
-    // The merge itself is fine; selecting its tests is not.
     std::fs::write(repo.lead.join(".zerus/tests.toml"), "version = 1\n[merge_queue\n").unwrap();
     run_git(&repo.lead, &["add", ".zerus/tests.toml"]);
     run_git(&repo.lead, &["commit", "-q", "-m", "break the test map"]);
@@ -310,71 +323,167 @@ fn a_selection_error_rolls_the_merge_back_and_returns_the_task() {
     let mut events = Vec::new();
     assert!(step_here(&mut team, &database, 100.0, &mut events).unwrap());
     let task = team.task(1).unwrap();
-    assert_eq!(task.status, TaskStatus::Pending, "a broken selection rolls back and returns");
+    assert_eq!(task.status, TaskStatus::Submitted, "the first selection error requeues");
+    let entry = task.merge.as_ref().expect("the merge is requeued");
+    assert_eq!(entry.state, "queued");
+    assert!(entry.note.contains("affected tests could not be selected"), "{}", entry.note);
+    assert_eq!(head(&repo), broken, "the failed merge was rolled back");
+    // A forced retry fails the selection again and returns the task.
+    team.task_mut(1).unwrap().merge.as_mut().unwrap().retry = true;
+    step_here(&mut team, &database, 101.0, &mut events).unwrap();
+    let task = team.task(1).unwrap();
+    assert_eq!(task.status, TaskStatus::Pending);
     assert!(task.merge.is_none());
-    assert!(task.decision_reason.contains("affected tests could not be selected"), "{}", task.decision_reason);
-    assert_eq!(head(&repo), broken, "the merge is rolled back to its prev");
-    assert_ne!(head(&repo), before);
-    assert!(events.iter().any(|event| event.kind == "merge_affected_failed"), "{events:?}");
-    assert!(events.iter().any(|event| event.kind == "merge_returned"), "{events:?}");
+    assert!(task.decision_reason.contains("could not be selected twice"), "{}", task.decision_reason);
+    assert_eq!(head(&repo), broken);
     assert!(database.queued("t1").unwrap().is_empty());
 }
 
 #[test]
-fn a_waiting_merge_retries_without_merging_again_and_blocks_later_merges() {
-    let repo = repo_with(&platform_providers());
-    write(&repo.member, "b.txt", "one\n");
-    run_git(&repo.member, &["add", "."]);
-    run_git(&repo.member, &["commit", "-q", "-m", "one"]);
+fn a_blocked_rollback_waits_for_the_lead_without_event_spam() {
+    let repo = repo();
+    write(&repo.lead, "after.txt", "after\n");
+    run_git(&repo.lead, &["add", "after.txt"]);
+    run_git(&repo.lead, &["commit", "-q", "-m", "after"]);
+    let head = head(&repo);
+    let previous = run_git(&repo.lead, &["rev-parse", "HEAD~1"]);
     let mut team = team(&repo);
-    accept(&mut team);
+    team.task_mut(1).unwrap().merge = Some(MergeEntry {
+        state: "queued".into(),
+        author: "dev".into(),
+        commit: head.clone(),
+        prev: previous.clone(),
+        merged: previous.clone(),
+        note: "The test runners could not be read: boom; The lead branch moved since; revert it by hand.".into(),
+        wait_head: head.clone(),
+        wait_map: super::tests_stamp(&team),
+        ..Default::default()
+    });
     let database = database(&repo);
     let mut events = Vec::new();
-    step_with(&mut team, &database, 100.0, &mut events, || Err(anyhow::anyhow!("boom"))).unwrap();
-    let merged = head(&repo);
-    assert_eq!(team.task(1).unwrap().merge.as_ref().unwrap().state, "waiting");
-    let host = vec!["windows".to_owned()];
-    // Neither HEAD nor the tests map changed: a tick does not retry by itself.
-    assert!(!step_with(&mut team, &database, 100.5, &mut events, || Ok((host.clone(), Vec::new()))).unwrap());
-    assert_eq!(team.task(1).unwrap().merge.as_ref().unwrap().state, "waiting");
-    // The lead's retry resumes it even though HEAD and the tests map are unchanged.
+    assert!(!step_with(&mut team, &database, 100.0, &mut events, || Ok((vec!["windows".into()], Vec::new()))).unwrap());
+    assert!(!step_with(&mut team, &database, 101.0, &mut events, || Ok((vec!["windows".into()], Vec::new()))).unwrap());
+    assert_eq!(events.iter().filter(|event| event.kind == "merge_rollback_blocked").count(), 0, "{events:?}");
+    let items = crate::state::teams::inbox::items_for(&team, "lead");
+    assert!(items.iter().any(|item| item.kind == "merge_waiting"), "{items:?}");
+    // The lead's retry resolves it: the branch moved, so the task returns.
     team.task_mut(1).unwrap().merge.as_mut().unwrap().retry = true;
-    // A second accepted task queues behind the waiting one.
-    write(&repo.member, "b.txt", "two\n");
-    run_git(&repo.member, &["add", "."]);
-    run_git(&repo.member, &["commit", "-q", "-m", "two"]);
-    let second = run_git(&repo.member, &["rev-parse", "HEAD"]);
-    team.tasks.push(Task {
-        id: 2,
-        title: "Behind".into(),
-        assignee: "dev".into(),
-        status: TaskStatus::Submitted,
-        attempts: vec![Attempt {
-            n: 1,
-            id: "A2".into(),
-            member: "dev".into(),
-            state: AttemptState::Reported,
-            folder_head: second,
-            folder_branch: "task/1".into(),
-            report: Some(Report { text: "two".into(), at: 2.0, ..Default::default() }),
+    step_with(&mut team, &database, 102.0, &mut events, || Ok((vec!["windows".into()], Vec::new()))).unwrap();
+    assert_eq!(team.task(1).unwrap().status, TaskStatus::Pending);
+    assert!(team.task(1).unwrap().merge.is_none());
+    assert!(events.iter().any(|event| event.kind == "merge_rollback_blocked"), "{events:?}");
+}
+
+#[test]
+fn a_git_error_is_unknown_not_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut team = Team {
+        id: "t".into(),
+        name: "T".into(),
+        lead: "lead".into(),
+        folder: dir.path().join("not-a-repository").display().to_string(),
+        status: TeamStatus::Running,
+        tasks: vec![Task {
+            id: 1,
+            title: "Work".into(),
+            status: TaskStatus::Submitted,
+            merge: Some(MergeEntry {
+                state: "queued".into(),
+                author: "dev".into(),
+                commit: "abc".into(),
+                prev: "def".into(),
+                merged: "def".into(),
+                note: "The test runners could not be read".into(),
+                ..Default::default()
+            }),
             ..Default::default()
         }],
         ..Default::default()
-    });
-    ops::apply(&mut team, "accept", &json!({"task":2}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
-    assert_eq!(team.task(2).unwrap().merge.as_ref().unwrap().state, "queued");
-    // The retry selects the first merge's tests without merging it again and
-    // does not let the second merge pass it.
-    step_with(&mut team, &database, 101.0, &mut events, || Ok((host.clone(), Vec::new()))).unwrap();
-    let first = team.task(1).unwrap().merge.as_ref().unwrap();
-    assert_eq!(first.state, "testing");
-    assert_eq!(team.task(2).unwrap().merge.as_ref().unwrap().state, "queued");
-    assert_eq!(head(&repo), merged, "the first merge was not merged again");
-    assert!(team.merge_tested.is_empty(), "a later merge must not mark the waiting range tested");
-    assert!(first.not_run.iter().any(|message| message.contains("python")), "{:?}", first.not_run);
-    let queued = database.queued("t1").unwrap();
-    let suites: Vec<&str> = queued.iter().map(|request| request.suite.as_str()).collect();
-    assert!(suites.contains(&"unit") && !suites.contains(&"python"), "{suites:?}");
+    };
+    let database = TestStore::open_at(&dir.path().join("tests.sqlite3"), false).unwrap();
+    let mut events = Vec::new();
+    step_with(&mut team, &database, 100.0, &mut events, || Ok((vec!["windows".into()], Vec::new()))).unwrap();
+    let entry = team.task(1).unwrap().merge.as_ref().expect("an unknown git answer never removes it");
+    assert_eq!(entry.state, "queued");
+    assert!(entry.note.contains("could not tell"), "{}", entry.note);
+    assert_eq!(team.task(1).unwrap().status, TaskStatus::Submitted);
+    assert!(events.iter().any(|event| event.kind == "merge_rollback_blocked"), "{events:?}");
+}
+
+#[test]
+fn rejecting_or_cancelling_a_queued_merge_clears_it() {
+    let repo = repo();
+    write(&repo.member, "b.txt", "work\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "work"]);
+    let mut rejected = team(&repo);
+    accept(&mut rejected);
+    let mut events = Vec::new();
+    ops::apply(&mut rejected, "reject", &json!({"task":1,"reason":"not yet"}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+    assert!(rejected.task(1).unwrap().merge.is_none());
+    let mut team = team(&repo);
+    accept(&mut team);
+    let mut events = Vec::new();
+    ops::apply(&mut team, "cancel", &json!({"task":1}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    assert_eq!(team.task(1).unwrap().status, TaskStatus::Cancelled);
+    assert!(team.task(1).unwrap().merge.is_none());
+}
+
+#[test]
+fn a_lead_accept_or_retry_resumes_a_queued_retry() {
+    let mut team = Team {
+        id: "t".into(),
+        name: "T".into(),
+        lead: "lead".into(),
+        status: TeamStatus::Running,
+        tasks: vec![Task {
+            id: 1,
+            title: "Queued".into(),
+            assignee: "dev".into(),
+            status: TaskStatus::Submitted,
+            attempts: vec![Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Reported, ..Default::default() }],
+            merge: Some(MergeEntry { state: "queued".into(), author: "dev".into(), note: "The tests map is broken; the merge was rolled back".into(), ..Default::default() }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let items = crate::state::teams::inbox::items_for(&team, "lead");
+    let item = items.iter().find(|item| item.kind == "merge_waiting").expect("the lead sees the retry");
+    assert!(item.command.contains("hgs team retry --json"), "{}", item.command);
+    let mut events = Vec::new();
+    let accepted = ops::apply(&mut team, "accept", &json!({"task":1}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+    assert_eq!(accepted["status"], "merge_retry");
+    assert!(team.task(1).unwrap().merge.as_ref().unwrap().retry);
+    assert_eq!(team.task(1).unwrap().status, TaskStatus::Submitted);
+    team.task_mut(1).unwrap().merge.as_mut().unwrap().retry = false;
+    let retried = ops::apply(&mut team, "retry", &json!({"task":1}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+    assert_eq!(retried["status"], "merge_retry");
+    assert!(team.task(1).unwrap().merge.as_ref().unwrap().retry);
+    assert!(events.iter().any(|event| event.kind == "merge_retry_requested"));
+}
+
+#[test]
+fn a_merge_waiting_item_names_its_cause() {
+    let mut team = Team {
+        id: "t".into(),
+        name: "T".into(),
+        lead: "lead".into(),
+        status: TeamStatus::Running,
+        tasks: vec![Task {
+            id: 1,
+            title: "Queued".into(),
+            status: TaskStatus::Submitted,
+            merge: Some(MergeEntry { state: "queued".into(), author: "dev".into(), note: "The test runners could not be read: boom; the merge was rolled back".into(), ..Default::default() }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let detail = |team: &Team| crate::state::teams::inbox::items_for(team, "lead").into_iter().find(|item| item.kind == "merge_waiting").unwrap().detail;
+    assert!(detail(&team).contains("Fix the runner or machine config"), "{}", detail(&team));
+    team.task_mut(1).unwrap().merge.as_mut().unwrap().note = "The affected tests could not be selected: broken map; the merge was rolled back".into();
+    assert!(detail(&team).contains("Fix the tests map"), "{}", detail(&team));
+    team.task_mut(1).unwrap().merge.as_mut().unwrap().note = "The lead branch moved and the merge could not be rolled back".into();
+    assert!(detail(&team).contains("revert it, then retry or reject"), "{}", detail(&team));
 }
 
 #[test]
@@ -437,161 +546,6 @@ fn an_open_range_overflow_holds_the_tested_point_and_says_so() {
     assert_eq!(team.merge_not_run.len(), 65, "no open range is silently evicted");
     assert_eq!(team.merge_tested, "s0");
     assert!(events.iter().any(|event| event.kind == "merge_not_run_overflow"), "{events:?}");
-}
-
-#[test]
-fn a_lead_accept_or_retry_resumes_a_waiting_merge() {
-    let mut team = Team {
-        id: "t".into(),
-        name: "T".into(),
-        lead: "lead".into(),
-        status: TeamStatus::Running,
-        members: vec![Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() }],
-        tasks: vec![Task {
-            id: 1,
-            title: "Waiting".into(),
-            assignee: "dev".into(),
-            status: TaskStatus::Submitted,
-            attempts: vec![Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Reported, ..Default::default() }],
-            merge: Some(MergeEntry { state: "waiting".into(), author: "dev".into(), prev: "p".into(), merged: "m".into(), note: "The tests map is broken".into(), ..Default::default() }),
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
-    let items = crate::state::teams::inbox::items_for(&team, "lead");
-    let item = items.iter().find(|item| item.kind == "merge_waiting").expect("the lead sees the waiting merge");
-    assert!(item.command.contains("hgs team retry --json"), "{}", item.command);
-    let mut events = Vec::new();
-    let accepted = ops::apply(&mut team, "accept", &json!({"task":1}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
-    assert_eq!(accepted["status"], "merge_retry");
-    assert!(team.task(1).unwrap().merge.as_ref().unwrap().retry);
-    assert_eq!(team.task(1).unwrap().status, TaskStatus::Submitted);
-    team.task_mut(1).unwrap().merge.as_mut().unwrap().retry = false;
-    let retried = ops::apply(&mut team, "retry", &json!({"task":1}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
-    assert_eq!(retried["status"], "merge_retry");
-    assert!(team.task(1).unwrap().merge.as_ref().unwrap().retry);
-    assert_eq!(team.task(1).unwrap().status, TaskStatus::Submitted);
-    assert!(events.iter().any(|event| event.kind == "merge_retry_requested"));
-}
-
-#[test]
-fn a_hand_reset_returns_the_waiting_task_on_retry_and_allows_reject() {
-    let repo = repo();
-    write(&repo.member, "b.txt", "work\n");
-    run_git(&repo.member, &["add", "."]);
-    run_git(&repo.member, &["commit", "-q", "-m", "work"]);
-    let mut first_team = team(&repo);
-    accept(&mut first_team);
-    let database = database(&repo);
-    let mut events = Vec::new();
-    step_with(&mut first_team, &database, 100.0, &mut events, || Err(anyhow::anyhow!("boom"))).unwrap();
-    let entry = first_team.task(1).unwrap().merge.clone().unwrap();
-    run_git(&repo.lead, &["reset", "--hard", &entry.prev]);
-    assert!(super::rollback_waiting(&first_team, 1), "a hand reset needs no second reset");
-    // A retry never tests a merge that the lead reset by hand.
-    first_team.task_mut(1).unwrap().merge.as_mut().unwrap().retry = true;
-    step_with(&mut first_team, &database, 101.0, &mut events, || panic!("no selection after a hand reset")).unwrap();
-    let task = first_team.task(1).unwrap();
-    assert_eq!(task.status, TaskStatus::Pending);
-    assert!(task.merge.is_none());
-    assert!(task.decision_reason.contains("no longer in the lead branch"), "{}", task.decision_reason);
-    assert_eq!(head(&repo), entry.prev);
-    assert!(database.queued("t1").unwrap().is_empty());
-
-    // The same hand reset lets the lead reject the waiting merge directly.
-    let mut team = team(&repo);
-    accept(&mut team);
-    let mut events = Vec::new();
-    step_with(&mut team, &database, 200.0, &mut events, || Err(anyhow::anyhow!("boom"))).unwrap();
-    let entry = team.task(1).unwrap().merge.clone().unwrap();
-    run_git(&repo.lead, &["reset", "--hard", &entry.prev]);
-    let rejected = ops::apply(&mut team, "reject", &json!({"task":1,"reason":"reverted by hand"}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
-    assert_eq!(rejected["status"], "pending");
-    assert!(team.task(1).unwrap().merge.is_none());
-    assert_eq!(head(&repo), entry.prev);
-}
-
-#[test]
-fn a_git_revert_needs_the_explicit_reverted_flag_to_reject() {
-    let repo = repo();
-    write(&repo.member, "b.txt", "work\n");
-    run_git(&repo.member, &["add", "."]);
-    run_git(&repo.member, &["commit", "-q", "-m", "work"]);
-    let mut team = team(&repo);
-    accept(&mut team);
-    let database = database(&repo);
-    let mut events = Vec::new();
-    step_with(&mut team, &database, 100.0, &mut events, || Err(anyhow::anyhow!("boom"))).unwrap();
-    // A later lead commit keeps the merge reachable: only an explicit revert
-    // confirmation may reject it.
-    write(&repo.lead, "after.txt", "after\n");
-    run_git(&repo.lead, &["add", "after.txt"]);
-    run_git(&repo.lead, &["commit", "-q", "-m", "after"]);
-    let error = ops::apply(&mut team, "reject", &json!({"task":1,"reason":"reverted"}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap_err().to_string();
-    assert!(error.contains("\"reverted\":true"), "{error}");
-    let rejected = ops::apply(&mut team, "reject", &json!({"task":1,"reason":"reverted","reverted":true}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
-    assert_eq!(rejected["status"], "pending");
-    assert!(team.task(1).unwrap().merge.is_none());
-}
-
-#[test]
-fn a_cancelled_task_with_a_merge_does_not_block_the_queue() {
-    let repo = repo();
-    write(&repo.member, "b.txt", "work\n");
-    run_git(&repo.member, &["add", "."]);
-    run_git(&repo.member, &["commit", "-q", "-m", "work"]);
-    let mut team = team(&repo);
-    accept(&mut team);
-    let mut events = Vec::new();
-    ops::apply(&mut team, "cancel", &json!({"task":1}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
-    let task = team.task(1).unwrap();
-    assert_eq!(task.status, TaskStatus::Cancelled);
-    assert!(task.merge.is_none(), "a queued merge is cleared on cancel");
-}
-
-#[test]
-fn a_cancelled_waiting_merge_is_reverted_by_the_queue() {
-    let repo = repo();
-    write(&repo.member, "b.txt", "work\n");
-    run_git(&repo.member, &["add", "."]);
-    run_git(&repo.member, &["commit", "-q", "-m", "work"]);
-    let mut team = team(&repo);
-    accept(&mut team);
-    let database = database(&repo);
-    let mut events = Vec::new();
-    step_with(&mut team, &database, 100.0, &mut events, || Err(anyhow::anyhow!("boom"))).unwrap();
-    let entry = team.task(1).unwrap().merge.clone().unwrap();
-    ops::apply(&mut team, "cancel", &json!({"task":1}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
-    assert_eq!(team.task(1).unwrap().merge.as_ref().unwrap().state, "reverting");
-    step_with(&mut team, &database, 101.0, &mut events, || panic!("the revert needs no test selection")).unwrap();
-    let task = team.task(1).unwrap();
-    assert_eq!(task.status, TaskStatus::Cancelled);
-    assert!(task.merge.is_none());
-    assert_eq!(head(&repo), entry.prev);
-}
-
-#[test]
-fn a_merge_waiting_item_names_its_cause() {
-    let mut team = Team {
-        id: "t".into(),
-        name: "T".into(),
-        lead: "lead".into(),
-        status: TeamStatus::Running,
-        tasks: vec![Task {
-            id: 1,
-            title: "Waiting".into(),
-            status: TaskStatus::Submitted,
-            merge: Some(MergeEntry { state: "waiting".into(), author: "dev".into(), note: "The test runners could not be read: boom; the merge waits".into(), ..Default::default() }),
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
-    let detail = |team: &Team| crate::state::teams::inbox::items_for(team, "lead").into_iter().find(|item| item.kind == "merge_waiting").unwrap().detail;
-    assert!(detail(&team).contains("Fix the runner or machine config"), "{}", detail(&team));
-    team.task_mut(1).unwrap().merge.as_mut().unwrap().note = "The affected tests could not be selected: broken map; the merge waits".into();
-    assert!(detail(&team).contains("Fix the tests map"), "{}", detail(&team));
-    team.task_mut(1).unwrap().merge.as_mut().unwrap().note = "The lead branch moved since; revert m by hand".into();
-    assert!(detail(&team).contains("\"reverted\":true"), "{}", detail(&team));
 }
 
 #[test]

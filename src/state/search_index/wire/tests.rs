@@ -89,7 +89,7 @@ fn budget() -> Budget {
         directory_entries: 2000,
         records: 512,
         bytes: 8 << 20,
-        deadline: Instant::now() + Duration::from_secs(30),
+        deadline: Instant::now() + Duration::from_secs(2),
     }
 }
 

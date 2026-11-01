@@ -31,7 +31,7 @@ fn budget(records: usize) -> Budget {
         directory_entries: 2000,
         records,
         bytes: 4 << 20,
-        deadline: Instant::now() + Duration::from_secs(30),
+        deadline: Instant::now() + Duration::from_secs(2),
     }
 }
 fn discover(store: &Store, state: &Path) {
@@ -42,7 +42,7 @@ fn discover(store: &Store, state: &Path) {
                 &DiscoveryBudget {
                     entries: 100,
                     path_bytes: 8 << 20,
-                    deadline: Instant::now() + Duration::from_secs(30),
+                    deadline: Instant::now() + Duration::from_secs(2),
                 },
                 &AtomicBool::new(false),
             )

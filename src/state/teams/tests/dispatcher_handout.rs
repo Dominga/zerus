@@ -268,6 +268,39 @@ fn a_rejected_task_is_retried_by_a_fresh_member_when_one_is_free() {
 }
 
 #[test]
+fn a_fresh_or_refused_retry_leaves_the_failed_member_even_with_other_work() {
+    for refused in [false, true] {
+        for modeled in [false, true] {
+            let (mut team, mut seen) = team_with_two_backends();
+            submit(&mut team, 1, "dev", false);
+            ops::apply(&mut team, "reject", &json!({"task":1,"reason":"Use a fresh context","fresh":true}),
+                &Actor::Member("lead".into()), &BTreeSet::new(), &mut Vec::new()).unwrap();
+            if refused { team.task_mut(1).unwrap().attempts[0].state = AttemptState::Refused; }
+            team.task_mut(2).unwrap().status = TaskStatus::InProgress;
+            team.task_mut(2).unwrap().attempts.push(Attempt { n: 1, member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+            seen[1].free = false;
+            if modeled {
+                team.task_mut(1).unwrap().models = vec!["test-model".into()];
+                for member in &mut team.members { member.model = "test-model".into(); }
+            }
+            let next = Step::Rebalance { task: 1, from: "dev".into(), to: "dev2".into() };
+            assert!(steps(&team, &seen, 100.0).contains(&next), "refused={refused} modeled={modeled}");
+            let dir = tempfile::tempdir().unwrap();
+            let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team.clone(), vec![]).unwrap();
+            set_fake_hgs(Some(Box::new(|_, args, _| {
+                assert_eq!(&args[..2], &["send", "codex/x/dev2"]);
+                Ok(fake_output(0, r#"{"status":"submitted"}"#, ""))
+            })));
+            let result = run_step(&mut store, &team, &next, "");
+            set_fake_hgs(None);
+            result.unwrap();
+            assert_eq!(store.load(&team.id).unwrap().unwrap().task(1).unwrap().assignee, "dev2");
+        }
+    }
+}
+
+#[test]
 fn a_rework_keeps_its_member_and_reserves_it_until_decided() {
     let (mut team, seen) = team_with_two_backends();
     // #2 belongs to the other busy member and would otherwise rebalance to dev.
@@ -302,14 +335,35 @@ fn a_rework_keeps_its_member_and_reserves_it_until_decided() {
     let saved = store.load(&team.id).unwrap().unwrap();
     let retry = saved.task(1).unwrap().attempts.last().unwrap();
     assert_eq!((retry.n, retry.member.as_str(), retry.state), (2, "dev", AttemptState::Delivered));
+    let retry_id = retry.id.clone();
     let mut reported = saved;
-    submit(&mut reported, 1, "dev", false);
+    ops::apply(&mut reported, "report", &json!({"task":1,"attempt":retry_id,"text":"Fixed"}),
+        &Actor::Member("dev".into()), &BTreeSet::new(), &mut Vec::new()).unwrap();
     assert!(!steps(&reported, &seen, 2.0).iter().any(|step| matches!(step, Step::Rebalance { to, .. } if to == "dev")));
     for mut draining in [team.clone(), reported] {
         ops::apply(&mut draining, "drain", &json!({"member":"dev"}), &Actor::Member("lead".into()),
             &BTreeSet::new(), &mut Vec::new()).unwrap();
         assert_eq!(draining.task(1).unwrap().assignee, "dev");
         assert!(!steps(&draining, &seen, 2.0).iter().any(|step| matches!(step, Step::Drain { member, .. } if member == "dev")));
+        if draining.task(1).unwrap().status == TaskStatus::Pending {
+            for modeled in [false, true] {
+                let mut draining = draining.clone();
+                if modeled {
+                    draining.task_mut(1).unwrap().models = vec!["test-model".into()];
+                    draining.members.iter_mut().find(|member| member.id == "dev").unwrap().model = "test-model".into();
+                }
+                assert!(steps(&draining, &seen, 2.0).contains(&Step::HandOut { task: 1, member: "dev".into() }));
+            }
+            // Its rework is completed through the normal report/accept path,
+            // then the same drain can finish.
+            draining.task_mut(1).unwrap().attempts.push(Attempt { n: 2, id: "drain-rework".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+            draining.task_mut(1).unwrap().status = TaskStatus::InProgress;
+            ops::apply(&mut draining, "report", &json!({"task":1,"attempt":"drain-rework","text":"Fixed"}),
+                &Actor::Member("dev".into()), &BTreeSet::new(), &mut Vec::new()).unwrap();
+        }
+        ops::apply(&mut draining, "accept", &json!({"task":1}), &Actor::Member("lead".into()),
+            &BTreeSet::new(), &mut Vec::new()).unwrap();
+        assert!(steps(&draining, &seen, 3.0).iter().any(|step| matches!(step, Step::Drain { member, .. } if member == "dev")));
     }
     // Even a held return reserves its member, independently of ready ordering.
     ops::apply(&mut team, "hold", &json!({"task":1}), &Actor::Member("lead".into()),
@@ -337,6 +391,9 @@ fn an_unavailable_rework_waits_without_timeout_and_reassign_still_moves_it() {
         seen[1].live = state != "stopped";
         if state == "limit" { seen[1].limited = Some(SeenLimit { at: 1.0, ..Default::default() }); }
         if state == "paused" { waiting.members.iter_mut().find(|m| m.id == "dev").unwrap().state = MemberState::Paused; }
+        let member = waiting.members.iter_mut().find(|m| m.id == "dev").unwrap();
+        member.seen = Some(MemberSeen { at: 1.0, live: seen[1].live });
+        member.seen_phase = if state == "approval" { "approval" } else if state == "limit" { "error" } else { "idle" }.into();
         for at in [60.0, 60.0 * 60.0 * 24.0 * 30.0] {
             let now = steps(&waiting, &seen, at);
             assert!(!now.iter().any(|s| matches!(s, Step::HandOut { task: 1, .. } | Step::Rebalance { task: 1, .. })), "{state}: {now:?}");
@@ -344,10 +401,28 @@ fn an_unavailable_rework_waits_without_timeout_and_reassign_still_moves_it() {
         let item = crate::state::teams::inbox::items(&waiting).into_iter().find(|item| item.task == Some(1) && item.kind == "rework_waits").unwrap();
         assert_eq!(item.summary, "#1 waits for its member, 7 min");
         assert!(item.command.contains("reassign"));
+        assert!(!item.detail.ends_with(' '));
         ops::apply(&mut waiting, "reassign", &json!({"task":1,"member":"dev2"}),
             &Actor::Member("lead".into()), &BTreeSet::new(), &mut Vec::new()).unwrap();
+        assert_eq!(waiting.task(1).unwrap().rework_since, None);
         assert!(steps(&waiting, &seen, 100.0).contains(&Step::HandOut { task: 1, member: "dev2".into() }));
     }
+}
+
+#[test]
+fn a_free_or_held_rework_has_no_member_wait_item() {
+    let mut team = team();
+    submit(&mut team, 1, "dev", false);
+    ops::apply(&mut team, "reject", &json!({"task":1,"reason":"Fix"}), &Actor::Member("lead".into()),
+        &BTreeSet::new(), &mut Vec::new()).unwrap();
+    let member = team.members.iter_mut().find(|m| m.id == "dev").unwrap();
+    member.seen = Some(MemberSeen { at: 1.0, live: true });
+    member.seen_phase = "idle".into();
+    member.seen_activity = "idle".into();
+    assert!(!crate::state::teams::inbox::items(&team).iter().any(|item| item.kind == "rework_waits"));
+    team.members.iter_mut().find(|m| m.id == "dev").unwrap().state = MemberState::Paused;
+    ops::apply(&mut team, "hold", &json!({"task":1}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut Vec::new()).unwrap();
+    assert!(!crate::state::teams::inbox::items(&team).iter().any(|item| item.kind == "rework_waits"));
 }
 
 #[test]

@@ -1239,9 +1239,13 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     let refused_recently = |member: &Member| {
         team.tasks.iter().flat_map(|t| &t.attempts).any(|a| a.member == member.id && a.state == AttemptState::Refused && now - a.sent_at < REFUSAL_PAUSE)
     };
+    let outputs = InProgressOutputs::new(team);
+    let own_rework = |member: &Member, task: Option<u32>| {
+        task.and_then(|id| team.task(id)).is_some_and(|task| task.rework() && task.assignee == member.id)
+    };
     let available = |member: &Member, busy: &BTreeSet<&str>, task: Option<u32>| {
         !matches!(member.state, MemberState::Removed | MemberState::Paused)
-            && !member.draining
+            && (!member.draining || own_rework(member, task))
             && !busy.contains(member.id.as_str())
             && !team.reserved_for_rework(&member.id, task)
             && member.session.is_some()
@@ -1268,7 +1272,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     // before new tasks: it finishes work already done.
     if team.status == TeamStatus::Running {
         for (task, candidates) in super::stages::waiting(team) {
-            if let Some(member) = candidates.iter().filter_map(|id| team.member(id)).find(|member| available(member, &busy, None)) {
+            if let Some(member) = candidates.iter().filter_map(|id| team.member(id)).find(|member| available(member, &busy, Some(task))) {
                 busy.insert(member.id.as_str());
                 steps.push(Step::StageOut { task, member: member.id.clone() });
             }
@@ -1363,16 +1367,14 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 continue;
             }
             let failed = |m: &Member| {
-                !team.keeps_assignee(task)
-                    && task
-                        .attempts
-                        .iter()
-                        .any(|a| a.member == m.id && matches!(a.state, AttemptState::Rejected | AttemptState::Refused) && !super::pipeline::pipeline_returned(a))
+                !team.requires_assignee(task) && task.failed_by(&m.id)
             };
+            let output_blocks = !task.failed_by(&task.assignee) && outputs.blocks(task);
             let candidates = super::models::candidates(team, task);
             let fits: Vec<(&Member, super::models::Fit)> = candidates
                 .iter()
                 .filter(|m| available(m, &busy, Some(id)) && !failed(m) && super::stages::held(team, &m.id).is_none())
+                .filter(|m| m.id == task.assignee || !output_blocks)
                 .filter_map(|m| {
                     let found = session_of(m, seen)?;
                     let current = if found.model.is_empty() { super::models::launch_model(m) } else { (found.model.as_str(), found.effort.as_str()) };
@@ -1395,7 +1397,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 None => {
                     // Start the first member that could run it once it is up.
                     if let Some(member) = candidates.iter().find(|m| {
-                        !team.reserved_for_rework(&m.id, Some(id)) && !failed(m)
+                        !team.reserved_for_rework(&m.id, Some(id)) && !failed(m) && (m.id == task.assignee || !output_blocks)
                             && m.session.is_none() && m.state != MemberState::Paused && m.launch_id.is_empty() && m.error.is_empty()
                             && super::models::fit(m, task, super::models::launch_model(m)).is_some()
                     }) {
@@ -1430,12 +1432,8 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         // U36: a test holding the assignee's folder keeps its next task back;
         // a free member with the same role may take it.
         let held = super::stages::held(team, &member.id).is_some();
-        if !team.keeps_assignee(task) {
-            let failed = |m: &Member| {
-                task.attempts
-                    .iter()
-                    .any(|a| a.member == m.id && matches!(a.state, AttemptState::Rejected | AttemptState::Refused) && !super::pipeline::pipeline_returned(a))
-            };
+        if !team.requires_assignee(task) && (task.failed_by(&member.id) || !outputs.blocks(task)) {
+            let failed = |m: &Member| task.failed_by(&m.id);
             let assignee_fits = available(member, &busy, Some(id)) && !failed(member) && !held;
             if !assignee_fits {
                 let role = team.role_of(&member.id);
@@ -1449,7 +1447,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 }
             }
         }
-        if matches!(member.state, MemberState::Removed | MemberState::Paused) || member.draining || busy.contains(member.id.as_str()) || held
+        if matches!(member.state, MemberState::Removed | MemberState::Paused) || (member.draining && !own_rework(member, Some(id))) || busy.contains(member.id.as_str()) || held
             || team.reserved_for_rework(&member.id, Some(id)) {
             continue;
         }
@@ -3921,7 +3919,7 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
     let member = team.member(member_id).cloned().with_context(|| format!("Unknown member {member_id}"))?;
     anyhow::ensure!(!team.reserved_for_rework(member_id, Some(task_id)), "member reserved for rework");
     if let Some(task) = team.task(task_id).filter(|task| task.assignee != member_id && !task.assignee.is_empty()) {
-        anyhow::ensure!(!team.keeps_assignee(task), "task must stay with its member");
+        anyhow::ensure!(!team.rebalance_blocked(task), "task must stay with its member");
     }
     // U48 (spec 1, step 2): the task's branch, confirmed before the hand-out;
     // a refused or unconfirmed one leaves the task waiting. A confirmed one
@@ -4019,7 +4017,7 @@ fn hand_out_now(
         let session = team.member(member_id).and_then(|m| m.session.clone()).context("no session")?;
         let member_host = team.member(member_id).map(|m| m.computer.clone()).unwrap_or_default();
         let roles = from.map(|from| (team.role_of(from), team.role_of(member_id)));
-        let keeps = team.task(task_id).is_some_and(|task| team.keeps_assignee(task));
+        let keeps = team.task(task_id).is_some_and(|task| team.rebalance_blocked(task));
         let task = team.task_mut(task_id).context("unknown task")?;
         // Given to a free member with the same role, unless the lead or you
         // chose the assignee in the meantime.
@@ -4587,7 +4585,7 @@ fn record_context_start(
     change(store, team_id, |team, events| {
         anyhow::ensure!(can_hand_out(team, task_id), "no longer ready");
         let roles = from.map(|from| (team.role_of(from), team.role_of(member_id)));
-        let keeps = team.task(task_id).is_some_and(|task| team.keeps_assignee(task));
+        let keeps = team.task(task_id).is_some_and(|task| team.rebalance_blocked(task));
         let task = team.task_mut(task_id).context("unknown task")?;
         let rebalanced = match from {
             Some(from) if task.assignee == from && !keeps => {
@@ -4626,7 +4624,7 @@ fn record_waits(
     change(store, team_id, |team, events| {
         anyhow::ensure!(can_hand_out(team, task_id), "no longer ready");
         let roles = from.map(|from| (team.role_of(from), team.role_of(member_id)));
-        let keeps = team.task(task_id).is_some_and(|task| team.keeps_assignee(task));
+        let keeps = team.task(task_id).is_some_and(|task| team.rebalance_blocked(task));
         let task = team.task_mut(task_id).context("unknown task")?;
         let rebalanced = match from {
             Some(from) if task.assignee == from && !keeps => {

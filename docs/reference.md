@@ -1694,6 +1694,12 @@ time limit. The lead's inbox shows `#N waits for its member, N min`; an explicit
 retry policy, preferring a free member of the same role that did not fail the
 task, subject to existing assignee pins. `"hold":true` still holds a returned
 task until release, and `"final":true` ends it.
+Fresh retries choose a peer even while the failed member has other work;
+Output protection applies to ordinary busy-assignee rebalance. A draining
+member may finish its own reserved rework before leaving. Explicit reassignment
+clears the rework reservation and its wait age. Returning an unstarted phase
+to a draft also clears rework reservations. Member-wait inbox items exclude
+held rework and members available to take it.
 
 Tasks may declare `"output":["src/api.rs","src/protocol/"]`: repository-relative
 files or directories, with a directory covering all paths beneath it. Plan,

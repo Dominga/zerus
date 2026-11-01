@@ -1898,6 +1898,7 @@ fn return_to_draft(team: &mut Team, input: &Value, actor: &Actor, events: &mut V
     for task in &mut team.tasks {
         if wanted.contains(&task.id) && task.status == TaskStatus::Pending {
             task.status = TaskStatus::Draft;
+            task.rework_since = None;
         }
     }
     let label = actor.label(team);
@@ -4616,6 +4617,7 @@ fn reassign(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
     let revoked = revoke(task, "reassigned");
     task.assignee = target.to_owned();
     task.pinned = true;
+    task.rework_since = None;
     // U45: a task for a role now has its member; a waiting step starts over.
     task.role.clear();
     task.waits = None;

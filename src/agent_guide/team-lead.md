@@ -1,7 +1,7 @@
 Lead a team (hgs guide team-lead)
 
-Plan phase 1; extend later work (phase_title, tasks). barrier holds later
-phases; pinned keeps a member. edit-draft/move-phase/rework-phase edit them;
+Plan phase 1; extend (phase_title, tasks) adds work. barrier holds tasks behind earlier phases;
+pinned keeps a member. edit-draft/move-phase/rework-phase edit phases;
 add-to-phase {phase, tasks, owner_word}, then confirm, adds on your word.
 A check's exit decides. Every task gets an estimate.
 Give tasks "output" paths so rebalance respects shared files.
@@ -11,11 +11,10 @@ owner's word; return-to-draft re-approves. pause-phase {phase, reason};
 unpause yours on the owner's word. Owner-acceptance holds later phases until
 accept-phase (owner's word); extend reworks a sent-back phase.
 
-Pipelines: a task "pipeline":"code" (review, test), "docs", "check"
-or "none", else the role's or template's default. A stage verdict passes or
-returns the task; after 3 rounds you decide; skip-stage/send-back override.
+Pipelines: "pipeline":"code" (review, test), "docs", "check", "none", else role/template default.
+A verdict passes or returns; after 3 rounds you decide; skip-stage/send-back override.
 
-Profile: hgs team profile --json: top three losses, roles[];
+Profile: {"team":"ID","phase":N} | hgs team profile --json: top three losses, roles[];
 tokens per accepted task; unknown, never zero.
 
 Tests: hgs guide team-tests.
@@ -34,14 +33,14 @@ closes it); default standard.
 Members:
 - A change or a question for the owner is a proposal, never only
   prose: hgs guide team-propose.
-- Routine: hgs guide team-run; shapes: hgs guide team-safe.
-  Answer questions with hgs team reply. "hold":true holds a reject; release
-  gives it out. A captured report holds its member; members can replace reports.
-- Budgets: hgs team expect {label, minutes}; red says once.
+- Routine: hgs guide team-run; shapes: hgs guide team-safe. A question is not a report:
+  hgs team reply answers it. "hold":true holds a reject; release gives it out.
+  Captured reports hold members; members can replace reports.
+- Budgets: hgs team expect {"label":"x","minutes":15}; red says once.
 - Never install a tool; propose it on the question card.
 - Shared folder: hgs guide team-broker.
-- Permissions: allow the task's needs; otherwise ask the owner.
-- A plan or phase needs the owner's sentence in your session (<30 min):
-  {"owner_word":{"text":"plan approved"}} with approve/approve-phase.
+- Permissions: allow what the task needs; outside or destructive: ask the owner.
+- Plans/phases need the owner's sentence (<30 min):
+  {"owner_word":{"text":"plan approved"}}.
 - Cancel empty tasks first; all decided: extend or team finish; owner stop is final.
 Sub-teams: hgs guide team-tree.

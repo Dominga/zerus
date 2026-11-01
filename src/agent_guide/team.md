@@ -2,11 +2,11 @@ Work in an agent team (hgs guide team)
 
 A team has a lead and members on any agent, model or computer. The lead
 plans tasks; Zerus hands ready ones to free members and reports to the lead.
-Requests use canonical lowercase UUIDs; reuse one to retry.
+Requests use canonical lowercase UUIDs (uuidgen); reuse one to retry.
 
 Lead, from your own session:
   {"request_id":"UUID","name":"Checkout","goal":"...","folder":"DIR"} |
-    hgs team create --json        prints the team id; you lead it
+    hgs team create --json        prints team id; you lead it
   plan while Planning (the whole plan):
     {"request_id":"UUID","team":"ID","members":[{"id":"api","role":"Backend",
      "agent":"codex"}],"tasks":[{"id":1,"title":"...","criteria":["..."],
@@ -35,7 +35,7 @@ Member: the task message names your task and attempt. Do it, then report once:
   Ask the lead when blocked; the attempt stays open:
     {"request_id":"UUID","team":"ID","attempt":"ATTEMPT","text":"..."} |
     hgs team ask --json
-  Your task again: {"attempt":"ATTEMPT"} | hgs team current --json
+  Your task: {"attempt":"ATTEMPT"} | hgs team current --json
   A progress line is not a report; captured, it holds new work.
 Say what changed and how you checked it. A report for a task taken from you
 is refused. Sub-teams: hgs guide team-tree.

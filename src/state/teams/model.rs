@@ -1480,6 +1480,30 @@ pub(crate) struct Task {
     pub prepare: Vec<PrepareStep>,
 }
 
+/// One tick's index of each member's in-progress tasks, built once rather
+/// than scanning the full task list for every candidate member.
+pub(crate) struct InProgressOutputs<'a> {
+    members: std::collections::BTreeMap<&'a str, Vec<&'a Task>>,
+}
+
+impl<'a> InProgressOutputs<'a> {
+    pub(crate) fn new(team: &'a Team) -> Self {
+        let mut members = std::collections::BTreeMap::<&str, Vec<&Task>>::new();
+        for task in &team.tasks {
+            if !task.assignee.is_empty() && matches!(task.status, TaskStatus::Assigned | TaskStatus::InProgress) {
+                members.entry(&task.assignee).or_default().push(task);
+            }
+        }
+        Self { members }
+    }
+
+    pub(crate) fn blocks(&self, task: &Task) -> bool {
+        self.members.get(task.assignee.as_str()).is_some_and(|active| active.iter().any(|other| {
+            other.id != task.id && (task.output.is_empty() || task.output_overlaps(other))
+        }))
+    }
+}
+
 /// U36: one stage of a task's pipeline snapshot.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct PipelineStage {
@@ -1731,6 +1755,11 @@ pub(crate) struct Lane {
 }
 
 impl Task {
+    pub(crate) fn failed_by(&self, member: &str) -> bool {
+        self.attempts.iter().any(|attempt| attempt.member == member
+            && matches!(attempt.state, AttemptState::Rejected | AttemptState::Refused)
+            && !super::pipeline::pipeline_returned(attempt))
+    }
     /// Paths are normalized at task creation/editing; directory containment
     /// compares components so `src/api` never contains `src/apis`.
     pub(crate) fn output_overlaps(&self, other: &Task) -> bool {
@@ -2209,14 +2238,15 @@ impl Team {
         task.rework() || task.pinned || (self.settings.keep_assignees && task.role.is_empty() && !task.assignee.is_empty())
     }
 
-    /// Assignment policies and shared in-progress files both prevent rebalance.
+    /// Assignment policy only. Output protection applies separately to
+    /// busy-assignee rebalance, never to choosing a fresh retry member.
     pub(crate) fn keeps_assignee(&self, task: &Task) -> bool {
         self.requires_assignee(task)
-            || (!task.assignee.is_empty() && self.tasks.iter().any(|other| {
-                other.id != task.id && other.assignee == task.assignee
-                    && matches!(other.status, TaskStatus::Assigned | TaskStatus::InProgress)
-                    && (task.output.is_empty() || task.output_overlaps(other))
-            }))
+    }
+
+    /// Recheck at the mutation boundary. Tick selection uses one shared index.
+    pub(crate) fn rebalance_blocked(&self, task: &Task) -> bool {
+        self.requires_assignee(task) || (!task.failed_by(&task.assignee) && InProgressOutputs::new(self).blocks(task))
     }
 
     /// A returned task reserves its member even while held or awaiting review.

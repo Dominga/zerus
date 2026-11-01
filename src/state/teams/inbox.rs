@@ -138,7 +138,14 @@ fn all_items(team: &Team) -> Vec<Item> {
     // A rework keeps its member indefinitely. Show the wait even when that
     // member has an approval or usage limit rather than a stored task wait.
     for task in team.tasks.iter().filter(|task| active && task.rework() && task.status == TaskStatus::Pending
-        && task.waits.as_ref().is_none_or(|wait| wait.waits_for == "member")) {
+        && task.hold.is_none() && task.waits.as_ref().is_none_or(|wait| wait.waits_for == "member")) {
+        let unavailable = team.member(&task.assignee).is_some_and(|member| {
+            matches!(member.state, MemberState::Removed | MemberState::Paused) || member.session.is_none()
+                || member.limited.is_some() || member.stuck.is_some() || member.seen.is_some_and(|seen| !seen.live)
+                || matches!(member.seen_phase.as_str(), "approval" | "question" | "input" | "error" | "working" | "tool" | "compacting")
+                || matches!(member.seen_activity.as_str(), "busy" | "attention" | "background")
+        });
+        if !unavailable { continue; }
         let since = task.rework_since.unwrap();
         let minutes = ((crate::state::now() - since) / 60.0).max(0.0).floor() as u64;
         items.push(Item {
@@ -152,7 +159,7 @@ fn all_items(team: &Team) -> Vec<Item> {
             command: format!("{} | hgs team reassign --json",
                 json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id,"member":"MEMBER"})),
             detail: format!("{} keeps this rework without a time limit. Wait for that member or explicitly reassign the task. {}",
-                team.name_of(&task.assignee), task.waits.as_ref().map(|wait| wait.reason.as_str()).unwrap_or_default()),
+                team.name_of(&task.assignee), task.waits.as_ref().map(|wait| wait.reason.as_str()).unwrap_or_default()).trim_end().to_owned(),
         });
     }
     // #752: two or more members in one folder build each other's half-done

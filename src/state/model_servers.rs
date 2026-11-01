@@ -1181,6 +1181,26 @@ pub(crate) fn account_gateway(home: &Path) -> Option<Server> {
     checked(Server { name: "gateway".into(), base_url: base_url.into(), kind: "anthropic".into(), key: key.into(), ..Default::default() }).ok()
 }
 
+/// `--settings <picker>` for a Claude session record behind a gateway (its
+/// model server, else its account's own gateway), for a resume or a fresh
+/// start of a session that began before its launch carried one. Empty for any
+/// other session, or when the list cannot be read.
+pub(crate) fn resume_picker_args(record: &Value) -> Vec<String> {
+    if record["agent"].as_str() != Some("claude") {
+        return Vec::new();
+    }
+    let Ok(config) = crate::config::Config::load() else { return Vec::new() };
+    let model = record["model_server"]["model"].as_str().unwrap_or_default();
+    let server = match record["model_server"]["server"].as_str().filter(|name| !name.is_empty()) {
+        Some(name) => load(&config).ok().and_then(|servers| servers.into_iter().find(|server| server.name == name)),
+        None => record["agent_home"].as_str().filter(|home| !home.is_empty()).and_then(|home| account_gateway(Path::new(home))),
+    };
+    server
+        .and_then(|server| picker_settings(&config, &server, model))
+        .map(|path| vec!["--settings".to_owned(), path.to_string_lossy().into_owned()])
+        .unwrap_or_default()
+}
+
 /// The model ids `server` lists, within `timeout`; empty when it cannot be read.
 pub(crate) fn model_names(config: &Config, server: &Server, timeout: Duration) -> Vec<String> {
     api_models_within(config, server, timeout)

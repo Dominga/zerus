@@ -652,6 +652,12 @@ fn session_spec(
     }
     let executable = runner_executable()?;
     let hint_environment = crate::config::agent_hint_environment(string(record, "agent"));
+    // The owner, 2026-11-02: a Claude session behind a gateway started before
+    // its launch carried the /model picker; its resume adds it.
+    let mut argv = argv;
+    if !argv.iter().any(|arg| arg == "--settings") {
+        argv.extend(super::model_servers::resume_picker_args(record));
+    }
     let launch = supervisor_command(record, &executable, argv, &hint_environment);
     let mut environment = BTreeMap::from([
         ("HGS_SESSION", name.to_owned()),

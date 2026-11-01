@@ -1369,8 +1369,6 @@ fn track(name: String, token: String, mut event: Value, started: &mut bool, hint
     if !matches(&record, panes.get(string(&record, "name"))) {
         return Ok(0);
     }
-    // Invalidate before any later work can fail, including rules resolution.
-    if clear_rules_proof(&mut record, &event) { write(&mut record)?; }
     if let Some(scoped) = external_agents::route(&mut record, &event) {
         processes::observe(&mut record, &scoped);
         journal::update_activity(&mut record, &scoped);
@@ -1393,6 +1391,10 @@ fn track(name: String, token: String, mut event: Value, started: &mut bool, hint
         && !external_agents::main_start(&record, &event) {
         return Ok(0);
     }
+    // Only an accepted main start may invalidate this record's proof. A
+    // foreign or child start must not alter its parent's startup delivery.
+    // Clear before later work can fail, including rules resolution.
+    if clear_rules_proof(&mut record, &event) { write(&mut record)?; }
     let agent = string(&record, "agent").to_owned();
     if !events(&agent).contains(&kind)
         && !versioned_events(&agent).iter().any(|(event, _)| *event == kind)
@@ -1555,6 +1557,54 @@ fn track(name: String, token: String, mut event: Value, started: &mut bool, hint
 mod tests {
     use super::windows::{self as forms, CLAUDE_EXEC_FORM};
     use super::*;
+
+    #[test]
+    fn a_foreign_session_start_leaves_the_record_and_rules_proof_byte_for_byte_unchanged() {
+        struct Backend;
+        impl crate::state::backend::TerminalBackend for Backend {
+            fn panes(&self) -> Result<Vec<crate::state::backend::PaneRow>> {
+                Ok(vec![crate::state::backend::PaneRow {
+                    session: "claude/hooks/parent".into(),
+                    session_id: "$1".into(),
+                    pane: "%1".into(),
+                    dead: "0".into(),
+                    run_marker: "parent-run".into(),
+                }])
+            }
+        }
+        for has_proof in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            super::super::with_test_state_root(directory.path(), || {
+                let name = "claude/hooks/parent";
+                let mut record = json!({"version":1,"name":name,"run_id":"parent-run","pane":"%1",
+                    "agent":"claude","pid":0,"conversation_id":"11111111-1111-4111-8111-111111111111",
+                    "model":"parent-model","iron_rules":["Keep the session rule"]});
+                if has_proof {
+                    record["iron_rules_start_supported"] = json!(true);
+                    record["iron_rules_start_project"] = json!("project");
+                    record["iron_rules_start_digest"] = json!("digest");
+                    record["iron_rules_start_run"] = json!("parent-run");
+                    record["iron_rules_start_conversation"] = record["conversation_id"].clone();
+                }
+                write(&mut record).unwrap();
+                let path = record_path(name);
+                let before = fs::read(&path).unwrap();
+                let mut started = false;
+                let mut hint = None;
+                let mut proof = None;
+                crate::state::backend::with_fake(&Backend, || {
+                    let event = json!({"hook_event_name":"SessionStart",
+                        "session_id":"22222222-2222-4222-8222-222222222222","model":"foreign-model"});
+                    assert_eq!(track(name.into(), "parent-run".into(), event,
+                        &mut started, &mut hint, &mut proof).unwrap(), 0);
+                });
+                assert_eq!(fs::read(path).unwrap(), before, "foreign start changed the record (proof={has_proof})");
+                assert!(!started);
+                assert!(hint.is_none());
+                assert!(proof.is_none());
+            });
+        }
+    }
 
     #[test]
     fn failed_or_oversized_start_rules_leave_hint_tasks_and_no_old_proof() {

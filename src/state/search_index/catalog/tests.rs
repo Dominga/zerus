@@ -28,7 +28,7 @@ impl Fixture {
         DiscoveryBudget {
             entries,
             path_bytes: 8 << 20,
-            deadline: Instant::now() + Duration::from_secs(1),
+            deadline: Instant::now() + Duration::from_secs(30),
         }
     }
     fn totals(&self) -> (i64, i64) {

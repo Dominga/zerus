@@ -334,9 +334,13 @@ void TestSessionsWindow::refreshedListingsKeepRowsUnlessTimeChangesThem()
     auto mac = *fleet().peer("mac"); mac.digest = "mac-1";
     // The peer's poll grows stale this long after the fixture's clock: room for a
     // slow runner to create and show the window before the checks below.
-    constexpr qint64 StaleInMs = 4000;
+    // It counts from after the window is shown: a slow CI runner took longer
+    // than 4 s to get there, and the peer read as offline at the first check.
+    constexpr qint64 StaleInMs = 8000;
     FleetState state; state.setLocal(local, now); state.setPeer(mac, now - FleetState::kPeerStaleMs + StaleInMs);
     SessionsWindow window(program()); keepDetailsPollsOut(window); window.resize(1120, 680); window.setFleet(state); window.show();
+    const qint64 peerAt = QDateTime::currentMSecsSinceEpoch() - FleetState::kPeerStaleMs + StaleInMs;
+    state.setPeer(mac, peerAt); window.setFleet(state);
     auto *list = window.findChild<QListWidget *>("sessionList"); QVERIFY(list);
     const auto row = [list](const QString &name) -> QListWidgetItem * {
         for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(SessionRoles::Key).toString().endsWith('\n' + name)) return list->item(i);
@@ -349,7 +353,7 @@ void TestSessionsWindow::refreshedListingsKeepRowsUnlessTimeChangesThem()
     auto later = local; later.metrics["cpu_percent"] = 42.0; later.sessions[0].backgroundObservedAt = 7;
     QVERIFY(state.refreshListing({}, later, now + 100)); window.refreshFleet(state);
     QCOMPARE(row("kimi/docs/research")->data(SessionRoles::Detail).toString(), QString("kept"));
-    QVERIFY(state.refreshListing("mac", mac, now - FleetState::kPeerStaleMs + StaleInMs)); window.refreshFleet(state);
+    QVERIFY(state.refreshListing("mac", mac, peerAt)); window.refreshFleet(state);
     QCOMPARE(row("kimi/docs/research")->data(SessionRoles::Detail).toString(), QString("kept"));
     // Unless the peer's poll grew stale meanwhile (on a very slow runner),
     // which shows it offline and rightly prepares the rows again.

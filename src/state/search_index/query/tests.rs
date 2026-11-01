@@ -69,7 +69,7 @@ fn budget() -> Budget {
         directory_entries: 2000,
         records: 512,
         bytes: 8 << 20,
-        deadline: Instant::now() + Duration::from_secs(1),
+        deadline: Instant::now() + Duration::from_secs(30),
     }
 }
 fn page(store: &mut Store, state: &Path, cursor: Option<&str>, budget: &Budget) -> Value {

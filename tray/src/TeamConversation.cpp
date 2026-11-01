@@ -228,6 +228,7 @@ TeamConversation::TeamConversation(HgsClient *client, QWidget *parent) : QWidget
     });
     QObject::connect(m_question, &QuestionCard::queueNavigationRequested, this, [this](int direction) { renderQuestion(direction); });
     QObject::connect(m_question, &QuestionCard::draftRestored, this, [this] { renderQuestion(); });
+    QObject::connect(m_question, &QuestionCard::openTerminalRequested, this, [this] { if (openTerminal) openTerminal(m_host, m_name); });
     QObject::connect(m_client, &HgsClient::questionAnswered, this, [this](quint64 request) { finishAnswer(request, true); });
     QObject::connect(m_client, &HgsClient::questionAnswerSubmitted, this, [this](quint64 request) { finishAnswer(request, true, {}, false, true); });
     QObject::connect(m_client, &HgsClient::questionAnswerFailed, this, [this](quint64 request, const QString &, const QString &, const QString &error, bool uncertain) {
@@ -693,7 +694,7 @@ void TeamConversation::renderQuestion(int navigation)
         question = optional[index];
     }
     const bool available = !question.isEmpty();
-    m_question->setTerminalAvailable(false, tr("Open the session in Activity for its terminal."));
+    m_question->setTerminalAvailable(static_cast<bool>(openTerminal), tr("Open the session in Activity for its terminal."));
     m_question->setQuestion(key, question, pending);
     m_question->setQueueNavigation(index, int(optional.size()));
     m_question->setVisible(available);

@@ -789,21 +789,26 @@ fn locked<T>(f: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
 }
 
 /// The Team designer's first prompt: what it may do and how it proposes.
-pub(crate) fn designer_brief(catalog: &Catalog, goal: &str, project: &str) -> String {
+pub(crate) fn designer_brief(catalog: &Catalog, goal: &str, project: &str, project_name: &str) -> String {
     let mut text = format!(
-        "You are the Zerus Team designer. You configure the team catalog: roles, templates (which roles a kind of work \
-         needs, with a task skeleton) and routing rules. Read `hgs guide designer` first. You may read the owner's \
+        "You are the Zerus Team designer, a conversational assistant for building agent teams. You configure the team catalog: \
+         roles, templates (which roles a kind of work needs, with a task skeleton) and routing rules. Read `hgs guide designer` \
+         first. Read the selected project and the existing catalog before designing. Discuss the owner's goals and ask focused \
+         questions when the tasks, constraints or acceptance criteria are unclear. Reuse suitable existing roles and templates, \
+         explain which ones fit, and propose new or changed ones only for needs they do not cover. You may read the owner's \
          projects to learn how they work, but change no file: your only output is proposals with `hgs team catalog propose --json`. \
          The owner keeps or rejects each proposal and applies them; running teams keep their roster. The catalog is v{}: \
-         read it with `hgs team catalog get --json <<< '{{}}'`. Run `hgs` directly and send JSON on stdin in a \
-         heredoc. Ask the owner what they need, then propose.",
+         read it with `hgs team catalog get --json <<< '{{}}'`. Run `hgs` directly and send JSON on stdin in a heredoc.",
         catalog.version
     );
     // Section 9.8: the designer explains sub-leads: a role may lead one, and a
     // seat may delegate to another template.
     text += "\n\nA role with can_lead_subteam may lead a sub-team; a roster seat may name subteam: <template> so that member delegates that template. Unknown templates and template cycles are refused, so keep the catalog acyclic.";
+    if !project_name.trim().is_empty() {
+        text += &format!("\n\nThe selected project is {}.", project_name.trim());
+    }
     if !project.trim().is_empty() {
-        text += &format!("\n\nThe owner works in the project folder {}.", project.trim());
+        text += &format!("\n\nRead the selected project in the folder {}.", project.trim());
     }
     if !goal.trim().is_empty() {
         text += &format!("\n\nThe owner asks: {}", goal.trim());
@@ -893,7 +898,7 @@ fn designer(input: &Value) -> anyhow::Result<Value> {
         let config = crate::config::Config::load()?;
         trust_designer(agent, &folder, &crate::accounts::claude_launch_config(&config)?)?;
     }
-    let brief = designer_brief(&load()?, input["goal"].as_str().unwrap_or_default(), project);
+    let brief = designer_brief(&load()?, input["goal"].as_str().unwrap_or_default(), project, input["project"].as_str().unwrap_or_default());
     let args = designer_commands(agent, &folder, &model, &effort, &brief, &launch_id);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let output = super::dispatcher::hgs("", &args, None, std::time::Duration::from_secs(120))?;
@@ -1033,7 +1038,10 @@ mod tests {
         // An old catalog without the field loads the built-in rules.
         let old: Catalog = serde_json::from_value(json!({"version":3,"roles":[],"templates":[],"routing":[]})).unwrap();
         assert_eq!(old.planning_rules, default_planning_rules());
-        assert!(designer_brief(&builtin, "goal", "").contains("Planning rules") || designer_brief(&builtin, "goal", "").contains("(24)"));
+        let brief = designer_brief(&builtin, "goal", "/work/orbit", "Orbit platform");
+        assert!(brief.contains("Planning rules") || brief.contains("(24)"));
+        assert!(brief.contains("Orbit platform") && brief.contains("/work/orbit"));
+        assert!(brief.contains("ask focused questions") && brief.contains("Reuse suitable existing roles and templates"));
         // The rules are versioned with the catalog like any other text.
         let mut edited = builtin.clone();
         edited.version = 4;

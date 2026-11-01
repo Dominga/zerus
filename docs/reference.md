@@ -1351,7 +1351,14 @@ Shift+PgUp/PgDn in Terminal, and Alt+↑/↓ in the Projects dialog's list.
 
 ## Agent teams
 
-### The Team designer's folder
+### The Team designer's project and folder
+
+Team designer does not require an open session. Choose any project folder on
+this computer in its header, then describe the project's work in the chat. A
+selected local session still supplies its project automatically. The designer
+reads that project and the existing catalog, asks about unclear tasks and
+constraints, reuses suitable roles and templates, and proposes new or changed
+ones only for uncovered needs. A running designer keeps its original project.
 
 The Team designer runs in Zerus's own folder,
 `<state>/hgs/sessions/team-designer` (`HGS_STATE_DIR` when set, else

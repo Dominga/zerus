@@ -8,6 +8,7 @@ private slots:
     void leadPanelKeepsItsRowsWhenNothingChanges();
     void aRowUpdateReadsLeadLinksAndKeepWarmHoursOnce();
     void agentTeamsGroupTheirSessions();
+    void teamDesignerOffersProjectsWithoutSessions();
     void waitingBannersShowInTheChatAndTheTeamView();
     void teamTreeShowsSubteamsAndRollsUp();
     void teamMembersFollowTheirSubLead_data();
@@ -275,6 +276,45 @@ void TestSessionsWindow::agentTeamsGroupTheirSessions()
     QVERIFY(painted(TeamUi::agentLogo("dsh", Qt::white), [](const QColor &px) { return px.blue() > 200 && px.red() < 120; }));
     QVERIFY(painted(TeamUi::agentLogo("kimi", QColor("#ff0000")), [](const QColor &px) { return px.red() > 200 && px.green() < 60 && px.blue() < 60; }));
     QVERIFY(painted(TeamUi::agentLogo("opencode", QColor("#00ff00")), [](const QColor &px) { return px.green() > 200 && px.red() < 60; }));
+}
+
+void TestSessionsWindow::teamDesignerOffersProjectsWithoutSessions()
+{
+    SessionOrganization organization;
+    const auto orbit = organization.createGroup("Orbit platform");
+    organization.addFolder(orbit, "arch", "/work/orbit", "Main");
+    organization.addFolder(orbit, "arch", "/work/orbit-docs", "Developer docs");
+    organization.addFolder(orbit, "mac", "/remote/orbit", "Remote");
+    const auto remote = organization.createGroup("Remote only");
+    organization.addFolder(remote, "mac", "/remote/only");
+    organization.setDefaultProject(orbit);
+    setJsonSetting("workspace/organization", QJsonDocument(organization.toJson()).toJson(QJsonDocument::Compact));
+    QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
+    const QByteArray answer =
+        "elif c=='team' and a[1:3]==['catalog','designer']:\n"
+        " p=json.load(sys.stdin);open(__file__+'.calls','a').write(json.dumps(p)+'\\n');print('{\"name\":\"claude/team-designer/team-designer\"}')\n"
+        "elif c=='team':print('{}')\n";
+    const QString fixture = m_dir->filePath("hgs-designer-projects");
+    QVERIFY(FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)));
+    BoxState local; local.host = "arch"; local.ok = true; local.metrics = QJsonObject{{"platform", "linux"}};
+    FleetState state; state.setLocal(local, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(fixture)); window.setFleet(state); window.show();
+    QPushButton *designerNav = nullptr;
+    for (auto *button : window.findChildren<QPushButton *>("railButton")) if (button->property("teamDesignerNav").toBool()) designerNav = button;
+    QVERIFY(designerNav); designerNav->click();
+    auto *page = window.findChild<QWidget *>("teamDesignerPage");
+    QTRY_VERIFY(page && page->isVisible());
+    auto *projects = page->findChild<QComboBox *>("teamDesignerProject"); QVERIFY(projects);
+    QCOMPARE(projects->count(), 3);   // two local folders; the remote folder and remote-only project stay out
+    projects->setCurrentIndex(2); emit projects->activated(2);
+    auto *input = page->findChild<QPlainTextEdit *>("teamConversationInput");
+    input->setPlainText("Plan the documentation work."); page->findChild<QPushButton *>("teamConversationSend")->click();
+    QTRY_VERIFY(QFile::exists(fixture + ".calls"));
+    QFile call(fixture + ".calls"); QVERIFY(call.open(QIODevice::ReadOnly));
+    const auto payload = QJsonDocument::fromJson(call.readLine()).object();
+    QCOMPARE(payload["folder"].toString(), QDir::toNativeSeparators(QStringLiteral("/work/orbit-docs")));
+    QCOMPARE(payload["project"].toString(), QStringLiteral("Orbit platform"));
+    QCOMPARE(payload["goal"].toString(), QStringLiteral("Plan the documentation work."));
 }
 
 // U55: what waits for the owner shows as a banner at the top of the session's

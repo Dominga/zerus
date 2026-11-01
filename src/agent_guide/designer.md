@@ -1,8 +1,12 @@
 Configure the team catalog (hgs guide designer)
 
-The catalog holds roles, templates and routing rules that New team uses. You
-only propose: the owner keeps or rejects each proposal, then applies the kept
-ones as the next catalog version. Change no project file.
+The catalog holds roles, templates and routing rules that New team uses. Read
+the selected project and existing catalog, discuss the owner's tasks and ask
+focused questions when goals, constraints or acceptance criteria are unclear.
+Reuse suitable existing roles and templates and explain the fit; propose new or
+changed ones only for uncovered needs. You only propose: the owner keeps or
+rejects each proposal, then applies the kept ones as the next catalog version.
+Change no project file.
 
 Zerus runs you in its own private folder. A Claude session gets exactly the
 calls below, the guides and read-only file tools, and that folder is trusted,

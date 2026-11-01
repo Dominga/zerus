@@ -215,8 +215,9 @@ questions (2026-10-24): the coordinator shares the Team tab's side column with t
 moves (both halves scroll); one designer process whose conversation follows the selected session's project; plan editing
 stays in the inspector as well; the session list never collapses by itself.
 
-- **Team designer mode (M7).** Left: the designer of the selected session's project (`<agent>/<project>/team-designer`):
-  its conversation (`TeamConversation`: inspection polled while shown, guarded send) with quick asks, and its proposals as
+- **Team designer mode (M7).** Left: the designer of the selected session's project, or of a local project folder chosen
+  directly without any session (`<agent>/<project>/team-designer`): its conversation (`TeamConversation`: inspection polled
+  while shown, guarded send) with quick asks, and its proposals as
   cards (Keep / Reject / Undo, Show in catalog); not running, an empty state asks "What do you need?" and starts it.
   Right: `TeamCatalogEditor`, one widget for this page and Settings > Teams — header with title and meta, segmented
   Roles / Templates / Routing, a role or template list (230) beside an editor card, one scroll for the body. By hand:

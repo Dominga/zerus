@@ -121,7 +121,7 @@ fn an_interim_report_keeps_the_attempt_open_and_does_not_reach_the_owner() {
         let lead = super::super::inbox::items(&saved);
         let item = lead.iter().find(|item| item.kind == "interim_report").expect("the lead sees the interim report");
         assert!(item.summary.contains("Half the API is in") && item.task == Some(1), "{item:?}");
-        let waiting = crate::state::teams::owner_waiting::items(&[saved.clone()], crate::state::now());
+        let waiting = crate::state::teams::owner_waiting::items(std::slice::from_ref(&saved), crate::state::now());
         assert!(!waiting.iter().any(|item| item["title"].as_str().unwrap_or_default().contains("Half the API is in")), "{waiting:#?}");
         // The feed names it for the lead and the owner.
         let page = Store::open(false).unwrap().events("rv", None, 20).unwrap();

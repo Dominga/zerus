@@ -143,8 +143,8 @@ fn project_write(input: &Value, migrate: bool) -> anyhow::Result<Value> {
     teams::commands::authorize_external_rules(input)?;
     // Migration never replaces an authoritative value, including an owner's
     // deliberately empty list. A replay therefore cannot resurrect old rules.
-    let result = if migrate && row.is_some() {
-        json!({"status":"kept","scope":"project","project":id,"rules":serde_json::from_str::<Value>(&row.unwrap().0)?,"revision":current,"migrated":true})
+    let result = if let Some((stored_rules, _)) = row.as_ref().filter(|_| migrate) {
+        json!({"status":"kept","scope":"project","project":id,"rules":serde_json::from_str::<Value>(stored_rules)?,"revision":current,"migrated":true})
     } else {
         ensure!(
             current == expected,

@@ -550,8 +550,11 @@ fn parse_status(text: &str) -> Parsed {
         if trimmed.is_empty() {
             continue;
         }
-        let lower = trimmed.to_ascii_lowercase();
-        if parsed.memory.is_null() && (lower.starts_with("memory") || lower.starts_with("free memory") || lower.starts_with("ram")) {
+        let lower = trimmed.to_lowercase();
+        // A server's own tool may answer in Russian ("Свободно памяти: 43.6 ГиБ
+        // из 121.6"): free first, then total, as in English.
+        let memory = ["memory", "free memory", "ram", "свободно памяти", "память"].iter().any(|prefix| lower.starts_with(prefix));
+        if parsed.memory.is_null() && memory {
             let numbers: Vec<f64> = trimmed
                 .split(|ch: char| !ch.is_ascii_digit() && ch != '.' && ch != '-')
                 .filter(|part| !part.is_empty())
@@ -1577,6 +1580,13 @@ mod tests {
         assert_eq!(value["models"], json!([{"name":"small","state":"ready"},{"name":"coder-a:q4","state":"running"}]));
         assert_eq!(value["memory"], json!({"free":8.0,"total":32.0}));
         assert_eq!(value["raw"], json!(["queue depth 3"]));
+        // A Russian memory line reads the same.
+        set_fake_command(Some(Box::new(|_: &Server, _: &[String], _| {
+            Ok(Run { code: Some(0), stdout: "small: выключена\nСвободно памяти: 43.6 ГиБ из 121.6\n".into(), stderr: String::new() })
+        })));
+        let value = status(&config, &server).unwrap();
+        assert_eq!(value["memory"], json!({"free":43.6,"total":121.6}));
+        assert_eq!(value["models"], json!([{"name":"small","state":"выключена"}]));
         // A refusal and an unreachable host are distinct.
         set_fake_command(Some(Box::new(|_: &Server, _: &[String], _| Err(Failure::Refused("no such model".into())))));
         assert_eq!(status(&config, &server).unwrap_err().kind(), "refused");

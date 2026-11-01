@@ -1911,7 +1911,9 @@ fn create(input: &Value) -> anyhow::Result<Value> {
     ensure!(canonical_uuid(request), "A canonical request_id is required");
     // A replay returns the first receipt; a parent link is repaired first
     // (N25: the child may exist from a create whose parent mutate failed).
-    if let Some(receipt) = Store::open(false)?.receipt(request, input)? {
+    // The computer's first team finds no store yet, so nothing to replay.
+    let replay = if store::path().exists() { Store::open(false)?.receipt(request, input)? } else { None };
+    if let Some(receipt) = replay {
         if input["parent"].is_object() {
             repair_parent_link(request, input)?;
         }

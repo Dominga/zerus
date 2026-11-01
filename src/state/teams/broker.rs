@@ -721,6 +721,7 @@ fn run_shared(
     let started = Instant::now();
     let until = started + config.ready_wait.min(timeout);
     let mut pending = unready(shared, team, member);
+    let initial_pending = !pending.is_empty();
     let mut told = false;
     while !pending.is_empty() && Instant::now() < until {
         if !told {
@@ -730,7 +731,10 @@ fn run_shared(
         std::thread::sleep(Duration::from_millis(500));
         pending = unready(shared, team, member);
     }
-    let waited = started.elapsed().as_secs();
+    // "waited" is the time spent waiting for other members, not the time this
+    // thread happened to be descheduled while checking readiness. A build with
+    // no initial wait or a zero ready window reports no wait.
+    let waited = if initial_pending && !config.ready_wait.is_zero() { started.elapsed().as_secs() } else { 0 };
     drop(waiting);
     let building = shared.join(".zerus-team").join("runs").join("broker-building");
     fs::create_dir_all(&building)?;

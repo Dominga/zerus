@@ -1387,6 +1387,10 @@ pub(crate) struct Task {
     pub title: String,
     #[serde(default)]
     pub description: String,
+    /// Repo-relative file or directory paths. Empty on older tasks: rebalance
+    /// keeps them with a member that already has work in progress.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output: Vec<String>,
     /// A plan task, or a check that runs a command (C5).
     #[serde(default, skip_serializing_if = "TaskKind::is_task")]
     pub kind: TaskKind,
@@ -1403,6 +1407,14 @@ pub(crate) struct Task {
     /// another member with the same role.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,
+    /// A non-final rejection reserves this task's member until it is decided
+    /// or explicitly reassigned. Missing on tasks saved before rework existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rework_since: Option<f64>,
+    /// Only an explicit fresh rejection may bypass shared Output on its next
+    /// attempt. Automatic send/preparation refusals never grant this policy.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fresh_retry: bool,
     /// Owner 2026-10-31: the lead's time estimate in minutes. Absent until the
     /// lead sets one; a task without one shows Zerus' own estimate from the
     /// per-computer history.
@@ -1477,6 +1489,30 @@ pub(crate) struct Task {
     /// they move to the attempt that hands it out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prepare: Vec<PrepareStep>,
+}
+
+/// One tick's index of each member's in-progress tasks, built once rather
+/// than scanning the full task list for every candidate member.
+pub(crate) struct InProgressOutputs<'a> {
+    members: std::collections::BTreeMap<&'a str, Vec<&'a Task>>,
+}
+
+impl<'a> InProgressOutputs<'a> {
+    pub(crate) fn new(team: &'a Team) -> Self {
+        let mut members = std::collections::BTreeMap::<&str, Vec<&Task>>::new();
+        for task in &team.tasks {
+            if !task.assignee.is_empty() && matches!(task.status, TaskStatus::Assigned | TaskStatus::InProgress) {
+                members.entry(&task.assignee).or_default().push(task);
+            }
+        }
+        Self { members }
+    }
+
+    pub(crate) fn blocks(&self, task: &Task) -> bool {
+        self.members.get(task.assignee.as_str()).is_some_and(|active| active.iter().any(|other| {
+            other.id != task.id && (task.output.is_empty() || task.output_overlaps(other))
+        }))
+    }
 }
 
 /// U36: one stage of a task's pipeline snapshot.
@@ -1730,6 +1766,28 @@ pub(crate) struct Lane {
 }
 
 impl Task {
+    pub(crate) fn requests_fresh_retry(&self) -> bool {
+        self.fresh_retry && self.failed_by(&self.assignee)
+    }
+    pub(crate) fn failed_by(&self, member: &str) -> bool {
+        self.attempts.iter().any(|attempt| attempt.member == member
+            && matches!(attempt.state, AttemptState::Rejected | AttemptState::Refused)
+            && !super::pipeline::pipeline_returned(attempt))
+    }
+    /// Paths are normalized at task creation/editing; directory containment
+    /// compares components so `src/api` never contains `src/apis`.
+    pub(crate) fn output_overlaps(&self, other: &Task) -> bool {
+        self.output.iter().any(|a| other.output.iter().any(|b| {
+            let a: Vec<_> = a.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
+            let b: Vec<_> = b.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
+            a.starts_with(&b) || b.starts_with(&a)
+        }))
+    }
+
+    pub(crate) fn rework(&self) -> bool {
+        self.rework_since.is_some() && !self.status.finished() && !self.assignee.is_empty()
+    }
+
     pub(crate) fn open_attempt(&self) -> Option<&Attempt> {
         self.attempts.iter().rev().find(|attempt| attempt.state.open())
     }
@@ -2189,10 +2247,27 @@ impl Team {
         format!("{member} ({role})")
     }
 
-    /// U56: a task Zerus never gives to another member of its role: pinned by
-    /// the lead or you, or any planned assignee under `keep_assignees`.
+    /// An explicit assignment policy, independent of other tasks' Output.
+    pub(crate) fn requires_assignee(&self, task: &Task) -> bool {
+        task.rework() || task.pinned || (self.settings.keep_assignees && task.role.is_empty() && !task.assignee.is_empty())
+    }
+
+    /// Assignment policy only. Output protection applies separately to
+    /// busy-assignee rebalance, never to choosing a fresh retry member.
     pub(crate) fn keeps_assignee(&self, task: &Task) -> bool {
-        task.pinned || (self.settings.keep_assignees && task.role.is_empty() && !task.assignee.is_empty())
+        self.requires_assignee(task)
+    }
+
+    /// Recheck at the mutation boundary. Tick selection uses one shared index.
+    pub(crate) fn rebalance_blocked(&self, task: &Task) -> bool {
+        self.requires_assignee(task) || (!task.requests_fresh_retry() && InProgressOutputs::new(self).blocks(task))
+    }
+
+    /// A returned task reserves its member even while held or awaiting review.
+    pub(crate) fn reserved_for_rework(&self, member: &str, task: Option<u32>) -> bool {
+        self.tasks.iter().filter(|found| found.rework() && found.assignee == member)
+            .min_by(|a, b| a.rework_since.unwrap().total_cmp(&b.rework_since.unwrap()).then(a.id.cmp(&b.id)))
+            .is_some_and(|found| Some(found.id) != task)
     }
 
     /// Spec 5.6: who reviews a member's work - its parent when that is a

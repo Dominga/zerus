@@ -595,6 +595,7 @@ fn an_accepted_phase_returns_to_a_draft_until_its_work_starts() {
     // You return the queued phase 2: it stays phase 2 before phase 3 with
     // its task #3, Draft again, with a feed event and nothing renumbered.
     events.clear();
+    team.task_mut(3).unwrap().rework_since = Some(1.0);
     let returned = apply(&mut team, "return-to-draft", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
     assert_eq!((returned["status"].as_str(), returned["from_phase"].as_u64(), returned["phase"].as_u64()), (Some("phase_returned_to_draft"), Some(2), Some(2)));
     assert_eq!(returned["tasks"], json!([3]));
@@ -602,6 +603,7 @@ fn an_accepted_phase_returns_to_a_draft_until_its_work_starts() {
     let draft = team.phases.iter().find(|phase| phase.state == PhaseState::Draft).unwrap();
     assert_eq!((draft.n, draft.decided_at, draft.decided_by.as_str()), (2, None, ""));
     assert_eq!(team.task(3).unwrap().status, TaskStatus::Draft);
+    assert_eq!(team.task(3).unwrap().rework_since, None);
     assert!(!events.iter().any(|event| event.kind == "phase_renumbered"));
     let event = events.iter().find(|event| event.kind == "phase_returned_to_draft").unwrap();
     assert_eq!((event.payload["by"].as_str(), event.payload["phase"].as_u64(), event.payload["from"].as_str()), (Some("You"), Some(2), Some("queued")));

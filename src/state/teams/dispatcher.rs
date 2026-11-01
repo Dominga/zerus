@@ -1305,6 +1305,9 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     }
     // #635 N1: a stage member's turn that ended after the hand-off without a
     // verdict, and with no stage question open, is a stalled item for the lead.
+    // The owner (2026-11-01): waiting for Background work (the reviewer's
+    // tests) or for a Zerus build is not a stall, so that turn is not silent
+    // while either runs; the budget or the block message reaches the lead.
     for task in &team.tasks {
         let Some(run) = task.pipeline_run.as_ref().and_then(|pipeline| pipeline.open_run()) else { continue };
         if run.state != StageState::Delivered || run.member.is_empty() || !run.silent.is_empty() {
@@ -1316,7 +1319,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         let Some(member) = team.member(&run.member) else { continue };
         let Some(found) = session_of(member, seen) else { continue };
         let delivered = run.delivered_at.unwrap_or(run.at);
-        if found.free && found.reply_at.unwrap_or(0.0) > delivered {
+        if found.free && !found.background && !found.building && found.reply_at.unwrap_or(0.0) > delivered {
             steps.push(Step::StageSilent { task: task.id, run: run.id.clone() });
         }
     }

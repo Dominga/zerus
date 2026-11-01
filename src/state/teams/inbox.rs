@@ -809,11 +809,20 @@ fn all_items(team: &Team) -> Vec<Item> {
         });
     }
     // U20: a delivered attempt whose turn ended long ago and still has no
-    // report is an item, whatever the capture did.
+    // report is an item, whatever the capture did. The owner (2026-11-01):
+    // waiting for the answer to the member's own question or for its Background
+    // work is not a stall, so that wait is no missing report; the budget or the
+    // block timeout reaches the lead as the blocked message instead.
     let now = crate::state::now();
     for task in &team.tasks {
         let Some(attempt) = task.open_attempt() else { continue };
         if attempt.member == team.lead || attempt.report.is_some() {
+            continue;
+        }
+        if attempt.open_question().is_some() || attempt.blocked_since.is_some() {
+            continue;
+        }
+        if team.member(&attempt.member).is_some_and(|member| member.background_since.is_some()) {
             continue;
         }
         let Some(ended) = attempt.turn_ended_at else { continue };

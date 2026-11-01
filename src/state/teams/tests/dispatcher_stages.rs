@@ -67,6 +67,40 @@ fn a_stage_member_whose_turn_ends_without_a_verdict_is_told_to_the_lead() {
     assert!(page["items"].as_array().unwrap().iter().any(|event| event["kind"] == "stage_silent"), "{page}");
 }
 
+/// The owner (2026-11-01): a reviewer whose turn ended with the tests still
+/// running waits for Background work or a Zerus build, which is not a stall;
+/// it is not reported silent while that work runs.
+#[test]
+fn a_stage_member_with_background_work_is_not_reported_silent() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut t = staged(&dir.path().display().to_string());
+    let run = super::super::pipeline::give_stage(&mut t, 1, "rev").unwrap();
+    {
+        let stage = t.task_mut(1).unwrap().pipeline_run.as_mut().unwrap().runs.iter_mut().find(|stage| stage.id == run).unwrap();
+        stage.delivered_at = Some(100.0);
+    }
+    let lead = session("claude/x/lead", "r0", true);
+    let dev = session("codex/x/dev", "r1", true);
+    let mut rev = session("claude/x/rev", "r2", true);
+    rev.reply_at = Some(200.0);
+    // Background work holds the finished turn: no silent notice, however long.
+    let mut background = rev.clone();
+    background.background = true;
+    for at in [1000.0, 10_000.0] {
+        let found = steps(&t, &[lead.clone(), dev.clone(), background.clone()], at);
+        assert!(!found.iter().any(|step| matches!(step, Step::StageSilent { .. })), "{at}: {found:?}");
+    }
+    // A Zerus build is work too: the reviewer's tests through hgs team run.
+    let mut building = rev.clone();
+    building.building = true;
+    assert!(
+        !steps(&t, &[lead.clone(), dev.clone(), building], 10_000.0).iter().any(|step| matches!(step, Step::StageSilent { .. })),
+        "a build is not a silent turn"
+    );
+    // The work ended and the turn still has no verdict: now the lead hears it.
+    assert!(steps(&t, &[lead, dev, rev], 10_000.0).contains(&Step::StageSilent { task: 1, run }));
+}
+
 /// #635 N3: an unconfirmed hand-off is stalled only with evidence it did
 /// not arrive; a reply after delivery or a run claim is evidence it did.
 #[test]

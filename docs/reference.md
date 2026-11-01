@@ -1372,9 +1372,12 @@ Claude's start-up trust stays manual for every other folder. No other agent
 ### The team roster on the owner's word
 
 The lead changes a team's roster only on the owner's explicit word: a sentence
-the owner typed in the lead's own session, at most 30 minutes old. For
-`add-member` the sentence must name what is added — the member's role or its
-agent/model, in English or Russian ("backend"/"бэкенд", "frontend"/"фронт",
+the owner typed in the lead's own session, at most 30 minutes old. Zerus reads
+that session's journal under its current and earlier names, so a session
+renamed after its journal began (its events stay under the name it had then)
+is still the lead's own. For `add-member` the sentence must name what is
+added — the member's role or its agent/model, in English or Russian
+("backend"/"бэкенд", "frontend"/"фронт",
 "qa", "reviewer"/"ревьюер", "expert"/"эксперт"; "DeepSeek"/"дипсик"/"dsh",
 "Claude"/"клод", "Opus"/"опус", "Codex"/"кодекс", "Kimi"/"кими") — not the
 generated id. The sentence says how many members it adds; one is the default.
@@ -1661,7 +1664,13 @@ returns "timed out after N min". The plan chooses a preset, never a command:
 only the owner's catalog writes it.
 
 A stage member that ends its turn without a verdict, with no stage question
-open, gives the lead one stalled item while the stage stays its own. An
+open, gives the lead one stalled item while the stage stays its own. A turn
+that waits for the lead's answer or for Background work (or for a Zerus build,
+such as the tests the reviewer runs) is not stalled: no silent item appears
+while that work runs, and the member may still report its verdict. The budget
+the member declared (`hgs team expect`) or the block timeout's "waiting N min"
+message tells the lead when the wait is too long; it is never reported as a
+missing report. An
 unconfirmed hand-off is not retried on a timer: the lead hears it stalled only
 with evidence that it did not arrive (the member stayed idle and free since
 delivery, with no question and no run claim under the stage's id), and the

@@ -584,6 +584,76 @@ fn a_count_word_authorizes_that_many_adds_and_the_cap_grows_by_one_each() {
     });
 }
 
+/// Owner (2026-11-01): the lead session's journal keeps the name it had when
+/// it began, so a renamed lead ("work-7c91e747" -> "Worker") has its events,
+/// including "plan approved", under the earlier name. The word belongs to the
+/// same conversation, so the approval is found.
+#[test]
+fn the_owners_word_is_found_under_an_earlier_name_of_the_lead_session() {
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let now = crate::state::now();
+    let name = "dsh/zerus-src/Worker";
+    let earlier = "dsh/zerus-src/work-7c91e747";
+    let conversation = "session-conv-lead";
+    let db = rusqlite::Connection::open(dir.path().join("events.sqlite3")).unwrap();
+    db.execute_batch("CREATE TABLE events (seq INTEGER PRIMARY KEY, name TEXT, conversation TEXT, payload TEXT);").unwrap();
+    db.execute(
+        "INSERT INTO events(name, conversation, payload) VALUES (?1, ?2, ?3)",
+        rusqlite::params![
+            earlier,
+            conversation,
+            json!({"type":"UserPromptSubmit","at":now - 60.0,"agent_id":"","detail":"plan approved"}).to_string()
+        ],
+    )
+    .unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let _worker = hold_worker_lock();
+        // The dsh binding of the renamed lead: hgs ls shows "Worker", and its
+        // journal began as "work-7c91e747".
+        let binding = dir.path().join("dsh/bindings").join(format!("{:x}.json", Sha256::digest(name.as_bytes())));
+        std::fs::create_dir_all(binding.parent().unwrap()).unwrap();
+        std::fs::write(
+            &binding,
+            json!({"version":1,"name":name,"backend":"dsh","agent":"dsh",
+                "run_id":"r0","conversation_id":conversation,"journal_name":earlier}).to_string(),
+        )
+        .unwrap();
+        let mut store = Store::open(true).unwrap();
+        let (mut team, _) = ops::create(
+            "t",
+            &json!({"name":"Renamed","lead":{"id":"lead","agent":"dsh",
+                "session":{"name":name,"run_id":"r0","conversation_id":conversation}}}),
+        )
+        .unwrap();
+        let mut events = Vec::new();
+        ops::apply(
+            &mut team,
+            "plan",
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"codex"}],
+                "tasks":[{"id":1,"title":"API","assignee":"dev"}]}),
+            &Actor::Human,
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap();
+        let id = team.id.clone();
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+        // The lead of the renamed session approves on the word under its old name.
+        set_test_caller_identities(Some((Some(conversation.into()), None, None)));
+        let approved = run(
+            "approve",
+            &json!({"request_id":"22222222-2222-4222-8222-222222222222","team":id,"owner_word":{"text":"plan approved"}}),
+            false,
+        )
+        .unwrap();
+        assert_eq!(approved["status"], "approved", "{approved}");
+        let saved = Store::open(false).unwrap().load(&id).unwrap().unwrap();
+        assert_eq!(saved.owner_word.as_ref().map(|word| word.text.as_str()), Some("plan approved"));
+        set_test_caller_identities(None);
+    });
+}
+
 /// #728: the lead relaunches a stuck member on the owner's setting without a
 /// word; the owner has the same route; without the setting the word is still
 /// asked.

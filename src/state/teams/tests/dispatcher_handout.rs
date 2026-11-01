@@ -268,14 +268,17 @@ fn a_rejected_task_is_retried_by_a_fresh_member_when_one_is_free() {
 }
 
 #[test]
-fn a_fresh_or_refused_retry_leaves_the_failed_member_even_with_other_work() {
-    for refused in [false, true] {
+fn a_fresh_retry_leaves_the_failed_member_even_with_other_work() {
+    for overlapping in [false, true] {
         for modeled in [false, true] {
             let (mut team, mut seen) = team_with_two_backends();
             submit(&mut team, 1, "dev", false);
             ops::apply(&mut team, "reject", &json!({"task":1,"reason":"Use a fresh context","fresh":true}),
                 &Actor::Member("lead".into()), &BTreeSet::new(), &mut Vec::new()).unwrap();
-            if refused { team.task_mut(1).unwrap().attempts[0].state = AttemptState::Refused; }
+            if overlapping {
+                team.task_mut(1).unwrap().output = vec!["src/shared.rs".into()];
+                team.task_mut(2).unwrap().output = vec!["src/shared.rs".into()];
+            }
             team.task_mut(2).unwrap().status = TaskStatus::InProgress;
             team.task_mut(2).unwrap().attempts.push(Attempt { n: 1, member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
             seen[1].free = false;
@@ -284,7 +287,7 @@ fn a_fresh_or_refused_retry_leaves_the_failed_member_even_with_other_work() {
                 for member in &mut team.members { member.model = "test-model".into(); }
             }
             let next = Step::Rebalance { task: 1, from: "dev".into(), to: "dev2".into() };
-            assert!(steps(&team, &seen, 100.0).contains(&next), "refused={refused} modeled={modeled}");
+            assert!(steps(&team, &seen, 100.0).contains(&next), "overlapping={overlapping} modeled={modeled}");
             let dir = tempfile::tempdir().unwrap();
             let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
             store.create("11111111-1111-4111-8111-111111111111", &json!({}), team.clone(), vec![]).unwrap();
@@ -295,7 +298,51 @@ fn a_fresh_or_refused_retry_leaves_the_failed_member_even_with_other_work() {
             let result = run_step(&mut store, &team, &next, "");
             set_fake_hgs(None);
             result.unwrap();
-            assert_eq!(store.load(&team.id).unwrap().unwrap().task(1).unwrap().assignee, "dev2");
+            let saved = store.load(&team.id).unwrap().unwrap();
+            assert_eq!(saved.task(1).unwrap().assignee, "dev2");
+            assert!(!saved.task(1).unwrap().fresh_retry);
+        }
+    }
+}
+
+#[test]
+fn an_automatic_refusal_keeps_overlapping_or_unknown_output_with_its_member() {
+    for missing_output in [false, true] {
+        for modeled in [false, true] {
+            let (team, mut seen) = team_with_two_backends();
+            let dir = tempfile::tempdir().unwrap();
+            let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team.clone(), vec![]).unwrap();
+            set_fake_hgs(Some(Box::new(|_, args, _| {
+                assert_eq!(&args[..2], &["send", "codex/x/dev"]);
+                Ok(fake_output(1, "", "session is busy"))
+            })));
+            let result = run_step(&mut store, &team, &Step::HandOut { task: 1, member: "dev".into() }, "");
+            set_fake_hgs(None);
+            result.unwrap();
+            let mut team = store.load(&team.id).unwrap().unwrap();
+            assert_eq!(team.task(1).unwrap().attempts.last().unwrap().state, AttemptState::Refused);
+            assert!(!team.task(1).unwrap().fresh_retry);
+            if !missing_output { team.task_mut(1).unwrap().output = vec!["src/shared.rs".into()]; }
+            team.task_mut(2).unwrap().output = vec!["src/shared.rs".into()];
+            team.task_mut(2).unwrap().status = TaskStatus::InProgress;
+            team.task_mut(2).unwrap().attempts.push(Attempt { n: 1, member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+            seen[1].free = false;
+            if modeled {
+                team.task_mut(1).unwrap().models = vec!["test-model".into()];
+                for member in &mut team.members { member.model = "test-model".into(); }
+            }
+            // Expire the send-refusal backoff before checking Output protection.
+            let at = crate::state::now() + 60.0;
+            assert!(!steps(&team, &seen, at).iter().any(|step| matches!(step, Step::Rebalance { task: 1, .. })),
+                "missing_output={missing_output} modeled={modeled}");
+            change(&mut store, &team.id, |saved, _| { *saved = team.clone(); Ok(()) }).unwrap();
+            set_fake_hgs(Some(Box::new(|_, _, _| panic!("a stale rebalance must not send"))));
+            let result = run_step(&mut store, &team, &Step::Rebalance { task: 1, from: "dev".into(), to: "dev2".into() }, "");
+            set_fake_hgs(None);
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("task must stay with its member"), "{error}");
+            assert_eq!(store.load(&team.id).unwrap().unwrap().task(1).unwrap().assignee, "dev");
         }
     }
 }

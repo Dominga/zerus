@@ -1369,7 +1369,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             let failed = |m: &Member| {
                 !team.requires_assignee(task) && task.failed_by(&m.id)
             };
-            let output_blocks = !task.failed_by(&task.assignee) && outputs.blocks(task);
+            let output_blocks = !task.requests_fresh_retry() && outputs.blocks(task);
             let candidates = super::models::candidates(team, task);
             let fits: Vec<(&Member, super::models::Fit)> = candidates
                 .iter()
@@ -1432,7 +1432,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         // U36: a test holding the assignee's folder keeps its next task back;
         // a free member with the same role may take it.
         let held = super::stages::held(team, &member.id).is_some();
-        if !team.requires_assignee(task) && (task.failed_by(&member.id) || !outputs.blocks(task)) {
+        if !team.requires_assignee(task) && (task.requests_fresh_retry() || !outputs.blocks(task)) {
             let failed = |m: &Member| task.failed_by(&m.id);
             let assignee_fits = available(member, &busy, Some(id)) && !failed(member) && !held;
             if !assignee_fits {
@@ -4030,6 +4030,7 @@ fn hand_out_now(
         };
         anyhow::ensure!(task.assignee == member_id, "reassigned");
         let n = task.attempts.len() as u32 + 1;
+        task.fresh_retry = false;
         task.attempts.push(Attempt {
             n,
             id: attempt_id.clone(),
@@ -4635,6 +4636,7 @@ fn record_waits(
         };
         anyhow::ensure!(task.assignee == member_id, "reassigned");
         let n = task.attempts.len() as u32 + 1;
+        task.fresh_retry = false;
         task.attempts.push(Attempt {
             n,
             id: uuid::Uuid::new_v4().to_string(),

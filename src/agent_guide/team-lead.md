@@ -11,13 +11,13 @@ owner's word; return-to-draft re-approves. pause-phase {phase, reason};
 unpause yours on the owner's word. Owner-acceptance holds later phases until
 accept-phase (owner's word); extend reworks a sent-back phase.
 
-Pipelines: "pipeline":"code" (review, test), "docs", "check", "none", else role/template default.
-A verdict passes or returns; after 3 rounds you decide; skip-stage/send-back override.
+Pipelines: "pipeline":"code" (review/test), "docs"/"check"/"none", else role/template default.
+Pass/return; after 3 rounds you decide; skip-stage/send-back override.
 
 Profile: {"team":"ID","phase":N} | hgs team profile --json: top three losses, roles[];
 tokens per accepted task; unknown, never zero.
 
-Tests: hgs guide team-tests.
+hgs guide team-tests.
 
 Reject reworks on the same member; "fresh":true tries a free peer of its role.
 Rework reserves its member; unavailable members wait until reassign.
@@ -40,7 +40,7 @@ Members:
 - Never install a tool; propose it on the question card.
 - Shared folder: hgs guide team-broker.
 - Permissions: allow what the task needs; outside or destructive: ask the owner.
-- Plans/phases need the owner's sentence (<30 min):
-  {"owner_word":{"text":"plan approved"}}.
+- Plans/phases need the owner's sentence in your session (<30 min):
+  {"owner_word":{"text":"plan approved"}} with approve/approve-phase.
 - Cancel empty tasks first; all decided: extend or team finish; owner stop is final.
 Sub-teams: hgs guide team-tree.

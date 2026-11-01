@@ -1404,6 +1404,10 @@ pub(crate) struct Task {
     /// or explicitly reassigned. Missing on tasks saved before rework existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rework_since: Option<f64>,
+    /// Only an explicit fresh rejection may bypass shared Output on its next
+    /// attempt. Automatic send/preparation refusals never grant this policy.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fresh_retry: bool,
     /// Owner 2026-10-31: the lead's time estimate in minutes. Absent until the
     /// lead sets one; a task without one shows Zerus' own estimate from the
     /// per-computer history.
@@ -1755,6 +1759,9 @@ pub(crate) struct Lane {
 }
 
 impl Task {
+    pub(crate) fn requests_fresh_retry(&self) -> bool {
+        self.fresh_retry && self.failed_by(&self.assignee)
+    }
     pub(crate) fn failed_by(&self, member: &str) -> bool {
         self.attempts.iter().any(|attempt| attempt.member == member
             && matches!(attempt.state, AttemptState::Rejected | AttemptState::Refused)
@@ -2246,7 +2253,7 @@ impl Team {
 
     /// Recheck at the mutation boundary. Tick selection uses one shared index.
     pub(crate) fn rebalance_blocked(&self, task: &Task) -> bool {
-        self.requires_assignee(task) || (!task.failed_by(&task.assignee) && InProgressOutputs::new(self).blocks(task))
+        self.requires_assignee(task) || (!task.requests_fresh_retry() && InProgressOutputs::new(self).blocks(task))
     }
 
     /// A returned task reserves its member even while held or awaiting review.

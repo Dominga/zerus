@@ -373,6 +373,7 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
     task.phase = 1;
     task.attempts.clear();
     task.rework_since = None;
+    task.fresh_retry = false;
     task.hold = None;
     task.decided_by = None;
     // U36: the plan names a preset; Zerus snapshots it when the task is
@@ -1899,6 +1900,7 @@ fn return_to_draft(team: &mut Team, input: &Value, actor: &Actor, events: &mut V
         if wanted.contains(&task.id) && task.status == TaskStatus::Pending {
             task.status = TaskStatus::Draft;
             task.rework_since = None;
+            task.fresh_retry = false;
         }
     }
     let label = actor.label(team);
@@ -4528,6 +4530,7 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     mark_decided(task);
     if accept {
         task.rework_since = None;
+        task.fresh_retry = false;
         revoke(task, "accepted without this attempt");
         task.status = TaskStatus::Accepted;
     } else {
@@ -4546,6 +4549,7 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
             TaskStatus::Pending
         };
         task.rework_since = if !fresh && task.status == TaskStatus::Pending { Some(now()) } else { None };
+        task.fresh_retry = fresh && task.status == TaskStatus::Pending;
         if hold {
             task.hold = Some(Hold { by: label.clone(), at: now(), reason: reason.clone() });
         }
@@ -4618,6 +4622,7 @@ fn reassign(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
     task.assignee = target.to_owned();
     task.pinned = true;
     task.rework_since = None;
+    task.fresh_retry = false;
     // U45: a task for a role now has its member; a waiting step starts over.
     task.role.clear();
     task.waits = None;
@@ -4742,6 +4747,7 @@ fn cancel(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     let phase = task.phase;
     let phase_build = task.phase_build;
     task.status = TaskStatus::Cancelled;
+    task.fresh_retry = false;
     // #759: the tasks it held start once their other dependencies are done;
     // the event and the lead's inbox name them for a re-plan.
     let released = super::plan::waiting_on(team, id);

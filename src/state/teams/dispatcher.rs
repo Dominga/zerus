@@ -4369,7 +4369,7 @@ fn stage_hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &st
         let report_host = if member_host.is_empty() { String::new() } else { host.to_owned() };
         let mut text = super::stages::hand_off_text(team, task, run, &prepared, &report_host);
         if !rules.is_empty() {
-            text.push_str("\n");
+            text.push('\n');
             text.push_str(&rules);
         }
         message = Some((run_id.clone(), text));

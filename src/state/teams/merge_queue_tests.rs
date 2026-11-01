@@ -606,8 +606,7 @@ fn a_kept_merge_with_nothing_selected_advances_the_tested_range() {
 
 #[test]
 fn an_open_not_run_suite_outlives_the_bounded_merge_log() {
-    let mut team = Team::default();
-    team.merge_tested = "head60".into();
+    let mut team = Team { merge_tested: "head60".into(), ..Default::default() };
     for i in 0..60 {
         team.merge_log.push(crate::state::teams::model::MergeLog {
             task: i + 1,
@@ -631,8 +630,7 @@ fn an_open_not_run_suite_outlives_the_bounded_merge_log() {
 
 #[test]
 fn an_open_range_overflow_holds_the_tested_point_and_says_so() {
-    let mut team = Team::default();
-    team.merge_tested = "newer".into();
+    let mut team = Team { merge_tested: "newer".into(), ..Default::default() };
     for i in 0..65 {
         team.merge_not_run.insert(
             format!("suite{i:02}"),

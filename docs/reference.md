@@ -6129,8 +6129,14 @@ Iron-rules compatibility and failure handling:
   `iron-rules-v1` and never requests a terminal or agent launch. Windows uses
   the guarded peer channel or a guarded SSH command.
 - A startup proof belongs to the exact run and conversation and is invalidated
-  at every root SessionStart before resolution. Resolution errors are logged
-  without losing the ordinary hint/task context; they keep per-send delivery.
+  at every accepted main SessionStart before resolution. Foreign starts cannot
+  invalidate the parent's proof. Resolution errors are logged without losing
+  the ordinary hint/task context; they keep per-send delivery.
+- The combined startup context is written and flushed before the confirmed
+  binding is published. Its rules proof is part of that same atomic record
+  update, with no later proof-only write after a fresh conversation is visible.
+  Early invalidation remains in place: failed output leaves no proof and does
+  not publish a fresh binding as started.
 - Claude Code's [hook output limit](https://code.claude.com/docs/en/hooks#json-output)
   is 10,000 characters per context string. Zerus accepts startup proof only for
   at most 6000 UTF-16 units of rules and 8000 units of combined context. Larger

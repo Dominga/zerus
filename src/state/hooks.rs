@@ -1264,39 +1264,8 @@ pub(super) fn hook() -> Result<i32> {
         return Ok(0);
     };
     let event = stdin_json()?;
-    let mut started = false;
-    let mut hint = None;
-    let conversation = string(&event, "session_id").to_owned();
-    let mut rules_proof = None;
-    let code = track(name.clone(), token.clone(), event, &mut started, &mut hint,
-        &mut rules_proof,
-    )?;
-    // The project's task commands, in the agent's context from its first turn on
-    // (docs/superpowers/specs/2026-10-13-project-task-queue-design.md); only a
-    // start this run recorded as its own conversation's, never a nested CLI's.
-    let tasks = (code == 0 && started)
-        .then(|| nonempty_env("HGS_AGENT").and_then(|agent| crate::tasks::session_context(&agent)))
-        .flatten();
-    if let Some(context) = start_context(hint, tasks) {
-        if context.encode_utf16().count() > super::iron_rules::MAX_START_CONTEXT { rules_proof = None; }
-        let stdout = io::stdout();
-        agent_hint::output(&mut stdout.lock(), &context)?;
-        // A failed stdout write must never establish startup delivery.
-        if let Some((project, digest)) = rules_proof {
-            let _guard = lock(None)?;
-            if let Some(mut record) = read_run(&name, &token)? {
-                if string(&record, "conversation_id") == conversation {
-                    record["iron_rules_start_supported"] = json!(true);
-                    record["iron_rules_start_project"] = json!(project);
-                    record["iron_rules_start_digest"] = json!(digest);
-                    record["iron_rules_start_run"] = json!(token);
-                    record["iron_rules_start_conversation"] = json!(conversation);
-                    write(&mut record)?;
-                }
-            }
-        }
-    }
-    Ok(code)
+    let stdout = io::stdout();
+    track(name, token, event, &mut stdout.lock())
 }
 
 /// Claude Code 2.1.312 refuses a hook output of two JSON objects: the agent
@@ -1336,10 +1305,9 @@ fn iron_rules_start(record: &Value, event: &Value) -> Result<Option<(String, Str
     Ok(Some(context))
 }
 
-/// Records one hook event of the session `name`'s run `token`; `started` says
-/// that it was the start of the run's own conversation.
-fn track(name: String, token: String, mut event: Value, started: &mut bool, hint_out: &mut Option<String>,
-    rules_proof: &mut Option<(String, String)>) -> Result<i32> {
+/// Records one hook event of this exact run. A main start publishes its
+/// confirmed binding only after its combined context was delivered.
+fn track(name: String, token: String, mut event: Value, output: &mut impl std::io::Write) -> Result<i32> {
     if nonempty_env("HGS_AGENT").as_deref() == Some("claude") {
         if let std::borrow::Cow::Owned(prompt) = journal::pasted_text(string(&event, "prompt")) {
             event["prompt"] = json!(prompt);
@@ -1534,22 +1502,35 @@ fn track(name: String, token: String, mut event: Value, started: &mut bool, hint
         }
     }
     let hint = agent_hint::start(&mut record, &event);
-    write(&mut record)?;
-    if kind == "SessionStart" && string(&event, "agent_id").is_empty() {
-        archive::confirm_restore(&mut record)?;
-        *started = true;
-    }
-    // The caller writes it, with the task commands, as one JSON object.
+    let own_start = kind == "SessionStart" && string(&event, "agent_id").is_empty();
     let rules = startup_rules(&record, &event);
-    *rules_proof = rules
-        .as_ref()
-        .map(|(project, text)| (project.clone(), teams::store::digest(&json!(text))));
     let parts: Vec<_> = hint.map(str::to_owned)
         .into_iter()
-        .chain(rules.map(|(_, text)| text))
+        .chain(rules.as_ref().map(|(_, text)| text.clone()))
         .filter(|text| !text.is_empty())
         .collect();
-    *hint_out = (!parts.is_empty()).then(|| parts.join("\n\n"));
+    let hint = (!parts.is_empty()).then(|| parts.join("\n\n"));
+    let tasks = own_start
+        .then(|| nonempty_env("HGS_AGENT").and_then(|agent| crate::tasks::session_context(&agent)))
+        .flatten();
+    if let Some(context) = start_context(hint, tasks) {
+        // A failed write or flush leaves only the early invalidation persisted.
+        // Never expose a fresh conversation as started before this succeeds.
+        agent_hint::output(output, &context)?;
+        if let Some((project, text)) = rules.filter(|_| context.encode_utf16().count() <= super::iron_rules::MAX_START_CONTEXT) {
+            record["iron_rules_start_supported"] = json!(true);
+            record["iron_rules_start_project"] = json!(project);
+            record["iron_rules_start_digest"] = json!(teams::store::digest(&json!(text)));
+            record["iron_rules_start_run"] = record["run_id"].clone();
+            record["iron_rules_start_conversation"] = record["conversation_id"].clone();
+        }
+    }
+    // The ready conversation and its proof become visible in the same atomic
+    // record update; hook() performs no later proof-only binding write.
+    write(&mut record)?;
+    if own_start {
+        archive::confirm_restore(&mut record)?;
+    }
     Ok(0)
 }
 
@@ -1557,6 +1538,101 @@ fn track(name: String, token: String, mut event: Value, started: &mut bool, hint
 mod tests {
     use super::windows::{self as forms, CLAUDE_EXEC_FORM};
     use super::*;
+
+    struct StartupBackend;
+    impl crate::state::backend::TerminalBackend for StartupBackend {
+        fn panes(&self) -> Result<Vec<crate::state::backend::PaneRow>> {
+            Ok(vec![crate::state::backend::PaneRow {
+                session: "claude/hooks/parent".into(), session_id: "$1".into(),
+                pane: "%1".into(), dead: "0".into(), run_marker: "parent-run".into(),
+            }])
+        }
+    }
+
+    struct StartupOutput {
+        path: PathBuf,
+        bytes: Vec<u8>,
+        visible: Vec<Value>,
+        fail_write: bool,
+        fail_flush: bool,
+    }
+
+    impl std::io::Write for StartupOutput {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.visible.push(serde_json::from_slice(&fs::read(&self.path)?).unwrap());
+            if self.fail_write { return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "fixture write")); }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.visible.push(serde_json::from_slice(&fs::read(&self.path)?).unwrap());
+            if self.fail_flush { return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "fixture flush")); }
+            Ok(())
+        }
+    }
+
+    fn pending_rules_start() -> Value {
+        json!({"version":1,"name":"claude/hooks/parent","run_id":"parent-run","pane":"%1",
+            "agent":"claude","pid":0,"conversation_id":"","activity":"unknown","phase":"unknown",
+            "iron_rules":["Keep this session rule"],"iron_rules_start_supported":true,
+            "iron_rules_start_project":"old-project","iron_rules_start_digest":"old-digest",
+            "iron_rules_start_run":"old-run","iron_rules_start_conversation":"old-conversation"})
+    }
+
+    #[test]
+    fn startup_proof_is_published_in_the_first_confirmed_binding() {
+        let directory = tempfile::tempdir().unwrap();
+        super::super::with_test_state_root(directory.path(), || {
+            let mut record = pending_rules_start();
+            write(&mut record).unwrap();
+            let mut output = StartupOutput { path: record_path("claude/hooks/parent"), bytes: Vec::new(),
+                visible: Vec::new(), fail_write: false, fail_flush: false };
+            let event = json!({"hook_event_name":"SessionStart","source":"startup","session_id":"new-conversation"});
+            crate::state::backend::with_fake(&StartupBackend, || {
+                assert_eq!(track("claude/hooks/parent".into(), "parent-run".into(), event, &mut output).unwrap(), 0);
+            });
+            assert!(!output.visible.is_empty(), "the real hook emitted its context");
+            for visible in &output.visible {
+                assert_eq!(string(visible, "conversation_id"), "", "start became visible before output finished: {visible}");
+                assert_eq!(visible["iron_rules_start_supported"], false);
+            }
+            let published: Value = serde_json::from_slice(&fs::read(&output.path).unwrap()).unwrap();
+            assert_eq!(published["conversation_id"], "new-conversation");
+            assert_eq!(published["activity"], "idle");
+            assert_eq!(published["iron_rules_start_supported"], true);
+            assert_eq!(published["iron_rules_start_run"], published["run_id"]);
+            assert_eq!(published["iron_rules_start_conversation"], published["conversation_id"]);
+            let expected = teams::store::digest(&json!(startup_rules(&published,
+                &json!({"hook_event_name":"SessionStart"})).unwrap().1));
+            assert_eq!(published["iron_rules_start_digest"], expected);
+            let sent: Value = serde_json::from_slice(&output.bytes).unwrap();
+            assert!(sent["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains("Keep this session rule"));
+        });
+    }
+
+    #[test]
+    fn broken_startup_output_never_publishes_a_proof_or_confirmed_binding() {
+        for fail_flush in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            super::super::with_test_state_root(directory.path(), || {
+                let mut record = pending_rules_start();
+                write(&mut record).unwrap();
+                let mut output = StartupOutput { path: record_path("claude/hooks/parent"), bytes: Vec::new(),
+                    visible: Vec::new(), fail_write: !fail_flush, fail_flush };
+                crate::state::backend::with_fake(&StartupBackend, || {
+                    let event = json!({"hook_event_name":"SessionStart","session_id":"new-conversation"});
+                    assert!(track("claude/hooks/parent".into(), "parent-run".into(), event, &mut output).is_err());
+                });
+                let saved: Value = serde_json::from_slice(&fs::read(&output.path).unwrap()).unwrap();
+                assert_eq!(saved["conversation_id"], "");
+                assert_eq!(saved["activity"], "unknown");
+                assert_eq!(saved["iron_rules_start_supported"], false);
+                for key in ["iron_rules_start_project", "iron_rules_start_digest", "iron_rules_start_run", "iron_rules_start_conversation"] {
+                    assert!(saved.get(key).is_none(), "old proof survived failed output: {key}");
+                }
+            });
+        }
+    }
 
     #[test]
     fn a_foreign_session_start_leaves_the_record_and_rules_proof_byte_for_byte_unchanged() {
@@ -1589,19 +1665,15 @@ mod tests {
                 write(&mut record).unwrap();
                 let path = record_path(name);
                 let before = fs::read(&path).unwrap();
-                let mut started = false;
-                let mut hint = None;
-                let mut proof = None;
+                let mut output = Vec::new();
                 crate::state::backend::with_fake(&Backend, || {
                     let event = json!({"hook_event_name":"SessionStart",
                         "session_id":"22222222-2222-4222-8222-222222222222","model":"foreign-model"});
                     assert_eq!(track(name.into(), "parent-run".into(), event,
-                        &mut started, &mut hint, &mut proof).unwrap(), 0);
+                        &mut output).unwrap(), 0);
                 });
                 assert_eq!(fs::read(path).unwrap(), before, "foreign start changed the record (proof={has_proof})");
-                assert!(!started);
-                assert!(hint.is_none());
-                assert!(proof.is_none());
+                assert!(output.is_empty(), "foreign starts emit no main-session context");
             });
         }
     }

@@ -202,6 +202,14 @@ pub(crate) struct Affected {
     pub not_run_since: std::collections::BTreeMap<String, String>,
 }
 
+/// The changed merge range and the HEAD on which its tests will run.
+#[derive(Clone, Copy)]
+pub(crate) struct TestRange<'a> {
+    prev: &'a str,
+    merged: &'a str,
+    run_at: &'a str,
+}
+
 /// The task's affected tests on the merged range, as test queue requests: the
 /// project's map over `prev..merged`, each run's command in its folder. A suite
 /// whose declared platforms exclude this computer is queued only when a
@@ -210,14 +218,13 @@ pub(crate) struct Affected {
 pub(crate) fn affected_requests(
     team: &Team,
     id: u32,
-    prev: &str,
-    merged: &str,
-    run_at: &str,
+    range: TestRange<'_>,
     now: f64,
     host: &[String],
     runners: &[super::test_runners::Runner],
 ) -> anyhow::Result<Affected> {
     use crate::test_discipline::{affected, config, durations, map};
+    let TestRange { prev, merged, run_at } = range;
     let lead = Path::new(&team.folder);
     let loaded = config::load(lead, team.settings.tests.as_ref())?;
     let config = &loaded.config;
@@ -417,7 +424,7 @@ where
     if !entry.merged.is_empty() {
         let reachable = ancestry(&team.folder, &entry.merged);
         if reachable != Ancestry::No {
-            return resolve_reachable(team, database, id, entry, &head, reachable, now, events, affected_hosts).map(|changed| changed || migrated);
+            return resolve_reachable(team, database, id, RecordedMerge { entry, head: &head, reachable }, now, events, affected_hosts).map(|changed| changed || migrated);
         }
         // A hand reset or revert removed the merge: the commit can be merged again.
         if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
@@ -484,7 +491,7 @@ where
                         return requeue_after_error(team, id, &prev, &merged, &reason, false, events);
                     }
                 };
-                match affected_requests(team, id, &prev, &merged, &merged, now, &host, &runners) {
+                match affected_requests(team, id, TestRange { prev: &prev, merged: &merged, run_at: &merged }, now, &host, &runners) {
                     Ok(affected) => affected,
                     Err(error) => {
                         let reason = format!("The affected tests could not be selected: {error}");
@@ -586,6 +593,13 @@ fn set_queue_note(team: &mut Team, id: u32, reason: &str, wait_reason: MergeWait
     true
 }
 
+/// A saved merge and Git's current reachability result for its checkout.
+struct RecordedMerge<'a> {
+    entry: MergeEntry,
+    head: &'a str,
+    reachable: Ancestry,
+}
+
 /// An untested merge still reachable from HEAD: never merge it again. Try the
 /// rollback while HEAD is still that merge; once HEAD moved, run the recorded
 /// prev..merged tests on HEAD. A successful run keeps the merge normally; a
@@ -594,9 +608,7 @@ fn resolve_reachable<F>(
     team: &mut Team,
     database: &TestStore,
     id: u32,
-    entry: MergeEntry,
-    head: &str,
-    reachable: Ancestry,
+    merge: RecordedMerge<'_>,
     now: f64,
     events: &mut Vec<Event>,
     affected_hosts: F,
@@ -604,6 +616,7 @@ fn resolve_reachable<F>(
 where
     F: FnOnce() -> anyhow::Result<(Vec<String>, Vec<super::test_runners::Runner>)>,
 {
+    let RecordedMerge { entry, head, reachable } = merge;
     if head == entry.merged {
         // A failed reset is retried only for a new HEAD or the lead's retry,
         // never because the note or tests-map text happened to change.
@@ -647,7 +660,7 @@ where
             return Ok(set_queue_note(team, id, &reason, MergeWaitReason::Runners, "merge_rollback_blocked", events));
         }
     };
-    let affected = match affected_requests(team, id, &entry.prev, &entry.merged, head, now, &host, &runners) {
+    let affected = match affected_requests(team, id, TestRange { prev: &entry.prev, merged: &entry.merged, run_at: head }, now, &host, &runners) {
         Ok(affected) => affected,
         Err(error) => {
             let reason = format!("The affected tests could not be selected: {error}");
@@ -753,8 +766,6 @@ fn requeue_after_error(
         }
     }
 }
-
-/// The merge stays: the suites that ran are tested, and the task is accepted as
 
 /// Drop the oldest tested suite by its commit's place in the bounded log, not
 /// by its name.

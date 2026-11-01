@@ -2010,6 +2010,12 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             }
             m_creationFixAccess->setText(tr("Folder rights fixed"));
             showNotice(tr("Folder rights fixed; starting the session again."),false);
+            // The sandbox check refuses before hgs writes or starts anything
+            // (dsh.rs, ensure_sandbox_folder), so this "unknown" launch started
+            // nothing: it ends as refused and starts again, under a new launch id.
+            const auto op=m_creations->operation(id);
+            if(op["state"]=="unknown"&&op["failed_stage"]=="launching"&&!sandboxFolderOf(op["error"].toString()).isEmpty())
+                m_creations->ended(id,op["launch_id"].toString(),op["error"].toString());
             if(SessionCreationController::canResume(m_creations->operation(id)))m_creations->resume(id);else m_creations->check(id);
         });
         ChildProcess::inheritStdioOnly(*process);

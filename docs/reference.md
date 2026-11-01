@@ -5923,15 +5923,17 @@ folder are decided at once as before.
   PLATFORMS; no runner of that class" and decides on the suites that ran. The
   merge view, the feed and the merge log name both the suites that ran and the
   ones not run here. Each kept merge advances the queue's tested point for the
-  suites that ran; a suite not run here keeps its own range open, so it cannot
-  hold the tested point of the suites that ran, and the phase build names it and
-  that range. On Windows each queued command reaches `cmd /D /S /C` as one
-  unescaped string, so a provider command that quotes its folder
-  (`cd /d "tests" && ...`) runs as written; Linux and macOS keep `sh -c`.
-- Each kept merge advances `merge_tested` for the suites that ran, and the
-  bounded per-suite points keep a suite not run here at its own last run. A
-  phase build checks `hgs test affected MERGE_TESTED..HEAD` and the not-run
-  suites from their own points to HEAD.
+  suites that ran, or when nothing was selected; a suite not run here keeps its
+  own range open, so it cannot hold the tested point of the suites that ran, and
+  the phase build names it and that range. On Windows each queued command
+  reaches `cmd /D /S /C` as one unescaped string, so a provider command that
+  quotes its folder (`cd /d "tests" && ...`) runs as written; Linux and macOS
+  keep `sh -c`.
+- Each kept merge advances `merge_tested` for the suites that ran (or when
+  nothing was selected), and the bounded per-suite points keep a suite not run
+  here at its own last run. A phase build checks
+  `hgs test affected MERGE_TESTED..HEAD` and the not-run suites from their own
+  points to HEAD.
 - With the queue on, every hand-out tells the member to merge the lead branch
   into its folder before it starts (the git-merge-lead template).
 

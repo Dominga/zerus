@@ -1604,10 +1604,12 @@ fn merge_queue_tick(store: &mut Store, team_id: &str, now: f64) -> anyhow::Resul
             super::merge_queue::step(team, &database, now, events, &[], &[]).map(|_| ())
         });
     }
-    // Only a queued merge will merge (and select its tests) now: the host
-    // classes and the machine config are read after the merge completes, never
-    // on a waiting tick.
-    if !team.tasks.iter().any(|task| task.merge.as_ref().is_some_and(|entry| entry.state == "queued")) {
+    // A queued merge will merge now; a waiting one retries its selection from
+    // its recorded range. Host classes and the machine config are read after a
+    // merge completes, never on a tick that only waits for test results.
+    let has_queued = team.tasks.iter().any(|task| task.merge.as_ref().is_some_and(|entry| entry.state == "queued"));
+    let has_waiting = team.tasks.iter().any(|task| task.merge.as_ref().is_some_and(|entry| entry.state == "waiting"));
+    if !has_queued && !has_waiting {
         return Ok(());
     }
     change(store, team_id, |team, events| {

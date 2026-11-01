@@ -207,6 +207,7 @@ fn a_suite_of_another_platform_with_no_runner_is_recorded_not_run() {
     assert_eq!(untested.since, entry.merged);
     assert_eq!(untested.suites(), vec!["python"]);
     assert_eq!(untested.per_suite, vec![("python".to_owned(), entry.prev.clone())]);
+    assert!(team.merge_not_run.contains_key("python"), "the open suite is persisted");
 }
 
 #[test]
@@ -286,10 +287,13 @@ fn a_config_error_after_the_merge_keeps_it_waiting_with_the_reason() {
     assert!(entry.note.contains("test runners could not be read: boom"), "{}", entry.note);
     assert_ne!(head(&repo), before, "the merge is in the lead branch");
     assert!(events.iter().any(|event| event.kind == "merge_config_failed"), "{events:?}");
+    // The same runner error on a later tick changes nothing and adds no event.
+    assert!(!step_with(&mut team, &database, 101.0, &mut events, || Err(anyhow::anyhow!("boom"))).unwrap());
+    assert_eq!(events.iter().filter(|event| event.kind == "merge_config_failed").count(), 1, "{events:?}");
 }
 
 #[test]
-fn a_selection_error_keeps_the_merge_waiting_with_its_reason() {
+fn a_selection_error_rolls_the_merge_back_and_returns_the_task() {
     let repo = repo();
     write(&repo.member, "b.txt", "work\n");
     run_git(&repo.member, &["add", "."]);
@@ -301,17 +305,116 @@ fn a_selection_error_keeps_the_merge_waiting_with_its_reason() {
     std::fs::write(repo.lead.join(".zerus/tests.toml"), "version = 1\n[merge_queue\n").unwrap();
     run_git(&repo.lead, &["add", ".zerus/tests.toml"]);
     run_git(&repo.lead, &["commit", "-q", "-m", "break the test map"]);
+    let broken = head(&repo);
     let database = database(&repo);
     let mut events = Vec::new();
     assert!(step_here(&mut team, &database, 100.0, &mut events).unwrap());
     let task = team.task(1).unwrap();
-    assert_eq!(task.status, TaskStatus::Submitted, "a selection error never accepts");
-    let entry = task.merge.as_ref().expect("the merge waits");
-    assert_eq!(entry.state, "waiting");
-    assert!(entry.note.contains("affected tests could not be selected"), "{}", entry.note);
-    assert_ne!(head(&repo), before, "the merge is in the lead branch");
+    assert_eq!(task.status, TaskStatus::Pending, "a broken selection rolls back and returns");
+    assert!(task.merge.is_none());
+    assert!(task.decision_reason.contains("affected tests could not be selected"), "{}", task.decision_reason);
+    assert_eq!(head(&repo), broken, "the merge is rolled back to its prev");
+    assert_ne!(head(&repo), before);
     assert!(events.iter().any(|event| event.kind == "merge_affected_failed"), "{events:?}");
+    assert!(events.iter().any(|event| event.kind == "merge_returned"), "{events:?}");
     assert!(database.queued("t1").unwrap().is_empty());
+}
+
+#[test]
+fn a_waiting_merge_retries_without_merging_again_and_blocks_later_merges() {
+    let repo = repo_with(&platform_providers());
+    write(&repo.member, "b.txt", "one\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "one"]);
+    let mut team = team(&repo);
+    accept(&mut team);
+    let database = database(&repo);
+    let mut events = Vec::new();
+    step_with(&mut team, &database, 100.0, &mut events, || Err(anyhow::anyhow!("boom"))).unwrap();
+    let merged = head(&repo);
+    assert_eq!(team.task(1).unwrap().merge.as_ref().unwrap().state, "waiting");
+    // A second accepted task queues behind the waiting one.
+    write(&repo.member, "b.txt", "two\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "two"]);
+    let second = run_git(&repo.member, &["rev-parse", "HEAD"]);
+    team.tasks.push(Task {
+        id: 2,
+        title: "Behind".into(),
+        assignee: "dev".into(),
+        status: TaskStatus::Submitted,
+        attempts: vec![Attempt {
+            n: 1,
+            id: "A2".into(),
+            member: "dev".into(),
+            state: AttemptState::Reported,
+            folder_head: second,
+            folder_branch: "task/1".into(),
+            report: Some(Report { text: "two".into(), at: 2.0, ..Default::default() }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    ops::apply(&mut team, "accept", &json!({"task":2}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+    assert_eq!(team.task(2).unwrap().merge.as_ref().unwrap().state, "queued");
+    // The retry selects the first merge's tests without merging it again and
+    // does not let the second merge pass it.
+    let host = vec!["windows".to_owned()];
+    step_with(&mut team, &database, 101.0, &mut events, || Ok((host.clone(), Vec::new()))).unwrap();
+    let first = team.task(1).unwrap().merge.as_ref().unwrap();
+    assert_eq!(first.state, "testing");
+    assert_eq!(team.task(2).unwrap().merge.as_ref().unwrap().state, "queued");
+    assert_eq!(head(&repo), merged, "the first merge was not merged again");
+    assert!(team.merge_tested.is_empty(), "a later merge must not mark the waiting range tested");
+    assert!(first.not_run.iter().any(|message| message.contains("python")), "{:?}", first.not_run);
+    let queued = database.queued("t1").unwrap();
+    let suites: Vec<&str> = queued.iter().map(|request| request.suite.as_str()).collect();
+    assert!(suites.contains(&"unit") && !suites.contains(&"python"), "{suites:?}");
+}
+
+#[test]
+fn a_kept_merge_with_nothing_selected_advances_the_tested_range() {
+    let repo = repo();
+    write(&repo.member, "b.txt", "work\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "work"]);
+    // The lead already has it: the merge is a no-op and nothing is selected.
+    run_git(&repo.lead, &["merge", "--no-edit", "task/1"]);
+    let already = head(&repo);
+    let mut team = team(&repo);
+    team.merge_tested = "older".into();
+    accept(&mut team);
+    let database = database(&repo);
+    let mut events = Vec::new();
+    assert!(step_here(&mut team, &database, 100.0, &mut events).unwrap());
+    assert_eq!(team.task(1).unwrap().status, TaskStatus::Accepted);
+    assert_eq!(team.merge_tested, already, "nothing selected still tests the current head");
+    assert!(team.merge_log[0].suites.is_empty() && team.merge_log[0].not_run.is_empty());
+}
+
+#[test]
+fn an_open_not_run_suite_outlives_the_bounded_merge_log() {
+    let mut team = Team::default();
+    team.merge_tested = "head60".into();
+    for i in 0..60 {
+        team.merge_log.push(crate::state::teams::model::MergeLog {
+            task: i + 1,
+            prev: format!("m{i}"),
+            merged: format!("m{}", i + 1),
+            suites: vec!["unit".into()],
+            ..Default::default()
+        });
+    }
+    team.merge_not_run.insert(
+        "python".into(),
+        crate::state::teams::model::OpenNotRun {
+            since: "base".into(),
+            message: "not run here: python runs on linux or macos; no runner of that class".into(),
+        },
+    );
+    let untested = untested_since(&team).expect("the open suite outlives the 50-entry log");
+    assert_eq!(untested.suites(), vec!["python"]);
+    assert_eq!(untested.per_suite, vec![("python".to_owned(), "base".to_owned())]);
 }
 
 #[test]
@@ -371,6 +474,7 @@ fn a_suite_of_another_platform_with_a_runner_is_queued_and_waited_for() {
     assert_eq!(team.task(1).unwrap().status, TaskStatus::Accepted);
     assert!(team.merge_log[0].suites.iter().any(|suite| suite == "python"));
     assert!(team.merge_log[0].not_run.is_empty());
+    assert!(team.merge_not_run.is_empty(), "a suite that ran clears its open range");
 }
 
 #[test]

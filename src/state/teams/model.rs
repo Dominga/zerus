@@ -766,6 +766,17 @@ pub(crate) struct MergeLog {
     pub not_run: Vec<String>,
 }
 
+/// U62 (#760): a suite whose range is still open because this computer cannot
+/// run it. It stays persisted while the bounded merge log may no longer name it.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct OpenNotRun {
+    /// The commit its open range starts at (the branch before its first
+    /// not-run merge).
+    pub since: String,
+    /// The merge queue's not-run message, naming the suite and its platforms.
+    pub message: String,
+}
+
 /// #718: a flaky suite's quarantine, shown to the lead and the owner until
 /// it expires.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -2036,6 +2047,10 @@ pub(crate) struct Team {
     /// point of the suites that did run. Bounded.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub merge_tested_suites: std::collections::BTreeMap<String, String>,
+    /// U62 (#760): suites whose ranges are still open because no runner here
+    /// could run them; kept separate from the bounded merge log.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub merge_not_run: std::collections::BTreeMap<String, OpenNotRun>,
     /// U62 (#760): the merges the queue kept, newest last (bounded).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub merge_log: Vec<MergeLog>,

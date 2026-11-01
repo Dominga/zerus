@@ -654,6 +654,72 @@ fn the_owners_word_is_found_under_an_earlier_name_of_the_lead_session() {
     });
 }
 
+/// Owner (2026-11-01): the same earlier-name journal applies to a Claude Code
+/// session record (not only a dsh binding): "claude/zerus-src/Worker" was
+/// "claude/zerus-src/work-7c91e747" when its journal began.
+#[test]
+fn the_owners_word_is_found_under_an_earlier_name_of_a_claude_session_record() {
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let now = crate::state::now();
+    let name = "claude/zerus-src/Worker";
+    let earlier = "claude/zerus-src/work-7c91e747";
+    let conversation = "claude-conv-lead";
+    let db = rusqlite::Connection::open(dir.path().join("events.sqlite3")).unwrap();
+    db.execute_batch("CREATE TABLE events (seq INTEGER PRIMARY KEY, name TEXT, conversation TEXT, payload TEXT);").unwrap();
+    db.execute(
+        "INSERT INTO events(name, conversation, payload) VALUES (?1, ?2, ?3)",
+        rusqlite::params![
+            earlier,
+            conversation,
+            json!({"type":"UserPromptSubmit","at":now - 60.0,"agent_id":"","detail":"plan approved"}).to_string()
+        ],
+    )
+    .unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let _worker = hold_worker_lock();
+        // The Claude Code record keeps the journal's first name.
+        let record = dir.path().join(format!("{:x}.json", Sha256::digest(name.as_bytes())));
+        std::fs::write(
+            &record,
+            json!({"version":1,"name":name,"agent":"claude",
+                "conversation_id":conversation,"journal_name":earlier}).to_string(),
+        )
+        .unwrap();
+        let mut store = Store::open(true).unwrap();
+        let (mut team, _) = ops::create(
+            "t",
+            &json!({"name":"Renamed Claude","lead":{"id":"lead","agent":"claude",
+                "session":{"name":name,"conversation_id":conversation}}}),
+        )
+        .unwrap();
+        let mut events = Vec::new();
+        ops::apply(
+            &mut team,
+            "plan",
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"codex"}],
+                "tasks":[{"id":1,"title":"API","assignee":"dev"}]}),
+            &Actor::Human,
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap();
+        let id = team.id.clone();
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+        set_test_caller_identities(Some((Some(conversation.into()), None, None)));
+        let approved = run(
+            "approve",
+            &json!({"request_id":"33333333-3333-4333-8333-333333333333","team":id,"owner_word":{"text":"plan approved"}}),
+            false,
+        )
+        .unwrap();
+        assert_eq!(approved["status"], "approved", "{approved}");
+        let saved = Store::open(false).unwrap().load(&id).unwrap().unwrap();
+        assert_eq!(saved.owner_word.as_ref().map(|word| word.text.as_str()), Some("plan approved"));
+        set_test_caller_identities(None);
+    });
+}
+
 /// #728: the lead relaunches a stuck member on the owner's setting without a
 /// word; the owner has the same route; without the setting the word is still
 /// asked.

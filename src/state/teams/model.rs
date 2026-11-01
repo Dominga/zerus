@@ -2031,6 +2031,11 @@ pub(crate) struct Team {
     /// queue tested; a phase integration checks only what came after it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub merge_tested: String,
+    /// U62 (#760): the newest merged commit each suite ran on. A suite this
+    /// computer cannot run keeps its own range open without holding the tested
+    /// point of the suites that did run. Bounded.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub merge_tested_suites: std::collections::BTreeMap<String, String>,
     /// U62 (#760): the merges the queue kept, newest last (bounded).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub merge_log: Vec<MergeLog>,

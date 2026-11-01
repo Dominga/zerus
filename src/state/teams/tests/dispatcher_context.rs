@@ -352,6 +352,7 @@ fn a_refused_context_leaves_the_task_waiting_with_its_reason() {
         let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
         let mut t = team();
         with_context(&mut t, "dev", "clear");
+        t.task_mut(1).unwrap().fresh_retry = true;
         stored(&mut store, &t);
         set_fake_hgs(Some(Box::new(|_, args: &[&str], _| match args.first().copied() {
             Some("clear-context") => Ok(fake_output(1, "", "hgs: Wait for the agent to become idle before clearing context")),
@@ -364,6 +365,7 @@ fn a_refused_context_leaves_the_task_waiting_with_its_reason() {
         let task = saved.task(1).unwrap();
         let attempt = task.attempts.last().unwrap();
         assert_eq!((attempt.prepare[0].result.as_str(), attempt.state), ("refused", AttemptState::Refused));
+        assert!(!task.fresh_retry, "an automatic refusal drops the fresh exemption");
         let wait = task.waits.as_ref().expect("the task waits for Zerus");
         assert!(wait.reason.contains("Wait for the agent to become idle"), "{wait:?}");
         assert_eq!(event_kinds(&store, &t.id), ["prepare_failed"]);

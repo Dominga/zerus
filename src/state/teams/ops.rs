@@ -2179,6 +2179,15 @@ fn add_build_task(team: &mut Team, phase: u32, by: &str, events: &mut Vec<Event>
                     " The merge queue did not run {} here: check them too.",
                     suites.join(", ")
                 ));
+                let ranges: Vec<String> = untested
+                    .per_suite
+                    .iter()
+                    .filter(|(_, since)| !since.is_empty())
+                    .map(|(suite, since)| format!("{suite} since {since}"))
+                    .collect();
+                if !ranges.is_empty() {
+                    text.push_str(&format!(" Their own ranges: {}; check each to HEAD.", ranges.join(", ")));
+                }
             }
             text
         }

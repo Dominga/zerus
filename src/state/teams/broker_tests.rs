@@ -381,7 +381,17 @@ fn a_shared_build_waits_for_the_others_edits_then_runs_in_the_folder_itself() {
     crate::state::teams::templates::settings_override(None);
     assert_eq!(first.exit, Some(0), "{first:?}");
     assert!(first.tail.contains("built build in the shared folder itself (no copy)"), "{}", first.tail);
-    assert!(first.tail.contains("waited 1 s") && first.tail.contains("included unfinished changes of dev2 (Gameplay) (src/b.c)"), "{}", first.tail);
+    // The machine's speed may round the wait up: it waited at least the 1 s
+    // ready delay for the other member's edits.
+    let waited: f64 = first
+        .tail
+        .split("waited ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|seconds| seconds.parse().ok())
+        .unwrap_or_default();
+    assert!(waited >= 1.0, "it waited for the edits: {}", first.tail);
+    assert!(first.tail.contains("included unfinished changes of dev2 (Gameplay) (src/b.c)"), "{}", first.tail);
     // It ran in the folder: its output is there, and no snapshot was made.
     assert!(root.join("built.txt").exists());
     assert!(!member_dir(root, "dev").join("tree").exists());

@@ -1149,12 +1149,22 @@ fn create_session(record: &mut Value, explicit: bool) -> Result<()> {
 /// WRITE_OWNER) of the folder it confines. On Windows a folder Zerus did not
 /// create may lack it — a worktree on a second drive inherits only
 /// Authenticated Users Modify — and every command then fails before it runs, so
-/// the session does not start and the owner gets the exact one-line fix. Other
+/// the session would not start. The owner, 2026-11-01: hgs gives this user
+/// the rights itself (what Fix folder rights did on a click): only this user's
+/// own entry on the session's own folder changes. Only when that grant fails
+/// (no WRITE_DAC to change it with) does the owner get the one-line fix. Other
 /// systems compile the check out.
 #[cfg(windows)]
 fn ensure_sandbox_folder(folder: &Path) -> Result<()> {
+    if crate::platform::sandbox_folder_problem(folder).map_err(|e| e.to_string())?.is_none() {
+        return Ok(());
+    }
+    let granted = crate::platform::grant_full_control(folder);
     if let Some(problem) = crate::platform::sandbox_folder_problem(folder).map_err(|e| e.to_string())? {
-        return Err(problem);
+        return Err(match granted {
+            Err(error) => format!("{problem}\n(hgs could not grant it itself: {error})"),
+            Ok(()) => problem,
+        });
     }
     Ok(())
 }
@@ -2806,6 +2816,23 @@ mod windows_tests {
         let value: Value = serde_json::from_str(&response).unwrap();
         assert_eq!(value["value"]["method"], "ping");
         assert!(node.0.wait().unwrap().success());
+    }
+
+    /// The owner, 2026-11-01: a DeepSeek session in a folder that inherits
+    /// Modify only (a second drive) starts: hgs grants this user the rights
+    /// the sandbox needs instead of failing with the icacls line.
+    #[test]
+    fn a_modify_only_folder_gets_the_sandbox_rights_before_the_start() {
+        let dir = tempfile::Builder::new().prefix("hgs-acl-").tempdir_in(".").unwrap();
+        let folder = dir.path().join("project");
+        std::fs::create_dir(&folder).unwrap();
+        crate::platform::set_modify_only(&folder).unwrap();
+        if crate::platform::missing_sandbox_rights(&folder).unwrap().is_empty() {
+            eprintln!("this account keeps full rights on a Modify-only folder; skipped");
+            return;
+        }
+        ensure_sandbox_folder(&folder).unwrap();
+        assert!(crate::platform::sandbox_folder_problem(&folder).unwrap().is_none());
     }
 }
 

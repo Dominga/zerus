@@ -1278,6 +1278,7 @@ pub(super) fn hook() -> Result<i32> {
         .then(|| nonempty_env("HGS_AGENT").and_then(|agent| crate::tasks::session_context(&agent)))
         .flatten();
     if let Some(context) = start_context(hint, tasks) {
+        if context.encode_utf16().count() > super::iron_rules::MAX_START_CONTEXT { rules_proof = None; }
         let stdout = io::stdout();
         agent_hint::output(&mut stdout.lock(), &context)?;
         // A failed stdout write must never establish startup delivery.
@@ -1288,6 +1289,8 @@ pub(super) fn hook() -> Result<i32> {
                     record["iron_rules_start_supported"] = json!(true);
                     record["iron_rules_start_project"] = json!(project);
                     record["iron_rules_start_digest"] = json!(digest);
+                    record["iron_rules_start_run"] = json!(token);
+                    record["iron_rules_start_conversation"] = json!(conversation);
                     write(&mut record)?;
                 }
             }
@@ -1302,6 +1305,23 @@ fn start_context(hint: Option<String>, tasks: Option<Value>) -> Option<String> {
     let tasks = tasks.and_then(|context| context["hookSpecificOutput"]["additionalContext"].as_str().map(str::to_owned));
     let parts: Vec<String> = hint.into_iter().chain(tasks).collect();
     (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
+fn clear_rules_proof(record: &mut Value, event: &Value) -> bool {
+    if string(event,"hook_event_name") != "SessionStart" || !string(event,"agent_id").is_empty() { return false; }
+    record["iron_rules_start_supported"] = json!(false);
+    for key in ["iron_rules_start_project","iron_rules_start_digest","iron_rules_start_run","iron_rules_start_conversation"] {
+        record.as_object_mut().unwrap().remove(key);
+    }
+    true
+}
+
+fn startup_rules(record: &Value, event: &Value) -> Option<(String,String)> {
+    match iron_rules_start(record,event) {
+        Ok(Some((project,text))) if text.encode_utf16().count() <= super::iron_rules::MAX_START_RULES => Some((project,text)),
+        Ok(_) => None,
+        Err(error) => { eprintln!("hgs: {error}; iron rules keep per-send delivery"); None }
+    }
 }
 
 fn iron_rules_start(record: &Value, event: &Value) -> Result<Option<(String, String)>> {
@@ -1349,6 +1369,8 @@ fn track(name: String, token: String, mut event: Value, started: &mut bool, hint
     if !matches(&record, panes.get(string(&record, "name"))) {
         return Ok(0);
     }
+    // Invalidate before any later work can fail, including rules resolution.
+    if clear_rules_proof(&mut record, &event) { write(&mut record)?; }
     if let Some(scoped) = external_agents::route(&mut record, &event) {
         processes::observe(&mut record, &scoped);
         journal::update_activity(&mut record, &scoped);
@@ -1516,7 +1538,7 @@ fn track(name: String, token: String, mut event: Value, started: &mut bool, hint
         *started = true;
     }
     // The caller writes it, with the task commands, as one JSON object.
-    let rules = iron_rules_start(&record, &event)?;
+    let rules = startup_rules(&record, &event);
     *rules_proof = rules
         .as_ref()
         .map(|(project, text)| (project.clone(), teams::store::digest(&json!(text))));
@@ -1533,6 +1555,27 @@ fn track(name: String, token: String, mut event: Value, started: &mut bool, hint
 mod tests {
     use super::windows::{self as forms, CLAUDE_EXEC_FORM};
     use super::*;
+
+    #[test]
+    fn failed_or_oversized_start_rules_leave_hint_tasks_and_no_old_proof() {
+        let dir=tempfile::tempdir().unwrap();
+        super::super::with_test_state_root(dir.path(),|| {
+            let mut record=json!({"agent":"claude","name":"claude/x/one","run_id":"r1","conversation_id":"c1",
+                "iron_rules_start_supported":true,"iron_rules_start_digest":"old","iron_rules_start_run":"old-run","iron_rules":["Own"]});
+            let event=json!({"hook_event_name":"SessionStart","source":"compact"});
+            assert!(clear_rules_proof(&mut record,&event));
+            // A malformed authoritative list forces a real resolution error.
+            record["iron_rules"]=json!([5]);
+            assert!(startup_rules(&record,&event).is_none());
+            assert_eq!(record["iron_rules_start_supported"],false); assert!(record.get("iron_rules_start_run").is_none());
+            let context=start_context(Some("Agent hint".into()),crate::tasks::session_context("claude")).unwrap();
+            assert!(context.contains("Agent hint") && context.contains("Zerus tasks"));
+            record["iron_rules"]=json!((0..20).map(|_|"\u{1f600}".repeat(150)).collect::<Vec<_>>());
+            assert!(startup_rules(&record,&event).is_none(),"UTF-16 expansion must keep the fallback");
+            record["iron_rules"]=json!(["Small"]);
+            assert!(startup_rules(&record,&event).is_some());
+        });
+    }
 
     #[test]
     fn iron_rules_follow_claude_start_resume_clear_and_compact_but_not_messages() {

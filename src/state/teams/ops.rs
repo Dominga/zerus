@@ -810,9 +810,18 @@ fn ensure_draft_revision(team: &Team, input: &Value) -> anyhow::Result<()> {
 fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you change the team's settings");
     ensure!(
-        matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
+        matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused)
+            || (team.status == TeamStatus::Draft && input.get("project_id").is_some()
+                && input.get("settings").is_none() && input.get("members_update").is_none()),
         "Only a planning, running or paused team changes its settings"
     );
+    if let Some(id) = input.get("project_id") {
+        ensure!(matches!(actor, Actor::Human), "Only the owner sets the team's project identity");
+        team.project_id = clean(id.as_str().context("project_id must be text")?, 200, "The project identity")?;
+        ensure!(!team.project_id.is_empty(), "Select a nonempty project identity");
+        team.iron_rules_error.clear();
+        team.iron_rules_error_at = None;
+    }
     let planning = team.status == TeamStatus::Planning;
     let mut changed = Vec::new();
     let mut widen = Vec::new();
@@ -906,7 +915,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
         }
         team.settings = updated;
     }
-    if changed.is_empty() && input.get("settings").is_none() {
+    if changed.is_empty() && input.get("settings").is_none() && input.get("project_id").is_none() {
         anyhow::bail!("A settings change names settings or members_update");
     }
     // C4: a member of a running team launches with its profile as it is, so

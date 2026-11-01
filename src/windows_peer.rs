@@ -72,6 +72,9 @@ pub fn command(args: &[String]) -> Result<String> {
         line.push(' ');
         line.push_str(&quote(argument)?);
     }
+    if args.first().is_some_and(|arg| arg == "rules") {
+        return Ok(format!(r#"{REMOTE_HGS} --help | findstr /L /C:"iron-rules-v1" >nul && {line}"#));
+    }
     Ok(line)
 }
 

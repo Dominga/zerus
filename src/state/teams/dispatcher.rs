@@ -1852,6 +1852,7 @@ pub(crate) fn hand_off_text(team: &Team, task: &Task, attempt: &Attempt, report_
 
 /// H6: the hand-off of a swapped member carries the previous attempt's partial
 /// report and open questions in `extra`; the git part is read at send time.
+#[cfg(test)]
 pub(crate) fn hand_off_text_with(
     team: &Team,
     task: &Task,
@@ -2213,6 +2214,7 @@ fn git_continuation(folder: &str, since: f64) -> String {
 /// The planning brief for the lead of a team created from the desktop: the
 /// goal, the members and tasks proposed so far, and how to plan. A lead
 /// swapped into a running team gets the short brief (H6).
+#[cfg(test)]
 pub(crate) fn brief_text(team: &Team) -> String {
     let rules = team
         .member(&team.lead)
@@ -6121,6 +6123,26 @@ fn capture_quiet(store: &mut Store, team_id: &str, task_id: u32, reply: &str) ->
 }
 
 fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::Result<()> {
+    if matches!(step, Step::Brief | Step::SubBrief{..} | Step::Launch{..} | Step::HandOut{..} | Step::StageOut{..}) {
+        match super::super::iron_rules::project_identity(team) {
+            Err(error) => {
+                let detail = error.to_string();
+                if team.iron_rules_error != detail || team.iron_rules_error_at.is_none() {
+                    change(store, &team.id, |team, events| {
+                        team.iron_rules_error = detail.clone();
+                        team.iron_rules_error_at = Some(now());
+                        events.push(Event::new("iron_rules_blocked", json!({"reason":detail})));
+                        Ok(())
+                    })?;
+                }
+                return Err(error);
+            }
+            Ok(_) if !team.iron_rules_error.is_empty() => {
+                change(store, &team.id, |team, _| { team.iron_rules_error.clear(); team.iron_rules_error_at = None; Ok(()) })?;
+            }
+            Ok(_) => {},
+        }
+    }
     match step {
         Step::Brief => send_brief(store, &team.id),
         Step::AllDecided => send_all_decided(store, &team.id),

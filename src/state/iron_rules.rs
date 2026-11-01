@@ -6,6 +6,21 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 pub(crate) const MAX_RULES: usize = 20;
 pub(crate) const MAX_LENGTH: usize = 300;
+// Claude Code persists strings over 10,000 UTF-16 units as a file/preview.
+// Keep mandatory startup rules far below that native cap, with room for hints
+// and task commands. https://code.claude.com/docs/en/hooks#json-output
+pub(crate) const MAX_START_RULES: usize = 6000;
+pub(crate) const MAX_START_CONTEXT: usize = 8000;
+
+pub(crate) fn start_proof_matches(record: &Value, effective: &str) -> bool {
+    record["iron_rules_start_supported"] == true
+        && string(record,"iron_rules_start_run") == string(record,"run_id")
+        && !string(record,"run_id").is_empty()
+        && string(record,"iron_rules_start_conversation") == string(record,"conversation_id")
+        && string(record,"iron_rules_start_digest") == teams::store::digest(&json!(effective))
+        && effective.encode_utf16().count() <= MAX_START_RULES
+}
+
 
 pub(crate) fn validate(value: &Value) -> anyhow::Result<Vec<String>> {
     let list = value.as_array().context("Rules must be a list")?;
@@ -121,6 +136,11 @@ fn project_write(input: &Value, migrate: bool) -> anyhow::Result<Value> {
         )
         .optional()?;
     let current = row.as_ref().map(|row| row.1).unwrap_or(0);
+    if !migrate || row.is_none() {
+        ensure!(current == expected, "Project rules changed; read them again");
+    }
+    // Validate identity/revision before spending a verified owner statement.
+    teams::commands::authorize_external_rules(input)?;
     // Migration never replaces an authoritative value, including an owner's
     // deliberately empty list. A replay therefore cannot resurrect old rules.
     let result = if migrate && row.is_some() {
@@ -213,7 +233,7 @@ fn remote_session(session: &teams::model::SessionRef) -> anyhow::Result<Value> {
     }
     let output = teams::dispatcher::hgs(
         &session.host,
-        &["__state", "rules", "get", "--json"],
+        &["rules", "get", "--json"],
         Some(&json!({"scope":"session","name":session.name,
         "expected_run_id":session.run_id,"expected_conversation_id":session.conversation_id})),
         std::time::Duration::from_secs(30),
@@ -233,7 +253,7 @@ fn remote_session(session: &teams::model::SessionRef) -> anyhow::Result<Value> {
     Ok(value)
 }
 
-fn project_identity(team: &teams::model::Team) -> anyhow::Result<String> {
+pub(crate) fn project_identity(team: &teams::model::Team) -> anyhow::Result<String> {
     if !team.project_id.is_empty() {
         return Ok(team.project_id.clone());
     }
@@ -406,12 +426,16 @@ pub(crate) fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             return Ok(
                 json!({"scope":"session","name":name,"rules":rules,"revision":record["iron_rules_revision"].as_u64().unwrap_or(0),
                 "run_id":run,"conversation_id":conversation,"effective_rules":effective,"project":project,
-                "start_delivery_supported":record["iron_rules_start_supported"]==true && string(&record,"iron_rules_start_digest")==teams::store::digest(&json!(effective)),
+                "start_delivery_supported":start_proof_matches(&record, &effective),
                 "start_project":record["iron_rules_start_project"].as_str().unwrap_or_default()}),
             );
         }
         ensure!(op == "set", "Session rules support get or set");
         let rules = validate(&input["rules"])?;
+        let expected = input["expected_revision"].as_u64().context("Supply expected_revision")?;
+        let replay = string(&record,"iron_rules_request") == string(input,"request_id")
+            && string(&record,"iron_rules_digest") == teams::store::digest(input);
+        ensure!(replay || expected == record["iron_rules_revision"].as_u64().unwrap_or(0), "Session rules changed; read them again");
         teams::commands::authorize_external_rules(input)?;
         return super::session_project::update_iron_rules(
             name,
@@ -428,10 +452,7 @@ pub(crate) fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
     ensure!(scope == "project", "Rules scope must be project or session");
     match op {
         "get" => project(string(input, "project")),
-        "set" | "migrate" => {
-            teams::commands::authorize_external_rules(input)?;
-            project_write(input, op == "migrate")
-        }
+        "set" | "migrate" => project_write(input, op == "migrate"),
         _ => anyhow::bail!("Rules operation must be get, set or migrate"),
     }
 }

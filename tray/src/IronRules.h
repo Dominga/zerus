@@ -112,16 +112,15 @@ inline void prepare(const Transport &send, const QString &host, const QString &p
                     const QString &text, std::function<void(const QString &, const QString &)> done)
 {
     loadProject(send, host, project, [=](const QJsonObject &p, const QString &error) {
-        if (!error.isEmpty()) { done({}, error); return; }
         if (p.value("unsupported").toBool()) { done(wrap(rules(project), text), {}); return; }
         send(host, "get", {{"scope", "session"}, {"name", name}, {"expected_run_id", run}, {"expected_conversation_id", conversation}},
             [=](const QJsonObject &s, const QString &failure) {
                 if (!failure.isEmpty()) { done({}, failure); return; }
-                if (s.value("start_delivery_supported").toBool() && s.value("start_project").toString() == project) { done(text, {}); return; }
+                if (error.isEmpty() && host.isEmpty() && s.value("start_delivery_supported").toBool() && s.value("start_project").toString() == project) { done(text, {}); return; }
                 QString effective = s.value("effective_rules").toString();
-                if (s.value("project").toString() != project) {
+                if (!error.isEmpty() || !host.isEmpty() || s.value("project").toString() != project) {
                     QString prefix;
-                    const auto inherited = list(p.value("rules"));
+                    const auto inherited = error.isEmpty() ? list(p.value("rules")) : rules(project);
                     if (!inherited.isEmpty()) {
                         prefix = "Project rules (also mandatory):\n";
                         for (const auto &rule : inherited) prefix += rule + '\n';

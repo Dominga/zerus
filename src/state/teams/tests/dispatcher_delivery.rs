@@ -229,7 +229,7 @@ fn real_task_delivery_carries_four_rule_levels_locally_and_remotely() {
                 if args == ["--help"] {
                     return Ok(fake_output(0, "iron-rules-v1", ""));
                 }
-                if args.first() == Some(&"__state") {
+                if args.first() == Some(&"rules") {
                     return Ok(fake_output(0, &json!({"scope":"session","name":"codex/x/dev","run_id":"r1","conversation_id":"c1",
                     "rules":["Session addition"],"effective_rules":"Session addition","start_delivery_supported":true}).to_string(), ""));
                 }

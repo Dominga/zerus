@@ -5,6 +5,10 @@
 #include <QPushButton>
 #include <QSettings>
 #include <QTemporaryDir>
+#include <QProcess>
+#include <QProcessEnvironment>
+#include <QFileInfo>
+#include <QDir>
 #include "IronRulesPanel.h"
 
 // WhiteWh fork: a project's iron rules travel ahead of every message and are
@@ -89,6 +93,55 @@ private slots:
         QCOMPARE(request.value("expected_conversation_id").toString(), QString("c1"));
         QCOMPARE(field->text(), QString("Own addition")); QVERIFY(panel.rules().isEmpty());
         QCOMPARE(panel.findChild<QLabel *>("ironRulesError")->text(), QString("Identity changed"));
+    }
+    void aRemoteProofCannotOmitTheLocalProjectAndFailedImportKeepsLegacyDelivery()
+    {
+        IronRules::setRules("p1", {"Legacy local rule"});
+        bool failImport=false; QString delivered,error;
+        IronRules::Transport send=[&](const QString &,const QString &op,const QJsonObject &input,IronRules::Reply done) {
+            if(op=="migrate") { done({},"Import failed"); return; }
+            if(input.value("scope")=="project") { done({{"rules",QJsonArray{"Local project rule"}},{"migrated",!failImport},{"revision",0}},{});return; }
+            done({{"effective_rules","Peer project rule\n"},{"project","p1"},{"start_project","p1"},{"start_delivery_supported",true}},{});
+        };
+        const auto done=[&](const QString &text,const QString &failure){delivered=text;error=failure;};
+        IronRules::prepare(send,"peer","p1","claude/x/one","r1","c1","Hello",done);
+        QVERIFY(error.isEmpty()); QVERIFY(delivered.contains("Local project rule")); QVERIFY(delivered.contains("Peer project rule"));
+        QCOMPARE(IronRules::strip(delivered),QString("Hello"));
+        failImport=true;
+        IronRules::prepare(send,{},"p1","claude/x/one","r1","c1","Hello",done);
+        QVERIFY(error.isEmpty()); QVERIFY(delivered.contains("Legacy local rule")); QCOMPARE(IronRules::strip(delivered),QString("Hello"));
+    }
+    void panelAddsAndRemovesThroughTheActualRustCli()
+    {
+        QTemporaryDir isolated;
+#ifdef Q_OS_WIN
+        const auto binary=QDir(QCoreApplication::applicationDirPath()).absoluteFilePath("../../../target/debug/hgs.exe");
+#else
+        const auto binary=QDir(QCoreApplication::applicationDirPath()).absoluteFilePath("../../../target/debug/hgs");
+#endif
+        QVERIFY2(QFileInfo::exists(binary),qPrintable(binary));
+        IronRulesPanel panel;
+        panel.setBackend([&](const QString &,const QString &op,QJsonObject input,IronRules::Reply done) {
+            QProcess process; auto env=QProcessEnvironment::systemEnvironment();
+            for(const auto &key:{"HGS_SESSION","HGS_RUN_ID","HGS_HOST_PANE","DSH_SESSION_ID","TMUX"}) env.remove(key);
+            for(const auto &key:{"HOME","USERPROFILE"}) env.insert(key,isolated.path()+"/home");
+            env.insert("HGS_STATE_DIR",isolated.path()+"/state"); env.insert("HGS_CONFIG_DIR",isolated.path()+"/config");
+            process.setProcessEnvironment(env); input.insert("by","human");
+            process.start(binary,{"rules",op,"--json"});
+            if(!process.waitForStarted(5000)){done({},process.errorString());return;}
+            process.write(QJsonDocument(input).toJson(QJsonDocument::Compact));process.closeWriteChannel();
+            if(!process.waitForFinished(5000)){process.kill();process.waitForFinished();done({},"CLI timeout");return;}
+            const auto output=QJsonDocument::fromJson(process.readAllStandardOutput()).object();
+            done(output,process.exitCode()==0?QString():QString::fromUtf8(process.readAllStandardError()));
+        });
+        panel.setProject("native-cli-project","Native project"); panel.show();
+        auto *field=panel.findChild<QLineEdit *>("ironRuleField"); field->setText("Persist this rule");
+        panel.findChild<QPushButton *>("addIronRule")->click();
+        QCOMPARE(panel.rules(),QStringList{"Persist this rule"});
+        QVERIFY(panel.findChild<QLabel *>("ironRulesError")->text().isEmpty());
+        panel.findChild<QPushButton *>("removeIronRule")->click(); QVERIFY(panel.rules().isEmpty());
+        panel.findChild<QPushButton *>("reloadIronRules")->click(); QVERIFY(panel.rules().isEmpty());
+        QVERIFY(panel.findChild<QLabel *>("ironRulesError")->text().isEmpty());
     }
     void panelAddsAndRemovesRules()
     {

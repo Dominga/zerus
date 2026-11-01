@@ -131,10 +131,18 @@ fn all_items(team: &Team) -> Vec<Item> {
     // N5: a finished team has no open work, but the owner's decision on the
     // lead's proposal is still the lead's to read (spec 4).
     let finished = matches!(team.status, TeamStatus::Done | TeamStatus::Stopped);
-    if !active && !finished {
+    if !active && !finished && team.iron_rules_error.is_empty() {
         return Vec::new();
     }
     let mut items: Vec<Item> = Vec::new();
+    if !team.iron_rules_error.is_empty() {
+        items.push(Item { kind:"stalled", key:"iron_rules".into(), task:None, member:team.lead.clone(), since:team.iron_rules_error_at.unwrap_or_else(crate::state::now),
+            summary:"Iron rules block team delivery; the owner must select its project".into(),
+            detail:team.iron_rules_error.clone(),
+            command:format!("Owner: {{\"team\":\"{}\",\"project_id\":\"STABLE_ID\",\"by\":\"human\",\"request_id\":\"UUID\"}} | hgs team settings --json",team.id),
+            subagents:Value::Null });
+    }
+
     // A rework keeps its member indefinitely. Show the wait even when that
     // member has an approval or usage limit rather than a stored task wait.
     for task in team.tasks.iter().filter(|task| active && task.rework() && task.status == TaskStatus::Pending

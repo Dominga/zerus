@@ -1238,14 +1238,14 @@ fn expected_revision(op: &str, input: &Value) -> Option<u64> {
     }
 }
 
-fn rule_policy(team: &Team) -> Value {
-    let members: std::collections::BTreeMap<_, _> = team
-        .members
-        .iter()
-        .filter(|member| !member.iron_rules.is_empty())
-        .map(|member| (&member.id, &member.iron_rules))
-        .collect();
-    json!({"team":team.settings.iron_rules,"members":members})
+fn rules_changed(before: &Team, after: &Team, op: &str) -> bool {
+    if before.settings.iron_rules != after.settings.iron_rules { return true; }
+    after.members.iter().filter(|m| m.state != MemberState::Removed).any(|member| {
+        let old = before.member(&member.id).filter(|old| old.state != MemberState::Removed);
+        // Ending/replacing a membership removes that scope, not a rule edit.
+        if op == "swap-member" && member.iron_rules.is_empty() { return false; }
+        old.map(|old| old.iron_rules.as_slice()).unwrap_or_default() != member.iron_rules.as_slice()
+    })
 }
 
 fn rules_word(team: &Team, input: &Value, caller: &Actor) -> anyhow::Result<Option<OwnerWord>> {
@@ -1257,7 +1257,7 @@ fn rules_word(team: &Team, input: &Value, caller: &Actor) -> anyhow::Result<Opti
         "Only the owner or the lead on the owner's word changes iron rules"
     );
     let rule = super::owner_word::WordRule {
-        phrases: &["rules", "желез"],
+        phrases: &["iron rules", "железн"],
         verbs: &["change", "set", "add", "remove", "измен", "добав", "удал"],
         names: vec![team.name.clone()],
         expect: format!("change the iron rules for {}", team.name),
@@ -1271,6 +1271,11 @@ fn rules_word(team: &Team, input: &Value, caller: &Actor) -> anyhow::Result<Opti
         &rule,
         super::super::now(),
     )?;
+    // Roster WordRule deliberately treats an operation verb as sufficient
+    // without its generic roster phrase. Iron rules need the specific scope.
+    let statement = word.text.to_lowercase();
+    ensure!(statement.contains("iron rules") || statement.contains("железн"),
+        "The owner's word must explicitly name iron rules");
     ensure!(
         team.owner_word_used(word.event).is_none(),
         "The owner's word was already used"
@@ -2082,16 +2087,18 @@ fn create(input: &Value) -> anyhow::Result<Value> {
             }
         }
     };
-    if !team.settings.iron_rules.is_empty()
-        || team
-            .members
-            .iter()
-            .any(|member| !member.iron_rules.is_empty())
-    {
-        let caller = actor(&team, "settings", input)?;
-        if let Some(word) = rules_word(&team, input, &caller)? {
-            team.record_owner_word(word.event, "the initial iron rules");
+    let rules_authorization = (|| -> anyhow::Result<()> {
+        if !team.settings.iron_rules.is_empty() || team.members.iter().any(|member| !member.iron_rules.is_empty()) {
+            let caller = actor(&team, "settings", input)?;
+            if let Some(word) = rules_word(&team, input, &caller)? {
+                team.record_owner_word(word.event, "the initial iron rules");
+            }
         }
+        Ok(())
+    })();
+    if let Err(error) = rules_authorization {
+        release_reservation(&parent_link, &child_id);
+        return Err(error);
     }
     // Section 9.2: depth, children and tree sessions are checked at create.
     if let Some((parent_id, _)) = &parent_link {
@@ -4295,7 +4302,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 let actor = if parent_lead { Actor::ParentLead } else { actor(team, op, &filled)? };
                 let before = team.clone();
                 let result = ops::apply(team, op, &filled, &actor, &BTreeSet::new(), events)?;
-                if rule_policy(&before) != rule_policy(team) {
+                if rules_changed(&before, team, op) {
                     if let Some(word) = rules_word(&before, input, &actor)? {
                         team.record_owner_word(word.event, "the team's iron rules");
                     }

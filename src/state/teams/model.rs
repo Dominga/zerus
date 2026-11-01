@@ -1988,6 +1988,10 @@ pub(crate) struct Team {
     /// Stable logical identity; the existing project field remains its label.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub project_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub iron_rules_error: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iron_rules_error_at: Option<f64>,
     #[serde(default)]
     pub folder: String,
     #[serde(default)]

@@ -121,23 +121,32 @@ impl Store {
         if write {
             // Build an indexed projection once; triggers keep it in the same
             // transaction as every team write, including dispatcher mutations.
-            let exists: bool = db.query_row(
+            let mut exists: bool = db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='team_rule_members')",
                 [],
                 |row| row.get(0),
             )?;
+            let old_projection = db.query_row("SELECT sql FROM sqlite_master WHERE name='team_rules_insert'", [], |row| row.get::<_,String>(0))
+                .optional()?.is_some_and(|sql| !sql.contains("NULLIF"));
+            let migration = !exists || old_projection;
+            if migration { db.execute_batch("BEGIN IMMEDIATE")?; }
+            if old_projection {
+                db.execute_batch("DROP TRIGGER IF EXISTS team_rules_insert; DROP TRIGGER IF EXISTS team_rules_update; DROP TRIGGER IF EXISTS team_rules_delete; DELETE FROM team_rule_members;")?;
+                exists = false;
+            }
             db.execute_batch("CREATE TABLE IF NOT EXISTS team_rule_members(team TEXT NOT NULL,member TEXT NOT NULL,host TEXT NOT NULL,name TEXT NOT NULL,run TEXT NOT NULL,conversation TEXT NOT NULL,launch TEXT NOT NULL,PRIMARY KEY(team,member));
                 CREATE INDEX IF NOT EXISTS team_rule_session ON team_rule_members(host,name,run,conversation);
                 CREATE INDEX IF NOT EXISTS team_rule_launch ON team_rule_members(launch);
                 CREATE TRIGGER IF NOT EXISTS team_rules_delete AFTER DELETE ON teams BEGIN DELETE FROM team_rule_members WHERE team=OLD.id; END;
                 CREATE TRIGGER IF NOT EXISTS team_rules_update AFTER UPDATE OF payload ON teams BEGIN
                     DELETE FROM team_rule_members WHERE team=NEW.id;
-                    INSERT INTO team_rule_members SELECT NEW.id,json_extract(m.value,'$.id'),COALESCE(json_extract(m.value,'$.session.host'),''),COALESCE(json_extract(m.value,'$.session.name'),''),COALESCE(json_extract(m.value,'$.session.run_id'),''),COALESCE(json_extract(m.value,'$.session.conversation_id'),''),COALESCE(json_extract(m.value,'$.launch_id'),'') FROM json_each(NEW.payload,'$.members') m; END;
+                    INSERT INTO team_rule_members SELECT NEW.id,json_extract(m.value,'$.id'),COALESCE(NULLIF(json_extract(m.value,'$.session.host'),''),json_extract(m.value,'$.computer'),''),COALESCE(json_extract(m.value,'$.session.name'),''),COALESCE(json_extract(m.value,'$.session.run_id'),''),COALESCE(json_extract(m.value,'$.session.conversation_id'),''),COALESCE(json_extract(m.value,'$.launch_id'),'') FROM json_each(NEW.payload,'$.members') m; END;
                 CREATE TRIGGER IF NOT EXISTS team_rules_insert AFTER INSERT ON teams BEGIN
-                    INSERT INTO team_rule_members SELECT NEW.id,json_extract(m.value,'$.id'),COALESCE(json_extract(m.value,'$.session.host'),''),COALESCE(json_extract(m.value,'$.session.name'),''),COALESCE(json_extract(m.value,'$.session.run_id'),''),COALESCE(json_extract(m.value,'$.session.conversation_id'),''),COALESCE(json_extract(m.value,'$.launch_id'),'') FROM json_each(NEW.payload,'$.members') m; END;")?;
+                    INSERT INTO team_rule_members SELECT NEW.id,json_extract(m.value,'$.id'),COALESCE(NULLIF(json_extract(m.value,'$.session.host'),''),json_extract(m.value,'$.computer'),''),COALESCE(json_extract(m.value,'$.session.name'),''),COALESCE(json_extract(m.value,'$.session.run_id'),''),COALESCE(json_extract(m.value,'$.session.conversation_id'),''),COALESCE(json_extract(m.value,'$.launch_id'),'') FROM json_each(NEW.payload,'$.members') m; END;")?;
             if !exists {
-                db.execute_batch("INSERT OR IGNORE INTO team_rule_members SELECT t.id,json_extract(m.value,'$.id'),COALESCE(json_extract(m.value,'$.session.host'),''),COALESCE(json_extract(m.value,'$.session.name'),''),COALESCE(json_extract(m.value,'$.session.run_id'),''),COALESCE(json_extract(m.value,'$.session.conversation_id'),''),COALESCE(json_extract(m.value,'$.launch_id'),'') FROM teams t,json_each(t.payload,'$.members') m;")?;
+                db.execute_batch("INSERT OR IGNORE INTO team_rule_members SELECT t.id,json_extract(m.value,'$.id'),COALESCE(NULLIF(json_extract(m.value,'$.session.host'),''),json_extract(m.value,'$.computer'),''),COALESCE(json_extract(m.value,'$.session.name'),''),COALESCE(json_extract(m.value,'$.session.run_id'),''),COALESCE(json_extract(m.value,'$.session.conversation_id'),''),COALESCE(json_extract(m.value,'$.launch_id'),'') FROM teams t,json_each(t.payload,'$.members') m;")?;
             }
+            if migration { db.execute_batch("COMMIT")?; }
         }
         Ok(Self { db })
     }
@@ -197,11 +206,11 @@ impl Store {
             .iter()
             .find(|member| {
                 member.session.as_ref().is_some_and(|session| {
-                    session.host == host
+                    (if session.host.is_empty() { member.computer.as_str() } else { session.host.as_str() }) == host
                         && session.name == name
                         && session.run_id == run
                         && session.conversation_id == conversation
-                }) || (!launch.is_empty() && member.launch_id == launch)
+                }) || (!launch.is_empty() && member.launch_id == launch && member.computer == host)
             })
             .map(|member| member.id.clone());
         Ok(member.map(|member| (team, member)))

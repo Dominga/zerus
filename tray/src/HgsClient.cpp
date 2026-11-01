@@ -589,7 +589,7 @@ IronRules::Transport HgsClient::rulesTransport()
         const bool remoteRead = op == "get" && input.value("scope") == "session" && !host.isEmpty();
         if (remoteRead) payload.insert("host", host);
         const QString destination = remoteRead || input.value("scope") == "project" ? QString() : host;
-        QStringList args{"__state", "rules", op, "--json"};
+        QStringList args{"rules", op, "--json"};
         if (!destination.isEmpty()) args.prepend('@' + destination);
         QStringList help{"--help"}; if (!destination.isEmpty()) help.prepend('@' + destination);
         runHgs(guard->m_hgs, help, 15000, guard, [guard, args, payload, done](const QByteArray &help) {

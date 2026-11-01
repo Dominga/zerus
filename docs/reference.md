@@ -6088,3 +6088,27 @@ delivery: their host cannot independently restore the lead's team/member rules
 at startup. GUI project rules belong to this GUI computer's Rust project store;
 session writes go to the selected session's host. No rules synchronization or
 remote startup contract is implied by this resolver.
+
+Iron-rules compatibility and failure handling:
+- Use the public `hgs @host rules ... --json` route; forwarding probes
+  `iron-rules-v1` and never requests a terminal or agent launch. Windows uses
+  the guarded peer channel or a guarded SSH command.
+- A startup proof belongs to the exact run and conversation and is invalidated
+  at every root SessionStart before resolution. Resolution errors are logged
+  without losing the ordinary hint/task context; they keep per-send delivery.
+- Claude Code's [hook output limit](https://code.claude.com/docs/en/hooks#json-output)
+  is 10,000 characters per context string. Zerus accepts startup proof only for
+  at most 6000 UTF-16 units of rules and 8000 units of combined context. Larger
+  lists retain the per-send fallback. All remote sessions retain this fallback,
+  including non-team Claude; local project rules remain mandatory even if the
+  peer has a different row under the same project identity.
+- A failed GUI migration keeps sending the legacy project rules and retries
+  migration later. It does not authorize dropping session or inherited rules.
+- For an ambiguous legacy project label, delivery fails closed and the team's
+  inbox shows an iron-rules blocker. The owner resolves it with
+  `hgs team settings --json`, giving the team's exact `team`, a stable
+  `project_id`, `by: "human"` and a canonical `request_id`. A lead cannot change
+  this association by claiming to be the owner.
+- An older hgs that rewrites a team record does not preserve unknown
+  `iron_rules`/`project_id` fields. Keep team writers on a rules-aware hgs;
+  additive deserialization alone cannot protect these fields from old writers.

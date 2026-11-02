@@ -4,6 +4,7 @@ import json
 import contextlib
 import io
 import hashlib
+import base64
 import socket
 import struct
 import os
@@ -41,6 +42,8 @@ def counter(name):
 
 
 def status():
+    if config.get('produced_status') is not None:
+        return config['produced_status']
     online = not config.get('offline', False)
     catalog_online = online and not config.get('coverage_offline', False)
     counts = {'epoch': epoch, 'scope': 'shared_host_state', 'display_only': True, 'authority': False,
@@ -60,12 +63,12 @@ def status():
                 'status': 'live' if online else 'reconnecting', 'accepting': online}]
     if config.get('peer_failure'):
         sources.append(dict(sources[0], computer='broken', incarnation=2))
-    return {'abi': 'desktop-v1', 'configuration': 'a' * 64, 'epoch': epoch, 'generation': 1,
+    return {'abi': 'desktop-v1', 'configuration': 'a' * 64, 'epoch': epoch, 'generation': 1, 'host': 'caption-only',
             'lifecycle': {'abi': 'desktop-lifecycle-v1', 'phase': 'serving', 'ipc_ready': True,
                           'configuration': 'a' * 64, 'epoch': epoch, 'generation': 1, 'background': background},
             'attention_counts': counts, 'automatic_approvals': False, 'catalog_reads': {'changes_abi': abi},
             'background_runtime': {'epoch': epoch, 'display_only': True, 'authority': False, 'state': 'running',
-                                   'computers': sources},
+                                   'computers': sources} if not config.get('peer_choices') else None,
             'detail_subscriptions': {'abi': 'desktop-details-v1', 'stopping': False} if config.get('details') else None}
 
 
@@ -172,6 +175,8 @@ def desktop_request():
         common['incarnation'] = 2
         if (root / 'peer-scope-recovered').exists():
             common['projection'] = 'b' * 32
+    if config.get('peer_choices') and value.get('computer') == 'offline':
+        common.update(incarnation=2, online=False, last_known=True, complete=False)
     if op == 'detail_follow':
         if config.get('follow_timeout') and value['subscription']['topic'] == 'activity':
             (root / 'follow-held').touch()
@@ -194,6 +199,8 @@ def desktop_request():
     elif op == 'catalog_page':
         number = counter('page-number')
         page = dict(common, start_revision='0', revision='0', items=[row('row')])
+        if config.get('peer_choices') and value['computer'] == 'offline':
+            page['start_revision'] = None
         if config.get('dirty_walk'):
             page.update(start_revision='0', revision='2', stale=True, complete=False)
             if number == 1:
@@ -274,7 +281,7 @@ def desktop_request():
         confirmed = path.exists()
         path.touch()
         print(json.dumps({'request_id': request_id, 'accepted': True, 'durable': confirmed, 'op': op}))
-    elif op == 'delivery_result' and (root / ('receipt-' + value['original_request_id'])).exists():
+    elif op in ['delivery_result', 'pending_reads_import_result'] and (root / ('receipt-' + value['original_request_id'])).exists():
         receipt = json.loads((root / ('receipt-' + value['original_request_id'])).read_text())
         print(json.dumps({'request_id': request_id, 'op': op, 'original_request_id': value['original_request_id'],
                           'accepted': True, 'durable': False, 'found': True, 'result': receipt}))
@@ -286,7 +293,7 @@ def desktop_request():
             print(json.dumps(receipt))
         else:
             print(json.dumps({'request_id': request_id, 'original_request_id': value['original_request_id'], 'accepted': False, 'code': 'unknown_request'}))
-    elif op == 'delivery_result':
+    elif op in ['delivery_result', 'pending_reads_import_result']:
         print(json.dumps({'request_id': request_id, 'accepted': True, 'durable': False, 'op': op,
                           'original_request_id': value['original_request_id'], 'found': False, 'result': None}))
     elif op == 'catalog_close':
@@ -301,6 +308,10 @@ if args == ['--help']:
         print('Desktop catalog relay ABI: desktop-catalog-relay-v1')
     if config.get('frontend_abi', True):
         print('Desktop frontend request ABI: desktop-ui-request-v1')
+    if config.get('activation_abi', False):
+        print('Desktop activation ABI: desktop-activation-v1')
+    if config.get('pending_reads_abi', True):
+        print('Desktop pending read import ABI: desktop-pending-reads-v1')
     if config.get('maintenance_abi', True):
         print('Desktop maintenance ABI: desktop-maintenance-v1')
 elif args == ['desktop', 'frontend-request', '--json']:
@@ -324,11 +335,39 @@ elif args == ['desktop', 'frontend-request', '--json']:
     (root / 'original-child-bound').touch()
     if config.get('frontend_hold'):
         wait(root / 'release-frontend')
+    if request['op'] == 'activation_wait':
+        n = counter('activation-waits')
+        if n > (2 if config.get('activation_idle_first') else 1):
+            wait(root / 'release-activation')
+        target = {'computer': '', 'run': 'exact-run', 'conversation': 'exact-conversation'}
+        token = base64.urlsafe_b64encode(json.dumps(dict(host='', name='fixture', notice='reply',
+            run=target['run'], conversation=target['conversation'])).encode()).rstrip(b'=').decode()
+        activation = {'activation_id': '11111111-1111-4111-8111-111111111111',
+                      'post_request_id': '22222222-2222-4222-8222-222222222222', 'target': target,
+                      'token': token, 'platform_context': {'platform': 'wayland', 'activation_token': 'ephemeral-fixture'}}
+        answer = {'abi': 'desktop-activation-v1', 'request_id': request['request_id'],
+                  'configuration': 'a' * 64, 'service_epoch': epoch,
+                  'activation': None if config.get('activation_idle_first') and n == 1 else activation}
+        bad = config.get('activation_invalid')
+        if bad == 'transport': raise SystemExit('fixture lost activation reply')
+        if bad == 'request': answer['request_id'] = str(uuid.uuid4())
+        if bad == 'epoch': answer['service_epoch'] = str(uuid.uuid4())
+        if bad == 'configuration': answer['configuration'] = 'b' * 64
+        if bad == 'target': answer['activation']['target']['conversation'] = 'other'
+        print(json.dumps(answer), flush=True)
+        raise SystemExit(0)
     if config.get('frontend_refuse'):
         print(json.dumps({'request_id': request['request_id'], 'accepted': False, 'durable': False,
                           'code': 'frontend_authentication_refused'}))
     else:
-        if request['op'] == 'automatic_approvals':
+        if request['op'] == 'import_pending_reads':
+            page = request['page']
+            receipt = {'request_id': request['request_id'], 'op': request['op'],
+                       'accepted': True, 'durable': True, 'source': page['source'],
+                       'after': page['after'], 'through': page['after'] + len(page['marks']),
+                       'superseded': len(page['marks']) if config.get('pending_reads_superseded') else 0,
+                       'delivered': False}
+        elif request['op'] == 'automatic_approvals':
             receipt = {'request_id': request['request_id'], 'op': request['op'], 'enabled': request['enabled'],
                        'accepted': True, 'durable': True, 'revision': 1}
         else:
@@ -359,6 +398,27 @@ elif args == ['desktop', 'watch', '--json']:
                               'lease': '00000000-0000-4000-8000-000000000003',
                               'limits': {'demands_per_subscriber': 64}}
     frame(0, 'hello', initial)
+    if config.get('peer_choices'):
+        for seq, stage in enumerate(['known', 'invalid', 'warming', 'stopping', 'removed', 'empty'], 1):
+            wait(root / ('roster-' + stage))
+            updated = status()
+            updated['generation'] = updated['lifecycle']['generation'] = seq + 1
+            computers = [{'computer': '', 'incarnation': 1, 'generation': 1, 'status': 'live', 'accepting': True}]
+            if stage in ['known', 'invalid']:
+                computers.append({'computer': 'offline', 'incarnation': 2, 'generation': 1,
+                                  'status': 'reconnecting', 'accepting': False})
+            if stage != 'empty':
+                computers.append({'computer': 'waiting', 'incarnation': 3, 'generation': 0,
+                                  'status': 'probing', 'accepting': False})
+            if stage == 'warming':
+                computers = [dict(computers[0], generation=0, status='probing', accepting=False)]
+            updated['background_runtime'] = {'epoch': epoch, 'display_only': True, 'authority': stage == 'invalid',
+                'state': 'stopping' if stage == 'stopping' else 'running', 'computers': [] if stage == 'stopping' else computers}
+            frame(seq, 'status', updated)
+            if stage == 'known' and config.get('roster_disconnect_early'):
+                raise SystemExit(0)
+        wait(root / 'roster-end')
+        raise SystemExit(0)
     if config.get('coverage_offline'):
         wait(root / 'repeat-status')
         for seq in [1, 2]:

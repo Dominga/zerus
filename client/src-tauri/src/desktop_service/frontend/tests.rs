@@ -6,6 +6,120 @@ fn approval(enabled: bool) -> Request {
     }
 }
 #[test]
+fn actual_root_status_controls_client_readiness_but_never_blocks_connected_disable() {
+    // Produced by the root private Store/Runtime projection and decorator test.
+    // Regenerate/check with client/scripts/generate-delivery-status-fixture.py.
+    let cases: Vec<Value> = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../fixtures/desktop-delivery-status.json"
+    )))
+    .unwrap();
+    assert_eq!(cases.len(), 7);
+    for case in cases {
+        let label = case["case"].as_str().unwrap();
+        let status = &case["status"];
+        let (reads, approvals, enabled) = match label {
+            "awaiting_handoff" => (false, false, None),
+            "disabled_but_ready" | "read_degraded" => (label != "read_degraded", true, Some(false)),
+            "enabled" => (true, true, Some(true)),
+            "approval_degraded" => (true, false, Some(true)),
+            "disabled_while_degraded" => (true, false, Some(false)),
+            "drained" => (false, false, Some(false)),
+            _ => panic!("unexpected real root case"),
+        };
+        let mut state =
+            service::State::new(status["configuration"].as_str().unwrap().into()).unwrap();
+        state.status(status).unwrap();
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.component_ready("reads"), reads, "{label}");
+        assert_eq!(snapshot.component_ready("approvals"), approvals, "{label}");
+        assert_eq!(snapshot.automatic_approvals, enabled, "{label}");
+        assert!(
+            submission_ready(snapshot, &approval(false)),
+            "connected disable: {label}"
+        );
+        assert_eq!(
+            submission_ready(snapshot, &approval(true)),
+            approvals,
+            "enable: {label}"
+        );
+        let mut disconnected = snapshot.clone();
+        disconnected.connected = false;
+        assert!(!submission_ready(&disconnected, &approval(false)));
+        let mut unknown_epoch = snapshot.clone();
+        unknown_epoch.epoch = None;
+        assert!(!submission_ready(&unknown_epoch, &approval(false)));
+    }
+}
+
+fn imported() -> Request {
+    let source=zerus_client_core::desktop::pending_reads::Capture::from_bytes(br#"[{"computer":"example","name":"agent/project/test","run_id":"run","conversation_id":"conversation","reply_id":"reply","attention_signature":null}]"#).unwrap();
+    Request::ImportPendingReads {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        page: Box::new(source.page(0).unwrap()),
+    }
+}
+fn imported_receipt(request: &Request) -> Value {
+    let Request::ImportPendingReads { request_id, page } = request else {
+        panic!("import")
+    };
+    json!({"request_id":request_id,"op":"import_pending_reads","accepted":true,"durable":true,
+        "source":page.source,"after":page.after,"through":page.through(),"superseded":0,"delivered":false})
+}
+
+#[test]
+fn imported_page_requires_its_original_source_cursor_and_durable_transfer_receipt() {
+    let request = imported();
+    let receipt = imported_receipt(&request);
+    assert!(checked(&request, receipt.clone(), false).unwrap().1);
+    for (field, wrong) in [
+        ("after", json!(1)),
+        ("through", json!(999)),
+        ("superseded", json!(2)),
+        ("source", json!({})),
+        ("durable", json!(false)),
+        ("delivered", json!(true)),
+        ("request_id", json!(uuid::Uuid::new_v4().to_string())),
+    ] {
+        let mut changed = receipt.clone();
+        changed[field] = wrong;
+        assert!(checked(&request, changed, false).is_none(), "{field}");
+    }
+    assert!(
+        serde_json::from_value::<Operation>(json!("import_pending_reads")).is_err(),
+        "native-only operation"
+    );
+}
+
+#[test]
+fn lost_import_reply_only_looks_up_the_original_page_and_then_advances() {
+    let frontend = Frontend::default();
+    let request = imported();
+    let Begin::Work(mut work) =
+        frontend.begin(Operation::ImportPendingReads, Some(request.clone()))
+    else {
+        panic!("initial")
+    };
+    work.record_original_exit(&Err(OwnedError::Incomplete));
+    drop(work);
+    let Begin::Work(work) = frontend.begin(Operation::ImportPendingReads, None) else {
+        panic!("lookup")
+    };
+    assert!(work.lookup);
+    assert_eq!(work.request, request);
+    let id = uuid::Uuid::new_v4().to_string();
+    let receipt = imported_receipt(&request);
+    let read = json!({"op":"pending_reads_import_result","request_id":id,"original_request_id":request.id(),
+        "accepted":true,"durable":false,"found":true,"result":receipt});
+    let receipt = lookup_receipt(&request, &id, read).unwrap();
+    assert_eq!(finish_receipt(work, receipt)["pending"], false);
+    let next = imported();
+    assert!(matches!(
+        frontend.begin(Operation::ImportPendingReads, Some(next)),
+        Begin::Work(_)
+    ));
+}
+#[test]
 fn an_unknown_original_intent_only_allows_receipt_lookup_and_blocks_a_new_writer() {
     let state = Frontend::default();
     let original = approval(true);
@@ -202,7 +316,7 @@ fn the_actual_version_suffix_alone_defines_the_gui_dev_number() {
 }
 
 #[cfg(target_os = "linux")]
-mod native {
+pub(in crate::desktop_service) mod native {
     use super::*;
     use crate::desktop_service::tests::Fixture;
     use std::{
@@ -212,12 +326,12 @@ mod native {
         thread,
     };
     use zerus_client_core::desktop::{Build, Responder};
-    struct CacheServer {
+    pub(in crate::desktop_service) struct CacheServer {
         stop: Arc<AtomicBool>,
         thread: Option<thread::JoinHandle<()>>,
     }
     impl CacheServer {
-        fn start(root: &Path, responder: Arc<Responder>) -> Self {
+        pub(in crate::desktop_service) fn start(root: &Path, responder: Arc<Responder>) -> Self {
             let listener = UnixListener::bind(root.join("native-cache.sock")).unwrap();
             listener.set_nonblocking(true).unwrap();
             let stop = Arc::new(AtomicBool::new(false));
@@ -270,7 +384,10 @@ mod native {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
-    fn responder() -> Arc<Responder> {
+    pub(in crate::desktop_service) fn responder() -> Arc<Responder> {
+        responder_for_configuration("a".repeat(64))
+    }
+    fn responder_for_configuration(configuration: String) -> Arc<Responder> {
         let build = crate::cli::build_info(&crate::cli::BUILD);
         let responder = Arc::new(Responder::new(
             "com.hgdev.hgs-tray".into(),
@@ -283,8 +400,177 @@ mod native {
             true,
             false,
         ));
-        responder.configure_once("a".repeat(64));
+        responder.configure_once(configuration);
         responder
+    }
+    #[test]
+    fn degraded_root_status_still_uses_the_original_child_disable_route() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        tauri::async_runtime::block_on(async {
+            let cases: Vec<Value> = serde_json::from_str(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../fixtures/desktop-delivery-status.json"
+            )))
+            .unwrap();
+            let status = &cases
+                .iter()
+                .find(|case| case["case"] == "approval_degraded")
+                .unwrap()["status"];
+            let fixture = Fixture::new(json!({"produced_status":status}));
+            std::fs::write(
+                fixture.0.join("runtime-epoch"),
+                status["epoch"].as_str().unwrap(),
+            )
+            .unwrap();
+            let responder =
+                responder_for_configuration(status["configuration"].as_str().unwrap().into());
+            let _cache = CacheServer::start(&fixture.0, responder.clone());
+            let (service, _) = fixture.start_with_responder(true, Some(responder));
+            eventually("actual root degraded policy is observed", || {
+                service.snapshot().connected && service.snapshot().automatic_approvals == Some(true)
+            })
+            .await;
+            assert!(!service.snapshot().component_ready("approvals"));
+            let enable = service
+                .automatic_approvals(uuid::Uuid::new_v4().to_string(), true)
+                .await
+                .unwrap();
+            let disable = service
+                .automatic_approvals(uuid::Uuid::new_v4().to_string(), false)
+                .await
+                .unwrap();
+            service.join().await.unwrap();
+            assert_eq!(enable["code"], "desktop_background_unavailable");
+            assert_eq!(disable["accepted"], true);
+            assert_eq!(disable["durable"], true);
+            assert_eq!(disable["enabled"], false);
+            assert!(fixture.0.join("original-child-bound").exists());
+            let calls = fixture.calls();
+            let writes: Vec<_> = calls
+                .iter()
+                .filter(|call| call["args"] == json!(["desktop", "frontend-request", "--json"]))
+                .collect();
+            assert_eq!(
+                writes.len(),
+                1,
+                "no enable or replay reaches the native relay"
+            );
+            assert_eq!(writes[0]["value"]["request"]["enabled"], false);
+            assert!(!calls
+                .iter()
+                .any(|call| call["value"]["op"] == "automatic_approvals"));
+        });
+    }
+    // Exercise the production startup producer through its original child and
+    // native cache registration. The private fake service supplies receipts;
+    // the service/ledger tests separately verify their real SQL commits.
+    async fn native_startup_import(lost_replies: bool, superseded: bool) {
+        let fixture = Fixture::new(
+            json!({"ready":false,"frontend_uncertain":lost_replies,"pending_reads_superseded":superseded}),
+        );
+        let responder = responder();
+        let _cache = CacheServer::start(&fixture.0, responder.clone());
+        let (service, _) = fixture.start_with_responder(true, Some(responder));
+        let path = fixture.0.join("managed-read-marks.json");
+        let actions = crate::actions::Actions::new(path.clone());
+        let marks: Vec<_> = (0..193)
+            .map(|n| zerus_client_core::readmarks::ReadMark {
+                computer: "example".into(),
+                name: format!("agent/project/{n}"),
+                run_id: format!("run-{n}"),
+                conversation_id: format!("conversation-{n}"),
+                reply_id: Some(format!("reply-{n}")),
+                attention_signature: None,
+            })
+            .collect();
+        actions.queue_marks(marks).unwrap();
+        actions.disarm_read_delivery().unwrap();
+        service.start_pending_read_import(actions.clone());
+        eventually("initial import stops or completes", || {
+            service
+                .snapshot()
+                .pending_read_import
+                .as_ref()
+                .is_some_and(|v| {
+                    v["complete"] == true
+                        || (v["running"] == false && v["code"] == "pending_read_import_unconfirmed")
+                })
+        })
+        .await;
+        let original_bytes = std::fs::read(&path).unwrap();
+        if lost_replies {
+            for completed_pages in 0..4 {
+                assert_eq!(
+                    fixture
+                        .calls()
+                        .iter()
+                        .filter(|c| c["args"] == json!(["desktop", "frontend-request", "--json"]))
+                        .count(),
+                    completed_pages + 1
+                );
+                assert!(
+                    service.read_marks(vec![]).await.is_err(),
+                    "live reads wait for the transfer"
+                );
+                service.retry(); // Explicit retry looks up the original page.
+                eventually("receipt lookup then next original page", || {
+                    service
+                        .snapshot()
+                        .pending_read_import
+                        .as_ref()
+                        .is_some_and(|v| {
+                            if completed_pages == 3 {
+                                v["complete"] == true
+                            } else {
+                                v["through"] == ((completed_pages + 1) * 64)
+                                    && v["running"] == false
+                                    && v["code"] == "pending_read_import_unconfirmed"
+                            }
+                        })
+                })
+                .await;
+            }
+        }
+        let status = service.snapshot();
+        let import = status.pending_read_import.as_ref().unwrap();
+        assert_eq!(import["complete"], true);
+        assert_eq!(import["through"], 193);
+        assert_eq!(import["superseded"], if superseded { 193 } else { 0 });
+        assert!(
+            service.read_marks(vec![]).await.is_ok(),
+            "completed conflicts release the read gate"
+        );
+        assert_eq!(import["delivered"], false);
+        assert!(
+            !status.component_ready("reads"),
+            "passive import needs no background readiness"
+        );
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            original_bytes,
+            "frozen source is retained"
+        );
+        assert!(actions.queue_marks(vec![]).is_err());
+        let calls = fixture.calls();
+        let pages: Vec<_> = calls
+            .iter()
+            .filter(|c| c["args"] == json!(["desktop", "frontend-request", "--json"]))
+            .map(|c| c["value"]["request"]["page"].clone())
+            .collect();
+        assert_eq!(
+            pages.len(),
+            4,
+            "one original send per page, even with lost replies"
+        );
+        for (i, page) in pages.iter().enumerate() {
+            assert_eq!(page["after"], i * 64);
+            assert_eq!(page["source"]["rows"], 193);
+        }
+        assert!(
+            !calls.iter().any(|c| c["value"]["op"] == "read_intent"),
+            "no second read worker"
+        );
+        service.join().await.unwrap();
     }
     #[test]
     fn original_child_registration_receipts_and_unknown_delivery_use_only_the_dedicated_route() {
@@ -308,6 +594,9 @@ mod native {
             return;
         }
         tauri::async_runtime::block_on(async {
+            native_startup_import(false, false).await;
+            native_startup_import(true, false).await;
+            native_startup_import(true, true).await;
             for case in [
                 "success",
                 "unknown",

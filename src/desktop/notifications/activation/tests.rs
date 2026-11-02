@@ -227,13 +227,26 @@ fn a_changed_full_proof_cannot_deliver_a_click_during_the_cache_interval() {
     );
     // Cheap handles remain live, but the original ancestry proof has changed
     // since admission. The periodic cache must not authorize this handoff.
+    let original_id = router.pending.front().unwrap().id.clone();
+    let original_until = router.pending.front().unwrap().until;
     probe.valid.store(false, Ordering::SeqCst);
     router.poll(&f.store, Some(&f.outbox), &mut 0);
     assert!(queue.closed());
     assert!(queue.take().is_none());
     assert_eq!(probe.full_checks.load(Ordering::SeqCst), 1);
-    assert!(
-        router.pending.is_empty(),
-        "unknown handoff is never replayed"
+    assert_eq!(router.pending.front().unwrap().until, original_until);
+    assert_eq!(
+        router.pending.len(),
+        1,
+        "known-unsent click survives proof refusal"
     );
+    let (_, next_queue) = f.wait(&mut router);
+    router.poll(&f.store, Some(&f.outbox), &mut 0);
+    let frame: Value = serde_json::from_slice(&next_queue.take().unwrap()).unwrap();
+    assert_eq!(frame["value"]["activation"]["activation_id"], original_id);
+    assert_eq!(
+        frame["value"]["activation"]["post_request_id"],
+        f.value.request_id
+    );
+    assert!(router.pending.is_empty());
 }

@@ -29,11 +29,22 @@ const SOURCES: usize = 64;
 const KEY_BYTES: usize = 32 << 20;
 const CATALOG_KEYS: usize = 1_000_000;
 
+#[cfg(target_os = "linux")]
+pub(crate) mod activation;
+
+#[derive(Default)]
+pub(crate) struct Observers {
+    pub projections: Vec<Projection>,
+    #[cfg(target_os = "linux")]
+    pub activation: Option<activation::Sink>,
+}
+
 mod catalog;
 mod catalog_relay;
 use catalog::catalog_loop;
 mod details;
 pub mod frontend;
+mod read_import;
 
 /// Registered at setup before start_source. Some contains a verified service
 /// watch frame; None invalidates the prior projection. Callbacks must not block.
@@ -213,6 +224,9 @@ struct Shared {
     pump: crate::pump::Pump,
     sink: Mutex<Option<SyncSender<Data>>>,
     snapshot: Mutex<Snapshot>,
+    // Bounded display-only names from a checked runtime roster. Missing or
+    // disconnected projections retain last-known choices, never a known zero.
+    peer_choices: Mutex<Option<BTreeSet<String>>>,
     dirty: Mutex<Dirty>,
     changed: Notify,
     rpc: Gate,
@@ -225,7 +239,10 @@ struct Shared {
     details_changed: Notify,
     organization: Mutex<Option<zerus_client_core::OrganizationSnapshot>>,
     frontend: frontend::Frontend,
+    read_import: Mutex<read_import::State>,
     projections: Vec<Projection>,
+    #[cfg(target_os = "linux")]
+    activation: Option<activation::Sink>,
 }
 
 struct ReadIntent {
@@ -242,6 +259,7 @@ pub struct Service {
 }
 
 impl Service {
+    #[cfg(all(test, unix))]
     pub fn start(
         hgs: PathBuf,
         pump: crate::pump::Pump,
@@ -251,12 +269,36 @@ impl Service {
         responder: Option<Arc<zerus_client_core::desktop::Responder>>,
         projections: Vec<Projection>,
     ) -> Arc<Self> {
+        Self::start_observed(
+            hgs,
+            pump,
+            sink,
+            allowed,
+            drain,
+            responder,
+            Observers {
+                projections,
+                #[cfg(target_os = "linux")]
+                activation: None,
+            },
+        )
+    }
+    pub(crate) fn start_observed(
+        hgs: PathBuf,
+        pump: crate::pump::Pump,
+        sink: SyncSender<Data>,
+        allowed: bool,
+        drain: std::thread::JoinHandle<()>,
+        responder: Option<Arc<zerus_client_core::desktop::Responder>>,
+        observers: Observers,
+    ) -> Arc<Self> {
         let shared = Arc::new(Shared {
             hgs,
             relay: Mutex::new(None),
             pump,
             sink: Mutex::new(Some(sink)),
             snapshot: Mutex::new(Snapshot::default()),
+            peer_choices: Mutex::new(None),
             dirty: Mutex::new(Dirty::default()),
             changed: Notify::new(),
             rpc: Gate::new(4).unwrap(),
@@ -269,7 +311,10 @@ impl Service {
             details_changed: Notify::new(),
             organization: Mutex::new(None),
             frontend: frontend::Frontend::default(),
-            projections,
+            read_import: Mutex::new(read_import::State::default()),
+            projections: observers.projections,
+            #[cfg(target_os = "linux")]
+            activation: observers.activation,
         });
         let (control, receiver) = watch::channel(Control::Retry(0));
         let (finished, join) = oneshot::channel();
@@ -293,10 +338,20 @@ impl Service {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
+    /// Settings choices only: offline and generation-zero computers remain
+    /// selectable. These names grant neither freshness nor writer authority.
+    pub fn peers(&self) -> Option<BTreeSet<String>> {
+        self.shared
+            .peer_choices
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
     pub fn retry(&self) {
         if self.shared.stopped.load(Ordering::Acquire) {
             return;
         }
+        read_import::retry(self.shared.clone());
         if let Some(cancel) = self
             .shared
             .cancellation
@@ -358,6 +413,15 @@ impl Service {
         &self,
         marks: Vec<zerus_client_core::readmarks::ReadMark>,
     ) -> Result<Vec<zerus_client_core::readmarks::ReadMark>, String> {
+        if self
+            .shared
+            .read_import
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .blocked()
+        {
+            return Err("Pending read marks have not been transferred to the service yet.".into());
+        }
         if marks.len() > service::CATALOG_ROWS {
             return Err("Select at most 128 read marks at once.".into());
         }
@@ -529,8 +593,42 @@ impl Drop for Service {
 }
 
 impl Shared {
-    fn publish(&self, snapshot: Snapshot) {
-        *self.snapshot.lock().unwrap_or_else(PoisonError::into_inner) = snapshot.clone();
+    fn observe_peer_choices(&self, state: &service::State, value: &Value) {
+        // A runtime draining its sources is not a peer-membership removal.
+        // The parser already checked configuration/epoch and the <=64 roster.
+        if value["background_runtime"]["state"] != "running" {
+            return;
+        }
+        if let Some(sources) = state.sources() {
+            // A restarted runtime initially knows only its ungreeted local
+            // source. That warming roster cannot remove last-known choices.
+            if !sources
+                .iter()
+                .any(|source| source.computer.is_empty() && source.generation > 0)
+            {
+                return;
+            }
+            *self
+                .peer_choices
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(
+                sources
+                    .iter()
+                    .filter(|source| !source.computer.is_empty())
+                    .map(|source| source.computer.clone())
+                    .collect(),
+            );
+        }
+    }
+    fn publish(&self, mut snapshot: Snapshot) {
+        snapshot.pending_read_import = Some(
+            self.read_import
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .status(),
+        );
+        let mut current = self.snapshot.lock().unwrap_or_else(PoisonError::into_inner);
+        *current = snapshot.clone();
         self.pump.service(snapshot);
     }
     fn unavailable(&self, code: &str) {
@@ -763,6 +861,7 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
     }
     let mut state = service::State::new(configuration.into())?;
     state.status(&value)?;
+    shared.observe_peer_choices(&state, &value);
     if let Some(responder) = &shared.responder {
         responder.configure_once(configuration.into());
     }
@@ -873,13 +972,21 @@ async fn connection(
     let (mut error_bytes, mut stderr_open) = (0usize, true);
     let catalog_shared = shared.clone();
     let catalog_stop = stop.clone();
+    let catalog_configuration = configuration.clone();
     let mut catalogs = tauri::async_runtime::spawn(async move {
-        catalog_loop(catalog_shared, catalog_stop, configuration).await
+        catalog_loop(catalog_shared, catalog_stop, catalog_configuration).await
     });
     let detail_shared = shared.clone();
     let detail_stop = stop.clone();
     let mut detail_worker =
         tauri::async_runtime::spawn(async move { details::run(detail_shared, detail_stop).await });
+    #[cfg(target_os = "linux")]
+    let activation_worker = {
+        let (state, cancelled) = (shared.clone(), stop.clone());
+        tauri::async_runtime::spawn(async move {
+            activation::run(state, configuration, cancelled).await;
+        })
+    };
     let mut last_frame = tokio::time::Instant::now();
     let result = async {
         loop {
@@ -905,6 +1012,7 @@ async fn connection(
                         shared.publish(state.snapshot().clone());
                         match update {
                             service::Update::Status => {
+                                shared.observe_peer_choices(&state, &frame["value"]);
                                 if let Some(computers) = state.sources() {
                                     for computer in computers {
                                         // Generation zero has not greeted the service yet.
@@ -950,6 +1058,8 @@ async fn connection(
     shared.changed.notify_one();
     shared.details_changed.notify_one();
     drop(stdin);
+    #[cfg(target_os = "linux")]
+    let _ = activation_worker.await;
     // Only this owned local proxy is stopped; the desktop service and native agents remain untouched.
     if child.kill().await.is_err() && child.wait().await.is_err() {
         shared.stopped.store(true, Ordering::Release);

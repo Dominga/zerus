@@ -58,6 +58,27 @@ fn spawn(command: &mut Command) -> std::io::Result<Child> {
 }
 
 impl Runtime {
+    #[cfg(test)]
+    pub(super) fn empty_for_test(epoch: &str) -> Self {
+        let (sender, receiver) = source::channel_with_legacy(
+            spawn,
+            Arc::new(|| Err(std::io::Error::other("empty fixture never spools"))),
+        );
+        Self {
+            epoch: epoch.into(),
+            hgs: PathBuf::new(),
+            timing: Timing::default(),
+            sender,
+            receiver: Some(receiver),
+            computers: BTreeMap::new(),
+            retiring: Vec::new(),
+            pending: VecDeque::new(),
+            desired: BTreeSet::new(),
+            next: 0,
+            error: None,
+            stopping: false,
+        }
+    }
     /// Bind service projection identity to this original handle's wire epoch.
     pub fn controls(&self, computer: &str, generation: u64, controls: &[Control]) -> bool {
         self.computers

@@ -16,7 +16,7 @@ use zerus_client_core::{
         ui_requests::{self, Request},
         Responder,
     },
-    run::{run_owned, OwnedError},
+    run::{run_owned_observed, OwnedError},
     Invocation,
 };
 
@@ -50,6 +50,9 @@ struct State {
     legacy: Option<Arc<relay::Connection>>,
     running: bool,
     code: String,
+    // First failing step wins over later read-only lookup failures. Only closed
+    // local codes are kept, never child output, IDs, paths or configuration.
+    diagnostic: Option<(&'static str, &'static str)>,
 }
 pub(crate) struct Controller {
     hgs: PathBuf,
@@ -224,6 +227,12 @@ fn invocation(args: &[&str], input: Vec<u8>) -> Invocation {
     }
 }
 impl Job {
+    fn failure(&self, step: &'static str, error: &OwnedError, stderr: Option<&str>) {
+        self.owner
+            .state()
+            .diagnostic
+            .get_or_insert((step, failure_code(error, stderr)));
+    }
     fn stopped(&self) -> bool {
         self.owner.stop.load(Ordering::Acquire) || self.cancel.load(Ordering::Acquire)
     }
@@ -250,13 +259,19 @@ impl Job {
             Arc::new((self.resources.clone(), self.owner.clone(), route.clone()));
         let mut call = invocation(args, input);
         self.bound(&mut call)?;
-        let result = run_owned(
+        let step = match args {
+            ["--help"] => "native_takeover.help",
+            ["desktop", "ownership-status", "--json"] => "native_takeover.status",
+            _ => "native_takeover.lookup",
+        };
+        let result = run_owned_observed(
             route.executable()?,
             &call,
             &[],
             &self.cancel,
             |c| c.spawn(),
             held,
+            |error, stderr| self.failure(step, error, stderr),
         )
         .map_err(|_| "ownership_transport_unavailable")?;
         route.executable()?;
@@ -482,7 +497,7 @@ impl Job {
             self.owner.state().intent.as_mut().unwrap().complete = true;
             return Err(code);
         }
-        let result = run_owned(
+        let result = run_owned_observed(
             helper,
             &call,
             &[],
@@ -494,6 +509,7 @@ impl Job {
                 Ok(child) // Always return the original, including a refused binding.
             },
             held,
+            |error, stderr| self.failure("native_takeover.frontend_request", error, stderr),
         );
         {
             let mut state = self.owner.state();
@@ -555,7 +571,48 @@ pub(crate) fn native_takeover(
     responder: Arc<Responder>,
 ) -> Result<NativeReady, &'static str> {
     let owner = Controller::new(hgs, Some(responder), Mode::Native);
-    native_startup(owner, Instant::now() + Duration::from_secs(15))
+    let result = native_startup(owner.clone(), Instant::now() + Duration::from_secs(15));
+    if let Err(code) = result {
+        let diagnostic = owner
+            .state()
+            .diagnostic
+            .unwrap_or(("native_takeover", code));
+        crate::startup_error::record(diagnostic.0, diagnostic.1);
+    }
+    result
+}
+
+fn failure_code(error: &OwnedError, stderr: Option<&str>) -> &'static str {
+    // Child text has no authority and is never written to the diagnostic.
+    // Exact known messages select codes; arbitrary/partial text stays generic.
+    if *error == OwnedError::ChildFailed {
+        match stderr.map(str::trim) {
+            Some("hgs: frontend process image unavailable") => {
+                return "frontend_process_image_unavailable"
+            }
+            Some("hgs: frontend process identity unavailable") => {
+                return "frontend_process_identity_unavailable"
+            }
+            Some("hgs: agent-descended frontend request refused") => {
+                return "agent_descended_frontend_refused"
+            }
+            Some("hgs: canonical frontend evidence unavailable") => {
+                return "canonical_frontend_evidence_unavailable"
+            }
+            _ => (),
+        }
+    }
+    match error {
+        OwnedError::InvalidInput => "invalid_input",
+        OwnedError::Cancelled => "cancelled",
+        OwnedError::TimedOut => "timed_out",
+        OwnedError::StartFailed => "start_failed",
+        OwnedError::WriteFailed => "write_failed",
+        OwnedError::ChildFailed => "child_failed",
+        OwnedError::OutputTooLarge => "output_too_large",
+        OwnedError::Incomplete => "incomplete",
+        OwnedError::ExitUnverified => "exit_unverified",
+    }
 }
 fn native_startup(owner: Arc<Controller>, deadline: Instant) -> Result<NativeReady, &'static str> {
     let mut action = Some(Action::NativeTakeover);

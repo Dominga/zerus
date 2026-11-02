@@ -20,6 +20,8 @@ use zerus_client_core::{
 use zerus_desktop_ledger::{self as ledger, Attempt, Identity, Kind, Reserve, State, Target};
 
 #[cfg(target_os = "linux")]
+mod closed;
+#[cfg(target_os = "linux")]
 pub(super) mod frontend;
 #[cfg(target_os = "linux")]
 pub(super) mod linux;
@@ -34,6 +36,8 @@ pub(super) mod activation;
 pub(super) mod attachment;
 #[cfg(unix)]
 pub(super) mod host;
+pub(super) mod preparation;
+pub(super) mod service;
 #[cfg(any(windows, test))]
 pub(super) mod windows;
 

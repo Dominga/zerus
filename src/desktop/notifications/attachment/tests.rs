@@ -60,6 +60,35 @@ struct Fixture {
     store: Store,
     session: Session,
 }
+
+#[test]
+fn temporary_host_readiness_loss_pauses_dispatch_without_replacing_the_policy() {
+    let mut f = Fixture::new();
+    let state = Arc::new(Mutex::new(State {
+        restore: true,
+        finish: true,
+        ready: true,
+        ..State::default()
+    }));
+    let mut runtime = f.attach(state.clone(), Arc::new(()));
+    let mut attention = attention::Runtime::new(&f.session.service_epoch);
+    for _ in 0..4 {
+        runtime.poll(&mut f.store, &mut attention);
+    }
+    assert!(runtime.admitting());
+    assert!(runtime.ready());
+    state.lock().unwrap().ready = false;
+    assert!(!runtime.ready());
+    assert!(
+        runtime.admitting(),
+        "a transient status observation is not a policy mutation"
+    );
+    state.lock().unwrap().joined = true;
+    runtime.request_stop();
+    runtime.poll(&mut f.store, &mut attention);
+    assert!(!runtime.admitting());
+    assert!(runtime.drained());
+}
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();

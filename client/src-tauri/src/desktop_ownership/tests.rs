@@ -3,6 +3,35 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn startup_diagnostics_select_only_closed_codes_and_never_child_content() {
+    use super::{failure_code, OwnedError};
+    assert_eq!(
+        failure_code(
+            &OwnedError::ChildFailed,
+            Some("hgs: frontend process image unavailable\n")
+        ),
+        "frontend_process_image_unavailable"
+    );
+    for body in [
+        "/private/fixture-secret",
+        "hgs: frontend process image unavailable\n/private/fixture-secret",
+        "hgs: agent-descended frontend request refused: /private/fixture-secret",
+    ] {
+        assert_eq!(
+            failure_code(&OwnedError::ChildFailed, Some(body)),
+            "child_failed"
+        );
+    }
+    assert_eq!(
+        failure_code(
+            &OwnedError::ExitUnverified,
+            Some("hgs: frontend process image unavailable")
+        ),
+        "exit_unverified"
+    );
+}
+
+#[test]
 fn a_remote_projection_cannot_supply_the_native_ownership_overlay() {
     let view: zerus_client_core::desktop::service::Snapshot = serde_json::from_value(json!({
         "notification_ownership":{"status":{"state":"service","identity_current":true}},

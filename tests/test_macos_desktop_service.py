@@ -49,12 +49,70 @@ class Commands:
         self.refuse_caller = False
         self.refuse_revoke = False
         self.revoke_receipts = {}
+        self.revoke_authorities = {}
+        self.held = False
+        self.hold_alive = True
+        self.holds = []
+        self.before_hold = None
+        self.after_revoke_check = None
+        self.after_action = None
+        self.during_probe = None
+        self.release_failure = False
+        self.hold_marker = True
+
+    def rearm(self):
+        if self.held:
+            return False
+        self.grant.update(state="service", rearm_required=False,
+                          request_id=str(uuid.uuid4()), owner_epoch=str(uuid.uuid4()))
+        return True
+
+    def hold(self, hgs, env, configuration, request, receipt, help_text):
+        test = self
+        installer.require(installer._hold.MARKER in help_text.splitlines()
+                          and receipt.get("configuration") == configuration
+                          and receipt.get("request_id") == request
+                          and "writer_epoch" in receipt
+                          and (receipt["writer_epoch"] is None
+                               or installer.ModeTransition.valid_uuid(receipt["writer_epoch"])),
+                          "Invalid original rollback identity.")
+        assert str(hgs) == self.argv[0]
+        assert env["HGS_CONFIG_DIR"] == self.argv[4] and env["HGS_STATE_DIR"] == self.argv[6]
+        class Held:
+            finished = False
+
+            def acquire(self):
+                if test.before_hold:
+                    test.before_hold()
+                installer.require(test.grant["state"] == "revoked"
+                                  and test.revoke_authorities[request] == test.grant["owner_epoch"],
+                                  "writer_authority_changed")
+                assert receipt == test.revoke_receipts[request]
+                test.held = True
+                test.holds.append(self)
+                return self
+
+            def check(self):
+                installer.require(test.hold_alive and not self.finished, "original hold exited")
+
+            def close(self, *, validate=True):
+                if self.finished:
+                    return
+                test.held = False
+                self.finished = True
+                installer.require(not (validate and test.release_failure), "original release unverified")
+        return Held()
 
     def __call__(self, argv, env=None, **kwargs):
         self.calls.append((list(argv), dict(env or {})))
         code, output = 0, ""
-        if argv[1:3] == ["desktop", "registration"]:
+        if argv[1:] == ["--help"]:
+            output = installer._hold.MARKER if self.hold_marker else "old CLI"
+        elif argv[1:3] == ["desktop", "registration"]:
             if argv[3:] == ["mode-check", "--json"]:
+                if self.revoke_receipts and self.after_revoke_check:
+                    callback, self.after_revoke_check = self.after_revoke_check, None
+                    callback()
                 code = 1 if self.refuse_caller else 0
                 output = json.dumps({"schema": 1, "configuration": self.config, "admitted": True, "source": "interactive_terminal"})
             else:
@@ -74,11 +132,19 @@ class Commands:
             record = json.loads(self.destination.with_name("." + installer.LABEL + ".zerus-registration.json").read_bytes())
             assert record["transition"]["request_id"] == original, "persist original before revoke"
             code = 1 if self.refuse_revoke else 0
+            authority = self.revoke_authorities.setdefault(original, self.grant["owner_epoch"])
+            old = self.revoke_receipts.get(original)
+            if (old and self.grant["state"] == "service"
+                    and authority != self.grant["owner_epoch"]):
+                return subprocess.CompletedProcess(argv, 1, "", "writer_authority_changed")
             output = json.dumps(self.revoke_receipts.setdefault(original, {"request_id": original,
-                "configuration": self.config, "accepted": True, "durable": True, "revoked": True, "checkpointed": True}))
+                "configuration": self.config, "accepted": True, "durable": True, "revoked": True, "checkpointed": True,
+                "writer_epoch": self.grant["owner_epoch"]}))
             if not self.refuse_revoke:
                 self.grant.update(state="revoked", rearm_required=True)
         elif argv[1:3] == ["desktop", "status"]:
+            if self.during_probe:
+                self.during_probe()
             output = json.dumps(self.status)
         elif argv[0] == "launchctl":
             if argv[1] == "print":
@@ -96,6 +162,10 @@ class Commands:
                 self.printed_argv = plistlib.loads(Path(argv[3]).read_bytes())["ProgramArguments"]
                 self.loaded = True
                 self.status["lifecycle"]["mode"] = "background" if "--background" in self.printed_argv else "passive"
+            if self.after_action is not None and self.after_action[0] == argv[1]:
+                _, callback = self.after_action
+                self.after_action = None
+                callback()
         else:
             raise AssertionError(argv)
         return subprocess.CompletedProcess(argv, code, output, "")
@@ -115,6 +185,7 @@ class MacDesktopService(unittest.TestCase):
         self.command = Commands(self.home, self.binary)
 
     def install(self, **kwargs):
+        kwargs.setdefault("hold_factory", self.command.hold)
         return installer.install(self.binary, self.home, {"HGS_EXECUTABLE": "/unselected/hgs"},
                                  command=self.command, **kwargs)
 
@@ -234,6 +305,207 @@ class MacDesktopService(unittest.TestCase):
         self.assertEqual(self.command.destination.read_bytes(), changed)
         self.assertEqual(self.command.mutations(), [])
 
+    def test_rearm_after_the_receipt_cannot_win_during_the_held_transition(self):
+        self.install()
+        self.install(mode="background")
+        outcomes = []
+        self.command.after_revoke_check = lambda: outcomes.append(self.command.rearm())
+        result = self.install(mode="passive")
+        self.assertEqual(outcomes, [False])
+        self.assertEqual(result["running_mode"], "passive")
+        self.assertEqual(self.command.grant["state"], "revoked")
+        self.assertFalse(self.command.held)
+        self.assertTrue(self.command.holds[0].finished)
+
+    def test_rearm_winning_before_the_hold_has_an_explicit_record_only_exit(self):
+        self.install()
+        self.install(mode="background")
+        original = self.command.destination.read_bytes()
+        self.command.before_hold = lambda: self.assertTrue(self.command.rearm())
+        self.command.calls.clear()
+        with self.assertRaisesRegex(installer.Refusal, "cancel-rollback"):
+            self.install(mode="passive")
+        request = json.loads(self.mode_record().read_bytes())["transition"]["request_id"]
+        grant, receipts = copy.deepcopy(self.command.grant), copy.deepcopy(self.command.revoke_receipts)
+        self.assertEqual(self.command.destination.read_bytes(), original)
+        self.assertEqual(self.command.mutations(), [])
+        with self.assertRaisesRegex(installer.Refusal, "writer_authority_changed"):
+            self.install(mode="passive")
+        self.command.calls.clear()
+        result = self.install(cancel_rollback=request)
+        self.install(cancel_rollback=request)
+        self.assertEqual(result["operation"], "cancel-rollback")
+        self.assertFalse(any(argv[0] == "launchctl" or "revoke" in argv for argv, _ in self.command.calls))
+        self.assertEqual(self.command.grant, grant)
+        self.assertEqual(self.command.revoke_receipts, receipts)
+        self.assertEqual(self.command.destination.read_bytes(), original)
+        record = json.loads(self.mode_record().read_bytes())
+        self.assertIsNone(record["transition"])
+        self.assertEqual(record["selected_mode"], "background")
+        self.assertEqual(record["last_cancelled_rollback_request_id"], request)
+        self.command.before_hold = None
+        result = self.install(mode="passive")
+        self.assertNotEqual(result["last_revoke_request_id"], request)
+        self.assertEqual(result["last_cancelled_rollback_request_id"], request)
+
+    def test_cancel_before_any_revoke_keeps_the_original_service_grant_and_unit(self):
+        self.install()
+        self.install(mode="background")
+        request = str(uuid.uuid4())
+        record = json.loads(self.mode_record().read_bytes())
+        record["transition"] = {"target": "passive", "request_id": request}
+        self.mode_record().write_text(json.dumps(record))
+        unit, grant = self.command.destination.read_bytes(), copy.deepcopy(self.command.grant)
+        self.command.calls.clear()
+        result = self.install(cancel_rollback=request)
+        self.assertEqual(result["last_cancelled_rollback_request_id"], request)
+        self.assertEqual(self.command.grant, grant)
+        self.assertEqual(self.command.revoke_receipts, {})
+        self.assertEqual(self.command.destination.read_bytes(), unit)
+        self.assertFalse(any(argv[0] == "launchctl" or "revoke" in argv for argv, _ in self.command.calls))
+
+    def test_cancellation_requires_exact_pending_uuid_current_service_grant_and_native_caller(self):
+        self.install()
+        self.install(mode="background")
+        request = str(uuid.uuid4())
+        record = json.loads(self.mode_record().read_bytes())
+        record["transition"] = {"target": "passive", "request_id": request}
+        self.mode_record().write_text(json.dumps(record))
+        original, unit = self.mode_record().read_bytes(), self.command.destination.read_bytes()
+        self.command.calls.clear()
+        for change in ({"state": "revoked", "rearm_required": True}, {"state": "passive"},
+                       {"identity_current": False}, {"configuration": "b" * 64}, {"owner_epoch": None}):
+            grant = dict(self.command.grant)
+            self.command.grant.update(change)
+            with self.subTest(change=change), self.assertRaisesRegex(installer.Refusal, "Grant/Rearm"):
+                self.install(cancel_rollback=request)
+            self.command.grant = grant
+        self.command.refuse_caller = True
+        with self.assertRaises(installer.Refusal):
+            self.install(cancel_rollback=request)
+        self.command.refuse_caller = False
+        for wrong in (str(uuid.uuid4()), "invalid"):
+            with self.assertRaises(installer.Refusal):
+                self.install(cancel_rollback=wrong)
+        with self.assertRaises(installer.Refusal):
+            self.install(mode="passive", cancel_rollback=request)
+        self.assertEqual(self.mode_record().read_bytes(), original)
+        self.assertEqual(self.command.destination.read_bytes(), unit)
+        self.assertFalse(any(argv[0] == "launchctl" or "revoke" in argv for argv, _ in self.command.calls))
+
+    def test_lost_hold_before_or_after_bootout_admits_no_later_manager_step(self):
+        self.install()
+        self.install(mode="background")
+        original = self.command.destination.read_bytes()
+        self.command.after_revoke_check = lambda: setattr(self.command, "hold_alive", False)
+        self.command.calls.clear()
+        with self.assertRaisesRegex(installer.Refusal, "hold exited"):
+            self.install(mode="passive")
+        self.assertEqual(self.command.mutations(), [])
+        self.command.hold_alive = True
+        self.command.after_action = ("bootout", lambda: setattr(self.command, "hold_alive", False))
+        self.command.calls.clear()
+        with self.assertRaisesRegex(installer.Refusal, "hold exited"):
+            self.install(mode="passive")
+        self.assertEqual([argv[1] for argv in self.command.mutations()], ["bootout"])
+        self.assertEqual(self.command.destination.read_bytes(), original)
+        self.assertIsNotNone(json.loads(self.mode_record().read_bytes())["transition"])
+        self.assertFalse(self.command.held)
+
+    def test_cancellation_cannot_overwrite_a_record_changed_during_native_checks(self):
+        from unittest.mock import patch
+        self.install()
+        self.install(mode="background")
+        record = json.loads(self.mode_record().read_bytes())
+        request = str(uuid.uuid4())
+        record["transition"] = {"target": "passive", "request_id": request}
+        self.mode_record().write_text(json.dumps(record))
+        caller = installer.ModeTransition.caller
+        replacement = copy.deepcopy(record)
+        replacement["transition"]["request_id"] = str(uuid.uuid4())
+        def replace_during_check(value):
+            caller(value)
+            self.mode_record().write_text(json.dumps(replacement))
+        self.command.calls.clear()
+        with patch.object(installer.ModeTransition, "caller", replace_during_check):
+            with self.assertRaisesRegex(installer.Refusal, "changed during cancellation"):
+                self.install(cancel_rollback=request)
+        self.assertEqual(json.loads(self.mode_record().read_bytes()), replacement)
+        self.assertFalse(any(argv[0] == "launchctl" or "revoke" in argv for argv, _ in self.command.calls))
+
+    def test_unverified_original_release_keeps_the_pending_transition(self):
+        self.install()
+        self.install(mode="background")
+        self.command.release_failure = True
+        with self.assertRaisesRegex(installer.Refusal, "release unverified"):
+            self.install(mode="passive")
+        record = json.loads(self.mode_record().read_bytes())
+        self.assertIsNotNone(record["transition"])
+        self.assertTrue(record["pending_restart"])
+        self.assertTrue(self.command.holds[0].finished)
+
+    def test_old_cli_without_the_hold_marker_refuses_before_revoke_or_pending_write(self):
+        self.install()
+        self.install(mode="background")
+        original = self.mode_record().read_bytes()
+        self.command.hold_marker = False
+        self.command.calls.clear()
+        with self.assertRaisesRegex(installer.Refusal, "native rollback hold"):
+            self.install(mode="passive")
+        self.assertEqual(self.mode_record().read_bytes(), original)
+        self.assertEqual(self.command.revoke_receipts, {})
+        self.assertEqual(self.command.mutations(), [])
+
+    def test_the_same_original_hold_spans_pending_ready_and_receipt_probes(self):
+        self.install()
+        self.install(mode="background")
+        observed = []
+        def probe():
+            if self.command.status["lifecycle"]["mode"] != "passive":
+                return
+            self.assertTrue(self.command.held, "hold released before passive readiness")
+            self.assertEqual(len(self.command.holds), 1)
+            original = self.command.holds[0]
+            self.assertFalse(original.finished)
+            self.assertFalse(self.command.rearm())
+            observed.append(original)
+            self.command.status["lifecycle"]["ipc_ready"] = len(observed) > 1
+        self.command.during_probe = probe
+        result = self.install(mode="passive")
+        self.command.during_probe = None
+        self.assertEqual(observed, [self.command.holds[0]] * 3)
+        self.assertTrue(observed[0].finished)
+        self.assertIsNone(result["transition"])
+        self.assertFalse(result["pending_restart"])
+
+    def test_missing_original_writer_uses_the_closed_null_epoch_receipt(self):
+        self.install()
+        self.install(mode="background")
+        self.command.refuse_revoke = True
+        with self.assertRaises(installer.Refusal):
+            self.install(mode="passive")
+        request = json.loads(self.mode_record().read_bytes())["transition"]["request_id"]
+        self.command.revoke_receipts[request]["writer_epoch"] = None
+        self.command.refuse_revoke = False
+        result = self.install(mode="passive")
+        self.assertEqual(result["last_revoke_request_id"], request)
+
+    def test_installed_helper_requires_its_shipped_sibling_hold_module(self):
+        scripts = self.root / "standalone-setup"
+        scripts.mkdir()
+        helper = scripts / "install-macos-desktop-service.py"
+        helper.write_bytes((ROOT / "scripts" / helper.name).read_bytes())
+        module = scripts / "desktop-revoke-hold.py"
+        module.write_bytes((ROOT / "scripts" / module.name).read_bytes())
+        result = subprocess.run([sys.executable, str(helper), "--help"], cwd=self.root,
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--cancel-rollback", result.stdout)
+        module.unlink()
+        result = subprocess.run([sys.executable, str(helper), "--help"], cwd=self.root,
+                                capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(result.returncode, 0)
+
     def test_custom_environment_is_actionable_and_mode_cannot_change_the_paired_runner(self):
         self.install()
         definition = plistlib.loads(self.command.destination.read_bytes())
@@ -281,7 +553,8 @@ class MacDesktopService(unittest.TestCase):
         for change in ({"configuration": "b" * 64}, {"request_id": str(uuid.uuid4())},
                        {"accepted": False}, {"durable": False}, {"revoked": False}, {"checkpointed": False}):
             self.command.revoke_receipts[request] = {"request_id": request, "configuration": self.command.config,
-                "accepted": True, "durable": True, "revoked": True, "checkpointed": True, **change}
+                "accepted": True, "durable": True, "revoked": True, "checkpointed": True,
+                "writer_epoch": self.command.grant["owner_epoch"], **change}
             self.command.calls.clear()
             with self.subTest(change=change), self.assertRaisesRegex(installer.Refusal, "not settled"):
                 self.install(mode="passive")
@@ -371,13 +644,18 @@ class MacDesktopService(unittest.TestCase):
             self.install(runner_hgs=runner)
         self.assertEqual(self.command.destination.read_bytes(), original)
 
-    def test_cli_refresh_repairs_a_paired_registration_after_unpaired_qt_rollback(self):
+    def unpaired_rollback_refresh(self, mode):
         bundled = self.root / "hgs-tray.app/Contents/MacOS/hgs"
         bundled.parent.mkdir(parents=True)
         bundled.write_text("paired CLI"); bundled.chmod(0o755)
         paired = Commands(self.home, bundled)
         self.assertEqual(installer.install(bundled, self.home, {}, runner_hgs=self.binary,
                                           command=paired), "ready")
+        if mode == "background":
+            installer.install(bundled, self.home, {}, runner_hgs=self.binary, command=paired,
+                              mode=mode, hold_factory=paired.hold)
+        original_argv = plistlib.loads(paired.destination.read_bytes())["ProgramArguments"]
+        self.command.calls.clear()
         # Model update-installed.py restoring the unpaired Qt app at the SAME
         # location; the old registration remains until this CLI-only refresh.
         bundled.unlink()
@@ -385,14 +663,25 @@ class MacDesktopService(unittest.TestCase):
         (bundled.parent.parent / "Info.plist").write_bytes(plistlib.dumps({
             "CFBundleIdentifier": "com.hgdev.hgs-tray", "CFBundleExecutable": "hgs-tray"}))
         self.command.loaded = True
-        self.command.printed_argv = paired.argv
+        self.command.printed_argv = original_argv
+        self.command.status["lifecycle"]["mode"] = mode
         self.assertEqual(self.install(refresh_runner=True, restart=True), "ready")
         restored = plistlib.loads(self.command.destination.read_bytes())
-        self.assertEqual(restored["ProgramArguments"], self.command.argv)
+        expected = list(self.command.argv)
+        if mode == "background":
+            expected.insert(7, "--background")
+        self.assertEqual(restored["ProgramArguments"], expected)
         self.assertNotIn("EnvironmentVariables", restored)
         self.assertEqual([args[1] for args in self.command.mutations()], ["bootout", "bootstrap"])
         self.assertFalse(bundled.exists())
         self.assertEqual(qt.read_text(), "Qt rollback")
+
+    def test_cli_refresh_repairs_a_paired_registration_after_unpaired_qt_rollback(self):
+        self.unpaired_rollback_refresh("passive")
+
+    def test_cli_refresh_after_unpaired_rollback_preserves_the_owned_background_selection(self):
+        self.unpaired_rollback_refresh("background")
+        self.assertEqual(json.loads(self.mode_record().read_bytes())["selected_mode"], "background")
 
     def test_cli_refresh_never_repairs_a_pair_with_its_helper_missing(self):
         bundled = self.root / "hgs-tray.app/Contents/MacOS/hgs"

@@ -81,6 +81,14 @@ Mac selection is supplied as the opaque native selection made off actor, and
 Linux takes an explicit Unix bus address. This component does not change the
 background registration, policy admission or client switch.
 
+Windows takes the selected service configuration and passes the same original
+owner resource to its in-process worker and native delegates. Restore retries
+retain the current page offset through its bounded FIFO. Finish waits for the
+worker's restored/ready acknowledgement, and stop waits for `try_join` plus
+native drain. The actor must continue polling original Closed callbacks through
+that join; a joined worker alone cannot settle the attachment. Native setup
+faults remain unavailable, and no registry repair occurs here.
+
 Before allowing discovery effects, attachment restores at most sixteen indexed
 candidates per turn, then waits for the platform's original restoration
 acknowledgement or ordered FIFO completion. A second fixed-highwater walk over

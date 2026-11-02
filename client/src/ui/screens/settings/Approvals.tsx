@@ -26,7 +26,7 @@ export function ApprovalsSection() {
   const [state, setState] = createSignal<JournalState>({ page: { entries: [], next: 0, previous: 0 }, loading: false, status: "", detailHint: tr(PLACEHOLDER) });
   const journal = createJournal({
     list: (request) => invoke<Page>("approvals_list", { ...request }),
-    detail: (id) => invoke<string>("approvals_detail", { id }),
+    detail: (id, scope) => invoke<string>("approvals_detail", { id, scope }),
   }, () => ({ host: host(), session: session() }), setState);
   // Outside the app there is no journal to read.
   const firstPage = () => { if (inTauri()) journal.firstPage(); };

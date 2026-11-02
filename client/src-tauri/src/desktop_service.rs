@@ -39,6 +39,7 @@ pub(crate) struct Observers {
     pub activation: Option<activation::Sink>,
 }
 
+pub(crate) mod audit;
 mod catalog;
 mod catalog_relay;
 use catalog::catalog_loop;
@@ -220,6 +221,7 @@ impl CatalogDelivery {
 
 struct Shared {
     hgs: PathBuf,
+    configuration: Mutex<Option<String>>,
     relay: Mutex<Option<Arc<zerus_client_core::desktop::relay::Connection>>>,
     pump: crate::pump::Pump,
     sink: Mutex<Option<SyncSender<Data>>>,
@@ -305,6 +307,7 @@ impl Service {
             allowed,
             stopped: AtomicBool::new(false),
             cancellation: Mutex::new(None),
+            configuration: Mutex::new(None),
             responder,
             reads: Mutex::new(BTreeMap::new()),
             details: Mutex::new(details::Hub::default()),
@@ -760,6 +763,16 @@ async fn command(
     stdin: Option<String>,
     stop: Arc<AtomicBool>,
 ) -> Result<Vec<u8>, &'static str> {
+    command_limited(shared, args, stdin, stop, service::FRAME_BYTES).await
+}
+
+async fn command_limited(
+    shared: &Arc<Shared>,
+    args: Vec<String>,
+    stdin: Option<String>,
+    stop: Arc<AtomicBool>,
+    limit: usize,
+) -> Result<Vec<u8>, &'static str> {
     if !shared.allowed {
         return Err("replay_transport_unavailable");
     }
@@ -789,14 +802,7 @@ async fn command(
             request_id: None,
         };
         let guard: Arc<dyn Send + Sync> = Arc::new(charge);
-        match zerus_client_core::run::run_accounted(
-            hgs,
-            &inv,
-            &[],
-            service::FRAME_BYTES,
-            &stop,
-            guard,
-        ) {
+        match zerus_client_core::run::run_accounted(hgs, &inv, &[], limit, &stop, guard) {
             Ok(zerus_client_core::Exit::Code {
                 code: 0, stdout, ..
             }) => Ok(stdout),
@@ -861,6 +867,10 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
     }
     let mut state = service::State::new(configuration.into())?;
     state.status(&value)?;
+    *shared
+        .configuration
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = Some(configuration.into());
     shared.observe_peer_choices(&state, &value);
     if let Some(responder) = &shared.responder {
         responder.configure_once(configuration.into());

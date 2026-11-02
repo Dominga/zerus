@@ -452,6 +452,8 @@
   "Terminating %1 sessions": "Завершение сессий: %1",
   "Terminating session": "Завершение сессии",
   "The agent ID is on the clipboard": "ID агента скопирован в буфер обмена",
+  "The approval journal changed. Refresh to read it again.": "Журнал разрешений изменился. Обновите, чтобы прочитать его заново.",
+  "The approval journal is unavailable. Refresh to try again.": "Журнал разрешений недоступен. Обновите, чтобы повторить попытку.",
   "The background service has not confirmed this settings change.": "Фоновая служба не подтвердила это изменение настроек.",
   "The clipboard is unavailable": "Буфер обмена недоступен",
   "The comment stays in the task; nothing was cancelled or sent again.": "Комментарий остаётся в задаче; ничего не отменено и не отправлено повторно.",

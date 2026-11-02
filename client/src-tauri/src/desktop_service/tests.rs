@@ -51,7 +51,7 @@ impl Drop for Fixture {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
-async fn eventually(label: &str, check: impl Fn() -> bool) {
+pub(super) async fn eventually(label: &str, check: impl Fn() -> bool) {
     let until = Instant::now() + Duration::from_secs(10);
     while !check() {
         assert!(Instant::now() < until, "{label}");

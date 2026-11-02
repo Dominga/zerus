@@ -649,14 +649,14 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                     };
                     // The initially empty one-shot never blocks the actor. A
                     // dropped caller/shutdown drops the original owner loan.
-                    if let Ok(owner) = owner {
-                        let _ = reply.try_send(import_evidence::held::Loan {
-                            owner,
-                            epoch: epoch.clone(),
-                            seq,
-                        });
-                    } // An owner-query error closes the reply as unknown,
-                      // never as the closed pre-reservation negative.
+                    // This actor never claims the stage. A failed owner query
+                    // is a definite no-job outcome for this request, not an
+                    // unknown filesystem publication.
+                    let _ = reply.try_send(import_evidence::held::Loan {
+                        owner: owner.unwrap_or(None),
+                        epoch: epoch.clone(),
+                        seq,
+                    });
                 }
                 Ok(Event::Command(hello, queue, authority)) => {
                     let mut value = projection(
@@ -1128,15 +1128,15 @@ fn client(
     #[cfg(windows)]
     transport::authenticate(&stream)?;
     let hello: Hello = serde_json::from_slice(&bytes).context("invalid desktop hello")?;
-    ensure!(!stopped.load(Ordering::SeqCst), "desktop is stopping");
-    if hello.op == "feed" {
-        return feed::client(stream, reader, hello, send, stopped, ingress);
-    }
     if hello.op == import_evidence::held::OP {
         // The finalizer's Session owns the only original connection handle;
         // its stream cleanup precedes release of the runtime Owner loan.
         drop(reader);
         return import_evidence::held::client(stream, hello, send, stopped, location);
+    }
+    ensure!(!stopped.load(Ordering::SeqCst), "desktop is stopping");
+    if hello.op == "feed" {
+        return feed::client(stream, reader, hello, send, stopped, ingress);
     }
     let watching = hello.op == "watch"
         || (hello.op == "frontend_request"

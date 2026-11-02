@@ -14,6 +14,9 @@ use std::{
 };
 use zerus_client_core::desktop::ui_requests::{Envelope, Reply, Request};
 
+#[cfg(target_os = "linux")]
+mod linux_manager;
+
 #[cfg(any(not(windows), test))]
 use std::collections::BTreeSet;
 #[cfg(windows)]
@@ -732,6 +735,10 @@ fn probe(_: &Location, _: &str, _: Instant) -> Option<Canonical> {
 fn check_ancestry(pid: u32, until: Instant) -> Result<()> {
     ancestry(pid, until, |pid| {
         if !same_user(pid)? {
+            return Ok(None);
+        }
+        #[cfg(target_os = "linux")]
+        if linux_manager::boundary(pid, unsafe { libc::geteuid() }) {
             return Ok(None);
         }
         let process = Process::read(pid)?;

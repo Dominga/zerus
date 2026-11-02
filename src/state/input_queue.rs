@@ -25,7 +25,7 @@ fn parse(agent: &str, screen: &str) -> Option<Queue> {
             }
         }
         let start = first;
-        let end = rows[start+1..].iter().position(|r|r.trim_start().starts_with('›') || r.trim_start().starts_with('╭')).map(|i|start+1+i).unwrap_or(rows.len());
+        let end = rows[start+1..].iter().position(|r|r.trim_start().starts_with('›') || r.trim_start().starts_with('»') || r.trim_start().starts_with('╭')).map(|i|start+1+i).unwrap_or(rows.len());
         let block = rows[start..end].join("\n");
         if !block.contains('↳') { return None; }
         let normalized = block.split_whitespace().collect::<Vec<_>>().join(" ");

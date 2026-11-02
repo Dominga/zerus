@@ -327,6 +327,13 @@ pub(super) fn normalized_activity(record: &Value, live_pane: bool) -> Value {
     let alive = live_pane && process_alive(record);
     let mut activity = record.get("activity").cloned().unwrap_or(json!("unknown"));
     let mut phase = record.get("phase").cloned().unwrap_or(json!("unknown"));
+    if alive && codex_approval::running(record) {
+        phase = json!(if record["active_tools"].as_object().is_some_and(|tools| !tools.is_empty()) {
+            "tool"
+        } else {
+            "working"
+        });
+    }
     // Legacy SessionEnd was overloaded as process death. It is not evidence of
     // either process death or idleness; old manifests remain restorable.
     if live_pane && (activity == "ended" || phase == "ended") && alive {

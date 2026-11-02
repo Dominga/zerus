@@ -18,6 +18,8 @@ one of these phrases (not a request that quotes it, such as a title request):
 - BASH: Claude's Bash tool with BASH_INPUT, which creates BASH_FILE in its folder; LONG_BASH
   the same command after LONG_LINES no-op lines, a panel taller than the 192 rows to which
   hgs grows a pane no client views (question_terminal::MAX_UNVIEWED_ROWS), so it stays clipped.
+- CODEX_ESCALATION: a Windows exec_command that explicitly requests escalation and
+  waits for a private fixture file, keeping approval and execution observable.
 
 After the tool's result the turn ends with DONE. Side requests (titles, token counts) get
 the plain reply.
@@ -45,6 +47,9 @@ LONG_BASH = "Use the long Bash tool now."
 BASH_FILE = "bash-approved.txt"
 BASH_INPUT = {"command": f"printf approved > {BASH_FILE}", "description": "Create the fixture file after approval"}
 LONG_LINES = 240
+CODEX_ESCALATION = "Run the Codex approval fixture now."
+CODEX_STARTED = "codex-command-started"
+CODEX_RELEASE = "codex-command-release"
 # The questions of tests/test_claude_questions_native.py, which the Windows screen fixtures
 # tests/fixtures/claude-question-*-windows.txt were recorded with.
 QUESTION_ITEMS = [
@@ -136,6 +141,13 @@ def plan(body, project):
     offered, prompt = tool_names(body), (typed(body) or "").strip()
     if results(body):
         return ("text", DONE)
+    if prompt == CODEX_ESCALATION and project:
+        quote = lambda name: "'" + os.path.join(project, name).replace("'", "''") + "'"
+        command = (f"New-Item -ItemType File -Path {quote(CODEX_STARTED)} | Out-Null; "
+                   f"while (-not (Test-Path -LiteralPath {quote(CODEX_RELEASE)})) "
+                   "{ Start-Sleep -Milliseconds 100 }; Write-Output approval-fixture")
+        return ("tool", "exec_command", dict(cmd=command, sandbox_permissions="require_escalated",
+                    justification="Run the local approval fixture?", yield_time_ms=10000))
     if prompt == QUESTIONS and "AskUserQuestion" in offered:
         return ("tool", "AskUserQuestion", {"questions": QUESTION_ITEMS})
     if prompt == TALL_QUESTION and "AskUserQuestion" in offered:

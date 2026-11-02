@@ -56,6 +56,7 @@ const DYNAMIC_FILES: Record<string, string> = {
   "./ui/screens/settings/ApprovalsConfirm.tsx": "the approval opt-in constants",
   "./ui/screens/settings/approvals-journal.ts": "its own placeholder constant",
   "./ui/screens/settings/Approvals.tsx": "the approval opt-in and journal constants",
+  "./ui/screens/settings/Sessions.tsx": "the native notification controller's closed unavailable, unconfirmed and not-applied messages",
   "./ui/screens/settings/computer-invitations.ts": "its own notice constant",
   "./ui/screens/settings/connector-actions.ts": "the workspace enrollment notice constants",
   "./ui/screens/settings/legacy-relay.ts": "its own notice constant",

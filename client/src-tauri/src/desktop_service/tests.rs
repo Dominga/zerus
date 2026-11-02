@@ -3,7 +3,7 @@ use std::{fs, path::Path, time::Instant};
 
 pub(super) struct Fixture(pub(super) PathBuf);
 
-fn private_root(parent: &Path) -> PathBuf {
+pub(super) fn private_root(parent: &Path) -> PathBuf {
     use std::os::unix::{ffi::OsStrExt, fs::DirBuilderExt};
     // Darwin's sun_path has 104 bytes, including the terminating NUL. Hosted
     // runners can supply a TMPDIR too long even for our shortest socket leaf.

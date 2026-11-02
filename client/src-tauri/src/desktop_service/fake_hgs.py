@@ -247,7 +247,7 @@ def desktop_request():
                 page.update(next_cursor=cursor, items=[row('first')])
         if config.get('replace_projection') == 'early' and number == 1:
             (root / 'page-started').touch()
-            wait(root / 'projection-replaced')
+            wait(root / 'release-old-page')
             page.update(next_cursor=cursor)
         elif config.get('replace_projection') and (root / 'projection-replaced').exists():
             page.update(projection='b' * 32, items=[row('replacement')])
@@ -306,8 +306,10 @@ def desktop_request():
         if config.get('replace_projection') and config['replace_projection'] != 'early' and number == 1:
             page.update(through_revision='1', revision='1', items=[change('obsolete', '1')], next_cursor=cursor)
             (root / 'initial-complete').touch()
-            # The old final page races the new projection hint.
-            wait(root / 'projection-replaced')
+            if config['replace_projection'] != 'exhausted':
+                wait(root / 'release-old-page')
+        elif config.get('replace_projection') == 'exhausted' and number == 2:
+            page.update(through_revision='1', revision='1')
         if config.get('large'):
             if number == 1:
                 (root / 'initial-complete').touch()
@@ -489,6 +491,8 @@ elif args == ['desktop', 'watch', '--json']:
         (root / 'delta-hinted').touch()
     if config.get('replace_projection'):
         wait(root / ('page-started' if config['replace_projection'] == 'early' else 'initial-complete'))
+        if config['replace_projection'] == 'exhausted':
+            wait(root / 'release-replacement-hint')
         hint(1, '0', 'b' * 32)
         (root / 'projection-replaced').touch()
     if config.get('delta_live'):

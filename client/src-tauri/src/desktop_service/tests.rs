@@ -117,11 +117,17 @@ fn dirty_walk_finishes_its_cursor_and_coalesces_one_refresh_without_deleting_row
             fixture.0.join("delta-page-two").exists()
         })
         .await;
+        // The next RPC can start before the view drain applies the prior row.
+        // Keep page two blocked while checking actual partial-view membership.
+        eventually(
+            "first delta row applied with page two still blocked",
+            || pump.row("", "inserted").is_some(),
+        )
+        .await;
         assert!(
             pump.row("", "unseen").is_some(),
             "partial catch-up cannot infer deletion"
         );
-        assert!(pump.row("", "inserted").is_some());
         fs::write(fixture.0.join("finish-delta"), []).unwrap();
         eventually("one follow-up delta", || {
             fixture.0.join("refresh-started").exists()
@@ -551,6 +557,23 @@ fn full_projection_replacement_rebaselines_even_with_unchanged_native_generation
         for stage in ["early", "late"] {
             let fixture = Fixture::new(json!({"replace_projection":stage}));
             let (service, pump) = fixture.start(true);
+            // Writing a hint to stdout is not evidence the client consumed it.
+            // Retain the old cursor page until the replacement is bound under
+            // the native hub lock, so this case really requires cursor close.
+            eventually("replacement hint applied before old cursor page", || {
+                service
+                    .shared
+                    .dirty
+                    .lock()
+                    .unwrap()
+                    .sources
+                    .get("")
+                    .is_some_and(|source| {
+                        source.projection.as_deref() == Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                    })
+            })
+            .await;
+            fs::write(fixture.0.join("release-old-page"), []).unwrap();
             eventually("replacement baseline and catch-up", || {
                 pump.row("", "replacement").is_some() && pump.row("", "row").is_none()
             })
@@ -564,9 +587,56 @@ fn full_projection_replacement_rebaselines_even_with_unchanged_native_generation
                     .count(),
                 2
             );
-            assert!(calls.iter().any(|c| c["value"]["op"] == "catalog_close"));
+            let closes: Vec<_> = calls
+                .iter()
+                .filter(|c| c["value"]["op"] == "catalog_close")
+                .collect();
+            assert_eq!(closes.len(), 1, "{stage}: {calls:?}");
+            assert_eq!(
+                closes[0]["value"]["cursor"],
+                "00000000-0000-4000-8000-000000000002"
+            );
+            assert_eq!(closes[0]["value"]["computer"], "");
             assert!(pump.row("", "obsolete").is_none());
         }
+    });
+}
+#[test]
+fn projection_replacement_after_cursor_exhaustion_needs_no_close() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({"replace_projection":"exhausted"}));
+        let (service, pump) = fixture.start(true);
+        let through = Revision::try_from("1".to_owned()).unwrap();
+        eventually("old cursor consumed and walk finished before hint", || {
+            let dirty = service.shared.dirty.lock().unwrap();
+            dirty.progress.get("") == Some(&through) && dirty.running.is_none()
+        })
+        .await;
+        assert!(pump.row("", "obsolete").is_some());
+        fs::write(fixture.0.join("release-replacement-hint"), []).unwrap();
+        eventually("replacement prunes old completed membership", || {
+            pump.row("", "replacement").is_some()
+                && pump.row("", "row").is_none()
+                && pump.row("", "obsolete").is_none()
+        })
+        .await;
+        service.join().await.unwrap();
+        let calls = fixture.calls();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| c["value"]["op"] == "catalog_page")
+                .count(),
+            2
+        );
+        assert!(calls.iter().any(|c| c["value"]["op"] == "catalog_changes"
+            && c["value"]["projection"] == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            && c["value"]["cursor"] == "00000000-0000-4000-8000-000000000002"));
+        assert!(
+            !calls.iter().any(|c| c["value"]["op"] == "catalog_close"),
+            "an already consumed cursor is not outstanding"
+        );
     });
 }
 #[test]

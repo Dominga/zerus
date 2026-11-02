@@ -143,7 +143,7 @@ pub(super) fn retry(shared: Arc<Shared>) {
             finish(&shared, "frontend_route_unavailable");
             return;
         }
-        let resources: Arc<dyn Send + Sync> = Arc::new((hold, captured.clone()));
+        let resources: Arc<dyn Send + Sync> = Arc::new((captured.clone(), hold));
         let deadline = Instant::now() + Duration::from_secs(30);
         let configuration = loop {
             if shared.stopped.load(Ordering::Acquire) {

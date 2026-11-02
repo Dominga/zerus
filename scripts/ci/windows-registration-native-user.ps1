@@ -22,6 +22,7 @@ $captureSource = @'
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.ServiceProcess;
 using System.Text;
 using System.Threading.Tasks;
 public static class RegistrationCapture {
@@ -34,6 +35,19 @@ public static class RegistrationCapture {
                 count += n;
             }
             throw new InvalidDataException("capture exceeded 64 KiB");
+        });
+    }
+    public static Task<bool> ReadyLogonService(string phases) {
+        return Task.Run(() => {
+            var watch = Stopwatch.StartNew();
+            using (var service = new ServiceController("seclogon")) {
+                var before = service.Status;
+                File.AppendAllText(phases, "before " + before + "\n");
+                if (before != ServiceControllerStatus.Running) service.Start();
+                service.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(20));
+                File.AppendAllText(phases, "running " + watch.ElapsedMilliseconds + "\n");
+                return true;
+            }
         });
     }
     public static Task<bool> Start(Process child, string phases) {
@@ -176,7 +190,8 @@ try {
     # Compile the bounded reader once under the warm controller. The fresh
     # account loads bytes only; no Add-Type/JSON/path cmdlet autoloading.
     $capturePath = Join-Path $Stage 'capture.dll'
-    Add-Type -TypeDefinition $captureSource -OutputAssembly $capturePath
+    $serviceAssembly=[Reflection.Assembly]::Load('System.ServiceProcess, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a')
+    Add-Type -TypeDefinition $captureSource -ReferencedAssemblies @('System.dll','System.Core.dll',$serviceAssembly.Location) -OutputAssembly $capturePath
     $ownedUser = New-LocalUser -Name $userName -Password $secure -Description 'Disposable Zerus CI fixture' -AccountNeverExpires
     # Explicit ordinary Users membership; never add an administrator membership.
     Add-LocalGroupMember -SID 'S-1-5-32-545' -Member $ownedUser
@@ -213,6 +228,21 @@ try {
     $outer.StartInfo.RedirectStandardOutput = $true
     $outer.StartInfo.RedirectStandardError = $true
     [void][Reflection.Assembly]::Load([IO.File]::ReadAllBytes($capturePath))
+    # This is fixture setup on the disposable VM, never a production service
+    # dependency repair. Bound SCM start/read as well as the subsequent wait.
+    $serviceReport=[ordered]@{service='seclogon';ready=$false;elapsed_ms=0}
+    $serviceWatch=[Diagnostics.Stopwatch]::StartNew()
+    $serviceReportPath=Join-Path $env:GITHUB_WORKSPACE 'artifacts/test-results/registration-logon-service.json'
+    Write-Report $serviceReportPath $serviceReport
+    $serviceReady=[RegistrationCapture]::ReadyLogonService((Join-Path $Stage 'logon-service-phases.txt'))
+    try {
+        if (-not $serviceReady.Wait(30000)) { throw 'Secondary Logon readiness remains pending; preserve fixture' }
+        $serviceReport.ready=$serviceReady.Result
+        if (-not $serviceReport.ready) { throw 'Secondary Logon readiness was not confirmed' }
+    } finally {
+        $serviceReport.elapsed_ms=$serviceWatch.ElapsedMilliseconds
+        Write-Report $serviceReportPath $serviceReport
+    }
     $launch = [ordered]@{ phase='spawn'; physical_wait=$false }
     $launchPath = Join-Path $env:GITHUB_WORKSPACE ('artifacts/test-results/registration-' + $Layout + '-launch.json')
     Write-Report $launchPath $launch
@@ -271,13 +301,14 @@ try {
 } finally {
     # Retain the ORIGINAL child evidence even when credentialed Start itself
     # never returned. Its absence is not evidence that the child never ran.
-    foreach ($entry in @(@('launch-native-phases.txt',1024), @('child-phases.txt',1024), @('result.json',200000))) {
+    foreach ($entry in @(@('logon-service-phases.txt',1024), @('launch-native-phases.txt',1024), @('child-phases.txt',1024), @('result.json',200000))) {
         $path = Join-Path $Stage $entry[0]
         if ([IO.File]::Exists($path)) {
             $file=[IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
             try {
-                if ($file.Length -gt $entry[1]) { throw 'Original fixture evidence exceeds its bound' }
-                $buffer=[byte[]]::new([int]$file.Length)
+                $length=$file.Length
+                if ($length -gt $entry[1]) { throw 'Original fixture evidence exceeds its bound' }
+                $buffer=[byte[]]::new([int]$length)
                 $offset=0
                 while ($offset -lt $buffer.Length) {
                     $read=$file.Read($buffer,$offset,$buffer.Length-$offset)

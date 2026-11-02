@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) mod hold;
+
 pub(super) const OPERATION_REMEDIATION: &str = "Keep Qt stopped. Wait for the named helper, or stop only that helper yourself. Then restart only hgs-desktop through its service manager and retry the original revoke request. Reboot only as a last resort.";
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
@@ -90,7 +93,10 @@ struct Record {
     result: Option<String>,
 }
 fn record(store: &Store, id: &str) -> Result<Option<Record>> {
-    Ok(store.db.query_row("SELECT substr(fingerprint,1,65),substr(reason,1,33),substr(writer_epoch,1,37),substr(state,1,16),substr(result,1,4097) FROM desktop_commands WHERE request_id=?1",[id],|r|Ok(Record {fingerprint:r.get(0)?,reason:r.get(1)?,writer_epoch:r.get(2)?,state:r.get(3)?,result:r.get(4)?})).optional()?)
+    record_db(&store.db, id)
+}
+fn record_db(db: &rusqlite::Connection, id: &str) -> Result<Option<Record>> {
+    Ok(db.query_row("SELECT substr(fingerprint,1,65),substr(reason,1,33),substr(writer_epoch,1,37),substr(state,1,16),substr(result,1,4097) FROM desktop_commands WHERE request_id=?1",[id],|r|Ok(Record {fingerprint:r.get(0)?,reason:r.get(1)?,writer_epoch:r.get(2)?,state:r.get(3)?,result:r.get(4)?})).optional()?)
 }
 
 /// A requested background mode is not a new handoff. Every retained revoke,

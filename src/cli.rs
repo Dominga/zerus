@@ -54,6 +54,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs desktop registration --json    preview this user's passive service definition
        hgs desktop registration --json --background    preview Linux background definition
        hgs desktop registration mode-check --json   verify an interactive mode-switch caller
+       hgs desktop revoke-hold --json --request-id UUID   retain original rollback exclusion until stdin EOF
        hgs desktop registration install|remove|status --json   Windows interactive-user logon task
        hgs desktop notification-registration install|status --json   Windows Toast registration
        hgs desktop notification-registration remove --json --request-id UUID   after exact settled revoke
@@ -71,6 +72,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        Desktop logon registration ABI: desktop-logon-task-v1
        Desktop Toast registration ABI: desktop-notification-registration-v1
         Desktop revoke ABI: desktop-revoke-v1
+        Desktop revoke hold ABI: desktop-revoke-hold-v1
         Desktop import ABI: desktop-import-v1
         Desktop source feed ABI: desktop-source-feed-v1
         Desktop owner ABI: desktop-delegation-v1

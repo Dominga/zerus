@@ -169,7 +169,7 @@ impl Journal {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::*;
     use std::{
@@ -188,7 +188,10 @@ mod tests {
                     .unwrap()
                     .as_nanos()
             ));
+            #[cfg(unix)]
             fs::create_dir(&root).unwrap();
+            #[cfg(windows)]
+            drop(crate::fsx::windows::Parents::open(&root, true).unwrap());
             Self(root.canonicalize().unwrap())
         }
         fn journal(&self) -> Journal {

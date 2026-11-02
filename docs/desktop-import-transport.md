@@ -150,7 +150,7 @@ startup Grant. Explicit Resume uses the same ordering. The report is best-effort
 busy, quarantined, unavailable and unconfirmed outcomes are recorded separately
 and never prevent Grant, watch, catalog or normal preference edits. This first report slice
 uses the existing Qt family decoders and the current local Settings bytes: 17
-Qt families on Linux (16 on macOS), plus three paired Next policy/recovery
+Qt families on Linux (16 on macOS and Windows), plus three paired Next policy/recovery
 families, with at most 64 MiB, 1,024 snapshots and 1,024 pages. It is a private
 Staged report, not materialization of these families into workers.
 
@@ -164,9 +164,22 @@ This is source-specific exclusion,
 not proof that Qt or the whole desktop drained. Every helper, writer and pipe
 retains its original resources through actual completion. Shutdown reports
 unconfirmed work rather than declaring an outstanding resource group drained.
-The generic Windows Qt/Settings capture and private report-journal adapter
-remain unavailable in this slice; the separate Windows pending-read checkpoint
-is unchanged. Missing Qt is reported as not applicable without inventing an
+On Windows the Qt INI and local Settings capture use the same managed-file
+primitives as the pending-read checkpoint: local disk paths only, pinned
+no-reparse ancestors, private ACL and single-link checks, and an original
+read-only leaf denying all sharing. Parsing and every recheck read that retained
+handle rather than reopening its path. Settings mutations remain paused until
+all original capture references drop. A pre-open sharing violation can retry at
+most twenty times at ten milliseconds within the original deadline; other
+failures refuse without a source rewrite. UNC/redirected or junction-backed
+stores stay unavailable and keep the report deferred. The pending-read state
+machine and its unknown-publication rule are unchanged.
+
+The Windows private report journal uses the same checked CREATE_NEW temporary,
+original-handle rename, sync and bounded readback as the checkpoint. Its original
+UUID and immutable expected record survive restart; a rename/sync uncertainty
+is not converted into a replay. No adapter repairs source permissions, truncates
+files, creates an absent source or adds a worker, schema or effect authority. Missing Qt is reported as not applicable without inventing an
 empty source or a successful import.
 
 The private managed `qt-retained-import-v1.json` retains the original UUID,

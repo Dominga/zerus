@@ -1,6 +1,23 @@
 use super::*;
+use crate::fsx::windows::{
+    cleanup_failed_temporary, info, verify, Allocation, Parents, READ_CONTROL,
+};
 use crate::readmarks::ReadMark;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    fs::OpenOptions,
+    io::Write,
+    os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
+    path::PathBuf,
+};
+use windows_sys::Win32::{
+    Foundation::{ERROR_SUCCESS, GENERIC_WRITE},
+    Security::{
+        Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SE_FILE_OBJECT},
+        DACL_SECURITY_INFORMATION,
+    },
+    Storage::FileSystem::*,
+};
 struct Temp(PathBuf);
 impl Temp {
     fn new() -> Self {

@@ -16,10 +16,12 @@ use zerus_client_core::desktop::ui_requests::{Envelope, Reply, Request};
 
 #[cfg(target_os = "linux")]
 mod linux_manager;
+#[cfg(any(target_os = "macos", test))]
+mod macos_ancestry;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) mod registration;
 
-#[cfg(any(not(windows), test))]
+#[cfg(any(all(not(windows), not(target_os = "macos")), test))]
 use std::collections::BTreeSet;
 #[cfg(windows)]
 use zerus_client_core::desktop::windows::{
@@ -795,7 +797,12 @@ fn probe(_: &Location, _: &str, _: Instant) -> Option<Canonical> {
     None
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn check_ancestry(pid: u32, until: Instant) -> Result<()> {
+    macos_ancestry::inspect(pid, until).map(|_| ())
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn check_ancestry(pid: u32, until: Instant) -> Result<()> {
     ancestry(pid, until, |pid| {
         if !same_user(pid)? {
@@ -809,22 +816,26 @@ fn check_ancestry(pid: u32, until: Instant) -> Result<()> {
         #[cfg(target_os = "linux")]
         untraced(pid)?;
         let tagged = agent_environment(pid)?;
-        let name = Path::new(&process.executable)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .trim_end_matches(".exe");
-        let agent = tagged
-            || matches!(
-                name,
-                "codex" | "claude" | "deepseek" | "gemini" | "opencode"
-            );
+        let agent = tagged || agent_image(&process.executable);
         ensure!(process.current(), "frontend ancestry changed");
         Ok(Some((process.identity.parent, agent)))
     })
 }
 
 #[cfg(any(not(windows), test))]
+fn agent_image(image: &str) -> bool {
+    let name = Path::new(image)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .trim_end_matches(".exe");
+    matches!(
+        name,
+        "codex" | "claude" | "deepseek" | "gemini" | "opencode"
+    )
+}
+
+#[cfg(any(all(not(windows), not(target_os = "macos")), test))]
 fn ancestry(
     mut pid: u32,
     until: Instant,
@@ -910,24 +921,6 @@ fn agent_environment(pid: u32) -> Result<bool> {
     Ok(marked(&bytes))
 }
 
-#[cfg(target_os = "macos")]
-fn same_user(pid: u32) -> Result<bool> {
-    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
-    let size = std::mem::size_of::<libc::proc_bsdinfo>();
-    // SAFETY: native PID and exactly sized writable output.
-    let used = unsafe {
-        libc::proc_pidinfo(
-            pid as i32,
-            libc::PROC_PIDTBSDINFO,
-            0,
-            info.as_mut_ptr().cast(),
-            size as i32,
-        )
-    };
-    ensure!(used == size as i32, "frontend user identity unavailable");
-    // SAFETY: proc_pidinfo initialized the complete output structure.
-    Ok(unsafe { info.assume_init().pbi_uid == libc::geteuid() })
-}
 #[cfg(target_os = "macos")]
 fn agent_environment(pid: u32) -> Result<bool> {
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as i32];

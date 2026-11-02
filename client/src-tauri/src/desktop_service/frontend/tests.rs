@@ -365,28 +365,70 @@ pub(crate) mod native {
                         }
                         Err(e) => panic!("{e}"),
                     };
-                    stream
-                        .set_read_timeout(Some(Duration::from_secs(1)))
-                        .unwrap();
-                    stream
-                        .set_write_timeout(Some(Duration::from_secs(1)))
-                        .unwrap();
-                    assert!(zerus_client_core::desktop::same_user(&stream));
-                    let mut line = Vec::new();
-                    let mut byte = [0];
-                    while line.len() < 64 && stream.read_exact(&mut byte).is_ok() {
-                        if byte[0] == b'\n' {
-                            break;
+                    #[cfg(target_os = "linux")]
+                    {
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(1)))
+                            .unwrap();
+                        stream
+                            .set_write_timeout(Some(Duration::from_secs(1)))
+                            .unwrap();
+                        assert!(zerus_client_core::desktop::same_user(&stream));
+                        let mut line = Vec::new();
+                        let mut byte = [0];
+                        while line.len() < 64 && stream.read_exact(&mut byte).is_ok() {
+                            if byte[0] == b'\n' {
+                                break;
+                            }
+                            line.push(byte[0]);
                         }
-                        line.push(byte[0]);
+                        let reply = responder.reply(&line).unwrap_or_else(|| b"null\n".to_vec());
+                        let _ = stream.write_all(&reply);
                     }
-                    let reply = responder.reply(&line).unwrap_or_else(|| b"null\n".to_vec());
-                    let _ = stream.write_all(&reply);
+                    #[cfg(target_os = "macos")]
+                    exchange_mac(&mut stream, &responder);
                 }
             });
             Self {
                 stop,
                 thread: Some(thread),
+            }
+        }
+    }
+    // The real Mac runner refuses SO_RCVTIMEO on this fixture socket.
+    // Poll bounded nonblocking I/O instead; the cache still serves only the
+    // original child's registered request, with the same peer check.
+    #[cfg(target_os = "macos")]
+    fn exchange_mac(stream: &mut std::os::unix::net::UnixStream, responder: &Responder) {
+        use std::io::ErrorKind;
+        stream.set_nonblocking(true).unwrap();
+        assert!(zerus_client_core::desktop::same_user(stream));
+        let until = std::time::Instant::now() + Duration::from_secs(1);
+        let mut line = Vec::new();
+        let mut byte = [0];
+        loop {
+            if std::time::Instant::now() >= until || line.len() >= 64 {
+                return;
+            }
+            match stream.read(&mut byte) {
+                Ok(1) if byte[0] == b'\n' => break,
+                Ok(1) => line.push(byte[0]),
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(2));
+                }
+                _ => return,
+            }
+        }
+        let reply = responder.reply(&line).unwrap_or_else(|| b"null\n".to_vec());
+        let mut remaining = reply.as_slice();
+        while !remaining.is_empty() && std::time::Instant::now() < until {
+            match stream.write(remaining) {
+                Ok(0) => break,
+                Ok(n) => remaining = &remaining[n..],
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(2));
+                }
+                _ => break,
             }
         }
     }

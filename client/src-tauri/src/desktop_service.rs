@@ -239,6 +239,8 @@ struct Shared {
     activation_retry: Mutex<Option<Duration>>,
     #[cfg(all(test, target_os = "linux"))]
     activation_backoffs: std::sync::atomic::AtomicUsize,
+    #[cfg(all(test, target_os = "linux"))]
+    activation_permanent: AtomicBool,
     allowed: bool,
     stopped: AtomicBool,
     cancellation: Mutex<Option<Arc<AtomicBool>>>,
@@ -317,6 +319,8 @@ impl Service {
             activation_retry: Mutex::new(None),
             #[cfg(all(test, target_os = "linux"))]
             activation_backoffs: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(all(test, target_os = "linux"))]
+            activation_permanent: AtomicBool::new(false),
             allowed,
             stopped: AtomicBool::new(false),
             cancellation: Mutex::new(None),

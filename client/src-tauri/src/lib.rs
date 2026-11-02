@@ -32,6 +32,9 @@ mod desk;
 ))]
 mod desktop_hello;
 #[cfg(feature = "live")]
+#[allow(dead_code)] // Preparation until Root publishes the native cache/Request route.
+mod desktop_notification_controls;
+#[cfg(feature = "live")]
 mod desktop_ownership;
 #[cfg(feature = "live")]
 mod desktop_service;

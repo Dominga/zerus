@@ -1119,9 +1119,22 @@ async fn connection(
         tauri::async_runtime::spawn(async move { details::run(detail_shared, detail_stop).await });
     #[cfg(target_os = "linux")]
     let activation_worker = {
-        let (state, cancelled) = (shared.clone(), stop.clone());
+        let (state, cancelled, configuration) =
+            (shared.clone(), stop.clone(), configuration.clone());
         tauri::async_runtime::spawn(async move {
             activation::run(state, configuration, cancelled).await;
+        })
+    };
+    let grant_cancel = Arc::new(Notify::new());
+    let grant_worker = {
+        let (shared, stop, cancelled, configuration) = (
+            shared.clone(),
+            stop.clone(),
+            grant_cancel.clone(),
+            configuration.clone(),
+        );
+        tauri::async_runtime::spawn(async move {
+            recover_grant(shared, configuration, stop, cancelled).await;
         })
     };
     let mut last_frame = tokio::time::Instant::now();
@@ -1192,9 +1205,11 @@ async fn connection(
         }
     }.await;
     stop.store(true, Ordering::Release);
+    grant_cancel.notify_waiters();
     shared.changed.notify_one();
     shared.details_changed.notify_one();
     drop(stdin);
+    let _ = grant_worker.await;
     #[cfg(target_os = "linux")]
     let _ = activation_worker.await;
     // Only this owned local proxy is stopped; the desktop service and native agents remain untouched.
@@ -1215,6 +1230,48 @@ async fn connection(
         let _ = detail_worker.await;
     }
     result
+}
+
+/// Keep a slow ownership drain recoverable without delaying the watch/catalog
+/// connection. One worker per original connection, joined on every exit.
+async fn recover_grant(
+    shared: Arc<Shared>,
+    configuration: String,
+    stop: Arc<AtomicBool>,
+    cancelled: Arc<Notify>,
+) {
+    const DELAYS: [u64; 5] = [1, 2, 5, 10, 30];
+    let mut step = 0;
+    loop {
+        let wake = cancelled.notified();
+        if stop.load(Ordering::Acquire)
+            || shared.stopped.load(Ordering::Acquire)
+            || !shared.ownership.retryable_grant()
+        {
+            return;
+        }
+        tokio::select! {
+            biased;
+            _ = wake => return,
+            _ = tokio::time::sleep(Duration::from_secs(DELAYS[step])) => (),
+        }
+        if stop.load(Ordering::Acquire)
+            || shared.stopped.load(Ordering::Acquire)
+            || !shared.ownership.retryable_grant()
+        {
+            return;
+        }
+        shared
+            .ownership
+            .request(
+                Some(zerus_client_core::desktop::ownership::Action::Grant),
+                Some(configuration.clone()),
+                Some(stop.clone()),
+            )
+            .await;
+        shared.publish_ownership();
+        step = (step + 1).min(DELAYS.len() - 1);
+    }
 }
 
 #[tauri::command]

@@ -123,20 +123,7 @@ impl Controller {
                     Some(cancel.clone()),
                 )
                 .await;
-            let retryable = {
-                let state = self.state();
-                (!state.running && state.code == "ownership_transport_busy"
-                    && state.intent.as_ref().is_none_or(|intent| intent.complete))
-                    || state.intent.as_ref().is_some_and(|intent| {
-                    intent.complete && intent.exit_confirmed
-                        && matches!(intent.request, Request::DesktopOwnership { action: Action::Grant, .. })
-                        && intent.receipt.as_ref().is_some_and(|receipt| {
-                            !receipt.accepted && !receipt.durable
-                                && matches!(&receipt.outcome, Outcome::Refused { code }
-                                    if matches!(code.as_str(), "ownership_drain_pending" | "ownership_resources_pending" | "ownership_transport_busy"))
-                        })
-                })
-            };
+            let retryable = self.retryable_grant();
             if !retryable || attempt == GRANT_RETRIES {
                 return view;
             }
@@ -149,6 +136,24 @@ impl Controller {
             }
         }
         unreachable!("the final bounded attempt returns its view")
+    }
+    /// Only a complete original refusal, or capacity before an uncertain
+    /// original exists, can admit another fresh startup Grant.
+    pub(crate) fn retryable_grant(&self) -> bool {
+        let state = self.state();
+        (!state.running && state.code == "ownership_transport_busy"
+                    && state.intent.as_ref().is_none_or(|intent| intent.complete))
+                    || state.intent.as_ref().is_some_and(|intent| {
+                    intent.complete && intent.exit_confirmed
+                        && matches!(intent.request, Request::DesktopOwnership { action: Action::Grant, .. })
+                        && intent.receipt.as_ref().is_some_and(|receipt| {
+                            !receipt.accepted && !receipt.durable
+                                && state.status.as_ref() == Some(&receipt.current)
+                                && matches!(&receipt.outcome, Outcome::Refused { code }
+                                    if (state.code.is_empty() || state.code == *code)
+                                        && matches!(code.as_str(), "ownership_drain_pending" | "ownership_resources_pending" | "ownership_transport_busy"))
+                        })
+                })
     }
     fn admit(
         self: &Arc<Self>,

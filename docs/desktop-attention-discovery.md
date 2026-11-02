@@ -122,10 +122,17 @@ its original 30-second age for a newly authenticated receiver. Once a handoff is
 attempted, a disconnected/uncertain outcome is not replayed automatically; the
 next wait is a new read and another native click is a distinct event.
 
-The service's `Router::closed_frontend` consumes a fresh canonical instance
-observation made off actor. Only `Absent`, with no authenticated waiting
-receiver, can produce the opaque one-use `Launch` for the selected installed
-frontend mechanics. Unknown, live and legacy observations do not launch.
+The service's `Router::closed_frontend` checks a fresh canonical instance
+observation made off actor. Absence alone cannot authorize a launch: the Linux
+mechanics force service mode and would also freeze/import the native read store.
+Until the authenticated notification ownership handoff exists, this decision
+refuses without consuming the queued click or extending its original age.
+The handoff must durably record a SERVICE-MODE frontend's grant for the exact
+configuration and selected frontend build/identity; revoke, rollback and native
+notification takeover end that grant. Missing, unknown or mismatched grants
+refuse. This is ownership state, not a separate mode preference. Unknown, live
+and legacy observations also do not launch. A future admitted decision supplies
+the opaque one-use `Launch` to the selected installed frontend mechanics.
 Linux owns the exact-target GUI consumer and launch implementation: the Wayland
 token goes only into that child environment as `XDG_ACTIVATION_TOKEN`, never
 process-global state, argv or disk. The parent lifecycle still owns callback

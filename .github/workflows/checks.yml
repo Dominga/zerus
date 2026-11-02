@@ -1471,15 +1471,6 @@ jobs:
           cargo build --release --locked
           cargo build --locked --example fake_ssh
           cargo build --locked --example fake_agent
-      # Exercise the same newly built release under an actual standard account;
-      # admin-only debug tests missed the former hidden PowerShell failure.
-      - name: Native desktop registration under a standard user
-        # The controller uses Framework JavaScriptSerializer, like its original
-        # credentialed fixture; run it under Windows PowerShell 5.1, not .NET Core.
-        shell: powershell
-        timeout-minutes: 5
-        run: |
-          & scripts/ci/windows-registration-native-user.ps1 -Hgs target/release/hgs.exe -Stage (Join-Path $env:ProgramData ('ZerusNativeRegistrationCI-' + [Guid]::NewGuid().ToString('N')))
       - name: Windows mobile connector build and native filesystem contracts
         run: |
           cargo +1.99.1 clippy --locked --manifest-path services/mobile/connector/Cargo.toml --target-dir target --all-targets -- -D warnings

@@ -547,7 +547,7 @@ mod tests {
             }));
             let request = Request::AutomaticApprovals {
                 request_id: control["request_id"].as_str().unwrap().into(),
-                enabled: false,
+                enabled: mode == "enable",
             };
             let registration = responder
                 .prepare_ui_request(uuid::Uuid::new_v4().to_string(), request)

@@ -343,6 +343,9 @@ def desktop_request():
 
 
 if args == ['--help']:
+    if config.get('audit_help_hold') and counter('audit-help-number') > 1:
+        (root / 'audit-help-held').touch()
+        wait(root / 'audit-help-release')
     print('Desktop service ABI: desktop-v1\nDesktop catalog changes ABI: ' + abi if config.get('supported', True) else 'Older fixture CLI')
     if config.get('catalog_relay_abi', True):
         print('Desktop catalog relay ABI: desktop-catalog-relay-v1')

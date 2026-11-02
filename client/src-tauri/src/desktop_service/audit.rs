@@ -9,6 +9,7 @@ pub(crate) const UNAVAILABLE: &str =
 const CHANGED: &str =
     zerus_client_core::source!("The approval journal changed. Refresh to read it again.");
 const SAFE_INTEGER: i64 = (1_i64 << 53) - 1;
+pub(in crate::desktop_service) mod help;
 
 /// Display read identity, carried by this page rather than a shared GUI cache.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -37,12 +38,13 @@ struct Read {
     epoch: String,
     generation: u64,
     stop: Arc<AtomicBool>,
+    routing: Arc<zerus_client_core::desktop::relay::Connection>,
 }
 impl Read {
     fn new(service: Option<Arc<Service>>) -> Result<Self, &'static str> {
         let service = service.ok_or(UNAVAILABLE)?;
         let snapshot = service.snapshot();
-        if !snapshot.connected {
+        if !service.shared.allowed || !snapshot.connected {
             return Err(UNAVAILABLE);
         }
         let configuration = service
@@ -59,12 +61,20 @@ impl Read {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
             .ok_or(UNAVAILABLE)?;
+        let routing = service
+            .shared
+            .relay
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .ok_or(UNAVAILABLE)?;
         Ok(Self {
             service,
             configuration,
             epoch: snapshot.epoch.ok_or(UNAVAILABLE)?,
             generation: snapshot.generation.ok_or(UNAVAILABLE)?,
             stop,
+            routing,
         })
     }
     fn current(&self) -> bool {
@@ -87,6 +97,12 @@ impl Read {
                 .unwrap_or_else(PoisonError::into_inner)
                 .as_ref()
                 .is_some_and(|stop| Arc::ptr_eq(stop, &self.stop))
+            && shared
+                .relay
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+                .is_some_and(|routing| Arc::ptr_eq(routing, &self.routing))
     }
     fn check(&self, scope: &Scope) -> Result<(), &'static str> {
         if !self.current()
@@ -106,32 +122,61 @@ impl Read {
         if !self.current() {
             return Err(CHANGED);
         }
-        let help = command_limited(
-            &self.service.shared,
-            vec!["--help".into()],
-            None,
-            self.stop.clone(),
-            wire::REPLY_BYTES,
-        )
-        .await
-        .map_err(|_| UNAVAILABLE)?;
-        if !std::str::from_utf8(&help)
-            .is_ok_and(|help| help.lines().any(|line| line.trim() == wire::HELP_MARKER))
-        {
-            return Err(UNAVAILABLE);
+        // One bounded read admission spans metadata, probe and query. Any original
+        // child/pipe or metadata job retains its clone after an uncertain return.
+        let resources: Arc<dyn Send + Sync> = Arc::new(
+            self.service
+                .shared
+                .rpc
+                .admit(Role::Fleet)
+                .map_err(|_| UNAVAILABLE)?,
+        );
+        let image = match help::capture(self, resources.clone()).await {
+            Ok(image) => image,
+            Err(error) => {
+                self.service.shared.audit_help.clear();
+                return Err(error);
+            }
+        };
+        if !self.current() {
+            return Err(CHANGED);
+        }
+        let cached = image
+            .as_ref()
+            .is_some_and(|image| self.service.shared.audit_help.matches(self, image));
+        if !cached {
+            self.service.shared.audit_help.clear();
+            let bytes = self
+                .command(
+                    vec!["--help".into()],
+                    None,
+                    resources.clone(),
+                    image.clone(),
+                )
+                .await?;
+            if !std::str::from_utf8(&bytes)
+                .is_ok_and(|help| help.lines().any(|line| line.trim() == wire::HELP_MARKER))
+            {
+                return Err(UNAVAILABLE);
+            }
+            if let Some(image) = &image {
+                self.service.shared.audit_help.remember(self, image.clone());
+            } else {
+                self.service.shared.audit_help.clear();
+            }
         }
         if !self.current() {
             return Err(CHANGED);
         }
-        let bytes = command_limited(
-            &self.service.shared,
-            vec!["desktop".into(), "request".into(), "--json".into()],
-            Some(serde_json::to_string(&request).map_err(|_| UNAVAILABLE)?),
-            self.stop.clone(),
-            wire::REPLY_BYTES,
-        )
-        .await
-        .map_err(|_| UNAVAILABLE)?;
+        let bytes = self
+            .command(
+                vec!["desktop".into(), "request".into(), "--json".into()],
+                Some(serde_json::to_string(&request).map_err(|_| UNAVAILABLE)?),
+                resources,
+                image,
+            )
+            .await
+            .map_err(|_| UNAVAILABLE)?;
         let reply: Value = serde_json::from_slice(&bytes).map_err(|_| UNAVAILABLE)?;
         if !self.current() {
             return Err(CHANGED);
@@ -147,6 +192,30 @@ impl Read {
             });
         }
         Ok(reply)
+    }
+    async fn command(
+        &self,
+        args: Vec<String>,
+        input: Option<String>,
+        resources: Arc<dyn Send + Sync>,
+        image: Option<Arc<help::Image>>,
+    ) -> Result<Vec<u8>, &'static str> {
+        command_accounted(
+            &self.service.shared,
+            self.routing.clone(),
+            zerus_client_core::Invocation {
+                args,
+                stdin: input.map(String::into_bytes),
+                timeout: RPC_WAIT,
+                request_id: None,
+            },
+            self.stop.clone(),
+            wire::REPLY_BYTES,
+            resources,
+            image,
+        )
+        .await
+        .map_err(|_| UNAVAILABLE)
     }
 }
 

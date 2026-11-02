@@ -22,6 +22,7 @@ mod notifications;
 #[allow(dead_code)]
 mod operations;
 mod owner;
+mod ownership;
 mod pending_reads;
 mod presence_admission;
 mod presence_worker;
@@ -63,7 +64,7 @@ use std::{
 use store::{Location, Store};
 use transport::{Listener, Stream, TIMEOUT};
 
-const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] [--background] | status [--json] | startup --json | owner-status --json | watch --json | feed --json | request --json | catalog-relay --json | registration --json | registration install|remove|status --json (Windows) | notification-registration install|status --json | notification-registration remove --json --request-id UUID (Windows) | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
+const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] [--background] | status [--json] | startup --json | owner-status --json | ownership-status --json | ownership-result --json | watch --json | feed --json | request --json | catalog-relay --json | registration --json | registration install|remove|status --json (Windows) | notification-registration install|status --json | notification-registration remove --json --request-id UUID (Windows) | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
 const HEARTBEAT: Duration = Duration::from_secs(10);
 pub const STARTUP_REFUSED: i32 = 78;
 
@@ -219,6 +220,34 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                 println!("{}", owner::status(&location));
                 Ok(())
             }
+            ["ownership-status", "--json"] => {
+                let value = match exchange(&location, "ownership_status", None)? {
+                    Some(value) => value,
+                    None => ownership::offline_read(&location, None)?,
+                };
+                println!("{value}");
+                Ok(())
+            }
+            ["ownership-result", "--json"] => {
+                let mut bytes = Vec::new();
+                std::io::stdin()
+                    .take(protocol::CONTROL_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes)?;
+                ensure!(
+                    bytes.len() <= protocol::CONTROL_BYTES,
+                    "ownership query limit"
+                );
+                let query: zerus_client_core::desktop::ownership::Query =
+                    serde_json::from_slice(&bytes)?;
+                ensure!(query.valid(), "invalid ownership query");
+                let value =
+                    match exchange(&location, "request", Some(serde_json::to_value(&query)?))? {
+                        Some(value) => value,
+                        None => ownership::offline_read(&location, Some(query))?,
+                    };
+                println!("{value}");
+                Ok(())
+            }
             ["status", "--json"] => {
                 println!("{}", status(&location)?);
                 Ok(())
@@ -299,19 +328,22 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                 );
                 let request: Value =
                     serde_json::from_slice(&bytes).context("invalid desktop request")?;
-                println!(
-                    "{}",
-                    exchange(
-                        &location,
-                        if args[0] == "frontend-request" {
-                            "frontend_request"
-                        } else {
-                            "request"
-                        },
-                        Some(request)
-                    )?
-                    .context("desktop service is not running")?
-                );
+                let value = match exchange(
+                    &location,
+                    if args[0] == "frontend-request" {
+                        "frontend_request"
+                    } else {
+                        "request"
+                    },
+                    Some(request.clone()),
+                )? {
+                    Some(value) => value,
+                    None if args[0] == "frontend-request" => {
+                        ownership::offline_frontend(config, &location, &request)?
+                    }
+                    None => anyhow::bail!("desktop service is not running"),
+                };
+                println!("{value}");
                 Ok(())
             }
             _ => anyhow::bail!(USAGE),
@@ -370,6 +402,9 @@ fn projection(
             "feed_producers":1,"feed_frame_bytes":feed::LINE_BYTES,"connections":protocol::CONNECTIONS},
         "components":{"fleet":"awaiting_handoff","presence":"awaiting_handoff","reads":"awaiting_handoff","attention":"awaiting_handoff","approvals":"awaiting_handoff"}});
     delivery::decorate_passive(store, &mut value);
+    value["desktop_ownership"] = ownership::status(store, &location.configuration)
+        .and_then(|v| Ok(serde_json::to_value(v)?))
+        .unwrap_or(Value::Null);
     value
 }
 
@@ -485,6 +520,37 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                 .context(StartupRefused)?;
         }
         while platform::shutdown_signal() == 0 {
+            // Prepared takeover reconciliation only reduces authority. Keep the
+            // same runtime until its actual drain succeeds; no replacement yet.
+            ownership::settle(&location, &mut store, None, |store| {
+                background.as_mut().map_or(Ok(()), |runtime| {
+                    runtime.drain(store, Duration::from_millis(10))
+                })
+            })?;
+            if background
+                .as_ref()
+                .is_some_and(background::Runtime::drained)
+                && ownership::service_granted(&store, &location.configuration)?
+            {
+                feed.stop(&mut store)?;
+                background = None;
+            }
+            let ownership_status = ownership::status(&store, &location.configuration)?;
+            if ownership_status.state == zerus_client_core::desktop::ownership::State::Native {
+                if background.is_some() {
+                    // NativeReady was written only after this original drain.
+                    feed.stop(&mut store)?;
+                    background = None;
+                }
+                background_blocked = true;
+            } else if background_mode
+                && background.is_none()
+                && ownership::service_granted(&store, &location.configuration)?
+            {
+                background = Some(background::Runtime::start(config, &epoch, &mut feed)?);
+                background.as_mut().unwrap().start_presence(&location)?;
+                background_blocked = false;
+            }
             let mut full_batch = false;
             if let Some(runtime) = &mut background {
                 let previous = seq;
@@ -544,10 +610,48 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         } else {
                             frame(&epoch, seq, "error", json!({"code":"subscriber_limit"}))
                         }
+                    } else if hello.op == "ownership_status" && hello.request.is_none() {
+                        frame(
+                            &epoch,
+                            seq,
+                            "response",
+                            serde_json::to_value(ownership::status(
+                                &store,
+                                &location.configuration,
+                            )?)?,
+                        )
                     } else if hello.op == "status" && hello.request.is_none() {
                         frame(&epoch, seq, "status", value)
                     } else if hello.op == "frontend_request" {
                         let result = match (authority, &mut background) {
+                            (Some(authority), _)
+                                if authority.operation() == "desktop_ownership" =>
+                            {
+                                match authority.into_request(&mut frontend_order) {
+                                    Ok(permit) => match ownership::frontend(
+                                        &location,
+                                        &mut store,
+                                        &epoch,
+                                        permit,
+                                        None,
+                                        |store| {
+                                            background.as_mut().map_or(Ok(()), |runtime| {
+                                                runtime.drain(store, Duration::from_millis(750))
+                                            })
+                                        },
+                                    ) {
+                                        Ok(receipt) => serde_json::to_value(receipt)?,
+                                        Err(_) => frontend_refused(
+                                            hello.request.as_ref(),
+                                            "ownership_not_settled",
+                                        ),
+                                    },
+                                    Err(_) => frontend_refused(
+                                        hello.request.as_ref(),
+                                        "frontend_identity_expired",
+                                    ),
+                                }
+                            }
                             (Some(authority), _)
                                 if authority.operation() == "import_pending_reads" =>
                             {
@@ -629,6 +733,25 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                             )
                         }) {
                             audit.request(hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "desktop_ownership_result")
+                        {
+                            ownership::result_request(
+                                &store,
+                                &location.configuration,
+                                hello.request.as_ref().unwrap(),
+                            )
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "desktop_ownership")
+                        {
+                            frontend_refused(
+                                hello.request.as_ref(),
+                                "frontend_authentication_required",
+                            )
                         } else if hello
                             .request
                             .as_ref()

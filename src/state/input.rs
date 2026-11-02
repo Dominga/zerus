@@ -447,7 +447,8 @@ fn styled_row(row: &str) -> Vec<(char, bool)> {
 /// placeholder in its empty composer, such as "Press up to edit queued
 /// messages" while a message is queued or an idle suggestion. Accept exactly
 /// that shape from the cursor column: one non-blank reverse cell, immediately
-/// followed by dim text, then only blank or dim cells without reverse video.
+/// followed by dim text (possibly a space after a one-letter word), then only
+/// blank or dim cells without reverse video, with visible dim continuation.
 /// The caret on a draft's first letter is followed by normal text, and a lone
 /// reverse character has no dim continuation; both remain drafts.
 fn claude_caret_placeholder(cells: &[(char, TerminalStyle)]) -> bool {
@@ -456,9 +457,10 @@ fn claude_caret_placeholder(cells: &[(char, TerminalStyle)]) -> bool {
     };
     caret_style.inverse
         && !caret.is_whitespace()
+        && rest.first().is_some_and(|(_, style)| style.dim)
         && rest
-            .first()
-            .is_some_and(|(ch, style)| style.dim && !ch.is_whitespace())
+            .iter()
+            .any(|(ch, style)| style.dim && !ch.is_whitespace())
         && rest
             .iter()
             .all(|(ch, style)| !style.inverse && (style.dim || ch.is_whitespace()))
@@ -1208,6 +1210,28 @@ mod tests {
         assert!(!prompt_empty("codex", codex, "", "", 2));
         let kimi = " │ > \x1b[7mA\x1b[0;2msk\x1b[0m │";
         assert!(!prompt_empty("kimi", kimi, " ╭──────────╮", "", 5));
+    }
+    #[test]
+    fn claude_one_letter_ghost_suggestion_is_empty_only_with_dim_continuation() {
+        // Synthetic shape: Claude's inverse caret covers the first letter;
+        // the following space and predicted words are faint, not user input.
+        let row = "\x1b[39m❯ \x1b[7mI\x1b[0;2m can add a test\x1b[0m";
+        let screen = |row: &str| format!("Ready\n──────────────\n{row}\n──────────────\nstatus");
+        assert!(composer_empty("claude", &screen(row), 2, 2));
+        assert!(!composer_empty("claude", &screen(row), 3, 2));
+        for changed in [
+            row.replace("0;2m", "0m"),
+            row.replace(" can", " \x1b[22mcan\x1b[2m"),
+            row.replace(" can", " \x1b[7mcan\x1b[27m"),
+            "\x1b[39m❯ \x1b[7mI\x1b[0;2m   \x1b[0m".into(),
+            "\x1b[39m❯ \x1b[7mI\x1b[0m \x1b[2mcan add a test\x1b[0m".into(),
+            format!("{row}\n  multiline draft"),
+        ] {
+            assert!(
+                !composer_empty("claude", &screen(&changed), 2, 2),
+                "{changed:?}"
+            );
+        }
     }
     #[test]
     fn placeholder_is_not_a_draft_or_dialog() {

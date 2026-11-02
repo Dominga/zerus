@@ -56,10 +56,10 @@ AGENTS = {
         tarball='https://registry.npmjs.org/@anthropic-ai/claude-code-{target}/-/claude-code-{target}-{version}.tgz',
         metadata='https://registry.npmjs.org/@anthropic-ai/claude-code-{target}/{version}', published='{version}',
         members={'linux-x64': 'package/claude', 'darwin-arm64': 'package/claude', WINDOWS: 'package/claude.exe'},
-        coverage='input, questions, approvals, trust, resume, usage-limit and auto-mode choices, clear, compaction, session-only model settings and '
+        coverage='input, dim prompt suggestions and draft preservation, questions, approvals, trust, resume, usage-limit and auto-mode choices, clear, compaction, session-only model settings and '
                  'status line context capacity and the session-start task instructions',
         timeout=900,
-        suites=['test_claude_input_native', 'test_busy_input_native.NativeBusyClaude', 'test_claude_questions_native', 'test_claude_approval_native', 'test_claude_safety_native',
+        suites=['test_claude_input_native', 'test_claude_suggestions_native', 'test_busy_input_native.NativeBusyClaude', 'test_claude_questions_native', 'test_claude_approval_native', 'test_claude_safety_native',
                 'test_claude_trust_native', 'test_claude_resume_native', 'test_claude_usage_limit_native', 'test_clear_context_native.NativeClearContext',
                 'test_compact_context_native', 'test_claude_settings_native', 'test_claude_statusline_native',
                 'test_claude_permission_native', 'test_task_context_native.NativeClaudeTaskContext',

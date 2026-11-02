@@ -108,7 +108,8 @@
   .act-table { width: 100%; min-width: calc(var(--fs-sm) * var(--table-columns) * 9); border-collapse: collapse; font-size: var(--fs-sm); }
   .act-table th { font-weight: 600; color: var(--z-color-label); font-size: var(--fs-xs); padding: 4px 8px; border-bottom: 1px solid var(--z-color-divider); }
   .act-table td { padding: 5px 8px; border-bottom: 1px solid color-mix(in srgb, var(--z-color-divider) 60%, transparent); }
-  .act-table th, .act-table td { vertical-align: top; white-space: normal; overflow-wrap: anywhere; }
+  /* Preserve word-sized min-content columns; long cells still wrap or scroll. */
+  .act-table th, .act-table td { vertical-align: top; white-space: normal; overflow-wrap: break-word; }
   .md-list { padding-left: 20px !important; list-style: disc !important; }
   .md-list li { margin: 2px 0; }
   ol.md-list { list-style: decimal !important; }

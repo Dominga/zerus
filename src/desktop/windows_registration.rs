@@ -31,6 +31,44 @@ fn powershell() -> Result<PathBuf> {
         .join("WindowsPowerShell/v1.0/powershell.exe"))
 }
 
+fn helper_environment(
+    program: &std::path::Path,
+    trace_path: &str,
+) -> Result<Vec<(String, String)>> {
+    let ps_home = program
+        .parent()
+        .context("Windows PowerShell home unavailable")?;
+    let system = ps_home
+        .parent()
+        .and_then(|path| path.parent())
+        .context("Windows system directory unavailable")?;
+    let windows = system.parent().context("Windows directory unavailable")?;
+    let temp = std::env::temp_dir();
+    let entries = [
+        ("SystemRoot", windows.to_path_buf()),
+        ("WINDIR", windows.to_path_buf()),
+        ("COMSPEC", system.join("cmd.exe")),
+        ("PATH", system.to_path_buf()),
+        ("PSModulePath", ps_home.join("Modules")),
+        ("TEMP", temp.clone()),
+        ("TMP", temp),
+    ];
+    let mut environment = Vec::with_capacity(entries.len() + 1);
+    for (key, path) in entries {
+        environment.push((
+            key.into(),
+            path.to_str()
+                .context("Windows helper path is not Unicode")?
+                .to_owned(),
+        ));
+    }
+    environment.push((
+        "HGS_DESKTOP_REGISTRATION_TRACE_FILE".into(),
+        trace_path.into(),
+    ));
+    Ok(environment)
+}
+
 fn invocation(operation: &str, plan: &Value) -> Result<Invocation> {
     ensure!(
         matches!(operation, "check" | "status" | "install" | "remove"),
@@ -47,7 +85,13 @@ fn invocation(operation: &str, plan: &Value) -> Result<Invocation> {
         .map(str::trim_start)
         .collect::<Vec<_>>()
         .join("\n");
-    let script = format!("{source}\nInvoke-RegistrationMain {}\n", request.len());
+    // Windows PowerShell may expand PSModulePath at startup. Reset it before
+    // any operation and disable implicit module discovery. This helper uses
+    // language constructs and explicit .NET assembly loading, with no modules.
+    let script = format!(
+        "{source}\nInitialize-RegistrationEnvironment\nInvoke-RegistrationMain {}\n",
+        request.len()
+    );
     let encoded = STANDARD.encode(
         script
             .encode_utf16()
@@ -77,17 +121,28 @@ fn exchange(operation: &str, plan: &Value) -> Result<Value> {
     let program = powershell()?;
     let trace = trace::Trace::new();
     // Never forward a caller-supplied trace path to the helper.
-    let environment = [(
-        "HGS_DESKTOP_REGISTRATION_TRACE_FILE",
-        trace.path().unwrap_or(""),
-    )];
+    let environment = helper_environment(&program, trace.path().unwrap_or(""))?;
+    let environment: Vec<_> = environment
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
     let result =
         zerus_client_core::run::run_hidden_limited(&program, &invocation, &environment, CAP);
     trace.finish();
-    let result = result.map_err(|_| {
-        anyhow::anyhow!(
-            "desktop registration helper output exceeded its bound; inspect status before retrying"
-        )
+    let result = result.map_err(|error| {
+        use zerus_client_core::run::HiddenError;
+        match error {
+            HiddenError::OutputTooLarge(_) => anyhow::anyhow!(
+                "desktop registration helper output exceeded its bound; inspect status before retrying"
+            ),
+            HiddenError::TerminationPending { child } => anyhow::anyhow!(
+                "desktop registration helper termination is pending (original pid {}, creation FILETIME {:?}); outcome unavailable, preserve its identity and inspect before retrying",
+                child.pid, child.creation_filetime
+            ),
+            HiddenError::PreviousExchangePending { child } => anyhow::anyhow!(
+                "desktop registration previous helper is still unsettled ({child:?}); no new helper was started"
+            ),
+        }
     })?;
     let value = match result {
         Exit::Code {
@@ -197,8 +252,35 @@ mod tests {
             "Invoke-RegistrationMain {}\n",
             call.stdin.as_ref().unwrap().len()
         )));
+        assert!(script.contains("\nInitialize-RegistrationEnvironment\nInvoke-RegistrationMain "));
         assert_eq!(call.timeout, Duration::from_secs(15));
         assert!(invocation("start", &plan).is_err());
         assert!(invocation("install", &json!({"oversize":"x".repeat(CAP)})).is_err());
+    }
+
+    #[test]
+    fn helper_environment_is_explicit_and_does_not_copy_a_user_profile() {
+        let program =
+            std::path::Path::new(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe");
+        let environment = helper_environment(program, r"C:\Example\phase").unwrap();
+        let keys: Vec<_> = environment.iter().map(|(key, _)| key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "SystemRoot",
+                "WINDIR",
+                "COMSPEC",
+                "PATH",
+                "PSModulePath",
+                "TEMP",
+                "TMP",
+                "HGS_DESKTOP_REGISTRATION_TRACE_FILE"
+            ]
+        );
+        assert_eq!(
+            environment[4].1,
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\Modules"
+        );
+        assert_eq!(environment[7].1, r"C:\Example\phase");
     }
 }

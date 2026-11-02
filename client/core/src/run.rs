@@ -1,5 +1,9 @@
 //! Runs one [`Invocation`] and reports how it ended as an [`Exit`].
+#[cfg(any(windows, test))]
+mod hidden;
 pub(crate) mod startup;
+#[cfg(windows)]
+pub use hidden::{HiddenError, ProcessIdentity};
 
 use crate::actions::{Exit, Invocation};
 use std::io::{ErrorKind, Read, Write};
@@ -64,18 +68,21 @@ pub fn run_limited(
     limited(hgs, inv, parent_env, stdout_cap, Pipes::default())
 }
 
-/// Console-free Windows child for noninteractive system helpers. This changes
-/// only process creation: the same input, output, timeout and error rules apply.
+/// Console-free Windows helper with bounded termination cleanup. A pending
+/// original child remains retained and prevents another helper in this process;
+/// an error never proves physical exit or authorizes replay. Only the supplied
+/// environment is passed to this fixed helper; the parent's profile is omitted.
 #[cfg(windows)]
 pub fn run_hidden_limited(
     program: &Path,
     inv: &Invocation,
     parent_env: &[(&str, &str)],
     stdout_cap: usize,
-) -> Result<Exit, TooLarge> {
+) -> Result<Exit, HiddenError> {
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
-    limited(
+    let stop = hidden::State::admit()?;
+    let result = limited(
         program,
         inv,
         parent_env,
@@ -84,9 +91,12 @@ pub fn run_hidden_limited(
             spawn: Some(Box::new(|command| {
                 command.creation_flags(CREATE_NO_WINDOW).spawn()
             })),
+            hidden_stop: Some(stop.clone()),
+            clear_environment: true,
             ..Pipes::default()
         },
-    )
+    );
+    stop.finish(result)
 }
 
 fn limited(
@@ -220,6 +230,15 @@ struct Pipes {
     retain_all: bool,
     stderr_cap: Option<usize>,
     child_exited: Option<Arc<AtomicBool>>,
+    clear_environment: bool,
+    #[cfg(any(windows, test))]
+    hidden_stop: Option<Arc<hidden::State>>,
+}
+
+struct StopContext {
+    exited: Option<Arc<AtomicBool>>,
+    #[cfg(any(windows, test))]
+    hidden: Option<Arc<hidden::State>>,
 }
 
 pub(crate) struct ChildCharge {
@@ -292,13 +311,31 @@ pub fn run_owned(
     spawn: impl FnOnce(&mut Command) -> std::io::Result<Child> + Send + 'static,
     resources: Arc<dyn Send + Sync>,
 ) -> Result<Vec<u8>, OwnedError> {
+    run_owned_observed(hgs, inv, parent_env, cancel, spawn, resources, |_, _| {})
+}
+
+/// The same owned exchange, with a failure-only diagnostic observer. Standard
+/// error is bounded to 16 KiB and remains untrusted: callers must select fixed
+/// codes rather than persist child text. Observation changes no result, custody
+/// or permission and never makes an uncertain exchange safe to replay.
+pub fn run_owned_observed(
+    hgs: &Path,
+    inv: &Invocation,
+    parent_env: &[(&str, &str)],
+    cancel: &AtomicBool,
+    spawn: impl FnOnce(&mut Command) -> std::io::Result<Child> + Send + 'static,
+    resources: Arc<dyn Send + Sync>,
+    observe: impl FnOnce(&OwnedError, Option<&str>),
+) -> Result<Vec<u8>, OwnedError> {
     if cancel.load(Ordering::Acquire) {
+        observe(&OwnedError::Cancelled, None);
         return Err(OwnedError::Cancelled);
     }
     if inv.stdin.as_ref().is_none_or(|bytes| bytes.len() > 1 << 20)
         || inv.timeout.is_zero()
         || inv.timeout > Duration::from_secs(30)
     {
+        observe(&OwnedError::InvalidInput, None);
         return Err(OwnedError::InvalidInput);
     }
     let child_exited = Arc::new(AtomicBool::new(false));
@@ -329,26 +366,35 @@ pub fn run_owned(
         child_exited.store(true, Ordering::Release);
     }
     if !child_exited.load(Ordering::Acquire) {
+        observe(&OwnedError::ExitUnverified, None);
         return Err(OwnedError::ExitUnverified);
     }
     // A cancellation/deadline racing completion cannot grant success.
     if cancel.load(Ordering::Acquire) {
+        observe(&OwnedError::Cancelled, None);
         return Err(OwnedError::Cancelled);
     }
     if Instant::now() >= until {
+        observe(&OwnedError::TimedOut, None);
         return Err(OwnedError::TimedOut);
     }
     match exit {
         Ok(Exit::Code {
             code: 0, stdout, ..
         }) => Ok(stdout),
-        Ok(Exit::Code { .. }) => Err(OwnedError::ChildFailed),
-        Ok(Exit::TimedOut) => Err(OwnedError::TimedOut),
-        Ok(Exit::StartFailed(_)) => Err(OwnedError::StartFailed),
-        Ok(Exit::WriteFailed) => Err(OwnedError::WriteFailed),
-        Ok(Exit::Abnormal { .. }) => Err(OwnedError::Incomplete),
-        Err(Stopped::Cancelled) => Err(OwnedError::Cancelled),
-        Err(Stopped::TooLarge(_)) => Err(OwnedError::OutputTooLarge),
+        other => {
+            let (error, stderr) = match other {
+                Ok(Exit::Code { stderr, .. }) => (OwnedError::ChildFailed, Some(stderr)),
+                Ok(Exit::TimedOut) => (OwnedError::TimedOut, None),
+                Ok(Exit::StartFailed(_)) => (OwnedError::StartFailed, None),
+                Ok(Exit::WriteFailed) => (OwnedError::WriteFailed, None),
+                Ok(Exit::Abnormal { stderr }) => (OwnedError::Incomplete, Some(stderr)),
+                Err(Stopped::Cancelled) => (OwnedError::Cancelled, None),
+                Err(Stopped::TooLarge(_)) => (OwnedError::OutputTooLarge, None),
+            };
+            observe(&error, stderr.as_deref());
+            Err(error)
+        }
     }
 }
 
@@ -488,6 +534,11 @@ fn run_inner(
     cancel: Option<&AtomicBool>,
     pipes: Pipes,
 ) -> Result<Exit, Stopped> {
+    let stop_context = StopContext {
+        exited: pipes.child_exited.clone(),
+        #[cfg(any(windows, test))]
+        hidden: pipes.hidden_stop.clone(),
+    };
     let consumed = pipes.output.is_some();
     let retain_all = pipes.require_complete || pipes.retain_all;
     let strict_outputs = pipes.input.is_some() || consumed || pipes.require_complete;
@@ -499,13 +550,18 @@ fn run_inner(
     let _cancel_output = CancelOutput(pipes.stop);
     let mut command = Command::new(hgs);
     command.args(&inv.args);
+    if pipes.clear_environment {
+        command.env_clear();
+    }
     for (key, value) in parent_env {
         command.env(key, value);
     }
     for key in remove {
         command.env_remove(key);
     }
-    crate::child_environment::restore(&mut command);
+    if !pipes.clear_environment {
+        crate::child_environment::restore(&mut command);
+    }
     command
         .env_remove("HGS_SESSION")
         .env_remove("HGS_RUN_ID")
@@ -530,7 +586,7 @@ fn run_inner(
             Exit::Abnormal {
                 stderr: "owned exchange requires all three pipes".into(),
             },
-            pipes.child_exited.as_deref(),
+            &stop_context,
         ));
     }
     let deadline = Instant::now() + inv.timeout;
@@ -621,13 +677,13 @@ fn run_inner(
             }
         }
         if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-            let _ = stop(child, Exit::TimedOut, pipes.child_exited.as_deref());
+            let _ = stop(child, Exit::TimedOut, &stop_context);
             drain(&done_rx);
             return Err(Stopped::Cancelled);
         }
         if over.load(Ordering::Relaxed) {
             // Ended for its output: the exit that gives is not reported.
-            let _ = stop(child, Exit::TimedOut, pipes.child_exited.as_deref());
+            let _ = stop(child, Exit::TimedOut, &stop_context);
             drain(&done_rx);
             return Err(too_large(&err));
         }
@@ -637,7 +693,7 @@ fn run_inner(
                 Exit::Abnormal {
                     stderr: "stdout decoder failed".into(),
                 },
-                pipes.child_exited.as_deref(),
+                &stop_context,
             );
             drain(&done_rx);
             return Ok(exit);
@@ -656,20 +712,16 @@ fn run_inner(
                     Exit::Abnormal {
                         stderr: error.to_string(),
                     },
-                    pipes.child_exited.as_deref(),
+                    &stop_context,
                 ))
             }
         }
         let now = Instant::now();
         if write_failed_until.is_some_and(|until| now >= until) {
-            return Ok(stop(
-                child,
-                Exit::WriteFailed,
-                pipes.child_exited.as_deref(),
-            ));
+            return Ok(stop(child, Exit::WriteFailed, &stop_context));
         }
         if now >= deadline {
-            let exit = stop(child, Exit::TimedOut, pipes.child_exited.as_deref());
+            let exit = stop(child, Exit::TimedOut, &stop_context);
             if consumed {
                 drain(&done_rx);
             }
@@ -769,10 +821,14 @@ fn drain(done: &Receiver<bool>) {
     }
 }
 
-fn stop(mut child: Child, exit: Exit, exited: Option<&AtomicBool>) -> Exit {
+fn stop(mut child: Child, exit: Exit, context: &StopContext) -> Exit {
+    #[cfg(any(windows, test))]
+    if let Some(state) = &context.hidden {
+        return state.stop(child, exit, context.exited.clone());
+    }
     let _ = child.kill();
     if child.wait().is_ok() {
-        if let Some(exited) = exited {
+        if let Some(exited) = &context.exited {
             exited.store(true, Ordering::Release);
         }
     }
@@ -883,6 +939,32 @@ mod stream_tests {
     }
 
     #[test]
+    fn an_explicit_helper_environment_omits_every_parent_variable() {
+        let call = Invocation {
+            args: vec![],
+            stdin: None,
+            timeout: Duration::from_secs(5),
+            request_id: None,
+        };
+        let result = run_inner(
+            Path::new("/usr/bin/env"),
+            &call,
+            &[("ZERUS_TEST_ONLY", "explicit")],
+            &[],
+            1024,
+            None,
+            Pipes {
+                clear_environment: true,
+                ..Pipes::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(result, Exit::Code { code: 0, stdout, .. } if stdout == b"ZERUS_TEST_ONLY=explicit\n")
+        );
+    }
+
+    #[test]
     fn streamed_eof_and_both_exact_output_limits_are_preserved() {
         let code = "import sys,os; assert sys.stdin.buffer.read() == b'bounded input'; assert 'HGS_SESSION' not in os.environ; sys.stdout.write('x'*16384); sys.stderr.write('y'*16384)";
         let exit = run_streamed(
@@ -951,10 +1033,24 @@ mod hidden_tests {
 
     #[test]
     fn a_hidden_helper_has_no_console_and_receives_exact_input_through_eof() {
-        let program = std::env::var_os("SystemRoot")
-            .map(std::path::PathBuf::from)
-            .expect("Windows has SystemRoot")
+        let system_root = std::env::var("SystemRoot").expect("Windows has Unicode SystemRoot");
+        let program = std::path::PathBuf::from(&system_root)
             .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let modules = program
+            .parent()
+            .unwrap()
+            .join("Modules")
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let temp = std::env::temp_dir().to_str().unwrap().to_owned();
+        let environment = [
+            ("SystemRoot", system_root.as_str()),
+            ("WINDIR", system_root.as_str()),
+            ("PSModulePath", modules.as_str()),
+            ("TEMP", temp.as_str()),
+            ("TMP", temp.as_str()),
+        ];
         let script = r#"$ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false,$true)
 Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class QuietHelper { [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); }'
@@ -977,7 +1073,7 @@ Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; pu
             timeout: Duration::from_secs(15),
             request_id: None,
         };
-        let result = run_hidden_limited(&program, &call, &[], 1024).unwrap();
+        let result = run_hidden_limited(&program, &call, &environment, 1024).unwrap();
         match result {
             Exit::Code {
                 code: 0, stdout, ..
@@ -987,5 +1083,67 @@ Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; pu
             ),
             other => panic!("{other:?}"),
         }
+
+        let body = "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);[Console]::WriteLine($env:PSModulePath);[Console]::WriteLine($env:ZERUS_TEST_PARENT_PROFILE);[Console]::WriteLine([string]$PSModuleAutoLoadingPreference)";
+        let probe = |source: &str| Invocation {
+            args: vec![
+                "-NoLogo".into(),
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-EncodedCommand".into(),
+                STANDARD.encode(
+                    source
+                        .encode_utf16()
+                        .flat_map(u16::to_le_bytes)
+                        .collect::<Vec<_>>(),
+                ),
+            ],
+            stdin: Some(Vec::new()),
+            timeout: Duration::from_secs(15),
+            request_id: None,
+        };
+        let inherited = run_limited(
+            &program,
+            &probe(&format!("$PSModuleAutoLoadingPreference='All';{body}")),
+            &[
+                ("PSModulePath", r"C:\Example\UserModules"),
+                ("ZERUS_TEST_PARENT_PROFILE", "inherited"),
+            ],
+            4096,
+        )
+        .unwrap();
+        let minimal = run_hidden_limited(&program, &probe(&format!(
+            "$PSModuleAutoLoadingPreference='None';$env:PSModulePath=[IO.Path]::Combine($PSHOME,'Modules');{body}"
+        )), &environment, 4096).unwrap();
+        let Exit::Code {
+            code: 0,
+            stdout: before,
+            ..
+        } = inherited
+        else {
+            panic!("inherited probe: {inherited:?}")
+        };
+        let Exit::Code {
+            code: 0,
+            stdout: after,
+            ..
+        } = minimal
+        else {
+            panic!("minimal probe: {minimal:?}")
+        };
+        let before = String::from_utf8(before).unwrap();
+        let after = String::from_utf8(after).unwrap();
+        assert!(before.contains(r"C:\Example\UserModules"));
+        assert!(before.contains("inherited"));
+        assert!(before.trim_end().ends_with("All"));
+        let after: Vec<_> = after.lines().collect();
+        assert_eq!(after.len(), 3);
+        // PathBuf retains literal '/' separators, while $PSHOME prints '\\'.
+        // Compare these known fixture paths with Windows path spelling rules.
+        assert_eq!(
+            after[0].replace('/', "\\").to_lowercase(),
+            modules.replace('/', "\\").to_lowercase()
+        );
+        assert_eq!(&after[1..], ["", "None"]);
     }
 }

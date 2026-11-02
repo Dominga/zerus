@@ -97,7 +97,7 @@ class NativeClaudeQuestions(unittest.TestCase):
     blocks=[dict(type='tool_use',id='toolu_native_fixture',name=fixture.tool_name,input=fixture.tool_input or dict(questions=fixture.items))] if asks and not answered else [dict(type='text',text='Fixture complete.')]
     if hasattr(fixture,'native_response_blocks'):blocks=fixture.native_response_blocks(body)
     asks=any(block['type']=='tool_use' for block in blocks)
-    message=dict(id='msg_fixture',type='message',role='assistant',model=body.get('model','claude-sonnet-4-6'),content=blocks,stop_reason='tool_use' if asks else 'end_turn',stop_sequence=None,usage=dict(input_tokens=100,output_tokens=30))
+    message=dict(id='msg_fixture',type='message',role='assistant',model=body.get('model','claude-sonnet-4-6'),content=blocks,stop_reason='tool_use' if asks else 'end_turn',stop_sequence=None,usage=getattr(fixture,'native_response_usage',dict(input_tokens=100,output_tokens=30)))
     self.send_response(200)
     if body.get('stream'):
      self.send_header('Content-Type','text/event-stream');self.end_headers()

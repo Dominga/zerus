@@ -6,6 +6,24 @@ fn approval(enabled: bool) -> Request {
     }
 }
 #[test]
+fn ownership_is_not_admitted_through_the_generic_policy_command_or_receipt_parser() {
+    use zerus_client_core::desktop::ownership::Action;
+    assert!(serde_json::from_value::<Operation>(json!("desktop_ownership")).is_err());
+    let request = Request::DesktopOwnership {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        action: Action::Grant,
+        journal: None,
+        revision: 0,
+    };
+    assert!(checked(
+        &request,
+        json!({"request_id":request.id(),"op":"desktop_ownership","accepted":true,"durable":true}),
+        false
+    )
+    .is_none());
+    assert!(checked(&request, json!({"request_id":request.id(),"accepted":false,"durable":false,"code":"frontend_authentication_refused"}), false).is_none());
+}
+#[test]
 fn actual_root_status_controls_client_readiness_but_never_blocks_connected_disable() {
     // Produced by the root private Store/Runtime projection and decorator test.
     // Regenerate/check with client/scripts/generate-delivery-status-fixture.py.
@@ -316,7 +334,7 @@ fn the_actual_version_suffix_alone_defines_the_gui_dev_number() {
 }
 
 #[cfg(target_os = "linux")]
-pub(in crate::desktop_service) mod native {
+pub(crate) mod native {
     use super::*;
     use crate::desktop_service::tests::Fixture;
     use std::{
@@ -326,12 +344,12 @@ pub(in crate::desktop_service) mod native {
         thread,
     };
     use zerus_client_core::desktop::{Build, Responder};
-    pub(in crate::desktop_service) struct CacheServer {
+    pub(crate) struct CacheServer {
         stop: Arc<AtomicBool>,
         thread: Option<thread::JoinHandle<()>>,
     }
     impl CacheServer {
-        pub(in crate::desktop_service) fn start(root: &Path, responder: Arc<Responder>) -> Self {
+        pub(crate) fn start(root: &Path, responder: Arc<Responder>) -> Self {
             let listener = UnixListener::bind(root.join("native-cache.sock")).unwrap();
             listener.set_nonblocking(true).unwrap();
             let stop = Arc::new(AtomicBool::new(false));
@@ -384,7 +402,7 @@ pub(in crate::desktop_service) mod native {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
-    pub(in crate::desktop_service) fn responder() -> Arc<Responder> {
+    pub(crate) fn responder() -> Arc<Responder> {
         responder_for_configuration("a".repeat(64))
     }
     fn responder_for_configuration(configuration: String) -> Arc<Responder> {

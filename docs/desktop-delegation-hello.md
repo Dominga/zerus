@@ -53,6 +53,92 @@ probe result substitutes for that proof.
 
 ## Native frontend policy requests
 
+### Ownership companion source (stage 1)
+
+The closed source contract is `desktop::ownership` in the shared core. Its ABI
+is `desktop-ownership-v1` and its help marker is exactly `Desktop ownership ABI:
+desktop-ownership-v1`. The selected CLI advertises it only with the root
+status/result/actor routes. The client companion must bind its native startup
+mode and original-child registration before using these routes.
+
+Before canonical instance claim and writer creation, native startup calls
+`Responder::configure_ownership_mode_once(Mode::Service | Mode::Native)`.
+Configuration still comes from the selected CLI and is cached separately with
+`configure_once`. Generic `Hello` stays unchanged. Only ownership requests carry
+the optional `Evidence::ownership_mode`, copied from the immutable native cache;
+ordinary evidence omits it. Missing or wrong mode refuses registration and the
+root independently joins it to the canonical peer/original-child proof. The
+intent has no mode, role, build, PID or confirmation field.
+
+The root entries are `desktop ownership-status --json` (bounded
+read-only `Status` without a subscription), the existing authenticated
+`desktop frontend-request --json`, and `desktop ownership-result --json` with
+the closed `Query` on stdin. All require the ownership and frontend help markers
+on the selected paired relay; none starts a service. This permits native startup
+to select configuration, configure its responder and request takeover AFTER
+canonical claim but BEFORE Bootstrap hold or native notification creation,
+without waiting for the later service-source connection.
+
+The authenticated payload is `Request::DesktopOwnership { request_id, action,
+journal, revision }`. All three actions share one native ordering key.
+`Grant` is the ordinary service-mode startup/connection intent and cannot
+supersede a retained revoke/native takeover. `Rearm` is a new explicit user
+intent after that state. Both require cached `Mode::Service`. `NativeTakeover`
+requires cached `Mode::Native` and closes service ownership before GUI writers
+can resume. A pure maintained frontend update only invalidates the closed-UI
+launch grant: it does not revoke background work or set `rearm_required`. The
+new authenticated canonical frontend's ordinary Grant binds its new identity,
+without explicit Rearm. A real retained revoke, rollback, native takeover or
+pending drain still requires the existing rearm path. The journal/revision come from the bounded status read; no journal
+is permitted only at initial revision zero. The root derives selected frontend
+build/file identity from native proof, not the payload. No action inherits an
+automatic-approval opt-in.
+
+`Receipt::matches` joins the original request ID/fingerprint, configuration,
+journal and revision. `Pending` and `Granted` never release native posting.
+`NativeReady` additionally requires revoked, checkpointed and actual drained
+completion. `Receipt::native_ready()` also joins the current actor observation
+to that exact native command/journal/revision, so a historical settled takeover
+cannot release a new GUI after ownership changes. The client consumes this only
+from its original retained CLI response, never a webview-supplied receipt.
+
+For a never-service configuration with no desktop database, handoff, sidecars or
+retained notification-host state, an authenticated NativeTakeover instead returns
+`Outcome::NativeAbsent`: accepted, non-durable, null journal and revision zero.
+It holds the existing owner exclusion if present and rechecks the same original
+native proof; it creates no directory, database, revoke or ownership row and does
+not force a later service-mode frontend to rearm. `native_ready()` recognizes
+this explicit observed no-op only after `matches()` on the original CLI reply.
+An unknown retained state or live but unreachable owner refuses it. A read-only
+lookup never manufactures NativeAbsent and a lost no-op response stays unknown.
+
+
+For an unknown mutation, retain its original logical UUID and child/pipe/cache
+resources, then issue only `Query::for_request` read lookups. A missing record
+alone is not proof of not-applied. Only an explicit root `definitive` negative
+AND confirmed original-child exit may retire that logical request and allow a
+new intent; the old mutating request is never replayed automatically. Refusal,
+pending/unknown and stale scope leave the relevant writer admissions fenced.
+
+Schema 15 stores one ownership row with a stable journal ID and increasing
+revision, plus the newest 4096 settled command receipts and at most one pending
+takeover. Revoke/rollback invalidates the grant in the same transaction as the
+writer fence; a pending takeover superseded by revoke closes as refused, never
+as NativeReady. Rearm cannot replace an undrained original runtime. Initial
+Grant and explicit Rearm do not enable a notification host or import approval
+consent; host attachment remains the next lifecycle stage.
+
+Independent status/result reads do not create or migrate an absent database.
+NativeTakeover can authenticate its original CLI child and acquire the original
+owner lock while a service with existing state is absent; it does not start a service. Existing
+operation custody remains a drain prerequisite. Only a missing request under
+the same nonempty journal and unchanged original revision is a definitive
+negative. Missing/replaced state or an initial unjournaled request stays unknown.
+For an unknown outcome, the client must first confirm its original child exited
+and then obtain a fresh definitive lookup before retiring that logical operation;
+a negative observed while that child was still live is not terminal. The service rechecks the original two-second native permit
+after acquiring the SQLite write transaction and before committing a new intent.
+
 The selected CLI advertises `Desktop frontend request ABI: desktop-ui-request-v1`.
 After its confirmation UI, Next prepares a closed `AutomaticApprovals` request
 with a stable request UUID and a fresh attempt UUID. Its native responder reserves

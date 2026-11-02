@@ -27,6 +27,7 @@ pub(super) struct Runtime {
     maintenance: maintenance::Runtime,
     attention: attention::Runtime,
     activations: activation::Router,
+    drained: bool,
 }
 
 impl Runtime {
@@ -45,6 +46,7 @@ impl Runtime {
                 maintenance,
                 attention: attention::Runtime::new(epoch),
                 activations: activation::Router::new(&location.configuration, epoch),
+                drained: false,
             }),
             Err(error) => {
                 producer.close();
@@ -212,6 +214,10 @@ impl Runtime {
         }
     }
 
+    pub fn drained(&self) -> bool {
+        self.drained
+    }
+
     pub fn drain(&mut self, store: &mut Store, timeout: Duration) -> Result<()> {
         self.activations.stop();
         self.details.stop();
@@ -240,7 +246,11 @@ impl Runtime {
                 }
             };
             if fleet_done && presence_done && delivery_done && maintenance_done && attention_done {
-                return failure.map_or(Ok(()), Err);
+                let result = failure.map_or(Ok(()), Err);
+                if result.is_ok() {
+                    self.drained = true;
+                }
+                return result;
             }
             ensure!(
                 Instant::now() < end,

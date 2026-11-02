@@ -14,6 +14,9 @@ use std::{
 };
 use zerus_client_core::desktop::ui_requests::{Envelope, Reply, Request};
 
+#[cfg(target_os = "linux")]
+mod linux_manager;
+
 #[cfg(any(not(windows), test))]
 use std::collections::BTreeSet;
 #[cfg(windows)]
@@ -203,12 +206,13 @@ pub(super) struct Authorized {
     until: Instant,
     instance: String,
     serial: u64,
+    ownership_origin: Option<super::ownership::Origin>,
     #[cfg(windows)]
     windows: Option<Box<WindowsFreshness>>,
 }
 /// Actor-side permit after the original peer was revalidated. It deliberately
 /// has no Clone/Deserialize or public constructor, even inside the request lane.
-pub(super) struct Validated(Request, Freshness);
+pub(super) struct Validated(Request, Freshness, Option<super::ownership::Origin>);
 enum Freshness {
     Native {
         caller: Process,
@@ -227,8 +231,8 @@ impl Validated {
     pub fn operation(&self) -> &'static str {
         self.0.operation()
     }
-    pub fn into_request(self) -> Result<Request> {
-        match self.1 {
+    fn check(&self) -> Result<()> {
+        match &self.1 {
             Freshness::Native {
                 caller,
                 frontend,
@@ -237,25 +241,50 @@ impl Validated {
                 windows,
             } => {
                 ensure!(
-                    Instant::now() < until && caller.current() && frontend.current(),
+                    Instant::now() < *until && caller.current() && frontend.current(),
                     "frontend permit expired"
                 );
                 #[cfg(windows)]
                 windows
                     .as_ref()
                     .context("original Windows evidence missing")?
-                    .check(until)?;
+                    .check(*until)?;
             }
             #[cfg(test)]
             Freshness::Fixture => (),
         }
+        Ok(())
+    }
+    pub fn into_request(self) -> Result<Request> {
+        self.check()?;
+        ensure!(
+            !matches!(self.0, Request::DesktopOwnership { .. }),
+            "ownership requires its typed boundary"
+        );
         Ok(self.0)
+    }
+    pub fn ownership_parts(&self) -> Result<(Request, super::ownership::Origin)> {
+        self.check()?;
+        ensure!(
+            matches!(self.0, Request::DesktopOwnership { .. }),
+            "not ownership"
+        );
+        let origin = self
+            .2
+            .as_ref()
+            .context("original ownership identity missing")?;
+        ensure!(origin.current(), "ownership image changed");
+        Ok((self.0.clone(), origin.clone()))
+    }
+    pub fn check_ownership(self) -> Result<()> {
+        self.ownership_parts().map(|_| ())
     }
     #[cfg(test)]
     pub fn fixture(value: &Value) -> Self {
         Self(
             serde_json::from_value(value.clone()).expect("synthetic native-policy fixture"),
             Freshness::Fixture,
+            None,
         )
     }
 }
@@ -397,7 +426,7 @@ impl Default for ActivationProbe {
 }
 impl Validated {
     pub fn activation_wait(self) -> Result<(String, ActivationReceiver)> {
-        let Self(request, freshness) = self;
+        let Self(request, freshness, _) = self;
         let original_until = match &freshness {
             Freshness::Native { until, .. } => *until,
             #[cfg(test)]
@@ -452,6 +481,7 @@ impl Authorized {
                 #[cfg(windows)]
                 windows: self.windows,
             },
+            self.ownership_origin,
         ))
     }
 }
@@ -513,6 +543,14 @@ pub(super) fn authenticate(location: &Scope, peer_pid: u32, value: &Value) -> Re
         Instant::now() < until && caller.current() && frontend.current(),
         "frontend changed during authentication"
     );
+    let ownership_origin = if matches!(envelope.request, Request::DesktopOwnership { .. }) {
+        Some(super::ownership::Origin::capture(
+            Path::new(&frontend.executable),
+            reply.hello.build.clone(),
+        )?)
+    } else {
+        None
+    };
     Ok(Authorized {
         envelope,
         caller,
@@ -520,6 +558,7 @@ pub(super) fn authenticate(location: &Scope, peer_pid: u32, value: &Value) -> Re
         until,
         instance: reply.hello.instance_epoch,
         serial: reply.request.serial,
+        ownership_origin,
         #[cfg(windows)]
         windows: Some(Box::new(windows)),
     })
@@ -569,6 +608,12 @@ fn validate(
             && reply.request.fingerprint == envelope.request.fingerprint(),
         "original frontend child/request does not match"
     );
+    if let Request::DesktopOwnership { action, .. } = &envelope.request {
+        ensure!(
+            reply.request.ownership_mode == Some(action.mode()),
+            "ownership mode does not match the native frontend"
+        );
+    }
     if let Request::MaintenanceConfigure {
         update: Some(update),
         ..
@@ -617,7 +662,10 @@ impl Order {
         ensure!(
             matches!(
                 operation,
-                "automatic_approvals" | "maintenance_configure" | "import_pending_reads"
+                "automatic_approvals"
+                    | "maintenance_configure"
+                    | "import_pending_reads"
+                    | "desktop_ownership"
             ),
             "unknown frontend operation"
         );
@@ -687,6 +735,10 @@ fn probe(_: &Location, _: &str, _: Instant) -> Option<Canonical> {
 fn check_ancestry(pid: u32, until: Instant) -> Result<()> {
     ancestry(pid, until, |pid| {
         if !same_user(pid)? {
+            return Ok(None);
+        }
+        #[cfg(target_os = "linux")]
+        if linux_manager::boundary(pid, unsafe { libc::geteuid() }) {
             return Ok(None);
         }
         let process = Process::read(pid)?;
@@ -922,6 +974,7 @@ mod tests {
                 replay: false,
             },
             request: Evidence {
+                ownership_mode: None,
                 attempt: id(1),
                 request_id: id(2),
                 fingerprint: envelope.request.fingerprint(),
@@ -957,6 +1010,31 @@ mod tests {
     }
 
     #[test]
+    fn ownership_requires_the_original_cached_native_mode_in_addition_to_child_proof() {
+        use zerus_client_core::desktop::ownership::{Action, Mode};
+        for action in [Action::Grant, Action::Rearm, Action::NativeTakeover] {
+            let (mut request, caller, frontend, mut reply) = fixture();
+            request.request = Request::DesktopOwnership {
+                request_id: id(2),
+                action,
+                journal: None,
+                revision: 0,
+            };
+            reply.request.fingerprint = request.request.fingerprint();
+            for mode in [None, Some(Mode::Native), Some(Mode::Service)] {
+                reply.request.ownership_mode = mode;
+                assert_eq!(
+                    validate(&request, &caller, &frontend, &reply, &"a".repeat(64)).is_ok(),
+                    mode == Some(action.mode()),
+                );
+            }
+            reply.request.ownership_mode = Some(action.mode());
+            reply.request.child_birth = "wrong original child".into();
+            assert!(validate(&request, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        }
+    }
+
+    #[test]
     fn a_retained_permit_must_still_be_fresh_at_the_mutation_boundary() {
         let (envelope, caller, frontend, _) = fixture();
         let permit = Validated(
@@ -968,6 +1046,7 @@ mod tests {
                 #[cfg(windows)]
                 windows: None,
             },
+            None,
         );
         // Expiration refuses before attempting any lookup of these fake PIDs.
         assert!(permit.into_request().is_err());
@@ -1115,6 +1194,43 @@ mod tests {
         order
             .observe(a, "automatic_approvals", 5, now + WAIT)
             .unwrap();
+    }
+
+    #[test]
+    fn ownership_actions_share_one_order_and_cannot_bypass_the_typed_boundary() {
+        use zerus_client_core::desktop::ownership::Action;
+        let mut order = Order::default();
+        let now = Instant::now();
+        let instance = (7, "100".into(), id(1));
+        for (serial, action) in [
+            (2, Action::Grant),
+            (3, Action::NativeTakeover),
+            (4, Action::Rearm),
+        ] {
+            let request = Request::DesktopOwnership {
+                request_id: id(serial),
+                action,
+                journal: None,
+                revision: 0,
+            };
+            order
+                .observe(instance.clone(), request.operation(), serial as u64, now)
+                .unwrap();
+            assert!(order
+                .observe(
+                    instance.clone(),
+                    request.operation(),
+                    (serial - 1) as u64,
+                    now
+                )
+                .is_err());
+            let value = serde_json::to_value(&request).unwrap();
+            assert!(Validated::fixture(&value).into_request().is_err());
+            assert!(
+                Validated::fixture(&value).ownership_parts().is_err(),
+                "no synthetic constructor grants native origin proof"
+            );
+        }
     }
 
     #[test]
@@ -1303,7 +1419,9 @@ mod activation_freshness_tests {
             frontend,
             until: Instant::now() - WAIT,
         };
-        assert!(Validated(request(), freshness).activation_wait().is_err());
+        assert!(Validated(request(), freshness, None)
+            .activation_wait()
+            .is_err());
     }
     #[cfg(windows)]
     #[test]
@@ -1319,7 +1437,9 @@ mod activation_freshness_tests {
                 windows: None,
             }
         };
-        assert!(Validated(request(), live()).activation_wait().is_err());
+        assert!(Validated(request(), live(), None)
+            .activation_wait()
+            .is_err());
         let receiver = ActivationReceiver::new(
             live(),
             Instant::now() + zerus_client_core::desktop::activation::PEER_WAIT,

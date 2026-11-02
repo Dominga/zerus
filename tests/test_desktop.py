@@ -41,6 +41,79 @@ class Desktop(unittest.TestCase):
         self.assertFalse(refused['accepted'])
         self.assertEqual(refused['code'], 'approval_audit_scope_changed')
 
+    def test_ownership_read_preflight_is_independent_and_never_creates_absent_state(self):
+        value = self.cli('desktop', 'ownership-status', '--json')
+        self.assertEqual(value['abi'], 'desktop-ownership-v1')
+        self.assertEqual(value['state'], 'passive')
+        self.assertIsNone(value['journal'])
+        self.assertEqual(value['revision'], 0)
+        self.assertFalse(self.desktop.exists())
+        query = dict(op='desktop_ownership_result', request_id=str(uuid.uuid4()),
+                     configuration=value['configuration'], original_request_id=str(uuid.uuid4()),
+                     fingerprint='a' * 64, journal=None, revision=0)
+        result = self.cli('desktop', 'ownership-result', '--json', data=query)
+        self.assertFalse(result['found'])
+        self.assertFalse(result['definitive'])
+        self.assertFalse(self.desktop.exists())
+
+    def test_ownership_preflight_and_lookup_use_current_selected_actor_scope(self):
+        process, service = self.serve()
+        value = self.cli('desktop', 'ownership-status', '--json')
+        self.assertEqual(value['configuration'], service['configuration'])
+        self.assertEqual(value['state'], 'passive')
+        self.assertEqual(value['revision'], 0)
+        self.assertEqual(service['desktop_ownership'], value)
+        query = dict(op='desktop_ownership_result', request_id=str(uuid.uuid4()),
+                     configuration=value['configuration'], original_request_id=str(uuid.uuid4()),
+                     fingerprint='a' * 64, journal=value['journal'], revision=0)
+        result = self.cli('desktop', 'ownership-result', '--json', data=query)
+        self.assertFalse(result['found'])
+        self.assertTrue(result['definitive'])
+        bad = dict(query, extra_authority=True)
+        refused = self.cli('desktop', 'request', '--json', data=bad)
+        self.assertFalse(refused['accepted'])
+        self.assertEqual(refused['code'], 'ownership_read_refused')
+        self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), value)
+        self.stop(process)
+        offline = self.cli('desktop', 'ownership-status', '--json')
+        self.assertEqual(offline, value)
+        self.assertEqual(self.cli('desktop', 'ownership-result', '--json', data=query), result)
+
+    def test_generic_ownership_mutation_has_no_authority_or_durable_reservation(self):
+        self.serve()
+        value = self.cli('desktop', 'ownership-status', '--json')
+        for action in ('grant', 'rearm', 'native_takeover'):
+            request = dict(op='desktop_ownership', request_id=str(uuid.uuid4()), action=action,
+                           journal=value['journal'], revision=value['revision'])
+            result = self.cli('desktop', 'request', '--json', data=request)
+            self.assertFalse(result['accepted'])
+            self.assertFalse(result['durable'])
+            self.assertEqual(result['code'], 'frontend_authentication_required')
+            self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), value)
+        with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_ownership_requests').fetchone()[0], 0)
+
+    def test_schema_fourteen_ownership_migration_is_atomic_and_never_grants(self):
+        process, _ = self.serve()
+        self.stop(process)
+        database = self.desktop / 'state.sqlite3'
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute('DROP TABLE desktop_ownership_requests')
+            db.execute('DROP TABLE desktop_ownership')
+            db.execute('PRAGMA user_version=14')
+            db.execute('CREATE TABLE desktop_ownership(fixture TEXT)')
+            db.execute("INSERT INTO desktop_ownership VALUES('retained')")
+        self.failed_serve()
+        with closing(sqlite3.connect(database)) as db, db:
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 14)
+            self.assertEqual(db.execute('SELECT fixture FROM desktop_ownership').fetchone()[0], 'retained')
+            self.assertEqual(db.execute("SELECT count(*) FROM sqlite_schema WHERE name='desktop_ownership_requests'").fetchone()[0], 0)
+            db.execute('DROP TABLE desktop_ownership')
+        _, service = self.serve()
+        self.assertEqual(service['schema'], 15)
+        self.assertEqual(service['desktop_ownership']['state'], 'passive')
+        self.assertFalse(service['writers_enabled'])
+
     def setUp(self):
         # macOS's per-user TMPDIR (/var/folders/...) leaves too little of the
         # 104-byte socket path for the desktop service under nested state dirs.
@@ -773,7 +846,7 @@ class Desktop(unittest.TestCase):
             db.execute('PRAGMA user_version=1')
         database.chmod(0o600)
         process, status = self.serve()
-        self.assertEqual(status['schema'], 14)
+        self.assertEqual(status['schema'], 15)
         self.assertEqual(status['generation'], 8)
         self.assertEqual(status['configuration'], configuration)
         self.assertTrue(status['effect_journal']['revoked'])
@@ -783,20 +856,22 @@ class Desktop(unittest.TestCase):
         self.assertFalse(status['read_queue']['recovery_error'])
         self.stop(process)
         with closing(sqlite3.connect(database)) as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 14)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 15)
             self.assertEqual(db.execute('SELECT rows,bytes FROM desktop_catalog_totals').fetchone(), (0, 0))
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_catalog_sources').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT configuration FROM service').fetchone()[0], configuration)
 
     @staticmethod
     def remove_changes_schema(db):
+        db.execute('DROP TABLE desktop_ownership_requests')
+        db.execute('DROP TABLE desktop_ownership')
         db.execute('DROP INDEX desktop_attention_catalog_identity')
         for table in ('desktop_attention_edges', 'desktop_attention_sessions', 'desktop_attention_totals', 'desktop_catalog_changes', 'desktop_catalog_change_views', 'desktop_catalog_change_totals'):
             db.execute(f'DROP TABLE {table}')
 
     @classmethod
     def remove_counts_and_delivery_schema(cls, db):
-        # Rewind every later layer, rather than leaving a schema-14 database
+        # Rewind every later layer, rather than leaving a schema-15 database
         # labelled as an older version. Production migrations stay strict.
         cls.remove_changes_schema(db)
         db.execute('DROP TABLE desktop_maintenance')
@@ -828,7 +903,7 @@ class Desktop(unittest.TestCase):
             db.execute('PRAGMA user_version=5')
         for _ in range(2):
             process, status = self.serve()
-            self.assertEqual(status['schema'], 14)
+            self.assertEqual(status['schema'], 15)
             self.assertEqual(status['catalog_projection']['stored_bytes'], expected)
             self.assertEqual(status['catalog_projection']['stored_rows'], 0)
             self.stop(process)
@@ -854,7 +929,7 @@ class Desktop(unittest.TestCase):
             self.assertEqual(db.execute("SELECT count(*) FROM sqlite_schema WHERE name='desktop_operations'").fetchone()[0], 0)
             db.execute('DROP TABLE desktop_operation_totals')
         process, status = self.serve()
-        self.assertEqual(status['schema'], 14)
+        self.assertEqual(status['schema'], 15)
         self.assertEqual({key:status['operation_queue'][key] for key in ('unsettled','undrained','admissions_paused','recovery_error')}, dict(unsettled=0, undrained=0, admissions_paused=True, recovery_error=False))
         self.assertFalse(status['writers_enabled'])
         self.stop(process)
@@ -877,7 +952,7 @@ class Desktop(unittest.TestCase):
             self.assertEqual(db.execute("SELECT count(*) FROM sqlite_schema WHERE name LIKE 'desktop_custody_%'").fetchone()[0], 0)
             db.execute('DROP INDEX desktop_commands_pending')
         process, status = self.serve()
-        self.assertEqual(status['schema'], 14)
+        self.assertEqual(status['schema'], 15)
         self.assertEqual(status['operation_queue']['undrained'], 0)
         self.assertTrue(status['operation_queue']['admissions_paused'])
         self.assertFalse((self.desktop / 'operation-custody').exists())
@@ -899,11 +974,11 @@ class Desktop(unittest.TestCase):
             self.assertEqual(db.execute('SELECT fixture FROM desktop_producer_prepared').fetchone()[0], 'retained')
             db.execute('DROP TABLE desktop_producer_prepared')
         process, status = self.serve()
-        self.assertEqual(status['schema'], 14)
+        self.assertEqual(status['schema'], 15)
         self.assertFalse(status['writers_enabled'])
         self.stop(process)
         with closing(sqlite3.connect(database)) as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 14)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 15)
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_producer_prepared').fetchone()[0], 0)
 
     def test_schema_eleven_maintenance_migration_stays_passive(self):
@@ -915,7 +990,7 @@ class Desktop(unittest.TestCase):
             db.execute('DROP TABLE desktop_maintenance')
             db.execute('PRAGMA user_version=11')
         process, status = self.serve()
-        self.assertEqual(status['schema'], 14)
+        self.assertEqual(status['schema'], 15)
         self.assertEqual(status['generation'], old['generation'] + 1)
         self.assertEqual(status['configuration'], old['configuration'])
         self.assertFalse(status['writers_enabled'])

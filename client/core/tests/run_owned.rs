@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 use zerus_client_core::{
-    run::{run_owned, OwnedError},
+    run::{run_owned, run_owned_observed, OwnedError},
     Invocation,
 };
 
@@ -63,6 +63,27 @@ fn run(code: &str, input: Vec<u8>) -> Result<Vec<u8>, OwnedError> {
     );
     wait_for_release(&dropped);
     result
+}
+
+#[test]
+fn diagnostic_observation_preserves_failure_and_original_resource_accounting() {
+    let (resources, dropped) = guard();
+    let mut observed = None;
+    let result = run_owned_observed(
+        Path::new("python3"),
+        &invocation("import sys;sys.stdin.buffer.read();sys.stderr.write('hgs: frontend process image unavailable\\n');sys.exit(1)", vec![], Duration::from_secs(5)),
+        &[], &AtomicBool::new(false), spawn, resources,
+        |error, stderr| observed = Some((format!("{error:?}"), stderr.unwrap_or("").to_owned())),
+    );
+    assert_eq!(result, Err(OwnedError::ChildFailed));
+    assert_eq!(
+        observed,
+        Some((
+            "ChildFailed".into(),
+            "hgs: frontend process image unavailable\n".into()
+        ))
+    );
+    wait_for_release(&dropped);
 }
 
 #[test]

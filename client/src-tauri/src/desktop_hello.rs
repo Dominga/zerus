@@ -18,6 +18,14 @@ pub fn prepare(identity: &crate::identity::Identity) -> (crate::instance::Reply,
         true,
         std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|v| !v.is_empty()),
     ));
+    // Native startup decides once, before canonical claim. Only ownership
+    // original-child evidence carries this binding; ordinary Hello is unchanged.
+    let mode = if crate::desktop_service::mode() {
+        zerus_client_core::desktop::ownership::Mode::Service
+    } else {
+        zerus_client_core::desktop::ownership::Mode::Native
+    };
+    responder.configure_ownership_mode_once(mode);
     let cached = Arc::clone(&responder);
     let reply: crate::instance::Reply = Arc::new(move |stream, line| {
         #[cfg(unix)]
@@ -35,21 +43,38 @@ pub fn prepare(identity: &crate::identity::Identity) -> (crate::instance::Reply,
 pub fn hold(
     production: bool,
     responder: &Arc<Responder>,
-) -> Result<Option<desktop::startup::Bootstrap>, desktop::startup::Refused> {
+) -> Result<
+    (
+        Option<desktop::startup::Bootstrap>,
+        Option<crate::desktop_ownership::NativeReady>,
+    ),
+    desktop::startup::Refused,
+> {
     if crate::desktop_service::mode() {
         // A consumer keeps its canonical identity but never claims GUI writer startup.
-        return Ok(None);
+        return Ok((None, None));
     }
     if !production || std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|v| !v.is_empty()) {
-        return Ok(None);
+        return Ok((None, None));
     }
+    let ownership = crate::desktop_ownership::native_takeover(
+        zerus_client_core::default_hgs(),
+        responder.clone(),
+    )
+    .map_err(|_| desktop::startup::Refused::Unknown)?;
     let mut held = desktop::startup::Bootstrap::begin(
-        &zerus_client_core::default_hgs(),
+        ownership.helper().map_err(|code| {
+            crate::startup_error::record("native_takeover.helper", code);
+            desktop::startup::Refused::Unknown
+        })?,
         &uuid::Uuid::new_v4().to_string(),
         &[],
-    )?;
+    )
+    .inspect_err(|&error| {
+        bootstrap_refusal("bootstrap.begin", error);
+    })?;
     match held.wait_ready() {
-        Ok(()) => Ok(Some(held)),
+        Ok(()) => Ok((Some(held), Some(ownership))),
         Err(desktop::startup::Refused::Unsupported) => {
             // Compatibility only: preserve today's GUI writers and cached hello,
             // without invoking the unknown command or claiming a held bootstrap.
@@ -62,10 +87,28 @@ pub fn hold(
                         responder.configure_once(configuration);
                     }
                 });
-            Ok(None)
+            Ok((None, Some(ownership)))
         }
-        Err(error) => Err(error),
+        Err(error) => {
+            bootstrap_refusal("bootstrap.ready", error);
+            Err(error)
+        }
     }
+}
+
+#[cfg(unix)]
+fn bootstrap_refusal(step: &'static str, error: desktop::startup::Refused) {
+    use desktop::startup::Refused;
+    crate::startup_error::record(
+        step,
+        match error {
+            Refused::Unsupported => "unsupported",
+            Refused::Invalid => "invalid",
+            Refused::Unavailable => "unavailable",
+            Refused::TimedOut => "timed_out",
+            Refused::Unknown => "unknown",
+        },
+    );
 }
 
 /// Request release after setup registered its writers, then retain and actually

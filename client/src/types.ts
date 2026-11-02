@@ -155,6 +155,16 @@ export type EditOutcome = (
   | { outcome: "kept"; detail: string }
   | { outcome: "refused"; detail: string }) & { project?: string; folder?: string };
 
+/** Native ownership presentation only; this can never authorize a writer. */
+export interface NotificationOwnership {
+  status: null | { abi: string; configuration: string; journal: string | null; revision: number;
+    state: "passive" | "preparing" | "service" | "draining" | "revoked" | "native" | "identity_changed" | "unavailable";
+    rearm_required: boolean; request_id: string | null; owner_epoch: string | null; identity_current: boolean };
+  request_id: string | null;
+  pending: boolean;
+  running: boolean;
+  code: string;
+}
 /** Desktop service presentation has separate provenance from device-local marks. */
 export interface DesktopService {
   connected: boolean;
@@ -170,6 +180,7 @@ export interface DesktopService {
   details_available: boolean;
   /** Native frozen-read transfer; completion is durable queueing, not host ACK. */
   pending_read_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; through: number; superseded: number; delivered: false };
+  notification_ownership?: NotificationOwnership;
   code: string;
 }
 

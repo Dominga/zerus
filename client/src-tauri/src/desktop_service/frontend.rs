@@ -17,6 +17,8 @@ const MAINTENANCE_UNAVAILABLE: &str =
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
+    #[serde(skip)] // Separate native ownership controller, never a generic policy request.
+    DesktopOwnership,
     #[serde(skip)] // Fixed native startup producer only, never JS row/path input.
     ImportPendingReads,
     #[serde(skip)] // The ephemeral consumer is separate from durable policy requests.
@@ -27,6 +29,7 @@ pub enum Operation {
 impl Operation {
     fn of(request: &Request) -> Self {
         match request {
+            Request::DesktopOwnership { .. } => Self::DesktopOwnership,
             Request::ImportPendingReads { .. } => Self::ImportPendingReads,
             Request::ActivationWait { .. } => Self::ActivationWait,
             Request::AutomaticApprovals { .. } => Self::AutomaticApprovals,
@@ -35,6 +38,7 @@ impl Operation {
     }
     fn name(self) -> &'static str {
         match self {
+            Self::DesktopOwnership => "desktop_ownership",
             Self::ImportPendingReads => "import_pending_reads",
             Self::ActivationWait => "activation_wait",
             Self::AutomaticApprovals => "automatic_approvals",
@@ -696,6 +700,13 @@ fn lookup_receipt(request: &Request, id: &str, value: Value) -> Result<Receipt, 
     }
 }
 fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, bool)> {
+    if matches!(
+        request,
+        Request::DesktopOwnership { .. } | Request::ActivationWait { .. }
+    ) {
+        // Their separate consumers validate different receipts and completion rules.
+        return None;
+    }
     if value["request_id"] != request.id() {
         return None;
     }
@@ -737,7 +748,7 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
             }
             true
         }
-        Request::ActivationWait { .. } => return None, // Separate ephemeral consumer, never a durable policy receipt.
+        Request::DesktopOwnership { .. } | Request::ActivationWait { .. } => return None,
         Request::AutomaticApprovals { enabled, .. } => {
             if value["op"] != "automatic_approvals" || value["enabled"] != *enabled {
                 return None;
@@ -821,4 +832,4 @@ pub async fn desktop_service_frontend_result(
 }
 
 #[cfg(all(test, unix))]
-pub(super) mod tests;
+pub(crate) mod tests;

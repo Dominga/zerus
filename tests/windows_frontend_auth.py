@@ -1,13 +1,15 @@
 """Explicit Windows native suite, with exact CI-built CLI and frontend fixture.
 
 No WebView, native agent, logon task or production service is started. The
-foreground service has private state and stays passive: the positive response
-proves native authentication, while policy delivery remains unavailable.
+foreground service has private state and stays passive: authenticated disabling
+commits, while enabling approvals remains unavailable.
 """
+from contextlib import closing
 import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import sys
 import unittest
@@ -59,17 +61,36 @@ class WindowsFrontend(unittest.TestCase):
         self.assertLessEqual(len(chains[0]), 32)
         print('FRONTEND_OBSERVED_CHAIN ' + json.dumps(dict(case=case, chain=chains[0])), file=sys.stderr)
         self.assertEqual(results[0]['request_id'], request_id)
-        self.assertFalse(results[0]['accepted'])
-        # Neither the positive authentication nor any negative fixture grants
-        # a real policy effect in this passive, privately launched service.
+        if case != 'positive':
+            self.assertFalse(results[0]['accepted'])
+            self.assertFalse(results[0]['durable'])
+        # Safe passive OFF may commit; neither positive nor negative case can
+        # enable approvals or grant writers in this privately launched service.
         after = self.cli('desktop', 'status', '--json')
         self.assertFalse(after['writers_enabled'])
         self.assertFalse(after['automatic_approvals'])
         self.assertFalse((self.root / 'unexpected-tool').exists())
         return results[0]
 
-    def test_real_canonical_frontend_and_original_child_authenticate_before_passive_refusal(self):
-        self.assertEqual(self.invoke()['code'], 'desktop_background_unavailable')
+    def test_real_canonical_frontend_and_original_child_disable_commits_in_passive_service(self):
+        receipt = self.invoke()
+        self.assertIs(receipt['accepted'], True)
+        self.assertIs(receipt['durable'], True)
+        self.assertIs(receipt['enabled'], False)
+        self.assertEqual(receipt, dict(request_id=receipt['request_id'], accepted=True, durable=True,
+                                      op='automatic_approvals', enabled=False, revision=1))
+        database = self.desktop / 'state.sqlite3'
+        self.assertTrue(database.is_file())
+        with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)) as db:
+            recorded = db.execute('SELECT receipt FROM desktop_delivery_requests WHERE request_id=?',
+                                  (receipt['request_id'],)).fetchone()
+            self.assertIsNotNone(recorded)
+            self.assertEqual(json.loads(recorded[0]), receipt)
+            self.assertEqual(db.execute('SELECT enabled,revision FROM desktop_delivery_policy WHERE id=1')
+                             .fetchone(), (0, 1))
+
+    def test_authenticated_enable_still_refuses_in_passive_service(self):
+        self.assertEqual(self.invoke('enable')['code'], 'desktop_background_unavailable')
 
     def test_wrong_native_child_birth_refuses_before_actor_admission(self):
         self.assertEqual(self.invoke('wrong_birth')['code'], 'frontend_authentication_refused')
@@ -90,7 +111,7 @@ class WindowsFrontend(unittest.TestCase):
         previous = os.environ.get(key)
         os.environ[key] = 'native-fixture-parent'
         try:
-            self.assertEqual(self.invoke()['code'], 'frontend_authentication_refused')
+            self.assertEqual(self.invoke('agent_parent')['code'], 'frontend_authentication_refused')
         finally:
             if previous is None:
                 os.environ.pop(key, None)

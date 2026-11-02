@@ -250,23 +250,56 @@ impl Bus {
         deadline: Instant,
         cancelled: impl Fn() -> bool,
     ) -> std::result::Result<Namespace, ()> {
-        self.drive(deadline, cancelled, Self::lookup(self.connection.clone()))?
+        self.drive(
+            deadline,
+            cancelled,
+            Self::lookup(self.connection.clone(), false),
+        )?
     }
-    async fn lookup(connection: Connection) -> Result<Namespace, ()> {
+    async fn lookup(connection: Connection, activate: bool) -> Result<Namespace, ()> {
         let bus = connection
             .call_method(Some(BUS), BUS_PATH, Some(BUS), "GetId", &())
             .await
             .map_err(|_| ())?;
-        let owner = connection
-            .call_method(
-                Some(BUS),
-                BUS_PATH,
-                Some(BUS),
-                "GetNameOwner",
-                &(native::SERVICE,),
-            )
-            .await
-            .map_err(|_| ())?;
+        async fn get_owner(connection: &Connection) -> zbus::Result<zbus::Message> {
+            connection
+                .call_method(
+                    Some(BUS),
+                    BUS_PATH,
+                    Some(BUS),
+                    "GetNameOwner",
+                    &(native::SERVICE,),
+                )
+                .await
+        }
+        let owner = match get_owner(&connection).await {
+            Ok(owner) => owner,
+            Err(zbus::Error::MethodError(name, _, reply))
+                if activate
+                    && name.as_str() == "org.freedesktop.DBus.Error.NameHasNoOwner"
+                    && reply.header().sender().map(|s| s.as_str()) == Some(BUS) =>
+            {
+                // Only the bus may activate this fixed desktop service. This
+                // is setup readiness, never a notification or an ID redirect.
+                let started = connection
+                    .call_method(
+                        Some(BUS),
+                        BUS_PATH,
+                        Some(BUS),
+                        "StartServiceByName",
+                        &(native::SERVICE, 0_u32),
+                    )
+                    .await
+                    .map_err(|_| ())?;
+                if !reply_from(&started, BUS)
+                    || !matches!(started.body().deserialize::<u32>(), Ok(1 | 2))
+                {
+                    return Err(());
+                }
+                get_owner(&connection).await.map_err(|_| ())?
+            }
+            Err(_) => return Err(()),
+        };
         if [bus.header(), owner.header()]
             .iter()
             .any(|h| h.sender().map(|s| s.as_str()) != Some(BUS))
@@ -359,7 +392,7 @@ impl Bus {
         let mut lookup = self
             .lookup
             .take()
-            .unwrap_or_else(|| Box::pin(Self::lookup(self.connection.clone())));
+            .unwrap_or_else(|| Box::pin(Self::lookup(self.connection.clone(), false)));
         #[cfg(test)]
         if let Some(pause) = self.batch_pause.take() {
             pause.reached.send(()).unwrap();
@@ -616,7 +649,10 @@ pub(super) fn run(
     };
     let mut good = bus.matches(true, setup, cancelled);
     let namespace = good
-        .then(|| bus.namespace(setup, cancelled))
+        .then(|| {
+            bus.drive(setup, cancelled, Bus::lookup(bus.connection.clone(), true))
+                .and_then(|v| v)
+        })
         .and_then(std::result::Result::ok);
     let Some(namespace) = namespace else {
         shared.failed.store(true, Ordering::Release);

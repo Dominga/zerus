@@ -208,17 +208,26 @@ impl Host for NativeHost {
             "notification platform unavailable"
         );
         #[cfg(target_os = "linux")]
-        ensure!(status["error"] != true, "notification host failed");
+        ensure!(
+            status["error"] != true,
+            "{}",
+            status["code"]
+                .as_str()
+                .unwrap_or("notification_linux_host_failed")
+        );
         #[cfg(target_os = "macos")]
         if let Some(code) = status["fault"].as_str() {
-            ensure!(
-                code == "notification_status_busy",
-                "notification host failed"
-            );
+            ensure!(code == "notification_status_busy", "{code}");
         }
         #[cfg(any(windows, test))]
         if matches!(&self.0, NativeKind::Windows { .. }) {
-            ensure!(status["fault"].is_null(), "notification host failed");
+            ensure!(
+                status["fault"].is_null(),
+                "{}",
+                status["fault"]
+                    .as_str()
+                    .unwrap_or("notification_windows_host_failed")
+            );
         }
         Ok(status["ready"] == true)
     }
@@ -476,6 +485,9 @@ impl<H: Host> Runtime<H> {
     }
     pub fn drained(&self) -> bool {
         self.drained
+    }
+    pub fn fault(&self) -> Option<&str> {
+        self.error.as_deref()
     }
     pub fn outbox(&self) -> &Outbox {
         &self.outbox

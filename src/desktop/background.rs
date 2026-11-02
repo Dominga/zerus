@@ -146,7 +146,7 @@ impl Runtime {
         }
         (
             changes,
-            consumed == POLL_EVENTS || self.attention.work_pending(),
+            consumed == POLL_EVENTS || self.notifications.ready() && self.attention.work_pending(),
         )
     }
 

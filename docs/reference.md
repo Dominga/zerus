@@ -3539,8 +3539,9 @@ those facts under its state lock and closes only that terminal, then verifies th
 original shell process exited. Tracked agent rows keep their separate verified
 termination path. An untracked shell creates no archive and never offers worktree
 or cache removal; its working folder stays, and detached jobs may continue. If
-the terminal changed or cannot be verified (including multiple panes), refresh
-the row or open its terminal and use `exit` after its jobs finish.
+the terminal changed or cannot be verified (including multiple panes, grouped
+sessions or linked windows), refresh the row or open its terminal and use `exit`
+after its jobs finish.
 
 If SSH drops, tmux on the remote host continues running. Reattach normally. If the
 local tmux server dies, its sessions are gone; `hgs` restores the terminal mode and

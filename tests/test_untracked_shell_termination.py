@@ -6,6 +6,8 @@ import subprocess
 import shlex
 import sys
 import unittest
+from unittest import mock
+import time
 import uuid
 
 import test_pause
@@ -21,6 +23,17 @@ class UntrackedShellTermination(test_pause.Harness):
 
     def create(self, name):
         self.t('new-session', '-d', '-s', name, '-c', str(self.project), '/bin/bash', '--noprofile', '--norc')
+        # new-session can return while the forked pane still has tmux's image.
+        # Require the actual shell, without changing production's allowlist.
+        deadline = time.monotonic() + 3
+        command = [str(self.bin/'tmux'), 'display-message', '-p', '-t', '='+name+':', '#{pane_current_command}']
+        while time.monotonic() < deadline:
+            result = subprocess.run(command, env=self.env, capture_output=True, text=True,
+                                    check=True, timeout=max(.001, min(1, deadline-time.monotonic())))
+            if result.stdout.strip() == 'bash':
+                return
+            time.sleep(.01)
+        self.fail('The private pane did not exec its shell within 3 seconds')
 
     def identity(self, name=None):
         result = json.loads(self.hgs('inspect', name or self.name, '--after', str(2**63-1), '--skip-processes'))
@@ -88,15 +101,13 @@ class UntrackedShellTermination(test_pause.Harness):
         self.request(identity, ok=False); self.assertTrue(self.alive())
         self.assertEqual(json.loads(binding.read_text())['run_id'], 'agent-run')
 
-    def test_server_queue_fence_refuses_a_run_marker_added_after_the_fresh_read(self):
+    def assert_server_queue_refusal(self, *arguments):
         identity = self.identity()
-        # The private PATH shim adds a tracked marker only after Rust's fresh
-        # read, immediately before the real server evaluates its if-shell.
+        # Mutate only after Rust's fresh read, before the real server fence.
         wrapper = self.bin/'tmux'
         before = wrapper.read_text()
         marker = self.root/'mutation-reached'
-        mutate = (shlex.quote(test_pause.TMUX)+' -S '+shlex.quote(self.socket)+
-                  ' set-option -t '+shlex.quote(identity['session_id'])+' @hgs_run fixture-run')
+        mutate = shlex.join([test_pause.TMUX, '-S', self.socket, *arguments])
         wrapper.write_text(before.replace('exec ',
             'case " $* " in *" if-shell "*) '+mutate+' && touch '+shlex.quote(str(marker))+' ;; esac\nexec ', 1))
         try:
@@ -105,6 +116,48 @@ class UntrackedShellTermination(test_pause.Harness):
             self.assertTrue(marker.exists(), 'the exact before-server mutation must be reached')
         self.assertIn('could not be verified', receipt['error'])
         self.assertTrue(self.alive()); self.assertTrue(self.alive('private-neighbour'))
+
+    def test_server_queue_fence_refuses_a_run_marker_added_after_the_fresh_read(self):
+        self.assert_server_queue_refusal('set-option', '-t', self.identity()['session_id'], '@hgs_run', 'fixture-run')
+
+    def test_a_grouped_session_refuses_before_closing_either_terminal(self):
+        identity = self.identity()
+        self.t('new-session', '-d', '-s', 'private-group', '-t', '='+self.name)
+        self.assertEqual(self.t('display-message', '-p', '-t', '='+self.name+':', '#{session_grouped}').strip(), '1')
+        result = json.loads(self.hgs('inspect', self.name, '--after', str(2**63-1), '--skip-processes'))
+        self.assertNotIn('untracked_terminal', result)
+        self.request(identity, ok=False)
+        self.assertTrue(self.alive()); self.assertTrue(self.alive('private-group'))
+
+    def test_a_linked_window_refuses_before_closing_either_terminal(self):
+        identity = self.identity()
+        self.t('link-window', '-s', '='+self.name+':', '-t', '=private-neighbour:1')
+        # This independently exercises window_linked: the session is not grouped.
+        self.assertEqual(self.t('display-message', '-p', '-t', '='+self.name+':', '#{session_grouped} #{window_linked}').strip(), '0 1')
+        result = json.loads(self.hgs('inspect', self.name, '--after', str(2**63-1), '--skip-processes'))
+        self.assertNotIn('untracked_terminal', result)
+        self.request(identity, ok=False)
+        self.assertTrue(self.alive()); self.assertTrue(self.alive('private-neighbour'))
+
+    def test_server_queue_fence_refuses_a_group_added_after_the_fresh_read(self):
+        self.assert_server_queue_refusal('new-session', '-d', '-s', 'private-group', '-t', '='+self.name)
+        self.assertTrue(self.alive('private-group'))
+
+    def test_server_queue_fence_refuses_a_link_added_after_the_fresh_read(self):
+        self.assert_server_queue_refusal('link-window', '-s', '='+self.name+':', '-t', '=private-neighbour:1')
+
+    def test_create_waits_past_the_pre_exec_tmux_image(self):
+        run, reads = subprocess.run, []
+        def observe(command, **kwargs):
+            if command[1:] == ['display-message', '-p', '-t', '=private-starting:', '#{pane_current_command}']:
+                reads.append(command)
+                if len(reads) == 1:
+                    return subprocess.CompletedProcess(command, 0, stdout='tmux\n', stderr='')
+            return run(command, **kwargs)
+        with mock.patch.object(subprocess, 'run', side_effect=observe):
+            self.create('private-starting')
+        self.assertGreaterEqual(len(reads), 2, 'pre-exec is not readiness')
+        self.assertEqual(self.identity('private-starting')['shell'], 'bash')
 
     def test_multiple_panes_have_no_shell_admission(self):
         self.t('split-window', '-d', '-t', '='+self.name+':', '/bin/bash', '--noprofile', '--norc')

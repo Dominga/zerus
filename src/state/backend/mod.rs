@@ -145,7 +145,9 @@ pub(crate) enum PaneField {
     SocketPath,
     SessionCreated,
     SessionWindows,
+    SessionGrouped,
     WindowPanes,
+    WindowLinked,
     PaneId,
     /// The terminal server's process ID.
     ServerPid,

@@ -33,7 +33,9 @@ fn capture_locked(name: &str) -> Result<Identity> {
                 SocketPath,
                 SessionCreated,
                 SessionWindows,
+                SessionGrouped,
                 WindowPanes,
+                WindowLinked,
                 PaneId,
                 PanePid,
                 ServerPid,
@@ -44,7 +46,7 @@ fn capture_locked(name: &str) -> Result<Identity> {
         )
         .map_err(|_| UNVERIFIED)?;
     let fields = info.fields();
-    let [session, actual_name, socket, created, windows, panes, pane, pid, server, command, dead, marker] =
+    let [session, actual_name, socket, created, windows, grouped, panes, linked, pane, pid, server, command, dead, marker] =
         fields.as_slice()
     else {
         return Err(UNVERIFIED.into());
@@ -52,6 +54,8 @@ fn capture_locked(name: &str) -> Result<Identity> {
     if *actual_name != name
         || *windows != "1"
         || *panes != "1"
+        || *grouped != "0"
+        || *linked != "0"
         || *dead != "0"
         || !marker.is_empty()
     {
@@ -154,6 +158,8 @@ pub(super) fn terminate(
                 ("pane_current_command", expected.shell.clone()),
                 ("session_windows", "1".into()),
                 ("window_panes", "1".into()),
+                ("session_grouped", "0".into()),
+                ("window_linked", "0".into()),
                 ("pane_dead", "0".into()),
                 ("@hgs_run", String::new()),
             ];

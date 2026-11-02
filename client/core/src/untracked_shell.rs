@@ -1,7 +1,7 @@
 //! Exact terminal evidence for an untracked shell; never a tracked agent run.
 use serde::{Deserialize, Serialize};
 
-pub const UNVERIFIED: &str = "This shell is not tracked by Zerus and its terminal could not be verified. Open its terminal and close it with exit after its jobs finish.";
+pub const UNVERIFIED: &str = "This session is not tracked by Zerus and its terminal could not be verified. Open its terminal and close it with exit after its jobs finish.";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

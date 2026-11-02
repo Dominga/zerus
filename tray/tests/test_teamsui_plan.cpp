@@ -1438,7 +1438,8 @@ void TestTeamsUiPlan::planModeIsChosenWhenThePlanIsApproved()
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamPhaseMode"));
     QCOMPARE(workspace.findChild<QWidget *>("teamPhaseMode")->property("mode").toString(), QStringLiteral("standard"));
     // No dots as separators in what the card says.
-    for (auto *text : card->findChildren<QLabel *>()) QVERIFY2(!text->text().contains(QChar(0x00b7)), qPrintable(text->text()));
+    // Fresh lookup: the waits above may rebuild the card.
+    for (auto *text : workspace.findChild<QFrame *>("teamPlanModeCard")->findChildren<QLabel *>()) QVERIFY2(!text->text().contains(QChar(0x00b7)), qPrintable(text->text()));
     // No choice: the approval carries no mode, and hgs keeps standard.
     armConfirm(&panel, false);
     workspace.findChild<QPushButton *>("teamWorkspaceApprove")->click();

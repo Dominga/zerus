@@ -78,6 +78,7 @@ mod supervisor;
 mod tasks;
 mod telemetry;
 mod terminate;
+mod untracked_shell;
 mod session_action;
 pub(crate) use session_action::status_machine as lifecycle_receipt_machine;
 mod shown_path;

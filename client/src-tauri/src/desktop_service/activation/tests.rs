@@ -275,11 +275,16 @@ fn original_bound_child_and_one_held_delivery_keep_reads_serial_and_stop_invalid
             delivery.open().post_request_id,
             "22222222-2222-4222-8222-222222222222"
         );
+        #[cfg(target_os = "linux")]
         assert!(
             matches!(&delivery.open().platform_context, Some(zerus_client_core::desktop::notifications::PlatformContext::Wayland { activation_token }) if activation_token == "ephemeral-fixture")
         );
+        #[cfg(target_os = "macos")]
+        assert!(delivery.open().platform_context.is_none());
+        let native_main = delivery.completion();
         let outcome = consume(delivery, true);
         assert!(outcome.show);
+        #[cfg(target_os = "linux")]
         assert_eq!(outcome.activation.as_deref(), Some("ephemeral-fixture"));
         assert_eq!(
             outcome.open,
@@ -294,7 +299,14 @@ fn original_bound_child_and_one_held_delivery_keep_reads_serial_and_stop_invalid
             1,
             "native-main completion still holds the one delivery"
         );
+        // apply() clones this hold into each queued native-main callback.
+        // Dropping the desk outcome cannot admit another click while even one
+        // of those original callbacks has not actually returned.
         drop(outcome);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(waits(&fixture).len(), 1);
+        assert!(native_main.current());
+        drop(native_main);
         until("next fresh read after UI consumes the delivery", || {
             waits(&fixture).len() == 2
         })
@@ -615,6 +627,30 @@ fn a_long_activation_read_leaves_all_fleet_slots_and_a_real_detail_follow_availa
             1
         );
         drop(held);
+        service.join().await.unwrap();
+    });
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_wayland_context_cannot_be_consumed_as_a_mac_activation() {
+    if !private_case("desktop_service::activation::tests::a_wayland_context_cannot_be_consumed_as_a_mac_activation") { return; }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({
+            "ready":true,"activation_abi":true,
+            "activation_platform_context":{"platform":"wayland","activation_token":"foreign-platform"}
+        }));
+        let responder = responder();
+        let _cache = CacheServer::start(&fixture.0, responder.clone());
+        let (service, rx) = start(&fixture, responder);
+        until("foreign platform reply refused", || {
+            service.shared.activation_backoffs.load(Ordering::Acquire) == 1
+        })
+        .await;
+        assert!(rx.try_recv().is_err());
+        assert_eq!(waits(&fixture).len(), 1);
+        assert!(service.snapshot().connected);
         service.join().await.unwrap();
     });
 }

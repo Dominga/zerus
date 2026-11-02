@@ -21,6 +21,7 @@ mod lifecycle;
 mod notifications;
 #[allow(dead_code)]
 mod operations;
+mod cache_maintenance;
 mod owner;
 mod ownership;
 mod pending_reads;

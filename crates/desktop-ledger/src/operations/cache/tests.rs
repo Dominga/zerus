@@ -1,0 +1,245 @@
+//! Storage mechanisms only. The production actor must supply native authority,
+//! original frozen workers, actual owner exclusion and physical join evidence.
+use super::*;
+use rusqlite::{Connection, TransactionBehavior};
+const EPOCH: &str = "11111111-1111-4111-8111-111111111111";
+fn id(n: usize) -> String {
+    format!("22222222-2222-4222-8222-{n:012}")
+}
+fn database(db: &mut Connection) {
+    db.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE service(id INTEGER PRIMARY KEY,configuration TEXT,epoch TEXT);
+        CREATE TABLE desktop_commands(state TEXT);").unwrap();
+    db.execute(
+        "INSERT INTO service VALUES(1,?1,?2)",
+        params!["a".repeat(64), EPOCH],
+    )
+    .unwrap();
+    let tx = db.transaction().unwrap();
+    super::super::migrate(&tx).unwrap();
+    migrate(&tx).unwrap();
+    tx.commit().unwrap();
+}
+fn original(n: usize) -> Original {
+    Original {
+        preparation_id: id(n * 2),
+        operation_id: id(n * 2 + 1),
+        configuration: "a".repeat(64),
+        root: "/srv/example/cache".into(),
+        limit: 1,
+        revision: 0,
+        service_epoch: EPOCH.into(),
+        writer_epoch: id(100),
+        lease: id(n + 200),
+    }
+}
+fn binding(original: &Original) -> Binding {
+    let directory = "b".repeat(64);
+    let name = "report.txt".to_owned();
+    let sha256 = "c".repeat(64);
+    Binding {
+        root: original.root.clone(),
+        directory: directory.clone(),
+        index_sha256: "d".repeat(64),
+        limit: 1,
+        candidates: vec![Candidate {
+            content_id: content_id(&directory, &name, &sha256),
+            name,
+            sha256,
+            bytes: 5,
+            identity: "e".repeat(64),
+        }],
+    }
+}
+fn prepare(db: &mut Connection, original: &Original, binding: &Binding) -> String {
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    assert!(begin(&tx, original, &"f".repeat(64)).unwrap());
+    let hash = prepared(&tx, original, binding).unwrap();
+    tx.commit().unwrap();
+    hash
+}
+fn admit(db: &mut Connection, original: &Original, hash: &str) -> Vec<bool> {
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    let flags = reserve(&tx, original, hash).unwrap();
+    tx.commit().unwrap();
+    flags
+}
+fn join(db: &mut Connection, original: &Original, receipt: Option<&Receipt>) {
+    let tx = db.transaction().unwrap();
+    finish_joined(&tx, original, receipt).unwrap();
+    tx.commit().unwrap();
+}
+
+#[test]
+fn preparation_has_no_execution_and_changed_originals_and_scopes_refuse() {
+    let mut db = Connection::open_in_memory().unwrap();
+    database(&mut db);
+    let original = original(1);
+    let binding = binding(&original);
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    assert!(begin(&tx, &original, &"f".repeat(64)).unwrap());
+    assert!(reserve(&tx, &original, &"a".repeat(64)).is_err());
+    assert!(!begin(&tx, &original, &"f".repeat(64)).unwrap());
+    assert!(begin(&tx, &original, &"b".repeat(64)).is_err());
+    let hash = prepared(&tx, &original, &binding).unwrap();
+    tx.commit().unwrap();
+    let tx = db.transaction().unwrap();
+    let mut changed = original.clone();
+    changed.lease = id(999);
+    assert!(reserve(&tx, &changed, &hash).is_err());
+    changed = original.clone();
+    changed.writer_epoch = id(998);
+    assert!(reserve(&tx, &changed, &hash).is_err());
+    assert!(reserve(&tx, &original, &"0".repeat(64)).is_err());
+    tx.rollback().unwrap();
+    db.execute("UPDATE service SET epoch=?1", [id(997)])
+        .unwrap();
+    let tx = db.transaction().unwrap();
+    assert!(reserve(&tx, &original, &hash).is_err());
+}
+
+#[test]
+fn a_lost_destructive_result_fences_the_same_content_under_new_ids_and_index_generation() {
+    let mut db = Connection::open_in_memory().unwrap();
+    database(&mut db);
+    let first = original(1);
+    let frozen = binding(&first);
+    let hash = prepare(&mut db, &first, &frozen);
+    assert_eq!(admit(&mut db, &first, &hash), [true]);
+    assert_eq!(undrained(&db).unwrap(), 1);
+    join(&mut db, &first, None);
+    assert_eq!(
+        load(&db, &first.operation_id).unwrap().unwrap().phase,
+        Phase::Unknown
+    );
+    assert_eq!(undrained(&db).unwrap(), 0);
+    let mut second = original(2);
+    second.revision = 1;
+    let mut new_generation = binding(&second);
+    new_generation.index_sha256 = "1".repeat(64);
+    let hash = prepare(&mut db, &second, &new_generation);
+    assert_eq!(admit(&mut db, &second, &hash), [false]);
+    let receipt = Receipt {
+        index_sha256: new_generation.index_sha256,
+        files: vec![FileState::Kept],
+        bytes: 5,
+        count: 1,
+    };
+    join(&mut db, &second, Some(&receipt));
+    assert!(db.execute("DELETE FROM desktop_cache_unknown", []).is_err());
+    assert!(db
+        .execute(
+            "UPDATE desktop_cache_unknown SET content_id=?1",
+            ["0".repeat(64)]
+        )
+        .is_err());
+    let row = load(&db, &first.preparation_id).unwrap().unwrap();
+    assert_eq!(row.phase, Phase::Unknown);
+}
+
+#[test]
+fn root_policy_changes_and_global_revoke_block_new_effects_without_releasing_workers() {
+    let mut db = Connection::open_in_memory().unwrap();
+    database(&mut db);
+    let first = original(1);
+    let hash = prepare(&mut db, &first, &binding(&first));
+    let tx = db.transaction().unwrap();
+    revoke(&tx).unwrap();
+    tx.commit().unwrap();
+    let tx = db.transaction().unwrap();
+    assert!(reserve(&tx, &first, &hash).is_err());
+    tx.rollback().unwrap();
+    assert_eq!(undrained(&db).unwrap(), 1);
+    let second = original(2);
+    let tx = db.transaction().unwrap();
+    assert!(begin(&tx, &second, &"f".repeat(64)).is_err());
+    tx.rollback().unwrap();
+    join(&mut db, &first, None);
+    assert_eq!(
+        load(&db, &first.operation_id).unwrap().unwrap().phase,
+        Phase::Refused
+    );
+    let hash = prepare(&mut db, &second, &binding(&second));
+    db.execute("INSERT INTO desktop_commands VALUES('prepared')", [])
+        .unwrap();
+    let tx = db.transaction().unwrap();
+    assert!(reserve(&tx, &second, &hash).is_err());
+}
+
+#[test]
+fn committed_original_result_can_finish_after_revoke_but_cannot_finish_twice() {
+    let mut db = Connection::open_in_memory().unwrap();
+    database(&mut db);
+    let original = original(1);
+    let binding = binding(&original);
+    let hash = prepare(&mut db, &original, &binding);
+    admit(&mut db, &original, &hash);
+    let tx = db.transaction().unwrap();
+    revoke(&tx).unwrap();
+    tx.commit().unwrap();
+    let receipt = Receipt {
+        index_sha256: binding.index_sha256,
+        files: vec![FileState::Removed],
+        bytes: 0,
+        count: 0,
+    };
+    join(&mut db, &original, Some(&receipt));
+    let row = load(&db, &original.operation_id).unwrap().unwrap();
+    assert_eq!(row.phase, Phase::Settled);
+    assert!(!row.undrained);
+    assert_eq!(row.receipt, Some(receipt.clone()));
+    let tx = db.transaction().unwrap();
+    assert!(finish_joined(&tx, &original, Some(&receipt)).is_err());
+}
+
+#[test]
+fn actual_database_reopen_recovers_reserved_work_as_unknown_without_replay() {
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("state.sqlite3");
+    let first = original(1);
+    {
+        let mut db = Connection::open(&path).unwrap();
+        database(&mut db);
+        let hash = prepare(&mut db, &first, &binding(&first));
+        admit(&mut db, &first, &hash);
+    }
+    let mut db = Connection::open(&path).unwrap();
+    let tx = db.transaction().unwrap();
+    recover(&tx).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(
+        load(&db, &first.operation_id).unwrap().unwrap().phase,
+        Phase::Unknown
+    );
+    assert_eq!(undrained(&db).unwrap(), 0);
+    let mut second = original(2);
+    second.revision = 1;
+    let hash = prepare(&mut db, &second, &binding(&second));
+    assert_eq!(admit(&mut db, &second, &hash), [false]);
+}
+
+#[test]
+fn nondestructive_preparation_recovery_is_refused_and_never_promoted() {
+    let mut db = Connection::open_in_memory().unwrap();
+    database(&mut db);
+    let first = original(1);
+    prepare(&mut db, &first, &binding(&first));
+    let tx = db.transaction().unwrap();
+    recover(&tx).unwrap();
+    tx.commit().unwrap();
+    let row = load(&db, &first.operation_id).unwrap().unwrap();
+    assert_eq!(row.phase, Phase::Refused);
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM desktop_cache_unknown", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    let tx = db.transaction().unwrap();
+    assert!(reserve(&tx, &first, row.binding_sha256.as_ref().unwrap()).is_err());
+}

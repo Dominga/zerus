@@ -260,8 +260,8 @@ impl Validated {
     pub fn into_request(self) -> Result<Request> {
         self.check()?;
         ensure!(
-            !matches!(self.0, Request::DesktopOwnership { .. }),
-            "ownership requires its typed boundary"
+            !matches!(self.0, Request::DesktopOwnership { .. } | Request::CacheMaintenance { .. }),
+            "request requires its typed boundary"
         );
         Ok(self.0)
     }
@@ -280,6 +280,17 @@ impl Validated {
     }
     pub fn check_ownership(self) -> Result<()> {
         self.ownership_parts().map(|_| ())
+    }
+    pub fn cache_parts(&self) -> Result<(String, zerus_client_core::desktop::cache_maintenance::Command)> {
+        self.check()?;
+        let Request::CacheMaintenance { request_id, command } = &self.0 else {
+            anyhow::bail!("not cache maintenance");
+        };
+        ensure!(command.valid(request_id), "invalid cache maintenance");
+        Ok((request_id.clone(), *command.clone()))
+    }
+    pub fn check_cache(self) -> Result<()> {
+        self.cache_parts().map(|_| ())
     }
     #[cfg(test)]
     pub fn fixture(value: &Value) -> Self {
@@ -665,6 +676,7 @@ impl Order {
             matches!(
                 operation,
                 "automatic_approvals"
+                    | "cache_maintenance"
                     | "maintenance_configure"
                     | "import_pending_reads"
                     | "desktop_ownership"

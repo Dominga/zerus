@@ -39,6 +39,10 @@ pub enum Request {
         request_id: String,
         enabled: bool,
     },
+    CacheMaintenance {
+        request_id: String,
+        command: Box<super::cache_maintenance::Command>,
+    },
     MaintenanceConfigure {
         request_id: String,
         #[serde(deserialize_with = "required_option")]
@@ -69,6 +73,7 @@ impl Request {
             | Self::DesktopOwnership { request_id, .. }
             | Self::ImportPendingReads { request_id, .. }
             | Self::AutomaticApprovals { request_id, .. }
+            | Self::CacheMaintenance { request_id, .. }
             | Self::MaintenanceConfigure { request_id, .. } => request_id,
         }
     }
@@ -78,6 +83,7 @@ impl Request {
             Self::ImportPendingReads { .. } => "import_pending_reads",
             Self::ActivationWait { .. } => "activation_wait",
             Self::AutomaticApprovals { .. } => "automatic_approvals",
+            Self::CacheMaintenance { .. } => "cache_maintenance",
             Self::MaintenanceConfigure { .. } => "maintenance_configure",
         }
     }
@@ -92,6 +98,10 @@ impl Request {
             }
             Self::ImportPendingReads { page, .. } => page.valid(),
             Self::ActivationWait { .. } | Self::AutomaticApprovals { .. } => true,
+            Self::CacheMaintenance {
+                request_id,
+                command,
+            } => command.valid(request_id),
             Self::MaintenanceConfigure {
                 update, recovery, ..
             } => crate::maintenance::Configuration {

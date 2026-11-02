@@ -18,6 +18,10 @@ pub struct HandoffLock {
     root: PathBuf,
     configuration: String,
 }
+pub(super) enum HandoffAttempt {
+    Acquired(HandoffLock),
+    Contended,
+}
 impl HandoffLock {
     pub fn verify(&self, location: &Location) -> Result<()> {
         ensure!(
@@ -93,14 +97,27 @@ impl Location {
     /// Passive inspection releases this immediately. Migrated writers will
     /// retain it for their full lifetime; the service process lock is separate.
     pub fn handoff_lock(&self) -> Result<HandoffLock> {
+        match self.try_handoff_lock()? {
+            HandoffAttempt::Acquired(lock) => Ok(lock),
+            HandoffAttempt::Contended => anyhow::bail!("desktop handoff is busy"),
+        }
+    }
+    /// Contention is recognized only at this exact OS try-lock call. Opening,
+    /// path/privacy validation and every other failure remain ordinary errors.
+    pub(super) fn try_handoff_lock(&self) -> Result<HandoffAttempt> {
         self.check_existing()?;
         let file = private_file(&self.root.join(HANDOFF_LOCK), true)?;
-        fs2::FileExt::try_lock_exclusive(&file).context("desktop handoff is busy")?;
-        Ok(HandoffLock {
+        if let Err(error) = fs2::FileExt::try_lock_exclusive(&file) {
+            if platform::lock_contended(&error) {
+                return Ok(HandoffAttempt::Contended);
+            }
+            return Err(error).context("desktop handoff is unavailable");
+        }
+        Ok(HandoffAttempt::Acquired(HandoffLock {
             _lock: platform::FileLock::held(file),
             root: self.root.clone(),
             configuration: self.configuration.clone(),
-        })
+        }))
     }
     /// Distinguish an actual flock contender from path/identity/open failures.
     /// Neither branch creates authority or repairs an existing state path.

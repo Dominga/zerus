@@ -9,6 +9,48 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Native managed metadata only. Reuse the checkpoint reader's bounded,
+/// no-follow/private/single-link checks; this selects no path or permission.
+pub fn read_private_bounded(path: &Path, limit: usize) -> io::Result<Option<Vec<u8>>> {
+    if limit == 0 || limit > 16 << 20 {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, limit);
+        Err(io::ErrorKind::Unsupported.into())
+    }
+    #[cfg(unix)]
+    {
+        use std::io::{Read, Seek};
+        let Some(mut source) = checkpoint::current(path, limit)? else {
+            return Ok(None);
+        };
+        source.file.rewind()?;
+        let mut bytes = Vec::with_capacity(source.bytes);
+        source.file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+        if bytes.len() != source.bytes || zerus_desktop_migration::sha256(&bytes) != source.hash {
+            return Err(io::Error::other("private source changed during capture"));
+        }
+        Ok(Some(bytes))
+    }
+}
+
+/// The existing atomic private writer with its parent-directory durability
+/// barrier. Native callers retain uncertainty if either sync fails.
+pub fn write_private_durable(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        write_private_atomic(path, bytes, true)?;
+        checkpoint::sync_parent(path)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, bytes);
+        Err(io::ErrorKind::Unsupported.into())
+    }
+}
+
 /// How many random names a write tries before it gives up.
 const ATTEMPTS: u32 = 16;
 

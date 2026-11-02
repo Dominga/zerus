@@ -593,6 +593,12 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                         source:source.clone(),settings:app.state::<settings::Store>().0.clone()
                     });
                     app.manage(source);
+                    if let Some(inputs) = desktop_service::retained_import::Inputs::native(
+                        &app.state::<identity::Identity>().bundle_id, replay, dir.clone(),
+                        app.state::<settings::Store>().0.clone(),
+                    ) {
+                        app.state::<commands::AppState>().set_retained_import_source(inputs);
+                    }
                 }
                 app.manage(speech_settings::SpeechPage::default());
                 app.manage(termination_cleanup::TerminationCleanup::default());

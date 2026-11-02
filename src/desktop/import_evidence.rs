@@ -156,6 +156,13 @@ pub fn cli(location: &Location) -> Result<Value> {
 
 /// No source-store reads, owner.lock, marker writes, worker or consent changes.
 fn publish(location: &Location, input: &mut impl BufRead) -> Result<Value> {
+    publish_with(location, input, |_| Ok(()))
+}
+fn publish_with(
+    location: &Location,
+    input: &mut impl BufRead,
+    after_reservation: impl FnOnce(&Path) -> Result<()>,
+) -> Result<Value> {
     let start: Start = header(input)?;
     ensure!(
         start.abi == ABI
@@ -285,7 +292,18 @@ fn publish(location: &Location, input: &mut impl BufRead) -> Result<Value> {
         platform::sync_dir(&stage.path().join(kind))?;
     }
     platform::sync_dir(stage.path())?;
-    let lock = location.handoff_lock()?;
+    let lock = match location.try_handoff_lock()? {
+        super::store::HandoffAttempt::Acquired(lock) => lock,
+        super::store::HandoffAttempt::Contended => {
+            // Complete input and the manifest were validated, but THIS
+            // invocation has not attempted mkdir/reservation. This says
+            // nothing about any earlier attempt or the global UUID state.
+            return Ok(json!({"abi":ABI,"published":false,
+                "configuration":start.configuration,"import_id":start.import_id,
+                "import_record":{"version":1,"sha256":sha256(&bytes)},
+                "code":"handoff_busy","this_attempt_not_committed":true}));
+        }
+    };
     lock.verify(location)?;
     location.check_existing()?;
     directory(&imports)?;
@@ -299,6 +317,7 @@ fn publish(location: &Location, input: &mut impl BufRead) -> Result<Value> {
     fs::create_dir(&target)?;
     platform::restrict_dir(&target)?;
     directory(&target)?;
+    after_reservation(&target)?;
     for kind in ["snapshots", "pages"] {
         fs::rename(stage.path().join(kind), target.join(kind))?;
     }

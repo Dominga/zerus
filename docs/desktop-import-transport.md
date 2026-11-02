@@ -100,6 +100,22 @@ Exit zero prints one bounded JSON result: `abi`, `published:true`,
 counts. Compare all identities before accepting the result. Reports contain no
 snapshot bodies or source paths. Errors are nonzero and redacted.
 
+There is one closed negative response: after all input and the final manifest
+have been validated, contention from the actual `try_lock_exclusive` call may
+return exit zero with `published:false`, `code:"handoff_busy"`,
+`this_attempt_not_committed:true`, and the exact ABI, configuration, import UUID
+and `import_record:{version:1,sha256}`. This invocation has not attempted the
+UUID directory reservation. Path, open, privacy, identity and permission errors
+are not this response. Any failure after reservation remains unknown.
+
+Accept that negative only after the original child exits successfully and its
+input writer and both output pipes finish completely, and only against the
+exact expected manifest receipt retained before sending the final record. It
+does not establish global absence or settle an earlier unknown attempt. A new
+**explicit** attempt may use the same retained UUID and record after fresh
+same-source checks. Lost, partial, malformed or mismatched negatives grant no
+retry; neither does an ordinary exit 1 or an absent status result.
+
 After a lost response, inspect the same ID using the supported read-only command:
 
 ```sh
@@ -114,3 +130,43 @@ authority. An absent or unknown outcome must not silently generate another ID
 or overwrite the old one. Preserve original sources and surface the result for
 review. Native Windows filesystem/runtime qualification remains separate from
 cross-target type checking.
+
+## Native Qt/Settings report caller
+
+The live switch identity's service connection captures managed sources off the
+GUI thread after paired-CLI selection and configuration preflight, before the
+startup Grant. Explicit Resume uses the same ordering. This first report slice
+uses the existing Qt family decoders and the current local Settings bytes: 17
+Qt families on Linux (16 on macOS), plus three paired Next policy/recovery
+families, with at most 64 MiB, 1,024 snapshots and 1,024 pages. It is a private
+Staged report, not materialization of these families into workers.
+
+The Unix source adapter retains the original private, single-link Qt file and
+Settings file identities and raw hashes. Mac defaults are exported read-only
+through the fixed owned helper and re-exported before the final record; an
+uncertain export never falls back to a plist. The local Settings writer pauses
+new mutations during its original capture. This is source-specific exclusion,
+not proof that Qt or the whole desktop drained. Every helper, writer and pipe
+retains its original resources through actual completion. Shutdown reports
+unconfirmed work rather than declaring an outstanding resource group drained.
+The generic Windows Qt/Settings capture and private report-journal adapter
+remain unavailable in this slice; the separate Windows pending-read checkpoint
+is unchanged. Missing Qt is reported as not applicable without inventing an
+empty source or a successful import.
+
+The private managed `qt-retained-import-v1.json` retains the original UUID,
+configuration, source hashes, attempt and expected manifest hash. Published
+records are historical: later starts inspect the original ID instead of
+re-seeding changed Qt state. Unknown attempts perform only original-ID lookup.
+Only an exact known pre-reservation negative admits an explicit same-record
+retry (at most 16 attempts). Invalid, changed or unsupported sources are kept
+for review without a final manifest; no source is truncated, cleared or
+rewritten. Service status carries body-free `retained_source_import` progress.
+
+This report does not replace the existing frozen pending-read capture or its
+separate authenticated safe-passive page transfer. That transfer may wait for
+the connected service and need not complete before Grant. If a prior runtime
+holds the handoff lock, report publication stays blocked; the caller never
+silently revokes it or treats status as permission. Remaining interim operation,
+draft/cache source adapters and actual migration/upgrade acceptance stay open
+under G3.

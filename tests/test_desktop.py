@@ -88,6 +88,29 @@ class Desktop(unittest.TestCase):
     def failed_serve(self, env=None):
         return self.cli('desktop', 'serve', ok=False, env=env)
 
+    def test_pending_read_import_requires_native_frontend_and_lookup_stays_read_only(self):
+        self.serve()
+        mark = dict(computer='example', name='agent/project/test', run_id='run',
+                    conversation_id='conversation', reply_id='reply', attention_signature=None)
+        page = dict(source=dict(sha256='a' * 64, bytes=256, rows=1), after=0, marks=[mark])
+        refused = self.cli('desktop', 'request', '--json', data=dict(
+            op='import_pending_reads', request_id=str(uuid.uuid4()), page=page,
+            confirmed=True, role='frontend'))
+        self.assertFalse(refused['accepted'])
+        self.assertFalse(refused['durable'])
+        self.assertEqual(refused['code'], 'frontend_authentication_required')
+        lookup = self.cli('desktop', 'request', '--json', data=dict(
+            op='pending_reads_import_result', request_id=str(uuid.uuid4()),
+            original_request_id=str(uuid.uuid4()), page=page))
+        self.assertTrue(lookup['accepted'])
+        self.assertFalse(lookup['durable'])
+        self.assertFalse(lookup['found'])
+        self.assertIsNone(lookup['result'])
+        status = self.cli('desktop', 'status', '--json')
+        self.assertFalse(status['writers_enabled'])
+        self.assertFalse(status['automatic_approvals'])
+        self.assertEqual(status['read_queue']['pending'], 0)
+
     def watch(self):
         process = subprocess.Popen([str(HGS), 'desktop', 'watch', '--json'], env=self.env,
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

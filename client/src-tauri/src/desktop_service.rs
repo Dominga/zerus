@@ -34,6 +34,7 @@ mod catalog_relay;
 use catalog::catalog_loop;
 mod details;
 pub mod frontend;
+mod read_import;
 
 /// Registered at setup before start_source. Some contains a verified service
 /// watch frame; None invalidates the prior projection. Callbacks must not block.
@@ -225,6 +226,7 @@ struct Shared {
     details_changed: Notify,
     organization: Mutex<Option<zerus_client_core::OrganizationSnapshot>>,
     frontend: frontend::Frontend,
+    read_import: Mutex<read_import::State>,
     projections: Vec<Projection>,
 }
 
@@ -269,6 +271,7 @@ impl Service {
             details_changed: Notify::new(),
             organization: Mutex::new(None),
             frontend: frontend::Frontend::default(),
+            read_import: Mutex::new(read_import::State::default()),
             projections,
         });
         let (control, receiver) = watch::channel(Control::Retry(0));
@@ -297,6 +300,7 @@ impl Service {
         if self.shared.stopped.load(Ordering::Acquire) {
             return;
         }
+        read_import::retry(self.shared.clone());
         if let Some(cancel) = self
             .shared
             .cancellation
@@ -358,6 +362,15 @@ impl Service {
         &self,
         marks: Vec<zerus_client_core::readmarks::ReadMark>,
     ) -> Result<Vec<zerus_client_core::readmarks::ReadMark>, String> {
+        if self
+            .shared
+            .read_import
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .blocked()
+        {
+            return Err("Pending read marks have not been transferred to the service yet.".into());
+        }
         if marks.len() > service::CATALOG_ROWS {
             return Err("Select at most 128 read marks at once.".into());
         }
@@ -529,8 +542,15 @@ impl Drop for Service {
 }
 
 impl Shared {
-    fn publish(&self, snapshot: Snapshot) {
-        *self.snapshot.lock().unwrap_or_else(PoisonError::into_inner) = snapshot.clone();
+    fn publish(&self, mut snapshot: Snapshot) {
+        snapshot.pending_read_import = Some(
+            self.read_import
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .status(),
+        );
+        let mut current = self.snapshot.lock().unwrap_or_else(PoisonError::into_inner);
+        *current = snapshot.clone();
         self.pump.service(snapshot);
     }
     fn unavailable(&self, code: &str) {

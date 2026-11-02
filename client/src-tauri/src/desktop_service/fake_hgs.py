@@ -165,6 +165,44 @@ def change(key, revision, remove=False):
 
 def desktop_request():
     op, request_id = value['op'], value['request_id']
+    if op in ['approval_audit_list', 'approval_audit_detail']:
+        journal = '00000000-0000-4000-8000-00000000000' + ('4' if (root / 'audit-replaced').exists() else '3')
+        if config.get('audit_hold'):
+            (root / 'audit-held').touch()
+            wait(root / 'audit-release')
+        reply = dict(abi='desktop-approval-audit-v1', request_id=request_id,
+                     configuration='a' * 64, service_epoch=epoch, read_only=True,
+                     accepted=True, journal=journal)
+        if value.get('journal') and value['journal'] != journal:
+            reply.update(accepted=False, code='approval_audit_scope_changed')
+        elif op == 'approval_audit_detail':
+            reply['result'] = dict(id=value['id'], status='approved', detail='Service audit outcome',
+                                   question={'questions': [{'question': 'Service-owned question', 'body': 'Fixture body'}]}, answers=[])
+        else:
+            high = value.get('through') or 53
+            ids = list(range(1, high + 1))
+            if value.get('before'):
+                ids = [i for i in ids if i < value['before']]
+            if value.get('after'):
+                ids = [i for i in ids if i > value['after']][:50]
+            else:
+                ids = ids[-50:]
+            ids.reverse()
+            reply['result'] = dict(through=high, next=ids[-1] if ids and ids[-1] > 1 else None,
+                                   previous=ids[0] if ids and ids[0] < high else None,
+                                   entries=[dict(id=i, at=1800000000000, host='a.example', session='agent/project/fixture',
+                                                 provider='claude', prompt='Service-owned question', status='approved') for i in ids])
+        fault = config.get('audit_fault')
+        if fault == 'oversize':
+            reply['overflow'] = 'x' * (256 * 1024)
+        elif fault in ['request_id', 'configuration', 'service_epoch', 'journal']:
+            reply[fault] = 'wrong'
+        elif fault == 'refused':
+            reply.update(accepted=False, code='approval_audit_unavailable')
+        elif fault == 'rows':
+            reply['result']['entries'] *= 2
+        print(json.dumps(reply))
+        return
     if op in ['delivery_result', 'maintenance_result'] and config.get('lookup_unavailable') and not (root / 'lookup-back').exists():
         raise SystemExit('fixture lookup transport unavailable')
     common = {'request_id': request_id, 'accepted': True, 'durable': False, 'abi': 'desktop-catalog-v1',
@@ -314,6 +352,8 @@ if args == ['--help']:
         print('Desktop pending read import ABI: desktop-pending-reads-v1')
     if config.get('maintenance_abi', True):
         print('Desktop maintenance ABI: desktop-maintenance-v1')
+    if config.get('audit_abi', True):
+        print('Desktop approval audit ABI: desktop-approval-audit-v1')
 elif args == ['desktop', 'frontend-request', '--json']:
     request = value['request']
     assert value['abi'] == 'desktop-ui-request-v1'

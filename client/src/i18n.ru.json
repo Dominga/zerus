@@ -2411,6 +2411,8 @@
   "The agent suggests starting a new task with /clear to save %1 context tokens. The current cache may still be warm.": "Агент предлагает запустить новую задачу с помощью /clear, чтобы сэкономить токены контекста (%1). Текущий кэш может быть еще теплым.",
   "The answer acknowledgement is invalid. Check Terminal before retrying.": "Подтверждение ответа недействительно. Проверьте терминал перед повторной попыткой.",
   "The answers exceed 64 KiB.": "Ответы превышают 64 КиБ.",
+  "The approval journal changed. Refresh to read it again.": "Журнал разрешений изменился. Обновите, чтобы прочитать его заново.",
+  "The approval journal is unavailable. Refresh to try again.": "Журнал разрешений недоступен. Обновите, чтобы повторить попытку.",
   "The attachment is empty.": "Вложение пусто.",
   "The background service has not confirmed this settings change.": "Фоновая служба не подтвердила это изменение настроек.",
   "The clipboard is unavailable": "Буфер обмена недоступен",

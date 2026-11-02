@@ -172,3 +172,74 @@ fn native_windows_capture_pins_survive_until_the_last_original_resource_owner_dr
     );
     assert!(!std::fs::read(f.path()).unwrap().is_empty());
 }
+
+#[test]
+fn native_windows_brief_sharing_contention_retries_the_same_frozen_source() {
+    let mut f = Fixture::new();
+    let mut initial = ReadMarks::load(f.path());
+    initial.add_all([mark(0)]);
+    drop(initial.checkpoint().unwrap());
+    f.actions = Actions::new(f.path());
+    let original = std::fs::read(f.path()).unwrap();
+    let reader = OpenOptions::new()
+        .read(true)
+        .share_mode(7)
+        .open(f.path())
+        .unwrap();
+    let worker = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(25));
+        drop(reader);
+    });
+    let frozen = Arc::new(f.actions.freeze_reads().unwrap());
+    let captured = frozen.capture(deadline());
+    worker.join().unwrap();
+    let captured = captured.unwrap();
+    assert_eq!(captured.capture.source().rows, 1);
+    assert!(f.actions.queue_marks(vec![mark(1)]).is_err());
+    drop(captured);
+    drop(frozen);
+    assert_eq!(std::fs::read(f.path()).unwrap(), original);
+}
+
+#[test]
+fn native_windows_sharing_wait_obeys_the_original_deadline_and_retains_retry() {
+    let mut f = Fixture::new();
+    let mut initial = ReadMarks::load(f.path());
+    drop(initial.checkpoint().unwrap());
+    f.actions = Actions::new(f.path());
+    let reader = OpenOptions::new()
+        .read(true)
+        .share_mode(7)
+        .open(f.path())
+        .unwrap();
+    let frozen = Arc::new(f.actions.freeze_reads().unwrap());
+    assert!(matches!(
+        frozen.capture(Instant::now() + Duration::from_millis(25)),
+        Err(Refused::Pending)
+    ));
+    assert!(f.actions.queue_marks(vec![mark(0)]).is_err());
+    assert_eq!(
+        f.actions.checkpoint_admission.snapshot().unwrap().admitted,
+        1
+    );
+    drop(reader);
+    assert_eq!(frozen.capture(deadline()).unwrap().capture.source().rows, 0);
+}
+
+#[test]
+fn sharing_retry_count_is_finite_and_other_errors_are_not_retried() {
+    for (code, expected) in [(32, 21), (5, 1)] {
+        let f = Fixture::new();
+        let frozen = f.actions.freeze_reads().unwrap();
+        let mut calls = 0;
+        assert!(matches!(
+            frozen.checkpoint_inner(deadline(), |_| {
+                calls += 1;
+                Err(std::io::Error::from_raw_os_error(code))
+            }),
+            Err(Refused::Checkpoint)
+        ));
+        assert_eq!(calls, expected);
+        assert!(!f.path().exists());
+    }
+}

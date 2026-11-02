@@ -9,6 +9,24 @@ use zerus_client_core::{
 
 const RETRY: Duration = Duration::from_secs(60);
 
+#[derive(Debug, PartialEq)]
+enum ReadError {
+    Permanent,
+    Retryable,
+}
+impl ReadError {
+    fn preparation(error: std::io::Error) -> Self {
+        match error.kind() {
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::InvalidInput => {
+                Self::Permanent
+            }
+            // Capacity and unknown registry errors do not establish a permanent
+            // identity refusal. A retry is a fresh read, never a replay.
+            _ => Self::Retryable,
+        }
+    }
+}
+
 pub(crate) type Sink = Arc<dyn Fn(Delivery) + Send + Sync>;
 
 /// Only this module can create a delivery, after the original reply matches.
@@ -149,27 +167,26 @@ fn read(
     charge: Charge,
     configuration: &str,
     epoch: &str,
-) -> Result<Option<wire::Open>, &'static str> {
+) -> Result<Option<wire::Open>, ReadError> {
     let id = uuid::Uuid::new_v4().to_string();
     let registration = shared
         .responder
         .as_ref()
-        .ok_or("activation_identity_unavailable")?
+        .ok_or(ReadError::Permanent)?
         .prepare_ui_request(
             uuid::Uuid::new_v4().to_string(),
             ui_requests::Request::ActivationWait {
                 request_id: id.clone(),
             },
         )
-        .map_err(|_| "activation_identity_unavailable")?;
-    let input =
-        serde_json::to_vec(registration.envelope()).map_err(|_| "invalid_activation_wait")?;
+        .map_err(ReadError::preparation)?;
+    let input = serde_json::to_vec(registration.envelope()).map_err(|_| ReadError::Permanent)?;
     if input.len() > zerus_watch_protocol::CONTROL_LINE_BYTES {
-        return Err("invalid_activation_wait");
+        return Err(ReadError::Permanent);
     }
     let resources: Arc<dyn Send + Sync> = Arc::new((charge, registration.resources()));
     let bytes = runner::run_owned(
-        relay.executable()?,
+        relay.executable().map_err(|_| ReadError::Retryable)?,
         &invocation(
             &["desktop", "frontend-request", "--json"],
             input,
@@ -185,14 +202,13 @@ fn read(
         },
         resources,
     )
-    .map_err(|_| "activation_transport_unavailable")?;
+    .map_err(|_| ReadError::Retryable)?;
     if bytes.len() > zerus_watch_protocol::CONTROL_LINE_BYTES {
-        return Err("invalid_activation_reply");
+        return Err(ReadError::Retryable);
     }
-    let reply: wire::Reply =
-        serde_json::from_slice(&bytes).map_err(|_| "invalid_activation_reply")?;
+    let reply: wire::Reply = serde_json::from_slice(&bytes).map_err(|_| ReadError::Retryable)?;
     if !reply.matches(&id, configuration, epoch) {
-        return Err("invalid_activation_reply");
+        return Err(ReadError::Retryable);
     }
     Ok(reply.activation)
 }
@@ -254,6 +270,14 @@ pub(super) async fn run(shared: Arc<Shared>, configuration: String, stop: Arc<At
         let open = match result {
             Ok(Ok(Some(open))) => open,
             Ok(Ok(None)) => continue, // Idle is a new read, never a replay.
+            Ok(Err(ReadError::Permanent)) => {
+                #[cfg(test)]
+                shared.activation_permanent.store(true, Ordering::Release);
+                if !stop.load(Ordering::Acquire) && !shared.stopped.load(Ordering::Acquire) {
+                    eprintln!("zerus-client: desktop activation identity unavailable");
+                }
+                return; // Only this reader stops; catalog/watch remain connected.
+            }
             _ => {
                 if !stop.load(Ordering::Acquire) && !shared.stopped.load(Ordering::Acquire) {
                     eprintln!("zerus-client: desktop activation unavailable");

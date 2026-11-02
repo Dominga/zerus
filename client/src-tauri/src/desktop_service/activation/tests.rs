@@ -8,12 +8,15 @@ use std::{sync::mpsc, time::Instant};
 // The native responder deliberately refuses an agent-attributed parent. Run
 // the GUI-only fixture in an exact child without mutating this harness's env.
 fn private_case(case: &'static str) -> bool {
+    private_case_as(case, false)
+}
+fn private_case_as(case: &'static str, agent: bool) -> bool {
     const MARKER: &str = "ZERUS_ACTIVATION_CONSUMER_CASE";
     if std::env::var(MARKER).as_deref() == Ok(case) {
         return true;
     }
     let _process = crate::PROCESS_TREE.read().unwrap();
-    let call = Invocation {
+    let mut call = Invocation {
         args: [
             "--exact",
             case,
@@ -28,26 +31,136 @@ fn private_case(case: &'static str) -> bool {
         timeout: Duration::from_secs(30),
         request_id: None,
     };
-    let result = runner::run_without(
-        &std::env::current_exe().unwrap(),
-        &call,
-        &[(MARKER, case)],
-        &["HGS_SESSION", "HGS_RUN_ID"],
-        64 << 10,
-    )
-    .unwrap();
-    assert!(
-        matches!(&result, zerus_client_core::Exit::Code { code: 0, .. }),
-        "private GUI case {case}: {result:?}"
-    );
-    if let zerus_client_core::Exit::Code { stdout, .. } = &result {
+    let stdout = if agent {
+        call.stdin = Some(vec![]);
+        // Set attribution only in this original test child, after the runner's
+        // ordinary environment clearing. The parallel harness stays unchanged.
+        runner::run_owned(
+            &std::env::current_exe().unwrap(),
+            &call,
+            &[(MARKER, case)],
+            &AtomicBool::new(false),
+            |command| {
+                command.env("HGS_SESSION", "codex/fixture/gui-parent");
+                command.env("HGS_RUN_ID", "fixture-agent-run");
+                command.spawn()
+            },
+            Arc::new(()),
+        )
+        .unwrap()
+    } else {
+        let result = runner::run_without(
+            &std::env::current_exe().unwrap(),
+            &call,
+            &[(MARKER, case)],
+            &["HGS_SESSION", "HGS_RUN_ID"],
+            64 << 10,
+        )
+        .unwrap();
         assert!(
-            String::from_utf8_lossy(stdout)
-                .contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
-            "the exact private GUI case must execute once: {result:?}"
+            matches!(&result, zerus_client_core::Exit::Code { code: 0, .. }),
+            "private GUI case {case}: {result:?}"
         );
-    }
+        let zerus_client_core::Exit::Code { stdout, .. } = result else {
+            unreachable!()
+        };
+        stdout
+    };
+    assert!(
+        String::from_utf8_lossy(&stdout)
+            .contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
+        "the exact private GUI case must execute once: {}",
+        String::from_utf8_lossy(&stdout)
+    );
     false
+}
+
+#[test]
+fn only_identity_and_invalid_input_preparation_errors_are_permanent() {
+    use std::io::ErrorKind;
+    for kind in [ErrorKind::PermissionDenied, ErrorKind::InvalidInput] {
+        assert_eq!(ReadError::preparation(kind.into()), ReadError::Permanent);
+    }
+    for kind in [
+        ErrorKind::WouldBlock,
+        ErrorKind::Other,
+        ErrorKind::Interrupted,
+    ] {
+        assert_eq!(ReadError::preparation(kind.into()), ReadError::Retryable);
+    }
+}
+
+#[test]
+fn an_agent_attributed_gui_stops_only_the_activation_reader_without_rearming() {
+    if !private_case_as("desktop_service::activation::tests::an_agent_attributed_gui_stops_only_the_activation_reader_without_rearming", true) { return; }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    assert_eq!(
+        std::env::var("HGS_SESSION").unwrap(),
+        "codex/fixture/gui-parent"
+    );
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({"ready":true,"activation_abi":true}));
+        let responder = responder();
+        let _cache = CacheServer::start(&fixture.0, responder.clone());
+        let (service, rx) = start(&fixture, responder);
+        until("actual native identity refusal stops the reader", || {
+            service.shared.activation_permanent.load(Ordering::Acquire)
+        })
+        .await;
+        assert_eq!(
+            service.shared.activation_backoffs.load(Ordering::Acquire),
+            0
+        );
+        assert!(
+            waits(&fixture).is_empty(),
+            "no activation CLI child was spawned"
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(
+            service.snapshot().connected,
+            "catalog/watch remain available"
+        );
+        service.join().await.unwrap();
+        assert_eq!(
+            service.shared.activation_rpc.snapshot().unwrap().admitted,
+            0
+        );
+    });
+}
+
+#[test]
+fn a_full_native_registration_cache_remains_retryable_without_disabling_the_catalog() {
+    if !private_case("desktop_service::activation::tests::a_full_native_registration_cache_remains_retryable_without_disabling_the_catalog") { return; }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({"ready":true,"activation_abi":true}));
+        let responder = responder();
+        let held: Vec<_> = (0..ui_requests::LIMIT)
+            .map(|_| {
+                responder
+                    .prepare_ui_request(
+                        uuid::Uuid::new_v4().to_string(),
+                        ui_requests::Request::ActivationWait {
+                            request_id: uuid::Uuid::new_v4().to_string(),
+                        },
+                    )
+                    .unwrap()
+            })
+            .collect();
+        let _cache = CacheServer::start(&fixture.0, responder.clone());
+        let (service, rx) = start(&fixture, responder);
+        until(
+            "capacity refusal enters the ordinary fresh-read backoff",
+            || service.shared.activation_backoffs.load(Ordering::Acquire) == 1,
+        )
+        .await;
+        assert!(!service.shared.activation_permanent.load(Ordering::Acquire));
+        assert!(waits(&fixture).is_empty());
+        assert!(rx.try_recv().is_err());
+        assert!(service.snapshot().connected);
+        service.join().await.unwrap();
+        drop(held);
+    });
 }
 
 fn start(

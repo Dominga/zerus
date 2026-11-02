@@ -91,10 +91,21 @@ Dirty/new state is bounded and flushed before renaming the original owned
 prepared-file handle, then flushed and read back through that same handle. An
 error after the rename attempt remains unknown: the source and prepared file
 are never deleted as recovery. An unchanged checkpoint does not rewrite bytes
-or unknown fields. File sharing failures retain the same freeze for Retry.
+or unknown fields. Before rename, a failed preparation requests deletion of only
+its newly created temporary file through that original handle; a cleanup failure
+retains both diagnostics and never falls back to deleting by path. File sharing
+violations get at most 20 brief 10 ms retries within the original capture deadline,
+without holding the marks mutex during sleeps. Other failures, exhausted retries
+and unknown publication retain the same freeze for the explicit Retry action.
 There is no directory-flush or whole-volume durability claim on Windows.
 `zerus-5wmh.66.3.31.6.1` tracks the native Windows validation; implementing this
 adapter does not itself enable the service-mode/default-on switch.
+
+Windows checkpoints support local drive paths only. A redirected `%APPDATA%`
+on a UNC/network share remains unavailable, including when represented by a
+reparse/junction ancestor. The paused-transfer notice stays visible and service
+read submissions remain blocked; it is never reported as an empty successful
+transfer. Retry does not change that path restriction or relocate user data.
 
 ## Observation and restart
 

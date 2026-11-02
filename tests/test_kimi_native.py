@@ -41,6 +41,21 @@ import uuid
 import test_pause as lifecycle
 from kimi_release import admitted_version
 
+def settled_turn(state, receipt):
+    """One native observation, after this exact submitted turn has replied."""
+    return (state.get('conversation_id') and state.get('activity') == 'idle' and state.get('phase') == 'idle'
+            and float(state.get('reply_at') or 0) > receipt['submitted_at']
+            and 'pause' in state.get('allowed_actions', []) and state)
+
+
+def settled_recovery(state):
+    job = state.get('recovery', {})
+    # A durable recovery result and the next live projection are separate
+    # observations. Do not accept success until the original receipt has settled.
+    return (job.get('state') == 'succeeded' and isinstance(job.get('receipt'), dict)
+            and settled_turn(state, job['receipt']))
+
+
 KIMI = os.environ.get('HGS_KIMI_TEST_BIN')
 GUARDS = [Path(path).resolve() for path in os.environ.get('ZERUS_KIMI_GUARD', '').split(os.pathsep) if path]
 # Where KIMI_CODE_BASE_URL points: Kimi asks its platform there for a banner
@@ -797,10 +812,7 @@ class NativeKimi(lifecycle.Harness):
         """The submitted turn has ended and the session is Ready again: Kimi's
         reply came after this submission, and hgs would pause the session now.
         SessionStart confirms the conversation idle before the turn starts."""
-        state = self.inspect(name)
-        return (state.get('conversation_id') and state.get('activity') == 'idle' and state.get('phase') == 'idle'
-                and float(state.get('reply_at') or 0) > receipt['submitted_at']
-                and 'pause' in state.get('allowed_actions', []) and state)
+        return settled_turn(self.inspect(name), receipt)
 
     def brief(self, state):
         keys = ('activity', 'phase', 'conversation_id', 'expected_id', 'active_tools', 'subagents',
@@ -977,8 +989,7 @@ class NativeKimi(lifecycle.Harness):
 
         def recovered():
             self.hgs('recovery', 'tick')
-            state = self.inspect(name)
-            return state if state.get('recovery', {}).get('state') == 'succeeded' else None
+            return settled_recovery(self.inspect(name))
         finished = self.until(recovered, name, seconds=60)
         job = finished['recovery']
         self.assertEqual((job['attempt'], job['attempts']), (1, dict(rate_limit=1)))
@@ -1553,6 +1564,22 @@ class FixtureControls(unittest.TestCase):
         self.assertGreaterEqual(kimi.binding_reads, 2, 'the initial supervisor PID is not a native agent identity')
         self.assertIn(TMUX_KEYS, kimi.shown(), 'the start was ready before Kimi drew its tmux warning')
         self.assertGreaterEqual(kimi.ticks, 6)
+
+    def test_recovery_success_waits_for_the_same_native_settlement_as_an_ordinary_turn(self):
+        receipt = dict(request_id=str(uuid.uuid4()), status='submitted', submitted_at=100.0)
+        ready = dict(conversation_id='conversation', activity='idle', phase='idle', reply_at=101.0,
+                     allowed_actions=['pause'], recovery=dict(state='succeeded', receipt=receipt))
+        for label, state in {
+            'persisted success while the live projection is working': dict(ready, activity='busy', phase='working'),
+            'an old reply': dict(ready, reply_at=99.0),
+            'no reply yet': dict(ready, reply_at=None),
+            'native work still blocks pause': dict(ready, allowed_actions=[]),
+            'no original receipt': dict(ready, recovery=dict(state='succeeded')),
+            'recovery still retrying': dict(ready, recovery=dict(state='retrying', receipt=receipt)),
+        }.items():
+            with self.subTest(label=label):
+                self.assertFalse(settled_recovery(state))
+        self.assertIs(settled_recovery(ready), ready)
 
     def test_a_turn_settles_only_with_a_reply_after_its_submission_while_pause_is_allowed(self):
         receipt = dict(request_id=str(uuid.uuid4()), status='submitted', submitted_at=100.0)

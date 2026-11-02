@@ -224,6 +224,9 @@ struct Shared {
     pump: crate::pump::Pump,
     sink: Mutex<Option<SyncSender<Data>>>,
     snapshot: Mutex<Snapshot>,
+    // Bounded display-only names from a checked runtime roster. Missing or
+    // disconnected projections retain last-known choices, never a known zero.
+    peer_choices: Mutex<Option<BTreeSet<String>>>,
     dirty: Mutex<Dirty>,
     changed: Notify,
     rpc: Gate,
@@ -295,6 +298,7 @@ impl Service {
             pump,
             sink: Mutex::new(Some(sink)),
             snapshot: Mutex::new(Snapshot::default()),
+            peer_choices: Mutex::new(None),
             dirty: Mutex::new(Dirty::default()),
             changed: Notify::new(),
             rpc: Gate::new(4).unwrap(),
@@ -330,6 +334,15 @@ impl Service {
     pub fn snapshot(&self) -> Snapshot {
         self.shared
             .snapshot
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+    /// Settings choices only: offline and generation-zero computers remain
+    /// selectable. These names grant neither freshness nor writer authority.
+    pub fn peers(&self) -> Option<BTreeSet<String>> {
+        self.shared
+            .peer_choices
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
@@ -580,6 +593,33 @@ impl Drop for Service {
 }
 
 impl Shared {
+    fn observe_peer_choices(&self, state: &service::State, value: &Value) {
+        // A runtime draining its sources is not a peer-membership removal.
+        // The parser already checked configuration/epoch and the <=64 roster.
+        if value["background_runtime"]["state"] != "running" {
+            return;
+        }
+        if let Some(sources) = state.sources() {
+            // A restarted runtime initially knows only its ungreeted local
+            // source. That warming roster cannot remove last-known choices.
+            if !sources
+                .iter()
+                .any(|source| source.computer.is_empty() && source.generation > 0)
+            {
+                return;
+            }
+            *self
+                .peer_choices
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(
+                sources
+                    .iter()
+                    .filter(|source| !source.computer.is_empty())
+                    .map(|source| source.computer.clone())
+                    .collect(),
+            );
+        }
+    }
     fn publish(&self, mut snapshot: Snapshot) {
         snapshot.pending_read_import = Some(
             self.read_import
@@ -821,6 +861,7 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
     }
     let mut state = service::State::new(configuration.into())?;
     state.status(&value)?;
+    shared.observe_peer_choices(&state, &value);
     if let Some(responder) = &shared.responder {
         responder.configure_once(configuration.into());
     }
@@ -971,6 +1012,7 @@ async fn connection(
                         shared.publish(state.snapshot().clone());
                         match update {
                             service::Update::Status => {
+                                shared.observe_peer_choices(&state, &frame["value"]);
                                 if let Some(computers) = state.sources() {
                                     for computer in computers {
                                         // Generation zero has not greeted the service yet.

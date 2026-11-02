@@ -61,12 +61,12 @@ def status():
                 'status': 'live' if online else 'reconnecting', 'accepting': online}]
     if config.get('peer_failure'):
         sources.append(dict(sources[0], computer='broken', incarnation=2))
-    return {'abi': 'desktop-v1', 'configuration': 'a' * 64, 'epoch': epoch, 'generation': 1,
+    return {'abi': 'desktop-v1', 'configuration': 'a' * 64, 'epoch': epoch, 'generation': 1, 'host': 'caption-only',
             'lifecycle': {'abi': 'desktop-lifecycle-v1', 'phase': 'serving', 'ipc_ready': True,
                           'configuration': 'a' * 64, 'epoch': epoch, 'generation': 1, 'background': background},
             'attention_counts': counts, 'automatic_approvals': False, 'catalog_reads': {'changes_abi': abi},
             'background_runtime': {'epoch': epoch, 'display_only': True, 'authority': False, 'state': 'running',
-                                   'computers': sources},
+                                   'computers': sources} if not config.get('peer_choices') else None,
             'detail_subscriptions': {'abi': 'desktop-details-v1', 'stopping': False} if config.get('details') else None}
 
 
@@ -173,6 +173,8 @@ def desktop_request():
         common['incarnation'] = 2
         if (root / 'peer-scope-recovered').exists():
             common['projection'] = 'b' * 32
+    if config.get('peer_choices') and value.get('computer') == 'offline':
+        common.update(incarnation=2, online=False, last_known=True, complete=False)
     if op == 'detail_follow':
         if config.get('follow_timeout') and value['subscription']['topic'] == 'activity':
             (root / 'follow-held').touch()
@@ -195,6 +197,8 @@ def desktop_request():
     elif op == 'catalog_page':
         number = counter('page-number')
         page = dict(common, start_revision='0', revision='0', items=[row('row')])
+        if config.get('peer_choices') and value['computer'] == 'offline':
+            page['start_revision'] = None
         if config.get('dirty_walk'):
             page.update(start_revision='0', revision='2', stale=True, complete=False)
             if number == 1:
@@ -392,6 +396,27 @@ elif args == ['desktop', 'watch', '--json']:
                               'lease': '00000000-0000-4000-8000-000000000003',
                               'limits': {'demands_per_subscriber': 64}}
     frame(0, 'hello', initial)
+    if config.get('peer_choices'):
+        for seq, stage in enumerate(['known', 'invalid', 'warming', 'stopping', 'removed', 'empty'], 1):
+            wait(root / ('roster-' + stage))
+            updated = status()
+            updated['generation'] = updated['lifecycle']['generation'] = seq + 1
+            computers = [{'computer': '', 'incarnation': 1, 'generation': 1, 'status': 'live', 'accepting': True}]
+            if stage in ['known', 'invalid']:
+                computers.append({'computer': 'offline', 'incarnation': 2, 'generation': 1,
+                                  'status': 'reconnecting', 'accepting': False})
+            if stage != 'empty':
+                computers.append({'computer': 'waiting', 'incarnation': 3, 'generation': 0,
+                                  'status': 'probing', 'accepting': False})
+            if stage == 'warming':
+                computers = [dict(computers[0], generation=0, status='probing', accepting=False)]
+            updated['background_runtime'] = {'epoch': epoch, 'display_only': True, 'authority': stage == 'invalid',
+                'state': 'stopping' if stage == 'stopping' else 'running', 'computers': [] if stage == 'stopping' else computers}
+            frame(seq, 'status', updated)
+            if stage == 'known' and config.get('roster_disconnect_early'):
+                raise SystemExit(0)
+        wait(root / 'roster-end')
+        raise SystemExit(0)
     if config.get('coverage_offline'):
         wait(root / 'repeat-status')
         for seq in [1, 2]:

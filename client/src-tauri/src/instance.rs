@@ -22,17 +22,29 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::identity::Platform;
 
 /// The line a start sends to the running instance.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Activation {
     Show,
     Sessions,
+    /// Public UI navigation only; never carries a callback token or permission.
+    #[cfg(all(feature = "live", target_os = "linux"))]
+    Navigation(zerus_client_core::desktop::activation::Target),
 }
 
 impl Activation {
-    pub fn line(self) -> &'static [u8] {
+    pub fn line(&self) -> Vec<u8> {
         match self {
-            Self::Show => b"show\n",
-            Self::Sessions => b"sessions\n",
+            Self::Show => b"show\n".to_vec(),
+            Self::Sessions => b"sessions\n".to_vec(),
+            #[cfg(all(feature = "live", target_os = "linux"))]
+            Self::Navigation(target) => format!(
+                "target {}\n",
+                match zerus_client_core::desktop::activation::encode_navigation(target) {
+                    Some(encoded) => encoded,
+                    None => return Vec::new(),
+                }
+            )
+            .into_bytes(),
         }
     }
 
@@ -51,7 +63,20 @@ impl Activation {
         match &line[start..end] {
             b"sessions" => Some(Self::Sessions),
             b"show" => Some(Self::Show),
-            _ => None,
+            _ => {
+                #[cfg(all(feature = "live", target_os = "linux"))]
+                {
+                    std::str::from_utf8(&line[start..end])
+                        .ok()
+                        .and_then(|line| line.strip_prefix("target "))
+                        .and_then(zerus_client_core::desktop::activation::decode_navigation)
+                        .map(Self::Navigation)
+                }
+                #[cfg(not(all(feature = "live", target_os = "linux")))]
+                {
+                    None
+                }
+            }
         }
     }
 }
@@ -542,7 +567,7 @@ pub fn start(
                 effects.report(&why);
             }
         }
-        if effects.forward(activation) {
+        if effects.forward(activation.clone()) {
             effects.unlock();
             return Outcome::Forwarded;
         }
@@ -580,11 +605,15 @@ pub fn start(
 
 /// Hands the activation to an instance that answers (`SingleInstance.cpp:22-31`).
 pub fn forward(socket: &Path, activation: Activation) -> bool {
+    let line = activation.line();
+    if line.is_empty() {
+        return false;
+    }
     let Ok(mut stream) = UnixStream::connect(socket) else {
         return false;
     };
     let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
-    let _ = stream.write_all(activation.line());
+    let _ = stream.write_all(&line);
     true
 }
 
@@ -768,11 +797,11 @@ fn claim_with_reply(
             let inode = fs::metadata(&paths.socket)
                 .map(|metadata| metadata.ino())
                 .unwrap_or(0);
-            let (sender, activations) = mpsc::channel();
+            let (sender, activations) = mpsc::sync_channel(32);
             listen(
                 listener,
                 move |activation| {
-                    let _ = sender.send(activation);
+                    let _ = sender.try_send(activation);
                 },
                 reply,
             );
@@ -817,7 +846,11 @@ fn listen(
                 }
                 let complete = loop {
                     let left = deadline.saturating_duration_since(Instant::now());
-                    if line.len() >= 64 || left.is_zero() {
+                    #[cfg(all(feature = "live", target_os = "linux"))]
+                    let cap = zerus_client_core::desktop::activation::NAVIGATION_BYTES + 8;
+                    #[cfg(not(all(feature = "live", target_os = "linux")))]
+                    let cap = 64;
+                    if line.len() >= cap || left.is_zero() {
                         break false;
                     }
                     // macOS refuses the option once the peer has closed; the
@@ -891,6 +924,39 @@ mod tests {
             service_wait: Duration::from_millis(400),
             poll: Duration::from_millis(20),
         }
+    }
+
+    #[cfg(all(feature = "live", target_os = "linux"))]
+    #[test]
+    fn navigation_instance_wire_is_target_only_and_retains_exact_identity() {
+        let value = Activation::Navigation(zerus_client_core::desktop::activation::Target {
+            computer: "peer.example".into(),
+            run: "original-run".into(),
+            conversation: "original-conversation".into(),
+        });
+        assert_eq!(Activation::parse(&value.line()), Some(value));
+        assert!(Activation::parse(br#"target {"computer":"peer","run":"r","conversation":"c","activation_token":"injected"}"#).is_none());
+        let dir = scratch("navigation");
+        let paths = paths("navigation", &dir, &dir);
+        let Claim::Claimed(first) =
+            claim_at(&paths, None, Activation::Show, &LockInfo::own(), &fast())
+        else {
+            panic!("first claims");
+        };
+        let target = zerus_client_core::desktop::activation::Target {
+            computer: "peer.example".into(),
+            run: "r".repeat(1024),
+            conversation: "c".repeat(1024),
+        };
+        let value = Activation::Navigation(target);
+        assert!(forward(&paths.socket, value.clone()));
+        assert_eq!(
+            first
+                .activations
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap(),
+            value
+        );
     }
 
     #[test]
@@ -1332,7 +1398,7 @@ mod tests {
         );
         for activation in [Activation::Show, Activation::Sessions] {
             assert!(matches!(
-                claim_at(&paths, None, activation, &LockInfo::own(), &fast()),
+                claim_at(&paths, None, activation.clone(), &LockInfo::own(), &fast()),
                 Claim::Forwarded
             ));
             assert_eq!(

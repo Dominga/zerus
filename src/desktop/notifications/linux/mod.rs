@@ -37,6 +37,10 @@ struct Shared {
     born: Instant,
     cleanup: AtomicU64,
 }
+struct Exit {
+    clean: bool,
+    drained: bool,
+}
 impl Shared {
     fn cleanup_deadline(&self) -> Instant {
         let wanted = (self.born.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64)
@@ -65,12 +69,13 @@ impl Acknowledgement {
 }
 
 /// Shared connection/worker lifetime is separate from per-command resources.
-/// Only a successful original cleanup AND actual thread join reports drained.
+/// Actual connection/executor teardown AND original thread join prove resource
+/// drain. A namespace/cleanup fault remains separate from that physical proof.
 pub(super) struct Runtime {
     shared: Arc<Shared>,
     control: mpsc::SyncSender<Control>,
-    thread: Option<JoinHandle<bool>>,
-    joined: Option<bool>,
+    thread: Option<JoinHandle<Exit>>,
+    joined: Option<Exit>,
 }
 impl Runtime {
     pub fn start(session: Session, endpoint: Endpoint, address: String) -> Result<Self> {
@@ -137,18 +142,23 @@ impl Runtime {
     }
     pub fn drained(&mut self) -> bool {
         if self.thread.as_ref().is_some_and(JoinHandle::is_finished) {
-            self.joined = Some(self.thread.take().unwrap().join().unwrap_or(false));
-            if self.joined == Some(false) {
+            self.joined = Some(self.thread.take().unwrap().join().unwrap_or(Exit {
+                clean: false,
+                drained: false,
+            }));
+            if self.joined.as_ref().is_some_and(|exit| !exit.clean) {
                 self.shared.failed.store(true, Ordering::Release);
             }
         }
-        self.joined == Some(true)
+        self.joined.as_ref().is_some_and(|exit| exit.drained)
     }
     pub fn status(&self) -> Value {
         json!({"platform":"linux","ready":self.shared.ready.load(Ordering::Acquire),
             "stopping":self.shared.stop.load(Ordering::Acquire),
             "error":self.shared.failed.load(Ordering::Acquire),
-            "joined":self.joined.is_some(),"drained":self.joined==Some(true)})
+            "code":self.shared.failed.load(Ordering::Acquire).then_some("notification_linux_host_failed"),
+            "joined":self.joined.is_some(),"clean":self.joined.as_ref().map(|exit|exit.clean),
+            "drained":self.joined.as_ref().is_some_and(|exit|exit.drained)})
     }
 }
 impl Drop for Runtime {

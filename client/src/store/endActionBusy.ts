@@ -14,7 +14,7 @@ export function claimEnds(captures: EndCapture[]): (() => void) | undefined {
   setPending(new Set([...pending(), ...keys]));
   return () => setPending((all) => new Set([...all].filter((k) => !keys.has(k))));
 }
-export const isEndAction = (action: Action) => ["archive", "terminate", "kill", "forget", "forget_binding", "forget_archive", "clear_context"].includes(action.kind);
+export const isEndAction = (action: Action) => ["archive", "terminate", "kill", "terminate_shell", "forget", "forget_binding", "forget_archive", "clear_context"].includes(action.kind);
 export const captureEnd = (row: ActionRow, action: EndAction): EndCapture => ({
   target: { computer: row.computer, name: row.name, run_id: row.runId ?? "", conversation_id: row.conversationId ?? "" }, action, state: row.state,
 });

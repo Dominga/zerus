@@ -95,8 +95,10 @@ def main():
     args = parser.parse_args()
     if args.static_wheel and not args.native_wheel:
         parser.error("--static-wheel requires --native-wheel")
-    if args.native_wheel and args.only != "variable-scroll":
-        parser.error("--native-wheel requires --only variable-scroll")
+    if args.static_wheel and args.only != "variable-scroll":
+        parser.error("--static-wheel requires --only variable-scroll")
+    if args.native_wheel and args.only not in ("variable-scroll", "activity-bottom"):
+        parser.error("--native-wheel requires --only variable-scroll or activity-bottom")
     app = args.app.resolve()
     scratch = args.scratch.resolve()
     if not app.is_file():
@@ -134,6 +136,10 @@ def main():
     replay = scratch / "replay.ndjson"
     replay.write_text("".join(json.dumps(frame, separators=(",", ":")) + "\n" for frame in frames), encoding="utf-8")
     config = fixture_config(replay)
+    for index in range(150):
+        config["attachments"][f"req-bottom-{index}"] = {"name": "late-image.png", "mime": "image/png", "data_base64": PNG}
+    if args.only == "activity-bottom":
+        config.setdefault("delays", {})["attachment"] = .4
     audio = io.BytesIO()
     with wave.open(audio, "wb") as wav:
         wav.setnchannels(1)

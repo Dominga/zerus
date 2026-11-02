@@ -170,6 +170,30 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                 println!("{}", registration::preview(config, &location)?);
                 Ok(())
             }
+            ["registration", "--json", "--background"] => {
+                ensure!(
+                    cfg!(target_os = "linux"),
+                    "background registration switching is currently supported on Linux only"
+                );
+                println!("{}", registration::preview_mode(config, &location, true)?);
+                Ok(())
+            }
+            ["registration", "mode-check", "--json"] => {
+                #[cfg(target_os = "linux")]
+                {
+                    let scope = ui_authority::Scope::new(config, &location);
+                    let source = ui_authority::registration::caller(&scope)?;
+                    println!(
+                        "{}",
+                        json!({"schema":1,"configuration":location.configuration,"admitted":true,"source":source})
+                    );
+                    Ok(())
+                }
+                #[cfg(not(target_os = "linux"))]
+                anyhow::bail!(
+                    "desktop registration mode checks are currently supported on Linux only"
+                )
+            }
             ["registration", operation @ ("install" | "remove" | "status"), "--json"] => {
                 #[cfg(windows)]
                 {
@@ -182,7 +206,9 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                 #[cfg(not(windows))]
                 {
                     let _ = operation;
-                    anyhow::bail!("desktop registration install/remove/status is available only on Windows; use the maintained platform installer")
+                    anyhow::bail!(
+                        "desktop registration install/remove/status is available only on Windows; use the maintained platform installer"
+                    )
                 }
             }
             ["notification-registration", rest @ ..] => {
@@ -311,9 +337,12 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                     && result["handoff"] == "none"
                     && result["revoked"] == true
                     && result["nothing_written"] == true;
-                ensure!((settled || absent) && result["request_id"] == command.id()
+                ensure!(
+                    (settled || absent)
+                        && result["request_id"] == command.id()
                         && result["configuration"] == location.configuration,
-                    "desktop revocation is not settled; keep Qt stopped and inspect the same request_id");
+                    "desktop revocation is not settled; keep Qt stopped and inspect the same request_id"
+                );
                 Ok(())
             }
             ["catalog-relay", "--json"] => catalog_relay::run(&location),
@@ -422,7 +451,7 @@ impl Drop for Permit {
 }
 
 fn serve(config: &Config, location: Location, background_mode: bool) -> Result<()> {
-    let (_signals, _lock, listener, epoch, mut store) = (|| -> Result<_> {
+    let (_signals, owner, listener, epoch, mut store) = (|| -> Result<_> {
         let signals = platform::ShutdownGuard::install()?;
         // This dedicated service process has no workers yet. Make socket creation
         // private too, so a concurrent status probe never sees the pre-chmod mode.
@@ -431,7 +460,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
             libc::umask(0o077);
         }
         location.prepare()?;
-        let lock = location.lock()?;
+        let lock = Arc::new(location.lock()?);
         let listener = Arc::new(Listener::bind(&location)?);
         let epoch = uuid::Uuid::new_v4().to_string();
         let store = Store::open(&location, &epoch)?;
@@ -509,7 +538,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
         }
         if background_mode && !background_blocked {
             background = Some(
-                background::Runtime::start(config, &epoch, &mut feed).context(StartupRefused)?,
+                background::Runtime::start(config, &epoch, &mut feed, owner.clone())
+                    .context(StartupRefused)?,
             );
             // Store the runtime first: a writer startup error still drains the
             // fleet through the common shutdown path below.
@@ -522,16 +552,21 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
         while platform::shutdown_signal() == 0 {
             // Prepared takeover reconciliation only reduces authority. Keep the
             // same runtime until its actual drain succeeds; no replacement yet.
-            ownership::settle(&location, &mut store, None, |store| {
+            let handoff = background.as_ref().and_then(background::Runtime::handoff);
+            ownership::settle(&location, &mut store, handoff.as_deref(), |store| {
                 background.as_mut().map_or(Ok(()), |runtime| {
                     runtime.drain(store, Duration::from_millis(10))
                 })
             })?;
-            if background
-                .as_ref()
-                .is_some_and(background::Runtime::drained)
-                && ownership::service_granted(&store, &location.configuration)?
-            {
+            drop(handoff);
+            if background::replacement_permitted(
+                background_mode,
+                background
+                    .as_ref()
+                    .is_some_and(background::Runtime::drained),
+                &location,
+                &store,
+            )? {
                 feed.stop(&mut store)?;
                 background = None;
             }
@@ -545,9 +580,14 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                 background_blocked = true;
             } else if background_mode
                 && background.is_none()
-                && ownership::service_granted(&store, &location.configuration)?
+                && revoke::background_permitted(&location, &store)?
             {
-                background = Some(background::Runtime::start(config, &epoch, &mut feed)?);
+                background = Some(background::Runtime::start(
+                    config,
+                    &epoch,
+                    &mut feed,
+                    owner.clone(),
+                )?);
                 background.as_mut().unwrap().start_presence(&location)?;
                 background_blocked = false;
             }
@@ -582,6 +622,12 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         &reads,
                     );
                     value["frontend_read_delivery"] = frontend.status();
+                    value["lifecycle"]["mode"] = if background_mode {
+                        "background"
+                    } else {
+                        "passive"
+                    }
+                    .into();
                     value["attention_counts"] = attention_counts(&store, &epoch, seq, &feed);
                     if let Some(runtime) = &background {
                         runtime.decorate(&mut value);
@@ -628,24 +674,31 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                 if authority.operation() == "desktop_ownership" =>
                             {
                                 match authority.into_request(&mut frontend_order) {
-                                    Ok(permit) => match ownership::frontend(
-                                        &location,
-                                        &mut store,
-                                        &epoch,
-                                        permit,
-                                        None,
-                                        |store| {
-                                            background.as_mut().map_or(Ok(()), |runtime| {
-                                                runtime.drain(store, Duration::from_millis(750))
-                                            })
-                                        },
-                                    ) {
-                                        Ok(receipt) => serde_json::to_value(receipt)?,
-                                        Err(_) => frontend_refused(
-                                            hello.request.as_ref(),
-                                            "ownership_not_settled",
-                                        ),
-                                    },
+                                    Ok(permit) => {
+                                        let handoff = background
+                                            .as_ref()
+                                            .and_then(background::Runtime::handoff);
+                                        let result = ownership::frontend(
+                                            &location,
+                                            &mut store,
+                                            &epoch,
+                                            permit,
+                                            handoff.as_deref(),
+                                            |store| {
+                                                background.as_mut().map_or(Ok(()), |runtime| {
+                                                    runtime.drain(store, Duration::from_millis(750))
+                                                })
+                                            },
+                                        );
+                                        drop(handoff);
+                                        match result {
+                                            Ok(receipt) => serde_json::to_value(receipt)?,
+                                            Err(_) => frontend_refused(
+                                                hello.request.as_ref(),
+                                                "ownership_not_settled",
+                                            ),
+                                        }
+                                    }
                                     Err(_) => frontend_refused(
                                         hello.request.as_ref(),
                                         "frontend_identity_expired",
@@ -786,13 +839,28 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                 request_value["op"].as_str(),
                                 Some("revoke" | "revoke_status")
                             ) {
-                                revoke::request_with_runtime(
+                                let handoff = runtime.handoff();
+                                let revoke_epoch = runtime.revocation_epoch(&epoch);
+                                let result = revoke::request_with_runtime(
                                     &location,
                                     &mut store,
                                     request_value,
-                                    &epoch,
+                                    &revoke_epoch,
+                                    handoff.as_deref(),
                                     |store| runtime.drain(store, Duration::from_millis(750)),
-                                )
+                                );
+                                // Match the original writer incarnation first;
+                                // a rearmed runtime must not lend its drain state
+                                // to an earlier incarnation's settled receipt.
+                                if request_value["op"] == "revoke_status"
+                                    && result["revoked"] == true
+                                    && !runtime.drained()
+                                {
+                                    json!({"request_id":request_value["request_id"],"accepted":false,"durable":false,
+                                        "revoked":false,"checkpointed":false,"code":"drain_not_settled"})
+                                } else {
+                                    result
+                                }
                             } else if matches!(request_value["op"].as_str(), Some("read_intent")) {
                                 runtime.delivery_request(&mut store, request_value)
                             } else {
@@ -801,7 +869,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         } else {
                             request(&location, &mut store, hello.request.as_ref())
                         };
-                        migration = handoff::inspect(&location);
+                        let held = background.as_ref().and_then(background::Runtime::handoff);
+                        migration = handoff::inspect_held(&location, held.as_deref());
                         frame(&epoch, seq, "response", result)
                     } else {
                         frame(
@@ -885,7 +954,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
             if Instant::now() >= heartbeat {
                 store.recover_effects(&epoch);
                 seq += 1;
-                migration = handoff::inspect(&location);
+                let held = background.as_ref().and_then(background::Runtime::handoff);
+                migration = handoff::inspect_held(&location, held.as_deref());
                 let mut value = projection(
                     &location,
                     &store,
@@ -896,6 +966,12 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                     &reads,
                 );
                 value["frontend_read_delivery"] = frontend.status();
+                value["lifecycle"]["mode"] = if background_mode {
+                    "background"
+                } else {
+                    "passive"
+                }
+                .into();
                 value["attention_counts"] = attention_counts(&store, &epoch, seq, &feed);
                 if let Some(runtime) = &background {
                     runtime.decorate(&mut value);

@@ -40,7 +40,7 @@ export interface EndOptions {
   current?: () => boolean;
 }
 export function actionVerb(c: EndCapture) {
-  return c.action.kind === "archive" ? "Archive" : ["terminate", "kill"].includes(c.action.kind) ? "Terminate" : c.action.kind === "clear_context" ? "Clear" : "Forget";
+  return c.action.kind === "archive" ? "Archive" : ["terminate", "kill", "terminate_shell"].includes(c.action.kind) ? "Terminate" : c.action.kind === "clear_context" ? "Clear" : "Forget";
 }
 // One session, then several; the toast title and its cancel notices.
 const ongoing = {

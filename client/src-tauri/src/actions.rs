@@ -161,7 +161,7 @@ impl WriteKind {
     pub fn of(action: &Action) -> Self {
         match action {
             Action::Settings { .. } => Self::Settings,
-            Action::Terminate | Action::Kill => Self::Terminate,
+            Action::Terminate | Action::Kill | Action::TerminateShell { .. } => Self::Terminate,
             Action::ClearContext { .. } => Self::Clear,
             _ => Self::Update,
         }
@@ -891,6 +891,9 @@ fn failed(detail: impl Into<String>) -> Outcome {
 /// `forgetArchive` do (`HgsClient.cpp:1303-1324`). Other calls are built off
 /// the async workers after the claim, since building one may read files.
 fn refused_before_claim(target: &Target, action: &Action) -> Option<String> {
+    if matches!(action, Action::Terminate | Action::Kill) && target.run_id.is_empty() {
+        return Some(zerus_client_core::untracked_shell::UNVERIFIED.into());
+    }
     match action {
         Action::Restore { .. } | Action::ForgetArchive { .. } => {
             invocation(target, action, "").err()
@@ -906,6 +909,58 @@ pub struct ActionReply {
     outcome: Outcome,
     #[serde(skip_serializing_if = "Option::is_none")]
     cleanup_capture: Option<crate::termination_cleanup::RetainedCapture>,
+}
+#[tauri::command]
+pub async fn untracked_shell_identity(
+    window: tauri::Webview,
+    app: State<'_, crate::commands::AppState>,
+    reads: State<'_, crate::termination_cleanup::TerminationCleanup>,
+    target: Target,
+) -> Result<zerus_client_core::untracked_shell::Identity, String> {
+    use zerus_client_core::untracked_shell::{Identity, UNVERIFIED};
+    if window.label() != "main" || !target.run_id.is_empty() || !target.conversation_id.is_empty() {
+        return Err(UNVERIFIED.into());
+    }
+    let row = app
+        .pump()
+        .row_named(&target.computer, &target.name)
+        .ok_or(UNVERIFIED)?;
+    if row.tracked
+        || row.state != "running"
+        || row.run_id.as_ref().is_some_and(|s| !s.is_empty())
+        || row.conversation_id.as_ref().is_some_and(|s| !s.is_empty())
+    {
+        return Err(UNVERIFIED.into());
+    }
+    let read = reads.read_terminal_identity()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _read = read;
+        let mut inv = zerus_client_core::details::details_invocation(&target, None);
+        let at = inv
+            .args
+            .iter()
+            .position(|s| s == "--after")
+            .ok_or(UNVERIFIED)?;
+        inv.args[at + 1] = i64::MAX.to_string();
+        let zerus_client_core::Exit::Code {
+            code: 0, stdout, ..
+        } = run_delayed(&default_hgs(), &inv)
+        else {
+            return Err(UNVERIFIED.into());
+        };
+        let value: serde_json::Value = serde_json::from_slice(&stdout).map_err(|_| UNVERIFIED)?;
+        if value["tracked"] != false || value["name"].as_str() != Some(&target.name) {
+            return Err(UNVERIFIED.into());
+        }
+        let identity: Identity =
+            serde_json::from_value(value["untracked_terminal"].clone()).map_err(|_| UNVERIFIED)?;
+        if !identity.valid() {
+            return Err(UNVERIFIED.into());
+        }
+        Ok(identity)
+    })
+    .await
+    .map_err(|_| UNVERIFIED.to_string())?
 }
 #[tauri::command]
 pub async fn run_action(
@@ -1288,15 +1343,16 @@ async fn dispatch_reserved_plan(
     let hgs = default_hgs();
     let (call_target, call_action) = (target.clone(), action.clone());
     let termination: Option<crate::pump::Termination> = (WriteKind::of(&action)
-        == WriteKind::Terminate)
-        .then(|| {
-            state
-                .termination_pump
-                .get()?
-                .upgrade()?
-                .capture_termination(&target)
-        })
-        .flatten();
+        == WriteKind::Terminate
+        && !matches!(action, Action::TerminateShell { .. }))
+    .then(|| {
+        state
+            .termination_pump
+            .get()?
+            .upgrade()?
+            .capture_termination(&target)
+    })
+    .flatten();
     let cleanup_receipt = cleanup.clone();
     let delayed_receipt = delayed.as_ref().map(|(captured, _)| captured.clone());
     let native_read = read_call.as_mut().map(crate::readsync::Call::native);
@@ -1984,6 +2040,59 @@ mod tests {
                 usize::from(runtime == "live")
             );
             assert_eq!(matches!(out, Outcome::Done { .. }), runtime == "live");
+        }
+    }
+
+    #[test]
+    fn delayed_untracked_shell_keeps_original_terminal_proof_and_never_calls_name_only_kill() {
+        use serde_json::json;
+        use zerus_client_core::{end_action::Captured, Exit};
+        for scenario in ["exact", "changed-pid", "agent"] {
+            let actions = Actions::new(
+                std::env::temp_dir().join(format!("zerus-shell-end-{}.json", uuid::Uuid::new_v4())),
+            );
+            let target = Target {
+                computer: String::new(),
+                name: "example-shell".into(),
+                run_id: String::new(),
+                conversation_id: String::new(),
+            };
+            let identity: zerus_client_core::untracked_shell::Identity = serde_json::from_value(json!({"version":1,"socket":"/tmp/example-tmux.sock","socket_dev":"1","socket_ino":"2","server_pid":10,"server_start":"server-birth","session_id":"$1","session_created":1700000000,"pane_id":"%2","pane_pid":11,"pane_start":"shell-birth","shell":"bash"})).unwrap();
+            let action = Action::TerminateShell {
+                identity: identity.clone(),
+            };
+            let captured = Captured {
+                target: target.clone(),
+                action: action.clone(),
+                state: "running".into(),
+            };
+            let claim = actions.reserve_end(&target).unwrap();
+            assert!(refused_before_claim(&target, &Action::Kill).is_some());
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let count = Arc::clone(&calls);
+            let out = tauri::async_runtime::block_on(dispatch_reserved_plan(&actions, target, action,
+                uuid::Uuid::new_v4().to_string(), move |_, inv, _| {
+                    let value = if inv.args.iter().any(|a| a == "inspect") {
+                        let mut proof = json!(identity);
+                        if scenario == "changed-pid" { proof["pane_pid"] = json!(99); }
+                        json!({"name":"example-shell","tracked":scenario=="agent","untracked_terminal":proof})
+                    } else {
+                        assert_eq!(inv.args, ["session-action", "example-shell", "--json"]);
+                        let body: serde_json::Value = serde_json::from_slice(inv.stdin.as_ref().unwrap()).unwrap();
+                        assert_eq!(body["action"], "terminate_shell");assert_eq!(body["terminal_identity"], json!(identity));
+                        count.fetch_add(1, Ordering::Relaxed);
+                        json!({"request_id":body["request_id"],"name":"example-shell","run_id":"","conversation_id":"","status":"completed","terminal_closed":true,"terminal_identity":identity})
+                    };
+                    Exit::Code { code: 0, stdout: serde_json::to_vec(&value).unwrap(), stderr: String::new() }
+                }, None, Some((captured, claim)))).unwrap();
+            assert_eq!(
+                calls.load(Ordering::Relaxed),
+                usize::from(scenario == "exact")
+            );
+            assert_eq!(
+                matches!(out, Outcome::Done { cleanup: None, .. }),
+                scenario == "exact"
+            );
         }
     }
 

@@ -5,6 +5,8 @@ use crate::desktop::store::{Location, Store};
 use std::sync::atomic::{AtomicU32, AtomicU8};
 use zerus_desktop_ledger::{self as ledger, Identity, Kind, Reserve, Target};
 
+mod recovery;
+
 fn session() -> Session {
     Session {
         configuration: "a".repeat(64),
@@ -324,10 +326,13 @@ struct Server {
 }
 impl Server {
     fn new(bus: &bus::Bus) -> Self {
+        Self::at(&bus.address)
+    }
+    fn at(address: &str) -> Self {
         let (called, calls) = mpsc::sync_channel(8);
         let (closed, closes) = mpsc::sync_channel(8);
         let mode = Arc::new(AtomicU8::new(0));
-        let connection = zbus::blocking::connection::Builder::address(bus.address.as_str())
+        let connection = zbus::blocking::connection::Builder::address(address)
             .unwrap()
             .name(zerus_freedesktop_notify::SERVICE)
             .unwrap()
@@ -904,9 +909,15 @@ fn actual_restore_rebuilds_callbacks_without_notify_and_rejects_other_daemon() {
     until(|| runtime.shared.failed.load(Ordering::Acquire));
     until(|| runtime.thread.as_ref().is_some_and(JoinHandle::is_finished));
     assert!(
-        !runtime.drained(),
-        "uncertain namespace loss never reports CleanExit"
+        runtime.drained(),
+        "the original socket/executor actually closed before join"
     );
+    assert_eq!(
+        runtime.status()["clean"],
+        false,
+        "namespace loss is never a clean callback fence"
+    );
+    assert_eq!(runtime.status()["error"], true);
     assert!(replacement.called.try_recv().is_err());
     assert!(replacement.closed.try_recv().is_err());
 }
@@ -946,6 +957,27 @@ fn actual_stop_drains_ordered_closed_callbacks_but_never_opens_a_late_click() {
                     &(42_u32, 2_u32),
                 )
                 .unwrap();
+            // emit_signal only writes this producer's socket. Fence it on the
+            // SAME connection before the consumer sends RemoveMatch: otherwise
+            // the bus can remove the match before forwarding these callbacks.
+            let reply = server
+                .connection
+                .call_method(
+                    Some("org.freedesktop.DBus"),
+                    "/org/freedesktop/DBus",
+                    Some("org.freedesktop.DBus"),
+                    "GetId",
+                    &(),
+                )
+                .unwrap();
+            assert_eq!(
+                reply.header().sender().map(|s| s.as_str()),
+                Some("org.freedesktop.DBus")
+            );
+            let bus_id: String = reply.body().deserialize().unwrap();
+            assert!(
+                matches!(&original.native_id, NativeId::Linux { bus_id: expected, .. } if *expected == bus_id)
+            );
         }
     ));
     assert_eq!(h.outbox.status()["callbacks"], 1);
@@ -961,6 +993,7 @@ fn actual_stop_drains_ordered_closed_callbacks_but_never_opens_a_late_click() {
 #[test]
 fn attachment_after_daemon_replacement_skips_old_live_and_cleanup_mappings() {
     use super::super::attachment;
+    let _serial = attachment::TEST_SERIAL.lock().unwrap();
     for retired in [false, true] {
         let bus = bus::Bus::new();
         let old = Server::new(&bus);
@@ -1026,4 +1059,159 @@ fn attachment_after_daemon_replacement_skips_old_live_and_cleanup_mappings() {
         });
         assert!(replacement.closed.try_recv().is_err());
     }
+}
+
+#[test]
+fn root_service_grant_attaches_original_host_posts_and_routes_click_then_releases_on_revoke() {
+    use crate::desktop::{
+        attention,
+        fanout::Queue,
+        notifications::{activation, attachment, preparation, service},
+        ownership, ui_authority,
+    };
+    let _prepare = preparation::TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _attach = attachment::TEST_SERIAL.lock().unwrap();
+    let bus = bus::Bus::new();
+    let server = Server::new(&bus);
+    let mut h = Harness::new();
+    let location = Location {
+        root: h._root.path().canonicalize().unwrap().join("state/desktop"),
+        configuration: h.outbox.session.configuration.clone(),
+    };
+    let config = crate::config::Config {
+        home: h._root.path().to_str().unwrap().into(),
+        dir: h._root.path().join("config"),
+        state: h._root.path().join("state"),
+        selves: vec![],
+        peers: vec![],
+        base_peers: vec![],
+        peers_from_environment: false,
+        machines: Default::default(),
+        tab: false,
+        tab_colors: String::new(),
+    };
+    let owner = Arc::new(location.lock().unwrap());
+    let mut runtime = service::Runtime::new(
+        &config,
+        &location,
+        &h.outbox.session.service_epoch,
+        owner.clone(),
+    );
+    let mut attention = attention::Runtime::new(&h.outbox.session.service_epoch);
+    let mut router =
+        activation::Router::new(&location.configuration, &h.outbox.session.service_epoch);
+    let mut seq = 0;
+    runtime.poll(&mut h.store, &mut attention, &mut router, &mut seq);
+    assert_eq!(
+        runtime.status()["attempted"],
+        false,
+        "no factory without native grant"
+    );
+    assert!(server.called.try_recv().is_err());
+    assert!(location.handoff_lock().is_ok());
+    let image = h._root.path().join("hgs-tray");
+    std::fs::write(&image, b"native grant fixture").unwrap();
+    let origin = ownership::Origin::capture(
+        &image,
+        zerus_client_core::desktop::Build {
+            version: "1.2.3".into(),
+            source_commit: "a".repeat(40),
+            source_dirty: Some(false),
+        },
+    )
+    .unwrap();
+    h.store
+        .db
+        .execute(
+            "UPDATE desktop_ownership SET state='service',owner_epoch=?1,origin=?2 WHERE id=1",
+            rusqlite::params![
+                uuid::Uuid::new_v4().to_string(),
+                serde_json::to_string(&origin).unwrap()
+            ],
+        )
+        .unwrap();
+    runtime.begin_on_test_bus(&mut h.store, bus.address.clone());
+    until(|| {
+        runtime.poll(&mut h.store, &mut attention, &mut router, &mut seq);
+        runtime.ready()
+    });
+    assert!(location.handoff_lock().is_err());
+    let action = command(session()).action;
+    let intent = ledger::put_intent(
+        &mut h.store.db,
+        &Identity {
+            kind: Kind::Post,
+            target: Target::Session {
+                computer: "peer.example".into(),
+                run: "run-1".into(),
+                conversation: "conversation-1".into(),
+            },
+            edge: uuid::Uuid::new_v4().to_string(),
+        },
+        1,
+        &serde_json::to_value(action).unwrap(),
+    )
+    .unwrap();
+    let request = runtime.offer_for_test(&mut h.store, &intent);
+    h.store.db.execute("INSERT INTO desktop_attention_edges(logical,session,intent,identity,payload,blocked,bytes)
+        SELECT 'root_fixture','fixture',id,identity,payload,0,0 FROM desktop_intents WHERE id=?1",[&intent]).unwrap();
+    server.called.recv_timeout(WAIT).unwrap();
+    until(|| {
+        runtime.poll(&mut h.store, &mut attention, &mut router, &mut seq);
+        h.store
+            .db
+            .query_row(
+                "SELECT state='delivered' FROM desktop_attempts WHERE request_id=?1",
+                [&request],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap()
+    });
+    let wait = uuid::Uuid::new_v4().to_string();
+    let queue = Arc::new(Queue::default());
+    router
+        .wait(
+            ui_authority::Validated::fixture(&json!({"op":"activation_wait","request_id":wait})),
+            queue.clone(),
+        )
+        .unwrap();
+    server.click(42);
+    let mut frame = None;
+    until(|| {
+        runtime.poll(&mut h.store, &mut attention, &mut router, &mut seq);
+        frame = queue.take();
+        frame.is_some()
+    });
+    let frame: serde_json::Value = serde_json::from_slice(&frame.unwrap()).unwrap();
+    let reply: zerus_client_core::desktop::activation::Reply =
+        serde_json::from_value(frame["value"].clone()).unwrap();
+    assert!(reply.matches(
+        &wait,
+        &location.configuration,
+        &h.outbox.session.service_epoch
+    ));
+    let click = reply.activation.unwrap();
+    assert_eq!(click.post_request_id, request);
+    assert_eq!(click.target.conversation, "conversation-1");
+    assert!(click.platform_context.is_some());
+    ownership::invalidate(&h.store.db).unwrap();
+    ledger::revoke(&h.store.db, "fixture_revoke").unwrap();
+    until(|| {
+        runtime.poll(&mut h.store, &mut attention, &mut router, &mut seq);
+        runtime.drained()
+    });
+    assert!(!runtime.ready());
+    assert_eq!(
+        server.closed.recv_timeout(WAIT).unwrap(),
+        42,
+        "actual native close precedes original host join"
+    );
+    assert!(location.handoff_lock().is_ok());
+    assert!(
+        server.called.try_recv().is_err(),
+        "no post replay on revoke/drain"
+    );
+    drop(runtime);
+    drop(owner);
+    assert!(location.lock().is_ok());
 }

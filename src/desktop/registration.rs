@@ -21,6 +21,7 @@ struct Spec {
     state: String,
     configuration: String,
     user_sid: String,
+    background: bool,
 }
 impl Spec {
     fn argv(&self, os: Os) -> Vec<&str> {
@@ -33,6 +34,9 @@ impl Spec {
             "--state-dir",
             &self.state,
         ];
+        if self.background {
+            argv.push("--background");
+        }
         if matches!(os, Os::Mac) {
             argv.push("--launchd");
         }
@@ -94,12 +98,20 @@ fn task_name(sid: &str) -> Result<String> {
 /// The installed/invoked CLI path stays selected, even when it is a maintained
 /// symlink. Never point a registration at an incidental current working folder.
 pub fn preview(config: &Config, location: &Location) -> Result<Value> {
+    preview_mode(config, location, false)
+}
+
+pub(super) fn preview_mode(
+    config: &Config,
+    location: &Location,
+    background: bool,
+) -> Result<Value> {
     let binary = crate::cli::executable_path()?;
     ensure!(
         binary.is_absolute() && platform::executable(&binary),
         "the selected hgs CLI is not executable"
     );
-    preview_for_binary(config, location, binary)
+    preview_for_binary_mode(config, location, binary, background)
 }
 
 /// Windows installation can stage the stable CLI without enabling local
@@ -119,7 +131,17 @@ pub(super) fn windows_plan(config: &Config, location: &Location) -> Result<Value
     preview_for_binary(config, location, path)
 }
 
+#[cfg(windows)]
 fn preview_for_binary(config: &Config, location: &Location, binary: PathBuf) -> Result<Value> {
+    preview_for_binary_mode(config, location, binary, false)
+}
+
+fn preview_for_binary_mode(
+    config: &Config,
+    location: &Location,
+    binary: PathBuf,
+    background: bool,
+) -> Result<Value> {
     let config_dir = if config.dir.is_absolute() {
         config.dir.clone()
     } else {
@@ -144,6 +166,7 @@ fn preview_for_binary(config: &Config, location: &Location, binary: PathBuf) -> 
             .context("desktop state path must be Unicode")?
             .into(),
         configuration: location.configuration.clone(),
+        background,
         #[cfg(windows)]
         user_sid: crate::host::token::user_sid()?,
         #[cfg(not(windows))]
@@ -175,6 +198,7 @@ fn preview_for_binary(config: &Config, location: &Location, binary: PathBuf) -> 
         )
     };
     let mut value = json!({"schema":1,"operation":"preview","configuration":spec.configuration,"label":label,"destination":destination,
+        "mode":if background {"background"} else {"passive"},
         "argv":spec.argv(os),"definition":render(&spec,os)?,
         "readiness":super::lifecycle::probe(&spec.binary,&spec.config,&spec.state,&spec.configuration),
         "session":session_requirements(os)});
@@ -221,16 +245,34 @@ fn render(spec: &Spec, os: Os) -> Result<String> {
     spec.validate(os)?;
     let argv = spec.argv(os);
     Ok(match os {
-        Os::Linux => format!("# {MARKER}; configuration={}\n[Unit]\nDescription=Zerus desktop background service\nAfter=graphical-session.target\nPartOf=graphical-session.target\nStartLimitIntervalSec=300\nStartLimitBurst=3\n\n[Service]\nType=simple\nExecStart={}\nRestart=on-failure\nRestartSec=10\nRestartPreventExitStatus=78\nTimeoutStopSec=10\n# Desktop owns only its readers; never terminate native process groups.\nKillMode=process\nUMask=0077\n\n[Install]\nWantedBy=graphical-session.target\n",spec.configuration,argv.iter().map(|arg|unit_quote(arg)).collect::<Vec<_>>().join(" ")),
+        Os::Linux => format!(
+            "# {MARKER}; configuration={}\n[Unit]\nDescription=Zerus desktop background service\nAfter=graphical-session.target\nPartOf=graphical-session.target\nStartLimitIntervalSec=300\nStartLimitBurst=3\n\n[Service]\nType=simple\nExecStart={}\nRestart=on-failure\nRestartSec=10\nRestartPreventExitStatus=78\nTimeoutStopSec=10\n# Desktop owns only its readers; never terminate native process groups.\nKillMode=process\nUMask=0077\n\n[Install]\nWantedBy=graphical-session.target\n",
+            spec.configuration,
+            argv.iter()
+                .map(|arg| unit_quote(arg))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
         Os::Mac => {
-            let arguments = argv.iter().map(|arg|format!("<string>{}</string>",xml(arg))).collect::<String>();
-            format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<!-- {MARKER}; configuration={} -->\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>com.hgdev.hgs-desktop</string>\n<key>ProgramArguments</key><array>{arguments}</array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n<key>ThrottleInterval</key><integer>10</integer>\n<key>AbandonProcessGroup</key><true/>\n<key>LimitLoadToSessionType</key><string>Aqua</string>\n</dict></plist>\n",spec.configuration)
-        },
+            let arguments = argv
+                .iter()
+                .map(|arg| format!("<string>{}</string>", xml(arg)))
+                .collect::<String>();
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<!-- {MARKER}; configuration={} -->\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>com.hgdev.hgs-desktop</string>\n<key>ProgramArguments</key><array>{arguments}</array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n<key>ThrottleInterval</key><integer>10</integer>\n<key>AbandonProcessGroup</key><true/>\n<key>LimitLoadToSessionType</key><string>Aqua</string>\n</dict></plist>\n",
+                spec.configuration
+            )
+        }
         Os::Windows => {
             // Task Scheduler expands environment variables even in quoted
             // arguments. Refuse paths that could select another executable or
             // state directory after expansion.
-            ensure!([&spec.binary, &spec.config, &spec.state].iter().all(|path| !path.contains('%')), "desktop task paths cannot contain environment-variable markers");
+            ensure!(
+                [&spec.binary, &spec.config, &spec.state]
+                    .iter()
+                    .all(|path| !path.contains('%')),
+                "desktop task paths cannot contain environment-variable markers"
+            );
             let task = task_name(&spec.user_sid)?;
             let args = crate::host::spawn::command_line(&argv[1..])?;
             let sid = xml(&spec.user_sid);
@@ -239,8 +281,14 @@ fn render(spec: &Spec, os: Os) -> Result<String> {
             // Omit the encoding so this also remains valid UTF-8 on disk.
             // Task Scheduler's restartType schema has a one-minute minimum.
             // https://learn.microsoft.com/en-us/windows/win32/taskschd/taskschedulerschema-interval-restarttype-element
-            format!("<?xml version=\"1.0\"?>\n<!-- {MARKER}; configuration={} -->\n<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n<RegistrationInfo><URI>\\{task}</URI><Description>{MARKER}; configuration={}</Description></RegistrationInfo>\n<Triggers><LogonTrigger><Enabled>true</Enabled><UserId>{sid}</UserId></LogonTrigger></Triggers>\n<Principals><Principal id=\"DesktopUser\"><UserId>{sid}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>\n<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><Enabled>true</Enabled><Hidden>true</Hidden><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure></Settings>\n<Actions Context=\"DesktopUser\"><Exec><Command>{}</Command><Arguments>{}</Arguments></Exec></Actions>\n</Task>\n",spec.configuration,spec.configuration,xml(&spec.binary),xml(&args))
-        },
+            format!(
+                "<?xml version=\"1.0\"?>\n<!-- {MARKER}; configuration={} -->\n<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n<RegistrationInfo><URI>\\{task}</URI><Description>{MARKER}; configuration={}</Description></RegistrationInfo>\n<Triggers><LogonTrigger><Enabled>true</Enabled><UserId>{sid}</UserId></LogonTrigger></Triggers>\n<Principals><Principal id=\"DesktopUser\"><UserId>{sid}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>\n<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><Enabled>true</Enabled><Hidden>true</Hidden><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure></Settings>\n<Actions Context=\"DesktopUser\"><Exec><Command>{}</Command><Arguments>{}</Arguments></Exec></Actions>\n</Task>\n",
+                spec.configuration,
+                spec.configuration,
+                xml(&spec.binary),
+                xml(&args)
+            )
+        }
     })
 }
 
@@ -254,6 +302,7 @@ mod tests {
             state: "/data/example/state & drafts".into(),
             configuration: "a".repeat(64),
             user_sid: "S-1-5-21-1000".into(),
+            background: false,
         }
     }
     fn windows_spec() -> Spec {
@@ -277,6 +326,23 @@ mod tests {
         assert!(unit.contains("After=graphical-session.target\nPartOf=graphical-session.target"));
         assert!(unit.contains("WantedBy=graphical-session.target"));
         assert!(!unit.contains("WantedBy=default.target"));
+    }
+    #[test]
+    fn background_variant_adds_only_the_explicit_desktop_argument() {
+        let mut input = spec();
+        let passive = input
+            .argv(Os::Linux)
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        input.background = true;
+        let mut expected = passive;
+        expected.push("--background".into());
+        assert_eq!(input.argv(Os::Linux), expected);
+        let unit = render(&input, Os::Linux).unwrap();
+        assert!(unit.contains("\"--background\"\n"));
+        assert!(unit.contains("KillMode=process"));
+        assert!(!unit.contains("ExecStop"));
     }
     #[test]
     fn mac_is_a_user_agent_with_exact_arguments_and_no_other_labels() {

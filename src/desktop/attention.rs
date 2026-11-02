@@ -226,7 +226,7 @@ impl Runtime {
             && mark.scope.source.service_epoch == self.epoch)
     }
     pub fn poll(&mut self, store: &mut Store, outbox: Option<&mut Outbox>) {
-        if self.stopping || self.error.is_some() {
+        if self.stopping {
             return;
         }
         if self.retiring() {
@@ -236,6 +236,9 @@ impl Runtime {
             return;
         }
         if !self.enabled() {
+            return;
+        }
+        if self.error.is_some() {
             return;
         }
         if let Err(error) = self.turn(store, outbox) {
@@ -563,6 +566,9 @@ impl Runtime {
     }
     pub fn drained(&self) -> bool {
         self.stopping && self.pending.is_none()
+    }
+    pub fn failed(&self) -> bool {
+        self.error.is_some()
     }
     pub fn status(&self) -> Value {
         json!({"sources":self.sources.len(),"pending_rows":self.pending.as_ref().map_or(0,|p|p.rows.len()),"enabled":self.policy.enabled,"optional_questions":self.policy.optional_questions,"retiring":self.retiring(),"stopping":self.stopping,"error":self.error,"stopped_on_error":self.error.is_some(),"error_retryable":self.error.as_ref().map(|_|false),"source_limit":catalog::MAX_SOURCES,"rows_per_turn":ROWS_PER_TURN,"effects_per_turn":EFFECTS_PER_TURN})

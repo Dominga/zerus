@@ -1,4 +1,4 @@
-//! One read-only desktop subscriber. No daemon launch, legacy fallback or writer admission.
+//! One owned desktop subscriber and closed native intents. No daemon launch or legacy fallback.
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -43,6 +43,7 @@ pub(crate) struct Observers {
 pub(crate) mod audit;
 mod catalog;
 mod catalog_relay;
+pub(crate) mod creation_clone;
 use catalog::catalog_loop;
 mod details;
 pub mod frontend;
@@ -222,6 +223,7 @@ impl CatalogDelivery {
 }
 
 struct Shared {
+    creation_rpc: Gate,
     notification_controls: Arc<crate::desktop_notification_controls::Controller>,
     notification_supported: AtomicBool,
     ownership: Arc<crate::desktop_ownership::Controller>,
@@ -317,6 +319,7 @@ impl Service {
             zerus_client_core::desktop::ownership::Mode::Service,
         );
         let shared = Arc::new(Shared {
+            creation_rpc: Gate::new(1).unwrap(),
             notification_controls: crate::desktop_notification_controls::Controller::new(
                 observers.notification_controls,
             ),
@@ -613,6 +616,7 @@ impl Service {
             .unwrap_or_else(PoisonError::into_inner)
             .take();
         self.shared.rpc.close();
+        self.shared.creation_rpc.close();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.shared.activation_rpc.close();
         let _ = self.control.send(Control::Stop);
@@ -638,6 +642,7 @@ impl Service {
             join_view(drain, RPC_WAIT).await?;
         }
         let closed = self.shared.rpc.close();
+        let creation_closed = self.shared.creation_rpc.close();
         let ownership_closed = self.shared.ownership.close();
         let notification_closed = self.shared.notification_controls.close();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -646,6 +651,9 @@ impl Service {
             let until = std::time::Instant::now() + RPC_WAIT;
             let drained =
                 closed.wait_until(until) == zerus_client_core::desktop::drain::Observation::Idle;
+            let drained = (creation_closed.wait_until(until)
+                == zerus_client_core::desktop::drain::Observation::Idle)
+                && drained;
             let drained = (ownership_closed.wait_until(until)
                 == zerus_client_core::desktop::drain::Observation::Idle)
                 && drained;

@@ -65,6 +65,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        Desktop frontend request ABI: desktop-ui-request-v1
        Desktop ownership ABI: desktop-ownership-v1
        Notification controls ABI: desktop-notification-controls-v1
+       Desktop creation clone ABI: desktop-creation-clone-v1
        Desktop pending read import ABI: desktop-pending-reads-v1
        Desktop activation ABI: desktop-activation-v1
        Desktop maintenance ABI: desktop-maintenance-v1
@@ -410,6 +411,9 @@ const UNIX_ONLY_COMMANDS: [&str; 3] = ["notify", "clip", "paste"];
 /// Whether a usage line tells of what only Unix has: a command of
 /// `UNIX_ONLY_COMMANDS` or the Ctrl+V that runs `hgs paste`.
 fn unix_only_usage(line: &str) -> bool {
+    if line.trim() == zerus_client_core::desktop::creation_clone::HELP_MARKER {
+        return true;
+    }
     let mut words = line.split_whitespace();
     match words.next() {
         Some("hgs") => words

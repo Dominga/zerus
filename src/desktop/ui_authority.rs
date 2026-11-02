@@ -268,11 +268,23 @@ impl Validated {
         ensure!(
             !matches!(
                 self.0,
-                Request::DesktopOwnership { .. } | Request::NotificationControl { .. }
+                Request::DesktopOwnership { .. }
+                    | Request::NotificationControl { .. }
+                    | Request::CreationClone { .. }
             ),
             "native controls require their typed boundary"
         );
         Ok(self.0)
+    }
+    /// Only the clone actor calls this after BEGIN IMMEDIATE. Cached native
+    /// Service mode was bound to this exact original request during admission.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn creation_clone(self) -> Result<zerus_client_core::desktop::creation_clone::Intent> {
+        self.check()?;
+        let Request::CreationClone { intent } = self.0 else {
+            anyhow::bail!("not a creation clone");
+        };
+        Ok(*intent)
     }
     pub fn ownership_parts(&self) -> Result<(Request, super::ownership::Origin)> {
         self.check()?;
@@ -630,6 +642,14 @@ fn validate(
             "ownership mode does not match the native frontend"
         );
     }
+    if let Request::CreationClone { intent } = &envelope.request {
+        ensure!(
+            reply.request.ownership_mode
+                == Some(zerus_client_core::desktop::ownership::Mode::Service)
+                && intent.scope.configuration == configuration,
+            "creation does not match the native service frontend"
+        );
+    }
     if let Request::NotificationControl { scope, control } = &envelope.request {
         let native = reply
             .request
@@ -709,6 +729,7 @@ impl Order {
                     | "desktop_ownership"
                     | "notification_preferences"
                     | "notification_focus"
+                    | "creation_clone"
             ),
             "unknown frontend operation"
         );
@@ -1053,6 +1074,44 @@ mod tests {
         }
     }
 
+    #[test]
+    fn creation_clone_requires_cached_service_mode_and_exact_configuration_at_the_typed_boundary() {
+        use zerus_client_core::desktop::{
+            creation_clone::{Intent, Scope},
+            ownership::Mode,
+        };
+        let (mut envelope, caller, frontend, mut reply) = fixture();
+        let original = serde_json::json!({"id":id(80),"creation_schema":1,"created":1,"revision":4,
+            "cmd":"codex","tag":"example","host":"","state":"cloning","repository":true,
+            "parent":"/srv","target":"/srv/repo","repository_name":"repo",
+            "url":"https://example.invalid/repo.git","clone_id":id(2),"expected_machine":id(81)});
+        envelope.request = Request::CreationClone {
+            intent: Box::new(Intent {
+                scope: Scope {
+                    configuration: "a".repeat(64),
+                    service_epoch: id(91),
+                },
+                creation_id: id(80),
+                clone_request_id: id(2),
+                revision: 4,
+                original: original.to_string(),
+            }),
+        };
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Native);
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Service);
+        validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).unwrap();
+        assert!(Validated::fixture(&serde_json::json!(envelope.request))
+            .into_request()
+            .is_err());
+        if let Request::CreationClone { intent } = &mut envelope.request {
+            intent.scope.configuration = "b".repeat(64);
+        }
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+    }
     #[test]
     fn notification_controls_require_cached_service_mode_and_matching_native_scope() {
         use zerus_client_core::desktop::notification_control::{

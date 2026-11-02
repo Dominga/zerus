@@ -20,6 +20,7 @@ import unittest
 import uuid
 
 HGS = Path(os.environ.get('HGS_TEST_BIN', Path(__file__).resolve().parents[1] / 'target/debug/hgs')).resolve()
+CURRENT_SCHEMA = 17
 
 
 class Desktop(unittest.TestCase):
@@ -62,6 +63,35 @@ class Desktop(unittest.TestCase):
         with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_notification_preferences_requests').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_attempts').fetchone()[0], 0)
+
+    def test_creation_clone_is_a_closed_native_intent_with_scoped_read_only_lookup(self):
+        self.serve()
+        status = self.cli('desktop', 'status', '--json')
+        scope = dict(configuration=status['configuration'], service_epoch=status['epoch'])
+        creation, clone = str(uuid.uuid4()), str(uuid.uuid4())
+        original = dict(id=creation, creation_schema=1, created=1, revision=4, cmd='codex', tag='example',
+                        host='', state='cloning', repository=True, parent='/srv', target='/srv/repo',
+                        repository_name='repo', url='https://example.invalid/repo.git', clone_id=clone,
+                        expected_machine='22222222-2222-4222-8222-222222222222')
+        intent = dict(scope=scope, creation_id=creation, clone_request_id=clone, revision=4,
+                      original=json.dumps(original, separators=(',', ':')))
+        refused = self.cli('desktop', 'request', '--json', data=dict(op='creation_clone', intent=intent))
+        self.assertFalse(refused['accepted'])
+        self.assertEqual(refused['code'], 'frontend_authentication_required')
+        query = dict(request_id=str(uuid.uuid4()), scope=scope, creation_id=creation, clone_request_id=clone,
+                     plan_sha256='a' * 64)
+        result = self.cli('desktop', 'request', '--json', data=dict(op='creation_clone_result', query=query))
+        self.assertEqual(result['abi'], 'desktop-creation-clone-v1')
+        self.assertEqual(result['scope'], scope)
+        self.assertTrue(result['read_only'])
+        self.assertFalse(result['found'])
+        self.assertIsNone(result['receipt'])
+        bad = dict(query, scope=dict(scope, service_epoch=str(uuid.uuid4())))
+        self.assertEqual(self.cli('desktop', 'request', '--json', data=dict(op='creation_clone_result', query=bad))['code'], 'creation_result_unavailable')
+        with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_creation_clones').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT rows,bytes,active FROM desktop_creation_clone_budget').fetchone(), (0, 0, 0))
+        self.assertEqual(status['operation_queue']['kinds']['creation_clone']['undrained'], 0)
 
     @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux registration mode')
     def test_registration_variant_is_read_only_and_service_reports_its_requested_mode(self):
@@ -210,6 +240,8 @@ finally:
         self.stop(process)
         database = self.desktop / 'state.sqlite3'
         with closing(sqlite3.connect(database)) as db, db:
+            db.execute('DROP TABLE desktop_creation_clones')
+            db.execute('DROP TABLE desktop_creation_clone_budget')
             db.execute('DROP TABLE desktop_notification_preferences_requests')
             db.execute('DROP TABLE desktop_notification_preferences')
             db.execute('DROP TABLE desktop_ownership_requests')
@@ -224,7 +256,7 @@ finally:
             self.assertEqual(db.execute("SELECT count(*) FROM sqlite_schema WHERE name='desktop_ownership_requests'").fetchone()[0], 0)
             db.execute('DROP TABLE desktop_ownership')
         _, service = self.serve()
-        self.assertEqual(service['schema'], 16)
+        self.assertEqual(service['schema'], CURRENT_SCHEMA)
         self.assertEqual(service['desktop_ownership']['state'], 'passive')
         self.assertFalse(service['writers_enabled'])
 
@@ -960,7 +992,7 @@ finally:
             db.execute('PRAGMA user_version=1')
         database.chmod(0o600)
         process, status = self.serve()
-        self.assertEqual(status['schema'], 16)
+        self.assertEqual(status['schema'], CURRENT_SCHEMA)
         self.assertEqual(status['generation'], 8)
         self.assertEqual(status['configuration'], configuration)
         self.assertTrue(status['effect_journal']['revoked'])
@@ -970,13 +1002,15 @@ finally:
         self.assertFalse(status['read_queue']['recovery_error'])
         self.stop(process)
         with closing(sqlite3.connect(database)) as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 16)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], CURRENT_SCHEMA)
             self.assertEqual(db.execute('SELECT rows,bytes FROM desktop_catalog_totals').fetchone(), (0, 0))
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_catalog_sources').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT configuration FROM service').fetchone()[0], configuration)
 
     @staticmethod
     def remove_changes_schema(db):
+        db.execute('DROP TABLE desktop_creation_clones')
+        db.execute('DROP TABLE desktop_creation_clone_budget')
         db.execute('DROP TABLE desktop_notification_preferences_requests')
         db.execute('DROP TABLE desktop_notification_preferences')
         db.execute('DROP TABLE desktop_ownership_requests')
@@ -987,7 +1021,7 @@ finally:
 
     @classmethod
     def remove_counts_and_delivery_schema(cls, db):
-        # Rewind every later layer, rather than leaving a schema-16 database
+        # Rewind every later layer, rather than leaving a current-schema database
         # labelled as an older version. Production migrations stay strict.
         cls.remove_changes_schema(db)
         db.execute('DROP TABLE desktop_maintenance')
@@ -1019,7 +1053,7 @@ finally:
             db.execute('PRAGMA user_version=5')
         for _ in range(2):
             process, status = self.serve()
-            self.assertEqual(status['schema'], 16)
+            self.assertEqual(status['schema'], CURRENT_SCHEMA)
             self.assertEqual(status['catalog_projection']['stored_bytes'], expected)
             self.assertEqual(status['catalog_projection']['stored_rows'], 0)
             self.stop(process)
@@ -1045,7 +1079,7 @@ finally:
             self.assertEqual(db.execute("SELECT count(*) FROM sqlite_schema WHERE name='desktop_operations'").fetchone()[0], 0)
             db.execute('DROP TABLE desktop_operation_totals')
         process, status = self.serve()
-        self.assertEqual(status['schema'], 16)
+        self.assertEqual(status['schema'], CURRENT_SCHEMA)
         self.assertEqual({key:status['operation_queue'][key] for key in ('unsettled','undrained','admissions_paused','recovery_error')}, dict(unsettled=0, undrained=0, admissions_paused=True, recovery_error=False))
         self.assertFalse(status['writers_enabled'])
         self.stop(process)
@@ -1068,7 +1102,7 @@ finally:
             self.assertEqual(db.execute("SELECT count(*) FROM sqlite_schema WHERE name LIKE 'desktop_custody_%'").fetchone()[0], 0)
             db.execute('DROP INDEX desktop_commands_pending')
         process, status = self.serve()
-        self.assertEqual(status['schema'], 16)
+        self.assertEqual(status['schema'], CURRENT_SCHEMA)
         self.assertEqual(status['operation_queue']['undrained'], 0)
         self.assertTrue(status['operation_queue']['admissions_paused'])
         self.assertFalse((self.desktop / 'operation-custody').exists())
@@ -1090,11 +1124,11 @@ finally:
             self.assertEqual(db.execute('SELECT fixture FROM desktop_producer_prepared').fetchone()[0], 'retained')
             db.execute('DROP TABLE desktop_producer_prepared')
         process, status = self.serve()
-        self.assertEqual(status['schema'], 16)
+        self.assertEqual(status['schema'], CURRENT_SCHEMA)
         self.assertFalse(status['writers_enabled'])
         self.stop(process)
         with closing(sqlite3.connect(database)) as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 16)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], CURRENT_SCHEMA)
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_producer_prepared').fetchone()[0], 0)
 
     def test_schema_eleven_maintenance_migration_stays_passive(self):
@@ -1106,7 +1140,7 @@ finally:
             db.execute('DROP TABLE desktop_maintenance')
             db.execute('PRAGMA user_version=11')
         process, status = self.serve()
-        self.assertEqual(status['schema'], 16)
+        self.assertEqual(status['schema'], CURRENT_SCHEMA)
         self.assertEqual(status['generation'], old['generation'] + 1)
         self.assertEqual(status['configuration'], old['configuration'])
         self.assertFalse(status['writers_enabled'])

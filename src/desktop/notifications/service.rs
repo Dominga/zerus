@@ -139,7 +139,7 @@ impl Runtime {
         // independent of read/approval readiness; failure to select a native
         // host cannot revoke their separately configured service work.
         ensure!(
-            zerus_desktop_ledger::operations::totals(&store.db)?.undrained == 0,
+            store.operation_undrained()? == 0,
             "original operation resources remain owned"
         );
         ensure!(

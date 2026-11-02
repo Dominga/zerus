@@ -222,6 +222,7 @@ impl CatalogDelivery {
 struct Shared {
     hgs: PathBuf,
     configuration: Mutex<Option<String>>,
+    audit_help: audit::help::Cache,
     relay: Mutex<Option<Arc<zerus_client_core::desktop::relay::Connection>>>,
     pump: crate::pump::Pump,
     sink: Mutex<Option<SyncSender<Data>>>,
@@ -325,6 +326,7 @@ impl Service {
             stopped: AtomicBool::new(false),
             cancellation: Mutex::new(None),
             configuration: Mutex::new(None),
+            audit_help: audit::help::Cache::default(),
             responder,
             reads: Mutex::new(BTreeMap::new()),
             details: Mutex::new(details::Hub::default()),
@@ -544,6 +546,7 @@ impl Service {
     }
     pub fn stop(&self) {
         self.shared.stopped.store(true, Ordering::Release);
+        self.shared.audit_help.clear();
         if let Some(cancel) = self
             .shared
             .cancellation
@@ -817,23 +820,49 @@ async fn command_limited(
         .unwrap_or_else(PoisonError::into_inner)
         .clone()
         .ok_or("service_unavailable")?;
+    let inv = zerus_client_core::Invocation {
+        args,
+        stdin: stdin.map(String::into_bytes),
+        timeout: RPC_WAIT,
+        request_id: None,
+    };
+    command_accounted(shared, relay, inv, stop, limit, Arc::new(charge), None).await
+}
+
+/// Admission also covers any retained original child/pipe after an uncertain return.
+async fn command_accounted(
+    shared: &Arc<Shared>,
+    relay: Arc<zerus_client_core::desktop::relay::Connection>,
+    inv: zerus_client_core::Invocation,
+    stop: Arc<AtomicBool>,
+    limit: usize,
+    resources: Arc<dyn Send + Sync>,
+    image: Option<Arc<audit::help::Image>>,
+) -> Result<Vec<u8>, &'static str> {
     let state = shared.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        if !state.allowed {
+            return Err("replay_transport_unavailable");
+        }
         let hgs = relay.executable()?;
         if state.stopped.load(Ordering::Acquire) || stop.load(Ordering::Acquire) {
             return Err("stopped");
         }
-        let inv = zerus_client_core::Invocation {
-            args,
-            stdin: stdin.map(String::into_bytes),
-            timeout: RPC_WAIT,
-            request_id: None,
-        };
-        let guard: Arc<dyn Send + Sync> = Arc::new(charge);
+        if image.as_ref().is_some_and(|image| !image.current(hgs)) {
+            return Err("service_helper_changed");
+        }
+        let guard: Arc<dyn Send + Sync> = Arc::new((resources, image.clone(), relay.clone()));
         match zerus_client_core::run::run_accounted(hgs, &inv, &[], limit, &stop, guard) {
             Ok(zerus_client_core::Exit::Code {
                 code: 0, stdout, ..
-            }) => Ok(stdout),
+            }) => {
+                if let Some(image) = image {
+                    if !image.current(relay.executable()?) {
+                        return Err("service_helper_changed");
+                    }
+                }
+                Ok(stdout)
+            }
             _ => Err("service_request_unconfirmed"),
         }
     })
@@ -921,6 +950,7 @@ async fn run(shared: Arc<Shared>, mut control: watch::Receiver<Control>) {
         let result = connection(shared.clone(), &mut control, stop.clone()).await;
         *shared.relay.lock().unwrap_or_else(PoisonError::into_inner) = None;
         stop.store(true, Ordering::Release);
+        shared.audit_help.clear();
         let computers = shared.invalidate();
         let changes = shared
             .details

@@ -1,6 +1,163 @@
 use super::*;
 use crate::desktop_service::tests::{eventually, Fixture};
 
+fn replace_helper(fixture: &Fixture) {
+    let path = fixture.0.join("hgs");
+    let replacement = fixture.0.join("hgs-new");
+    std::fs::copy(&path, &replacement).unwrap();
+    std::fs::rename(replacement, path).unwrap();
+}
+fn help_calls(fixture: &Fixture) -> usize {
+    fixture
+        .calls()
+        .iter()
+        .filter(|call| call["args"] == json!(["--help"]))
+        .count()
+}
+fn audit_calls(fixture: &Fixture) -> usize {
+    fixture
+        .calls()
+        .iter()
+        .filter(|call| {
+            call["value"]["op"]
+                .as_str()
+                .is_some_and(|op| op.starts_with("approval_audit_"))
+        })
+        .count()
+}
+
+#[test]
+fn abi_probe_reuses_only_the_original_connection_and_helper_image() {
+    use std::io::Write;
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({}));
+        replace_helper(&fixture); // Never modify the shared source fixture's symlink target.
+        let (service, _) = fixture.start(true);
+        eventually("connected", || service.snapshot().connected).await;
+        let scope = first(service.clone()).await.unwrap().scope;
+        detail(Some(service.clone()), 53, scope).await.unwrap();
+        assert_eq!(
+            help_calls(&fixture),
+            2,
+            "one connection probe plus one audit probe"
+        );
+        service.retry();
+        eventually("same-epoch new original watch", || {
+            fixture
+                .calls()
+                .iter()
+                .filter(|call| call["args"] == json!(["desktop", "watch", "--json"]))
+                .count()
+                == 2
+                && service.snapshot().connected
+        })
+        .await;
+        let scope = first(service.clone()).await.unwrap().scope;
+        detail(Some(service.clone()), 53, scope).await.unwrap();
+        assert_eq!(
+            help_calls(&fixture),
+            4,
+            "same epoch still needs the new connection's probe"
+        );
+        replace_helper(&fixture);
+        let scope = first(service.clone()).await.unwrap().scope;
+        detail(Some(service.clone()), 53, scope).await.unwrap();
+        assert_eq!(help_calls(&fixture), 5, "same pathname, new file identity");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(fixture.0.join("hgs"))
+            .unwrap()
+            .write_all(b"\n# changed helper image\n")
+            .unwrap();
+        let scope = first(service.clone()).await.unwrap().scope;
+        detail(Some(service.clone()), 53, scope).await.unwrap();
+        assert_eq!(help_calls(&fixture), 6, "in-place version change");
+        let queries = audit_calls(&fixture);
+        std::fs::write(
+            fixture.0.join("fixture.json"),
+            json!({"audit_abi":false}).to_string(),
+        )
+        .unwrap();
+        replace_helper(&fixture);
+        assert!(first(service.clone()).await.is_err());
+        assert!(first(service.clone()).await.is_err());
+        assert_eq!(
+            help_calls(&fixture),
+            8,
+            "unsupported probes are never positive cached"
+        );
+        assert_eq!(audit_calls(&fixture), queries);
+        assert!(service.snapshot().connected);
+        service.join().await.unwrap();
+        assert!(service.shared.audit_help.is_empty());
+    });
+}
+
+#[test]
+fn helper_replacement_during_probe_or_cached_query_refuses_stale_results() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        for during_probe in [true, false] {
+            let fixture = Fixture::new(json!({"audit_help_hold":during_probe}));
+            replace_helper(&fixture);
+            let (service, _) = fixture.start(true);
+            eventually("connected", || service.snapshot().connected).await;
+            let scope = if during_probe {
+                None
+            } else {
+                let page = first(service.clone()).await.unwrap();
+                std::fs::write(
+                    fixture.0.join("fixture.json"),
+                    json!({"audit_hold":true}).to_string(),
+                )
+                .unwrap();
+                page.scope
+            };
+            let shared = service.clone();
+            let request = tauri::async_runtime::spawn(async move {
+                if during_probe {
+                    first(shared).await.map(|_| ())
+                } else {
+                    detail(Some(shared), 53, scope).await.map(|_| ())
+                }
+            });
+            eventually("helper call held", || {
+                fixture
+                    .0
+                    .join(if during_probe {
+                        "audit-help-held"
+                    } else {
+                        "audit-held"
+                    })
+                    .exists()
+            })
+            .await;
+            replace_helper(&fixture);
+            std::fs::write(
+                fixture.0.join(if during_probe {
+                    "audit-help-release"
+                } else {
+                    "audit-release"
+                }),
+                [],
+            )
+            .unwrap();
+            assert!(
+                request.await.unwrap().is_err(),
+                "an old helper result is not adopted"
+            );
+            if during_probe {
+                assert_eq!(audit_calls(&fixture), 0);
+            } else {
+                assert_eq!(help_calls(&fixture), 2, "cached query does not spawn help");
+            }
+            assert!(service.snapshot().connected);
+            service.join().await.unwrap();
+        }
+    });
+}
+
 async fn first(service: Arc<Service>) -> Result<Page, String> {
     list(
         Some(service),

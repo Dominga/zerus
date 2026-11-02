@@ -34,7 +34,7 @@ import { creationCount, creationFooter, creationStatusMenu } from "../../store/c
 import {
   selectedKey, setSelectedKey, setExpandedChildren, expandedChildren,
   setCompactRows, compactRows, expandCompactRows, hasCompactRows, stateFilter, setStateFilter, search, setSearch, stripMode, setStripMode,
-  setMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter, accountFilterSet, setAccountFilter, folderFilter, setPage,
+  setMenu, visibleMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter, accountFilterSet, setAccountFilter, folderFilter, setPage,
   multi, setMulti, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, commitSessionsWidth, menu, subagentOpen,
   revealing, setRevealing, setDetailTab,
   type StateFilter, type MenuEntry,
@@ -73,10 +73,10 @@ const filterTone = (id: StateFilter) => ({
   "t-active": id === "active" && counts().active > 0,
 });
 
-const openMenu = (e: MouseEvent, items: MenuEntry[]) => {
+const openMenu = (e: MouseEvent, items: MenuEntry[], sessionKey?: string) => {
   e.preventDefault();
   e.stopPropagation();
-  setMenu({ x: e.clientX, y: e.clientY, items });
+  setMenu({ x: e.clientX, y: e.clientY, items, sessionKey });
 };
 
 // Card <-> compact row. The swap is instant in Qt; here it morphs in 220 ms so
@@ -191,7 +191,7 @@ export function sessionMenu(s: Session, folderStatus?: { request: ReturnType<typ
   const mark = markEntry(s);
   const fresh = freshActionEntry(s);
   const archived = s.state === "archived";
-  const commands = runningCommandsEntry(s, () => computerFresh(s.computer), () => flag("processes/enabled"), () => { setSelectedKey(s.key); setDetailTab("processes"); });
+  const commands = runningCommandsEntry(s, () => computerFresh(s.computer), () => flag("processes/enabled"), () => { setSelectedKey(s.key); setSubagentOpen(undefined); setDetailTab("processes"); });
   return [
     // Keep attention actions first, with Mark before Mute.
     ...(archived ? [] : [...(mark ? [mark] : []), ...(mute ? [mute] : []), { separator: true } as const]),
@@ -227,7 +227,7 @@ function openSessionMenu(e: MouseEvent, s: Session) {
   let items = sessionMenu(s);
   let folderStatus: { request: ReturnType<typeof folderRequest>; status: FolderStatus } | undefined;
   let forkDetails = details;
-  openMenu(e, items);
+  openMenu(e, items, s.key);
   const refresh = () => {
     const shown = menu();
     if (shown?.items !== items) return;
@@ -241,6 +241,14 @@ function openSessionMenu(e: MouseEvent, s: Session) {
   // contextForkSession. The exact open-menu identity drops late replies.
   if (!details && !computerOffline(s.computer)) void inspectSession({ computer: s.computer, name: s.name, run_id: s.runId ?? "", conversation_id: s.conversationId ?? "" }, s.archiveId ?? null)
     .then((value) => { forkDetails = value ?? undefined; refresh(); }).catch(() => {});
+}
+
+/** A context target is independent of the open conversation and selection. */
+export function sessionContextMenu(e: MouseEvent, s: Session) {
+  // macOS turns Control-click into a context click; keep its selection meaning.
+  if (e.ctrlKey && e.button === 0 && IS_MAC) { e.preventDefault(); e.stopPropagation(); selectSession(s.key, e); return; }
+  if (multi[s.key] && selectedRows(listRows()).length > 1) { openMenu(e, selectionContextMenu(listRows())); return; }
+  openSessionMenu(e, s);
 }
 
 /** The project header's menu (SessionsWindow.cpp:2568-2616); its rules are organization-ui.ts's. */
@@ -704,15 +712,10 @@ function ListRow(props: { id: string; list: RowSource }) {
       <Show when={row()?.type === "creation" ? (row() as Extract<Row, { type: "creation" }>) : undefined}>{(v) => <CreationCard card={v().creation} />}</Show>
       <Show when={row()?.type === "card" ? (row() as Extract<Row, { type: "card" }>) : undefined}>
         {(v) => (
-          <div onDragOver={(e) => taskDragOver(e, groupOf(v().session.key), v().session)} onDrop={(e) => taskDrop(e, groupOf(v().session.key), v().session)} class="rowhit" classList={{ "has-kids-open": v().expanded && !v().compactRow, multi: !!multi[v().session.key], dragged: dragItem()?.id === v().session.key }}
+          <div onDragOver={(e) => taskDragOver(e, groupOf(v().session.key), v().session)} onDrop={(e) => taskDrop(e, groupOf(v().session.key), v().session)} class="rowhit" classList={{ "has-kids-open": v().expanded && !v().compactRow, multi: !!multi[v().session.key], dragged: dragItem()?.id === v().session.key, "context-target": visibleMenu()?.sessionKey === v().session.key }}
             draggable="true" onDragStart={(e) => startDrag(e, { kind: "session", id: v().session.key })}
             onMouseDown={(e) => { if (e.shiftKey) e.preventDefault(); }} onClick={(e) => selectSession(v().session.key, e)}
-            onContextMenu={(e) => {
-              // macOS turns Control-click into a context click; Control keeps its selection meaning here.
-              if (e.ctrlKey && e.button === 0 && IS_MAC) { e.preventDefault(); selectSession(v().session.key, e); return; }
-              if (multi[v().session.key] && selectedRows(listRows()).length > 1) { openMenu(e, selectionContextMenu(listRows())); return; }
-              if (!multi[v().session.key]) selectSession(v().session.key); openSessionMenu(e, v().session);
-            }}
+            onContextMenu={(e) => sessionContextMenu(e, v().session)}
             onDblClick={(e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey) setRowCompact(v().session.key, !compactRows[v().session.key]); }}>
             <Show when={!v().compactRow} fallback={<CompactCard session={v().session} selected={selectedKey() === v().session.key || !!multi[v().session.key]} onExpand={() => setRowCompact(v().session.key, false)} />}>
               <SessionCard session={v().session} selected={(selectedKey() === v().session.key && !subagentOpen()) || !!multi[v().session.key]} expandable={v().expandable}
@@ -847,8 +850,8 @@ function StripTile(props: { row: Extract<Row, { type: "card" }> }) {
   const frame = () => (emphasis(s()) === "draft" ? "draft" : kind() === "muted-attention" || kind() === "muted-unread" ? "muted" : kind() === "unread" ? "attention" : kind());
   const tip = () => [`${s().name}: ${statusCaption(s())}`, s().summary, `${folderOf(s())}${s().branch ? ` / ${s().branch}` : ""} on ${s().machine}`, s().git ? gitTooltip(s()) : "", s().optionalQuestions ? `${s().optionalQuestions} optional question(s) waiting` : ""].filter(Boolean).join("\n");
   return (
-    <button class="strip-tile" classList={{ selected: selectedKey() === s().key }} data-frame={frame()} title={tip()} onClick={() => selectSession(s().key)}
-      onContextMenu={(e) => { selectSession(s().key); openSessionMenu(e, s()); }}>
+    <button class="strip-tile" classList={{ selected: selectedKey() === s().key, "context-target": visibleMenu()?.sessionKey === s().key }} data-frame={frame()} title={tip()} onClick={() => selectSession(s().key)}
+      onContextMenu={(e) => sessionContextMenu(e, s())}>
       <span class="st-block">
         <span class="st-top">
           <span class="st-status">

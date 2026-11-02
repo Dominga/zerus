@@ -23,7 +23,7 @@ afterEach(() => { bindMenuBarrier(undefined); setMenu(undefined); });
 describe("native child menu admission", () => {
   it("retains logical menu identity and independent read updates while hiding the child", async () => {
     const hidden = barrier();
-    const initial = { x: 10, y: 20, items: [{ label: "Fork session…", disabled: true }] };
+    const initial = { x: 10, y: 20, sessionKey: "context-target", items: [{ label: "Fork session…", disabled: true }] };
     setMenu(initial);
     expect(menu()).toBe(initial);
     expect(visibleMenu()).toBeUndefined();
@@ -33,6 +33,9 @@ describe("native child menu admission", () => {
     expect(visibleMenu()).toBeUndefined();
     hidden(); await tick();
     expect(visibleMenu()).toBe(updated);
+    expect(visibleMenu()?.sessionKey).toBe("context-target");
+    setMenu(undefined);
+    expect(visibleMenu()?.sessionKey).toBeUndefined();
   });
 
   it("never paints a menu closed or replaced before the child acknowledged hiding", async () => {

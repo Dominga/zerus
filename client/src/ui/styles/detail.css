@@ -224,12 +224,15 @@
   .q-option small { color: var(--z-color-muted); font-size: var(--fs-xs); }
   .question-card footer { display: flex; align-items: center; gap: 10px; }
 
-  /* The native queue shares the reading column (ActivityView.cpp:1280-1292). */
+  /* Pending outgoing messages share the reading column and stay distinct from sent Activity. */
   .act-queue { width: min(var(--col), calc(100% - 32px)); margin: 0 auto 8px; padding: 8px 12px; flex-shrink: 0;
-    background: var(--z-color-surface); border: 1px solid var(--z-color-border); border-radius: var(--z-radius-md); }
+    background: var(--z-color-surface); border: 1px dashed var(--z-color-accent-muted); border-radius: var(--z-radius-md); }
   .act-queue-head { display: flex; align-items: center; gap: 8px; }
   .act-queue-head b { color: var(--z-color-muted); font-weight: 600; }
-  .act-queue-text { max-height: 100px; overflow-y: auto; user-select: text; }
+  .act-queue-head > svg { color: var(--z-color-muted); flex-shrink: 0; }
+  .act-queue-text { max-height: 220px; overflow-y: auto; user-select: text; }
+  .act-queue-message { margin-top: 8px; padding-left: 10px; border-left: 2px solid var(--z-color-accent-muted); }
+  .act-queue-message + .act-queue-message { padding-top: 8px; border-top: 1px dashed var(--z-color-border); }
 
   /* Composer: toolbar 34, editor 76, action row 34. */
   .cmp-col { width: min(var(--col), calc(100% - 32px)); margin: 0 auto 10px; }

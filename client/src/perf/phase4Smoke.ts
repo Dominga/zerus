@@ -932,9 +932,20 @@ async function approvalStep() {
 
 async function queueStep() {
   await select(RELEASE);
-  await until(() => document.querySelector(".act-queue")?.textContent?.includes("↳ also update the changelog") === true,
+  await until(() => document.querySelector(".act-queue")?.textContent?.includes("also update the changelog") === true,
     10_000, "the native queue did not appear");
   const panel = document.querySelector(".act-queue")!;
+  await until(() => panel.querySelector(".act-body b")?.textContent === "Queued review"
+    && panel.querySelector(".att-caption")?.textContent?.includes("pasted-image.png") === true,
+  5000, "the queue did not use the outgoing Markdown and receipt attachment renderer");
+  if (panel.textContent?.includes("Inspect the attached") || panel.textContent?.includes("↳")
+    || panel.textContent?.includes("/synthetic/")) throw new Error("raw terminal queue chrome/path leaked into the outgoing preview");
+  if (getComputedStyle(panel).borderTopStyle !== "dashed" || !panel.querySelector(".act-queue-head svg"))
+    throw new Error("queued messages are missing their pending treatment");
+  await until(() => {
+    const image = panel.querySelector<HTMLImageElement>(".att-thumb img");
+    return !!image && image.complete && image.naturalWidth === 1;
+  }, 5000, "the exact queued receipt thumbnail did not load");
   if (button("Send now", panel).disabled) throw new Error("Send now is disabled");
   button("Send now", panel).click();
   const sent = await waitCall("send-now", 1);

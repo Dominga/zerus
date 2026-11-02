@@ -39,6 +39,17 @@ UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{6F1B0C52-
 SETUP_LIMIT = 300
 
 
+def installer_environment(isolated, original):
+    """Keep Windows shell folders real while hgs uses its private HOME/HGS roots."""
+    result = dict(isolated)
+    for key in ('USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'HOMEDRIVE', 'HOMEPATH'):
+        if key in original:
+            result[key] = original[key]
+        else:
+            result.pop(key, None)
+    return result
+
+
 def registered():
     """DisplayVersion and InstallLocation of the HKCU uninstall entry, or None."""
     import winreg
@@ -60,6 +71,7 @@ class Installer(windows_host.HostCase):
         self.backend_clean = True
         self.backend_request = str(uuid.uuid4())
         self.env['HGS_CONFIG_DIR'] = str(self.home / '.config' / 'hgs')
+        self.installer_env = installer_environment(self.env, os.environ)
         self.setup_exe = Path(INSTALLER).resolve()
         self.assertTrue(self.setup_exe.is_file(), self.setup_exe)
         self.assertTrue(PORTABLE_ZIP and Path(PORTABLE_ZIP).is_file(), "HGS_TEST_PORTABLE_ZIP")
@@ -87,8 +99,9 @@ class Installer(windows_host.HostCase):
         self.addCleanup(self.cleanup_backend)
         self.addCleanup(self.uninstall_if_installed)
 
-    # Shell shortcuts/uninstall records still use the runner's real shell
-    # folders. Maintained CLI hooks inherit only this case's selected HGS profile.
+    # Do not give Inno Setup the host fixture's synthetic USERPROFILE: its shell
+    # folder expansion must match the real shortcut assertion. hgs prefers HOME,
+    # which stays private along with its explicit config/state roots.
 
     def backend(self, command, operation):
         args = [str(windows_host.HGS), 'desktop', command, operation, '--json']
@@ -137,7 +150,7 @@ class Installer(windows_host.HostCase):
         if self.backend_tracking:
             self.backend_clean = False  # Unknown delivery keeps the selected paths.
         result = subprocess.run([str(self.setup_exe), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
-                                 f"/DIR={self.app}", f"/LOG={log}"], env=self.env, stdin=subprocess.DEVNULL, capture_output=True,
+                                 f"/DIR={self.app}", f"/LOG={log}"], env=self.installer_env, stdin=subprocess.DEVNULL, capture_output=True,
                                 timeout=SETUP_LIMIT, creationflags=HIDDEN)
         return result.returncode, log.read_text(encoding="utf-8", errors="replace") if log.is_file() else "(no log)"
 
@@ -153,7 +166,7 @@ class Installer(windows_host.HostCase):
         uninstaller = self.app / "uninstall" / "unins000.exe"
         self.assertTrue(uninstaller.is_file(), uninstaller)
         result = subprocess.run([str(uninstaller), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
-                                env=self.env, stdin=subprocess.DEVNULL, capture_output=True, timeout=SETUP_LIMIT,
+                                env=self.installer_env, stdin=subprocess.DEVNULL, capture_output=True, timeout=SETUP_LIMIT,
                                 creationflags=HIDDEN)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         if self.backend_tracking:
@@ -185,10 +198,10 @@ class Installer(windows_host.HostCase):
 
     def test_upgrade_and_uninstall_leave_the_session_host_and_staged_files_alone(self):
         version = self.record["version"]
-        self.install()
+        setup_log = self.install()
         self.assertEqual(windows_installer.problems(self.app, self.expected), [])
         self.assertEqual(registered(), {"DisplayVersion": version, "InstallLocation": str(self.app) + "\\"})
-        self.assertTrue(self.shortcut.is_file(), self.shortcut)
+        self.assertTrue(self.shortcut.is_file(), f"{self.shortcut}\n{setup_log[-8000:]}")
         record = json.loads((self.app / windows_installer.INSTALLATION).read_text(encoding="utf-8"))
         self.assertEqual((record["kind"], record["version"]), ("installer", version))
         self.assertEqual(self.run_installed("hgs-tray.exe", "--version"), f"Zerus {self.record['product_version']}")

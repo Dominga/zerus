@@ -66,6 +66,9 @@ impl AppState {
     pub fn desktop_service(&self) -> Option<std::sync::Arc<crate::desktop_service::Service>> {
         self.live.desktop_service()
     }
+    pub(crate) fn set_pending_read_source(&self, actions: crate::actions::Actions) {
+        let _ = self.live.pending_read_source.set(actions);
+    }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     pub fn set_desktop_responder(&self, responder: Arc<zerus_client_core::desktop::Responder>) {
@@ -174,6 +177,7 @@ mod live {
         pub organization: OnceLock<Organization>,
         pub creations: OnceLock<crate::creations::CreationHost>,
         pub(super) desktop_responder: OnceLock<Arc<zerus_client_core::desktop::Responder>>,
+        pub(super) pending_read_source: OnceLock<crate::actions::Actions>,
         service_projections: Mutex<Vec<crate::desktop_service::Projection>>,
         #[cfg(target_os = "linux")]
         service_activation: OnceLock<crate::desktop_service::activation::Sink>,
@@ -193,6 +197,7 @@ mod live {
                 organization: OnceLock::new(),
                 creations: OnceLock::new(),
                 desktop_responder: OnceLock::new(),
+                pending_read_source: OnceLock::new(),
                 service_projections: Mutex::new(Vec::new()),
                 #[cfg(target_os = "linux")]
                 service_activation: OnceLock::new(),
@@ -394,6 +399,9 @@ mod live {
                         activation: self.service_activation.get().cloned(),
                     },
                 );
+                if let Some(actions) = self.pending_read_source.get() {
+                    service.start_pending_read_import(actions.clone());
+                }
                 if let Some(organization) = &organization {
                     // The observer runs under detail admission. Its source
                     // callback must not re-enter Live.source or that admission.

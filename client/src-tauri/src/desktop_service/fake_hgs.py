@@ -275,7 +275,7 @@ def desktop_request():
         confirmed = path.exists()
         path.touch()
         print(json.dumps({'request_id': request_id, 'accepted': True, 'durable': confirmed, 'op': op}))
-    elif op == 'delivery_result' and (root / ('receipt-' + value['original_request_id'])).exists():
+    elif op in ['delivery_result', 'pending_reads_import_result'] and (root / ('receipt-' + value['original_request_id'])).exists():
         receipt = json.loads((root / ('receipt-' + value['original_request_id'])).read_text())
         print(json.dumps({'request_id': request_id, 'op': op, 'original_request_id': value['original_request_id'],
                           'accepted': True, 'durable': False, 'found': True, 'result': receipt}))
@@ -287,7 +287,7 @@ def desktop_request():
             print(json.dumps(receipt))
         else:
             print(json.dumps({'request_id': request_id, 'original_request_id': value['original_request_id'], 'accepted': False, 'code': 'unknown_request'}))
-    elif op == 'delivery_result':
+    elif op in ['delivery_result', 'pending_reads_import_result']:
         print(json.dumps({'request_id': request_id, 'accepted': True, 'durable': False, 'op': op,
                           'original_request_id': value['original_request_id'], 'found': False, 'result': None}))
     elif op == 'catalog_close':
@@ -304,6 +304,8 @@ if args == ['--help']:
         print('Desktop frontend request ABI: desktop-ui-request-v1')
     if config.get('activation_abi', False):
         print('Desktop activation ABI: desktop-activation-v1')
+    if config.get('pending_reads_abi', True):
+        print('Desktop pending read import ABI: desktop-pending-reads-v1')
     if config.get('maintenance_abi', True):
         print('Desktop maintenance ABI: desktop-maintenance-v1')
 elif args == ['desktop', 'frontend-request', '--json']:
@@ -352,7 +354,14 @@ elif args == ['desktop', 'frontend-request', '--json']:
         print(json.dumps({'request_id': request['request_id'], 'accepted': False, 'durable': False,
                           'code': 'frontend_authentication_refused'}))
     else:
-        if request['op'] == 'automatic_approvals':
+        if request['op'] == 'import_pending_reads':
+            page = request['page']
+            receipt = {'request_id': request['request_id'], 'op': request['op'],
+                       'accepted': True, 'durable': True, 'source': page['source'],
+                       'after': page['after'], 'through': page['after'] + len(page['marks']),
+                       'superseded': len(page['marks']) if config.get('pending_reads_superseded') else 0,
+                       'delivered': False}
+        elif request['op'] == 'automatic_approvals':
             receipt = {'request_id': request['request_id'], 'op': request['op'], 'enabled': request['enabled'],
                        'accepted': True, 'durable': True, 'revision': 1}
         else:

@@ -15,6 +15,7 @@ use zerus_desktop_migration::canonical_uuid;
 pub mod activation;
 pub mod drain;
 pub mod notifications;
+pub mod pending_reads;
 pub mod producer;
 pub mod profile;
 pub mod relay;
@@ -115,6 +116,10 @@ pub struct Responder {
     ui_requests: ui_requests::Cache,
 }
 impl Responder {
+    /// Cached identity data only; no I/O, worker permission or writer grant.
+    pub fn cached_configuration(&self) -> Option<&str> {
+        self.configuration.get().map(String::as_str)
+    }
     pub fn new(
         application: String,
         build: Build,

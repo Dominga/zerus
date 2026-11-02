@@ -214,7 +214,9 @@ and a positive entry ID. `Request::matches` validates the reply scope, shape and
 The service holds one original read-only connection and file identity. A changed
 journal, protection, schema or missing filter index refuses instead of adopting
 old cursors or repairing the journal. A fresh first List can select the current
-journal. An absent journal is an empty read and creates no directory or database;
-unreadable and oversized records remain unavailable, never truncated. This API
+journal. An absent journal is an empty read and creates no directory or database
+file. Opening an existing WAL journal read-only can create SQLite's `-wal` and
+`-shm` sidecars; the original database file remains unchanged. Unreadable and
+oversized records remain unavailable, never truncated. This API
 has no Begin/Finish, reservation, worker, policy or consent operation. Ordinary
 `hgs approval-log` compatibility remains unchanged.

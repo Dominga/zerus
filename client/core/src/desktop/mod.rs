@@ -16,6 +16,7 @@ pub mod activation;
 pub mod approval_audit;
 pub mod drain;
 pub mod notifications;
+pub mod ownership;
 pub mod pending_reads;
 pub mod producer;
 pub mod profile;
@@ -113,6 +114,7 @@ pub struct Responder {
     live: bool,
     replay: bool,
     configuration: OnceLock<String>,
+    ownership_mode: OnceLock<ownership::Mode>,
     producer: Mutex<producer::Cached>,
     ui_requests: ui_requests::Cache,
 }
@@ -135,12 +137,19 @@ impl Responder {
             live,
             replay,
             configuration: OnceLock::new(),
+            ownership_mode: OnceLock::new(),
             producer: Mutex::default(),
             ui_requests: ui_requests::Cache::default(),
         }
     }
     pub fn configure_once(&self, configuration: String) -> bool {
         digest(&configuration) && self.configuration.set(configuration).is_ok()
+    }
+    /// Native startup only, before canonical claim and any writer creation.
+    /// This cached value is not read from a request's JSON or an environment
+    /// variable by the responder, and cannot change within an instance.
+    pub fn configure_ownership_mode_once(&self, mode: ownership::Mode) -> bool {
+        self.live && !self.replay && self.ownership_mode.set(mode).is_ok()
     }
     pub fn reply(&self, line_without_lf: &[u8]) -> Option<Vec<u8>> {
         if let Some(attempt) = ui_requests::query_attempt(line_without_lf) {

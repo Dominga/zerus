@@ -8,7 +8,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 import unittest
 import uuid
 
@@ -160,33 +159,46 @@ class DesktopRevokeHold(unittest.TestCase):
         gate = self.root / "pipe-gate"
         os.mkfifo(gate)
         fd = os.open(gate, os.O_RDWR | os.O_NONBLOCK)
-        hold = self.hold("held_pipe", env={"PATH": "/usr/bin:/bin", "HOME": str(self.root),
-                         "RECEIPT": json.dumps(self.receipt), "MODE": "held_pipe", "GATE": str(gate)}).acquire()
-        hold.timeout = 0.05  # Only the close phase; startup still has its full bound.
-        errors = []
-        def close():
-            try:
-                hold.close()
-            except protocol.Refusal as error:
-                errors.append(str(error))
-        thread = threading.Thread(target=close)
-        thread.start()
+        thread = None
         try:
-            until = time.monotonic() + 2
-            while hold.child.poll() is None and time.monotonic() < until:
-                time.sleep(0.005)
+            hold = self.hold("held_pipe", env={"PATH": "/usr/bin:/bin", "HOME": str(self.root),
+                             "RECEIPT": json.dumps(self.receipt), "MODE": "held_pipe", "GATE": str(gate)}).acquire()
+            # Let the original child observe EOF and exit before expiring the
+            # logical close deadline. Only its gated descendant retains the pipes;
+            # this test must not race normal process exit against a 50 ms kill.
+            hold.child.stdin.close()
+            self.assertEqual(hold.child.wait(timeout=2), 0)
+            hold.timeout = 0  # Deterministic expiry; startup still has its full bound.
+            draining = threading.Event()
+            original_pump = hold.pump
+            def pump(timeout):
+                # The expired close phase reaches pump only in actual cleanup.
+                draining.set()
+                return original_pump(timeout)
+            hold.pump = pump
+            errors = []
+            def close():
+                try:
+                    hold.close()
+                except protocol.Refusal as error:
+                    errors.append(str(error))
+            thread = threading.Thread(target=close)
+            thread.start()
+            self.assertTrue(draining.wait(timeout=2), 'original pipe cleanup did not start')
             self.assertEqual(hold.child.returncode, 0)
-            time.sleep(0.1)  # Exceed ONLY the deliberate close-failure bound.
             self.assertTrue(thread.is_alive())
             self.assertFalse(hold.finished)
             self.assertFalse(hold.child.stdout.closed)
+            self.assertFalse(hold.child.stderr.closed)
         finally:
             os.write(fd, b"x")
-            thread.join(timeout=3)
+            if thread is not None:
+                thread.join(timeout=3)
             os.close(fd)
         self.assertFalse(thread.is_alive())
         self.assertTrue(hold.finished)
         self.assertTrue(hold.child.stdout.closed)
+        self.assertTrue(hold.child.stderr.closed)
         self.assertEqual(len(errors), 1)
         self.assertIn("did not drain", errors[0])
 

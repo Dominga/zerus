@@ -1002,6 +1002,7 @@ export async function attachmentMedia(computer: string, file: AttachmentRef, vid
 
 /** Timing/reservations only: every effect still uses its original native writer. */
 export const actionDelayBegin = (id: string, captures: import("./store/endActionBusy").EndCapture[]) => desktop<void>("action_delay_begin", { id, captures });
+export const untrackedShellIdentity = (target: Target) => desktop<import("./types").UntrackedShellIdentity>("untracked_shell_identity", { target });
 export const actionDelayWait = (id: string) => desktop<boolean>("action_delay_wait", { id });
 export const actionDelayCancel = (id: string) => desktop<void>("action_delay_cancel", { id });
 

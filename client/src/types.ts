@@ -298,6 +298,7 @@ export type Action =
   | { kind: "archive" }
   | { kind: "terminate" }
   | { kind: "kill" }
+  | { kind: "terminate_shell"; identity: UntrackedShellIdentity }
   | { kind: "start_fresh" }
   | { kind: "forget" }
   | { kind: "forget_binding" }
@@ -309,6 +310,11 @@ export type Action =
   | { kind: "recovery"; job_id: string; action: "now" | "cancel" };
 
 export interface WorktreeCleanup { status: string; path: string; common_dir: string; reason?: string | null }
+export interface UntrackedShellIdentity {
+  version: number; socket: string; socket_dev: string; socket_ino: string;
+  server_pid: number; server_start: string; session_id: string; session_created: number;
+  pane_id: string; pane_pid: number; pane_start: string; shell: string;
+}
 
 export type Outcome =
   | { outcome: "done"; receipt: unknown; cleanup: WorktreeCleanup | null; cleanup_capture?: import("./store/terminationCleanup").RetainedCapture | null }

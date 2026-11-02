@@ -83,7 +83,7 @@ export function createActions(
       return;
     }
     if (key && out.outcome === "failed" && out.detail === STATE_CHANGED && isEndAction(action)) {
-      const verb = action.kind === "archive" ? "Archive" : ["terminate", "kill"].includes(action.kind) ? "Terminate" : "Forget";
+      const verb = action.kind === "archive" ? "Archive" : ["terminate", "kill", "terminate_shell"].includes(action.kind) ? "Terminate" : "Forget";
       notify("info", `${verb} cancelled: the session changed.`); return;
     }
     if (out.outcome === "failed") { notify("error", out.detail, true); return; }
@@ -166,14 +166,14 @@ export function createActions(
    * opened; then `action` is the call the dialog chose. A computer that went
    * offline meanwhile gets no call and no notice, as in Qt.
    */
-  async function end(row: ActionRow, action: "terminate" | "kill", cleanupId?: string): Promise<Outcome> {
+  async function end(row: ActionRow, action: "terminate" | "kill" | Extract<Action, { kind: "terminate_shell" }>, cleanupId?: string): Promise<Outcome> {
     if (!online(row.computer)) return failed("offline");
     const live = catalog.rows[row.key];
     if (live && terminates(live) !== terminates(row)) {
       notify("error", tr(STATE_CHANGED), true);
       return failed(STATE_CHANGED);
     }
-    return perform(row, { kind: action }, { cleanupId: action === "terminate" ? cleanupId : undefined });
+    return perform(row, typeof action === "string" ? { kind: action } : action, { cleanupId: action === "terminate" ? cleanupId : undefined });
   }
 
   /**

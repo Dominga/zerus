@@ -17,6 +17,7 @@ mod frontend;
 mod handoff;
 mod import_evidence;
 mod lifecycle;
+mod notification_controls;
 #[allow(dead_code)] // Platform adapters attach this outbox in the next integration slice.
 mod notifications;
 #[allow(dead_code)]
@@ -480,6 +481,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     let mut feed = feed::Broker::new(&epoch);
     let mut reads = catalog_read::Reader::default();
     let mut audit = approval_audit::Reader::new(config, &location, &epoch);
+    let mut notification_controls =
+        notification_controls::Runtime::new(&store, &location.configuration, &epoch)?;
     let mut frontend = frontend::Cache::default();
     let mut background: Option<background::Runtime> = None;
     let mut frontend_order = ui_authority::Order::default();
@@ -602,6 +605,10 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
             let mut full_batch = false;
             if let Some(runtime) = &mut background {
                 let previous = seq;
+                runtime.notification_controls(
+                    notification_controls.preferences(),
+                    notification_controls.foreground_until(),
+                );
                 let (changes, full) = runtime.poll(&mut store, &mut feed, &mut seq);
                 full_batch = full || previous != seq;
                 for mut change in changes {
@@ -630,6 +637,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         &reads,
                     );
                     value["frontend_read_delivery"] = frontend.status();
+                    value["notification_controls"] = notification_controls.projection(&store);
                     value["lifecycle"]["mode"] = if background_mode {
                         "background"
                     } else {
@@ -714,6 +722,22 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                 }
                             }
                             (Some(authority), _)
+                                if matches!(
+                                    authority.operation(),
+                                    "notification_preferences" | "notification_focus"
+                                ) =>
+                            {
+                                match authority.into_request(&mut frontend_order) {
+                                    Ok(permit) => {
+                                        notification_controls.frontend(&mut store, permit)
+                                    }
+                                    Err(_) => frontend_refused(
+                                        hello.request.as_ref(),
+                                        "frontend_identity_expired",
+                                    ),
+                                }
+                            }
+                            (Some(authority), _)
                                 if authority.operation() == "import_pending_reads" =>
                             {
                                 match authority.into_request(&mut frontend_order) {
@@ -787,6 +811,25 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                             )
                         }) {
                             reads.request(&store, &feed, &epoch, hello.request.as_ref().unwrap())
+                        } else if hello.request.as_ref().is_some_and(|v| {
+                            matches!(
+                                v["op"].as_str(),
+                                Some(
+                                    "notification_preferences_status"
+                                        | "notification_preferences_result"
+                                )
+                            )
+                        }) {
+                            notification_controls.request(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "notification_control")
+                        {
+                            frontend_refused(
+                                hello.request.as_ref(),
+                                "frontend_authentication_required",
+                            )
                         } else if hello.request.as_ref().is_some_and(|v| {
                             matches!(
                                 v["op"].as_str(),
@@ -974,6 +1017,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                     &reads,
                 );
                 value["frontend_read_delivery"] = frontend.status();
+                value["notification_controls"] = notification_controls.projection(&store);
                 value["lifecycle"]["mode"] = if background_mode {
                     "background"
                 } else {

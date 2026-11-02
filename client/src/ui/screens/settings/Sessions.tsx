@@ -1,8 +1,13 @@
-import { Show } from "solid-js";
+import { Show, onMount } from "solid-js";
+import { invoke } from "@tauri-apps/api/core";
+import { inTauri } from "../../../bridge";
+import { desktopService } from "../../../store/desktopService";
+import { bus } from "../../../store/notices";
 import { flag, setSetting } from "../../../store/settings";
 import { motionReduced } from "../../motion";
 import { Group, SectionHead, ToggleRow } from "./ui";
 import { tr, trNoop } from "../../../i18n";
+import { createNotificationPreferences } from "./notification-preferences";
 
 // Settings > Sessions (tray/src/SettingsPage.h:97-107,
 // QuestionNotificationSettings.h) as the approved mockup lays it out
@@ -12,6 +17,11 @@ import { tr, trNoop } from "../../../i18n";
 const toggle = (key: string) => (on: boolean) => void setSetting(key, on);
 
 export function SessionsSection() {
+  const notifications = createNotificationPreferences(desktopService.enabled, desktopService.state,
+    () => flag("notifications/optionalQuestions"), enabled => setSetting("notifications/optionalQuestions", enabled),
+    (command, args) => invoke(command, args), error => bus.notify("error", String(error), true));
+  const notification = notifications.view;
+  onMount(() => {if (inTauri() && desktopService.enabled()) void notifications.check();});
   const systemOnly = () => motionReduced() && !flag("workspace/reduceMotion");
   return (
     <>
@@ -23,8 +33,16 @@ export function SessionsSection() {
           hint={motionReduced() ? tr("Reduce motion is on, so working sessions hold still.") : undefined} />
         <ToggleRow label={trNoop("Show completed subagents")} checked={flag("workspace/showCompletedSubagents")} onChange={toggle("workspace/showCompletedSubagents")}
           hint={trNoop("Include agents whose latest turn has finished in the session list and its counts. Plan & agents always shows all reported agents. Agents with unknown status remain visible.")} />
-        <ToggleRow label={trNoop("Notify about optional questions")} checked={flag("notifications/optionalQuestions")} onChange={toggle("notifications/optionalQuestions")}
+        <ToggleRow label={trNoop("Notify about optional questions")} checked={notifications.checked()} onChange={(on)=>void notifications.change(on)}
+          disabled={notifications.disabled()}
           hint={trNoop("Off by default. Shows a system notification once for each new optional question, which the agent keeps working without. It is withdrawn when the questions are answered or skipped, or the session is marked as read. Questions that need an answer always notify.")} />
+        <Show when={desktopService.enabled()}>
+          <Show when={notification()?.pending} fallback={<Show when={!notification()?.available && !notification()?.code}><p class="set-group-hint">{tr("Notification settings are unavailable from the desktop service.")}</p></Show>}>
+            <p class="set-group-hint">{tr("The previous notification setting is unconfirmed. Check its result before making another change.")}</p>
+          </Show>
+          <Show when={notification()?.code}><p class="set-group-hint">{tr(notification()!.code)}</p></Show>
+          <button class="btn small" disabled={notifications.busy() || notification()?.running} onClick={()=>void notifications.check()}>{tr("Check result")}</button>
+        </Show>
       </Group>
       <Group title={trNoop("Motion")}>
         <ToggleRow label={trNoop("Reduce motion")} checked={flag("workspace/reduceMotion")} onChange={toggle("workspace/reduceMotion")}

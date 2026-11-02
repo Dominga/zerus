@@ -1,10 +1,34 @@
 # Notification preferences and foreground observations
 
-The closed wire foundation is `client/core/src/desktop/notification_control.rs`.
-Its ABI is `desktop-notification-controls-v1`. This source does not expose a
-callable CLI route or advertise its help marker. Root admission and the native
-client companion follow the stage 2 host attachment. Consumers must check the
-actual marker before dispatch, independently of DTO availability.
+The closed types live in `client/core/src/desktop/notification_control.rs`.
+The Root route advertises `Notification controls ABI:
+desktop-notification-controls-v1`. Consumers check that exact marker and the
+existing frontend-request marker on the selected paired CLI before dispatch.
+The native client companion supplies the actual window events and connection
+lifetime; the generic policy sender refuses this operation.
+
+Mutation uses `Request::NotificationControl { scope, control }` on the existing
+original-child `desktop frontend-request --json` route. `scope` is the verified
+current configuration/service epoch; `control` is the closed Configure or Focus
+command below. Generic `desktop request` rejects `notification_control`.
+Read-only requests on that generic lane are exactly
+`{ op: "notification_preferences_status", request_id, scope }` and
+`{ op: "notification_preferences_result", query: Query }`. Status and lookup
+remain display/recovery data and cannot establish native provenance.
+
+The canonical Responder's `notification_connect(Scope)` returns an owned native
+`notification_control::native::Connection`. It generates the connection UUID,
+starts Unknown/revision zero, exposes `snapshot`, `observe(FocusState)`,
+`invalidate`, `id` and `scope`, and invalidates on Drop. Native toplevel events
+use `observe`; Foreground renewals use `snapshot`. The service connection retains
+this handle and invalidates it promptly on disconnect/loss. The original
+`Registration::notification_evidence()` is the exact attached snapshot used for
+reply comparison. Query-time invalidation retains every original child/pipe/Slot
+resource charge until actual custody ends.
+
+Store schema 16 atomically adds one preference singleton and at most 4096
+indexed immutable request receipts. It adds no focus table, worker permission or
+approval consent. Older CLIs fail closed on that newer store.
 
 ## Preference transfer
 
@@ -81,6 +105,9 @@ connection or reply cannot renew it: the last Foreground snapshot expires on a
 monotonic deadline within five seconds. The actor checks cheap held-process
 liveness every turn, bounded full proof periodically, and full proof before
 accepting a replacement lease. The original mutation deadline is not extended.
+On Windows the periodic hint check uses the same retained frontend and ancestor
+objects after the original relay exits; admission still checks that relay's
+liveness and the original two-second deadline.
 A stale native revision or a former connection cannot replace a newer lease.
 
 The client compares the returned native connection ID/revision with the exact
@@ -99,3 +126,26 @@ to suppress newly observed foreground edges without replaying them after blur.
 Required notifications still depend on the independent durable ownership
 grant and actual original host. Preferences and focus cannot rearm a revoked
 grant, start a service, authorize approvals or establish closed-UI launch mode.
+
+## Zerus Next consumer
+
+In service mode the native client creates one control connection only after
+the original verified watch hello. It probes both markers on the retained
+paired helper and pins that image through each bounded exchange. One separate
+admission slot accounts for the original child, registration and every pipe;
+disconnect invalidates native evidence before joining that worker. Metadata
+probes and transport run off the UI and watch reader.
+
+Rust observes all native toplevel windows. A fresh focused visible window means
+Foreground; failed observations mean Unknown unless another window proves
+Foreground. Reconnect asks the native main thread for a new observation and
+never replays the previous connection's focus. Background/Unknown invalidates
+older registrations immediately even when an original helper still holds pipes.
+
+Settings > Sessions sends optional-question changes through the separate typed
+native command. An unconfigured service gets at most one initialization attempt
+per connection from the existing local preference. A configured service's fresh
+status is retained instead of that local value. Pending edits disable further
+changes; Check result and reconnect query the original receipt only. A historical
+save is followed by a fresh scoped status, and unavailable status offers no local
+write fallback. Native mode retains the existing local setting path.

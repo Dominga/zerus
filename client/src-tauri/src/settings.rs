@@ -142,6 +142,12 @@ pub async fn settings_set(
             "Automatic approval settings must be changed through the background service.".into(),
         );
     }
+    if crate::desktop_service::mode() && key == "notifications/optionalQuestions" {
+        return Err(zerus_client_core::source!(
+            "Notification settings must be changed through the background service."
+        )
+        .into());
+    }
     let (value, revision) = if key == ALWAYS_ON_TOP {
         let on = value.as_bool().ok_or("Keep Above requires a boolean.")?;
         crate::window_layer::request(&app, on).await?

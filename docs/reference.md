@@ -3768,10 +3768,20 @@ No reverse connection is created by default. Explicit peer setup uses
 | `--open-mode MODE` | Linux auto/tab/window/clipboard; macOS terminal/clipboard; Windows auto/tab/window/console/clipboard |
 | `--selftest` | Headless hgs connectivity check |
 | `--sessions` | Open the workspace; on Windows also the default |
+| `--desktop-target JSON` | Zerus Next on Linux: open the exact `computer`, `run` and `conversation`; implies `--sessions`. Navigation data only, with no notification or writer authority |
 | `--background` | Start in the tray only; the default on Linux and macOS. Not together with `--sessions` |
 
 A single-instance socket forwards repeated launches to the running GUI: one that
 would open the workspace opens it there.
+The Linux target value is bounded to 8192 bytes and accepts only those three
+fields. It follows the exact run and conversation through a session rename and
+refuses an archived or replaced session. The service's selected-child launcher
+requires the separate environment-input capability and passes the same target
+as `ZERUS_CLIENT_DESKTOP_TARGET` in that child only, keeping the identifiers out
+of its command line. An ephemeral Wayland activation token also travels only in
+that child's environment. The new GUI consumes both values before starting its
+workers; forwarding navigation to an already running GUI carries no token.
+Conflicting argument/environment targets and target/background starts refuse.
 On Linux and macOS, concurrent launches take turns on it, and a launch such as
 `hgs-tray --sessions` leaves it to the `hgs-tray` systemd or launchd service
 while that service runs or restarts: it waits up to 30 seconds for the
@@ -4489,6 +4499,23 @@ It creates no files, contacts no service manager and enables no writer.
 Its `operation:preview` identifies this
 render-only operation; it makes no claim about OS registration. Maintained installer
 ownership checks and delegation are separate steps before using the definition.
+
+On Windows, `hgs desktop notification-registration install|status --json`
+manages only the owned `com.hgdev.hgs-tray` AUMID/COM registration. Install the
+passive service task first so the selected stable CLI matches the current
+installer. Status is metadata, not native notification readiness. The fixed
+cold activation entry refuses before configuration or owner acquisition. No
+worker repairs registration or enables background consent.
+
+Explicit removal uses `notification-registration remove --json --request-id UUID`
+only after the original selected service's settled manual revoke with that same
+UUID. The authenticated current-service reply must match configuration and
+original runtime epoch and have accepted/durable/revoked/checkpointed all true.
+Lost replies authorize read-only `revoke_status`, never a new revoke UUID.
+Unknown or retained offline state stays for inspection. UI-only uninstall keeps
+the service task, staged CLI and Toast identity; its separate UI login entry is
+removed normally. Active removal currently remains unavailable until root Windows Runtime drain
+attachment is integrated; metadata removal does not claim native history deletion.
 
 The proposed service names are `hgs-desktop.service` (systemd user),
 `com.hgdev.hgs-desktop` (LaunchAgent), and `hgs-desktop` (per-user Windows logon

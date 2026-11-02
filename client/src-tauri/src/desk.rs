@@ -76,11 +76,26 @@ pub enum DeskInput {
         token: String,
         activation: String,
     },
+    #[cfg(target_os = "linux")]
+    ServiceClicked(Box<crate::desktop_service::activation::Delivery>),
+    /// Public launch/instance navigation data, not callback/writer authority.
+    #[cfg(target_os = "linux")]
+    Navigate {
+        target: zerus_client_core::desktop::activation::Target,
+        activation: Option<String>,
+    },
     /// A delivery failed (`AttentionNotifier::failed`).
     Failed {
         token: String,
         detail: String,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExactSession {
+    pub run: String,
+    pub conversation: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +106,8 @@ pub struct OpenSession {
     /// (`SessionsWindow::showAttentionSession`, `SessionsWindow.cpp:2837-2842`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub attention: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected: Option<ExactSession>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -526,6 +543,36 @@ pub fn observe_round(
 struct Click {
     target: Map<String, Value>,
     deadline: Instant,
+    #[cfg(target_os = "linux")]
+    service: Option<Box<crate::desktop_service::activation::Delivery>>,
+    #[cfg(target_os = "linux")]
+    exact: Option<zerus_client_core::desktop::activation::Target>,
+}
+#[cfg(target_os = "linux")]
+fn resolve_service(
+    target: &zerus_client_core::desktop::activation::Target,
+    desk: &Desk,
+    expired: bool,
+) -> Resolution {
+    let computer = ComputerId(target.computer.clone());
+    let state = desk.computers().get(&computer);
+    if let Some((key, _)) = state.and_then(|state| {
+        state.rows.iter().find(|(_, row)| {
+            row.state != "archived"
+                && row.run_id.as_deref() == Some(&target.run)
+                && row.conversation_id.as_deref() == Some(&target.conversation)
+        })
+    }) {
+        return Resolution::Open {
+            computer,
+            key: key.clone(),
+        };
+    }
+    if expired || state.is_some_and(|state| state.fresh()) {
+        Resolution::Gone(target.run.clone())
+    } else {
+        Resolution::Waiting
+    }
 }
 
 /// What one round reads from the app, and the status item it offers.
@@ -556,6 +603,10 @@ pub struct Outcome {
     pub show: bool,
     #[cfg(target_os = "linux")]
     pub activation: Option<String>,
+    #[cfg(target_os = "linux")]
+    completion: Option<crate::desktop_service::activation::Completion>,
+    #[cfg(target_os = "linux")]
+    expected: Option<ExactSession>,
     /// Banners to withdraw, then post.
     pub changes: Changes,
     /// The clicked notification's session.
@@ -658,6 +709,10 @@ impl DeskLoop {
                         self.click = Some(Click {
                             target,
                             deadline: cx.now + CLICK_WAIT,
+                            #[cfg(target_os = "linux")]
+                            service: None,
+                            #[cfg(target_os = "linux")]
+                            exact: None,
                         });
                         outcome.show = true;
                     }
@@ -668,10 +723,46 @@ impl DeskLoop {
                         self.click = Some(Click {
                             target,
                             deadline: cx.now + CLICK_WAIT,
+                            #[cfg(target_os = "linux")]
+                            service: None,
+                            #[cfg(target_os = "linux")]
+                            exact: None,
                         });
                         outcome.show = true;
                         outcome.activation = (!activation.is_empty()).then_some(activation);
                     }
+                }
+                #[cfg(target_os = "linux")]
+                DeskInput::ServiceClicked(delivery)
+                    if self.attention_completions && delivery.current() =>
+                {
+                    let open = delivery.open();
+                    let target =
+                        attention::target(&open.token).expect("validated activation token");
+                    outcome.activation = open.platform_context.as_ref().map(|context| match context {
+                        zerus_client_core::desktop::notifications::PlatformContext::Wayland { activation_token } => activation_token.clone(),
+                    });
+                    outcome.completion = Some(delivery.completion());
+                    outcome.show = true;
+                    self.click = Some(Click {
+                        target,
+                        deadline: cx.now + CLICK_WAIT,
+                        exact: Some(delivery.open().target.clone()),
+                        service: Some(delivery),
+                    });
+                }
+                #[cfg(target_os = "linux")]
+                DeskInput::Navigate { target, activation }
+                    if self.attention_completions && target.valid() =>
+                {
+                    outcome.show = true;
+                    outcome.activation = activation;
+                    self.click = Some(Click {
+                        target: Map::new(),
+                        deadline: cx.now + CLICK_WAIT,
+                        service: None,
+                        exact: Some(target),
+                    });
                 }
                 DeskInput::Failed { token, detail }
                     if self.attention_completions
@@ -689,7 +780,9 @@ impl DeskLoop {
                 }
                 DeskInput::Clicked(_) | DeskInput::Failed { .. } => {}
                 #[cfg(target_os = "linux")]
-                DeskInput::LinuxClicked { .. } => {}
+                DeskInput::LinuxClicked { .. }
+                | DeskInput::ServiceClicked(_)
+                | DeskInput::Navigate { .. } => {}
             }
         }
         // Read once however many changes were announced.
@@ -729,13 +822,43 @@ impl DeskLoop {
         }
         // A live stream is the current listing Qt asks for at the click; a
         // stale one waits for its rows up to `CLICK_WAIT` (`TrayAgent.cpp:188-192`).
+        #[cfg(target_os = "linux")]
+        if self
+            .click
+            .as_ref()
+            .and_then(|click| click.service.as_ref())
+            .is_some_and(|delivery| !delivery.current())
+        {
+            self.click = None;
+        }
         if let Some(click) = &self.click {
-            match attention::resolve(&click.target, &self.desk, cx.now >= click.deadline) {
+            let resolution =
+                attention::resolve(&click.target, &self.desk, cx.now >= click.deadline);
+            #[cfg(target_os = "linux")]
+            let resolution = click.exact.as_ref().map_or(resolution, |target| {
+                resolve_service(target, &self.desk, cx.now >= click.deadline)
+            });
+            match resolution {
                 Resolution::Open { computer, key } => {
                     outcome.open = Some((computer, key));
+                    #[cfg(target_os = "linux")]
+                    if let Some(delivery) = &click.service {
+                        outcome.completion = Some(delivery.completion());
+                    }
+                    #[cfg(target_os = "linux")]
+                    if let Some(target) = &click.exact {
+                        outcome.expected = Some(ExactSession {
+                            run: target.run.clone(),
+                            conversation: target.conversation.clone(),
+                        });
+                    }
                     self.click = None;
                 }
                 Resolution::Gone(name) => {
+                    #[cfg(target_os = "linux")]
+                    if let Some(delivery) = &click.service {
+                        outcome.completion = Some(delivery.completion());
+                    }
                     outcome.notices.push(attention::gone_text(&name));
                     self.click = None;
                 }
@@ -849,7 +972,16 @@ fn apply(app: &AppHandle, outcome: Outcome) {
     deliver(app, outcome.changes);
     if outcome.show {
         let handle = app.clone();
+        #[cfg(target_os = "linux")]
+        let completion = outcome.completion.clone();
         let _ = app.run_on_main_thread(move || {
+            #[cfg(target_os = "linux")]
+            if completion
+                .as_ref()
+                .is_some_and(|completion| !completion.current())
+            {
+                return;
+            }
             #[cfg(target_os = "linux")]
             crate::platform::linux_tray::present(&handle, outcome.activation.as_deref());
             #[cfg(not(target_os = "linux"))]
@@ -859,17 +991,44 @@ fn apply(app: &AppHandle, outcome: Outcome) {
         });
     }
     if let Some((computer, key)) = outcome.open {
-        open(
+        #[cfg(target_os = "linux")]
+        let completion = outcome.completion.clone();
+        open_if(
             app,
             OpenSession {
                 computer: computer.0,
                 key,
                 attention: true,
+                #[cfg(target_os = "linux")]
+                expected: outcome.expected,
+                #[cfg(not(target_os = "linux"))]
+                expected: None,
+            },
+            move || {
+                #[cfg(target_os = "linux")]
+                if completion
+                    .as_ref()
+                    .is_some_and(|completion| !completion.current())
+                {
+                    return false;
+                }
+                true
             },
         );
     }
     for text in outcome.notices {
-        window_notice(app, "Zerus", &text);
+        #[cfg(target_os = "linux")]
+        let completion = outcome.completion.clone();
+        window_notice_if(app, "Zerus", &text, move || {
+            #[cfg(target_os = "linux")]
+            if completion
+                .as_ref()
+                .is_some_and(|completion| !completion.current())
+            {
+                return false;
+            }
+            true
+        });
     }
     if crate::main_window(app).is_some() {
         for text in outcome.window_notices {
@@ -972,6 +1131,7 @@ pub fn open_session(app: &AppHandle, computer: &ComputerId, key: &str) {
             computer: computer.0.clone(),
             key: key.to_owned(),
             attention: false,
+            expected: None,
         },
     );
 }
@@ -990,8 +1150,14 @@ pub fn open_updates(app: &AppHandle) {
 }
 
 fn open(app: &AppHandle, target: OpenSession) {
+    open_if(app, target, || true);
+}
+fn open_if(app: &AppHandle, target: OpenSession, current: impl FnOnce() -> bool + Send + 'static) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
+        if !current() {
+            return;
+        }
         if let Err(error) = crate::lifecycle::request_main(&handle) {
             eprintln!("zerus-client: could not open the window: {error}");
         }
@@ -1008,12 +1174,23 @@ fn open(app: &AppHandle, target: OpenSession) {
 
 /// A notice inside the window (Qt's `showNotificationNotice`).
 pub fn window_notice(app: &AppHandle, title: &str, text: &str) {
+    window_notice_if(app, title, text, || true);
+}
+fn window_notice_if(
+    app: &AppHandle,
+    title: &str,
+    text: &str,
+    current: impl FnOnce() -> bool + Send + 'static,
+) {
     let notice = Notice {
         title: title.to_owned(),
         text: text.to_owned(),
     };
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
+        if !current() {
+            return;
+        }
         let send = |notice: Notice| {
             let _ = handle.emit("desk-notice", notice);
         };
@@ -2075,6 +2252,92 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_navigation_waits_for_exact_identity_and_never_creates_a_callback_receipt() {
+        let dir = scratch("startup-navigation");
+        let mut thread = Thread::new(&dir);
+        let target = zerus_client_core::desktop::activation::Target {
+            computer: "peer".into(),
+            run: "original-run".into(),
+            conversation: "original-conversation".into(),
+        };
+        let initial = thread.round(
+            0.0,
+            vec![DeskInput::Navigate {
+                target: target.clone(),
+                activation: Some("synthetic-wayland".into()),
+            }],
+        );
+        assert!(initial.show);
+        assert!(initial.open.is_none());
+        assert_eq!(initial.activation.as_deref(), Some("synthetic-wayland"));
+        assert!(initial.completion.is_none());
+        let mut row = asking("renamed/exact-target");
+        row.run_id = Some(target.run.clone());
+        row.conversation_id = Some(target.conversation.clone());
+        let resolved = thread.round(1.0, live("peer", vec![row]));
+        assert_eq!(
+            resolved.open,
+            Some((ComputerId::from("peer"), "run:renamed/exact-target".into()))
+        );
+        assert_eq!(
+            resolved.expected,
+            Some(ExactSession {
+                run: target.run,
+                conversation: target.conversation
+            })
+        );
+        assert!(resolved.completion.is_none());
+        assert!(thread.round(2.0, Vec::new()).open.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn service_click_requires_both_original_run_and_conversation_without_name_fallback() {
+        let mut desk = Desk::default();
+        let target = zerus_client_core::desktop::activation::Target {
+            computer: "peer".into(),
+            run: "original-run".into(),
+            conversation: "original-conversation".into(),
+        };
+        assert_eq!(resolve_service(&target, &desk, false), Resolution::Waiting);
+        let mut original = asking("codex/renamed/current");
+        original.run_id = Some(target.run.clone());
+        original.conversation_id = Some(target.conversation.clone());
+        let mut wrong_conversation = original.clone();
+        wrong_conversation.name = "same-run-other-conversation".into();
+        wrong_conversation.conversation_id = Some("other-conversation".into());
+        let mut wrong_run = original.clone();
+        wrong_run.name = "same-conversation-other-run".into();
+        wrong_run.run_id = Some("other-run".into());
+        listed(&mut desk, "peer", vec![wrong_conversation, wrong_run]);
+        assert!(matches!(
+            resolve_service(&target, &desk, false),
+            Resolution::Gone(_)
+        ));
+        listed(&mut desk, "other-peer", vec![original.clone()]);
+        assert!(matches!(
+            resolve_service(&target, &desk, false),
+            Resolution::Gone(_)
+        ));
+        listed(&mut desk, "peer", vec![original.clone()]);
+        assert_eq!(
+            resolve_service(&target, &desk, false),
+            Resolution::Open {
+                computer: ComputerId("peer".into()),
+                key: original.name.clone()
+            }
+        );
+        original.state = "archived".into();
+        listed(&mut desk, "peer", vec![original]);
+        assert!(matches!(
+            resolve_service(&target, &desk, false),
+            Resolution::Gone(_)
+        ));
+    }
+
     #[test]
     fn a_click_with_a_live_stream_resolves_at_once() {
         let dir = scratch("click-live");
@@ -2253,6 +2516,7 @@ mod tests {
             computer: "studio".into(),
             key: "run:a".into(),
             attention: false,
+            expected: None,
         };
         assert_eq!(
             serde_json::to_value(&open).unwrap(),
@@ -2263,6 +2527,28 @@ mod tests {
             serde_json::to_value(&open).unwrap(),
             serde_json::json!({"computer": "studio", "key": "run:a", "attention": true})
         );
+    }
+
+    #[test]
+    fn an_exact_service_target_survives_the_cold_page_inbox_and_wire() {
+        let target = OpenSession {
+            computer: "peer".into(),
+            key: "run:original".into(),
+            attention: true,
+            expected: Some(ExactSession {
+                run: "original".into(),
+                conversation: "conversation".into(),
+            }),
+        };
+        let mut inbox = Inbox::default();
+        inbox.open(target.clone(), |_| {
+            panic!("the cold page cannot receive yet")
+        });
+        let pending = inbox.take(0);
+        let decoded: Pending =
+            serde_json::from_slice(&serde_json::to_vec(&pending).unwrap()).unwrap();
+        assert_eq!(decoded.open, Some(target));
+        assert!(inbox.take(0).open.is_none());
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -2409,6 +2695,7 @@ mod tests {
             computer: "studio".into(),
             key: key.into(),
             attention: false,
+            expected: None,
         }
     }
 

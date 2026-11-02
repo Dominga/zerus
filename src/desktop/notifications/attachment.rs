@@ -44,7 +44,9 @@ pub(in crate::desktop) enum Selection {
     Linux { address: String },
     #[cfg(target_os = "macos")]
     Macos(super::host::SelectedHost),
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    Windows { config: crate::config::Config },
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     Unavailable,
 }
 
@@ -71,13 +73,29 @@ enum NativeKind {
         offset: usize,
         finished: bool,
     },
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(any(windows, test))]
+    Windows {
+        runtime: super::windows::runtime::Runtime,
+        offset: usize,
+        finished: bool,
+    },
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     Unavailable,
+}
+impl NativeHost {
+    #[cfg(any(windows, test))]
+    pub(in crate::desktop) fn windows(runtime: super::windows::runtime::Runtime) -> Self {
+        Self(NativeKind::Windows {
+            runtime,
+            offset: 0,
+            finished: false,
+        })
+    }
 }
 impl Host for NativeHost {
     fn restore(&mut self, page: &[Activation]) -> Result<bool> {
         match &mut self.0 {
-            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
             NativeKind::Unavailable => {
                 let _ = page;
                 anyhow::bail!("notification platform unavailable")
@@ -116,11 +134,24 @@ impl Host for NativeHost {
                 *offset = 0;
                 Ok(true)
             }
+            #[cfg(any(windows, test))]
+            NativeKind::Windows {
+                runtime, offset, ..
+            } => {
+                while *offset < page.len() {
+                    if !runtime.try_restore(page[*offset].clone()) {
+                        return Ok(false);
+                    }
+                    *offset += 1;
+                }
+                *offset = 0;
+                Ok(true)
+            }
         }
     }
     fn finish(&mut self) -> Result<bool> {
         match &mut self.0 {
-            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
             NativeKind::Unavailable => anyhow::bail!("notification platform unavailable"),
             #[cfg(target_os = "linux")]
             NativeKind::Linux {
@@ -151,11 +182,25 @@ impl Host for NativeHost {
                 // The original FIFO writes every Restore before new commands.
                 Ok(runtime.status()["ready"] == true)
             }
+            #[cfg(any(windows, test))]
+            NativeKind::Windows {
+                runtime, finished, ..
+            } => {
+                if !*finished {
+                    ensure!(runtime.finish_restoration(), "notification finish refused");
+                    *finished = true;
+                }
+                let status = runtime.status();
+                ensure!(status["fault"].is_null(), "notification host failed");
+                // The worker acknowledges only after its original restore FIFO
+                // is empty and native activation admission has been opened.
+                Ok(status["restored"] == true && status["ready"] == true)
+            }
         }
     }
     fn ready(&self) -> Result<bool> {
         let status = self.status();
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         ensure!(
             status["supported"] == true,
             "notification platform unavailable"
@@ -169,36 +214,49 @@ impl Host for NativeHost {
                 "notification host failed"
             );
         }
+        #[cfg(any(windows, test))]
+        if matches!(&self.0, NativeKind::Windows { .. }) {
+            ensure!(status["fault"].is_null(), "notification host failed");
+        }
         Ok(status["ready"] == true)
     }
     fn stop(&self) {
         match &self.0 {
-            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
             NativeKind::Unavailable => (),
             #[cfg(target_os = "linux")]
             NativeKind::Linux { runtime, .. } => runtime.request_stop(),
             #[cfg(target_os = "macos")]
             NativeKind::Macos { runtime, .. } => runtime.request_stop(),
+            #[cfg(any(windows, test))]
+            NativeKind::Windows { runtime, .. } => runtime.request_stop(),
         }
     }
     fn drained(&mut self) -> bool {
         match &mut self.0 {
-            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
             NativeKind::Unavailable => true,
             #[cfg(target_os = "linux")]
             NativeKind::Linux { runtime, .. } => runtime.drained(),
             #[cfg(target_os = "macos")]
             NativeKind::Macos { runtime, .. } => runtime.poll_drained(),
+            #[cfg(any(windows, test))]
+            NativeKind::Windows { runtime, .. } => {
+                runtime.try_join();
+                runtime.drained()
+            }
         }
     }
     fn status(&self) -> Value {
         match &self.0 {
-            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
             NativeKind::Unavailable => json!({"supported":false,"ready":false}),
             #[cfg(target_os = "linux")]
             NativeKind::Linux { runtime, .. } => runtime.status(),
             #[cfg(target_os = "macos")]
             NativeKind::Macos { runtime, .. } => runtime.status(),
+            #[cfg(any(windows, test))]
+            NativeKind::Windows { runtime, .. } => runtime.status(),
         }
     }
 }
@@ -230,12 +288,14 @@ impl Runtime<NativeHost> {
             _owner: owner,
             _admission: Admission::acquire()?,
         });
+        #[cfg(windows)]
+        let windows_owner = lifetime.clone();
         Self::with_factory(
             store,
             session,
             lifetime,
             |session, endpoint| match selection {
-                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
                 Selection::Unavailable => {
                     let _ = (location, session, endpoint);
                     anyhow::bail!("notification platform unavailable")
@@ -254,6 +314,24 @@ impl Runtime<NativeHost> {
                     offset: 0,
                     finished: false,
                 })),
+                #[cfg(windows)]
+                Selection::Windows { config } => {
+                    let selected = Location::new(&config)?;
+                    ensure!(
+                        selected.configuration == location.configuration
+                            && selected.root == location.root,
+                        "notification configuration changed"
+                    );
+                    Ok(NativeHost::windows(
+                        super::windows::runtime::Runtime::start(
+                            config,
+                            session,
+                            endpoint,
+                            windows_owner,
+                        )
+                        .map_err(anyhow::Error::msg)?,
+                    ))
+                }
             },
         )
     }

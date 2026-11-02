@@ -1761,5 +1761,31 @@ class TestflightUploadSigningTests(unittest.TestCase):
             self.assertNotIn("export", calls)
 
 
+class WindowsInstallerPublicationWorkflow(unittest.TestCase):
+    def test_nightly_version_reaches_the_same_checks_that_build_and_test_the_installer(self):
+        nightly = (ROOT / '.github/workflows/nightly.yml').read_text()
+        checks = (ROOT / '.github/workflows/checks.yml').read_text()
+        for name in ('verify', 'review'):
+            part = job(nightly, name)
+            self.assertIn('needs: version', part)
+            self.assertIn('windows_installer_version: ${{ needs.version.outputs.installer }}', part)
+        version = job(nightly, 'version')
+        self.assertIn('cache-mode: none', version)
+        self.assertIn('persist-credentials: false', version)
+        self.assertIn("github.ref == 'refs/heads/main'", version)
+        self.assertNotIn('secrets.', version)
+        ci = (ROOT / '.github/workflows/ci.yml').read_text()
+        self.assertIn("windows_installer_version: ${{ inputs.windows_installer_version || '' }}", job(ci, 'review'))
+        windows = job(checks, 'windows-desktop')
+        self.assertIn('WINDOWS_INSTALLER_VERSION: ${{ inputs.windows_installer_version }}', windows)
+        self.assertIn('--info artifacts/installer/windows-installer-info.json', windows)
+        self.assertIn('HGS_TEST_INSTALLER_VERSION=', windows)
+        for workflow in ('release.yml', 'nightly.yml'):
+            assembly = job((ROOT / '.github/workflows' / workflow).read_text(), 'assemble')
+            self.assertIn('--windows-installer artifacts/windows/installer/zerus-windows-x86_64-setup.exe', assembly)
+            self.assertIn('--windows-installer-info artifacts/windows/installer/windows-installer-info.json', assembly)
+            self.assertNotIn('secrets.', assembly)
+
+
 if __name__ == "__main__":
     unittest.main()

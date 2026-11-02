@@ -51,8 +51,9 @@ impl Drop for Fixture {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
-async fn eventually(label: &str, check: impl Fn() -> bool) {
-    let until = Instant::now() + Duration::from_secs(10);
+pub(super) async fn eventually(label: &str, check: impl Fn() -> bool) {
+    // A loaded hosted macOS runner missed 10 s for an initial live baseline.
+    let until = Instant::now() + Duration::from_secs(30);
     while !check() {
         assert!(Instant::now() < until, "{label}");
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -91,7 +92,7 @@ fn incompatible_cli_stays_unavailable_until_one_explicit_retry_without_fallback(
         .await;
         assert_eq!(fixture.calls().len(), 1);
         fs::write(fixture.0.join("fixture.json"), json!({}).to_string()).unwrap();
-        service.retry();
+        assert!(service.reconnect("peer")); // Composer Refresh can retry a disconnected service.
         eventually("new CLI connected", || service.snapshot().connected).await;
         eventually("one watch", || watch_calls(&fixture.calls()) == 1).await;
         assert!(!service.snapshot().background_ready());
@@ -117,11 +118,17 @@ fn dirty_walk_finishes_its_cursor_and_coalesces_one_refresh_without_deleting_row
             fixture.0.join("delta-page-two").exists()
         })
         .await;
+        // The next RPC can start before the view drain applies the prior row.
+        // Keep page two blocked while checking actual partial-view membership.
+        eventually(
+            "first delta row applied with page two still blocked",
+            || pump.row("", "inserted").is_some(),
+        )
+        .await;
         assert!(
             pump.row("", "unseen").is_some(),
             "partial catch-up cannot infer deletion"
         );
-        assert!(pump.row("", "inserted").is_some());
         fs::write(fixture.0.join("finish-delta"), []).unwrap();
         eventually("one follow-up delta", || {
             fixture.0.join("refresh-started").exists()
@@ -218,7 +225,7 @@ fn uncertain_read_keeps_its_uuid_and_only_durable_actor_commit_acknowledges() {
     });
 }
 #[test]
-fn queued_catalog_rows_are_discarded_after_source_replacement_and_removal() {
+fn queued_catalog_rows_are_discarded_after_walk_retirement_source_replacement_and_removal() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let fixture = Fixture::new(json!({"supported":false}));
@@ -239,11 +246,11 @@ fn queued_catalog_rows_are_discarded_after_source_replacement_and_removal() {
         };
         service.shared.dirty("", old).unwrap();
         let old = service.shared.dirty.lock().unwrap().sources[""].clone();
-        let delivery = |key: &str| CatalogDelivery {
+        let delivery = |key: &str, source: &SourceVersion| CatalogDelivery {
             shared: Arc::downgrade(&service.shared),
             computer: "".into(),
             epoch: "epoch".into(),
-            source: old.clone(),
+            source: source.clone(),
             stopped: Arc::new(AtomicBool::new(false)),
             value: CatalogValue::Row(Box::new(Change::Upsert {
                 computer: ComputerId::local(),
@@ -251,7 +258,12 @@ fn queued_catalog_rows_are_discarded_after_source_replacement_and_removal() {
                 row: zerus_client_core::view::row(&json!({"name":"codex/example/row"})),
             })),
         };
-        let queued = delivery("stale");
+        let queued = delivery("retired", &old);
+        service.shared.dirty.lock().unwrap().restart("").unwrap();
+        queued.apply(&pump, &|_| {});
+        assert!(pump.row("", "retired").is_none());
+        let current = service.shared.dirty.lock().unwrap().sources[""].clone();
+        let queued = delivery("stale", &current);
         service
             .shared
             .dirty(
@@ -266,7 +278,8 @@ fn queued_catalog_rows_are_discarded_after_source_replacement_and_removal() {
         queued.apply(&pump, &|_| {});
         assert!(pump.row("", "stale").is_none());
         service.shared.dirty("", old.clone()).unwrap();
-        let queued = delivery("removed");
+        let current = service.shared.dirty.lock().unwrap().sources[""].clone();
+        let queued = delivery("removed", &current);
         service.shared.invalidate();
         queued.apply(&pump, &|_| {});
         assert!(pump.row("", "removed").is_none());
@@ -328,6 +341,170 @@ fn startup_switch_selects_only_the_service_source_and_closes_legacy_read_admissi
 }
 
 #[test]
+fn service_roster_restores_settings_peer_choices_without_authorizing_legacy_marks() {
+    const CHILD: &str = "ZERUS_FIXTURE_SERVICE_PEERS_CHILD";
+    if let Some(root) = std::env::var_os(CHILD) {
+        tauri::async_runtime::block_on(async {
+            assert!(mode());
+            let root = PathBuf::from(root);
+            let config: Value =
+                serde_json::from_slice(&fs::read(root.join("fixture.json")).unwrap()).unwrap();
+            let mark_file = root.join("marks.json");
+            let actions = crate::actions::Actions::new(mark_file.clone());
+            actions
+                .queue_marks(vec![zerus_client_core::readmarks::ReadMark {
+                    computer: "offline".into(),
+                    name: "codex/example/recorded".into(),
+                    run_id: "run".into(),
+                    conversation_id: "conversation".into(),
+                    reply_id: Some("reply".into()),
+                    attention_signature: None,
+                }])
+                .unwrap();
+            actions.flush_marks();
+            actions.disarm_read_delivery().unwrap();
+            let frozen = fs::read(&mark_file).unwrap();
+            let source = crate::commands::AppState::default();
+            assert!(
+                source.peers().is_none(),
+                "not started is unknown, not empty"
+            );
+            assert_eq!(source.start_source().unwrap(), "service");
+            let service = source.desktop_service().unwrap();
+            eventually("connected without a verified roster", || {
+                service.snapshot().connected
+            })
+            .await;
+            assert!(
+                source.peers().is_none(),
+                "counts/captions do not supply peer choices"
+            );
+            fs::write(root.join("roster-known"), []).unwrap();
+            let known = BTreeSet::from(["offline".to_owned(), "waiting".to_owned()]);
+            eventually(
+                "native settings receive offline and not-yet-greeted peers",
+                || source.peers() == Some(known.clone()),
+            )
+            .await;
+            let mut page = zerus_client_core::worktree_policy::page::Page::new();
+            page.set_peers(source.peers().unwrap());
+            assert_eq!(page.view().peers, vec!["offline", "waiting"]);
+            let read = page.choose("offline").unwrap();
+            assert_eq!(read.route, "offline");
+            assert!(read.change.is_none(), "choosing a target is only a read");
+            page.answered(read.id, false, Err("Offline fixture".into()));
+            if config["roster_disconnect_early"] == true {
+                eventually("watch EOF marks service unavailable", || {
+                    !service.snapshot().connected
+                })
+                .await;
+                assert_eq!(
+                    source.peers(),
+                    Some(known),
+                    "EOF retains last-known names, not a complete zero"
+                );
+                assert_eq!(
+                    source.refresh(),
+                    1,
+                    "one shared source, not one retry per displayed peer"
+                );
+                eventually("exactly one refreshed watch", || {
+                    fs::read_to_string(root.join("calls"))
+                        .unwrap_or_default()
+                        .lines()
+                        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                        .filter(|call| call["args"] == json!(["desktop", "watch", "--json"]))
+                        .count()
+                        == 2
+                })
+                .await;
+                eventually("refreshed fixture disconnects", || {
+                    !service.snapshot().connected
+                })
+                .await;
+            } else {
+                for (stage, generation) in [("invalid", 3), ("warming", 4), ("stopping", 5)] {
+                    fs::write(root.join(format!("roster-{stage}")), []).unwrap();
+                    eventually("changed status consumed", || {
+                        service.snapshot().generation == Some(generation)
+                    })
+                    .await;
+                    assert_eq!(
+                        source.peers(),
+                        Some(known.clone()),
+                        "{stage} is not membership removal"
+                    );
+                    page.set_peers(source.peers().unwrap());
+                    assert_eq!(page.view().route, "offline");
+                }
+                fs::write(root.join("roster-removed"), []).unwrap();
+                eventually("verified roster removes only its absent peer", || {
+                    source.peers() == Some(BTreeSet::from(["waiting".to_owned()]))
+                })
+                .await;
+                page.set_peers(source.peers().unwrap());
+                assert_eq!(page.view().peers, vec!["waiting"]);
+                assert!(page.view().route.is_empty());
+                fs::write(root.join("roster-empty"), []).unwrap();
+                eventually("verified empty peer roster is known empty", || {
+                    source.peers() == Some(BTreeSet::new())
+                })
+                .await;
+                page.set_peers(source.peers().unwrap());
+                assert!(page.view().peers.is_empty());
+                fs::write(root.join("roster-end"), []).unwrap();
+                eventually("final EOF", || !service.snapshot().connected).await;
+                assert_eq!(source.peers(), Some(BTreeSet::new()));
+            }
+            let inspected = std::cell::Cell::new(false);
+            actions.drop_orphans(|| {
+                inspected.set(true);
+                source.peers()
+            });
+            let inspected = inspected.get();
+            let after = fs::read(&mark_file).unwrap();
+            service.join().await.unwrap();
+            assert!(
+                !inspected,
+                "closed mark admission refuses before inspecting peer choices"
+            );
+            assert_eq!(
+                after, frozen,
+                "the frozen pre-cutover queue is never pruned"
+            );
+        });
+        return;
+    }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    for disconnected in [false, true] {
+        let fixture = Fixture::new(
+            json!({"peer_choices":true,"counts_computer":"counts-only","roster_disconnect_early":disconnected}),
+        );
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "desktop_service::tests::service_roster_restores_settings_peer_choices_without_authorizing_legacy_marks", "--nocapture"])
+            .env(CHILD, &fixture.0).env(service::MODE_ENV, "1")
+            .env("ZERUS_CLIENT_HGS", fixture.0.join("hgs")).env_remove("ZERUS_CLIENT_REPLAY")
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let calls = fixture.calls();
+        assert_eq!(watch_calls(&calls), if disconnected { 2 } else { 1 });
+        assert!(calls
+            .iter()
+            .all(|call| call["args"] == json!(["--help"]) || call["args"][0] == "desktop"));
+        assert!(
+            !calls
+                .iter()
+                .any(|call| call["value"]["computer"] == "waiting"),
+            "an ungreeted choice does not start a GUI watcher or read"
+        );
+    }
+}
+
+#[test]
 fn approval_seam_is_an_explicit_refusal_without_a_generic_cli_policy_call() {
     tauri::async_runtime::block_on(async {
         let id = uuid::Uuid::new_v4().to_string();
@@ -381,6 +558,23 @@ fn full_projection_replacement_rebaselines_even_with_unchanged_native_generation
         for stage in ["early", "late"] {
             let fixture = Fixture::new(json!({"replace_projection":stage}));
             let (service, pump) = fixture.start(true);
+            // Writing a hint to stdout is not evidence the client consumed it.
+            // Retain the old cursor page until the replacement is bound under
+            // the native hub lock, so this case really requires cursor close.
+            eventually("replacement hint applied before old cursor page", || {
+                service
+                    .shared
+                    .dirty
+                    .lock()
+                    .unwrap()
+                    .sources
+                    .get("")
+                    .is_some_and(|source| {
+                        source.projection.as_deref() == Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                    })
+            })
+            .await;
+            fs::write(fixture.0.join("release-old-page"), []).unwrap();
             eventually("replacement baseline and catch-up", || {
                 pump.row("", "replacement").is_some() && pump.row("", "row").is_none()
             })
@@ -394,9 +588,56 @@ fn full_projection_replacement_rebaselines_even_with_unchanged_native_generation
                     .count(),
                 2
             );
-            assert!(calls.iter().any(|c| c["value"]["op"] == "catalog_close"));
+            let closes: Vec<_> = calls
+                .iter()
+                .filter(|c| c["value"]["op"] == "catalog_close")
+                .collect();
+            assert_eq!(closes.len(), 1, "{stage}: {calls:?}");
+            assert_eq!(
+                closes[0]["value"]["cursor"],
+                "00000000-0000-4000-8000-000000000002"
+            );
+            assert_eq!(closes[0]["value"]["computer"], "");
             assert!(pump.row("", "obsolete").is_none());
         }
+    });
+}
+#[test]
+fn projection_replacement_after_cursor_exhaustion_needs_no_close() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({"replace_projection":"exhausted"}));
+        let (service, pump) = fixture.start(true);
+        let through = Revision::try_from("1".to_owned()).unwrap();
+        eventually("old cursor consumed and walk finished before hint", || {
+            let dirty = service.shared.dirty.lock().unwrap();
+            dirty.progress.get("") == Some(&through) && dirty.running.is_none()
+        })
+        .await;
+        assert!(pump.row("", "obsolete").is_some());
+        fs::write(fixture.0.join("release-replacement-hint"), []).unwrap();
+        eventually("replacement prunes old completed membership", || {
+            pump.row("", "replacement").is_some()
+                && pump.row("", "row").is_none()
+                && pump.row("", "obsolete").is_none()
+        })
+        .await;
+        service.join().await.unwrap();
+        let calls = fixture.calls();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| c["value"]["op"] == "catalog_page")
+                .count(),
+            2
+        );
+        assert!(calls.iter().any(|c| c["value"]["op"] == "catalog_changes"
+            && c["value"]["projection"] == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            && c["value"]["cursor"] == "00000000-0000-4000-8000-000000000002"));
+        assert!(
+            !calls.iter().any(|c| c["value"]["op"] == "catalog_close"),
+            "an already consumed cursor is not outstanding"
+        );
     });
 }
 #[test]
@@ -461,9 +702,10 @@ fn twenty_thousand_rows_need_only_one_three_key_delta_after_the_baseline() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let fixture = Fixture::new(json!({"large":20000}));
+        let started = Instant::now();
         let (service, pump) = fixture.start(true);
-        // The bounded serial walk spawns one isolated CLI per page; 158 spawns
-        // took over 30 s on a hosted macOS runner.
+        // Keep a generous fixture deadline for hosted runners; the process
+        // count below, rather than a timing threshold, guards spawn overhead.
         let deadline = Instant::now() + Duration::from_secs(120);
         while pump.row("", "new").is_none() {
             assert!(Instant::now() < deadline);
@@ -473,6 +715,16 @@ fn twenty_thousand_rows_need_only_one_three_key_delta_after_the_baseline() {
         assert!(pump.row("", "row-1").is_none());
         service.join().await.unwrap();
         let calls = fixture.calls();
+        let relays: BTreeSet<_> = calls
+            .iter()
+            .filter(|call| call["args"] == json!(["desktop", "catalog-relay", "--json"]))
+            .filter_map(|call| call["pid"].as_u64())
+            .collect();
+        assert_eq!(relays.len(), 2, "one original child per walk, not per page");
+        assert!(!calls
+            .iter()
+            .any(|call| call["args"] == json!(["desktop", "request", "--json"])));
+        eprintln!("20k catalog baseline + delta: {:?}, 157 baseline pages, 2 delta reads, {} relay children", started.elapsed(), relays.len());
         assert_eq!(
             calls
                 .iter()
@@ -1062,5 +1314,131 @@ fn runtime_transport_readiness_does_not_rewalk_a_last_known_catalog_on_every_sta
         );
         assert!(service.snapshot().connected);
         service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn repeated_catalog_failure_retires_only_its_peer_until_manual_retry_or_a_new_scope() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        for scope_change in [false, true] {
+            let fixture = Fixture::new(json!({"peer_failure":true}));
+            let (service, pump) = fixture.start(true);
+            pump.push(Change::Upsert {
+                computer: ComputerId::from("broken"),
+                key: "cached".into(),
+                row: zerus_client_core::view::row(&json!({"name":"codex/example/cached"})),
+            });
+            let statuses = Arc::new(Mutex::new(Vec::new()));
+            let observed = statuses.clone();
+            pump.tap(Box::new(move |change| {
+                if let Change::Computer { computer, status } = change {
+                    observed.lock().unwrap().push((computer.clone(), *status));
+                }
+            }));
+            eventually("only broken catalog exhausted its two walks", || {
+                statuses.lock().unwrap().contains(&(
+                    ComputerId::from("broken"),
+                    ComputerStatus::Reconnecting { attempt: 2 },
+                ))
+            })
+            .await;
+            assert!(service.snapshot().connected);
+            assert!(
+                pump.row("broken", "cached").is_some(),
+                "failed baseline cannot prune last-known rows"
+            );
+            assert!(pump.row("", "row").is_some());
+            let peer_pages = || {
+                fixture
+                    .calls()
+                    .iter()
+                    .filter(|call| {
+                        call["value"]["op"] == "catalog_page"
+                            && call["value"]["computer"] == "broken"
+                    })
+                    .count()
+            };
+            assert_eq!(peer_pages(), 2);
+            statuses.lock().unwrap().clear();
+            fs::write(fixture.0.join("peer-hints"), []).unwrap();
+            eventually(
+                "healthy local delta and all repeated peer hints consumed",
+                || service.snapshot().generation == Some(2) && pump.row("", "after-peer").is_some(),
+            )
+            .await;
+            // The serial walker has processed its pending work; no time-based
+            // assertion can accidentally pass before the final peer hint.
+            eventually("pending work drained without another peer RPC", || {
+                let drained = {
+                    let dirty = service.shared.dirty.lock().unwrap();
+                    dirty.pending.is_empty()
+                        && dirty.progress.get("")
+                            == Some(&Revision::try_from("1".to_owned()).unwrap())
+                };
+                drained
+                    && service
+                        .shared
+                        .rpc
+                        .snapshot()
+                        .is_ok_and(|rpc| rpc.admitted == 0)
+            })
+            .await;
+            assert_eq!(
+                peer_pages(),
+                2,
+                "ordinary hints cannot restart a halted peer"
+            );
+            assert!(statuses
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(computer, status)| !computer.is_local() || *status == ComputerStatus::Live));
+            assert_eq!(watch_calls(&fixture.calls()), 1);
+            if scope_change {
+                fs::write(fixture.0.join("peer-scope-recovered"), []).unwrap();
+            } else {
+                fs::write(fixture.0.join("peer-recovered"), []).unwrap();
+                // Retry now and both native tray Refresh paths call local
+                // reconnect first; service mode has no GUI peer listing.
+                assert!(service.reconnect(""));
+                assert!(!service.reconnect(""), "pending Refresh is not restarted");
+            }
+            eventually("only recovered peer finishes a new baseline", || {
+                pump.row("broken", "cached").is_none()
+                    && service
+                        .shared
+                        .dirty
+                        .lock()
+                        .unwrap()
+                        .progress
+                        .contains_key("broken")
+            })
+            .await;
+            assert!(pump.row("", "after-peer").is_some());
+            assert!(service.snapshot().connected);
+            assert!(!service.reconnect(""), "Refresh leaves live catalogs alone");
+            assert!(!service.reconnect("not-listed"));
+            assert!(statuses
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(computer, status)| !computer.is_local() || *status == ComputerStatus::Live));
+            assert_eq!(
+                watch_calls(&fixture.calls()),
+                1,
+                "peer Retry keeps the shared subscription"
+            );
+            assert_eq!(
+                fixture
+                    .calls()
+                    .iter()
+                    .filter(|call| call["value"]["op"] == "catalog_page"
+                        && call["value"]["computer"] == "")
+                    .count(),
+                1
+            );
+            service.join().await.unwrap();
+        }
     });
 }

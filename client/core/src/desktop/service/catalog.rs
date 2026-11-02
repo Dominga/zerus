@@ -5,6 +5,8 @@ use serde_json::Value;
 
 pub const CHANGES_ABI: &str = "desktop-catalog-changes-v1";
 pub const CHANGES_HELP: &str = "Desktop catalog changes ABI: desktop-catalog-changes-v1";
+pub const RELAY_ABI: &str = "desktop-catalog-relay-v1";
+pub const RELAY_HELP: &str = "Desktop catalog relay ABI: desktop-catalog-relay-v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]

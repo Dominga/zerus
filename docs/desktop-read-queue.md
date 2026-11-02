@@ -45,7 +45,71 @@ waits 120 seconds. Partial application waits 120, 240, 480, then 960 seconds.
 Changed intent resets the counters and becomes immediately eligible after any
 older owned call ends. Clock addition saturates rather than overflowing.
 
+## Frozen pending-read transfer
+
+In service mode the native Next startup path first disarms legacy read delivery.
+One owned background job freezes the managed read-mark store and checkpoints it,
+then fully consumes `next_pending_reads` before sending any mutation. The whole
+source is limited to 16 MiB and 50,000 entries; an invalid final entry refuses
+the capture, including its valid prefix. The original file is retained. Read-only overlay borrows are retried within the
+same 30-second capture deadline; a timed-out capture retains its original freeze
+handle for Retry without reopening mark writers.
+
+The job waits for the canonical responder, selected configuration and CLI ABI.
+It submits the closed native `import_pending_reads` request through the existing
+original-child frontend authentication. JS cannot choose its paths or rows, and
+generic desktop requests refuse this operation. Normalized transport pages have
+at most 64 entries and 48 KiB, inside the unchanged 64 KiB control-line limit;
+the underlying capture adapter's 1 MiB pages are never truncated.
+
+The actor commits each page into the existing read ledger, even while passive.
+Mark request UUIDs depend on configuration and the exact normalized target,
+including run, conversation, reply and attention identity, never retry, service
+epoch or page cursor. The original receipts survive retirement. An identical settled row is not revived. A different frozen part after settlement
+becomes new intent at the next revision. A conflicting unsettled/in-flight mark
+stays current; the frozen mark receives a durable superseded receipt so it cannot
+block the page or overwrite the current intent. Replays return that original
+receipt, including after the current row retires.
+
+`pending_reads_import_result` checks at most one page of those indexed receipts
+without mutating anything. A lost reply is looked up before the producer advances;
+partial or unknown transfer retains its original source and resource bindings.
+The client exposes bounded progress as `pending_read_import`, independently of
+native service readiness. The service status UI shows a paused transfer and its
+existing Retry action. Transfer completion means durable queued intent, not
+host acknowledgement, worker drain, approval consent or a writer handoff.
+
+On Windows the checkpoint retains its original exclusive read/write file handle
+and pinned parent chain through capture and original helper resources. It rejects
+reparse points (including junction ancestors), multiple links, changed sources
+and ACLs outside the existing user/SYSTEM/Administrators/OWNER RIGHTS policy.
+New managed folders have protected inheritable private ACLs; prepared files
+inherit that policy and explicitly name the creating user as owner. Existing
+ACLs are verified, never repaired.
+
+Dirty/new state is bounded and flushed before renaming the original owned
+prepared-file handle, then flushed and read back through that same handle. An
+error after the rename attempt remains unknown: the source and prepared file
+are never deleted as recovery. An unchanged checkpoint does not rewrite bytes
+or unknown fields. File sharing failures retain the same freeze for Retry.
+There is no directory-flush or whole-volume durability claim on Windows.
+`zerus-5wmh.66.3.31.6.1` tracks the native Windows validation; implementing this
+adapter does not itself enable the service-mode/default-on switch.
+
 ## Observation and restart
+
+The canonical client slots are `lifecycle.background.reads` and `approvals`,
+each with `ready`, `code` and conservative original-runtime `drained` values.
+Approvals also exposes nullable `enabled`, independently of readiness; disabled
+policy can be ready for an authenticated enable request. `automatic_approvals`
+reports that durable opt-in, not an assumption that workers are healthy.
+Passive status preserves the stored opt-in with both readiness slots false;
+absence of the runtime does not imply that consent was revoked or an older
+owner drained.
+Component-local failures remain `unavailable`; stopping uses `draining` or
+`drained`, and a missing writer uses `awaiting_handoff`. Readiness grants no
+writer authority. The actor rechecks current writer identity and the opaque
+frontend proof at mutation time.
 
 A successful delivery receipt never retires a mark. `observe` accepts a fresh
 authoritative catalog row in source order and the exact pending revision. It
@@ -99,17 +163,22 @@ sequence watermark. It looks up each session through the catalog index and uses
 the existing exact settlement policy, including superseded run identities. An
 unacknowledged early intent cannot starve later intents.
 
-The component accepts three closed request shapes for the existing desktop-v1
-request transport:
+The component uses these closed request shapes:
 
 - `read_intent`: canonical UUID `request_id` and the exact `mark` fields
   `computer`, `name`, `run_id`, `conversation_id`, `reply_id`, and
   `attention_signature`. Acceptance follows the queue commit; it means queued,
   never delivered or read.
-- `automatic_approvals`: canonical UUID `request_id` and Boolean `enabled`.
-  This explicit service policy does not import the old Qt or UI opt-in. The
+- `automatic_approvals`: canonical UUID `request_id` and Boolean `enabled`,
+  accepted only through the authenticated native frontend route after its
+  confirmation UI. Generic desktop requests refuse it. This explicit service
+  policy does not import the old Qt or UI opt-in. The
   policy update and immutable request receipt commit together. Replaying an old
   request returns that receipt without undoing a newer setting.
+  A new Enable requires the actual ready delivery runtime and a freshly checked
+  current writer. An authenticated Disable can commit with degraded, stopping
+  or absent background workers while the route and store remain writable;
+  generic requests still refuse it. A failed commit never reports success.
 - `delivery_result`: a new canonical UUID `request_id` and the canonical
   `original_request_id`. This indexed lookup returns the original acceptance
   receipt after a transport timeout; it neither replays nor proves delivery.
@@ -136,3 +205,31 @@ another answer, including after a restart. Disabling the policy cancels pending
 inspections and answers; cancellation after a possible send remains unknown.
 Read receipt retries remain distinct from this no-replay approval rule. Neither
 status nor a command receipt establishes worker drain, currentness or release.
+
+
+## Read-only approval audit
+
+The selected desktop service accepts the closed `approval_audit_list` and
+`approval_audit_detail` requests from `desktop::approval_audit::Request` in the
+shared core. Probe the selected CLI for `Desktop approval audit ABI:
+desktop-approval-audit-v1`, then use its existing `desktop request --json`
+transport. Each query and reply binds the request ID, configuration and service
+epoch. These reads need no background writer or automatic-approval opt-in.
+
+The first List omits `journal` and `through`; its result contains at most fifty
+entries, `next`/`previous` keyset cursors and a fixed `through` high-water ID.
+Subsequent pages retain the returned journal identity and high-water, using
+`before` for older or `after` for newer entries. Exact `host` and `session`
+filters use their existing indexes. Detail requires the same journal identity
+and a positive entry ID. `Request::matches` validates the reply scope, shape and
+256 KiB bound before the client unwraps `result` for its existing journal UI.
+
+The service holds one original read-only connection and file identity. A changed
+journal, protection, schema or missing filter index refuses instead of adopting
+old cursors or repairing the journal. A fresh first List can select the current
+journal. An absent journal is an empty read and creates no directory or database
+file. Opening an existing WAL journal read-only can create SQLite's `-wal` and
+`-shm` sidecars; the original database file remains unchanged. Unreadable and
+oversized records remain unavailable, never truncated. This API
+has no Begin/Finish, reservation, worker, policy or consent operation. Ordinary
+`hgs approval-log` compatibility remains unchanged.

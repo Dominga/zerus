@@ -25,10 +25,24 @@ struct Wait {
 }
 /// Passed only by the service's verified-absence decision to the selected native
 /// launch mechanics. It is not Clone/Deserialize and has no public constructor.
-pub(in crate::desktop) struct Launch(Open);
+pub(in crate::desktop) struct Launch {
+    open: Open,
+    configuration: String,
+}
 impl Launch {
+    #[cfg(test)]
+    pub(super) fn fixture(open: Open, configuration: String) -> Self {
+        Self {
+            open,
+            configuration,
+        }
+    }
+
     pub fn open(&self) -> &Open {
-        &self.0
+        &self.open
+    }
+    pub fn configuration(&self) -> &str {
+        &self.configuration
     }
 }
 pub(in crate::desktop) struct Router {
@@ -141,22 +155,28 @@ impl Router {
         }
         wait.queue.close();
     }
-    /// Called with a fresh canonical instance probe made off actor. Unknown or
-    /// legacy/live peers never establish UI absence and never trigger a launch.
+    /// Canonical absence is necessary but cannot grant a mode-changing launch.
+    /// The durable authenticated notification handoff is not implemented yet;
+    /// structural import evidence and the service environment cannot replace it.
     pub fn closed_frontend(
         &mut self,
-        store: &Store,
-        outbox: &Outbox,
+        _store: &Store,
+        _outbox: &Outbox,
         observation: &desktop::Observation,
     ) -> Result<Option<Launch>> {
         self.expire();
         if self.stopping
             || self.waiting.is_some()
             || !matches!(observation, desktop::Observation::Absent)
+            || self.pending.is_empty()
         {
             return Ok(None);
         }
-        Ok(self.next(store, outbox)?.map(Launch))
+        // The Linux mechanics force service mode, which also freezes/imports
+        // the native read store. Until a SERVICE-MODE frontend has granted
+        // notification ownership for this configuration and selected image,
+        // refuse without popping the known-unsent click or extending its age.
+        anyhow::bail!("authenticated notification ownership handoff required")
     }
     fn next(&mut self, store: &Store, outbox: &Outbox) -> Result<Option<Open>> {
         ensure!(
@@ -184,6 +204,14 @@ impl Router {
             else {
                 continue;
             };
+            if let Some(wait) = &self.waiting {
+                // No frame was offered yet. Keep a refused click under its
+                // ORIGINAL age so a newly authenticated receiver can take it.
+                if wait.queue.closed() || !wait.peer.handoff_current() {
+                    self.pending.push_front(pending);
+                    anyhow::bail!("activation receiver changed");
+                }
+            }
             let open = Open {
                 activation_id: pending.id,
                 post_request_id: pending.value.request_id,

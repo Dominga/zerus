@@ -9,6 +9,10 @@ use std::{ffi::OsString, os::windows::ffi::OsStringExt, path::PathBuf, time::Dur
 use zerus_client_core::actions::{Exit, Invocation};
 
 const CAP: usize = 64 * 1024;
+// Functions only: hgs appends Invoke-RegistrationMain and the exact byte length.
+// TASK_CREATE | TASK_IGNORE_REGISTRATION_TRIGGERS never overwrites a task which
+// appeared after the ownership check. Removal never calls Run, Stop or End.
+// The input is one bounded frame, independent of delayed pipe EOF.
 const SCRIPT: &str = include_str!("windows_registration.ps1");
 
 fn powershell() -> Result<PathBuf> {
@@ -37,7 +41,13 @@ fn invocation(operation: &str, plan: &Value) -> Result<Invocation> {
         request.len() <= CAP,
         "desktop registration request exceeds its bound"
     );
-    let script = format!("{SCRIPT}\nInvoke-RegistrationMain {}\n", request.len());
+    // No here-strings: trim only source indentation, never request data.
+    let source = SCRIPT
+        .lines()
+        .map(str::trim_start)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let script = format!("{source}\nInvoke-RegistrationMain {}\n", request.len());
     let encoded = STANDARD.encode(
         script
             .encode_utf16()
@@ -149,6 +159,14 @@ mod tests {
     use super::*;
     #[test]
     fn fixed_helper_has_bounded_input_and_never_passes_shell_arguments() {
+        assert!(!SCRIPT.contains("@'"));
+        assert!(!SCRIPT.contains("@\""));
+        for cmdlet in ["ConvertFrom-Json", "ConvertTo-Json", "New-Object"] {
+            assert!(
+                !SCRIPT.contains(cmdlet),
+                "helper must not auto-load a module"
+            );
+        }
         let plan =
             json!({"argv":["C:/Example/CLI & tools/hgs.exe"],"configuration":"a".repeat(64)});
         let call = invocation("status", &plan).unwrap();

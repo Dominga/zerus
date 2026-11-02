@@ -1,4 +1,4 @@
-//! Data received only through the original-child authenticated frontend route.
+//! Authenticated activation replies and separate, non-authoritative UI navigation.
 //! Decoding a frame or a token does not grant activation or writer authority.
 use super::{digest, notifications::PlatformContext};
 use serde::{Deserialize, Serialize};
@@ -7,6 +7,17 @@ use zerus_desktop_migration::canonical_uuid;
 
 pub const ABI: &str = "desktop-activation-v1";
 pub const HELP_MARKER: &str = "Desktop activation ABI: desktop-activation-v1";
+/// GUI navigation only: this capability/argument never grants callback or
+/// writer authority. Launch custody remains the service's opaque selection.
+pub const NAVIGATION_ABI: &str = "desktop-target-v1";
+pub const NAVIGATION_HELP_MARKER: &str = "Desktop target navigation ABI: desktop-target-v1";
+pub const NAVIGATION_ARG: &str = "--desktop-target";
+/// Service launch input is consumed before any GUI worker can inherit it.
+pub const NAVIGATION_ENV: &str = "ZERUS_CLIENT_DESKTOP_TARGET";
+pub const NAVIGATION_ENV_HELP_MARKER: &str =
+    "Desktop target environment ABI: desktop-target-env-v1";
+pub const NAVIGATION_BYTES: usize = 8192;
+
 pub const WAIT: Duration = Duration::from_secs(15);
 pub const PEER_WAIT: Duration = Duration::from_secs(20);
 pub const CLIENT_WAIT: Duration = Duration::from_secs(25);
@@ -29,6 +40,23 @@ impl Target {
                 .all(|v| !v.is_empty() && v.len() <= 1024 && !v.chars().any(char::is_control))
     }
 }
+pub fn encode_navigation(target: &Target) -> Option<String> {
+    if !target.valid() {
+        return None;
+    }
+    serde_json::to_string(target)
+        .ok()
+        .filter(|value| value.len() <= NAVIGATION_BYTES)
+}
+pub fn decode_navigation(value: &str) -> Option<Target> {
+    if value.len() > NAVIGATION_BYTES {
+        return None;
+    }
+    serde_json::from_str::<Target>(value)
+        .ok()
+        .filter(Target::valid)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Open {
@@ -92,6 +120,26 @@ impl Reply {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn navigation_is_bounded_closed_target_data_without_callback_context() {
+        let target = Target {
+            computer: "peer.example".into(),
+            run: "original-run".into(),
+            conversation: "original-conversation".into(),
+        };
+        let encoded = encode_navigation(&target).unwrap();
+        assert_eq!(decode_navigation(&encoded), Some(target));
+        for input in [
+            "{}".to_owned(),
+            "x".repeat(NAVIGATION_BYTES + 1),
+            r#"{"computer":"peer","run":"r","conversation":"c","token":"injected"}"#.into(),
+            r#"{"computer":"peer","run":"r\n","conversation":"c"}"#.into(),
+            r#"{"computer":"peer","run":"","conversation":"c"}"#.into(),
+        ] {
+            assert!(decode_navigation(&input).is_none());
+        }
+    }
+
     #[test]
     fn exact_target_epoch_and_closed_request_shape() {
         let id = "11111111-1111-4111-8111-111111111111";

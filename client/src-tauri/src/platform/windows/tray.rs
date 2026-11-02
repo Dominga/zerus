@@ -205,10 +205,7 @@ fn dispatch(app: &AppHandle, action: MenuAction) {
         MenuAction::Mode(mode) => crate::desk::set_mode(app, mode),
         MenuAction::Refresh => {
             let fleet = app.state::<crate::commands::AppState>();
-            fleet.reconnect("");
-            for peer in fleet.peers().into_iter().flatten() {
-                fleet.reconnect(&peer);
-            }
+            fleet.refresh();
         }
         MenuAction::Quit => crate::exit_flush::quit_with_flush(app, 0),
     }

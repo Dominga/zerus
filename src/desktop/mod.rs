@@ -1,8 +1,10 @@
 //! Durable desktop service kernel with explicit service-owned fleet activation.
+mod approval_audit;
 #[allow(dead_code)] // Discovery is bound to the original notification factory at cutover.
 mod attention;
 mod background;
 mod catalog_read;
+mod catalog_relay;
 mod counts;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod custody;
@@ -20,6 +22,7 @@ mod notifications;
 #[allow(dead_code)]
 mod operations;
 mod owner;
+mod pending_reads;
 mod presence_admission;
 mod presence_worker;
 #[allow(dead_code)]
@@ -60,7 +63,7 @@ use std::{
 use store::{Location, Store};
 use transport::{Listener, Stream, TIMEOUT};
 
-const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] [--background] | status [--json] | startup --json | owner-status --json | watch --json | feed --json | request --json | registration --json | registration install|remove|status --json (Windows) | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
+const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] [--background] | status [--json] | startup --json | owner-status --json | watch --json | feed --json | request --json | catalog-relay --json | registration --json | registration install|remove|status --json (Windows) | notification-registration install|status --json | notification-registration remove --json --request-id UUID (Windows) | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
 const HEARTBEAT: Duration = Duration::from_secs(10);
 pub const STARTUP_REFUSED: i32 = 78;
 
@@ -72,6 +75,12 @@ impl std::fmt::Display for StartupRefused {
     }
 }
 impl std::error::Error for StartupRefused {}
+
+#[cfg(windows)]
+pub(crate) fn windows_notification_activation(first: Option<&str>) -> Option<i32> {
+    (first == Some(notifications::windows::ACTIVATION_ENTRY))
+        .then(notifications::windows::cold_entry)
+}
 
 pub fn registered_command(args: &[String]) -> bool {
     let args = if args.len() == 7 && args[6] == "--background" {
@@ -175,6 +184,28 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                     anyhow::bail!("desktop registration install/remove/status is available only on Windows; use the maintained platform installer")
                 }
             }
+            ["notification-registration", rest @ ..] => {
+                let (operation, request_id) = match rest {
+                    [operation @ ("install" | "status"), "--json"] => (*operation, None),
+                    ["remove", "--json", "--request-id", id] => ("remove", Some(*id)),
+                    _ => anyhow::bail!(USAGE),
+                };
+                #[cfg(windows)]
+                {
+                    println!(
+                        "{}",
+                        notifications::windows::registration::command(
+                            config, operation, request_id
+                        )?
+                    );
+                    Ok(())
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = (operation, request_id);
+                    anyhow::bail!("Windows Toast registration is available only on Windows")
+                }
+            }
             ["import-evidence", "--json"] => {
                 println!("{}", import_evidence::cli(&location)?);
                 Ok(())
@@ -256,6 +287,7 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                     "desktop revocation is not settled; keep Qt stopped and inspect the same request_id");
                 Ok(())
             }
+            ["catalog-relay", "--json"] => catalog_relay::run(&location),
             ["request", "--json"] | ["frontend-request", "--json"] => {
                 let mut bytes = Vec::new();
                 std::io::stdin()
@@ -325,7 +357,7 @@ fn projection(
     feed: &feed::Broker,
     reads: &catalog_read::Reader,
 ) -> Value {
-    json!({"abi":ABI,"version":env!("CARGO_PKG_VERSION"),"schema":store::SCHEMA,
+    let mut value = json!({"abi":ABI,"version":env!("CARGO_PKG_VERSION"),"schema":store::SCHEMA,
         "configuration":location.configuration,"generation":store.generation,"epoch":epoch,
         "lifecycle":lifecycle::status(&location.configuration,epoch,store.generation),
         "running":true,"ownership":"passive","writers_enabled":false,"handoff":"required",
@@ -336,7 +368,9 @@ fn projection(
         "limits":{"subscribers":protocol::SUBSCRIBERS,"queue_bytes":protocol::QUEUE_BYTES,
             "frame_bytes":protocol::FRAME_BYTES,"control_bytes":protocol::CONTROL_BYTES,"ingress_bytes":feed::INGRESS_BYTES,
             "feed_producers":1,"feed_frame_bytes":feed::LINE_BYTES,"connections":protocol::CONNECTIONS},
-        "components":{"fleet":"awaiting_handoff","presence":"awaiting_handoff","reads":"awaiting_handoff","attention":"awaiting_handoff","approvals":"awaiting_handoff"}})
+        "components":{"fleet":"awaiting_handoff","presence":"awaiting_handoff","reads":"awaiting_handoff","attention":"awaiting_handoff","approvals":"awaiting_handoff"}});
+    delivery::decorate_passive(store, &mut value);
+    value
 }
 
 enum Event {
@@ -373,6 +407,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     let active = Arc::new(AtomicUsize::new(0));
     let mut feed = feed::Broker::new(&epoch);
     let mut reads = catalog_read::Reader::default();
+    let mut audit = approval_audit::Reader::new(config, &location, &epoch);
     let mut frontend = frontend::Cache::default();
     let mut background: Option<background::Runtime> = None;
     let mut frontend_order = ui_authority::Order::default();
@@ -513,6 +548,17 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         frame(&epoch, seq, "status", value)
                     } else if hello.op == "frontend_request" {
                         let result = match (authority, &mut background) {
+                            (Some(authority), _)
+                                if authority.operation() == "import_pending_reads" =>
+                            {
+                                match authority.into_request(&mut frontend_order) {
+                                    Ok(request) => pending_reads::frontend(&mut store, request),
+                                    Err(_) => frontend_refused(
+                                        hello.request.as_ref(),
+                                        "frontend_identity_expired",
+                                    ),
+                                }
+                            }
                             (Some(authority), Some(runtime)) => {
                                 match authority.into_request(&mut frontend_order) {
                                     Ok(request) if request.operation() == "activation_wait" => {
@@ -539,10 +585,17 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                 hello.request.as_ref(),
                                 "frontend_authentication_refused",
                             ),
-                            (_, None) => frontend_refused(
-                                hello.request.as_ref(),
-                                "desktop_background_unavailable",
-                            ),
+                            (Some(authority), None) => {
+                                match authority.into_request(&mut frontend_order) {
+                                    Ok(request) => {
+                                        delivery::passive_frontend_request(&mut store, request)
+                                    }
+                                    Err(_) => frontend_refused(
+                                        hello.request.as_ref(),
+                                        "frontend_identity_expired",
+                                    ),
+                                }
+                            }
                         };
                         frame(&epoch, seq, "response", result)
                     } else if hello.op == "request" {
@@ -569,6 +622,26 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                             )
                         }) {
                             reads.request(&store, &feed, &epoch, hello.request.as_ref().unwrap())
+                        } else if hello.request.as_ref().is_some_and(|v| {
+                            matches!(
+                                v["op"].as_str(),
+                                Some("approval_audit_list" | "approval_audit_detail")
+                            )
+                        }) {
+                            audit.request(hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "pending_reads_import_result")
+                        {
+                            pending_reads::result_request(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "import_pending_reads")
+                        {
+                            json!({"request_id":hello.request.as_ref().unwrap()["request_id"],
+                                "accepted":false,"durable":false,"code":"frontend_authentication_required"})
                         } else if hello
                             .request
                             .as_ref()

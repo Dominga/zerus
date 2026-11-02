@@ -10,6 +10,7 @@ fn id() -> String {
 #[test]
 fn committed_policy_receipt_remains_readable_without_a_runtime() {
     let mut f = Fixture::new(Arc::new(|_, _, _, _| panic!("no executor needed")));
+    f.active();
     let receipt = f.enabled(true);
     let location = f.location;
     drop(f.runtime);
@@ -43,6 +44,22 @@ struct Fixture {
     generation: u64,
 }
 impl Fixture {
+    fn passive_projection(&self) -> Value {
+        crate::desktop::projection(
+            &self.location,
+            &self.store,
+            &self.runtime.epoch,
+            0,
+            &Value::Null,
+            &self.feed,
+            &crate::desktop::catalog_read::Reader::default(),
+        )
+    }
+    fn projection(&self) -> Value {
+        let mut value = self.passive_projection();
+        self.runtime.decorate(&mut value);
+        value
+    }
     fn new(run: Runner) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let location = Location {
@@ -187,6 +204,7 @@ fn reserve_read(f: &mut Fixture) -> reads::Delivery {
 fn policy_defaults_off_and_replayed_receipts_never_reapply_old_settings() {
     let mut f = Fixture::new(quiet());
     assert!(!state::policy(&f.store.db).unwrap().enabled);
+    f.active();
     let first = json!({"op":"automatic_approvals","request_id":id(),"enabled":true});
     let receipt = f.native_policy(&first);
     assert_eq!(receipt["durable"], true);
@@ -246,6 +264,7 @@ fn request_types_cross_operation_ids_and_failed_commit_refuse() {
     let request = id();
     assert!(state::set_policy(&mut f.store.db, &request, false).is_ok());
     assert!(state::enqueue(&mut f.store.db, &request, &mark(), now()).is_err());
+    f.active();
     f.store.db.execute_batch("CREATE TRIGGER fail_policy BEFORE INSERT ON desktop_delivery_requests BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
     assert_eq!(f.enabled(true)["accepted"], false);
     assert!(!state::policy(&f.store.db).unwrap().enabled);
@@ -253,8 +272,143 @@ fn request_types_cross_operation_ids_and_failed_commit_refuse() {
         .db
         .execute_batch("DROP TRIGGER fail_policy;")
         .unwrap();
+    assert_eq!(f.enabled(false)["accepted"], true);
     assert_eq!(f.enabled(true)["accepted"], true);
     assert!(f.runtime.approval_error.is_none());
+}
+
+#[test]
+fn actual_root_projection_is_consumed_by_the_client_without_ready_json_fixtures() {
+    use zerus_client_core::desktop::service::State;
+    let mut f = Fixture::new(quiet());
+    let mut client = State::new(f.location.configuration.clone()).unwrap();
+    let mut output = Vec::new();
+    let mut check = |case: &str, f: &Fixture, reads: bool, approvals: bool| {
+        let value = f.projection();
+        client.status(&value).unwrap();
+        assert!(client.snapshot().connected);
+        assert_eq!(client.snapshot().component_ready("reads"), reads, "{case}");
+        assert_eq!(
+            client.snapshot().component_ready("approvals"),
+            approvals,
+            "{case}"
+        );
+        output.push(json!({"case":case,"status":value}));
+    };
+    check("awaiting_handoff", &f, false, false);
+    f.active();
+    check("disabled_but_ready", &f, true, true);
+    assert_eq!(
+        f.projection()["lifecycle"]["background"]["approvals"]["code"],
+        "disabled"
+    );
+    assert_eq!(
+        f.projection()["lifecycle"]["background"]["approvals"]["enabled"],
+        false
+    );
+    assert_eq!(f.enabled(true)["durable"], true);
+    check("enabled", &f, true, true);
+    f.runtime.approval_error = Some("fixture_approval_unavailable");
+    check("approval_degraded", &f, true, false);
+    assert_eq!(
+        f.projection()["automatic_approvals"],
+        true,
+        "durable opt-in is not worker readiness"
+    );
+    assert_eq!(f.enabled(false)["durable"], true);
+    assert!(!state::policy(&f.store.db).unwrap().enabled);
+    check("disabled_while_degraded", &f, true, false);
+    f.runtime.approval_error = None;
+    f.runtime.read_error = Some("fixture_read_unavailable");
+    check("read_degraded", &f, false, true);
+    f.runtime.request_stop();
+    check("drained", &f, false, false);
+    assert_eq!(
+        f.projection()["lifecycle"]["background"]["approvals"]["code"],
+        "drained"
+    );
+    println!(
+        "ROOT_DELIVERY_STATUS {}",
+        serde_json::to_string(&output).unwrap()
+    );
+}
+
+#[test]
+fn enable_requires_current_writer_even_when_cached_projection_was_ready() {
+    let mut f = Fixture::new(quiet());
+    assert_eq!(f.enabled(true)["accepted"], false);
+    f.active();
+    assert_eq!(
+        f.projection()["lifecycle"]["background"]["approvals"]["ready"],
+        true
+    );
+    zerus_desktop_ledger::revoke(&f.store.db, "fixture").unwrap();
+    // No intervening poll: the display cache must grant no authority.
+    assert_eq!(f.enabled(true)["accepted"], false);
+    assert!(!state::policy(&f.store.db).unwrap().enabled);
+    assert_eq!(f.enabled(false)["durable"], true);
+    f.runtime.request_stop();
+    assert_eq!(f.enabled(false)["durable"], true);
+}
+
+#[test]
+fn degraded_runtime_returns_original_receipt_without_reapplying_old_enable() {
+    let mut f = Fixture::new(quiet());
+    f.active();
+    let original = json!({"op":"automatic_approvals","request_id":id(),"enabled":true});
+    let receipt = f.native_policy(&original);
+    assert_eq!(receipt["durable"], true);
+    assert_eq!(f.enabled(false)["durable"], true);
+    f.runtime.request_stop();
+    assert_eq!(f.native_policy(&original), receipt);
+    assert!(!state::policy(&f.store.db).unwrap().enabled);
+    assert_eq!(f.enabled(true)["accepted"], false);
+}
+
+#[test]
+fn passive_disable_requires_typed_authentication_and_an_actual_store_commit() {
+    let mut f = Fixture::new(quiet());
+    state::set_policy(&mut f.store.db, &id(), true).unwrap();
+    let passive = f.passive_projection();
+    assert_eq!(passive["automatic_approvals"], true);
+    assert_eq!(
+        passive["lifecycle"]["background"]["approvals"]["enabled"],
+        true
+    );
+    assert_eq!(
+        passive["lifecycle"]["background"]["approvals"]["ready"],
+        false
+    );
+    let mut client =
+        zerus_client_core::desktop::service::State::new(f.location.configuration.clone()).unwrap();
+    client.status(&passive).unwrap();
+    assert_eq!(client.snapshot().automatic_approvals, Some(true));
+    assert!(!client.snapshot().component_ready("approvals"));
+    let request = |enabled| json!({"op":"automatic_approvals","request_id":id(),"enabled":enabled});
+    let apply = |store: &mut Store, request: &Value| {
+        passive_frontend_request(
+            store,
+            crate::desktop::ui_authority::Validated::fixture(request),
+        )
+    };
+    assert_eq!(apply(&mut f.store, &request(true))["accepted"], false);
+    assert!(state::policy(&f.store.db).unwrap().enabled);
+    f.store.db.execute_batch("CREATE TRIGGER deny_disable BEFORE UPDATE ON desktop_delivery_policy BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+    let original = request(false);
+    assert_eq!(apply(&mut f.store, &original)["durable"], false);
+    assert!(state::policy(&f.store.db).unwrap().enabled);
+    f.store
+        .db
+        .execute_batch("DROP TRIGGER deny_disable;")
+        .unwrap();
+    let receipt = apply(&mut f.store, &original);
+    assert_eq!(receipt["durable"], true);
+    assert_eq!(apply(&mut f.store, &original), receipt);
+    assert!(!state::policy(&f.store.db).unwrap().enabled);
+    assert_eq!(
+        f.runtime.request(&mut f.store, &request(false))["code"],
+        "frontend_authentication_required"
+    );
 }
 
 #[test]
@@ -311,7 +465,31 @@ fn failed_read_worker_retains_the_original_ticket_until_finish_commits() {
 
 #[test]
 fn cancelled_reserved_answer_retries_only_its_journal_finish() {
-    let mut f = Fixture::new(quiet());
+    cancelled_answer_finish_with_due_scan(false);
+}
+
+#[test]
+fn cancelled_reserved_answer_finish_survives_stop_without_new_inspection() {
+    cancelled_answer_finish_with_due_scan(true);
+}
+
+fn cancelled_answer_finish_with_due_scan(stopping: bool) {
+    let inspections = Arc::new(AtomicUsize::new(0));
+    let answers = Arc::new(AtomicUsize::new(0));
+    let run: Runner = {
+        let inspections = inspections.clone();
+        let answers = answers.clone();
+        Arc::new(move |inv, _, _, _| {
+            if inv.args.iter().any(|arg| arg == "inspect") {
+                inspections.fetch_add(1, Ordering::SeqCst);
+                inspected(question())
+            } else {
+                answers.fetch_add(1, Ordering::SeqCst);
+                panic!("a cancelled Answer must never be replayed");
+            }
+        })
+    };
+    let mut f = Fixture::new(run);
     f.active();
     f.enabled(true);
     f.source(row(), true);
@@ -325,6 +503,8 @@ fn cancelled_reserved_answer_retries_only_its_journal_finish() {
     let reserved = policy::reserved(&r, "claude", &question())
         .unwrap()
         .unwrap();
+    let original_id = reserved.id;
+    let original_request = reserved.request.clone();
     journal.execute_batch("CREATE TRIGGER fail_finish BEFORE UPDATE ON attempts BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
     f.runtime.journal = Some(journal);
     let lease = f.runtime.lease(Kind::Approval).unwrap();
@@ -338,19 +518,75 @@ fn cancelled_reserved_answer_retries_only_its_journal_finish() {
         },
         lease,
     ));
+    if stopping {
+        f.runtime.request_stop();
+    }
+    // Poll also discovers new work. Make that boundary deterministic instead
+    // of depending on setup finishing within the one-second scan interval.
+    f.runtime.scan_at = Instant::now();
     f.runtime.poll(&mut f.store);
     assert_eq!(f.journal_status().as_deref(), Some("prepared"));
     assert_eq!(f.runtime.jobs.len(), 1);
+    assert!(
+        matches!(&f.runtime.jobs[0].phase, Phase::Answer { audit, .. }
+        if audit.id == original_id && audit.request == original_request)
+    );
+    assert_eq!(
+        f.runtime.approval_error,
+        Some("approval_receipt_uncommitted")
+    );
+    assert_eq!(inspections.load(Ordering::SeqCst), 0);
+    assert_eq!(answers.load(Ordering::SeqCst), 0);
     f.runtime
         .journal
         .as_ref()
         .unwrap()
         .execute_batch("DROP TRIGGER fail_finish;")
         .unwrap();
+    f.runtime.scan_at = Instant::now();
     f.runtime.poll(&mut f.store);
-    assert!(f.runtime.jobs.is_empty());
     assert_eq!(f.journal_status().as_deref(), Some("cancelled"));
     assert!(f.runtime.approval_error.is_none());
+    if stopping {
+        assert!(f.runtime.drained());
+    } else {
+        // The original Answer is finished. Its removal and recovered journal
+        // permit a FRESH Inspect in this same poll, never an Answer retry.
+        assert_eq!(f.runtime.jobs.len(), 1);
+        assert!(matches!(&f.runtime.jobs[0].phase, Phase::Inspect(_)));
+        // Finish this worker with policy/writer admission still active. The
+        // same question must find its cancelled reservation, not send Answer.
+        // Keep later discovery outside tick_until's bounded five-second wait.
+        f.runtime.scan_at = Instant::now() + Duration::from_secs(60);
+        f.tick_until(|runtime| runtime.jobs.is_empty());
+        f.runtime.request_stop();
+        assert!(f.runtime.drained());
+    }
+    let journal = f.runtime.journal.as_ref().unwrap();
+    let entry: (i64, String, String, String) = journal
+        .query_row(
+            "SELECT id,request_id,status,detail FROM attempts",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        entry,
+        (
+            original_id,
+            original_request,
+            "cancelled".into(),
+            policy::CANCELLED.into()
+        )
+    );
+    assert_eq!(
+        journal
+            .query_row("SELECT count(*) FROM attempts", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(inspections.load(Ordering::SeqCst), usize::from(!stopping));
+    assert_eq!(answers.load(Ordering::SeqCst), 0);
 }
 
 #[test]
@@ -496,6 +732,63 @@ fn read_receipt_does_not_retire_intent_until_native_catalog_confirms_it() {
     f.source(seen, true);
     f.runtime.sources.observe_reads(&mut f.store).unwrap();
     assert_eq!(reads::status(&f.store.db).unwrap()["pending"], 0);
+}
+
+#[test]
+fn imported_frozen_marks_use_the_original_identity_guarded_delivery_path_once() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let count = calls.clone();
+    let run: Runner = Arc::new(move |inv, _, _, _| {
+        assert!(inv.args.iter().any(|a| a == "read"));
+        assert!(inv.args.iter().any(|a| a == "claude/example/a"));
+        let input: Value = serde_json::from_slice(inv.stdin.as_deref().unwrap()).unwrap();
+        assert_eq!(input["run_id"], "run");
+        assert_eq!(input["conversation_id"], "conversation");
+        assert_eq!(input["reply_id"], "reply");
+        assert_eq!(input["attention_signature"], "attention");
+        count.fetch_add(1, Ordering::SeqCst);
+        Exit::Code {
+            code: 0,
+            stderr: String::new(),
+            stdout: br#"{"ok":true,"applied":{"reply_id":true,"attention_signature":true}}"#
+                .to_vec(),
+        }
+    });
+    let mut f = Fixture::new(run);
+    let capture = zerus_client_core::desktop::pending_reads::Capture::from_bytes(
+        &serde_json::to_vec(&vec![mark()]).unwrap(),
+    )
+    .unwrap();
+    let page = capture.page(0).unwrap();
+    let request = || json!({"op":"import_pending_reads","request_id":id(),"page":page});
+    assert_eq!(
+        crate::desktop::pending_reads::frontend(
+            &mut f.store,
+            crate::desktop::ui_authority::Validated::fixture(&request())
+        )["durable"],
+        true
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(!state::policy(&f.store.db).unwrap().enabled);
+    f.source(row(), true);
+    f.active();
+    f.tick_until(|r| r.jobs.is_empty());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(reads::status(&f.store.db).unwrap()["pending"], 1);
+    let mut seen = row();
+    seen["read"] = json!({"conversation_id":"conversation","reply_id":"reply","attention_signature":"attention"});
+    f.source(seen, true);
+    f.runtime.sources.observe_reads(&mut f.store).unwrap();
+    assert_eq!(reads::status(&f.store.db).unwrap()["pending"], 0);
+    assert_eq!(
+        crate::desktop::pending_reads::frontend(
+            &mut f.store,
+            crate::desktop::ui_authority::Validated::fixture(&request())
+        )["durable"],
+        true
+    );
+    f.scan();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]

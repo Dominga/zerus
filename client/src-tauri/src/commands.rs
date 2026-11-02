@@ -23,14 +23,7 @@ pub struct AppState {
 #[cfg(feature = "live")]
 #[tauri::command]
 pub fn fleet_refresh(state: State<'_, AppState>) -> usize {
-    let mut nudged = state.reconnect("") as usize;
-    if let Some(peers) = state.peers() {
-        nudged += peers
-            .iter()
-            .filter(|computer| state.reconnect(computer))
-            .count();
-    }
-    nudged
+    state.refresh()
 }
 
 #[cfg(not(feature = "live"))]
@@ -50,6 +43,11 @@ impl AppState {
     pub fn reconnect(&self, computer: &str) -> bool {
         self.live.reconnect(computer)
     }
+    /// One visible Refresh: one shared service subscription, or the legacy
+    /// Fleet's existing offline sources. Display choices never multiply it.
+    pub fn refresh(&self) -> usize {
+        self.live.refresh()
+    }
 
     /// The change pump, whose mirror is the screens hub's view of the fleet.
     pub fn pump(&self) -> crate::pump::Pump {
@@ -66,6 +64,9 @@ impl AppState {
     pub fn desktop_service(&self) -> Option<std::sync::Arc<crate::desktop_service::Service>> {
         self.live.desktop_service()
     }
+    pub(crate) fn set_pending_read_source(&self, actions: crate::actions::Actions) {
+        let _ = self.live.pending_read_source.set(actions);
+    }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     pub fn set_desktop_responder(&self, responder: Arc<zerus_client_core::desktop::Responder>) {
@@ -80,8 +81,17 @@ impl AppState {
         self.live.register_service_projection(observer)
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn register_service_activation(
+        &self,
+        sink: crate::desktop_service::activation::Sink,
+    ) -> Result<(), String> {
+        self.live.register_service_activation(sink)
+    }
+
     /// The peers this computer's listing names; None before a listing named
-    /// them, and for a replay.
+    /// them, and for a replay. Service mode supplies verified display-only
+    /// runtime names, retaining last-known choices while unavailable.
     pub fn peers(&self) -> Option<std::collections::BTreeSet<String>> {
         self.live.peers()
     }
@@ -166,7 +176,10 @@ mod live {
         pub organization: OnceLock<Organization>,
         pub creations: OnceLock<crate::creations::CreationHost>,
         pub(super) desktop_responder: OnceLock<Arc<zerus_client_core::desktop::Responder>>,
+        pub(super) pending_read_source: OnceLock<crate::actions::Actions>,
         service_projections: Mutex<Vec<crate::desktop_service::Projection>>,
+        #[cfg(target_os = "linux")]
+        service_activation: OnceLock<crate::desktop_service::activation::Sink>,
         tasks_project: Mutex<Option<String>>,
         controls: zerus_client_core::desktop::drain::Gate,
         resources: zerus_client_core::desktop::drain::Gate,
@@ -183,7 +196,10 @@ mod live {
                 organization: OnceLock::new(),
                 creations: OnceLock::new(),
                 desktop_responder: OnceLock::new(),
+                pending_read_source: OnceLock::new(),
                 service_projections: Mutex::new(Vec::new()),
+                #[cfg(target_os = "linux")]
+                service_activation: OnceLock::new(),
                 tasks_project: Mutex::new(None),
                 controls: Gate::new(64).unwrap(),
                 resources: Gate::new(1).unwrap(),
@@ -193,6 +209,19 @@ mod live {
         }
     }
     impl Live {
+        #[cfg(target_os = "linux")]
+        pub(super) fn register_service_activation(
+            &self,
+            sink: crate::desktop_service::activation::Sink,
+        ) -> Result<(), String> {
+            let source = self.source.lock().unwrap_or_else(PoisonError::into_inner);
+            if source.is_some() {
+                return Err("Service activation must be registered before startup.".into());
+            }
+            self.service_activation
+                .set(sink)
+                .map_err(|_| "Service activation is already registered.".into())
+        }
         #[allow(dead_code)] // Reserved setup hook for the .66.3.36 maintenance consumer.
         pub(super) fn register_service_projection(
             &self,
@@ -285,6 +314,30 @@ mod live {
             }
             Ok(())
         }
+        pub fn refresh(&self) -> usize {
+            let Ok(_admission) = self.admit() else {
+                return 0;
+            };
+            match self
+                .source
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+            {
+                Some(Source::Service(service)) => service.reconnect("") as usize,
+                Some(Source::Fleet(fleet)) => {
+                    let local = fleet.reconnect(&ComputerId::local()) as usize;
+                    local
+                        + fleet
+                            .peers()
+                            .into_iter()
+                            .flatten()
+                            .filter(|peer| fleet.reconnect(&ComputerId::from(peer.as_str())))
+                            .count()
+                }
+                _ => 0,
+            }
+        }
         pub fn reconnect(&self, computer: &str) -> bool {
             let Ok(_admission) = self.admit() else {
                 return false;
@@ -296,10 +349,7 @@ mod live {
                 .as_ref()
             {
                 Some(Source::Fleet(fleet)) => fleet.reconnect(&ComputerId::from(computer)),
-                Some(Source::Service(service)) => {
-                    service.retry();
-                    true
-                }
+                Some(Source::Service(service)) => service.reconnect(computer),
                 Some(Source::Replay(_)) | None => false,
             }
         }
@@ -355,18 +405,26 @@ mod live {
                 });
                 let allowed = replay.is_none()
                     || std::env::var_os("ZERUS_CLIENT_HGS").is_some_and(|value| !value.is_empty());
-                let service = crate::desktop_service::Service::start(
+                let service = crate::desktop_service::Service::start_observed(
                     hgs(),
                     pump,
                     sink,
                     allowed,
                     drain,
                     self.desktop_responder.get().cloned(),
-                    self.service_projections
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .clone(),
+                    crate::desktop_service::Observers {
+                        projections: self
+                            .service_projections
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .clone(),
+                        #[cfg(target_os = "linux")]
+                        activation: self.service_activation.get().cloned(),
+                    },
                 );
+                if let Some(actions) = self.pending_read_source.get() {
+                    service.start_pending_read_import(actions.clone());
+                }
                 if let Some(organization) = &organization {
                     // The observer runs under detail admission. Its source
                     // callback must not re-enter Live.source or that admission.
@@ -466,7 +524,8 @@ mod live {
         }
 
         /// The peers this computer's listing names; None before a listing
-        /// named them, and for a replay.
+        /// named them, and for a replay. Service rosters supply choices only;
+        /// no background worker or writer permission follows from this list.
         pub fn peers(&self) -> Option<BTreeSet<String>> {
             match self
                 .source
@@ -475,6 +534,7 @@ mod live {
                 .as_ref()
             {
                 Some(Source::Fleet(fleet)) => fleet.peers(),
+                Some(Source::Service(service)) => service.peers(),
                 _ => None,
             }
         }

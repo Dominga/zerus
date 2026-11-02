@@ -81,6 +81,14 @@ Mac selection is supplied as the opaque native selection made off actor, and
 Linux takes an explicit Unix bus address. This component does not change the
 background registration, policy admission or client switch.
 
+Windows takes the selected service configuration and passes the same original
+owner resource to its in-process worker and native delegates. Restore retries
+retain the current page offset through its bounded FIFO. Finish waits for the
+worker's restored/ready acknowledgement, and stop waits for `try_join` plus
+native drain. The actor must continue polling original Closed callbacks through
+that join; a joined worker alone cannot settle the attachment. Native setup
+faults remain unavailable, and no registry repair occurs here.
+
 Before allowing discovery effects, attachment restores at most sixteen indexed
 candidates per turn, then waits for the platform's original restoration
 acknowledgement or ordered FIFO completion. A second fixed-highwater walk over
@@ -114,17 +122,51 @@ optional `Open` contains a distinct click UUID, original post UUID, exact
 computer/run/conversation target, original token and optional ephemeral Wayland
 context. `None` means idle, not readiness or an ownership grant. The service
 rechecks the original Delivered mapping at handoff, so intervening withdrawal or
-revocation refuses it. The queue has at most 32 clicks, expires them after 30
-seconds, and never persists context. A disconnected/uncertain handoff is not
-replayed automatically; the next wait is a new read and another native click is
-a distinct event.
+revocation refuses it. Each actor turn checks held-process and canonical-peer
+liveness. Full retained ancestry validation is limited to once per 500 ms while
+waiting, and is always repeated immediately before handing a click to a waiting frontend. The queue has at most 32 clicks, expires them after 30
+seconds, and never persists context. A proof refusal before any frame is offered keeps the known-unsent click under
+its original 30-second age for a newly authenticated receiver. Once a handoff is
+attempted, a disconnected/uncertain outcome is not replayed automatically; the
+next wait is a new read and another native click is a distinct event.
 
-The service's `Router::closed_frontend` consumes a fresh canonical instance
-observation made off actor. Only `Absent`, with no authenticated waiting
-receiver, can produce the opaque one-use `Launch` for the selected installed
-frontend mechanics. Unknown, live and legacy observations do not launch.
+The service's `Router::closed_frontend` checks a fresh canonical instance
+observation made off actor. Absence alone cannot authorize a launch: the Linux
+mechanics force service mode and would also freeze/import the native read store.
+Until the authenticated notification ownership handoff exists, this decision
+refuses without consuming the queued click or extending its original age.
+The handoff must durably record a SERVICE-MODE frontend's grant for the exact
+configuration and selected frontend build/identity; revoke, rollback and native
+notification takeover end that grant. Missing, unknown or mismatched grants
+refuse. This is ownership state, not a separate mode preference. Unknown, live
+and legacy observations also do not launch. A future admitted decision supplies
+the opaque one-use `Launch` to the selected installed frontend mechanics.
 Linux owns the exact-target GUI consumer and launch implementation: the Wayland
 token goes only into that child environment as `XDG_ACTIVATION_TOKEN`, never
 process-global state, argv or disk. The parent lifecycle still owns callback
 attachment, selected image launch, policy and final cutover; the transport alone
 does not activate any of them.
+
+On Linux, `ui_authority::Scope::select_frontend(image)` binds the root's explicit
+maintained-image choice under the same installed-image catalog used for inbound
+authentication. It performs no PATH lookup or alternate-install fallback. The
+actual running CLI and selected `bin/hgs-tray` may have different installation
+prefixes; a system CLI with a user GUI remains supported. It retains the original files and stable
+directory identities. If the maintained local-WebKit setting exists, its exact
+setting and `libexec/hgs-tray-launch` are retained too. File/entry replacement or
+selection changes refuse; unrelated directory writes do not. The opaque handle
+exposes `image()`, `entry()`, `revalidate()` and original-child observation.
+The selected catalog path is canonicalized before pinning, including a symlinked
+installation prefix. Group-writable files/directories are accepted only for the
+effective user-private group: bounded NSS reads require its name to equal the
+user's and its listed membership to be empty. Other group write and all world
+write still refuse. Exact file ctime remains part of custody, so relabelling or
+link changes require a fresh selection shortly before launch.
+The Linux helper keeps its original `Child`, waits through wrapper exec, and
+uses `observe_original_child` / `revalidate_child` against the retained image and
+birth identity. `revalidate_for_launch` also binds the opaque Launch to the same
+service configuration. A cached exited child or another process is never adopted.
+This is image custody, not a navigation capability or launch permit: the helper
+still requires the selected frontend's actual target-argument ABI, and only the
+service-owned `Launch` supplies an exact target. No installed program is queried
+or started by selection itself.

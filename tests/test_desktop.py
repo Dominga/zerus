@@ -23,6 +23,24 @@ HGS = Path(os.environ.get('HGS_TEST_BIN', Path(__file__).resolve().parents[1] / 
 
 
 class Desktop(unittest.TestCase):
+    def test_approval_audit_is_selected_scoped_and_does_not_create_a_journal(self):
+        self.serve()
+        status = self.cli('desktop', 'status', '--json')
+        query = dict(op='approval_audit_list', request_id=str(uuid.uuid4()),
+                     configuration=status['configuration'], epoch=status['epoch'])
+        reply = self.cli('desktop', 'request', '--json', data=query)
+        self.assertEqual(reply['abi'], 'desktop-approval-audit-v1')
+        self.assertTrue(reply['accepted'])
+        self.assertTrue(reply['read_only'])
+        self.assertEqual(reply['configuration'], status['configuration'])
+        self.assertEqual(reply['service_epoch'], status['epoch'])
+        self.assertEqual(reply['result']['entries'], [])
+        self.assertFalse((self.state / 'approval-audit').exists())
+        query['epoch'] = str(uuid.uuid4())
+        refused = self.cli('desktop', 'request', '--json', data=query)
+        self.assertFalse(refused['accepted'])
+        self.assertEqual(refused['code'], 'approval_audit_scope_changed')
+
     def setUp(self):
         # macOS's per-user TMPDIR (/var/folders/...) leaves too little of the
         # 104-byte socket path for the desktop service under nested state dirs.
@@ -87,6 +105,29 @@ class Desktop(unittest.TestCase):
 
     def failed_serve(self, env=None):
         return self.cli('desktop', 'serve', ok=False, env=env)
+
+    def test_pending_read_import_requires_native_frontend_and_lookup_stays_read_only(self):
+        self.serve()
+        mark = dict(computer='example', name='agent/project/test', run_id='run',
+                    conversation_id='conversation', reply_id='reply', attention_signature=None)
+        page = dict(source=dict(sha256='a' * 64, bytes=256, rows=1), after=0, marks=[mark])
+        refused = self.cli('desktop', 'request', '--json', data=dict(
+            op='import_pending_reads', request_id=str(uuid.uuid4()), page=page,
+            confirmed=True, role='frontend'))
+        self.assertFalse(refused['accepted'])
+        self.assertFalse(refused['durable'])
+        self.assertEqual(refused['code'], 'frontend_authentication_required')
+        lookup = self.cli('desktop', 'request', '--json', data=dict(
+            op='pending_reads_import_result', request_id=str(uuid.uuid4()),
+            original_request_id=str(uuid.uuid4()), page=page))
+        self.assertTrue(lookup['accepted'])
+        self.assertFalse(lookup['durable'])
+        self.assertFalse(lookup['found'])
+        self.assertIsNone(lookup['result'])
+        status = self.cli('desktop', 'status', '--json')
+        self.assertFalse(status['writers_enabled'])
+        self.assertFalse(status['automatic_approvals'])
+        self.assertEqual(status['read_queue']['pending'], 0)
 
     def watch(self):
         process = subprocess.Popen([str(HGS), 'desktop', 'watch', '--json'], env=self.env,

@@ -5,8 +5,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::desktop_service::audit::{Page, Scope};
 use tauri::State;
-use zerus_client_core::approvals::{self, Operation, Page};
+use zerus_client_core::approvals::{self, Operation};
 use zerus_client_core::default_hgs;
 
 mod automatic;
@@ -39,9 +40,7 @@ async fn read(
     data: serde_json::Value,
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     if crate::desktop_service::mode() {
-        return Err(
-            "The approval journal is unavailable with this background service connection.".into(),
-        );
+        return Err(crate::desktop_service::audit::UNAVAILABLE.into());
     }
     if approvals.blocked {
         return Err("The automatic approval journal is not read in a replay.".into());
@@ -64,23 +63,47 @@ async fn read(
 #[tauri::command]
 pub async fn approvals_list(
     approvals: State<'_, Approvals>,
+    source: State<'_, crate::commands::AppState>,
     host: String,
     session: String,
     before: i64,
     after: i64,
+    scope: Option<Scope>,
 ) -> Result<Page, String> {
+    if crate::desktop_service::mode() {
+        return crate::desktop_service::audit::list(
+            source.desktop_service(),
+            host,
+            session,
+            before,
+            after,
+            scope,
+        )
+        .await;
+    }
     let reply = read(
         &approvals,
         Operation::List,
         approvals::list_request(&host, &session, before, after),
     )
     .await?;
-    approvals::page(&reply)
+    Ok(Page {
+        page: approvals::page(&reply)?,
+        scope: None,
+    })
 }
 
 /// One entry's question and outcome, as Qt words them.
 #[tauri::command]
-pub async fn approvals_detail(approvals: State<'_, Approvals>, id: i64) -> Result<String, String> {
+pub async fn approvals_detail(
+    approvals: State<'_, Approvals>,
+    source: State<'_, crate::commands::AppState>,
+    id: i64,
+    scope: Option<Scope>,
+) -> Result<String, String> {
+    if crate::desktop_service::mode() {
+        return crate::desktop_service::audit::detail(source.desktop_service(), id, scope).await;
+    }
     let reply = read(
         &approvals,
         Operation::Detail,

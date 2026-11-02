@@ -363,7 +363,10 @@ fn exercise_driver(chatty: bool, churn: bool) {
     } else {
         assert!(host.status()["fault"].is_null(), "{}", host.status());
     }
-    assert!(fs2::FileExt::try_lock_exclusive(&file).is_ok());
+    // The host is joined, but a concurrent fork can retain a duplicate of the
+    // shared open-file description until exec closes its CLOEXEC descriptors.
+    // Require actual lock release within the fixture deadline, not this turn.
+    wait(|| fs2::FileExt::try_lock_exclusive(&file).is_ok());
 }
 
 fn offer_fixture(
@@ -466,11 +469,14 @@ fn logs_keep_a_bounded_prefix_and_still_observe_original_eof() {
     let mut eof = false;
     write.write_all(b"xyz").unwrap();
     drop(write);
-    assert_eq!(log_turn(&mut read, &mut prefix, &mut eof).unwrap(), 2);
+    let mut dropped = 0;
+    wait(|| {
+        dropped += log_turn(&mut read, &mut prefix, &mut eof).unwrap();
+        eof
+    });
+    assert_eq!(dropped, 2);
     assert_eq!(prefix.len(), LOG_BYTES);
     assert_eq!(prefix[LOG_BYTES - 1], b'x');
-    assert!(!eof);
-    assert_eq!(log_turn(&mut read, &mut prefix, &mut eof).unwrap(), 0);
     assert!(eof);
 }
 

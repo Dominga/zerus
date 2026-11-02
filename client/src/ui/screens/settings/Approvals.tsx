@@ -10,6 +10,7 @@ import { Icon } from "../../lib/icons";
 import { Actions, Group, SectionHead, Status, Table, Switch } from "./ui";
 import { PLACEHOLDER, createJournal, type JournalState, type Page } from "./approvals-journal";
 import { tr, trNoop } from "../../../i18n";
+import { canToggleServiceApproval } from "./approval-readiness";
 
 // Settings > Automatic approvals (tray/src/AutomaticApprovalSettings.cpp) as
 // the approved mockup lays it out. The separate opt-in is never seeded from
@@ -25,7 +26,7 @@ export function ApprovalsSection() {
   const [state, setState] = createSignal<JournalState>({ page: { entries: [], next: 0, previous: 0 }, loading: false, status: "", detailHint: tr(PLACEHOLDER) });
   const journal = createJournal({
     list: (request) => invoke<Page>("approvals_list", { ...request }),
-    detail: (id) => invoke<string>("approvals_detail", { id }),
+    detail: (id, scope) => invoke<string>("approvals_detail", { id, scope }),
   }, () => ({ host: host(), session: session() }), setState);
   // Outside the app there is no journal to read.
   const firstPage = () => { if (inTauri()) journal.firstPage(); };
@@ -45,7 +46,7 @@ export function ApprovalsSection() {
       <SectionHead title={trNoop("Automatic approvals")} />
       <Group class="appr-toggle">
         <div class="set-row"><div class="set-row-text"><label class="set-label danger" for="appr-on">{tr("Automatically approve tool requests (dangerous)")}</label></div>
-          <div class="set-row-control"><Switch id="appr-on" checked={desktopService.enabled() ? desktopService.state()?.automatic_approvals === true : flag(APPROVALS_KEY)} label={trNoop("Automatically approve tool requests (dangerous)")} disabled={optIn.busy() || (desktopService.enabled() && (!desktopService.ready("approvals") || desktopService.state()?.automatic_approvals == null || !!serviceApprovalIntent.pending()))}
+          <div class="set-row-control"><Switch id="appr-on" checked={desktopService.enabled() ? desktopService.state()?.automatic_approvals === true : flag(APPROVALS_KEY)} label={trNoop("Automatically approve tool requests (dangerous)")} disabled={optIn.busy() || (desktopService.enabled() && (!canToggleServiceApproval(desktopService.state()) || !!serviceApprovalIntent.pending()))}
             onChange={(on) => optIn.request(on, document.getElementById("appr-on") ?? document.activeElement as HTMLElement)} /></div></div>
         <Show when={desktopService.enabled()}><p class="set-group-hint">{tr("Automatic approvals are owned by the background service and may continue while this window is closed.")}</p></Show>
         <Show when={desktopService.enabled() && serviceApprovalIntent.pending()}>

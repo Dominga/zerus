@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Isolated desktop-v1 fixture; never launches a real CLI, service or agent."""
 import json
+import contextlib
+import io
 import hashlib
+import base64
 import socket
 import struct
 import os
@@ -20,7 +23,7 @@ abi = 'desktop-catalog-changes-v1'
 args = sys.argv[1:]
 value = json.loads(sys.stdin.readline()) if args[:2] in [['desktop', 'request'], ['desktop', 'frontend-request']] else {}
 with (root / 'calls').open('a') as log:
-    log.write(json.dumps({'args': args, 'value': value}) + '\n')
+    log.write(json.dumps({'args': args, 'value': value, 'pid': os.getpid()}) + '\n')
 
 
 def wait(path):
@@ -39,6 +42,8 @@ def counter(name):
 
 
 def status():
+    if config.get('produced_status') is not None:
+        return config['produced_status']
     online = not config.get('offline', False)
     catalog_online = online and not config.get('coverage_offline', False)
     counts = {'epoch': epoch, 'scope': 'shared_host_state', 'display_only': True, 'authority': False,
@@ -54,13 +59,16 @@ def status():
         counts['computers'][0]['computer'] = config['counts_computer']
     background = {name: {'ready': config.get('ready', False), 'code': 'fixture'}
                   for name in ['fleet', 'presence', 'reads', 'attention', 'approvals']}
-    return {'abi': 'desktop-v1', 'configuration': 'a' * 64, 'epoch': epoch, 'generation': 1,
+    sources = [{'computer': '', 'incarnation': 1, 'generation': 1,
+                'status': 'live' if online else 'reconnecting', 'accepting': online}]
+    if config.get('peer_failure'):
+        sources.append(dict(sources[0], computer='broken', incarnation=2))
+    return {'abi': 'desktop-v1', 'configuration': 'a' * 64, 'epoch': epoch, 'generation': 1, 'host': 'caption-only',
             'lifecycle': {'abi': 'desktop-lifecycle-v1', 'phase': 'serving', 'ipc_ready': True,
                           'configuration': 'a' * 64, 'epoch': epoch, 'generation': 1, 'background': background},
             'attention_counts': counts, 'automatic_approvals': False, 'catalog_reads': {'changes_abi': abi},
             'background_runtime': {'epoch': epoch, 'display_only': True, 'authority': False, 'state': 'running',
-                                   'computers': [{'computer': '', 'incarnation': 1, 'generation': 1,
-                                                  'status': 'live' if online else 'reconnecting', 'accepting': online}]},
+                                   'computers': sources} if not config.get('peer_choices') else None,
             'detail_subscriptions': {'abi': 'desktop-details-v1', 'stopping': False} if config.get('details') else None}
 
 
@@ -140,8 +148,8 @@ def frame(seq, kind, body):
     print(json.dumps({'abi': 'desktop-v1', 'epoch': epoch, 'seq': seq, 't': kind, 'value': body}), flush=True)
 
 
-def hint(seq, revision, selected=projection):
-    frame(seq, 'catalog_changed', {'computer': '', 'incarnation': 1, 'generation': 1,
+def hint(seq, revision, selected=projection, computer=''):
+    frame(seq, 'catalog_changed', {'computer': computer, 'incarnation': 2 if computer else 1, 'generation': 1,
           'projection': selected, 'revision': revision, 'online': True, 'last_known': False,
           'complete': True, 'reset_required': False, 'changes_abi': abi, 'attention_counts': status()['attention_counts']})
 
@@ -155,131 +163,58 @@ def change(key, revision, remove=False):
             'row': None if remove else row(key)['row']}
 
 
-if args == ['--help']:
-    print('Desktop service ABI: desktop-v1\nDesktop catalog changes ABI: ' + abi if config.get('supported', True) else 'Older fixture CLI')
-    if config.get('frontend_abi', True):
-        print('Desktop frontend request ABI: desktop-ui-request-v1')
-    if config.get('maintenance_abi', True):
-        print('Desktop maintenance ABI: desktop-maintenance-v1')
-elif args == ['desktop', 'frontend-request', '--json']:
-    request = value['request']
-    assert value['abi'] == 'desktop-ui-request-v1'
-    if config.get('frontend_unreachable') and not (root / 'service-back').exists():
-        raise SystemExit('fixture service unavailable before mutation')
-    with socket.socket(socket.AF_UNIX) as stream:
-        stream.settimeout(2)
-        stream.connect(str(root / 'native-cache.sock'))
-        pid, uid, _ = struct.unpack('3i', stream.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
-        assert pid == os.getppid() and uid == os.getuid()
-        stream.sendall(('desktop-ui-request-v1 ' + value['attempt'] + '\n').encode())
-        reply = json.loads(stream.makefile('rb').readline(4097))
-    evidence = reply['request']
-    assert reply['hello']['nonce'] == value['attempt']
-    assert evidence['child_pid'] == os.getpid() and evidence['attempt'] == value['attempt']
-    assert evidence['request_id'] == request['request_id']
-    fingerprint = hashlib.sha256(json.dumps(request, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
-    assert evidence['fingerprint'] == fingerprint
-    (root / 'original-child-bound').touch()
-    if config.get('frontend_hold'):
-        wait(root / 'release-frontend')
-    if config.get('frontend_refuse'):
-        print(json.dumps({'request_id': request['request_id'], 'accepted': False, 'durable': False,
-                          'code': 'frontend_authentication_refused'}))
-    else:
-        if request['op'] == 'automatic_approvals':
-            receipt = {'request_id': request['request_id'], 'op': request['op'], 'enabled': request['enabled'],
-                       'accepted': True, 'durable': True, 'revision': 1}
-        else:
-            gui = request.get('update', {}).get('gui') if request.get('update') else None
-            if gui:
-                assert gui['app_version'] == reply['hello']['build']['version']
-                assert gui['source_commit'] == reply['hello']['build']['source_commit']
-                assert Path(gui['executable']).resolve() == Path(os.readlink('/proc/' + str(os.getppid()) + '/exe')).resolve()
-            receipt = {'request_id': request['request_id'], 'original_request_id': request['request_id'],
-                       'accepted': True, 'durable': True, 'configured': True, 'revision': 1, 'recovery_save': 'not_requested'}
-        (root / ('receipt-' + request['request_id'])).write_text(json.dumps(receipt))
-        if config.get('frontend_uncertain'):
-            raise SystemExit('fixture lost its reply after actor commit')
-        if config.get('frontend_retain') and os.fork() == 0:
-            # The original owned CLI exits; only this private fixture holds
-            # its inherited output pipes. Release by file, never by a PID kill.
-            until = time.monotonic() + 10
-            while not (root / 'release-retainer').exists() and time.monotonic() < until:
-                time.sleep(.005)
-            os._exit(0)
-        print(json.dumps(receipt))
-elif args == ['desktop', 'status', '--json']:
-    print(json.dumps(status()))
-elif args == ['desktop', 'watch', '--json']:
-    initial = status()
-    if config.get('details'):
-        initial['details'] = {'abi': 'desktop-details-v1', 'epoch': epoch,
-                              'lease': '00000000-0000-4000-8000-000000000003',
-                              'limits': {'demands_per_subscriber': 64}}
-    frame(0, 'hello', initial)
-    if config.get('coverage_offline'):
-        wait(root / 'repeat-status')
-        for seq in [1, 2]:
-            repeated = status()
-            repeated['generation'] = seq + 1
-            repeated['lifecycle']['generation'] = seq + 1
-            frame(seq, 'status', repeated)
-    if config.get('counts_transition'):
-        wait(root / 'drop-counts')
-        degraded = status()
-        degraded['attention_counts'] = {'aggregate': {'complete': False}, 'error': 'counts_unavailable'}
-        frame(1, 'status', degraded)
-        frame(2, 'catalog_changed', {'computer': '', 'incarnation': 1, 'generation': 1,
-                                    'projection': projection, 'revision': '1', 'online': True,
-                                    'attention_counts': degraded['attention_counts']})
-        wait(root / 'restore-counts')
-        frame(3, 'heartbeat', status())
-    if config.get('details'):
-        frame(7, 'status', status())  # No replacement lease on ordinary status.
-    if config.get('dirty_walk'):
-        wait(root / 'page-started')
-        hint(1, '2')
-        hint(2, '2')
-        (root / 'hinted').touch()
-        wait(root / 'delta-started')
-        hint(3, '3')
-        hint(4, '3')
-        (root / 'delta-hinted').touch()
-    if config.get('replace_projection'):
-        wait(root / ('page-started' if config['replace_projection'] == 'early' else 'initial-complete'))
-        hint(1, '0', 'b' * 32)
-        (root / 'projection-replaced').touch()
-    if config.get('delta_live'):
-        wait(root / 'send-delta')
-        hint(1, '1')
-        wait(root / 'live-delta-started')
-        hint(2, '2')
-        (root / 'live-delta-hinted').touch()
-    if config.get('large'):
-        wait(root / 'initial-complete')
-        hint(1, '3')
-    if config.get('details'):
-        seq = 100
-        seen = set()
-        while not select.select([sys.stdin], [], [], .005)[0]:
-            for path in sorted(root.glob('pending-*')):
-                if path.suffix == '.tmp' or path.name in seen:
-                    continue
-                seen.add(path.name)
-                for kind, body in json.loads(path.read_text()):
-                    seq += 7  # Outer targeted sequences are monotone, not contiguous.
-                    frame(seq, kind, body)
-        sys.stdin.read()
-    else:
-        sys.stdin.read()  # Detaches only when the owning subscriber closes stdin.
-elif args == ['desktop', 'request', '--json']:
+def desktop_request():
     op, request_id = value['op'], value['request_id']
+    if op in ['approval_audit_list', 'approval_audit_detail']:
+        journal = '00000000-0000-4000-8000-00000000000' + ('4' if (root / 'audit-replaced').exists() else '3')
+        if config.get('audit_hold'):
+            (root / 'audit-held').touch()
+            wait(root / 'audit-release')
+        reply = dict(abi='desktop-approval-audit-v1', request_id=request_id,
+                     configuration='a' * 64, service_epoch=epoch, read_only=True,
+                     accepted=True, journal=journal)
+        if value.get('journal') and value['journal'] != journal:
+            reply.update(accepted=False, code='approval_audit_scope_changed')
+        elif op == 'approval_audit_detail':
+            reply['result'] = dict(id=value['id'], status='approved', detail='Service audit outcome',
+                                   question={'questions': [{'question': 'Service-owned question', 'body': 'Fixture body'}]}, answers=[])
+        else:
+            high = value.get('through') or 53
+            ids = list(range(1, high + 1))
+            if value.get('before'):
+                ids = [i for i in ids if i < value['before']]
+            if value.get('after'):
+                ids = [i for i in ids if i > value['after']][:50]
+            else:
+                ids = ids[-50:]
+            ids.reverse()
+            reply['result'] = dict(through=high, next=ids[-1] if ids and ids[-1] > 1 else None,
+                                   previous=ids[0] if ids and ids[0] < high else None,
+                                   entries=[dict(id=i, at=1800000000000, host='a.example', session='agent/project/fixture',
+                                                 provider='claude', prompt='Service-owned question', status='approved') for i in ids])
+        fault = config.get('audit_fault')
+        if fault == 'oversize':
+            reply['overflow'] = 'x' * (256 * 1024)
+        elif fault in ['request_id', 'configuration', 'service_epoch', 'journal']:
+            reply[fault] = 'wrong'
+        elif fault == 'refused':
+            reply.update(accepted=False, code='approval_audit_unavailable')
+        elif fault == 'rows':
+            reply['result']['entries'] *= 2
+        print(json.dumps(reply))
+        return
     if op in ['delivery_result', 'maintenance_result'] and config.get('lookup_unavailable') and not (root / 'lookup-back').exists():
         raise SystemExit('fixture lookup transport unavailable')
     common = {'request_id': request_id, 'accepted': True, 'durable': False, 'abi': 'desktop-catalog-v1',
               'changes_abi': abi, 'epoch': epoch, 'computer': value.get('computer', ''), 'incarnation': 1,
               'generation': 1, 'projection': projection, 'display_only': True, 'authority': False,
               'complete': True, 'online': True, 'last_known': False, 'stale': False, 'next_cursor': None}
+    if config.get('peer_failure') and value.get('computer') == 'broken':
+        common['incarnation'] = 2
+        if (root / 'peer-scope-recovered').exists():
+            common['projection'] = 'b' * 32
+    if config.get('peer_choices') and value.get('computer') == 'offline':
+        common.update(incarnation=2, online=False, last_known=True, complete=False)
     if op == 'detail_follow':
         if config.get('follow_timeout') and value['subscription']['topic'] == 'activity':
             (root / 'follow-held').touch()
@@ -302,6 +237,8 @@ elif args == ['desktop', 'request', '--json']:
     elif op == 'catalog_page':
         number = counter('page-number')
         page = dict(common, start_revision='0', revision='0', items=[row('row')])
+        if config.get('peer_choices') and value['computer'] == 'offline':
+            page['start_revision'] = None
         if config.get('dirty_walk'):
             page.update(start_revision='0', revision='2', stale=True, complete=False)
             if number == 1:
@@ -310,7 +247,7 @@ elif args == ['desktop', 'request', '--json']:
                 page.update(next_cursor=cursor, items=[row('first')])
         if config.get('replace_projection') == 'early' and number == 1:
             (root / 'page-started').touch()
-            wait(root / 'projection-replaced')
+            wait(root / 'release-old-page')
             page.update(next_cursor=cursor)
         elif config.get('replace_projection') and (root / 'projection-replaced').exists():
             page.update(projection='b' * 32, items=[row('replacement')])
@@ -328,6 +265,13 @@ elif args == ['desktop', 'request', '--json']:
         number = counter('delta-number')
         page = dict(common, projection=value['projection'], since_revision=value['since_revision'],
                     through_revision=value['since_revision'], revision=value['since_revision'], items=[])
+        if config.get('peer_failure'):
+            if value['computer'] == 'broken':
+                if not any((root / path).exists() for path in ['peer-recovered', 'peer-scope-recovered']):
+                    page = {'request_id': request_id, 'accepted': False, 'durable': False,
+                            'code': 'catalog_changes_gap', 'reset_required': True}
+            elif (root / 'peer-hints').exists():
+                page.update(through_revision='1', revision='1', items=[change('after-peer', '1')])
         if config.get('counts_transition') and (root / 'drop-counts').exists():
             page.update(through_revision='1', revision='1', items=[change('after-counts', '1')])
         if config.get('dirty_walk'):
@@ -362,8 +306,10 @@ elif args == ['desktop', 'request', '--json']:
         if config.get('replace_projection') and config['replace_projection'] != 'early' and number == 1:
             page.update(through_revision='1', revision='1', items=[change('obsolete', '1')], next_cursor=cursor)
             (root / 'initial-complete').touch()
-            # The old final page races the new projection hint.
-            wait(root / 'projection-replaced')
+            if config['replace_projection'] != 'exhausted':
+                wait(root / 'release-old-page')
+        elif config.get('replace_projection') == 'exhausted' and number == 2:
+            page.update(through_revision='1', revision='1')
         if config.get('large'):
             if number == 1:
                 (root / 'initial-complete').touch()
@@ -375,7 +321,7 @@ elif args == ['desktop', 'request', '--json']:
         confirmed = path.exists()
         path.touch()
         print(json.dumps({'request_id': request_id, 'accepted': True, 'durable': confirmed, 'op': op}))
-    elif op == 'delivery_result' and (root / ('receipt-' + value['original_request_id'])).exists():
+    elif op in ['delivery_result', 'pending_reads_import_result'] and (root / ('receipt-' + value['original_request_id'])).exists():
         receipt = json.loads((root / ('receipt-' + value['original_request_id'])).read_text())
         print(json.dumps({'request_id': request_id, 'op': op, 'original_request_id': value['original_request_id'],
                           'accepted': True, 'durable': False, 'found': True, 'result': receipt}))
@@ -387,12 +333,240 @@ elif args == ['desktop', 'request', '--json']:
             print(json.dumps(receipt))
         else:
             print(json.dumps({'request_id': request_id, 'original_request_id': value['original_request_id'], 'accepted': False, 'code': 'unknown_request'}))
-    elif op == 'delivery_result':
+    elif op in ['delivery_result', 'pending_reads_import_result']:
         print(json.dumps({'request_id': request_id, 'accepted': True, 'durable': False, 'op': op,
                           'original_request_id': value['original_request_id'], 'found': False, 'result': None}))
     elif op == 'catalog_close':
         print(json.dumps({'request_id': request_id, 'accepted': True, 'durable': False}))
     else:
         raise SystemExit('Unexpected fixture operation')
+
+
+if args == ['--help']:
+    print('Desktop service ABI: desktop-v1\nDesktop catalog changes ABI: ' + abi if config.get('supported', True) else 'Older fixture CLI')
+    if config.get('catalog_relay_abi', True):
+        print('Desktop catalog relay ABI: desktop-catalog-relay-v1')
+    if config.get('frontend_abi', True):
+        print('Desktop frontend request ABI: desktop-ui-request-v1')
+    if config.get('activation_abi', False):
+        print('Desktop activation ABI: desktop-activation-v1')
+    if config.get('pending_reads_abi', True):
+        print('Desktop pending read import ABI: desktop-pending-reads-v1')
+    if config.get('maintenance_abi', True):
+        print('Desktop maintenance ABI: desktop-maintenance-v1')
+    if config.get('audit_abi', True):
+        print('Desktop approval audit ABI: desktop-approval-audit-v1')
+elif args == ['desktop', 'frontend-request', '--json']:
+    request = value['request']
+    assert value['abi'] == 'desktop-ui-request-v1'
+    if config.get('frontend_unreachable') and not (root / 'service-back').exists():
+        raise SystemExit('fixture service unavailable before mutation')
+    with socket.socket(socket.AF_UNIX) as stream:
+        stream.settimeout(2)
+        stream.connect(str(root / 'native-cache.sock'))
+        pid, uid, _ = struct.unpack('3i', stream.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        assert pid == os.getppid() and uid == os.getuid()
+        stream.sendall(('desktop-ui-request-v1 ' + value['attempt'] + '\n').encode())
+        reply = json.loads(stream.makefile('rb').readline(4097))
+    evidence = reply['request']
+    assert reply['hello']['nonce'] == value['attempt']
+    assert evidence['child_pid'] == os.getpid() and evidence['attempt'] == value['attempt']
+    assert evidence['request_id'] == request['request_id']
+    fingerprint = hashlib.sha256(json.dumps(request, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+    assert evidence['fingerprint'] == fingerprint
+    (root / 'original-child-bound').touch()
+    if config.get('frontend_hold'):
+        wait(root / 'release-frontend')
+    if request['op'] == 'activation_wait':
+        n = counter('activation-waits')
+        first_failure = config.get('activation_fail_first')
+        if n > (2 if config.get('activation_idle_first') or first_failure else 1):
+            wait(root / 'release-activation')
+        if first_failure and n == 1:
+            wait(root / 'release-first-activation')
+            if first_failure == 'pipe' and os.fork() == 0:
+                # This private descendant holds only inherited stdout/stderr.
+                # The original registered CLI exits; release without PID signals.
+                (root / 'activation-pipe-held').touch()
+                until = time.monotonic() + 15
+                while not (root / 'release-activation-pipe').exists() and time.monotonic() < until:
+                    time.sleep(.005)
+                os._exit(0)
+            raise SystemExit('fixture lost its first activation reply')
+        target = {'computer': '', 'run': 'exact-run', 'conversation': 'exact-conversation'}
+        token = base64.urlsafe_b64encode(json.dumps(dict(host='', name='fixture', notice='reply',
+            run=target['run'], conversation=target['conversation'])).encode()).rstrip(b'=').decode()
+        activation = {'activation_id': '11111111-1111-4111-8111-111111111111',
+                      'post_request_id': '22222222-2222-4222-8222-222222222222', 'target': target,
+                      'token': token, 'platform_context': {'platform': 'wayland', 'activation_token': 'ephemeral-fixture'}}
+        answer = {'abi': 'desktop-activation-v1', 'request_id': request['request_id'],
+                  'configuration': 'a' * 64, 'service_epoch': epoch,
+                  'activation': None if config.get('activation_idle_first') and n == 1 else activation}
+        bad = config.get('activation_invalid')
+        if bad == 'transport': raise SystemExit('fixture lost activation reply')
+        if bad == 'request': answer['request_id'] = str(uuid.uuid4())
+        if bad == 'epoch': answer['service_epoch'] = str(uuid.uuid4())
+        if bad == 'configuration': answer['configuration'] = 'b' * 64
+        if bad == 'target': answer['activation']['target']['conversation'] = 'other'
+        print(json.dumps(answer), flush=True)
+        raise SystemExit(0)
+    if config.get('frontend_refuse'):
+        print(json.dumps({'request_id': request['request_id'], 'accepted': False, 'durable': False,
+                          'code': 'frontend_authentication_refused'}))
+    else:
+        if request['op'] == 'import_pending_reads':
+            page = request['page']
+            receipt = {'request_id': request['request_id'], 'op': request['op'],
+                       'accepted': True, 'durable': True, 'source': page['source'],
+                       'after': page['after'], 'through': page['after'] + len(page['marks']),
+                       'superseded': len(page['marks']) if config.get('pending_reads_superseded') else 0,
+                       'delivered': False}
+        elif request['op'] == 'automatic_approvals':
+            receipt = {'request_id': request['request_id'], 'op': request['op'], 'enabled': request['enabled'],
+                       'accepted': True, 'durable': True, 'revision': 1}
+        else:
+            gui = request.get('update', {}).get('gui') if request.get('update') else None
+            if gui:
+                assert gui['app_version'] == reply['hello']['build']['version']
+                assert gui['source_commit'] == reply['hello']['build']['source_commit']
+                assert Path(gui['executable']).resolve() == Path(os.readlink('/proc/' + str(os.getppid()) + '/exe')).resolve()
+            receipt = {'request_id': request['request_id'], 'original_request_id': request['request_id'],
+                       'accepted': True, 'durable': True, 'configured': True, 'revision': 1, 'recovery_save': 'not_requested'}
+        (root / ('receipt-' + request['request_id'])).write_text(json.dumps(receipt))
+        if config.get('frontend_uncertain'):
+            raise SystemExit('fixture lost its reply after actor commit')
+        if config.get('frontend_retain') and os.fork() == 0:
+            # The original owned CLI exits; only this private fixture holds
+            # its inherited output pipes. Release by file, never by a PID kill.
+            until = time.monotonic() + 10
+            while not (root / 'release-retainer').exists() and time.monotonic() < until:
+                time.sleep(.005)
+            os._exit(0)
+        print(json.dumps(receipt))
+elif args == ['desktop', 'status', '--json']:
+    print(json.dumps(status()))
+elif args == ['desktop', 'watch', '--json']:
+    initial = status()
+    if config.get('details'):
+        initial['details'] = {'abi': 'desktop-details-v1', 'epoch': epoch,
+                              'lease': '00000000-0000-4000-8000-000000000003',
+                              'limits': {'demands_per_subscriber': 64}}
+    frame(0, 'hello', initial)
+    if config.get('peer_choices'):
+        for seq, stage in enumerate(['known', 'invalid', 'warming', 'stopping', 'removed', 'empty'], 1):
+            wait(root / ('roster-' + stage))
+            updated = status()
+            updated['generation'] = updated['lifecycle']['generation'] = seq + 1
+            computers = [{'computer': '', 'incarnation': 1, 'generation': 1, 'status': 'live', 'accepting': True}]
+            if stage in ['known', 'invalid']:
+                computers.append({'computer': 'offline', 'incarnation': 2, 'generation': 1,
+                                  'status': 'reconnecting', 'accepting': False})
+            if stage != 'empty':
+                computers.append({'computer': 'waiting', 'incarnation': 3, 'generation': 0,
+                                  'status': 'probing', 'accepting': False})
+            if stage == 'warming':
+                computers = [dict(computers[0], generation=0, status='probing', accepting=False)]
+            updated['background_runtime'] = {'epoch': epoch, 'display_only': True, 'authority': stage == 'invalid',
+                'state': 'stopping' if stage == 'stopping' else 'running', 'computers': [] if stage == 'stopping' else computers}
+            frame(seq, 'status', updated)
+            if stage == 'known' and config.get('roster_disconnect_early'):
+                raise SystemExit(0)
+        wait(root / 'roster-end')
+        raise SystemExit(0)
+    if config.get('coverage_offline'):
+        wait(root / 'repeat-status')
+        for seq in [1, 2]:
+            repeated = status()
+            repeated['generation'] = seq + 1
+            repeated['lifecycle']['generation'] = seq + 1
+            frame(seq, 'status', repeated)
+    if config.get('counts_transition'):
+        wait(root / 'drop-counts')
+        degraded = status()
+        degraded['attention_counts'] = {'aggregate': {'complete': False}, 'error': 'counts_unavailable'}
+        frame(1, 'status', degraded)
+        frame(2, 'catalog_changed', {'computer': '', 'incarnation': 1, 'generation': 1,
+                                    'projection': projection, 'revision': '1', 'online': True,
+                                    'attention_counts': degraded['attention_counts']})
+        wait(root / 'restore-counts')
+        frame(3, 'heartbeat', status())
+    if config.get('details'):
+        frame(7, 'status', status())  # No replacement lease on ordinary status.
+    if config.get('dirty_walk'):
+        wait(root / 'page-started')
+        hint(1, '2')
+        hint(2, '2')
+        (root / 'hinted').touch()
+        wait(root / 'delta-started')
+        hint(3, '3')
+        hint(4, '3')
+        (root / 'delta-hinted').touch()
+    if config.get('replace_projection'):
+        wait(root / ('page-started' if config['replace_projection'] == 'early' else 'initial-complete'))
+        if config['replace_projection'] == 'exhausted':
+            wait(root / 'release-replacement-hint')
+        hint(1, '0', 'b' * 32)
+        (root / 'projection-replaced').touch()
+    if config.get('delta_live'):
+        wait(root / 'send-delta')
+        hint(1, '1')
+        wait(root / 'live-delta-started')
+        hint(2, '2')
+        (root / 'live-delta-hinted').touch()
+    if config.get('large'):
+        wait(root / 'initial-complete')
+        hint(1, '3')
+    if config.get('peer_failure'):
+        wait(root / 'peer-hints')
+        hint(1, '1')
+        for seq in range(2, 6):
+            hint(seq, str(seq), computer='broken')
+        repeated = status()
+        repeated['generation'] = repeated['lifecycle']['generation'] = 2
+        frame(6, 'status', repeated)
+        wait(root / 'peer-scope-recovered')
+        hint(7, '0', selected='b' * 32, computer='broken')
+    if config.get('details'):
+        seq = 100
+        seen = set()
+        while not select.select([sys.stdin], [], [], .005)[0]:
+            for path in sorted(root.glob('pending-*')):
+                if path.suffix == '.tmp' or path.name in seen:
+                    continue
+                seen.add(path.name)
+                for kind, body in json.loads(path.read_text()):
+                    seq += 7  # Outer targeted sequences are monotone, not contiguous.
+                    frame(seq, kind, body)
+        sys.stdin.read()
+    else:
+        sys.stdin.read()  # Detaches only when the owning subscriber closes stdin.
+elif args == ['desktop', 'request', '--json']:
+    desktop_request()
+elif args == ['desktop', 'catalog-relay', '--json']:
+    print(json.dumps({'abi': 'desktop-catalog-relay-v1', 'configuration': ('b' if config.get('relay_fault') == 'configuration' else 'a') * 64}), flush=True)
+    for line in sys.stdin:
+        value = json.loads(line)
+        assert value['op'] in ['catalog_page', 'catalog_changes', 'catalog_close']
+        with (root / 'calls').open('a') as log:
+            log.write(json.dumps({'args': args, 'value': value, 'pid': os.getpid()}) + '\n')
+        fault = config.get('relay_fault')
+        if fault == 'hang':
+            (root / 'relay-held').touch()
+            wait(root / 'release-relay')
+        if fault == 'oversize':
+            print('x' * (1048576 + 4096 + 1), flush=True)
+            continue
+        if fault == 'incomplete':
+            print('{', end='', flush=True)
+            raise SystemExit(0)
+        if fault == 'stderr':
+            sys.stderr.write('x' * (64 * 1024 + 1))
+            sys.stderr.flush()
+            wait(root / 'release-relay')
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            desktop_request()
+        response = json.loads(captured.getvalue())
+        print(json.dumps({'abi': 'desktop-catalog-relay-v1', 'request_id': str(uuid.uuid4()) if fault == 'identity' else value['request_id'], 'value': response}), flush=True)
 else:
     raise SystemExit('Forbidden fallback CLI call')

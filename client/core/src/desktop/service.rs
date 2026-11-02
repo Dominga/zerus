@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 mod catalog;
 pub use catalog::{
     CatalogIdentity, CatalogItem, CatalogPage, ChangeItem, ChangePage, Revision, CHANGES_ABI,
-    CHANGES_HELP,
+    CHANGES_HELP, RELAY_ABI, RELAY_HELP,
 };
 pub mod details;
 
@@ -37,6 +37,8 @@ pub struct Component {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
+    /// Native-client transfer state, attached locally; never a service writer grant.
+    pub pending_read_import: Option<Value>,
     pub connected: bool,
     pub epoch: Option<String>,
     pub generation: Option<u64>,
@@ -50,6 +52,7 @@ pub struct Snapshot {
 impl Default for Snapshot {
     fn default() -> Self {
         Self {
+            pending_read_import: None,
             connected: false,
             epoch: None,
             generation: None,
@@ -179,6 +182,7 @@ impl State {
         self.sources = checked_sources(&value["background_runtime"], epoch);
         self.snapshot = Snapshot {
             connected: true,
+            pending_read_import: None,
             epoch: Some(epoch.into()),
             generation: Some(generation),
             background,

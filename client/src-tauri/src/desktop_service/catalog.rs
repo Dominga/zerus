@@ -4,8 +4,10 @@ use super::*;
 pub(super) async fn catalog_loop(
     shared: Arc<Shared>,
     stop: Arc<AtomicBool>,
+    configuration: String,
 ) -> Result<(), &'static str> {
     let mut failures = BTreeMap::<String, (u64, u8)>::new();
+    let mut last = None::<String>;
     loop {
         if stop.load(Ordering::Acquire) {
             return Ok(());
@@ -13,7 +15,24 @@ pub(super) async fn catalog_loop(
         let work = {
             let mut dirty = shared.dirty.lock().unwrap_or_else(PoisonError::into_inner);
             failures.retain(|computer, _| dirty.sources.contains_key(computer));
-            dirty.pending.pop_first().and_then(|computer| {
+            // One walker, with round-robin admission so a failed baseline's
+            // single retry cannot repeatedly jump ahead of another computer.
+            let next = last
+                .as_ref()
+                .and_then(|last| {
+                    dirty
+                        .pending
+                        .range::<String, _>((
+                            std::ops::Bound::Excluded(last),
+                            std::ops::Bound::Unbounded,
+                        ))
+                        .next()
+                        .cloned()
+                })
+                .or_else(|| dirty.pending.first().cloned());
+            next.and_then(|computer| {
+                dirty.pending.remove(&computer);
+                dirty.running = Some(computer.clone());
                 dirty.sources.get(&computer).cloned().map(|source| {
                     let since = dirty.progress.get(&computer).copied();
                     (computer, source, since)
@@ -21,6 +40,7 @@ pub(super) async fn catalog_loop(
             })
         };
         if let Some((computer, source, since)) = work {
+            last = Some(computer.clone());
             if failures
                 .get(&computer)
                 .is_some_and(|(serial, _)| *serial != source.serial)
@@ -34,20 +54,26 @@ pub(super) async fn catalog_loop(
                 .epoch
                 .clone()
                 .ok_or("service_unavailable")?;
-            match walk(
+            let result = walk(
                 &shared,
                 &computer,
                 source.clone(),
                 &epoch,
                 since,
                 stop.clone(),
+                &configuration,
             )
-            .await
-            {
+            .await;
+            shared
+                .dirty
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .running = None;
+            match result {
                 Ok(()) => {
                     failures.remove(&computer);
                 }
-                Err(error)
+                Err(_)
                     if shared
                         .dirty
                         .lock()
@@ -58,28 +84,42 @@ pub(super) async fn catalog_loop(
                         && !stop.load(Ordering::Acquire) =>
                 {
                     // A one-use cursor's unknown outcome is never replayed.
-                    // Retire the walk and try one fresh baseline; persistent
-                    // failure becomes explicit unavailable/retry, not a loop.
+                    // Try one fresh baseline. Persistent failure fences only
+                    // this computer; its rows remain last known until Retry
+                    // or an actual source scope change, never a global EOF.
                     let count = failures.get(&computer).map_or(1, |(_, count)| count + 1);
-                    if count > 1 {
-                        return Err(error);
-                    }
-                    let current = shared
-                        .dirty
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .sources
-                        .get(&computer)
-                        .cloned()
-                        .ok_or("catalog_invalidated")?;
-                    shared.catalog_hint(&computer, current, None, true)?;
-                    let serial = shared
-                        .dirty
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .sources[&computer]
-                        .serial;
-                    failures.insert(computer, (serial, count));
+                    let current = {
+                        let mut dirty = shared.dirty.lock().unwrap_or_else(PoisonError::into_inner);
+                        // Retry/removal/hint can race the completed RPC.
+                        if !dirty
+                            .sources
+                            .get(&computer)
+                            .is_some_and(|current| current.serial == source.serial)
+                        {
+                            continue;
+                        }
+                        let current = dirty.restart(&computer)?.ok_or("catalog_invalidated")?;
+                        if count > 1 {
+                            dirty.pending.remove(&computer);
+                            dirty.halted.insert(computer.clone());
+                        }
+                        current
+                    };
+                    failures.insert(computer.clone(), (current.serial, count));
+                    row(
+                        &shared,
+                        &computer,
+                        &current,
+                        &epoch,
+                        &stop,
+                        Change::Computer {
+                            computer: ComputerId::from(computer.as_str()),
+                            status: ComputerStatus::Reconnecting {
+                                attempt: count.into(),
+                            },
+                        },
+                    )
+                    .await?;
                 }
                 Err(_) => (),
             }
@@ -215,8 +255,10 @@ async fn walk(
     epoch: &str,
     since: Option<Revision>,
     stop: Arc<AtomicBool>,
+    configuration: &str,
 ) -> Result<(), &'static str> {
     let mut cursor = None::<String>;
+    let mut relay = catalog_relay::Relay::default();
     let result = async {
         if since.is_none() {
             row(shared, computer, &source, epoch, &stop, Change::Computer { computer: ComputerId::from(computer), status: ComputerStatus::Reconnecting { attempt: 0 } }).await?;
@@ -229,7 +271,7 @@ async fn walk(
             loop {
                 if stop.load(Ordering::Acquire) || !shared.current(computer, &source, epoch) { return Ok(()); }
                 let id = uuid::Uuid::new_v4().to_string();
-                let value = request(shared, json!({"op":"catalog_page","request_id":id,"computer":computer,"cursor":cursor}), stop.clone()).await?;
+                let value = relay.request(shared, configuration, json!({"op":"catalog_page","request_id":id,"computer":computer,"cursor":cursor}), &stop).await?;
                 let page = CatalogPage::checked(value, &id, epoch, computer)?;
                 cursor = page.next_cursor.clone();
                 if !shared.current(computer, &source, epoch) { return Ok(()); }
@@ -256,9 +298,9 @@ async fn walk(
             loop {
                 if stop.load(Ordering::Acquire) || !shared.current(computer, &source, epoch) { return Ok(()); }
                 let id = uuid::Uuid::new_v4().to_string();
-                let value = request(shared, json!({"op":"catalog_changes","request_id":id,"epoch":epoch,"computer":computer,
+                let value = relay.request(shared, configuration, json!({"op":"catalog_changes","request_id":id,"epoch":epoch,"computer":computer,
                     "incarnation":source.incarnation,"generation":source.generation,"projection":source.projection,
-                    "since_revision":start,"cursor":cursor}), stop.clone()).await?;
+                    "since_revision":start,"cursor":cursor}), &stop).await?;
                 let page = ChangePage::checked(value, &id, epoch, computer)?;
                 cursor = page.next_cursor.clone();
                 if !shared.current(computer, &source, epoch) { return Ok(()); }
@@ -287,13 +329,15 @@ async fn walk(
             }
             through
         } else { None };
+        relay.close().await?;
         let (done, joined) = oneshot::channel();
         deliver(shared, computer, &source, epoch, &stop, CatalogValue::Finish { through, keys, done }).await?;
         tokio::time::timeout(RPC_WAIT, joined).await.map_err(|_| "catalog_view_timeout")?.map_err(|_| "catalog_invalidated")?;
         Ok(())
     }.await;
+    let drained = relay.close().await;
     if let Some(cursor) = cursor {
         let _ = request(shared, json!({"op":"catalog_close","request_id":uuid::Uuid::new_v4().to_string(),"computer":computer,"cursor":cursor}), Arc::new(AtomicBool::new(false))).await;
     }
-    result
+    result.and(drained)
 }

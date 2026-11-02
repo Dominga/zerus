@@ -168,6 +168,8 @@ export interface DesktopService {
   };
   automatic_approvals: boolean | null;
   details_available: boolean;
+  /** Native frozen-read transfer; completion is durable queueing, not host ACK. */
+  pending_read_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; through: number; superseded: number; delivered: false };
   code: string;
 }
 

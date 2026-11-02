@@ -53,20 +53,26 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs desktop feed --json             passive owner source data, no reader launch
        hgs desktop registration --json    preview this user's passive service definition
        hgs desktop registration install|remove|status --json   Windows interactive-user logon task
+       hgs desktop notification-registration install|status --json   Windows Toast registration
+       hgs desktop notification-registration remove --json --request-id UUID   after exact settled revoke
        hgs desktop import-evidence --json private staged migration input on stdin
        hgs desktop import-status --json --import-id UUID  read one import manifest
        Desktop service ABI: desktop-v1
+       Desktop approval audit ABI: desktop-approval-audit-v1
        Desktop frontend request ABI: desktop-ui-request-v1
+       Desktop pending read import ABI: desktop-pending-reads-v1
        Desktop activation ABI: desktop-activation-v1
        Desktop maintenance ABI: desktop-maintenance-v1
        Desktop startup ABI: desktop-startup-v1
        Desktop logon registration ABI: desktop-logon-task-v1
+       Desktop Toast registration ABI: desktop-notification-registration-v1
         Desktop revoke ABI: desktop-revoke-v1
         Desktop import ABI: desktop-import-v1
         Desktop source feed ABI: desktop-source-feed-v1
         Desktop owner ABI: desktop-delegation-v1
         Desktop catalog ABI: desktop-catalog-v1
         Desktop catalog changes ABI: desktop-catalog-changes-v1
+        Desktop catalog relay ABI: desktop-catalog-relay-v1
        hgs mobile-peer --json         guarded direct-peer native request from JSON stdin
        hgs [@host] voice <session> --json  send and inspect persistent voice messages (JSON stdin; voice-video-v1)
        hgs [@host] speech --json      host speech providers and durable jobs (JSON stdin)

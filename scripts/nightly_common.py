@@ -80,6 +80,12 @@ def validate_nightly(directory, commit=None, run_id=None, run_number=None):
     if windows is not None:
         require(windows == windows_asset(version), "Invalid Windows nightly asset.")
         expected_files.add(windows)
+    installer = info.get("windows_installer")
+    if installer is not None:
+        import windows_installer_release
+        require(isinstance(installer, dict) and installer.get("asset") == windows_installer_release.installer_name(version),
+                "Invalid Windows nightly installer asset.")
+        expected_files.add(installer["asset"])
     if macos:
         expected_files.update(macos_assets(macos))
     sums = {}
@@ -96,6 +102,8 @@ def validate_nightly(directory, commit=None, run_id=None, run_number=None):
     require(set(sums) == expected_files and
             {path.name for path in directory.iterdir()} == expected_files | directories | {"SHA256SUMS"},
             "Unsealed/missing nightly assets.")
+    if installer is not None:
+        windows_installer_release.validate_metadata(installer, version, windows, sums)
     if windows is not None:
         # Bounded reads of the zip directory, build-info.json and the pinned ConPTY
         # pair; nothing is extracted or run.

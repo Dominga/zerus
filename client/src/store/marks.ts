@@ -665,6 +665,7 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     return true;
   }
 
+  // Cutover requires importing every frozen next_pending_reads mark (zerus-5wmh.66.3.31.6); this overlay never delivers it.
   const sharedReadNeeded = (s: Session) => s.sharedRead && !!(
     (s.replyId && !s.localReadReply && s.readReplyId !== s.replyId) || (s.attentionSignature && !s.localReadAttention && s.readAttentionSignature !== s.attentionSignature)
   );

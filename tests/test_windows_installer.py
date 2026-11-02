@@ -213,6 +213,29 @@ class PackagerVersions(unittest.TestCase):
             self.main("--version", "0.99.0", "--stage-only", str(staged), "--output", str(self.root / "setup.exe"))
         self.assertEqual(list(staged.iterdir()), [])
 
+    def test_compiled_ci_metadata_binds_both_stable_and_nightly_payloads(self):
+        import windows_installer_release
+        before = self.archive.read_bytes()
+        for index, version in enumerate(["0.45.0", f"0.45.0.r812.g{COMMIT[:7]}.n42"]):
+            with self.subTest(version=version):
+                output = self.root / f"setup-{index}.exe"
+                info = self.root / f"setup-{index}.json"
+                def compile_(command, **kwargs):
+                    definitions = dict(arg[2:].split("=", 1) for arg in command[2:-1])
+                    record = json.loads((Path(definitions["PayloadDir"]) / "installation.json").read_text())
+                    self.assertEqual(definitions["AppVersion"], version)
+                    self.assertEqual(record["version"], version)
+                    output.write_bytes(b"MZsynthetic compiled installer")
+                with patch.object(self.packager, "compiler", return_value=Path("ISCC.exe")), \
+                        patch.object(self.packager.subprocess, "run", side_effect=compile_):
+                    self.main("--version", version, "--output", str(output), "--info", str(info))
+                windows_installer_release.require_build(output, self.archive, info, version, "0.45.0", COMMIT)
+                self.assertEqual(self.archive.read_bytes(), before)
+                with patch.object(self.packager.subprocess, "run") as compile_:
+                    with self.assertRaisesRegex(ValueError, "fresh compiled"):
+                        self.main("--version", version, "--output", str(output), "--info", str(info))
+                    compile_.assert_not_called()
+
     def test_the_compiler_receives_the_version_installation_json_records(self):
         nightly = f"0.45.0.r812.g{COMMIT[:7]}.n42"
         staged = self.root / "staged"
@@ -255,8 +278,15 @@ class Script(unittest.TestCase):
         self.assertNotIn("RegDelete", self.text)
         self.assertNotIn("/silent /install", self.text)
         hook = self.procedure("DesktopServiceRegistration")
-        self.assertIn("hook pending the maintained G1", hook)
-        self.assertNotIn("Exec(", hook)
+        self.assertIn("desktop registration install --json", hook)
+        self.assertIn("desktop notification-registration install --json", hook)
+        self.assertLess(hook.index("desktop registration install"), hook.index("desktop notification-registration install"))
+        self.assertIn("if not Installing then", hook)
+        self.assertIn("UI-only removal keeps", hook)
+        self.assertNotIn("desktop registration remove", hook)
+        self.assertNotIn("notification-registration remove", hook)
+        self.assertNotIn("schtasks", hook.lower())
+        self.assertNotIn("desktop revoke", hook)
         self.assertIn("DesktopServiceRegistration(True)", self.procedure("CurStepChanged"))
         self.assertIn("DesktopServiceRegistration(False)", self.procedure("CurUninstallStepChanged"))
 
@@ -327,6 +357,95 @@ class Script(unittest.TestCase):
                                 '"{app}\\hgs-tray.exe"; Description: "Start Zerus"; Flags: nowait postinstall skipifsilent',
                                 '"{app}\\hgs-tray.exe"; Flags: nowait; Check: Relaunch'])
         self.assertIn("CompareText(ParamStr(I), '/RELAUNCH') = 0", self.text)
+
+
+class InstallerEnvironment(unittest.TestCase):
+    def test_shell_profile_is_real_but_backend_home_and_roots_stay_private(self):
+        from test_windows_installer_survival import installer_environment
+        isolated = {'HOME': 'C:/Example/private', 'USERPROFILE': 'C:/Example/private',
+                    'APPDATA': 'C:/Example/private/roaming', 'LOCALAPPDATA': 'C:/Example/private/local',
+                    'HGS_CONFIG_DIR': 'C:/Example/private/config', 'HGS_STATE_DIR': 'C:/Example/private/state'}
+        original = {'USERPROFILE': 'C:/Users/example', 'APPDATA': 'C:/Users/example/AppData/Roaming',
+                    'LOCALAPPDATA': 'C:/Users/example/AppData/Local'}
+        selected = installer_environment(isolated, original)
+        self.assertEqual({key: selected[key] for key in original}, original)
+        for key in ('HOME', 'HGS_CONFIG_DIR', 'HGS_STATE_DIR'):
+            self.assertEqual(selected[key], isolated[key])
+        self.assertEqual(isolated['USERPROFILE'], 'C:/Example/private')
+        self.assertNotIn('USERPROFILE', installer_environment(isolated, {}))
+
+    def test_setup_and_uninstall_share_the_selected_shell_environment(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from test_windows_installer_survival import Installer
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            case = Installer()
+            case.root = case.app = root
+            case.setup_exe = root / 'setup.exe'
+            (root / 'uninstall').mkdir()
+            (root / 'uninstall' / 'unins000.exe').write_bytes(b'synthetic uninstaller, never executed')
+            case.logs = 0
+            case.backend_tracking = False
+            case.installer_env = {'HOME': str(root), 'USERPROFILE': 'C:/Users/example'}
+            case.env = {'USERPROFILE': str(root)}
+            case.wait_for = Mock()
+            with patch('test_windows_installer_survival.subprocess.run',
+                       return_value=SimpleNamespace(returncode=0, stdout=b'', stderr=b'')) as run:
+                self.assertEqual(Installer.setup(case)[0], 0)
+                Installer.uninstall(case)
+            self.assertEqual(run.call_count, 2)
+            for call in run.call_args_list:
+                self.assertIs(call.kwargs['env'], case.installer_env)
+
+
+class BackendProfileRetention(unittest.TestCase):
+    def test_unknown_backend_cleanup_retains_its_selected_cli_profile(self):
+        from unittest.mock import Mock
+        from test_windows_installer_survival import Installer
+        case = object.__new__(Installer)
+        case.backend_clean = False
+        case.root = Path("C:/Example/private-fixture")
+        case.temp = Mock()
+        Installer.cleanup_temp(case)
+        case.temp._finalizer.detach.assert_called_once_with()
+        case.temp.cleanup.assert_not_called()
+
+    def test_unconfirmed_ui_uninstall_keeps_profile_even_after_backend_cleanup(self):
+        from unittest.mock import Mock, patch
+        from test_windows_installer_survival import Installer
+        case = object.__new__(Installer)
+        case.backend_clean = True
+        case.root = case.app = Path("C:/Example/private-fixture")
+        case.temp = Mock()
+        with patch("test_windows_installer_survival.registered", return_value={"InstallLocation": str(case.app)}):
+            with self.assertRaisesRegex(AssertionError, "UI uninstall is not confirmed"):
+                Installer.cleanup_temp(case)
+        case.temp._finalizer.detach.assert_called_once_with()
+        case.temp.cleanup.assert_not_called()
+
+    def test_unreadable_uninstall_record_does_not_authorize_profile_removal(self):
+        from unittest.mock import Mock, patch
+        from test_windows_installer_survival import Installer
+        case = object.__new__(Installer)
+        case.backend_clean = True
+        case.root = case.app = Path("C:/Example/private-fixture")
+        case.temp = Mock()
+        with patch("test_windows_installer_survival.registered", side_effect=OSError("unavailable")):
+            with self.assertRaises(AssertionError):
+                Installer.cleanup_temp(case)
+        case.temp._finalizer.detach.assert_called_once_with()
+        case.temp.cleanup.assert_not_called()
+
+    def test_confirmed_backend_absence_allows_original_profile_cleanup(self):
+        from unittest.mock import Mock
+        from test_windows_installer_survival import Installer
+        case = object.__new__(Installer)
+        case.backend_clean = True
+        case.temp = Mock()
+        Installer.cleanup_temp(case)
+        case.temp.cleanup.assert_called_once_with()
+        case.temp._finalizer.detach.assert_not_called()
 
 
 if __name__ == "__main__":

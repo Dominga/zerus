@@ -20,7 +20,7 @@ pub struct HandoffLock {
 }
 pub(super) enum HandoffAttempt {
     Acquired(HandoffLock),
-    Contended(io::Error),
+    Contended(std::io::Error),
 }
 impl HandoffLock {
     pub fn verify(&self, location: &Location) -> Result<()> {

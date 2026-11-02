@@ -53,6 +53,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs desktop feed --json             passive owner source data, no reader launch
        hgs desktop registration --json    preview this user's passive service definition
        hgs desktop registration install|remove|status --json   Windows interactive-user logon task
+       hgs desktop notification-registration install|status --json   Windows Toast registration
+       hgs desktop notification-registration remove --json --request-id UUID   after exact settled revoke
        hgs desktop import-evidence --json private staged migration input on stdin
        hgs desktop import-status --json --import-id UUID  read one import manifest
        Desktop service ABI: desktop-v1
@@ -61,6 +63,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        Desktop maintenance ABI: desktop-maintenance-v1
        Desktop startup ABI: desktop-startup-v1
        Desktop logon registration ABI: desktop-logon-task-v1
+       Desktop Toast registration ABI: desktop-notification-registration-v1
         Desktop revoke ABI: desktop-revoke-v1
         Desktop import ABI: desktop-import-v1
         Desktop source feed ABI: desktop-source-feed-v1

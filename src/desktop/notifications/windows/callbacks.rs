@@ -95,6 +95,9 @@ impl Slot {
         }
         // Successful enqueue is only bounded correlation delivery. The runtime
         // still joins it to its original known Delivered mapping and Endpoint.
+        // Windows delegates cannot safely block/backpressure a native callback.
+        // Overflow of this user-paced queue is deliberately fatal to this host;
+        // it must not silently lose an activation or Closed edge.
         if self.sender.try_send(value).is_err() {
             self.shared.overflow.store(true, Ordering::Release);
             self.shared.wake.unpark();

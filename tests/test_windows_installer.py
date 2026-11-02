@@ -278,8 +278,15 @@ class Script(unittest.TestCase):
         self.assertNotIn("RegDelete", self.text)
         self.assertNotIn("/silent /install", self.text)
         hook = self.procedure("DesktopServiceRegistration")
-        self.assertIn("hook pending the maintained G1", hook)
-        self.assertNotIn("Exec(", hook)
+        self.assertIn("desktop registration install --json", hook)
+        self.assertIn("desktop notification-registration install --json", hook)
+        self.assertLess(hook.index("desktop registration install"), hook.index("desktop notification-registration install"))
+        self.assertIn("if not Installing then", hook)
+        self.assertIn("UI-only removal keeps", hook)
+        self.assertNotIn("desktop registration remove", hook)
+        self.assertNotIn("notification-registration remove", hook)
+        self.assertNotIn("schtasks", hook.lower())
+        self.assertNotIn("desktop revoke", hook)
         self.assertIn("DesktopServiceRegistration(True)", self.procedure("CurStepChanged"))
         self.assertIn("DesktopServiceRegistration(False)", self.procedure("CurUninstallStepChanged"))
 
@@ -350,6 +357,55 @@ class Script(unittest.TestCase):
                                 '"{app}\\hgs-tray.exe"; Description: "Start Zerus"; Flags: nowait postinstall skipifsilent',
                                 '"{app}\\hgs-tray.exe"; Flags: nowait; Check: Relaunch'])
         self.assertIn("CompareText(ParamStr(I), '/RELAUNCH') = 0", self.text)
+
+
+class BackendProfileRetention(unittest.TestCase):
+    def test_unknown_backend_cleanup_retains_its_selected_cli_profile(self):
+        from unittest.mock import Mock
+        from test_windows_installer_survival import Installer
+        case = object.__new__(Installer)
+        case.backend_clean = False
+        case.root = Path("C:/Example/private-fixture")
+        case.temp = Mock()
+        Installer.cleanup_temp(case)
+        case.temp._finalizer.detach.assert_called_once_with()
+        case.temp.cleanup.assert_not_called()
+
+    def test_unconfirmed_ui_uninstall_keeps_profile_even_after_backend_cleanup(self):
+        from unittest.mock import Mock, patch
+        from test_windows_installer_survival import Installer
+        case = object.__new__(Installer)
+        case.backend_clean = True
+        case.root = case.app = Path("C:/Example/private-fixture")
+        case.temp = Mock()
+        with patch("test_windows_installer_survival.registered", return_value={"InstallLocation": str(case.app)}):
+            with self.assertRaisesRegex(AssertionError, "UI uninstall is not confirmed"):
+                Installer.cleanup_temp(case)
+        case.temp._finalizer.detach.assert_called_once_with()
+        case.temp.cleanup.assert_not_called()
+
+    def test_unreadable_uninstall_record_does_not_authorize_profile_removal(self):
+        from unittest.mock import Mock, patch
+        from test_windows_installer_survival import Installer
+        case = object.__new__(Installer)
+        case.backend_clean = True
+        case.root = case.app = Path("C:/Example/private-fixture")
+        case.temp = Mock()
+        with patch("test_windows_installer_survival.registered", side_effect=OSError("unavailable")):
+            with self.assertRaises(AssertionError):
+                Installer.cleanup_temp(case)
+        case.temp._finalizer.detach.assert_called_once_with()
+        case.temp.cleanup.assert_not_called()
+
+    def test_confirmed_backend_absence_allows_original_profile_cleanup(self):
+        from unittest.mock import Mock
+        from test_windows_installer_survival import Installer
+        case = object.__new__(Installer)
+        case.backend_clean = True
+        case.temp = Mock()
+        Installer.cleanup_temp(case)
+        case.temp.cleanup.assert_called_once_with()
+        case.temp._finalizer.detach.assert_not_called()
 
 
 if __name__ == "__main__":

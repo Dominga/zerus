@@ -73,6 +73,7 @@ function Assert-DesktopTask($task,$plan,[string]$sid) {
 
 function Invoke-RegistrationOperation($request,$scheduler,[string]$sid) {
     Require-Registration ($sid -notin @('S-1-5-18','S-1-5-19','S-1-5-20') -and -not $sid.StartsWith('S-1-5-80-')) 'A system/service account cannot own a desktop logon registration.'
+    # Dictionary dot access assumes no plan fields named Count, Keys, Values or Item.
     $plan=$request.plan
     Require-Registration ($request.schema -eq 1 -and $request.operation -cin @('check','status','install','remove')) 'Unsupported registration request.'
     Require-Registration ($plan.schema -eq 1 -and $plan.operation -ceq 'preview' -and $plan.label -ceq 'hgs-desktop') 'Unsupported registration plan.'

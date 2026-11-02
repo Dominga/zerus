@@ -1,6 +1,56 @@
 use super::*;
 use std::cell::Cell;
 
+#[test]
+fn reconnect_keeps_ownership_epoch_but_new_image_and_explicit_rearm_rotate_it() {
+    let mut f = Fixture::new();
+    let request = f.request(Action::Grant);
+    f.apply(request);
+    let first = f.current().owner_epoch.unwrap();
+    let request = f.request(Action::Grant);
+    f.apply(request);
+    assert_eq!(f.current().owner_epoch.as_deref(), Some(first.as_str()));
+    std::fs::write(&f.origin.image, b"updated selected native frontend image").unwrap();
+    assert!(!service_granted(&f.store, &f.location.configuration).unwrap());
+    f.origin = Origin::capture(&f.origin.image, f.origin.build.clone()).unwrap();
+    let request = f.request(Action::Grant);
+    assert!(f.apply(request).service_granted());
+    let updated = f.current().owner_epoch.unwrap();
+    assert_ne!(updated, first);
+    let request = f.request(Action::Rearm);
+    assert!(f.apply(request).service_granted());
+    assert_ne!(f.current().owner_epoch.unwrap(), updated);
+}
+
+#[cfg(unix)]
+#[test]
+fn native_takeover_waits_for_an_original_host_lock_that_outlives_the_root_runtime() {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = Fixture::new();
+    let request = f.request(Action::Grant);
+    f.apply(request);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(f.location.root.join("notification-host.lock"))
+        .unwrap();
+    fs2::FileExt::try_lock_exclusive(&file).unwrap();
+    let request = f.request(Action::NativeTakeover);
+    let receipt = f.apply(request.clone());
+    assert!(matches!(receipt.outcome, Outcome::Pending));
+    assert!(!receipt.native_ready());
+    drop(file);
+    settle(&f.location, &mut f.store, None, |_| Ok(())).unwrap();
+    let (receipt, _) = original(&f.store.db, request.id()).unwrap().unwrap();
+    assert!(current_receipt(&f.store.db, receipt)
+        .unwrap()
+        .native_ready());
+    // The same original request, never another takeover, now completes.
+    assert_eq!(f.current().state, State::Native);
+}
+
 struct Fixture {
     _temp: tempfile::TempDir,
     // Canonical: macOS temp dirs sit under the /var symlink, which the store refuses.
@@ -148,6 +198,7 @@ fn revoke_requires_explicit_rearm_even_after_restart_and_preserves_history() {
     // Reopen under a new process epoch without dropping the original temp root.
     let old = std::mem::replace(&mut f.store, Store::open(&f.location, &next_epoch).unwrap());
     drop(old);
+    f.epoch = next_epoch;
     assert!(f.current().rearm_required);
     let rearm = f.request(Action::Rearm);
     let receipt = f.apply(rearm);

@@ -422,7 +422,7 @@ impl Drop for Permit {
 }
 
 fn serve(config: &Config, location: Location, background_mode: bool) -> Result<()> {
-    let (_signals, _lock, listener, epoch, mut store) = (|| -> Result<_> {
+    let (_signals, owner, listener, epoch, mut store) = (|| -> Result<_> {
         let signals = platform::ShutdownGuard::install()?;
         // This dedicated service process has no workers yet. Make socket creation
         // private too, so a concurrent status probe never sees the pre-chmod mode.
@@ -431,7 +431,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
             libc::umask(0o077);
         }
         location.prepare()?;
-        let lock = location.lock()?;
+        let lock = Arc::new(location.lock()?);
         let listener = Arc::new(Listener::bind(&location)?);
         let epoch = uuid::Uuid::new_v4().to_string();
         let store = Store::open(&location, &epoch)?;
@@ -509,7 +509,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
         }
         if background_mode && !background_blocked {
             background = Some(
-                background::Runtime::start(config, &epoch, &mut feed).context(StartupRefused)?,
+                background::Runtime::start(config, &epoch, &mut feed, owner.clone())
+                    .context(StartupRefused)?,
             );
             // Store the runtime first: a writer startup error still drains the
             // fleet through the common shutdown path below.
@@ -522,16 +523,21 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
         while platform::shutdown_signal() == 0 {
             // Prepared takeover reconciliation only reduces authority. Keep the
             // same runtime until its actual drain succeeds; no replacement yet.
-            ownership::settle(&location, &mut store, None, |store| {
+            let handoff = background.as_ref().and_then(background::Runtime::handoff);
+            ownership::settle(&location, &mut store, handoff.as_deref(), |store| {
                 background.as_mut().map_or(Ok(()), |runtime| {
                     runtime.drain(store, Duration::from_millis(10))
                 })
             })?;
-            if background
-                .as_ref()
-                .is_some_and(background::Runtime::drained)
-                && ownership::service_granted(&store, &location.configuration)?
-            {
+            drop(handoff);
+            if background::replacement_permitted(
+                background_mode,
+                background
+                    .as_ref()
+                    .is_some_and(background::Runtime::drained),
+                &location,
+                &store,
+            )? {
                 feed.stop(&mut store)?;
                 background = None;
             }
@@ -545,9 +551,14 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                 background_blocked = true;
             } else if background_mode
                 && background.is_none()
-                && ownership::service_granted(&store, &location.configuration)?
+                && revoke::background_permitted(&location, &store)?
             {
-                background = Some(background::Runtime::start(config, &epoch, &mut feed)?);
+                background = Some(background::Runtime::start(
+                    config,
+                    &epoch,
+                    &mut feed,
+                    owner.clone(),
+                )?);
                 background.as_mut().unwrap().start_presence(&location)?;
                 background_blocked = false;
             }
@@ -628,24 +639,31 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                 if authority.operation() == "desktop_ownership" =>
                             {
                                 match authority.into_request(&mut frontend_order) {
-                                    Ok(permit) => match ownership::frontend(
-                                        &location,
-                                        &mut store,
-                                        &epoch,
-                                        permit,
-                                        None,
-                                        |store| {
-                                            background.as_mut().map_or(Ok(()), |runtime| {
-                                                runtime.drain(store, Duration::from_millis(750))
-                                            })
-                                        },
-                                    ) {
-                                        Ok(receipt) => serde_json::to_value(receipt)?,
-                                        Err(_) => frontend_refused(
-                                            hello.request.as_ref(),
-                                            "ownership_not_settled",
-                                        ),
-                                    },
+                                    Ok(permit) => {
+                                        let handoff = background
+                                            .as_ref()
+                                            .and_then(background::Runtime::handoff);
+                                        let result = ownership::frontend(
+                                            &location,
+                                            &mut store,
+                                            &epoch,
+                                            permit,
+                                            handoff.as_deref(),
+                                            |store| {
+                                                background.as_mut().map_or(Ok(()), |runtime| {
+                                                    runtime.drain(store, Duration::from_millis(750))
+                                                })
+                                            },
+                                        );
+                                        drop(handoff);
+                                        match result {
+                                            Ok(receipt) => serde_json::to_value(receipt)?,
+                                            Err(_) => frontend_refused(
+                                                hello.request.as_ref(),
+                                                "ownership_not_settled",
+                                            ),
+                                        }
+                                    }
                                     Err(_) => frontend_refused(
                                         hello.request.as_ref(),
                                         "frontend_identity_expired",
@@ -786,13 +804,20 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                 request_value["op"].as_str(),
                                 Some("revoke" | "revoke_status")
                             ) {
-                                revoke::request_with_runtime(
-                                    &location,
-                                    &mut store,
-                                    request_value,
-                                    &epoch,
-                                    |store| runtime.drain(store, Duration::from_millis(750)),
-                                )
+                                let handoff = runtime.handoff();
+                                if request_value["op"] == "revoke_status" && !runtime.drained() {
+                                    json!({"request_id":request_value["request_id"],"accepted":false,"durable":false,
+                                        "revoked":false,"checkpointed":false,"code":"drain_not_settled"})
+                                } else {
+                                    revoke::request_with_runtime(
+                                        &location,
+                                        &mut store,
+                                        request_value,
+                                        &epoch,
+                                        handoff.as_deref(),
+                                        |store| runtime.drain(store, Duration::from_millis(750)),
+                                    )
+                                }
                             } else if matches!(request_value["op"].as_str(), Some("read_intent")) {
                                 runtime.delivery_request(&mut store, request_value)
                             } else {

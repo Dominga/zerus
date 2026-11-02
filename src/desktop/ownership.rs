@@ -167,6 +167,73 @@ pub(super) fn service_granted(store: &Store, configuration: &str) -> Result<bool
     let current = status(store, configuration)?;
     Ok(current.state == State::Service && current.identity_current && !current.rearm_required)
 }
+/// A retained grant read by the sole actor. It cannot be constructed from a
+/// status/receipt or caller JSON. Runtime preparations retain this exact owner
+/// incarnation through their original worker and recheck it before attachment.
+#[derive(Clone)]
+pub(super) struct Grant {
+    configuration: String,
+    journal: String,
+    owner_epoch: String,
+    origin: Origin,
+}
+impl Grant {
+    pub(super) fn current(&self, store: &Store) -> Result<bool> {
+        let now = row(&store.db, &self.configuration)?;
+        Ok(
+            matches!(now.status.state, State::Service | State::IdentityChanged)
+                && !now.status.rearm_required
+                && now.status.journal.as_ref() == Some(&self.journal)
+                && now.status.owner_epoch.as_ref() == Some(&self.owner_epoch)
+                && now.origin.as_ref() == Some(&self.origin),
+        )
+    }
+    #[cfg(target_os = "linux")]
+    pub(super) fn image(&self) -> &Path {
+        &self.origin.image
+    }
+    pub(super) fn writer_epoch(&self) -> &str {
+        &self.owner_epoch
+    }
+    pub(super) fn revalidate_image(&self) -> Result<()> {
+        ensure!(self.origin.current(), "granted frontend image changed");
+        Ok(())
+    }
+    pub(super) fn permits_launch(
+        &self,
+        store: &Store,
+        configuration: &str,
+        writer_epoch: &str,
+    ) -> Result<()> {
+        ensure!(
+            self.configuration == configuration
+                && self.owner_epoch == writer_epoch
+                && self.current(store)?,
+            "notification launch grant changed"
+        );
+        self.revalidate_image()
+    }
+}
+pub(super) fn grant(store: &Store, configuration: &str) -> Result<Option<Grant>> {
+    let row = row(&store.db, configuration)?;
+    if !matches!(row.status.state, State::Service | State::IdentityChanged)
+        || row.status.rearm_required
+    {
+        return Ok(None);
+    }
+    Ok(Some(Grant {
+        configuration: configuration.into(),
+        journal: row
+            .status
+            .journal
+            .context("ownership journal unavailable")?,
+        owner_epoch: row
+            .status
+            .owner_epoch
+            .context("ownership epoch unavailable")?,
+        origin: row.origin.context("ownership frontend unavailable")?,
+    }))
+}
 fn original(db: &Connection, id: &str) -> Result<Option<(Receipt, Origin)>> {
     let record: Option<(String,String)> = db.query_row(
         "SELECT substr(receipt,1,16385),substr(origin,1,8193) FROM desktop_ownership_requests WHERE request_id=?1",[id],
@@ -350,11 +417,23 @@ fn apply_guarded(
     } else {
         State::Service
     };
-    let owner_epoch = if takeover {
+    let keep_epoch = takeover
+        || (*action == Action::Grant
+            && old.status.state == State::Service
+            && old.origin.as_ref() == Some(&origin));
+    let owner_epoch = if keep_epoch {
         old.status.owner_epoch.clone()
     } else {
-        Some(epoch.into())
+        Some(uuid::Uuid::new_v4().to_string())
     };
+    ensure!(
+        store
+            .db
+            .query_row("SELECT epoch FROM service WHERE id=1", [], |r| r
+                .get::<_, String>(0))?
+            == epoch,
+        "ownership service epoch changed"
+    );
     let current = Status {
         abi: wire::ABI.into(),
         configuration: location.configuration.clone(),
@@ -380,7 +459,7 @@ fn apply_guarded(
             Outcome::Pending
         } else {
             Outcome::Granted {
-                owner_epoch: epoch.into(),
+                owner_epoch: owner_epoch.clone().context("ownership epoch unavailable")?,
             }
         },
         current,
@@ -459,6 +538,18 @@ fn settle_locked(
     {
         return Ok(());
     }
+    #[cfg(unix)]
+    let _native_host = match location.notification_host_exclusion() {
+        Ok(held) => held,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(platform::lock_contended) =>
+        {
+            return Ok(())
+        }
+        Err(error) => return Err(error),
+    };
     if let Some(marker) = handoff::marker(location, lock)? {
         handoff::write_revoked(location, lock, &marker)?;
     }

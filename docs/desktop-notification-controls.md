@@ -68,6 +68,10 @@ coalesces only the latest state; it sends the clear as soon as original custody
 drains, without starting a second child. No unbounded worker or input queue is
 created. Focus is suppression data, not a permission.
 
+Foreground suppression is app-wide: an active Zerus window suppresses banners
+for every session, matching the existing native AttentionTracker. It is not a
+per-session focus selector.
+
 Root retains at most one original canonical-frontend proof/connection lease.
 A verified Background/Unknown update, old connection, failed proof, known UI
 exit or verified disconnect clears suppression immediately when Root observes
@@ -78,6 +82,11 @@ monotonic deadline within five seconds. The actor checks cheap held-process
 liveness every turn, bounded full proof periodically, and full proof before
 accepting a replacement lease. The original mutation deadline is not extended.
 A stale native revision or a former connection cannot replace a newer lease.
+
+The client compares the returned native connection ID/revision with the exact
+NativeFocus attached to its original registered request. The echoed request UUID
+alone cannot bind a returned observation. Receipt.service_epoch records the
+historical commit; it never proves currentness.
 
 FocusReply carries the exact UUID and Scope, native observation and remaining
 TTL (zero except for Foreground). It has no durable receipt, lookup, journal,

@@ -53,6 +53,58 @@ probe result substitutes for that proof.
 
 ## Native frontend policy requests
 
+### Ownership companion source (stage 1)
+
+The closed source contract is `desktop::ownership` in the shared core. Its ABI
+is `desktop-ownership-v1` and its help marker is exactly `Desktop ownership ABI:
+desktop-ownership-v1`. The shared types/cache mode binding alone do not advertise
+that CLI capability or implement a positive handoff. Client callers remain
+unavailable until the root status/result/actor routes land in the same stage.
+
+Before canonical instance claim and writer creation, native startup calls
+`Responder::configure_ownership_mode_once(Mode::Service | Mode::Native)`.
+Configuration still comes from the selected CLI and is cached separately with
+`configure_once`. Generic `Hello` stays unchanged. Only ownership requests carry
+the optional `Evidence::ownership_mode`, copied from the immutable native cache;
+ordinary evidence omits it. Missing or wrong mode refuses registration and the
+root independently joins it to the canonical peer/original-child proof. The
+intent has no mode, role, build, PID or confirmation field.
+
+The intended root entries are `desktop ownership-status --json` (bounded
+read-only `Status` without a subscription), the existing authenticated
+`desktop frontend-request --json`, and `desktop ownership-result --json` with
+the closed `Query` on stdin. All require the ownership and frontend help markers
+on the selected paired relay; none starts a service. This permits native startup
+to select configuration, configure its responder and request takeover AFTER
+canonical claim but BEFORE Bootstrap hold or native notification creation,
+without waiting for the later service-source connection.
+
+The authenticated payload is `Request::DesktopOwnership { request_id, action,
+journal, revision }`. All three actions share one native ordering key.
+`Grant` is the ordinary service-mode startup/connection intent and cannot
+supersede a retained revoke/native takeover. `Rearm` is a new explicit user
+intent after that state. Both require cached `Mode::Service`. `NativeTakeover`
+requires cached `Mode::Native` and closes service ownership before GUI writers
+can resume. The journal/revision come from the bounded status read; no journal
+is permitted only at initial revision zero. The root derives selected frontend
+build/file identity from native proof, not the payload. No action inherits an
+automatic-approval opt-in.
+
+`Receipt::matches` joins the original request ID/fingerprint, configuration,
+journal and revision. `Pending` and `Granted` never release native posting.
+`NativeReady` additionally requires revoked, checkpointed and actual drained
+completion. `Receipt::native_ready()` also joins the current actor observation
+to that exact native command/journal/revision, so a historical settled takeover
+cannot release a new GUI after ownership changes. The client consumes this only
+from its original retained CLI response, never a webview-supplied receipt.
+
+For an unknown mutation, retain its original logical UUID and child/pipe/cache
+resources, then issue only `Query::for_request` read lookups. A missing record
+alone is not proof of not-applied. Only an explicit root `definitive` negative
+AND confirmed original-child exit may retire that logical request and allow a
+new intent; the old mutating request is never replayed automatically. Refusal,
+pending/unknown and stale scope leave the relevant writer admissions fenced.
+
 The selected CLI advertises `Desktop frontend request ABI: desktop-ui-request-v1`.
 After its confirmation UI, Next prepares a closed `AutomaticApprovals` request
 with a stable request UUID and a fresh attempt UUID. Its native responder reserves

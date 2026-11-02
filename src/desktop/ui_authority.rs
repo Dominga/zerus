@@ -569,6 +569,12 @@ fn validate(
             && reply.request.fingerprint == envelope.request.fingerprint(),
         "original frontend child/request does not match"
     );
+    if let Request::DesktopOwnership { action, .. } = &envelope.request {
+        ensure!(
+            reply.request.ownership_mode == Some(action.mode()),
+            "ownership mode does not match the native frontend"
+        );
+    }
     if let Request::MaintenanceConfigure {
         update: Some(update),
         ..
@@ -922,6 +928,7 @@ mod tests {
                 replay: false,
             },
             request: Evidence {
+                ownership_mode: None,
                 attempt: id(1),
                 request_id: id(2),
                 fingerprint: envelope.request.fingerprint(),
@@ -953,6 +960,31 @@ mod tests {
                 _ => reply.request.serial = 0,
             }
             assert!(validate(&request, &caller, &frontend, &reply, &config).is_err());
+        }
+    }
+
+    #[test]
+    fn ownership_requires_the_original_cached_native_mode_in_addition_to_child_proof() {
+        use zerus_client_core::desktop::ownership::{Action, Mode};
+        for action in [Action::Grant, Action::Rearm, Action::NativeTakeover] {
+            let (mut request, caller, frontend, mut reply) = fixture();
+            request.request = Request::DesktopOwnership {
+                request_id: id(2),
+                action,
+                journal: None,
+                revision: 0,
+            };
+            reply.request.fingerprint = request.request.fingerprint();
+            for mode in [None, Some(Mode::Native), Some(Mode::Service)] {
+                reply.request.ownership_mode = mode;
+                assert_eq!(
+                    validate(&request, &caller, &frontend, &reply, &"a".repeat(64)).is_ok(),
+                    mode == Some(action.mode()),
+                );
+            }
+            reply.request.ownership_mode = Some(action.mode());
+            reply.request.child_birth = "wrong original child".into();
+            assert!(validate(&request, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
         }
     }
 

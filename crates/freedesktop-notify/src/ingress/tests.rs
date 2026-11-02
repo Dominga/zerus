@@ -535,8 +535,16 @@ fn real_bus_saturates_one_shared16_queue_with_boundary_frames_and_drains_both_re
         tick();
         std::thread::yield_now();
     }
+    // Admission happens at the 17th header; its body may still be in flight
+    // from the producer thread. Wait for that frame to finish, never a tick count.
+    while ingress.partial.load(Ordering::Relaxed) != 0 {
+        assert!(Instant::now() < end, "the 17th frame must complete");
+        tick();
+        std::thread::yield_now();
+    }
     for _ in 0..32 {
         tick();
+        std::thread::yield_now();
     }
     assert_eq!(
         ingress.admitted.load(Ordering::Relaxed),

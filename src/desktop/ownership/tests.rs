@@ -2,7 +2,9 @@ use super::*;
 use std::cell::Cell;
 
 struct Fixture {
-    temp: tempfile::TempDir,
+    _temp: tempfile::TempDir,
+    // Canonical: macOS temp dirs sit under the /var symlink, which the store refuses.
+    base: std::path::PathBuf,
     location: Location,
     store: Store,
     epoch: String,
@@ -11,14 +13,15 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
         let location = Location {
-            root: temp.path().join("state/desktop"),
+            root: base.join("state/desktop"),
             configuration: "a".repeat(64),
         };
         location.prepare().unwrap();
         let epoch = uuid::Uuid::new_v4().to_string();
         let store = Store::open(&location, &epoch).unwrap();
-        let image = temp.path().join("hgs-tray");
+        let image = base.join("hgs-tray");
         std::fs::write(&image, b"original selected native frontend").unwrap();
         let origin = Origin::capture(
             &image,
@@ -30,7 +33,8 @@ impl Fixture {
         )
         .unwrap();
         Self {
-            temp,
+            _temp: temp,
+            base,
             location,
             store,
             epoch,
@@ -227,7 +231,7 @@ fn replacement_image_refuses_launch_but_background_and_new_startup_grant_continu
     let mut f = Fixture::new();
     let request = f.request(Action::Grant);
     f.apply(request);
-    let other = f.temp.path().join("replacement");
+    let other = f.base.join("replacement");
     std::fs::write(&other, b"new selected native frontend").unwrap();
     std::fs::rename(&other, &f.origin.image).unwrap();
     assert_eq!(f.current().state, State::IdentityChanged);
@@ -262,8 +266,9 @@ fn negative_lookup_is_definitive_only_for_the_unchanged_original_scope() {
 #[test]
 fn read_only_absence_never_creates_state_and_incomplete_state_refuses() {
     let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
     let location = Location {
-        root: temp.path().join("absent/desktop"),
+        root: base.join("absent/desktop"),
         configuration: "a".repeat(64),
     };
     let current: Status = serde_json::from_value(offline_read(&location, None).unwrap()).unwrap();
@@ -452,7 +457,7 @@ fn identity_update_after_an_explicit_rearm_does_not_resurrect_old_revoke_history
     let rearm = f.request(Action::Rearm);
     f.apply(rearm);
     let old = f.current();
-    let other = f.temp.path().join("new-image");
+    let other = f.base.join("new-image");
     std::fs::write(&other, b"updated frontend").unwrap();
     std::fs::rename(other, &f.origin.image).unwrap();
     assert!(!f.current().rearm_required);
@@ -472,7 +477,7 @@ fn absent_native_takeover_is_a_definitive_noop_without_creating_any_desktop_stor
     // Keep the selected image but remove the private fixture's unused service
     // state to model a never-service native startup, not a live owner.
     let location = Location {
-        root: f.temp.path().join("never-service/desktop"),
+        root: f.base.join("never-service/desktop"),
         configuration: f.location.configuration.clone(),
     };
     let request = Request::DesktopOwnership {
@@ -533,7 +538,7 @@ fn unknown_absence_and_a_live_owner_cannot_supply_an_absent_takeover_receipt() {
         revision: 0,
     };
     let location = Location {
-        root: f.temp.path().join("unknown/desktop"),
+        root: f.base.join("unknown/desktop"),
         configuration: f.location.configuration.clone(),
     };
     location.prepare().unwrap();

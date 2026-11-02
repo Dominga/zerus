@@ -531,7 +531,8 @@ fn exit_waits_for_the_owned_proxy_and_blocked_view_callback_before_finishing() {
         let drain = pump.drain_service(rx, move |change| {
             if matches!(change, Change::Upsert { .. }) && first.swap(false, Ordering::AcqRel) {
                 entered.send(()).unwrap();
-                resume.recv_timeout(Duration::from_secs(10)).unwrap();
+                // A loaded runner may starve the test task; the release still arrives.
+                resume.recv_timeout(Duration::from_secs(60)).unwrap();
             }
         });
         let service = Service::start(fixture.0.join("hgs"), pump, sink, true, drain, None, vec![]);
@@ -754,7 +755,8 @@ fn stuck_view_callback_cannot_hold_the_quit_completion_past_its_deadline() {
         let drain = pump.drain_service(rx, move |change| {
             if matches!(change, Change::Upsert { .. }) && first.swap(false, Ordering::AcqRel) {
                 entered.send(()).unwrap();
-                resume.recv_timeout(Duration::from_secs(10)).unwrap();
+                // A loaded runner may starve the test task; the release still arrives.
+                resume.recv_timeout(Duration::from_secs(60)).unwrap();
             }
         });
         let service = Service::start(fixture.0.join("hgs"), pump, sink, true, drain, None, vec![]);

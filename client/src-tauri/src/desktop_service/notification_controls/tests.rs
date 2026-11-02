@@ -40,11 +40,7 @@ struct Fixture(PathBuf);
 impl Fixture {
     fn new(config: Value) -> Self {
         use std::os::unix::fs::PermissionsExt;
-        // Leave room for native-cache.sock under macOS's long login TMPDIR.
-        let nonce = uuid::Uuid::new_v4().simple().to_string();
-        let root = std::env::temp_dir().join(format!("znc-{}", &nonce[..16]));
-        fs::create_dir(&root).unwrap();
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let root = crate::desktop_service::tests::private_root(&std::env::temp_dir());
         fs::write(root.join("hgs"), include_str!("fixture.py")).unwrap();
         fs::set_permissions(root.join("hgs"), fs::Permissions::from_mode(0o700)).unwrap();
         let fixture = Self(root);

@@ -294,7 +294,7 @@ fn publish_with(
     platform::sync_dir(stage.path())?;
     let lock = match location.try_handoff_lock()? {
         super::store::HandoffAttempt::Acquired(lock) => lock,
-        super::store::HandoffAttempt::Contended => {
+        super::store::HandoffAttempt::Contended(_) => {
             // Complete input and the manifest were validated, but THIS
             // invocation has not attempted mkdir/reservation. This says
             // nothing about any earlier attempt or the global UUID state.

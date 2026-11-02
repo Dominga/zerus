@@ -20,7 +20,7 @@ pub struct HandoffLock {
 }
 pub(super) enum HandoffAttempt {
     Acquired(HandoffLock),
-    Contended,
+    Contended(io::Error),
 }
 impl HandoffLock {
     pub fn verify(&self, location: &Location) -> Result<()> {
@@ -99,7 +99,7 @@ impl Location {
     pub fn handoff_lock(&self) -> Result<HandoffLock> {
         match self.try_handoff_lock()? {
             HandoffAttempt::Acquired(lock) => Ok(lock),
-            HandoffAttempt::Contended => anyhow::bail!("desktop handoff is busy"),
+            HandoffAttempt::Contended(error) => Err(error).context("desktop handoff is busy"),
         }
     }
     /// Contention is recognized only at this exact OS try-lock call. Opening,
@@ -109,7 +109,7 @@ impl Location {
         let file = private_file(&self.root.join(HANDOFF_LOCK), true)?;
         if let Err(error) = fs2::FileExt::try_lock_exclusive(&file) {
             if platform::lock_contended(&error) {
-                return Ok(HandoffAttempt::Contended);
+                return Ok(HandoffAttempt::Contended(error));
             }
             return Err(error).context("desktop handoff is unavailable");
         }

@@ -215,6 +215,13 @@ fn only_actual_pre_reservation_contention_allows_a_fresh_same_record_attempt() {
     let f = Fixture::new();
     f.location.prepare().unwrap();
     let held = f.location.handoff_lock().unwrap();
+    let original_error = f.location.handoff_lock().err().unwrap();
+    assert!(
+        original_error
+            .downcast_ref::<io::Error>()
+            .is_some_and(platform::lock_contended),
+        "existing handoff callers retain the original OS contention error"
+    );
     let refused = publish(&f.location, &mut &bundle("")[..]).unwrap();
     assert_eq!(refused["configuration"], f.location.configuration);
     assert_eq!(refused["import_id"], id());

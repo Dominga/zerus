@@ -10,17 +10,27 @@ pub(crate) enum Role {
     Host,
 }
 
+// The public os_log macro performs compiler-assisted literal encoding in C.
+// Only closed numeric labels cross the bridge; no native strings or format
+// arguments do. Logs are observations, never callback/permission authority.
+unsafe extern "C" {
+    fn zerus_macos_notification_callback(role: u32, kind: u32);
+}
+
 /// Called only by an already installed delegate, without changing its behavior.
 pub(crate) fn response(role: Role, action: &NSString) {
     let role = match role {
         #[cfg(feature = "live")]
-        Role::Gui => "gui",
-        Role::Host => "host",
+        Role::Gui => 0,
+        Role::Host => 1,
     };
-    eprintln!(
-        "zerus-client: notification callback role={role} kind={}",
-        kind(action)
-    );
+    let kind = match kind(action) {
+        "default" => 0,
+        "dismiss" => 1,
+        _ => 2,
+    };
+    // SAFETY: the bridge accepts plain numbers and logs only static literals.
+    unsafe { zerus_macos_notification_callback(role, kind) };
 }
 
 fn kind(action: &NSString) -> &'static str {
@@ -37,6 +47,13 @@ fn kind(action: &NSString) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unified_log_transport_smoke_without_a_native_callback() {
+        // This is a logging transport probe, never an observed OS callback.
+        println!("UNIFIED_LOG_TRANSPORT_SMOKE_PID {}", std::process::id());
+        response(Role::Host, &NSString::from_str("private-fixture-action"));
+    }
 
     #[test]
     fn native_identifiers_are_classified_without_exposing_other_action_text() {

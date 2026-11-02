@@ -6,7 +6,7 @@ import subprocess
 
 
 root = Path(__file__).resolve().parents[2]
-policy = root / "src/desktop/windows_registration.ps1"
+policy = root / "scripts/ci/fixtures/windows-desktop-registration-legacy.ps1"
 argument = str(policy).replace("'", "''")
 for name in ("windows-desktop-registration-tests.ps1", "windows-registration-json-tests.ps1"):
     source = (root / "scripts/ci" / name).read_text(encoding="utf-8")

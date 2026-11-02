@@ -1,3 +1,4 @@
+# Test-only pre-native compatibility oracle; never loaded by hgs.
 # Explicitly initialized only by the maintained helper entry. Importing these
 # function definitions for policy controls does not change the caller session.
 function Initialize-RegistrationEnvironment {

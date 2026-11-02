@@ -119,6 +119,12 @@ fn embed_identity() {
 
 fn main() {
     embed_identity();
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rerun-if-changed=src/macos_notification_log.c");
+        cc::Build::new()
+            .file("src/macos_notification_log.c")
+            .compile("zerus_macos_notification_log");
+    }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         // Tauri's normal resource is linked only into application binaries.
         // Keep its icon/version there, and link the v6 activation manifest once

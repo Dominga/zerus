@@ -46,6 +46,8 @@ mod transport;
 mod ui_authority;
 #[cfg(windows)]
 mod windows_registration;
+#[cfg(any(windows, test))]
+mod windows_registration_policy;
 
 use crate::{cli, config::Config, platform};
 use anyhow::{ensure, Context, Result};
@@ -82,6 +84,11 @@ impl std::error::Error for StartupRefused {}
 pub(crate) fn windows_notification_activation(first: Option<&str>) -> Option<i32> {
     (first == Some(notifications::windows::ACTIVATION_ENTRY))
         .then(notifications::windows::cold_entry)
+}
+
+#[cfg(windows)]
+pub(crate) fn windows_registration_entry(args: &[String]) -> Option<i32> {
+    windows_registration::entry(args)
 }
 
 pub fn registered_command(args: &[String]) -> bool {

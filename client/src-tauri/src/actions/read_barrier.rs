@@ -1,6 +1,5 @@
-//! The ReadDelivery store's one-way barrier. No producer command calls it yet.
-//! A future authenticated profile controller must retain this opaque handle in
-//! its background worker through checkpoint I/O; dropping a receiver is not drain.
+//! The ReadDelivery store's one-way barrier. The native service-mode importer
+//! retains this opaque handle through checkpoint/capture and owned helper I/O.
 use super::Actions;
 use std::{
     sync::{Arc, Mutex},
@@ -32,6 +31,25 @@ pub(crate) struct FrozenReads {
     native: Closed,
     _checkpoint: Charge,
 }
+
+pub(crate) struct CapturedReads {
+    frozen: FrozenReads,
+    checkpoint: Checkpoint,
+    pub capture: zerus_client_core::desktop::pending_reads::Capture,
+}
+impl CapturedReads {
+    pub fn unchanged(&self) -> Result<(), Refused> {
+        let marks = self
+            .frozen
+            .marks
+            .try_lock()
+            .map_err(|_| Refused::Unavailable)?;
+        marks
+            .checkpoint_bytes(&self.checkpoint)
+            .map(|_| ())
+            .map_err(|_| Refused::Checkpoint)
+    }
+}
 impl Actions {
     pub(super) fn admit_marks(&self) -> Result<Charge, String> {
         self.mark_admissions
@@ -41,7 +59,6 @@ impl Actions {
 
     /// Close every mark writer before cancelling native calls. A failed wait
     /// never reopens anything. Unsupported platforms refuse before any close.
-    #[allow(dead_code)] // No authenticated producer controller is admitted yet.
     pub(crate) fn freeze_reads(&self) -> Result<FrozenReads, Refused> {
         #[cfg(not(unix))]
         {
@@ -69,15 +86,41 @@ impl Actions {
     }
 }
 impl FrozenReads {
+    pub(crate) fn capture(self, deadline: Instant) -> Result<CapturedReads, Refused> {
+        let checkpoint = self.checkpoint_inner(deadline, ReadMarks::checkpoint)?;
+        let bytes = self
+            .marks
+            .try_lock()
+            .map_err(|_| Refused::Unavailable)?
+            .checkpoint_bytes(&checkpoint)
+            .map_err(|_| Refused::Checkpoint)?;
+        let capture = zerus_client_core::desktop::pending_reads::Capture::from_bytes(&bytes)
+            .map_err(|_| Refused::Checkpoint)?;
+        if Instant::now() >= deadline {
+            return Err(Refused::Pending);
+        }
+        Ok(CapturedReads {
+            frozen: self,
+            checkpoint,
+            capture,
+        })
+    }
     /// Blocking, off the GUI thread. The same absolute deadline bounds both
     /// drains. Filesystem I/O may outlive it; self retains the barrier charge
     /// throughout, and a late completed sync still cannot return success.
-    #[allow(dead_code)] // First internal caller, fenced from all production IPC.
+    #[allow(dead_code)] // Checkpoint-only callers keep the original consuming API.
     pub(crate) fn checkpoint(self, deadline: Instant) -> Result<Checkpoint, Refused> {
         self.checkpoint_with(deadline, ReadMarks::checkpoint)
     }
     fn checkpoint_with(
         self,
+        deadline: Instant,
+        sync: impl FnOnce(&mut ReadMarks) -> std::io::Result<Checkpoint>,
+    ) -> Result<Checkpoint, Refused> {
+        self.checkpoint_inner(deadline, sync)
+    }
+    fn checkpoint_inner(
+        &self,
         deadline: Instant,
         sync: impl FnOnce(&mut ReadMarks) -> std::io::Result<Checkpoint>,
     ) -> Result<Checkpoint, Refused> {

@@ -294,6 +294,49 @@ fn poisoned_store_and_unreliable_initial_load_refuse_the_barrier() {
 }
 
 #[test]
+fn original_frozen_capture_retains_its_charge_and_refuses_source_drift() {
+    let f = Fixture::new();
+    f.actions.queue_marks(vec![mark()]).unwrap();
+    let captured = std::sync::Arc::new(
+        f.actions
+            .freeze_reads()
+            .unwrap()
+            .capture(deadline())
+            .unwrap(),
+    );
+    assert_eq!(captured.capture.source().rows, 1);
+    assert!(captured.unchanged().is_ok());
+    let closed = f.actions.checkpoint_admission.close();
+    assert_eq!(closed.wait_until(Instant::now()), Observation::Pending);
+    // The original managed source remains intact until an explicit test mutation.
+    std::fs::write(f.path(), b"[]").unwrap();
+    assert_eq!(captured.unchanged(), Err(Refused::Checkpoint));
+    drop(captured);
+    assert_eq!(closed.wait_until(deadline()), Observation::Idle);
+}
+
+#[test]
+fn an_invalid_last_managed_mark_never_exposes_an_import_capture() {
+    let mut f = Fixture::new();
+    let mut rows: Vec<_> = (0..193)
+        .map(|n| {
+            let mut m = mark();
+            m.name = format!("agent/example/{n}");
+            serde_json::json!(m)
+        })
+        .collect();
+    rows[192]["conversation_id"] = serde_json::json!("");
+    let bytes = serde_json::to_vec(&rows).unwrap();
+    zerus_client_core::fsx::write_private_atomic(&f.path(), &bytes, true).unwrap();
+    f.actions = Actions::new(f.path());
+    assert!(matches!(
+        f.actions.freeze_reads().unwrap().capture(deadline()),
+        Err(Refused::Checkpoint)
+    ));
+    assert_eq!(std::fs::read(f.path()).unwrap(), bytes);
+}
+
+#[test]
 fn checkpoint_io_keeps_its_charge_and_a_late_success_is_refused() {
     let f = Fixture::new();
     f.actions.queue_marks(vec![mark()]).unwrap();

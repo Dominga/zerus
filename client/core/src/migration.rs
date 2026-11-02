@@ -72,6 +72,12 @@ impl SourceStream {
         &self.identity
     }
 
+    /// Internal consumers may project already-bounded snapshot values. This
+    /// exposes data only, never a source drain or import-admission permit.
+    pub(crate) fn into_chunks(self) -> Box<dyn Iterator<Item = SourceResult<Value>> + Send> {
+        self.chunks
+    }
+
     /// Recheck the exact source after its decoder finishes. The caller uses
     /// the existing source reader under G1's current drain, checking path/file
     /// identity there too. An error or changed hash prevents a final manifest.

@@ -45,6 +45,39 @@ waits 120 seconds. Partial application waits 120, 240, 480, then 960 seconds.
 Changed intent resets the counters and becomes immediately eligible after any
 older owned call ends. Clock addition saturates rather than overflowing.
 
+## Frozen pending-read transfer
+
+In service mode the native Next startup path first disarms legacy read delivery.
+One owned background job freezes the managed read-mark store and checkpoints it,
+then fully consumes `next_pending_reads` before sending any mutation. The whole
+source is limited to 16 MiB and 50,000 entries; an invalid final entry refuses
+the capture, including its valid prefix. The original file is retained.
+
+The job waits for the canonical responder, selected configuration and CLI ABI.
+It submits the closed native `import_pending_reads` request through the existing
+original-child frontend authentication. JS cannot choose its paths or rows, and
+generic desktop requests refuse this operation. Normalized transport pages have
+at most 64 entries and 48 KiB, inside the unchanged 64 KiB control-line limit;
+the underlying capture adapter's 1 MiB pages are never truncated.
+
+The actor commits each page into the existing read ledger, even while passive.
+Mark request UUIDs depend on configuration and the exact normalized target,
+including run, conversation, reply and attention identity, never retry, service
+epoch or page cursor. The original receipts survive retirement. Historical
+transfer cannot overwrite a different current intent or revive an identical
+settled row still retained by an original in-flight dispatch.
+
+`pending_reads_import_result` checks at most one page of those indexed receipts
+without mutating anything. A lost reply is looked up before the producer advances;
+partial or unknown transfer retains its original source and resource bindings.
+The client exposes bounded progress as `pending_read_import`, independently of
+native service readiness. Transfer completion means durable queued intent, not
+host acknowledgement, worker drain, approval consent or a writer handoff.
+
+Windows' freeze/checkpoint adapter remains explicitly unsupported, tracked by
+`zerus-5wmh.66.3.31.6.1`. It reports unavailable and blocks default-on acceptance;
+the synchronous disarm step and an absent capture do not imply an empty import.
+
 ## Observation and restart
 
 A successful delivery receipt never retires a mark. `observe` accepts a fresh
@@ -99,15 +132,16 @@ sequence watermark. It looks up each session through the catalog index and uses
 the existing exact settlement policy, including superseded run identities. An
 unacknowledged early intent cannot starve later intents.
 
-The component accepts three closed request shapes for the existing desktop-v1
-request transport:
+The component uses these closed request shapes:
 
 - `read_intent`: canonical UUID `request_id` and the exact `mark` fields
   `computer`, `name`, `run_id`, `conversation_id`, `reply_id`, and
   `attention_signature`. Acceptance follows the queue commit; it means queued,
   never delivered or read.
-- `automatic_approvals`: canonical UUID `request_id` and Boolean `enabled`.
-  This explicit service policy does not import the old Qt or UI opt-in. The
+- `automatic_approvals`: canonical UUID `request_id` and Boolean `enabled`,
+  accepted only through the authenticated native frontend route after its
+  confirmation UI. Generic desktop requests refuse it. This explicit service
+  policy does not import the old Qt or UI opt-in. The
   policy update and immutable request receipt commit together. Replaying an old
   request returns that receipt without undoing a newer setting.
 - `delivery_result`: a new canonical UUID `request_id` and the canonical

@@ -90,6 +90,43 @@ fn merge_and_request_replay_preserve_exact_identity() {
 }
 
 #[test]
+fn import_transaction_rolls_back_all_marks_on_a_later_identity_mismatch() {
+    let mut db = db();
+    let original = mark("mac", "original");
+    let receipt = put(&mut db, 10, &original);
+    {
+        let tx = db.transaction().unwrap();
+        enqueue_in(&tx, &id(11), &mark("mac", "new"), 0).unwrap();
+        let mut changed = original.clone();
+        changed.reply_id = Some("different-reply".into());
+        assert!(enqueue_in(&tx, &id(10), &changed, 0).is_err());
+        // No page receipt or intent may survive the failed original transaction.
+    }
+    assert_eq!(status(&db).unwrap()["pending"], 1);
+    assert_eq!(put(&mut db, 10, &original), receipt);
+    assert!(!db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM desktop_read_requests WHERE request_id=?1)",
+            [id(11)],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap());
+}
+
+#[test]
+fn import_transaction_commits_exact_receipts_without_authorizing_delivery() {
+    let mut db = db();
+    let mark = mark("mac", "original");
+    let tx = db.transaction().unwrap();
+    let first = enqueue_in(&tx, &id(10), &mark, 0).unwrap();
+    assert_eq!(enqueue_in(&tx, &id(10), &mark, 1).unwrap(), first);
+    tx.commit().unwrap();
+    assert_eq!(put(&mut db, 10, &mark), first);
+    assert_eq!(status(&db).unwrap()["pending"], 1);
+    assert!(reserve(&mut db, &id(2), &id(1), &id(11), 0).is_err());
+}
+
+#[test]
 fn admission_is_four_global_with_fair_host_choice() {
     let mut db = db();
     for (n, host, name) in [

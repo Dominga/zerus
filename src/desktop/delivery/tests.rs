@@ -499,6 +499,63 @@ fn read_receipt_does_not_retire_intent_until_native_catalog_confirms_it() {
 }
 
 #[test]
+fn imported_frozen_marks_use_the_original_identity_guarded_delivery_path_once() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let count = calls.clone();
+    let run: Runner = Arc::new(move |inv, _, _, _| {
+        assert!(inv.args.iter().any(|a| a == "read"));
+        assert!(inv.args.iter().any(|a| a == "claude/example/a"));
+        let input: Value = serde_json::from_slice(inv.stdin.as_deref().unwrap()).unwrap();
+        assert_eq!(input["run_id"], "run");
+        assert_eq!(input["conversation_id"], "conversation");
+        assert_eq!(input["reply_id"], "reply");
+        assert_eq!(input["attention_signature"], "attention");
+        count.fetch_add(1, Ordering::SeqCst);
+        Exit::Code {
+            code: 0,
+            stderr: String::new(),
+            stdout: br#"{"ok":true,"applied":{"reply_id":true,"attention_signature":true}}"#
+                .to_vec(),
+        }
+    });
+    let mut f = Fixture::new(run);
+    let capture = zerus_client_core::desktop::pending_reads::Capture::from_bytes(
+        &serde_json::to_vec(&vec![mark()]).unwrap(),
+    )
+    .unwrap();
+    let page = capture.page(0).unwrap();
+    let request = || json!({"op":"import_pending_reads","request_id":id(),"page":page});
+    assert_eq!(
+        crate::desktop::pending_reads::frontend(
+            &mut f.store,
+            crate::desktop::ui_authority::Validated::fixture(&request())
+        )["durable"],
+        true
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(!state::policy(&f.store.db).unwrap().enabled);
+    f.source(row(), true);
+    f.active();
+    f.tick_until(|r| r.jobs.is_empty());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(reads::status(&f.store.db).unwrap()["pending"], 1);
+    let mut seen = row();
+    seen["read"] = json!({"conversation_id":"conversation","reply_id":"reply","attention_signature":"attention"});
+    f.source(seen, true);
+    f.runtime.sources.observe_reads(&mut f.store).unwrap();
+    assert_eq!(reads::status(&f.store.db).unwrap()["pending"], 0);
+    assert_eq!(
+        crate::desktop::pending_reads::frontend(
+            &mut f.store,
+            crate::desktop::ui_authority::Validated::fixture(&request())
+        )["durable"],
+        true
+    );
+    f.scan();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn pending_observation_is_fair_bounded_and_indexed() {
     let mut f = Fixture::new(quiet());
     let m = mark();

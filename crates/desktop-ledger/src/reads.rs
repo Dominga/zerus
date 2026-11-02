@@ -138,17 +138,79 @@ fn refresh(tx: &Transaction<'_>, computer: &str) -> Result<()> {
 pub fn enqueue(db: &mut Connection, request_id: &str, mark: &ReadMark, now: i64) -> Result<Queued> {
     uuid(request_id)?;
     let encoded = encode(mark)?;
-    let fingerprint = hash(encoded.as_bytes());
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let old: Option<(String, String)> = tx
+    let receipt = enqueue_encoded(&tx, request_id, mark, encoded, now)?;
+    tx.commit()?;
+    Ok(receipt)
+}
+
+/// Actor-owned imports may commit a bounded page and its progress atomically.
+/// The returned receipt is provisional until the caller commits this original
+/// transaction. This records intent only; it grants no dispatch permission.
+pub fn enqueue_in(
+    tx: &Transaction<'_>,
+    request_id: &str,
+    mark: &ReadMark,
+    now: i64,
+) -> Result<Queued> {
+    uuid(request_id)?;
+    enqueue_encoded(tx, request_id, mark, encode(mark)?, now)
+}
+
+fn enqueue_encoded(
+    tx: &Transaction<'_>,
+    request_id: &str,
+    mark: &ReadMark,
+    encoded: String,
+    now: i64,
+) -> Result<Queued> {
+    if let Some(receipt) = receipt_encoded(tx, request_id, mark, &encoded)? {
+        return Ok(receipt);
+    }
+    enqueue_new(tx, request_id, mark, encoded, now, false)
+}
+
+/// Historical frozen intent must not revive an identical settled row or
+/// overwrite a conflicting current part. Its stable import receipt is still
+/// committed in the caller's original transaction.
+pub fn adopt_in(
+    tx: &Transaction<'_>,
+    request_id: &str,
+    mark: &ReadMark,
+    now: i64,
+) -> Result<Queued> {
+    uuid(request_id)?;
+    let encoded = encode(mark)?;
+    if let Some(receipt) = receipt_encoded(tx, request_id, mark, &encoded)? {
+        return Ok(receipt);
+    }
+    enqueue_new(tx, request_id, mark, encoded, now, true)
+}
+
+/// Indexed, read-only lookup bound to the exact normalized mark. Retired queue
+/// rows do not erase their immutable request receipts.
+pub fn receipt(db: &Connection, request_id: &str, mark: &ReadMark) -> Result<Option<Queued>> {
+    uuid(request_id)?;
+    receipt_encoded(db, request_id, mark, &encode(mark)?)
+}
+
+fn receipt_encoded(
+    db: &Connection,
+    request_id: &str,
+    mark: &ReadMark,
+    encoded: &str,
+) -> Result<Option<Queued>> {
+    let fingerprint = hash(encoded.as_bytes());
+    let old: Option<(String, String)> = db
         .query_row(
-            "SELECT fingerprint,receipt FROM desktop_read_requests WHERE request_id=?1",
+            "SELECT substr(fingerprint,1,65),substr(receipt,1,4097) FROM desktop_read_requests WHERE request_id=?1",
             [request_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
     if let Some((previous, receipt)) = old {
         ensure!(previous == fingerprint, "read request identity changed");
+        ensure!(receipt.len() <= 4096, "invalid stored read receipt");
         let receipt: Queued = serde_json::from_str(&receipt)?;
         ensure!(
             receipt.request_id == request_id
@@ -157,8 +219,20 @@ pub fn enqueue(db: &mut Connection, request_id: &str, mark: &ReadMark, now: i64)
                 && receipt.revision > 0,
             "invalid stored read receipt"
         );
-        return Ok(receipt);
+        return Ok(Some(receipt));
     }
+    Ok(None)
+}
+
+fn enqueue_new(
+    tx: &Transaction<'_>,
+    request_id: &str,
+    mark: &ReadMark,
+    encoded: String,
+    now: i64,
+    historical: bool,
+) -> Result<Queued> {
+    let fingerprint = hash(encoded.as_bytes());
     let key = key(mark)?;
     let old: Option<(String, i64, bool)> = tx
         .query_row(
@@ -177,7 +251,20 @@ pub fn enqueue(db: &mut Connection, request_id: &str, mark: &ReadMark, now: i64)
             "stored read identity changed"
         );
         let merged = ReadMark::merged(&old, mark.clone());
-        if old != merged || settled {
+        if historical {
+            for (previous, incoming) in [
+                (&old.reply_id, &mark.reply_id),
+                (&old.attention_signature, &mark.attention_signature),
+            ] {
+                let previous = previous.as_deref().filter(|s| !s.is_empty());
+                let incoming = incoming.as_deref().filter(|s| !s.is_empty());
+                ensure!(
+                    previous.is_none() || incoming.is_none() || previous == incoming,
+                    "frozen read conflicts with current intent"
+                );
+            }
+        }
+        if old != merged || (settled && !historical) {
             let revision = revision
                 .checked_add(1)
                 .ok_or_else(|| anyhow::anyhow!("read revision exhausted"))?;
@@ -205,8 +292,7 @@ pub fn enqueue(db: &mut Connection, request_id: &str, mark: &ReadMark, now: i64)
         "INSERT INTO desktop_read_requests VALUES(?1,?2,?3)",
         params![request_id, fingerprint, json(&receipt, 4096)?],
     )?;
-    refresh(&tx, &mark.computer)?;
-    tx.commit()?;
+    refresh(tx, &mark.computer)?;
     Ok(receipt)
 }
 

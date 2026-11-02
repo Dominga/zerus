@@ -21,6 +21,7 @@ mod notifications;
 #[allow(dead_code)]
 mod operations;
 mod owner;
+mod pending_reads;
 mod presence_admission;
 mod presence_worker;
 #[allow(dead_code)]
@@ -543,6 +544,17 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         frame(&epoch, seq, "status", value)
                     } else if hello.op == "frontend_request" {
                         let result = match (authority, &mut background) {
+                            (Some(authority), _)
+                                if authority.operation() == "import_pending_reads" =>
+                            {
+                                match authority.into_request(&mut frontend_order) {
+                                    Ok(request) => pending_reads::frontend(&mut store, request),
+                                    Err(_) => frontend_refused(
+                                        hello.request.as_ref(),
+                                        "frontend_identity_expired",
+                                    ),
+                                }
+                            }
                             (Some(authority), Some(runtime)) => {
                                 match authority.into_request(&mut frontend_order) {
                                     Ok(request) if request.operation() == "activation_wait" => {
@@ -599,6 +611,19 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                             )
                         }) {
                             reads.request(&store, &feed, &epoch, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "pending_reads_import_result")
+                        {
+                            pending_reads::result_request(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "import_pending_reads")
+                        {
+                            json!({"request_id":hello.request.as_ref().unwrap()["request_id"],
+                                "accepted":false,"durable":false,"code":"frontend_authentication_required"})
                         } else if hello
                             .request
                             .as_ref()

@@ -24,6 +24,7 @@ use std::time::Duration;
 
 use tauri::State;
 mod read_barrier;
+pub(crate) use read_barrier::CapturedReads;
 use zerus_client_core::actions::{
     change_notifications, classify, invocation, parse_reference, recovery_preflight,
     reference_invocation, ALREADY_ANSWERING, ALREADY_SENDING,

@@ -758,7 +758,7 @@ export const windowVisibility: PageVisibility = {
 
 /** A session the menu bar or a notification opens: its computer and catalog key. */
 /** `attention`: a clicked notification's session, shown on its Activity tab (Qt's `showAttentionSession`). */
-export type OpenSession = { computer: ComputerId; key: string; attention?: boolean; preserveFilters?: boolean };
+export type OpenSession = { computer: ComputerId; key: string; attention?: boolean; preserveFilters?: boolean; expected?: { run: string; conversation: string } };
 /** A notice for the window. */
 export type DeskNotice = { title: string; text: string };
 export type DeskPending = { open: OpenSession | null; notices: DeskNotice[]; updates?: boolean };

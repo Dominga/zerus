@@ -17,6 +17,8 @@ const MAINTENANCE_UNAVAILABLE: &str =
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
+    #[serde(skip)] // Fixed native startup producer only, never JS row/path input.
+    ImportPendingReads,
     #[serde(skip)] // The ephemeral consumer is separate from durable policy requests.
     ActivationWait,
     AutomaticApprovals,
@@ -25,6 +27,7 @@ pub enum Operation {
 impl Operation {
     fn of(request: &Request) -> Self {
         match request {
+            Request::ImportPendingReads { .. } => Self::ImportPendingReads,
             Request::ActivationWait { .. } => Self::ActivationWait,
             Request::AutomaticApprovals { .. } => Self::AutomaticApprovals,
             Request::MaintenanceConfigure { .. } => Self::MaintenanceConfigure,
@@ -32,6 +35,7 @@ impl Operation {
     }
     fn name(self) -> &'static str {
         match self {
+            Self::ImportPendingReads => "import_pending_reads",
             Self::ActivationWait => "activation_wait",
             Self::AutomaticApprovals => "automatic_approvals",
             Self::MaintenanceConfigure => "maintenance_configure",
@@ -249,6 +253,10 @@ fn version_dev_number(version: &str) -> Option<u64> {
 }
 
 enum Input {
+    ImportReads {
+        id: String,
+        page: Box<zerus_client_core::desktop::pending_reads::Page>,
+    },
     Approvals {
         id: String,
         enabled: bool,
@@ -263,6 +271,7 @@ enum Input {
 impl Input {
     fn operation(&self) -> Operation {
         match self {
+            Self::ImportReads { .. } => Operation::ImportPendingReads,
             Self::Approvals { .. } => Operation::AutomaticApprovals,
             Self::Maintenance { .. } => Operation::MaintenanceConfigure,
             Self::Result(op) => *op,
@@ -270,6 +279,10 @@ impl Input {
     }
     fn request(self) -> Result<Option<Request>, &'static str> {
         match self {
+            Self::ImportReads { id, page } => Ok(Some(Request::ImportPendingReads {
+                request_id: id,
+                page,
+            })),
             Self::Approvals { id, enabled } => Ok(Some(Request::AutomaticApprovals {
                 request_id: id,
                 enabled,
@@ -292,6 +305,8 @@ impl Input {
     }
     fn refusal(&self, code: &str) -> Value {
         match self {
+            Self::ImportReads { id, .. } => json!({"request_id":id,"op":"import_pending_reads",
+                "accepted":false,"durable":false,"pending":false,"code":code}),
             Self::Approvals { id, enabled } => refused(
                 &Request::AutomaticApprovals {
                     request_id: id.clone(),
@@ -362,6 +377,9 @@ pub(super) async fn approval_command(
     }
 }
 async fn submit(shared: Arc<Shared>, input: Input) -> Value {
+    submit_held(shared, input, Arc::new(())).await
+}
+async fn submit_held(shared: Arc<Shared>, input: Input, held: Arc<dyn Send + Sync>) -> Value {
     let operation = input.operation();
     let fallback = input.refusal("frontend_route_unavailable");
     // Bound workers BEFORE spawn_blocking; webview reloads cannot accumulate
@@ -385,11 +403,41 @@ async fn submit(shared: Arc<Shared>, input: Input) -> Value {
             Begin::Immediate(value) => return value,
             Begin::Work(work) => work,
         };
-        let resources: Arc<dyn Send + Sync> = Arc::new(charge);
+        let resources: Arc<dyn Send + Sync> = Arc::new((charge, held));
         execute(&shared, reservation, resources)
     })
     .await
     .unwrap_or_else(|_| shared_fallback(operation))
+}
+
+pub(super) async fn import_page(
+    shared: Arc<Shared>,
+    page: zerus_client_core::desktop::pending_reads::Page,
+    held: Arc<dyn Send + Sync>,
+) -> Value {
+    let input = {
+        let state = shared
+            .frontend
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match state.operations.get(&Operation::ImportPendingReads) {
+            Some(entry) if !entry.complete => match &entry.request {
+                Request::ImportPendingReads { page: original, .. } if **original == page => {
+                    Input::Result(Operation::ImportPendingReads)
+                }
+                _ => {
+                    return json!({"op":"import_pending_reads","accepted":false,
+                    "durable":false,"pending":true,"code":"previous_frontend_request_unconfirmed"})
+                }
+            },
+            _ => Input::ImportReads {
+                id: uuid::Uuid::new_v4().to_string(),
+                page: Box::new(page),
+            },
+        }
+    };
+    submit_held(shared, input, held).await
 }
 fn shared_fallback(operation: Operation) -> Value {
     // A failed worker may already have delivered its original intent. No
@@ -434,6 +482,8 @@ fn help(
     if !marker(HELP)
         || (!lookup && !marker(ui_requests::HELP_MARKER))
         || (operation == Operation::MaintenanceConfigure && !marker(maintenance::HELP_MARKER))
+        || (operation == Operation::ImportPendingReads
+            && !marker(zerus_client_core::desktop::pending_reads::HELP_MARKER))
     {
         return Err("incompatible_frontend_cli");
     }
@@ -450,7 +500,7 @@ fn execute(
         if !shared.allowed || shared.stopped.load(Ordering::Acquire) {
             return Err("frontend_route_unavailable");
         }
-        if !reservation.lookup {
+        if !reservation.lookup && operation != Operation::ImportPendingReads {
             let snapshot = shared
                 .snapshot
                 .lock()
@@ -572,10 +622,15 @@ fn lookup(
     let id = uuid::Uuid::new_v4().to_string();
     let operation = if Operation::of(request) == Operation::AutomaticApprovals {
         "delivery_result"
+    } else if Operation::of(request) == Operation::ImportPendingReads {
+        "pending_reads_import_result"
     } else {
         "maintenance_result"
     };
-    let input = json!({"op":operation,"request_id":id,"original_request_id":request.id()});
+    let mut input = json!({"op":operation,"request_id":id,"original_request_id":request.id()});
+    if let Request::ImportPendingReads { page, .. } = request {
+        input["page"] = json!(page);
+    }
     let bytes = owned(
         shared,
         relay,
@@ -592,11 +647,16 @@ fn lookup_receipt(request: &Request, id: &str, value: Value) -> Result<Receipt, 
     if value["request_id"] != id || value["original_request_id"] != request.id() {
         return Err("invalid_frontend_response");
     }
-    if Operation::of(request) == Operation::AutomaticApprovals {
-        if value["op"] != "delivery_result"
-            || value["accepted"] != true
-            || value["durable"] != false
-        {
+    if matches!(
+        Operation::of(request),
+        Operation::AutomaticApprovals | Operation::ImportPendingReads
+    ) {
+        let expected = if Operation::of(request) == Operation::ImportPendingReads {
+            "pending_reads_import_result"
+        } else {
+            "delivery_result"
+        };
+        if value["op"] != expected || value["accepted"] != true || value["durable"] != false {
             return Err("frontend_receipt_unconfirmed");
         }
         match value["found"].as_bool() {
@@ -652,6 +712,20 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
         return None;
     }
     let complete = match request {
+        Request::ImportPendingReads { page, .. } => {
+            if value["op"] != "import_pending_reads"
+                || value["source"] != json!(page.source)
+                || value["after"] != page.after
+                || value["through"] != page.through()
+                || !value["superseded"]
+                    .as_u64()
+                    .is_some_and(|count| count <= page.marks.len() as u64)
+                || value["delivered"] != false
+            {
+                return None;
+            }
+            true
+        }
         Request::ActivationWait { .. } => return None, // Separate ephemeral consumer, never a durable policy receipt.
         Request::AutomaticApprovals { enabled, .. } => {
             if value["op"] != "automatic_approvals" || value["enabled"] != *enabled {
@@ -736,4 +810,4 @@ pub async fn desktop_service_frontend_result(
 }
 
 #[cfg(all(test, unix))]
-mod tests;
+pub(super) mod tests;

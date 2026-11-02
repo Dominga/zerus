@@ -21,6 +21,7 @@ mod notifications;
 #[allow(dead_code)]
 mod operations;
 mod owner;
+mod pending_reads;
 mod presence_admission;
 mod presence_worker;
 #[allow(dead_code)]
@@ -355,7 +356,7 @@ fn projection(
     feed: &feed::Broker,
     reads: &catalog_read::Reader,
 ) -> Value {
-    json!({"abi":ABI,"version":env!("CARGO_PKG_VERSION"),"schema":store::SCHEMA,
+    let mut value = json!({"abi":ABI,"version":env!("CARGO_PKG_VERSION"),"schema":store::SCHEMA,
         "configuration":location.configuration,"generation":store.generation,"epoch":epoch,
         "lifecycle":lifecycle::status(&location.configuration,epoch,store.generation),
         "running":true,"ownership":"passive","writers_enabled":false,"handoff":"required",
@@ -366,7 +367,9 @@ fn projection(
         "limits":{"subscribers":protocol::SUBSCRIBERS,"queue_bytes":protocol::QUEUE_BYTES,
             "frame_bytes":protocol::FRAME_BYTES,"control_bytes":protocol::CONTROL_BYTES,"ingress_bytes":feed::INGRESS_BYTES,
             "feed_producers":1,"feed_frame_bytes":feed::LINE_BYTES,"connections":protocol::CONNECTIONS},
-        "components":{"fleet":"awaiting_handoff","presence":"awaiting_handoff","reads":"awaiting_handoff","attention":"awaiting_handoff","approvals":"awaiting_handoff"}})
+        "components":{"fleet":"awaiting_handoff","presence":"awaiting_handoff","reads":"awaiting_handoff","attention":"awaiting_handoff","approvals":"awaiting_handoff"}});
+    delivery::decorate_passive(store, &mut value);
+    value
 }
 
 enum Event {
@@ -543,6 +546,17 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         frame(&epoch, seq, "status", value)
                     } else if hello.op == "frontend_request" {
                         let result = match (authority, &mut background) {
+                            (Some(authority), _)
+                                if authority.operation() == "import_pending_reads" =>
+                            {
+                                match authority.into_request(&mut frontend_order) {
+                                    Ok(request) => pending_reads::frontend(&mut store, request),
+                                    Err(_) => frontend_refused(
+                                        hello.request.as_ref(),
+                                        "frontend_identity_expired",
+                                    ),
+                                }
+                            }
                             (Some(authority), Some(runtime)) => {
                                 match authority.into_request(&mut frontend_order) {
                                     Ok(request) if request.operation() == "activation_wait" => {
@@ -569,10 +583,17 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                 hello.request.as_ref(),
                                 "frontend_authentication_refused",
                             ),
-                            (_, None) => frontend_refused(
-                                hello.request.as_ref(),
-                                "desktop_background_unavailable",
-                            ),
+                            (Some(authority), None) => {
+                                match authority.into_request(&mut frontend_order) {
+                                    Ok(request) => {
+                                        delivery::passive_frontend_request(&mut store, request)
+                                    }
+                                    Err(_) => frontend_refused(
+                                        hello.request.as_ref(),
+                                        "frontend_identity_expired",
+                                    ),
+                                }
+                            }
                         };
                         frame(&epoch, seq, "response", result)
                     } else if hello.op == "request" {
@@ -599,6 +620,19 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                             )
                         }) {
                             reads.request(&store, &feed, &epoch, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "pending_reads_import_result")
+                        {
+                            pending_reads::result_request(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "import_pending_reads")
+                        {
+                            json!({"request_id":hello.request.as_ref().unwrap()["request_id"],
+                                "accepted":false,"durable":false,"code":"frontend_authentication_required"})
                         } else if hello
                             .request
                             .as_ref()

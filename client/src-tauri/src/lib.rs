@@ -497,7 +497,12 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(mobile::start(app.handle()));
                 // A replay never touches the real read or attention marks.
                 let actions = actions::Actions::new(dir.join(actions::marks_file(replay)));
-                if desktop_service::mode() { actions.disarm_read_delivery()?; }
+                if desktop_service::mode() {
+                    actions.disarm_read_delivery()?;
+                    if !replay {
+                        app.state::<commands::AppState>().set_pending_read_source(actions.clone());
+                    }
+                }
                 let notice_app = app.handle().clone();
                 if desktop_service::mode() {
                     app.manage(actions.read_delivery.clone());
@@ -822,6 +827,13 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                         })) as desk::LoadAttention
                     });
                     desk::start(app.handle(), &pump, dir.clone(), desk::load_linux_mode(&dir, conf.as_deref()), attention);
+                    if desktop_service::mode() {
+                        if let Some(sender) = desk::sender(app.handle()) {
+                            app.state::<commands::AppState>().register_service_activation(std::sync::Arc::new(move |delivery| {
+                                let _ = sender.send(desk::DeskInput::ServiceClicked(Box::new(delivery)));
+                            })).map_err(std::io::Error::other)?;
+                        }
+                    }
                     if posts {
                         if let Some(sender) = desk::sender(app.handle()) { platform::linux_notify::install(app.handle(), dir.clone(), switch, sender); }
                     }

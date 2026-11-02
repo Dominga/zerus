@@ -181,23 +181,10 @@ impl Runtime {
         };
         let presence = self.presence.as_ref().map(presence_worker::Runtime::status);
         let delivery = self.delivery.status();
-        let writer = delivery["writer_ready"] == true && delivery["stopping"] == false;
-        value["automatic_approvals"] = (writer
-            && delivery["approvals"]["enabled"] == true
-            && delivery["approvals"]["error"].is_null())
-        .into();
-        value["components"]["reads"] = if writer {
-            "running"
-        } else {
-            "awaiting_handoff"
-        }
-        .into();
-        value["components"]["approvals"] = if value["automatic_approvals"] == true {
-            "running"
-        } else {
-            "disabled_or_unavailable"
-        }
-        .into();
+        self.delivery.decorate(value);
+        value["components"]["reads"] = value["lifecycle"]["background"]["reads"]["code"].clone();
+        value["components"]["approvals"] =
+            value["lifecycle"]["background"]["approvals"]["code"].clone();
         value["lifecycle"]["background"]["delivery"] = delivery.clone();
         value["delivery_runtime"] = delivery.clone();
         value["ownership"] = if code == "drained"

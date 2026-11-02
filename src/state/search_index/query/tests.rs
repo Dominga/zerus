@@ -41,8 +41,9 @@ fn source_fixture(archive: bool) -> (tempfile::TempDir, PathBuf, PathBuf, PathBu
     .unwrap();
     let mut store = Store::open(&state.join("content-search-v1")).unwrap();
     // Page tests start with a warm source. A slow disk may need more than one
-    // bounded catch-up; this does not grant a larger per-call work budget.
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // bounded catch-up; this does not grant a larger per-call work budget. A
+    // loaded hosted Windows runner exceeded 30 s; the loop stays bounded at 128.
+    let deadline = Instant::now() + Duration::from_secs(120);
     for _ in 0..128 {
         store
             .discover(

@@ -15,6 +15,14 @@ export function createDesktopService() {
 export const desktopService = createDesktopService();
 export const retryDesktopService = () => invoke<void>("desktop_service_retry");
 
+export function pendingReadNotice(state: DesktopService | undefined): string {
+  const transfer = state?.pending_read_import;
+  if (!transfer?.required || transfer.complete) return "";
+  return transfer.running
+    ? tr("Transferring saved read marks. Marking sessions as read is paused.")
+    : tr("Saved read marks could not be transferred. Marking sessions as read is paused. Retry to continue.");
+}
+
 /** Called by the existing opt-in confirmation only. An uncertain request is not replayed. */
 export function createServiceApprovalIntent(
   send: (id: string, enabled: boolean) => Promise<unknown>,

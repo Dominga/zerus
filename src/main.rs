@@ -32,6 +32,13 @@ fn main() {
     {
         std::process::exit(code);
     }
+    // Fixed native implementation worker: bounded frame, no config/owner load.
+    #[cfg(windows)]
+    if let Some(code) =
+        desktop::windows_registration_entry(&std::env::args().skip(1).collect::<Vec<_>>())
+    {
+        std::process::exit(code);
+    }
     if std::env::args().nth(1).as_deref() == Some("--macos-session-service") {
         std::process::exit(macos_session::serve());
     }

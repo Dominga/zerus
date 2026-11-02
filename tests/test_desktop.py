@@ -23,6 +23,106 @@ HGS = Path(os.environ.get('HGS_TEST_BIN', Path(__file__).resolve().parents[1] / 
 
 
 class Desktop(unittest.TestCase):
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux private foreground holder')
+    def test_installer_retains_the_real_original_hold_through_private_passive_restart(self):
+        import pty
+        service, _ = self.serve()
+        self.stop(service)
+        # A pre-existing private native-host lock is also retained by Root.
+        fd = os.open(self.desktop / 'notification-host.lock', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(fd)
+        request = str(uuid.uuid4())
+        receipt = self.cli('desktop', 'revoke', '--json', '--request-id', request, '--reason', 'rollback')
+        protocol = Path(__file__).resolve().parents[1] / 'scripts/desktop-revoke-hold.py'
+        script = r'''import fcntl,importlib.util,json,os,signal,subprocess,sys,termios,time
+tty=os.open(sys.argv[1],os.O_RDWR)
+fcntl.ioctl(tty,termios.TIOCSCTTY,0)
+old=signal.signal(signal.SIGTTOU,signal.SIG_IGN)
+os.tcsetpgrp(tty,os.getpgrp());signal.signal(signal.SIGTTOU,old)
+spec=importlib.util.spec_from_file_location('hold',sys.argv[2]);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+hgs=sys.argv[3];receipt=json.loads(sys.argv[4]);locks=json.loads(sys.argv[5])
+help_text=subprocess.check_output([hgs,'--help'],timeout=5).decode()
+hold=module.Hold(hgs,os.environ,receipt['configuration'],receipt['request_id'],receipt,help_text).acquire()
+service=None
+try:
+ for path in locks:
+  with open(path,'rb') as lock:
+   try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+   except BlockingIOError:pass
+   else:raise AssertionError('original native exclusion is not held')
+ service=subprocess.Popen([hgs,'desktop','serve'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,close_fds=True)
+ until=time.monotonic()+8
+ while True:
+  result=subprocess.run([hgs,'desktop','status','--json'],capture_output=True,timeout=2)
+  if result.returncode==0 and json.loads(result.stdout).get('lifecycle',{}).get('ipc_ready'):break
+  assert service.poll() is None and time.monotonic()<until
+  time.sleep(.02)
+ hold.check()
+ service.terminate();_,error=service.communicate(timeout=5);assert len(error)<=65536
+ hold.check();hold.close()
+ assert hold.child.returncode==0 and hold.finished
+ for path in locks:
+  with open(path,'rb') as lock:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+ print(json.dumps(dict(passive_ready_while_held=True,original_holder_reaped=True,pipes_drained=True)))
+finally:
+ if service is not None and service.poll() is None:
+  service.terminate();service.communicate(timeout=5)
+ hold.close(validate=False);os.close(tty)
+'''
+        master, slave = pty.openpty()
+        try:
+            locks = [str(self.desktop / name) for name in ('handoff.lock', 'notification-host.lock')]
+            result = subprocess.run([sys.executable, '-c', script, os.ttyname(slave), str(protocol),
+                                     str(HGS), json.dumps(receipt), json.dumps(locks)],
+                                    env=self.env, start_new_session=True, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=25)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(json.loads(result.stdout), dict(passive_ready_while_held=True,
+                             original_holder_reaped=True, pipes_drained=True))
+        finally:
+            os.close(master)
+            os.close(slave)
+
+    @unittest.skipUnless(sys.platform.startswith(('linux', 'darwin')), 'Unix rollback hold')
+    def test_rollback_hold_agent_refusal_is_structured_and_creates_no_state(self):
+        selected = dict(self.env, HGS_SESSION='private-agent-fixture')
+        result = subprocess.run([str(HGS), 'desktop', 'revoke-hold', '--json', '--request-id', str(uuid.uuid4())],
+                                input=b'', stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                env=selected, timeout=5)
+        self.assertNotEqual(result.returncode, 0)
+        value = json.loads(result.stdout)
+        self.assertEqual(value['abi'], 'desktop-revoke-hold-v1')
+        self.assertIs(value['held'], False)
+        self.assertEqual(value['code'], 'revoke_hold_refused')
+        self.assertFalse(self.desktop.exists())
+
+    def test_notification_controls_are_scoped_reads_and_generic_mutation_is_refused(self):
+        self.serve()
+        current = self.cli('desktop', 'status', '--json')
+        scope = dict(configuration=current['configuration'], service_epoch=current['epoch'])
+        query = dict(op='notification_preferences_status', request_id=str(uuid.uuid4()), scope=scope)
+        status = self.cli('desktop', 'request', '--json', data=query)
+        self.assertEqual(status['abi'], 'desktop-notification-controls-v1')
+        self.assertEqual(status['scope'], scope)
+        self.assertFalse(status['configured'])
+        self.assertEqual(status['preferences'], dict(optional_questions=False))
+        original = dict(kind='configure', request_id=str(uuid.uuid4()), journal=status['journal'],
+                        revision=0, preferences=dict(optional_questions=True))
+        mutation = dict(op='notification_control', scope=scope, control=original)
+        refused = self.cli('desktop', 'request', '--json', data=mutation)
+        self.assertFalse(refused['accepted'])
+        self.assertEqual(refused['code'], 'frontend_authentication_required')
+        lookup = dict(op='notification_preferences_result', query=dict(
+            request_id=str(uuid.uuid4()), scope=scope, original=original))
+        result = self.cli('desktop', 'request', '--json', data=lookup)
+        self.assertTrue(result['definitive_not_applied'])
+        self.assertIsNone(result['receipt'])
+        bad = dict(query, scope=dict(scope, service_epoch=str(uuid.uuid4())))
+        self.assertEqual(self.cli('desktop', 'request', '--json', data=bad)['code'], 'notification_control_query_refused')
+        with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_notification_preferences_requests').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_attempts').fetchone()[0], 0)
+
     @unittest.skipUnless(sys.platform.startswith('linux') or sys.platform == 'darwin', 'Unix registration mode')
     def test_registration_variant_is_read_only_and_service_reports_its_requested_mode(self):
         passive = self.cli('desktop', 'registration', '--json')
@@ -217,6 +317,8 @@ finally:
         self.stop(process)
         database = self.desktop / 'state.sqlite3'
         with closing(sqlite3.connect(database)) as db, db:
+            db.execute('DROP TABLE desktop_notification_preferences_requests')
+            db.execute('DROP TABLE desktop_notification_preferences')
             db.execute('DROP TABLE desktop_ownership_requests')
             db.execute('DROP TABLE desktop_ownership')
             db.execute('PRAGMA user_version=14')
@@ -229,7 +331,7 @@ finally:
             self.assertEqual(db.execute("SELECT count(*) FROM sqlite_schema WHERE name='desktop_ownership_requests'").fetchone()[0], 0)
             db.execute('DROP TABLE desktop_ownership')
         _, service = self.serve()
-        self.assertEqual(service['schema'], 15)
+        self.assertEqual(service['schema'], 16)
         self.assertEqual(service['desktop_ownership']['state'], 'passive')
         self.assertFalse(service['writers_enabled'])
 
@@ -965,7 +1067,7 @@ finally:
             db.execute('PRAGMA user_version=1')
         database.chmod(0o600)
         process, status = self.serve()
-        self.assertEqual(status['schema'], 15)
+        self.assertEqual(status['schema'], 16)
         self.assertEqual(status['generation'], 8)
         self.assertEqual(status['configuration'], configuration)
         self.assertTrue(status['effect_journal']['revoked'])
@@ -975,13 +1077,15 @@ finally:
         self.assertFalse(status['read_queue']['recovery_error'])
         self.stop(process)
         with closing(sqlite3.connect(database)) as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 15)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 16)
             self.assertEqual(db.execute('SELECT rows,bytes FROM desktop_catalog_totals').fetchone(), (0, 0))
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_catalog_sources').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT configuration FROM service').fetchone()[0], configuration)
 
     @staticmethod
     def remove_changes_schema(db):
+        db.execute('DROP TABLE desktop_notification_preferences_requests')
+        db.execute('DROP TABLE desktop_notification_preferences')
         db.execute('DROP TABLE desktop_ownership_requests')
         db.execute('DROP TABLE desktop_ownership')
         db.execute('DROP INDEX desktop_attention_catalog_identity')
@@ -990,7 +1094,7 @@ finally:
 
     @classmethod
     def remove_counts_and_delivery_schema(cls, db):
-        # Rewind every later layer, rather than leaving a schema-15 database
+        # Rewind every later layer, rather than leaving a schema-16 database
         # labelled as an older version. Production migrations stay strict.
         cls.remove_changes_schema(db)
         db.execute('DROP TABLE desktop_maintenance')
@@ -1022,7 +1126,7 @@ finally:
             db.execute('PRAGMA user_version=5')
         for _ in range(2):
             process, status = self.serve()
-            self.assertEqual(status['schema'], 15)
+            self.assertEqual(status['schema'], 16)
             self.assertEqual(status['catalog_projection']['stored_bytes'], expected)
             self.assertEqual(status['catalog_projection']['stored_rows'], 0)
             self.stop(process)
@@ -1048,7 +1152,7 @@ finally:
             self.assertEqual(db.execute("SELECT count(*) FROM sqlite_schema WHERE name='desktop_operations'").fetchone()[0], 0)
             db.execute('DROP TABLE desktop_operation_totals')
         process, status = self.serve()
-        self.assertEqual(status['schema'], 15)
+        self.assertEqual(status['schema'], 16)
         self.assertEqual({key:status['operation_queue'][key] for key in ('unsettled','undrained','admissions_paused','recovery_error')}, dict(unsettled=0, undrained=0, admissions_paused=True, recovery_error=False))
         self.assertFalse(status['writers_enabled'])
         self.stop(process)
@@ -1071,7 +1175,7 @@ finally:
             self.assertEqual(db.execute("SELECT count(*) FROM sqlite_schema WHERE name LIKE 'desktop_custody_%'").fetchone()[0], 0)
             db.execute('DROP INDEX desktop_commands_pending')
         process, status = self.serve()
-        self.assertEqual(status['schema'], 15)
+        self.assertEqual(status['schema'], 16)
         self.assertEqual(status['operation_queue']['undrained'], 0)
         self.assertTrue(status['operation_queue']['admissions_paused'])
         self.assertFalse((self.desktop / 'operation-custody').exists())
@@ -1093,11 +1197,11 @@ finally:
             self.assertEqual(db.execute('SELECT fixture FROM desktop_producer_prepared').fetchone()[0], 'retained')
             db.execute('DROP TABLE desktop_producer_prepared')
         process, status = self.serve()
-        self.assertEqual(status['schema'], 15)
+        self.assertEqual(status['schema'], 16)
         self.assertFalse(status['writers_enabled'])
         self.stop(process)
         with closing(sqlite3.connect(database)) as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 15)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 16)
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_producer_prepared').fetchone()[0], 0)
 
     def test_schema_eleven_maintenance_migration_stays_passive(self):
@@ -1109,7 +1213,7 @@ finally:
             db.execute('DROP TABLE desktop_maintenance')
             db.execute('PRAGMA user_version=11')
         process, status = self.serve()
-        self.assertEqual(status['schema'], 15)
+        self.assertEqual(status['schema'], 16)
         self.assertEqual(status['generation'], old['generation'] + 1)
         self.assertEqual(status['configuration'], old['configuration'])
         self.assertFalse(status['writers_enabled'])

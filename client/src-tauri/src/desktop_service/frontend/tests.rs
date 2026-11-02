@@ -24,6 +24,27 @@ fn ownership_is_not_admitted_through_the_generic_policy_command_or_receipt_parse
     assert!(checked(&request, json!({"request_id":request.id(),"accepted":false,"durable":false,"code":"frontend_authentication_refused"}), false).is_none());
 }
 #[test]
+fn notification_controls_are_excluded_from_generic_policy_and_receipt_handling() {
+    use zerus_client_core::desktop::notification_control::{Command, Scope};
+    assert!(serde_json::from_value::<Operation>(json!("notification_control")).is_err());
+    let request = Request::NotificationControl {
+        scope: Scope {
+            configuration: "a".repeat(64),
+            service_epoch: uuid::Uuid::new_v4().to_string(),
+        },
+        control: Command::Focus {
+            request_id: uuid::Uuid::new_v4().to_string(),
+        },
+    };
+    assert!(checked(
+        &request,
+        json!({"request_id":request.id(),"accepted":true,"durable":true}),
+        false
+    )
+    .is_none());
+    assert!(lookup_receipt(&request,"query",json!({"request_id":"query","original_request_id":request.id(),"accepted":true,"durable":true})).is_err());
+}
+#[test]
 fn actual_root_status_controls_client_readiness_but_never_blocks_connected_disable() {
     // Produced by the root private Store/Runtime projection and decorator test.
     // Regenerate/check with client/scripts/generate-delivery-status-fixture.py.

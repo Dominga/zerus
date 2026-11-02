@@ -2,12 +2,42 @@ use super::*;
 use std::{fs, path::Path, time::Instant};
 
 pub(super) struct Fixture(pub(super) PathBuf);
+
+pub(super) fn private_root(parent: &Path) -> PathBuf {
+    use std::os::unix::{ffi::OsStrExt, fs::DirBuilderExt};
+    // Darwin's sun_path has 104 bytes, including the terminating NUL. Hosted
+    // runners can supply a TMPDIR too long even for our shortest socket leaf.
+    let parent = if parent
+        .join("hgs-svc-0000000000000000")
+        .join("native-cache.sock")
+        .as_os_str()
+        .as_bytes()
+        .len()
+        < 104
+    {
+        parent
+    } else if cfg!(target_os = "macos") {
+        Path::new("/private/tmp")
+    } else {
+        Path::new("/tmp")
+    };
+    for _ in 0..128 {
+        let root = parent.join(format!(
+            "hgs-svc-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..16]
+        ));
+        match fs::DirBuilder::new().mode(0o700).create(&root) {
+            Ok(()) => return root,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("private service fixture: {error}"),
+        }
+    }
+    panic!("private service fixture candidates exhausted");
+}
+
 impl Fixture {
     pub(super) fn new(config: Value) -> Self {
-        use std::os::unix::fs::DirBuilderExt;
-        let root =
-            std::env::temp_dir().join(format!("zerus-client-service-{}", uuid::Uuid::new_v4()));
-        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let root = private_root(&std::env::temp_dir());
         std::os::unix::fs::symlink(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("src/desktop_service/fake_hgs.py"),
             root.join("hgs"),
@@ -51,6 +81,23 @@ impl Drop for Fixture {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
+
+#[test]
+fn a_long_temp_parent_still_gets_a_private_bindable_socket_root() {
+    use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+    let outer = Fixture::new(json!({}));
+    let long_parent = outer.0.join("a".repeat(100));
+    fs::create_dir(&long_parent).unwrap();
+    let root = Fixture(private_root(&long_parent));
+    assert!(!root.0.starts_with(&long_parent));
+    assert_eq!(
+        fs::metadata(&root.0).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    let _listener = UnixListener::bind(root.0.join("native-cache.sock")).unwrap();
+    assert!(long_parent.is_dir(), "the supplied parent is never removed");
+}
+
 pub(super) async fn eventually(label: &str, check: impl Fn() -> bool) {
     // A loaded hosted macOS runner missed 10 s for an initial live baseline.
     let until = Instant::now() + Duration::from_secs(30);

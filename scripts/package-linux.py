@@ -42,7 +42,9 @@ def main():
                               (destination / "usr/lib/zerus/install-mobile-connector-service.py",
                                ROOT / "scripts/install-mobile-connector-service.py"),
                               (destination / "usr/lib/zerus/install-linux-desktop-service.py",
-                               ROOT / "scripts/install-linux-desktop-service.py")):
+                               ROOT / "scripts/install-linux-desktop-service.py"),
+                              (destination / "usr/lib/zerus/desktop-revoke-hold.py",
+                               ROOT / "scripts/desktop-revoke-hold.py")):
         install(source, installed, 0o755)
         # Arch owns /usr/bin/python. Make the runtime dependency visible to
         # package tools while retaining portable source shebangs elsewhere.

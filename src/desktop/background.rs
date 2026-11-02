@@ -247,6 +247,14 @@ impl Runtime {
     pub fn handoff(&self) -> Option<Arc<super::store::HandoffLock>> {
         self.notifications.handoff()
     }
+    pub fn notification_controls(
+        &mut self,
+        preferences: zerus_client_core::desktop::notification_control::Preferences,
+        foreground_until: Option<Instant>,
+    ) {
+        self.notifications.set_preferences(preferences);
+        self.attention.set_foreground_until(foreground_until);
+    }
     pub fn revocation_epoch(&self, fallback: &str) -> String {
         self.notifications
             .writer_epoch()

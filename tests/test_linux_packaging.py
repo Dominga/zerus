@@ -29,6 +29,7 @@ class LinuxPackaging(unittest.TestCase):
                      "hgs_state.py", "packaging/linux/zerus-setup", "packaging/linux/hgs-tray.desktop",
                      "packaging/linux/hgs-tray.service", "scripts/install-mobile-connector-service.py",
                      "scripts/install-linux-desktop-service.py",
+                     "scripts/desktop-revoke-hold.py",
                      "docs/licenses/codex-LICENSE.txt", "tray/resources/icons/hgs-zerus-symbolic.svg"):
             self.file("source/" + name)
         for size in (16, 24, 32, 48, 64, 128, 256, 512, 1024):
@@ -57,6 +58,7 @@ class LinuxPackaging(unittest.TestCase):
         info = json.loads((dest / "usr/share/doc/zerus/build-info.json").read_text())
         self.assertEqual(info["desktop_build"]["ZerusGUI"], "tauri")
         self.assertTrue((dest / "usr/lib/systemd/user/hgs-tray.service").is_file())
+        self.assertTrue((dest / "usr/lib/zerus/desktop-revoke-hold.py").is_file())
 
     def test_qt_binary_is_refused_by_next_packager(self):
         with self.assertRaises(SystemExit):

@@ -127,14 +127,32 @@ To return to passive service registration:
 python3 scripts/install-linux-desktop-service.py install --hgs "$(command -v hgs)" --mode passive --json
 ```
 
-This first records one original rollback revoke UUID, then requires that exact
-durable, checkpointed revoke (including runtime/resource drain) before replacing
-the unit and restarting only the desktop service. A lost or unsettled result
-retains the original transition; inspect `status` and repeat **the same passive
-transition**, which retains its UUID. An unfinished rollback blocks background
-selection and ordinary refresh. Never remove its record, revoke or database to
-recover. Returning to background later requires a fresh authenticated frontend
-Rearm. The [Mac helper](macos-distribution.md#explicit-desktop-service-mode)
+This first checks the selected CLI's `desktop-revoke-hold-v1` help marker,
+records one original rollback revoke UUID, and requires its exact durable,
+checkpointed revoke (including runtime/resource drain). It then retains the
+original native hold child through unit replacement, the desktop-only restart
+and passive readiness. Every manager step checks that child before and after.
+Only stdin EOF releases the exclusion; the matching release frame, actual child
+exit and both output pipes must settle before the transition completes. See
+[the native hold contract](desktop-revoke-hold.md).
+
+A lost or unsettled result retains the original transition; inspect `status`
+and repeat **the same passive transition**, which retains its UUID. An
+unfinished rollback blocks background selection and ordinary refresh. If a new
+authenticated Grant/Rearm won before the hold, the old UUID correctly refuses.
+The owner can explicitly cancel only that pending registration record:
+
+```sh
+python3 scripts/install-linux-desktop-service.py cancel-rollback --hgs "$(command -v hgs)" --request-id ORIGINAL_UUID --json
+```
+
+Cancellation requires the same native caller check and a verified current
+Service grant. It changes no unit, selected mode, native receipt, revoke or
+manager state, and records `last_cancelled_rollback_request_id`. A later
+`install --mode passive` is a new explicit owner intent with a new UUID; no
+unknown operation is automatically replayed. Never delete records or the
+database to recover. Returning to background requires a fresh authenticated
+frontend Rearm. The [Mac helper](macos-distribution.md#explicit-desktop-service-mode)
 provides the corresponding LaunchAgent route. Windows mode switching remains
 separate work; all fresh registration defaults are passive.
 

@@ -320,8 +320,15 @@ selections **before** the GUI rollback. It durably retains one revoke UUID and
 requires the original checkpointed drain before changing/restarting only
 `hgs-desktop.service`. Record `last_revoke_request_id` on success. On uncertainty,
 `status.transition.request_id` is the original ID; inspect it and resume only
-that same passive transition. Do not substitute a new revoke UUID or return to
-background while it is pending. The helper never restarts the GUI or agents.
+that same passive transition. The native `desktop-revoke-hold-v1` child remains
+held through the manager change and passive readiness; its matching release,
+actual exit and pipe drain precede completion. Do not substitute a new revoke
+UUID or return to background while it is pending. If a new authenticated Rearm
+won before acquisition, use the documented explicit
+[`cancel-rollback --request-id ORIGINAL_UUID`](linux-distribution.md#select-the-desktop-service-mode)
+record-only recovery, then choose a new passive intent explicitly. Cancellation
+requires a current Service grant and changes no native revoke, unit or manager.
+The helper never restarts the GUI or agents.
 
 ### Mac background registration opt-in
 

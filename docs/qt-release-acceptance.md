@@ -312,8 +312,8 @@ clearing files or launching a second service. Agent ancestry and `HGS_SESSION`/
 `HGS_RUN_ID` refuse even if the environment is stripped in a child. The future
 native Settings control uses this same helper contract; an agent cannot perform
 the acceptance mode switch on the owner's behalf. Default install is passive;
-normal refreshes preserve selection. Mac/Windows switches need their own
-maintained platform route; the Linux command does not qualify them.
+normal refreshes preserve selection. Mac uses its own maintained route below;
+Windows switching remains separate work. Linux results do not qualify them.
 
 For Linux passive rollback, use `install --mode passive --json` with the same
 selections **before** the GUI rollback. It durably retains one revoke UUID and
@@ -322,6 +322,37 @@ requires the original checkpointed drain before changing/restarting only
 `status.transition.request_id` is the original ID; inspect it and resume only
 that same passive transition. Do not substitute a new revoke UUID or return to
 background while it is pending. The helper never restarts the GUI or agents.
+
+### Mac background registration opt-in
+
+Complete the actual service-mode GUI's authenticated Grant/Rearm against the
+passive actor first. From the coordinator's genuine non-agent foreground
+Terminal context in the current Aqua login, use the installed paired selections:
+
+```bash
+: "${APP:?canonical installed paired app}" "${RUNNER_HGS:?independent installed runner}"
+MAC_DESKTOP_HELPER="$APP/Contents/Resources/setup/install-macos-desktop-service.py"
+python3 "$MAC_DESKTOP_HELPER" "$SERVICE_HGS" --runner-hgs "$RUNNER_HGS" \
+  --config-dir "$CFG" --state-dir "$STATE" --mode background --json
+python3 "$MAC_DESKTOP_HELPER" "$SERVICE_HGS" \
+  --config-dir "$CFG" --state-dir "$STATE" --status --json
+desktop_cli status --json
+```
+
+Require the signed bundled service image and independent runner to stay selected,
+and verify selected/running background mode separately from each component's
+readiness. A private pty, stripped markers, SSH agent context or launchd-submit
+does not replace the native caller/ancestor check. Missing/stale Grant, retained
+revoke, no Aqua or a custom plist refuses; do not repair it by changing files or
+starting another service. Only the owned desktop LaunchAgent reloads; neither
+GUI nor agents restart. Normal GUI installs and CLI-only refresh preserve mode.
+
+Before GUI rollback, use this helper with the same selections and `--mode
+passive --json`. It retains one original revoke UUID and requires its exact
+checkpointed runtime/resource drain before bootout/rewrite. Record
+`last_revoke_request_id`; on uncertainty, inspect `--status --json` and resume
+only its original passive transition. Authenticated Rearm is required before
+returning to background. No file clearing or new UUID substitutes for settlement.
 
 ### Client cases
 
@@ -359,19 +390,16 @@ an unbounded full listing or the GUI's local overlay.
 
 ### Revoke and rollback commands
 
-On Linux, use the maintained `--mode passive` command above and retain its
-original revoke ID. On macOS, generate and retain one canonical `REVOKE_ID` in
-the private run record before submitting it. The lookup uses that same original
-ID; it does not repeat revoke.
+On Linux/macOS, use the appropriate maintained `--mode passive` command above
+and retain its original revoke ID. A read-only lookup uses that same original
+ID; it does not repeat revoke. Never create a second revoke while the helper
+has a pending original transition.
 The GUI rollback path is its actual installed path, not a staged copy.
 
 ```bash
 : "${INSTALLED_GUI:?actual installed GUI}"
-# macOS only, until its maintained mode-switch route is available:
-: "${REVOKE_ID:?saved original UUID}"
-desktop_cli revoke --json --request-id "$REVOKE_ID" --reason rollback
-
-# Only if the first result was uncertain, read its original receipt:
+# Only if the helper result was uncertain, read its original receipt:
+: "${REVOKE_ID:?original ID from the helper transition}"
 printf '{"op":"revoke_status","request_id":"%s"}\n' "$REVOKE_ID" |
   env HGS_CONFIG_DIR="$CFG" HGS_STATE_DIR="$STATE" "$SERVICE_HGS" desktop request --json
 

@@ -134,8 +134,9 @@ retains the original transition; inspect `status` and repeat **the same passive
 transition**, which retains its UUID. An unfinished rollback blocks background
 selection and ordinary refresh. Never remove its record, revoke or database to
 recover. Returning to background later requires a fresh authenticated frontend
-Rearm. Mac and Windows mode switching remain separate platform work; their
-registration defaults are unchanged.
+Rearm. The [Mac helper](macos-distribution.md#explicit-desktop-service-mode)
+provides the corresponding LaunchAgent route. Windows mode switching remains
+separate work; all fresh registration defaults are passive.
 
 ## Qualify in a scratch prefix
 

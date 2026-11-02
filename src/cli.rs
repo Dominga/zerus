@@ -52,7 +52,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs desktop watch|request --json    private local desktop-v1 IPC
        hgs desktop feed --json             passive owner source data, no reader launch
        hgs desktop registration --json    preview this user's passive service definition
-       hgs desktop registration --json --background    preview Linux background definition
+       hgs desktop registration --json --background    preview Unix background definition
        hgs desktop registration mode-check --json   verify an interactive mode-switch caller
        hgs desktop registration install|remove|status --json   Windows interactive-user logon task
        hgs desktop notification-registration install|status --json   Windows Toast registration

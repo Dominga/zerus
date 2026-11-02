@@ -91,6 +91,49 @@ Recovery, swarm and voice retain their existing installer/update rules.
 `tray/install.sh` preflights it before the GUI swap and retains an
 unchanged active backend during GUI-only updates.
 
+### Explicit desktop service mode
+
+Fresh LaunchAgent registration is passive. Start the maintained Next frontend
+in service mode and complete its authenticated Grant against that passive
+actor first; a retained revoke requires explicit Rearm. Then use the maintained
+helper from a foreground terminal **outside Zerus** in the current Aqua login:
+
+```sh
+python3 scripts/install-macos-desktop-service.py "$APP/Contents/MacOS/hgs" \
+  --runner-hgs "$RUNNER_HGS" --mode background --json
+python3 scripts/install-macos-desktop-service.py "$APP/Contents/MacOS/hgs" --status --json
+```
+
+`APP` and `RUNNER_HGS` are the exact installed paired app and independent runner,
+not a build or guessed sibling. Optional absolute `--config-dir` and `--state-dir`
+select the same configuration as the frontend. Registration is rendered by the
+signed bundled service CLI before the ordinary runner override is applied. A
+mode change preserves that service/runner split; ordinary GUI installs and
+CLI-only `--refresh-runner` also preserve the selected mode. The GUI's own
+`--hgs` selection is unchanged.
+
+The native shared caller guard requires the actual controlling foreground TTY
+or installed frontend ancestor and rejects agent ancestry, including stripped
+child environments. `HGS_SESSION`/`HGS_RUN_ID` in terminals opened inside Zerus
+also refuse. A missing/stale native ownership grant, no Aqua session, custom
+plist controls or an unknown original transition refuses. The helper does not
+create a grant, clear revoke, change defaults or restart the GUI. It reloads
+only the owned `com.hgdev.hgs-desktop` LaunchAgent; other services and agents
+remain under their own lifecycle.
+
+For rollback, use the same selections with `--mode passive --json`. Before any
+unload or rewrite, the helper persists one original rollback revoke UUID and
+requires that exact durable checkpointed runtime/resource drain. An uncertain
+result retains `transition.request_id`; inspect `--status --json` and resume only
+the same passive transition. Do not replace the UUID, clear its record or switch
+to background while rollback is pending. After success `last_revoke_request_id`
+identifies that original receipt. Returning to background needs authenticated
+frontend Rearm. `selected_mode`, `running_mode` and `pending_restart` are separate
+status fields; they do not grant permission or prove individual workers ready.
+Mode changes require an already owned registration and the current Aqua login.
+Fresh setup is passive; headless refresh preserves the existing selection and
+does not establish active-background acceptance.
+
 The signed app's fixed `--desktop-notification-host` entry keeps
 `com.hgdev.hgs-tray` without a window, Dock tile or ordinary GUI instance.
 Its sealed `HGSDesktopNotificationHostABI` capability lets the desktop service

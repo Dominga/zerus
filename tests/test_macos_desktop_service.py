@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("mac_desktop_installer", ROOT / "scripts/install-macos-desktop-service.py")
@@ -38,15 +39,45 @@ class Commands:
                      "ready_field": "lifecycle.ipc_ready", "epoch_field": "lifecycle.epoch",
                      "generation_field": "lifecycle.generation"}}
         self.status = {"lifecycle": {"abi": installer.ABI, "configuration": self.config, "ipc_ready": True,
+                        "mode": "passive",
                         "pid": self.pid, "epoch": "fixture-epoch", "generation": 1,
                         "background": {"attention": {"ready": False, "code": "not_started"}}}}
         self.printed_path, self.printed_argv = str(self.destination), list(self.argv)
+        self.grant = {"abi": "desktop-ownership-v1", "configuration": self.config, "state": "service",
+                      "identity_current": True, "rearm_required": False, "revision": 1,
+                      **{key: str(uuid.uuid4()) for key in ("journal", "request_id", "owner_epoch")}}
+        self.refuse_caller = False
+        self.refuse_revoke = False
+        self.revoke_receipts = {}
 
     def __call__(self, argv, env=None, **kwargs):
         self.calls.append((list(argv), dict(env or {})))
         code, output = 0, ""
         if argv[1:3] == ["desktop", "registration"]:
-            output = json.dumps(self.plan)
+            if argv[3:] == ["mode-check", "--json"]:
+                code = 1 if self.refuse_caller else 0
+                output = json.dumps({"schema": 1, "configuration": self.config, "admitted": True, "source": "interactive_terminal"})
+            else:
+                value = copy.deepcopy(self.plan)
+                if argv[-1] == "--background":
+                    value["mode"] = "background"
+                    value["argv"].insert(7, "--background")
+                    definition = plistlib.loads(value["definition"].encode())
+                    definition["ProgramArguments"] = value["argv"]
+                    value["definition"] = plistlib.dumps(definition).decode().replace("?>", "?>\n<!-- " + installer.MARKER
+                        + "; configuration=" + self.config + " -->", 1)
+                output = json.dumps(value)
+        elif argv[1:3] == ["desktop", "ownership-status"]:
+            output = json.dumps(self.grant)
+        elif argv[1:3] == ["desktop", "revoke"]:
+            original = argv[argv.index("--request-id") + 1]
+            record = json.loads(self.destination.with_name("." + installer.LABEL + ".zerus-registration.json").read_bytes())
+            assert record["transition"]["request_id"] == original, "persist original before revoke"
+            code = 1 if self.refuse_revoke else 0
+            output = json.dumps(self.revoke_receipts.setdefault(original, {"request_id": original,
+                "configuration": self.config, "accepted": True, "durable": True, "revoked": True, "checkpointed": True}))
+            if not self.refuse_revoke:
+                self.grant.update(state="revoked", rearm_required=True)
         elif argv[1:3] == ["desktop", "status"]:
             output = json.dumps(self.status)
         elif argv[0] == "launchctl":
@@ -64,6 +95,7 @@ class Commands:
                 self.printed_path = argv[3]
                 self.printed_argv = plistlib.loads(Path(argv[3]).read_bytes())["ProgramArguments"]
                 self.loaded = True
+                self.status["lifecycle"]["mode"] = "background" if "--background" in self.printed_argv else "passive"
         else:
             raise AssertionError(argv)
         return subprocess.CompletedProcess(argv, code, output, "")
@@ -91,6 +123,174 @@ class MacDesktopService(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(self.command.plan["definition"] if content is None else content)
         return path
+
+    def mode_record(self):
+        return self.command.destination.with_name("." + installer.LABEL + ".zerus-registration.json")
+
+    def test_explicit_background_requires_native_grant_and_reloads_only_desktop(self):
+        self.install()
+        self.command.calls.clear()
+        result = self.install(mode="background")
+        self.assertTrue(result["ok"])
+        self.assertEqual((result["selected_mode"], result["running_mode"]), ("background", "background"))
+        self.assertIn("--background", plistlib.loads(self.command.destination.read_bytes())["ProgramArguments"])
+        self.assertEqual([args[1] for args in self.command.mutations()], ["bootout", "bootstrap"])
+        self.command.calls.clear()
+        self.install(mode="background")
+        self.assertEqual(self.command.mutations(), [])
+
+    def test_mode_preserves_paired_backend_runner_and_cli_refresh_selection(self):
+        runner = self.root / "stable-hgs"; runner.write_text("runner"); runner.chmod(0o755)
+        self.install(runner_hgs=runner)
+        result = self.install(mode="background")
+        definition = plistlib.loads(self.command.destination.read_bytes())
+        self.assertEqual(definition["ProgramArguments"][0], str(self.binary))
+        self.assertEqual(definition["EnvironmentVariables"], {"HGS_EXECUTABLE": str(runner)})
+        self.command.calls.clear()
+        self.install(runner_hgs=runner)
+        self.assertEqual(self.command.mutations(), [])
+        stable = Commands(self.home, runner)
+        def command(argv, **kwargs):
+            if argv[:3] == [str(runner), "desktop", "registration"]:
+                return stable(argv, **kwargs)
+            return self.command(argv, **kwargs)
+        installer.install(runner, self.home, {}, refresh_runner=True, command=command)
+        definition = plistlib.loads(self.command.destination.read_bytes())
+        self.assertIn("--background", definition["ProgramArguments"])
+        self.assertEqual(definition["EnvironmentVariables"], {"HGS_EXECUTABLE": str(runner)})
+        self.assertEqual(self.command.mutations(), [])
+
+    def test_revoked_missing_stale_or_wrong_config_grant_refuses_before_any_manager_mutation(self):
+        self.install()
+        old = self.command.destination.read_bytes()
+        for changes in ({"state": "passive"}, {"state": "revoked", "rearm_required": True},
+                        {"state": "identity_changed", "identity_current": False}, {"configuration": "b" * 64},
+                        {"owner_epoch": None}, {"revision": True}):
+            grant = dict(self.command.grant)
+            self.command.grant.update(changes)
+            self.command.calls.clear()
+            with self.subTest(changes=changes), self.assertRaisesRegex(installer.Refusal, "Grant/Rearm"):
+                self.install(mode="background")
+            self.assertEqual(self.command.destination.read_bytes(), old)
+            self.assertEqual(self.command.mutations(), [])
+            self.command.grant = grant
+
+    def test_agent_markers_and_native_ancestry_refusal_block_both_mode_selections(self):
+        self.install()
+        original = self.command.destination.read_bytes()
+        for mode in ("background", "passive"):
+            for name in ("HGS_SESSION", "HGS_RUN_ID"):
+                self.command.calls.clear()
+                with self.assertRaisesRegex(installer.Refusal, "Agent sessions"):
+                    installer.install(self.binary, self.home, {name: ""}, mode=mode, command=self.command)
+                self.assertEqual(self.command.destination.read_bytes(), original)
+                self.assertEqual(self.command.mutations(), [])
+            self.command.refuse_caller = True
+            with self.assertRaises(installer.Refusal):
+                self.install(mode=mode)
+            self.command.refuse_caller = False
+
+    def test_passive_rollback_retains_original_revoke_id_before_bootout_and_never_rearms(self):
+        self.install()
+        self.install(mode="background")
+        self.command.calls.clear()
+        old = self.command.destination.read_bytes()
+        self.command.refuse_revoke = True
+        with self.assertRaises(installer.Refusal):
+            self.install(mode="passive")
+        pending = json.loads(self.mode_record().read_bytes())
+        original = pending["transition"]["request_id"]
+        self.assertEqual(self.command.destination.read_bytes(), old)
+        self.assertEqual(self.command.mutations(), [])
+        with self.assertRaisesRegex(installer.Refusal, "same --mode passive"):
+            self.install(mode="background")
+        with self.assertRaisesRegex(installer.Refusal, "same --mode passive"):
+            self.install()
+        self.command.refuse_revoke = False
+        result = self.install(mode="passive")
+        self.assertEqual(result["last_revoke_request_id"], original)
+        requests = [args[args.index("--request-id") + 1] for args, _ in self.command.calls if "revoke" in args]
+        self.assertEqual(requests, [original, original])
+        self.assertNotIn("--background", plistlib.loads(self.command.destination.read_bytes())["ProgramArguments"])
+        self.assertEqual(self.command.grant["state"], "revoked")
+        with self.assertRaisesRegex(installer.Refusal, "Grant/Rearm"):
+            self.install(mode="background")
+
+    def test_custom_controls_and_no_aqua_refuse_mode_changes_without_overwrite(self):
+        self.install()
+        original = self.command.destination.read_bytes()
+        self.command.gui = False
+        with self.assertRaisesRegex(installer.Refusal, "Aqua login"):
+            self.install(mode="background")
+        self.command.gui = True
+        definition = plistlib.loads(original)
+        definition["ProcessType"] = "Background"
+        self.command.destination.write_bytes(plistlib.dumps(definition).replace(b"?>", b"?>\n<!-- " + installer.MARKER.encode()
+            + b"; configuration=" + self.command.config.encode() + b" -->", 1))
+        changed = self.command.destination.read_bytes()
+        self.command.calls.clear()
+        with self.assertRaisesRegex(installer.Refusal, "Custom desktop"):
+            self.install(mode="background")
+        self.assertEqual(self.command.destination.read_bytes(), changed)
+        self.assertEqual(self.command.mutations(), [])
+
+    def test_status_is_read_only_and_distinguishes_selection_from_running_mode(self):
+        self.install()
+        self.install(mode="background")
+        original = self.mode_record().read_bytes()
+        self.command.calls.clear()
+        value = self.install(status_only=True)
+        self.assertEqual((value["selected_mode"], value["running_mode"]), ("background", "background"))
+        self.assertEqual(self.command.mutations(), [])
+        self.assertEqual(self.mode_record().read_bytes(), original)
+        self.command.loaded = False
+        value = self.install(status_only=True)
+        self.assertIsNone(value["running_mode"])
+        self.assertFalse(value["ipc_ready"])
+
+    def test_wrong_or_incomplete_revoke_keeps_the_original_unit_and_uuid(self):
+        self.install()
+        self.install(mode="background")
+        original = self.command.destination.read_bytes()
+        self.command.refuse_revoke = True
+        with self.assertRaises(installer.Refusal):
+            self.install(mode="passive")
+        request = json.loads(self.mode_record().read_bytes())["transition"]["request_id"]
+        self.command.refuse_revoke = False
+        for change in ({"configuration": "b" * 64}, {"request_id": str(uuid.uuid4())},
+                       {"accepted": False}, {"durable": False}, {"revoked": False}, {"checkpointed": False}):
+            self.command.revoke_receipts[request] = {"request_id": request, "configuration": self.command.config,
+                "accepted": True, "durable": True, "revoked": True, "checkpointed": True, **change}
+            self.command.calls.clear()
+            with self.subTest(change=change), self.assertRaisesRegex(installer.Refusal, "not settled"):
+                self.install(mode="passive")
+            self.assertEqual(self.command.destination.read_bytes(), original)
+            self.assertEqual(json.loads(self.mode_record().read_bytes())["transition"]["request_id"], request)
+            self.assertEqual(self.command.mutations(), [])
+
+    def test_concurrent_transition_and_symlinked_metadata_cannot_replace_owned_state(self):
+        self.install()
+        original = self.command.destination.read_bytes()
+        with installer.registration_lock(self.home):
+            with self.assertRaises(BlockingIOError):
+                self.install(mode="background")
+        self.assertEqual(self.command.destination.read_bytes(), original)
+        target = self.root / "foreign-mode-record"
+        target.write_text("kept")
+        self.mode_record().symlink_to(target)
+        self.command.calls.clear()
+        with self.assertRaises(installer.Refusal):
+            self.install(mode="background")
+        self.assertEqual(target.read_text(), "kept")
+        self.assertEqual(self.command.mutations(), [])
+
+    def test_mode_and_check_remove_or_runner_refresh_are_not_combined(self):
+        self.install()
+        self.command.calls.clear()
+        for flags in ({"remove": True}, {"check_only": True}, {"refresh_runner": True}, {"status_only": True}):
+            with self.assertRaisesRegex(installer.Refusal, "cannot be combined"):
+                self.install(mode="background", **flags)
+        self.assertEqual(self.command.mutations(), [])
 
     def test_aqua_registration_and_readiness_preserve_the_selected_config_and_cli(self):
         self.assertEqual(self.install(), "ready")

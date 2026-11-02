@@ -172,14 +172,14 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
             }
             ["registration", "--json", "--background"] => {
                 ensure!(
-                    cfg!(target_os = "linux"),
-                    "background registration switching is currently supported on Linux only"
+                    cfg!(any(target_os = "linux", target_os = "macos")),
+                    "background registration switching is currently supported on Linux and macOS"
                 );
                 println!("{}", registration::preview_mode(config, &location, true)?);
                 Ok(())
             }
             ["registration", "mode-check", "--json"] => {
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
                 {
                     let scope = ui_authority::Scope::new(config, &location);
                     let source = ui_authority::registration::caller(&scope)?;
@@ -189,9 +189,9 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                     );
                     Ok(())
                 }
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
                 anyhow::bail!(
-                    "desktop registration mode checks are currently supported on Linux only"
+                    "desktop registration mode checks are currently supported on Linux and macOS"
                 )
             }
             ["registration", operation @ ("install" | "remove" | "status"), "--json"] => {

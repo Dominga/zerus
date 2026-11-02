@@ -22,6 +22,12 @@ pub const LIFETIME: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
+    DesktopOwnership {
+        request_id: String,
+        action: super::ownership::Action,
+        journal: Option<String>,
+        revision: u64,
+    },
     ImportPendingReads {
         request_id: String,
         page: Box<super::pending_reads::Page>,
@@ -60,6 +66,7 @@ impl Request {
     pub fn id(&self) -> &str {
         match self {
             Self::ActivationWait { request_id }
+            | Self::DesktopOwnership { request_id, .. }
             | Self::ImportPendingReads { request_id, .. }
             | Self::AutomaticApprovals { request_id, .. }
             | Self::MaintenanceConfigure { request_id, .. } => request_id,
@@ -67,6 +74,7 @@ impl Request {
     }
     pub fn operation(&self) -> &'static str {
         match self {
+            Self::DesktopOwnership { .. } => "desktop_ownership",
             Self::ImportPendingReads { .. } => "import_pending_reads",
             Self::ActivationWait { .. } => "activation_wait",
             Self::AutomaticApprovals { .. } => "automatic_approvals",
@@ -75,6 +83,13 @@ impl Request {
     }
     fn valid(&self) -> bool {
         match self {
+            Self::DesktopOwnership {
+                journal, revision, ..
+            } => {
+                journal.as_deref().is_none_or(canonical_uuid)
+                    && *revision <= super::ownership::MAX_REVISION
+                    && (journal.is_some() || *revision == 0)
+            }
             Self::ImportPendingReads { page, .. } => page.valid(),
             Self::ActivationWait { .. } | Self::AutomaticApprovals { .. } => true,
             Self::MaintenanceConfigure {
@@ -119,6 +134,11 @@ pub struct Evidence {
     pub child_pid: u32,
     pub child_birth: String,
     pub serial: u64,
+    /// Cached native startup mode, emitted only for ownership intents. It is
+    /// not an input field on Request and is checked by the service's original
+    /// kernel-peer/cached-child proof before any ownership mutation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ownership_mode: Option<super::ownership::Mode>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -143,6 +163,7 @@ struct Slot {
     until: Instant,
     child: Mutex<Option<(u32, String)>>,
     serial: u64,
+    ownership_mode: Option<super::ownership::Mode>,
 }
 
 #[derive(Default)]
@@ -153,8 +174,23 @@ struct State {
 #[derive(Default)]
 pub(super) struct Cache(Mutex<State>);
 impl Cache {
+    #[cfg(test)]
     pub fn prepare(&self, envelope: Envelope) -> io::Result<Registration> {
+        self.prepare_with_mode(envelope, None)
+    }
+    fn prepare_with_mode(
+        &self,
+        envelope: Envelope,
+        ownership_mode: Option<super::ownership::Mode>,
+    ) -> io::Result<Registration> {
         if !envelope.valid() {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        if let Request::DesktopOwnership { action, .. } = &envelope.request {
+            if ownership_mode != Some(action.mode()) {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+        } else if ownership_mode.is_some() {
             return Err(io::ErrorKind::InvalidInput.into());
         }
         let mut state = self.0.lock().map_err(|_| io::ErrorKind::Other)?;
@@ -171,6 +207,7 @@ impl Cache {
             until: Instant::now() + LIFETIME,
             child: Mutex::new(None),
             serial: state.serial,
+            ownership_mode,
         });
         state
             .slots
@@ -194,6 +231,7 @@ impl Cache {
             child_pid,
             child_birth,
             serial: slot.serial,
+            ownership_mode: slot.ownership_mode,
         })
     }
 }
@@ -244,11 +282,24 @@ impl Responder {
         {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
-        self.ui_requests.prepare(Envelope {
-            abi: ABI.into(),
-            attempt,
-            request,
-        })
+        let mode = match &request {
+            Request::DesktopOwnership { action, .. } => {
+                let mode = self.ownership_mode.get().copied();
+                if mode != Some(action.mode()) {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                mode
+            }
+            _ => None,
+        };
+        self.ui_requests.prepare_with_mode(
+            Envelope {
+                abi: ABI.into(),
+                attempt,
+                request,
+            },
+            mode,
+        )
     }
 
     pub(super) fn ui_reply(&self, attempt: &str) -> Option<Vec<u8>> {
@@ -358,6 +409,32 @@ mod tests {
                 enabled: true,
             },
         }
+    }
+
+    #[test]
+    fn ownership_mode_is_bound_to_the_native_slot_and_ordinary_evidence_stays_compatible() {
+        use crate::desktop::ownership::{Action, Mode};
+        let cache = Cache::default();
+        let mut value = envelope(1);
+        value.request = Request::DesktopOwnership {
+            request_id: id(101),
+            action: Action::Grant,
+            journal: None,
+            revision: 0,
+        };
+        assert!(cache.prepare(value.clone()).is_err());
+        assert!(cache
+            .prepare_with_mode(value.clone(), Some(Mode::Native))
+            .is_err());
+        let slot = cache.prepare_with_mode(value, Some(Mode::Service)).unwrap();
+        *slot.0.child.lock().unwrap() = Some((23, "synthetic-birth".into()));
+        let evidence = cache.evidence(&id(1)).unwrap();
+        assert_eq!(evidence.ownership_mode, Some(Mode::Service));
+        assert_eq!(evidence.fingerprint, slot.envelope().request.fingerprint());
+        let ordinary = cache.prepare(envelope(2)).unwrap();
+        *ordinary.0.child.lock().unwrap() = Some((24, "synthetic-birth".into()));
+        let value = serde_json::to_value(cache.evidence(&id(2)).unwrap()).unwrap();
+        assert!(value.get("ownership_mode").is_none());
     }
 
     #[test]

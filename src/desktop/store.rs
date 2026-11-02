@@ -12,7 +12,7 @@ use zerus_desktop_migration::{canonical, configuration, HANDOFF_LOCK};
 #[path = "maintenance.rs"]
 pub(crate) mod maintenance;
 
-pub const SCHEMA: i64 = 14;
+pub const SCHEMA: i64 = 15;
 pub struct HandoffLock {
     _lock: platform::FileLock,
     root: PathBuf,
@@ -126,7 +126,7 @@ fn private_file(path: &Path, create: bool) -> Result<fs::File> {
 }
 
 /// Reused before opening SQLite in either the actor or a legacy admission probe.
-fn database_files(location: &Location) -> Result<()> {
+pub(super) fn database_files(location: &Location) -> Result<()> {
     for name in [
         "state.sqlite3",
         "state.sqlite3-wal",
@@ -334,6 +334,12 @@ impl Store {
             let tx = db.transaction()?;
             super::attention::migrate(&tx)?;
             tx.execute_batch("PRAGMA user_version=14;")?;
+            tx.commit()?;
+        }
+        if version < 15 {
+            let tx = db.transaction()?;
+            super::ownership::migrate(&tx)?;
+            tx.execute_batch("PRAGMA user_version=15;")?;
             tx.commit()?;
         }
         zerus_desktop_catalog::begin_service(&mut db, epoch)?;

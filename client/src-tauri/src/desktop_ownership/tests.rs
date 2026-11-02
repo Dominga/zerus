@@ -212,14 +212,92 @@ mod native {
     }
 
     #[test]
-    fn the_actual_service_connection_grants_once_and_retains_revoked_state_until_the_action() {
+    fn startup_retries_only_a_definitive_image_drain_refusal_with_new_bounded_intents() {
         let _process = crate::PROCESS_TREE.read().unwrap();
         tauri::async_runtime::block_on(async {
-            for revoked in [false, true] {
+            for (config, count, granted) in [
+                (
+                    json!({"refuse":"ownership_drain_pending","refuse_once":true}),
+                    2,
+                    true,
+                ),
+                (json!({"refuse":"ownership_drain_pending"}), 3, false),
+                (
+                    json!({"refuse":"ownership_resources_pending","refuse_once":true}),
+                    2,
+                    true,
+                ),
+                (
+                    json!({"refuse":"ownership_transport_busy","refuse_once":true}),
+                    2,
+                    true,
+                ),
+                (json!({"refuse":"ownership_rearm_required"}), 1, false),
+                (json!({"lost":true}), 1, false),
+                (json!({"pending":true}), 1, false),
+            ] {
+                let f = Fixture::new(Mode::Service, config);
+                let result = f
+                    .owner
+                    .startup_grant("a".repeat(64), Arc::new(AtomicBool::new(false)))
+                    .await;
+                let calls = f.calls("frontend-request");
+                assert_eq!(calls.len(), count, "{result:?}");
+                let ids: std::collections::BTreeSet<_> = calls
+                    .iter()
+                    .map(|call| call["value"]["request"]["request_id"].as_str().unwrap())
+                    .collect();
+                assert_eq!(ids.len(), count, "no old mutation is resent");
+                assert_eq!(
+                    f.calls("ownership-status").len(),
+                    count,
+                    "each new intent uses fresh scope"
+                );
+                assert_eq!(f.owner.granted(), granted);
+            }
+        });
+    }
+
+    #[test]
+    fn local_transport_capacity_recovers_without_an_original_to_replay() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        let f = Fixture::new(Mode::Service, json!({}));
+        let held = [
+            f.owner.gate.admit(Role::Fleet).unwrap(),
+            f.owner.gate.admit(Role::Fleet).unwrap(),
+        ];
+        let owner = f.owner.clone();
+        let worker = std::thread::spawn(move || {
+            let until = Instant::now() + Duration::from_secs(5);
+            while owner.view().code != "ownership_transport_busy" {
+                assert!(
+                    Instant::now() < until,
+                    "the first admission must observe capacity"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            drop(held);
+        });
+        let view = tauri::async_runtime::block_on(
+            f.owner
+                .startup_grant("a".repeat(64), Arc::new(AtomicBool::new(false))),
+        );
+        worker.join().unwrap();
+        assert!(view.code.is_empty(), "{view:?}");
+        assert_eq!(f.calls("frontend-request").len(), 1);
+        assert_eq!(f.calls("ownership-status").len(), 1);
+    }
+
+    #[test]
+    fn the_actual_service_connection_retries_slow_drain_and_preserves_explicit_rearm() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        tauri::async_runtime::block_on(async {
+            for (revoked, slow) in [(false, false), (true, false), (false, true)] {
                 let f = Fixture::new(
                     Mode::Service,
                     json!({"ready":true,"rearm_required":revoked,
-                    "state":if revoked {"revoked"} else {"identity_changed"}}),
+                    "state":if revoked {"revoked"} else {"identity_changed"},
+                    "refuse":if slow {Some("ownership_drain_pending")} else {None}, "refuse_once":slow}),
                 );
                 let pump = crate::pump::Pump::default();
                 let (sink, rx) = std::sync::mpsc::sync_channel(256);
@@ -238,7 +316,10 @@ mod native {
                     assert!(Instant::now() < until, "{:?}", service.snapshot());
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
-                assert_eq!(f.calls("frontend-request").len(), usize::from(!revoked));
+                assert_eq!(
+                    f.calls("frontend-request").len(),
+                    usize::from(!revoked) + usize::from(slow)
+                );
                 if revoked {
                     assert_eq!(
                         service.snapshot().notification_ownership.as_ref().unwrap()["status"]
@@ -267,14 +348,16 @@ mod native {
         let proof =
             native_takeover(f.root.join("hgs"), f.owner.responder.clone().unwrap()).unwrap();
         assert_eq!(proof.helper().unwrap(), f.root.join("hgs"));
-        assert!(proof._receipt.native_ready());
+        assert!(proof._receipt.as_ref().unwrap().native_ready());
         assert_eq!(f.calls("frontend-request").len(), 1);
         let no_marker = Fixture::new(Mode::Native, json!({"ownership_abi":false}));
-        assert!(native_takeover(
+        let legacy = native_takeover(
             no_marker.root.join("hgs"),
-            no_marker.owner.responder.clone().unwrap()
+            no_marker.owner.responder.clone().unwrap(),
         )
-        .is_err());
+        .unwrap();
+        assert!(legacy._receipt.is_none());
+        assert!(no_marker.calls("ownership-status").is_empty());
         assert!(no_marker.calls("frontend-request").is_empty());
     }
 
@@ -284,9 +367,12 @@ mod native {
         let f = Fixture::new(Mode::Native, json!({"never_service":true}));
         let proof =
             native_takeover(f.root.join("hgs"), f.owner.responder.clone().unwrap()).unwrap();
-        assert_eq!(proof._receipt.outcome, Outcome::NativeAbsent);
-        assert!(!proof._receipt.durable);
-        assert!(proof._receipt.journal.is_none());
+        assert_eq!(
+            proof._receipt.as_ref().unwrap().outcome,
+            Outcome::NativeAbsent
+        );
+        assert!(!proof._receipt.as_ref().unwrap().durable);
+        assert!(proof._receipt.as_ref().unwrap().journal.is_none());
         assert_eq!(f.calls("frontend-request").len(), 1);
         assert!(f.calls("ownership-result").is_empty());
 
@@ -310,6 +396,99 @@ mod native {
             "an unjournaled missing original cannot settle"
         );
         assert_eq!(lost.calls("frontend-request").len(), 1);
+    }
+
+    #[test]
+    fn two_lost_noop_intents_exit_fenced_within_the_original_budget() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        let f = Fixture::new(
+            Mode::Native,
+            json!({"never_service":true,"lost":true,"missing":true}),
+        );
+        let original = f.run(Some(Action::NativeTakeover));
+        assert!(original.pending);
+        let before = Instant::now();
+        let result = native_startup(f.owner.clone(), before + Duration::from_secs(3));
+        assert!(
+            result.is_err(),
+            "an absent lookup cannot mint native posting permission"
+        );
+        assert!(before.elapsed() < Duration::from_secs(6));
+        assert_ne!(f.owner.view().request_id, original.request_id);
+        assert_eq!(
+            f.owner
+                .state()
+                .retired_native
+                .as_ref()
+                .unwrap()
+                .request
+                .id(),
+            original.request_id.as_deref().unwrap()
+        );
+        assert!(f.owner.view().pending);
+        assert_eq!(f.calls("frontend-request").len(), 2);
+        assert!(!f.calls("ownership-result").is_empty());
+    }
+
+    #[test]
+    fn lost_initial_noop_admits_only_one_fresh_authenticated_takeover_and_uses_its_result() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        let f = Fixture::new(
+            Mode::Native,
+            json!({"never_service":true,"lost":true,"lost_once":true}),
+        );
+        let proof =
+            native_takeover(f.root.join("hgs"), f.owner.responder.clone().unwrap()).unwrap();
+        assert!(proof._receipt.as_ref().unwrap().native_ready());
+        let calls = f.calls("frontend-request");
+        assert_eq!(calls.len(), 2);
+        let old = &calls[0]["value"]["request"]["request_id"];
+        let fresh = &calls[1]["value"]["request"]["request_id"];
+        assert_ne!(old, fresh);
+        assert_eq!(
+            proof._receipt.as_ref().unwrap().request_id,
+            fresh.as_str().unwrap()
+        );
+        assert!(
+            f.calls("ownership-status").len() >= 3,
+            "fresh absent observation and fresh original scope"
+        );
+    }
+
+    #[test]
+    fn an_unverified_exit_or_existing_journal_never_gets_the_absent_native_exception() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        for (never_service, confirmed) in [(true, false), (false, true)] {
+            let f = Fixture::new(
+                Mode::Native,
+                json!({"never_service":never_service,"lost":true,"missing":true}),
+            );
+            f.run(Some(Action::NativeTakeover));
+            f.owner.state().intent.as_mut().unwrap().exit_confirmed = confirmed;
+            let mut job = f
+                .owner
+                .admit(Some(Action::NativeTakeover), None, None)
+                .unwrap();
+            job.refresh_absent_native = true;
+            job.run();
+            drop(job);
+            assert!(f.owner.view().pending);
+            assert!(f.owner.state().retired_native.is_none());
+            assert_eq!(f.calls("frontend-request").len(), 1);
+        }
+        // Replacing the CLI by an older one cannot erase an unknown original.
+        let f = Fixture::new(Mode::Native, json!({"never_service":true,"lost":true}));
+        f.run(Some(Action::NativeTakeover));
+        f.config(json!({"ownership_abi":false}));
+        let mut job = f
+            .owner
+            .admit(Some(Action::NativeTakeover), None, None)
+            .unwrap();
+        job.refresh_absent_native = true;
+        job.run();
+        drop(job);
+        assert!(f.owner.state().legacy.is_none());
+        assert!(f.owner.view().pending);
     }
 
     #[test]
@@ -350,7 +529,7 @@ mod native {
         assert!(f.root.join("pipe-held").exists());
         fs::write(f.root.join("release-pipe"), []).unwrap();
         let proof = rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
-        assert!(proof._receipt.native_ready());
+        assert!(proof._receipt.as_ref().unwrap().native_ready());
         worker.join().unwrap();
         assert_eq!(f.calls("frontend-request").len(), 1);
     }

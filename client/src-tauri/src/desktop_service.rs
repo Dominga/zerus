@@ -1070,11 +1070,7 @@ async fn connection(
     if shared.ownership_supported.load(Ordering::Acquire) {
         shared
             .ownership
-            .request(
-                Some(zerus_client_core::desktop::ownership::Action::Grant),
-                Some(configuration.clone()),
-                Some(stop.clone()),
-            )
+            .startup_grant(configuration.clone(), stop.clone())
             .await;
     } else {
         shared.ownership.unsupported();

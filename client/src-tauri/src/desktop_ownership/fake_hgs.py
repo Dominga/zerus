@@ -34,6 +34,12 @@ def status():
 
 def receipt(request):
     current = status()
+    if config.get('refuse') and (not config.get('refuse_once') or not (root / 'refused-once').exists()):
+        (root / 'refused-once').touch()
+        return dict(abi=abi, request_id=request['request_id'], configuration=current['configuration'],
+                    journal=current['journal'], revision=current['revision'], action=request['action'],
+                    fingerprint=hashlib.sha256(json.dumps(request, separators=(',', ':')).encode()).hexdigest(),
+                    accepted=False, durable=False, outcome=dict(state='refused', code=config['refuse']), current=current)
     revision = request['revision'] + 1
     native = request['action'] == 'native_takeover'
     current.update(revision=revision, state='native' if native else 'service',
@@ -90,7 +96,8 @@ elif args == ['desktop', 'frontend-request', '--json']:
     assert evidence['fingerprint'] == hashlib.sha256(json.dumps(request, separators=(',', ':')).encode()).hexdigest()
     (root / 'original.json').write_text(json.dumps(request))
     (root / 'bound').touch()
-    if config.get('lost'):
+    if config.get('lost') and (not config.get('lost_once') or not (root / 'lost-once').exists()):
+        (root / 'lost-once').touch()
         raise SystemExit('private lost reply')
     if config.get('held_pipe') and os.fork() == 0:
         (root / 'pipe-held').touch()
@@ -104,7 +111,7 @@ elif args == ['desktop', 'ownership-result', '--json']:
     assert value['original_request_id'] == original['request_id']
     assert value['fingerprint'] == hashlib.sha256(json.dumps(original, separators=(',', ':')).encode()).hexdigest()
     assert value['journal'] == original['journal'] and value['revision'] == original['revision']
-    missing = config.get('missing', False)
+    missing = config.get('missing', False) or config.get('lost_once', False)
     print(json.dumps(dict(abi=abi, request_id=value['request_id'], configuration='a' * 64,
                          found=not missing, definitive=missing and config.get('definitive', False),
                          receipt=None if missing else receipt(original))))

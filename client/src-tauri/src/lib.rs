@@ -91,6 +91,8 @@ mod signals;
 #[cfg(feature = "live")]
 mod speech_settings;
 #[cfg(feature = "live")]
+mod startup_error;
+#[cfg(feature = "live")]
 mod task_details;
 #[cfg(feature = "live")]
 mod task_editor;
@@ -326,7 +328,8 @@ pub fn run() {
                         let settled = match desktop_hello::hold(identity.is_switch(), &responder) {
                             Ok(held) => held,
                             Err(_) => {
-                                eprintln!("zerus-client: desktop startup refused before writers; use a compatible local hgs and reconcile unsettled desktop state");
+                                eprintln!("zerus-client: desktop startup is unconfirmed; writers remain stopped");
+                                startup_error::show(context);
                                 return;
                             }
                         };
@@ -369,6 +372,7 @@ pub fn run() {
                     Ok(proof) => Some(proof),
                     Err(code) => {
                         eprintln!("zerus-client: native ownership takeover is unconfirmed: {code}");
+                        startup_error::show(context);
                         return;
                     }
                 };
@@ -384,6 +388,7 @@ pub fn run() {
         .is_some_and(|proof| proof.helper().is_err())
     {
         eprintln!("zerus-client: native ownership helper changed before GUI startup");
+        startup_error::show(context);
         return;
     }
     #[cfg(target_os = "macos")]

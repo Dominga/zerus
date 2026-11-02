@@ -192,3 +192,29 @@ another answer, including after a restart. Disabling the policy cancels pending
 inspections and answers; cancellation after a possible send remains unknown.
 Read receipt retries remain distinct from this no-replay approval rule. Neither
 status nor a command receipt establishes worker drain, currentness or release.
+
+
+## Read-only approval audit
+
+The selected desktop service accepts the closed `approval_audit_list` and
+`approval_audit_detail` requests from `desktop::approval_audit::Request` in the
+shared core. Probe the selected CLI for `Desktop approval audit ABI:
+desktop-approval-audit-v1`, then use its existing `desktop request --json`
+transport. Each query and reply binds the request ID, configuration and service
+epoch. These reads need no background writer or automatic-approval opt-in.
+
+The first List omits `journal` and `through`; its result contains at most fifty
+entries, `next`/`previous` keyset cursors and a fixed `through` high-water ID.
+Subsequent pages retain the returned journal identity and high-water, using
+`before` for older or `after` for newer entries. Exact `host` and `session`
+filters use their existing indexes. Detail requires the same journal identity
+and a positive entry ID. `Request::matches` validates the reply scope, shape and
+256 KiB bound before the client unwraps `result` for its existing journal UI.
+
+The service holds one original read-only connection and file identity. A changed
+journal, protection, schema or missing filter index refuses instead of adopting
+old cursors or repairing the journal. A fresh first List can select the current
+journal. An absent journal is an empty read and creates no directory or database;
+unreadable and oversized records remain unavailable, never truncated. This API
+has no Begin/Finish, reservation, worker, policy or consent operation. Ordinary
+`hgs approval-log` compatibility remains unchanged.

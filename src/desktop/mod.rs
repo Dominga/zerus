@@ -1,4 +1,5 @@
 //! Durable desktop service kernel with explicit service-owned fleet activation.
+mod approval_audit;
 #[allow(dead_code)] // Discovery is bound to the original notification factory at cutover.
 mod attention;
 mod background;
@@ -406,6 +407,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     let active = Arc::new(AtomicUsize::new(0));
     let mut feed = feed::Broker::new(&epoch);
     let mut reads = catalog_read::Reader::default();
+    let mut audit = approval_audit::Reader::new(config, &location, &epoch);
     let mut frontend = frontend::Cache::default();
     let mut background: Option<background::Runtime> = None;
     let mut frontend_order = ui_authority::Order::default();
@@ -620,6 +622,13 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                             )
                         }) {
                             reads.request(&store, &feed, &epoch, hello.request.as_ref().unwrap())
+                        } else if hello.request.as_ref().is_some_and(|v| {
+                            matches!(
+                                v["op"].as_str(),
+                                Some("approval_audit_list" | "approval_audit_detail")
+                            )
+                        }) {
+                            audit.request(hello.request.as_ref().unwrap())
                         } else if hello
                             .request
                             .as_ref()

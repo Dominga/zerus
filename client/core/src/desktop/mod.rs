@@ -13,6 +13,7 @@ use std::{
 use zerus_desktop_migration::canonical_uuid;
 
 pub mod activation;
+pub mod approval_audit;
 pub mod drain;
 pub mod notifications;
 pub mod pending_reads;

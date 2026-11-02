@@ -23,6 +23,24 @@ HGS = Path(os.environ.get('HGS_TEST_BIN', Path(__file__).resolve().parents[1] / 
 
 
 class Desktop(unittest.TestCase):
+    def test_approval_audit_is_selected_scoped_and_does_not_create_a_journal(self):
+        self.serve()
+        status = self.cli('desktop', 'status', '--json')
+        query = dict(op='approval_audit_list', request_id=str(uuid.uuid4()),
+                     configuration=status['configuration'], epoch=status['epoch'])
+        reply = self.cli('desktop', 'request', '--json', data=query)
+        self.assertEqual(reply['abi'], 'desktop-approval-audit-v1')
+        self.assertTrue(reply['accepted'])
+        self.assertTrue(reply['read_only'])
+        self.assertEqual(reply['configuration'], status['configuration'])
+        self.assertEqual(reply['service_epoch'], status['epoch'])
+        self.assertEqual(reply['result']['entries'], [])
+        self.assertFalse((self.state / 'approval-audit').exists())
+        query['epoch'] = str(uuid.uuid4())
+        refused = self.cli('desktop', 'request', '--json', data=query)
+        self.assertFalse(refused['accepted'])
+        self.assertEqual(refused['code'], 'approval_audit_scope_changed')
+
     def setUp(self):
         # macOS's per-user TMPDIR (/var/folders/...) leaves too little of the
         # 104-byte socket path for the desktop service under nested state dirs.

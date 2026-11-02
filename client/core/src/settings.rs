@@ -7,7 +7,9 @@
 //! from Qt's own store; Qt's store is never written, so a rollback finds Qt as
 //! it was. Loading, seeding and writing run on the store's own thread.
 
+mod capture;
 pub mod geometry;
+pub use capture::{CapturedQt, CapturedSettings};
 mod imports;
 pub mod qt;
 mod qt_layout;
@@ -578,6 +580,57 @@ impl QtStore {
             modified_at,
         }))
     }
+
+    /// Native report capture. The fixed Mac export child and every original
+    /// pipe retain the supplied source resources; failure never substitutes a
+    /// potentially stale plist for an uncertain current defaults export.
+    pub fn snapshot_retained(
+        &self,
+        resources: Arc<dyn Send + Sync>,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<Option<QtSnapshot>, String> {
+        if cancel.load(std::sync::atomic::Ordering::Acquire) {
+            return Err("Qt source capture stopped".into());
+        }
+        if let QtStore::Plist {
+            domain: Some(domain),
+            ..
+        } = self
+        {
+            let invocation = crate::actions::Invocation {
+                args: vec!["export".into(), domain.into(), "-".into()],
+                stdin: None,
+                timeout: Duration::from_secs(10),
+                request_id: None,
+            };
+            let result = crate::run::run_streamed_retained(
+                Path::new(DEFAULTS),
+                &invocation,
+                &[],
+                MAX_QT_STORE as usize,
+                cancel,
+                resources,
+                |_| true,
+            );
+            let bytes = match result {
+                Ok(crate::actions::Exit::Code {
+                    code: 0, stdout, ..
+                }) => stdout,
+                _ => return Err("Qt source export is unconfirmed".into()),
+            };
+            let values = qt::read_plist(&bytes)?;
+            return Ok(Some(QtSnapshot {
+                values,
+                source: "qt-defaults",
+                sha256: zerus_desktop_migration::sha256(&bytes),
+                modified_at: fs::metadata(self.path())
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(seconds),
+            }));
+        }
+        self.snapshot()
+    }
 }
 
 fn seconds(time: SystemTime) -> Option<u64> {
@@ -748,6 +801,7 @@ struct State {
     seed: Option<QtStore>,
     error: Option<String>,
     revision: u64,
+    capturing: bool,
 }
 
 struct Shared {
@@ -786,6 +840,7 @@ impl Settings {
                 seed,
                 error: None,
                 revision: 0,
+                capturing: false,
             }),
             signal: Condvar::new(),
             listeners: Mutex::new(Vec::new()),
@@ -902,6 +957,9 @@ impl Settings {
         };
         let (now, revision) = {
             let mut state = self.loaded();
+            if state.capturing {
+                return Err("Settings are temporarily paused for the migration snapshot.".into());
+            }
             if let Some(error) = &state.unreadable {
                 return Err(error.clone());
             }
@@ -1004,7 +1062,7 @@ impl Settings {
     ) -> Result<bool, String> {
         let changed = {
             let mut state = self.loaded();
-            if state.unreadable.is_some() || state.closed {
+            if state.unreadable.is_some() || state.closed || state.capturing {
                 return Err("Settings cannot record a project import.".into());
             }
             let mut candidate = state.contents.clone();

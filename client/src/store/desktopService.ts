@@ -23,6 +23,14 @@ export function pendingReadNotice(state: DesktopService | undefined): string {
     : tr("Saved read marks could not be transferred. Marking sessions as read is paused. Retry to continue.");
 }
 
+export function retainedSourceNotice(state: DesktopService | undefined): string {
+  const report = state?.retained_source_import;
+  if (!report?.required || !report.code || report.code === "retained_import_staged") return "";
+  if (report.running) return tr("Preparing the migration report. Your sessions remain available.");
+  if (report.code === "retained_import_handoff_busy") return tr("The migration report is deferred while background work is running.");
+  return tr("The migration report needs review. Your sessions remain available.");
+}
+
 /** Called by the existing opt-in confirmation only. An uncertain request is not replayed. */
 export function createServiceApprovalIntent(
   send: (id: string, enabled: boolean) => Promise<unknown>,

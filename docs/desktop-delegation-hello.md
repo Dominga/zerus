@@ -85,7 +85,11 @@ journal, revision }`. All three actions share one native ordering key.
 supersede a retained revoke/native takeover. `Rearm` is a new explicit user
 intent after that state. Both require cached `Mode::Service`. `NativeTakeover`
 requires cached `Mode::Native` and closes service ownership before GUI writers
-can resume. The journal/revision come from the bounded status read; no journal
+can resume. A pure maintained frontend update only invalidates the closed-UI
+launch grant: it does not revoke background work or set `rearm_required`. The
+new authenticated canonical frontend's ordinary Grant binds its new identity,
+without explicit Rearm. A real retained revoke, rollback, native takeover or
+pending drain still requires the existing rearm path. The journal/revision come from the bounded status read; no journal
 is permitted only at initial revision zero. The root derives selected frontend
 build/file identity from native proof, not the payload. No action inherits an
 automatic-approval opt-in.
@@ -97,6 +101,17 @@ completion. `Receipt::native_ready()` also joins the current actor observation
 to that exact native command/journal/revision, so a historical settled takeover
 cannot release a new GUI after ownership changes. The client consumes this only
 from its original retained CLI response, never a webview-supplied receipt.
+
+For a never-service configuration with no desktop database, handoff, sidecars or
+retained notification-host state, an authenticated NativeTakeover instead returns
+`Outcome::NativeAbsent`: accepted, non-durable, null journal and revision zero.
+It holds the existing owner exclusion if present and rechecks the same original
+native proof; it creates no directory, database, revoke or ownership row and does
+not force a later service-mode frontend to rearm. `native_ready()` recognizes
+this explicit observed no-op only after `matches()` on the original CLI reply.
+An unknown retained state or live but unreachable owner refuses it. A read-only
+lookup never manufactures NativeAbsent and a lost no-op response stays unknown.
+
 
 For an unknown mutation, retain its original logical UUID and child/pipe/cache
 resources, then issue only `Query::for_request` read lookups. A missing record
@@ -115,7 +130,7 @@ consent; host attachment remains the next lifecycle stage.
 
 Independent status/result reads do not create or migrate an absent database.
 NativeTakeover can authenticate its original CLI child and acquire the original
-owner lock while the service is absent; it does not start a service. Existing
+owner lock while a service with existing state is absent; it does not start a service. Existing
 operation custody remains a drain prerequisite. Only a missing request under
 the same nonempty journal and unchanged original revision is a definitive
 negative. Missing/replaced state or an initial unjournaled request stays unknown.

@@ -19,7 +19,7 @@ fn receipt(action: Action) -> Receipt {
         abi: ABI.into(),
         request_id: id(1),
         configuration: "a".repeat(64),
-        journal: id(2),
+        journal: Some(id(2)),
         fingerprint: request.fingerprint(),
         action,
         revision: 8,
@@ -93,6 +93,39 @@ fn closed_intents_distinguish_startup_rearm_and_takeover_without_mode_claims() {
 
 #[test]
 fn native_mode_is_once_per_instance_and_missing_or_wrong_mode_cannot_register() {
+    const CASE: &str = "desktop::ownership::tests::native_mode_is_once_per_instance_and_missing_or_wrong_mode_cannot_register";
+    const MARKER: &str = "ZERUS_OWNERSHIP_MODE_TEST";
+    if std::env::var(MARKER).as_deref() != Ok(CASE) {
+        let invocation = crate::Invocation {
+            args: vec![
+                "--exact".into(),
+                CASE.into(),
+                "--nocapture".into(),
+                "--test-threads=1".into(),
+            ],
+            stdin: None,
+            request_id: None,
+            timeout: std::time::Duration::from_secs(30),
+        };
+        let result = crate::run::run_without(
+            &std::env::current_exe().unwrap(),
+            &invocation,
+            &[(MARKER, CASE)],
+            &["HGS_SESSION", "HGS_RUN_ID"],
+            64 << 10,
+        )
+        .unwrap();
+        assert!(
+            matches!(&result, crate::Exit::Code { code: 0, .. }),
+            "isolated native mode case: {result:?}"
+        );
+        let crate::Exit::Code { stdout, .. } = result else {
+            unreachable!()
+        };
+        assert!(String::from_utf8_lossy(&stdout)
+            .contains("test result: ok. 1 passed; 0 failed; 0 ignored;"));
+        return;
+    }
     let responder = responder();
     assert!(responder.configure_once("a".repeat(64)));
     assert!(responder
@@ -204,4 +237,49 @@ fn lookup_preserves_original_identity_and_missing_is_not_an_implicit_negative() 
     reply.receipt.as_mut().unwrap().request_id = id(1);
     reply.definitive = true;
     assert!(!reply.matches(&query));
+}
+
+#[test]
+fn only_an_explicit_authenticated_absent_takeover_receipt_can_settle_the_noop() {
+    let request = Request::DesktopOwnership {
+        request_id: id(20),
+        action: Action::NativeTakeover,
+        journal: None,
+        revision: 0,
+    };
+    let mut value = receipt(Action::NativeTakeover);
+    value.request_id = id(20);
+    value.fingerprint = request.fingerprint();
+    value.journal = None;
+    value.revision = 0;
+    value.durable = false;
+    value.outcome = Outcome::NativeAbsent;
+    value.current.journal = None;
+    value.current.revision = 0;
+    value.current.owner_epoch = None;
+    value.current.state = State::Native;
+    value.current.request_id = Some(id(20));
+    assert!(value.matches(&request, &"a".repeat(64)));
+    assert!(value.native_ready());
+    let query = Query::for_request(id(21), "a".repeat(64), &request).unwrap();
+    let lookup = Lookup {
+        abi: ABI.into(),
+        request_id: id(21),
+        configuration: "a".repeat(64),
+        found: true,
+        definitive: false,
+        receipt: Some(value.clone()),
+    };
+    assert!(
+        !lookup.matches(&query),
+        "a read-only lookup cannot manufacture an unstored no-op permission"
+    );
+    value.durable = true;
+    assert!(!value.valid());
+    value.durable = false;
+    value.current.state = State::Service;
+    assert!(!value.native_ready());
+    value.current.state = State::Native;
+    value.current.journal = Some(id(2));
+    assert!(!value.native_ready());
 }

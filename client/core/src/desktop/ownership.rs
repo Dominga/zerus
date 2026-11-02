@@ -79,6 +79,9 @@ impl Status {
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Outcome {
     Pending,
+    /// Authenticated native takeover found no desktop state or service. This
+    /// is a one-time observed no-op, not a durable grant or committed command.
+    NativeAbsent,
     Granted {
         owner_epoch: String,
     },
@@ -101,7 +104,7 @@ pub struct Receipt {
     pub abi: String,
     pub request_id: String,
     pub configuration: String,
-    pub journal: String,
+    pub journal: Option<String>,
     pub fingerprint: String,
     pub action: Action,
     pub revision: u64,
@@ -117,18 +120,33 @@ impl Receipt {
         self.abi == ABI
             && canonical_uuid(&self.request_id)
             && digest(&self.configuration)
-            && canonical_uuid(&self.journal)
+            && self.journal.as_deref().is_none_or(canonical_uuid)
             && digest(&self.fingerprint)
             && self.revision <= MAX_REVISION
             && (!self.durable || self.accepted)
             && self.current.matches(&self.configuration)
             && bounded(self)
             && match &self.outcome {
-                Outcome::Pending => self.accepted && self.durable,
+                Outcome::Pending => self.accepted && self.durable && self.journal.is_some(),
+                Outcome::NativeAbsent => {
+                    self.action == Action::NativeTakeover
+                        && self.accepted
+                        && !self.durable
+                        && self.journal.is_none()
+                        && self.revision == 0
+                        && self.current.journal.is_none()
+                        && self.current.revision == 0
+                        && self.current.state == State::Native
+                        && !self.current.rearm_required
+                        && self.current.owner_epoch.is_none()
+                        && self.current.request_id.as_deref() == Some(self.request_id.as_str())
+                        && self.current.identity_current
+                }
                 Outcome::Granted { owner_epoch } => {
                     self.action != Action::NativeTakeover
                         && self.accepted
                         && self.durable
+                        && self.journal.is_some()
                         && canonical_uuid(owner_epoch)
                 }
                 Outcome::NativeReady {
@@ -140,6 +158,7 @@ impl Receipt {
                     self.action == Action::NativeTakeover
                         && self.accepted
                         && self.durable
+                        && self.journal.is_some()
                         && *revoked
                         && *checkpointed
                         && *drained
@@ -167,8 +186,13 @@ impl Receipt {
             && self.request_id == *request_id
             && self.action == *action
             && self.fingerprint == request.fingerprint()
-            && journal.as_deref().is_none_or(|id| id == self.journal)
-            && (matches!(self.outcome, Outcome::Refused { .. }) || self.revision > *revision)
+            && journal
+                .as_ref()
+                .is_none_or(|id| Some(id) == self.journal.as_ref())
+            && (matches!(
+                self.outcome,
+                Outcome::Refused { .. } | Outcome::NativeAbsent
+            ) || self.revision > *revision)
     }
     /// A historical grant receipt is readable but cannot stand in for the
     /// fresh current ownership observation attached by the actor.
@@ -179,7 +203,7 @@ impl Receipt {
             && self.current.state == State::Service
             && self.current.identity_current
             && !self.current.rearm_required
-            && self.current.journal.as_deref() == Some(self.journal.as_str())
+            && self.current.journal == self.journal
             && self.current.revision == self.revision
             && self.current.request_id.as_deref() == Some(self.request_id.as_str())
     }
@@ -188,10 +212,13 @@ impl Receipt {
     pub fn native_ready(&self) -> bool {
         self.valid()
             && self.action == Action::NativeTakeover
-            && matches!(self.outcome, Outcome::NativeReady { .. })
+            && matches!(
+                self.outcome,
+                Outcome::NativeReady { .. } | Outcome::NativeAbsent
+            )
             && self.current.state == State::Native
             && self.current.identity_current
-            && self.current.journal.as_deref() == Some(self.journal.as_str())
+            && self.current.journal == self.journal
             && self.current.revision == self.revision
             && self.current.request_id.as_deref() == Some(self.request_id.as_str())
     }
@@ -287,10 +314,13 @@ impl Lookup {
                     self.found
                         && !self.definitive
                         && receipt.valid()
+                        && receipt.durable
                         && receipt.request_id == *original_request_id
                         && receipt.configuration == *configuration
                         && receipt.fingerprint == *fingerprint
-                        && journal.as_deref().is_none_or(|id| id == receipt.journal)
+                        && journal
+                            .as_ref()
+                            .is_none_or(|id| Some(id) == receipt.journal.as_ref())
                 }
                 None => !self.found,
             }

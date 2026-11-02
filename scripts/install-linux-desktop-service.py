@@ -4,6 +4,7 @@ import argparse
 import configparser
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -22,8 +23,10 @@ LIMIT = 65536
 GRAPHICAL = "graphical-session.target"
 
 
-class Refusal(Exception):
-    pass
+_spec = importlib.util.spec_from_file_location("desktop_revoke_hold", Path(__file__).with_name("desktop-revoke-hold.py"))
+_hold = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_hold)
+Refusal = _hold.Refusal
 
 
 class PendingRestart(Refusal):
@@ -212,9 +215,11 @@ def graphics(env):
 
 
 class Installer:
-    def __init__(self, hgs, env=None, run=command, mode=None):
+    def __init__(self, hgs, env=None, run=command, mode=None, hold_factory=None):
         self.env = dict(os.environ if env is None else env)
         self.run = run
+        self.hold_factory = hold_factory or _hold.Hold
+        self.rollback_hold = None
         self.hgs = os.path.abspath(hgs)
         require(os.access(self.hgs, os.X_OK), "selected hgs is not executable")
         require(mode in (None, "passive", "background"), "unsupported desktop service mode")
@@ -267,7 +272,14 @@ class Installer:
         return value
 
     def manager(self, *args):
-        return self.run(["systemctl", "--user", *args], self.env)
+        self.fence()
+        value = self.run(["systemctl", "--user", *args], self.env)
+        self.fence()
+        return value
+
+    def fence(self):
+        if self.rollback_hold is not None:
+            self.rollback_hold.check()
 
     def state(self):
         raw = self.manager("show", UNIT, "--property=LoadState,ActiveState,MainPID,FragmentPath,DropInPaths", "--no-pager")
@@ -338,7 +350,9 @@ class Installer:
         return lifecycle
 
     def save(self, record):
+        self.fence()
         write_file(self.record_path, (json.dumps(record, indent=2) + "\n").encode())
+        self.fence()
 
     def status(self):
         previous = self.ownership()
@@ -367,6 +381,10 @@ class Installer:
                 and value.get("configuration") == self.configuration
                 and all(value.get(key) is True for key in ("accepted", "durable", "revoked", "checkpointed")),
                 "original rollback revoke has not settled; keep the same pending transition")
+        hold = self.hold_factory(self.hgs, dict(self.env, **self.registration["readiness"]["environment"]),
+                                 self.configuration, transition["request_id"], value,
+                                 self.run([self.hgs, "--help"], self.env))
+        self.rollback_hold = hold.acquire()
         return transition
 
     def install(self, *, check=False, no_start=False, session=False, refresh=False):
@@ -439,7 +457,9 @@ class Installer:
                 if self.mode == "background":
                     self.grant()
             if read_file(self.destination) != self.definition:
+                self.fence()
                 write_file(self.destination, self.definition)
+                self.fence()
             self.save(record)
             if explicit:
                 self.caller()
@@ -484,12 +504,20 @@ class Installer:
                 self.grant()
                 require(self.last_status.get("background_start", {}).get("durably_blocked") is not True,
                         "background handoff is blocked; complete authenticated Rearm, never clear the revoke")
+            if self.rollback_hold is not None:
+                self.fence()
+                self.rollback_hold.close()
+                self.rollback_hold = None
             record.update(session=context, pending_restart=False)
             record.pop("transition", None)
             self.save(record)
             return "Desktop service IPC ready. Background workers have their separate lifecycle status."
         finally:
-            os.close(fd)  # No explicit unlock; no descriptor is exported to a child.
+            try:
+                if self.rollback_hold is not None:
+                    self.rollback_hold.close()
+            finally:
+                os.close(fd)  # Retain the installer lock through the original hold's join.
 
 
 def main():

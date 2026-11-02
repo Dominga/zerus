@@ -174,7 +174,7 @@ enum Input {
     Catalog,
     Flush(SyncSender<()>),
     #[cfg(all(test, unix))]
-    Barrier(SyncSender<()>),
+    Barrier(Job, SyncSender<()>),
 }
 
 enum Done {
@@ -264,6 +264,8 @@ impl CreationHost {
                     pending: BTreeMap::new(),
                     shutdown: quitting,
                     quitting: false,
+                    #[cfg(all(test, unix))]
+                    barrier: None,
                 };
                 let effects = worker.queue.load(load(&file));
                 // Loaded bound records intentionally emit no Changed event,
@@ -298,6 +300,13 @@ impl CreationHost {
                         let changed = worker.catalog.swap(false, Ordering::AcqRel);
                         worker.reconcile_pending(changed);
                         worker.poll(changed);
+                    }
+                    // A fixture phase ends after this pass's reconciliation,
+                    // then after its ordered journal writes. An input reply
+                    // alone precedes reconciliation and is not such a fence.
+                    #[cfg(all(test, unix))]
+                    if let Some(answer) = worker.barrier.take() {
+                        let _ = worker.writer.send(Write::Flush(answer));
                     }
                 }
             })
@@ -411,8 +420,20 @@ impl CreationHost {
 
     #[cfg(all(test, unix))]
     fn flush_journal_for_test(&self) -> bool {
+        self.arrange_for_test(|| {})
+    }
+
+    /// Publish one fixture phase inside the original queue worker's turn,
+    /// before it reads readiness or consumes the coalesced catalog wake.
+    #[cfg(all(test, unix))]
+    fn arrange_for_test(&self, arrange: impl FnOnce() + Send + 'static) -> bool {
         let (send, answer) = mpsc::sync_channel(1);
-        if self.0.input.send(Input::Barrier(send)).is_err() {
+        if self
+            .0
+            .input
+            .send(Input::Barrier(Box::new(arrange), send))
+            .is_err()
+        {
             return false;
         }
         answer.recv_timeout(Duration::from_secs(2)).is_ok()
@@ -462,6 +483,8 @@ struct Worker {
     pending: BTreeMap<String, PendingBinding>,
     shutdown: Arc<AtomicBool>,
     quitting: bool,
+    #[cfg(all(test, unix))]
+    barrier: Option<SyncSender<()>>,
 }
 
 struct Placement(Resolve);
@@ -541,8 +564,9 @@ impl Worker {
                 let _ = answer.send(Ok(()));
             }
             #[cfg(all(test, unix))]
-            Input::Barrier(answer) => {
-                let _ = self.writer.send(Write::Flush(answer));
+            Input::Barrier(arrange, answer) => {
+                arrange();
+                self.barrier = Some(answer);
             }
             Input::Catalog => {}
             Input::Flush(answer) => {
@@ -2456,6 +2480,15 @@ mod tests {
 
     #[test]
     fn bound_edits_wait_once_for_readiness_then_once_for_the_member_without_journal_or_notice() {
+        bound_edits_phases(true);
+    }
+
+    #[test]
+    fn bound_edits_coalesce_readiness_and_member_arrival_without_a_second_retry() {
+        bound_edits_phases(false);
+    }
+
+    fn bound_edits_phases(separate_member: bool) {
         let fake = Fake::new();
         let pump = crate::pump::Pump::default();
         let organization = organization_fixture(&fake, &pump, true);
@@ -2506,24 +2539,38 @@ mod tests {
                 reason: None,
             });
         }
-        // Two worker messages prove a pass occurred while readiness was unchanged.
-        let _ = host.action(id.clone(), CreationAction::Show);
-        let _ = host.action(id.clone(), CreationAction::Show);
+        // Drain the complete unchanged-readiness pass, rather than treating
+        // an Action reply (sent before reconciliation) as its completion.
+        assert!(host.flush_journal_for_test());
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
-        let change = ready_organization(&organization);
-        host.observe(&change);
-        wait("one attempt after ready", || {
-            attempts.load(Ordering::SeqCst) == 2
-        });
-        let change = row_for_binding(&pump);
-        host.observe(&change);
+        let org = organization.clone();
+        let rows = pump.clone();
+        let wake = host.clone();
+        assert!(host.arrange_for_test(move || {
+            let change = ready_organization(&org);
+            wake.observe(&change);
+            if !separate_member {
+                let change = row_for_binding(&rows);
+                wake.observe(&change);
+            }
+        }));
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        if separate_member {
+            let rows = pump.clone();
+            let wake = host.clone();
+            assert!(host.arrange_for_test(move || {
+                let change = row_for_binding(&rows);
+                wake.observe(&change);
+            }));
+        }
         wait("the exact member moved", || {
             !pump.members_of("p").is_empty()
         });
         let settled = attempts.load(Ordering::SeqCst);
-        assert!(
-            matches!(settled, 2 | 3),
-            "readiness and member arrival may share one wake"
+        assert_eq!(
+            settled,
+            if separate_member { 3 } else { 2 },
+            "one attempt per explicitly completed fixture phase"
         );
         assert!(host.flush_journal_for_test());
         assert_eq!(
@@ -2580,6 +2627,7 @@ mod tests {
             },
         );
         state(&host, &id, "bound");
+        assert!(host.flush_journal_for_test());
         assert_eq!(text(&operation(&host, &id), "error"), "");
         assert!(lock(&fake.probe.events)
             .iter()

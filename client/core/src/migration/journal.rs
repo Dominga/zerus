@@ -174,19 +174,22 @@ mod tests {
     use super::*;
     use std::{
         fs,
+        sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
 
     struct Scratch(PathBuf);
     impl Scratch {
         fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
             let root = std::env::temp_dir().join(format!(
-                "zerus-import-journal-{}-{}",
+                "zerus-import-journal-{}-{}-{}",
                 std::process::id(),
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
-                    .as_nanos()
+                    .as_nanos(),
+                NEXT.fetch_add(1, Ordering::Relaxed),
             ));
             #[cfg(unix)]
             fs::create_dir(&root).unwrap();

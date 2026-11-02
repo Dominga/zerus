@@ -705,6 +705,8 @@ impl Order {
                     | "maintenance_configure"
                     | "import_pending_reads"
                     | "desktop_ownership"
+                    | "notification_preferences"
+                    | "notification_focus"
             ),
             "unknown frontend operation"
         );
@@ -1097,6 +1099,27 @@ mod tests {
             permit.into_request().is_err(),
             "generic mutation consumes no notification authority"
         );
+    }
+    #[test]
+    fn native_notification_operations_are_admitted_and_ordered_independently() {
+        let mut order = Order::default();
+        let instance = (42, "birth".to_string(), id(95));
+        let now = Instant::now();
+        order
+            .observe(instance.clone(), "notification_preferences", 2, now)
+            .unwrap();
+        order
+            .observe(instance.clone(), "notification_focus", 1, now)
+            .unwrap();
+        assert!(order
+            .observe(instance.clone(), "notification_preferences", 1, now)
+            .is_err());
+        assert!(order
+            .observe(instance.clone(), "notification_focus", 1, now)
+            .is_err());
+        order
+            .observe(instance, "notification_focus", 2, now)
+            .unwrap();
     }
 
     #[test]

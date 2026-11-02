@@ -465,7 +465,31 @@ fn failed_read_worker_retains_the_original_ticket_until_finish_commits() {
 
 #[test]
 fn cancelled_reserved_answer_retries_only_its_journal_finish() {
-    let mut f = Fixture::new(quiet());
+    cancelled_answer_finish_with_due_scan(false);
+}
+
+#[test]
+fn cancelled_reserved_answer_finish_survives_stop_without_new_inspection() {
+    cancelled_answer_finish_with_due_scan(true);
+}
+
+fn cancelled_answer_finish_with_due_scan(stopping: bool) {
+    let inspections = Arc::new(AtomicUsize::new(0));
+    let answers = Arc::new(AtomicUsize::new(0));
+    let run: Runner = {
+        let inspections = inspections.clone();
+        let answers = answers.clone();
+        Arc::new(move |inv, _, _, _| {
+            if inv.args.iter().any(|arg| arg == "inspect") {
+                inspections.fetch_add(1, Ordering::SeqCst);
+                inspected(question())
+            } else {
+                answers.fetch_add(1, Ordering::SeqCst);
+                panic!("a cancelled Answer must never be replayed");
+            }
+        })
+    };
+    let mut f = Fixture::new(run);
     f.active();
     f.enabled(true);
     f.source(row(), true);
@@ -479,6 +503,8 @@ fn cancelled_reserved_answer_retries_only_its_journal_finish() {
     let reserved = policy::reserved(&r, "claude", &question())
         .unwrap()
         .unwrap();
+    let original_id = reserved.id;
+    let original_request = reserved.request.clone();
     journal.execute_batch("CREATE TRIGGER fail_finish BEFORE UPDATE ON attempts BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
     f.runtime.journal = Some(journal);
     let lease = f.runtime.lease(Kind::Approval).unwrap();
@@ -492,19 +518,75 @@ fn cancelled_reserved_answer_retries_only_its_journal_finish() {
         },
         lease,
     ));
+    if stopping {
+        f.runtime.request_stop();
+    }
+    // Poll also discovers new work. Make that boundary deterministic instead
+    // of depending on setup finishing within the one-second scan interval.
+    f.runtime.scan_at = Instant::now();
     f.runtime.poll(&mut f.store);
     assert_eq!(f.journal_status().as_deref(), Some("prepared"));
     assert_eq!(f.runtime.jobs.len(), 1);
+    assert!(
+        matches!(&f.runtime.jobs[0].phase, Phase::Answer { audit, .. }
+        if audit.id == original_id && audit.request == original_request)
+    );
+    assert_eq!(
+        f.runtime.approval_error,
+        Some("approval_receipt_uncommitted")
+    );
+    assert_eq!(inspections.load(Ordering::SeqCst), 0);
+    assert_eq!(answers.load(Ordering::SeqCst), 0);
     f.runtime
         .journal
         .as_ref()
         .unwrap()
         .execute_batch("DROP TRIGGER fail_finish;")
         .unwrap();
+    f.runtime.scan_at = Instant::now();
     f.runtime.poll(&mut f.store);
-    assert!(f.runtime.jobs.is_empty());
     assert_eq!(f.journal_status().as_deref(), Some("cancelled"));
     assert!(f.runtime.approval_error.is_none());
+    if stopping {
+        assert!(f.runtime.drained());
+    } else {
+        // The original Answer is finished. Its removal and recovered journal
+        // permit a FRESH Inspect in this same poll, never an Answer retry.
+        assert_eq!(f.runtime.jobs.len(), 1);
+        assert!(matches!(&f.runtime.jobs[0].phase, Phase::Inspect(_)));
+        // Finish this worker with policy/writer admission still active. The
+        // same question must find its cancelled reservation, not send Answer.
+        // Keep later discovery outside tick_until's bounded five-second wait.
+        f.runtime.scan_at = Instant::now() + Duration::from_secs(60);
+        f.tick_until(|runtime| runtime.jobs.is_empty());
+        f.runtime.request_stop();
+        assert!(f.runtime.drained());
+    }
+    let journal = f.runtime.journal.as_ref().unwrap();
+    let entry: (i64, String, String, String) = journal
+        .query_row(
+            "SELECT id,request_id,status,detail FROM attempts",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        entry,
+        (
+            original_id,
+            original_request,
+            "cancelled".into(),
+            policy::CANCELLED.into()
+        )
+    );
+    assert_eq!(
+        journal
+            .query_row("SELECT count(*) FROM attempts", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(inspections.load(Ordering::SeqCst), usize::from(!stopping));
+    assert_eq!(answers.load(Ordering::SeqCst), 0);
 }
 
 #[test]

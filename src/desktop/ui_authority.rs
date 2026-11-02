@@ -83,12 +83,24 @@ impl Scope {
         }
     }
     fn selected_frontend(&self, image: &Path) -> bool {
-        let Some(identity) = platform::file_identity(image) else {
-            return false;
-        };
+        self.installed_frontend(image).is_some()
+    }
+    pub(super) fn installed_frontend(&self, image: &Path) -> Option<&Path> {
+        let identity = platform::file_identity(image)?;
         self.frontend_images
             .iter()
-            .any(|path| platform::file_identity(path) == Some(identity))
+            .find(|path| platform::file_identity(path) == Some(identity))
+            .map(PathBuf::as_path)
+    }
+    /// Bind an explicit maintained-image choice; this never discovers one from
+    /// PATH or turns an inbound path check into a launch/worker permission.
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)] // Consumed by the following Linux UI-closed launch slice.
+    pub fn select_frontend(
+        &self,
+        image: &Path,
+    ) -> Result<super::notifications::frontend::SelectedFrontend> {
+        super::notifications::frontend::SelectedFrontend::select(self, image)
     }
 }
 
@@ -1155,6 +1167,43 @@ mod tests {
         let mut injected = launcher.to_vec();
         injected.extend_from_slice(b"LD_PRELOAD=/opt/example/inject.so\0");
         assert!(marked(&injected));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn frontend_custody_uses_the_explicit_installed_catalog_choice() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let prefix = temp.path().canonicalize().unwrap().join("selected");
+        std::fs::create_dir_all(prefix.join("bin")).unwrap();
+        std::fs::set_permissions(&prefix, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(prefix.join("bin"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let image = prefix.join("bin/hgs-tray");
+        std::fs::copy("/bin/cat", &image).unwrap();
+        let other = prefix.join("bin/other");
+        std::fs::copy("/bin/cat", &other).unwrap();
+        let mut scope = Scope {
+            location: Location {
+                root: temp.path().join("state/desktop"),
+                configuration: "a".repeat(64),
+            },
+            frontend_images: vec![image.clone()],
+        };
+        // Synthetic catalog and private files, not an installed GUI claim.
+        let selected = scope.select_frontend(&image).unwrap();
+        assert_eq!(selected.image(), image);
+        assert_eq!(selected.configuration(), scope.configuration);
+        selected.revalidate().unwrap();
+        assert!(scope.select_frontend(&other).is_err());
+        // HOME's maintained prefix may itself be a symlink. Its catalog entry
+        // still identifies the same file; custody pins the canonical layout.
+        let linked = temp.path().join(".local");
+        std::os::unix::fs::symlink(&prefix, &linked).unwrap();
+        scope.frontend_images.insert(0, linked.join("bin/hgs-tray"));
+        let selected = scope.select_frontend(&image).unwrap();
+        assert_eq!(selected.image(), image);
+        selected.revalidate().unwrap();
     }
 
     #[test]

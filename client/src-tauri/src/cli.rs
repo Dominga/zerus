@@ -41,6 +41,28 @@ pub enum Command {
     LoginItem { enabled: bool },
 }
 
+/// Consume only this new GUI process's launch input. The environment is never
+/// a callback authority; reject conflicts rather than silently changing targets.
+#[cfg(all(feature = "live", target_os = "linux"))]
+pub fn take_navigation_environment(options: &mut Options) -> Result<(), String> {
+    use zerus_client_core::desktop::activation::{decode_navigation, NAVIGATION_ENV};
+    let raw = std::env::var_os(NAVIGATION_ENV);
+    std::env::remove_var(NAVIGATION_ENV);
+    let Some(raw) = raw else {
+        return Ok(());
+    };
+    if options.target.is_some() || options.background {
+        return Err("Conflicting desktop navigation inputs".into());
+    }
+    let value = raw
+        .into_string()
+        .map_err(|_| "Invalid desktop target environment")?;
+    let target = decode_navigation(&value).ok_or("Invalid desktop target environment")?;
+    options.target = Some(target);
+    options.sessions = true;
+    Ok(())
+}
+
 /// Called once before GUI workers start; never mutates the service's environment.
 #[cfg(all(feature = "live", target_os = "linux"))]
 pub fn take_activation_token(navigation: bool) -> Option<String> {
@@ -152,9 +174,10 @@ pub fn usage() -> String {
     #[cfg(all(feature = "live", target_os = "linux"))]
     {
         format!(
-            "{base}\n  {} <json>  open an exact computer/run/conversation\n{}\n",
+            "{base}\n  {} <json>  open an exact computer/run/conversation\n{}\n{}\n",
             zerus_client_core::desktop::activation::NAVIGATION_ARG,
-            zerus_client_core::desktop::activation::NAVIGATION_HELP_MARKER
+            zerus_client_core::desktop::activation::NAVIGATION_HELP_MARKER,
+            zerus_client_core::desktop::activation::NAVIGATION_ENV_HELP_MARKER
         )
     }
     #[cfg(not(all(feature = "live", target_os = "linux")))]
@@ -261,10 +284,23 @@ mod tests {
 
     #[cfg(all(feature = "live", target_os = "linux"))]
     #[test]
-    fn navigation_consumes_its_startup_token_in_an_isolated_child() {
-        const CASE: &str = "cli::tests::navigation_consumes_its_startup_token_in_an_isolated_child";
+    fn navigation_consumes_its_startup_inputs_in_an_isolated_child() {
+        const CASE: &str =
+            "cli::tests::navigation_consumes_its_startup_inputs_in_an_isolated_child";
         const GUARD: &str = "ZERUS_TEST_NAVIGATION_TOKEN";
+        let target = zerus_client_core::desktop::activation::Target {
+            computer: "peer.example".into(),
+            run: "original-run".into(),
+            conversation: "original-conversation".into(),
+        };
+        let encoded = zerus_client_core::desktop::activation::encode_navigation(&target).unwrap();
+        use zerus_client_core::desktop::activation::NAVIGATION_ENV;
         if std::env::var(GUARD).as_deref() == Ok("1") {
+            let mut options = Options::default();
+            take_navigation_environment(&mut options).unwrap();
+            assert_eq!(options.target, Some(target.clone()));
+            assert!(options.opens_sessions(true));
+            assert!(std::env::var_os(NAVIGATION_ENV).is_none());
             assert_eq!(
                 std::env::var("XDG_ACTIVATION_TOKEN").as_deref(),
                 Ok("synthetic-wayland")
@@ -275,6 +311,37 @@ mod tests {
             );
             assert!(std::env::var_os("XDG_ACTIVATION_TOKEN").is_none());
             assert!(take_activation_token(true).is_none());
+            for bad in [
+                "{}".to_owned(),
+                "x".repeat(8193),
+                r#"{"computer":"peer","run":"r","conversation":"c","token":"injected"}"#.into(),
+            ] {
+                std::env::set_var(NAVIGATION_ENV, bad);
+                let mut options = Options::default();
+                assert!(take_navigation_environment(&mut options).is_err());
+                assert_eq!(options, Options::default());
+                assert!(std::env::var_os(NAVIGATION_ENV).is_none());
+            }
+            for mut options in [
+                Options {
+                    background: true,
+                    ..Options::default()
+                },
+                Options {
+                    target: Some(target),
+                    ..Options::default()
+                },
+            ] {
+                std::env::set_var(NAVIGATION_ENV, &encoded);
+                let before = options.clone();
+                assert!(take_navigation_environment(&mut options).is_err());
+                assert_eq!(options, before);
+                assert!(std::env::var_os(NAVIGATION_ENV).is_none());
+            }
+            use std::os::unix::ffi::OsStringExt;
+            std::env::set_var(NAVIGATION_ENV, std::ffi::OsString::from_vec(vec![0xff]));
+            assert!(take_navigation_environment(&mut Options::default()).is_err());
+            assert!(std::env::var_os(NAVIGATION_ENV).is_none());
             return;
         }
         let invocation = zerus_client_core::actions::Invocation {
@@ -291,7 +358,11 @@ mod tests {
         let output = zerus_client_core::run::run_owned(
             &std::env::current_exe().unwrap(),
             &invocation,
-            &[(GUARD, "1"), ("XDG_ACTIVATION_TOKEN", "synthetic-wayland")],
+            &[
+                (GUARD, "1"),
+                ("XDG_ACTIVATION_TOKEN", "synthetic-wayland"),
+                (NAVIGATION_ENV, &encoded),
+            ],
             &std::sync::atomic::AtomicBool::new(false),
             |command| command.spawn(),
             std::sync::Arc::new(()),
@@ -325,6 +396,9 @@ mod tests {
         assert!(usage()
             .lines()
             .any(|line| line == wire::NAVIGATION_HELP_MARKER));
+        assert!(usage()
+            .lines()
+            .any(|line| line == wire::NAVIGATION_ENV_HELP_MARKER));
         for argv in [
             vec![wire::NAVIGATION_ARG],
             vec![wire::NAVIGATION_ARG, "{}"],

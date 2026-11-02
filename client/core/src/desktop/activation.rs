@@ -12,6 +12,10 @@ pub const HELP_MARKER: &str = "Desktop activation ABI: desktop-activation-v1";
 pub const NAVIGATION_ABI: &str = "desktop-target-v1";
 pub const NAVIGATION_HELP_MARKER: &str = "Desktop target navigation ABI: desktop-target-v1";
 pub const NAVIGATION_ARG: &str = "--desktop-target";
+/// Service launch input is consumed before any GUI worker can inherit it.
+pub const NAVIGATION_ENV: &str = "ZERUS_CLIENT_DESKTOP_TARGET";
+pub const NAVIGATION_ENV_HELP_MARKER: &str =
+    "Desktop target environment ABI: desktop-target-env-v1";
 pub const NAVIGATION_BYTES: usize = 8192;
 
 pub const WAIT: Duration = Duration::from_secs(15);

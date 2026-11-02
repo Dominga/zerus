@@ -3776,9 +3776,12 @@ would open the workspace opens it there.
 The Linux target value is bounded to 8192 bytes and accepts only those three
 fields. It follows the exact run and conversation through a session rename and
 refuses an archived or replaced session. The service's selected-child launcher
-passes any ephemeral Wayland activation token in that child's environment, never
-in the target argument or a file. The new GUI consumes it before starting its
+requires the separate environment-input capability and passes the same target
+as `ZERUS_CLIENT_DESKTOP_TARGET` in that child only, keeping the identifiers out
+of its command line. An ephemeral Wayland activation token also travels only in
+that child's environment. The new GUI consumes both values before starting its
 workers; forwarding navigation to an already running GUI carries no token.
+Conflicting argument/environment targets and target/background starts refuse.
 On Linux and macOS, concurrent launches take turns on it, and a launch such as
 `hgs-tray --sessions` leaves it to the `hgs-tray` systemd or launchd service
 while that service runs or restarts: it waits up to 30 seconds for the

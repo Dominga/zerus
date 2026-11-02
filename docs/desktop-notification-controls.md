@@ -55,15 +55,24 @@ ActivationWait, source activity or service readiness. Native mode cannot
 register this service-mode request. Ordinary Hello/evidence stays compatible;
 the additional native observation is bound only to this request arm.
 
-The client sends one bounded off-UI snapshot at a time, at most every two
-seconds while connected, and promptly on a native focus transition. It retains
+The client sends one bounded off-UI snapshot at a time. Repeated Foreground
+renewals run at most once every two seconds while connected. Background/Unknown
+transitions bypass that renewal delay. It retains
 the same paired relay connection selection and original child/resources through
-each exchange. A pending exchange coalesces later native changes; no unbounded
-worker or input queue is created. Focus is suppression data, not a permission.
+each exchange. A native transition immediately increments the connection-scoped
+cache revision and invalidates older Focus registrations, without releasing
+their original child/resource charges. The existing native evidence query reads
+the current cache and refuses an invalidated slot. Connection change or
+disconnect sets Unknown and invalidates the old incarnation. A pending exchange
+coalesces only the latest state; it sends the clear as soon as original custody
+drains, without starting a second child. No unbounded worker or input queue is
+created. Focus is suppression data, not a permission.
 
 Root retains at most one original canonical-frontend proof/connection lease.
 A verified Background/Unknown update, old connection, failed proof, known UI
-exit or verified disconnect clears suppression immediately. An uncertain lost
+exit or verified disconnect clears suppression immediately when Root observes
+it. If a snapshot was already admitted before the native event, propagation
+through a blocked exchange has no zero-latency guarantee. An uncertain lost
 connection or reply cannot renew it: the last Foreground snapshot expires on a
 monotonic deadline within five seconds. The actor checks cheap held-process
 liveness every turn, bounded full proof periodically, and full proof before

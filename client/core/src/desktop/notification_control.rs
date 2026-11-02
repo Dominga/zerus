@@ -12,6 +12,8 @@ pub const HELP_MARKER: &str = "Notification controls ABI: desktop-notification-c
 pub const BYTES: usize = 8192;
 pub const MAX_REVISION: u64 = (1 << 53) - 1;
 pub const FOCUS_TTL_MS: u64 = 5000;
+/// Repeated Foreground renewals only. Background/Unknown transitions bypass
+/// this delay, while still retaining one outstanding original child at a time.
 pub const FOCUS_REFRESH_MS: u64 = 2000;
 
 /// Exactly the existing optional-question preference. No writer or approval

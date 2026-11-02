@@ -23,6 +23,33 @@ HGS = Path(os.environ.get('HGS_TEST_BIN', Path(__file__).resolve().parents[1] / 
 
 
 class Desktop(unittest.TestCase):
+    def test_notification_controls_are_scoped_reads_and_generic_mutation_is_refused(self):
+        self.serve()
+        current = self.cli('desktop', 'status', '--json')
+        scope = dict(configuration=current['configuration'], service_epoch=current['epoch'])
+        query = dict(op='notification_preferences_status', request_id=str(uuid.uuid4()), scope=scope)
+        status = self.cli('desktop', 'request', '--json', data=query)
+        self.assertEqual(status['abi'], 'desktop-notification-controls-v1')
+        self.assertEqual(status['scope'], scope)
+        self.assertFalse(status['configured'])
+        self.assertEqual(status['preferences'], dict(optional_questions=False))
+        original = dict(kind='configure', request_id=str(uuid.uuid4()), journal=status['journal'],
+                        revision=0, preferences=dict(optional_questions=True))
+        mutation = dict(op='notification_control', scope=scope, control=original)
+        refused = self.cli('desktop', 'request', '--json', data=mutation)
+        self.assertFalse(refused['accepted'])
+        self.assertEqual(refused['code'], 'frontend_authentication_required')
+        lookup = dict(op='notification_preferences_result', query=dict(
+            request_id=str(uuid.uuid4()), scope=scope, original=original))
+        result = self.cli('desktop', 'request', '--json', data=lookup)
+        self.assertTrue(result['definitive_not_applied'])
+        self.assertIsNone(result['receipt'])
+        bad = dict(query, scope=dict(scope, service_epoch=str(uuid.uuid4())))
+        self.assertEqual(self.cli('desktop', 'request', '--json', data=bad)['code'], 'notification_control_query_refused')
+        with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_notification_preferences_requests').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_attempts').fetchone()[0], 0)
+
     def test_approval_audit_is_selected_scoped_and_does_not_create_a_journal(self):
         self.serve()
         status = self.cli('desktop', 'status', '--json')
@@ -98,6 +125,8 @@ class Desktop(unittest.TestCase):
         self.stop(process)
         database = self.desktop / 'state.sqlite3'
         with closing(sqlite3.connect(database)) as db, db:
+            db.execute('DROP TABLE desktop_notification_preferences_requests')
+            db.execute('DROP TABLE desktop_notification_preferences')
             db.execute('DROP TABLE desktop_ownership_requests')
             db.execute('DROP TABLE desktop_ownership')
             db.execute('PRAGMA user_version=14')
@@ -110,7 +139,7 @@ class Desktop(unittest.TestCase):
             self.assertEqual(db.execute("SELECT count(*) FROM sqlite_schema WHERE name='desktop_ownership_requests'").fetchone()[0], 0)
             db.execute('DROP TABLE desktop_ownership')
         _, service = self.serve()
-        self.assertEqual(service['schema'], 15)
+        self.assertEqual(service['schema'], 16)
         self.assertEqual(service['desktop_ownership']['state'], 'passive')
         self.assertFalse(service['writers_enabled'])
 
@@ -846,7 +875,7 @@ class Desktop(unittest.TestCase):
             db.execute('PRAGMA user_version=1')
         database.chmod(0o600)
         process, status = self.serve()
-        self.assertEqual(status['schema'], 15)
+        self.assertEqual(status['schema'], 16)
         self.assertEqual(status['generation'], 8)
         self.assertEqual(status['configuration'], configuration)
         self.assertTrue(status['effect_journal']['revoked'])
@@ -856,13 +885,15 @@ class Desktop(unittest.TestCase):
         self.assertFalse(status['read_queue']['recovery_error'])
         self.stop(process)
         with closing(sqlite3.connect(database)) as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 15)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 16)
             self.assertEqual(db.execute('SELECT rows,bytes FROM desktop_catalog_totals').fetchone(), (0, 0))
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_catalog_sources').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT configuration FROM service').fetchone()[0], configuration)
 
     @staticmethod
     def remove_changes_schema(db):
+        db.execute('DROP TABLE desktop_notification_preferences_requests')
+        db.execute('DROP TABLE desktop_notification_preferences')
         db.execute('DROP TABLE desktop_ownership_requests')
         db.execute('DROP TABLE desktop_ownership')
         db.execute('DROP INDEX desktop_attention_catalog_identity')
@@ -871,7 +902,7 @@ class Desktop(unittest.TestCase):
 
     @classmethod
     def remove_counts_and_delivery_schema(cls, db):
-        # Rewind every later layer, rather than leaving a schema-15 database
+        # Rewind every later layer, rather than leaving a schema-16 database
         # labelled as an older version. Production migrations stay strict.
         cls.remove_changes_schema(db)
         db.execute('DROP TABLE desktop_maintenance')
@@ -903,7 +934,7 @@ class Desktop(unittest.TestCase):
             db.execute('PRAGMA user_version=5')
         for _ in range(2):
             process, status = self.serve()
-            self.assertEqual(status['schema'], 15)
+            self.assertEqual(status['schema'], 16)
             self.assertEqual(status['catalog_projection']['stored_bytes'], expected)
             self.assertEqual(status['catalog_projection']['stored_rows'], 0)
             self.stop(process)
@@ -929,7 +960,7 @@ class Desktop(unittest.TestCase):
             self.assertEqual(db.execute("SELECT count(*) FROM sqlite_schema WHERE name='desktop_operations'").fetchone()[0], 0)
             db.execute('DROP TABLE desktop_operation_totals')
         process, status = self.serve()
-        self.assertEqual(status['schema'], 15)
+        self.assertEqual(status['schema'], 16)
         self.assertEqual({key:status['operation_queue'][key] for key in ('unsettled','undrained','admissions_paused','recovery_error')}, dict(unsettled=0, undrained=0, admissions_paused=True, recovery_error=False))
         self.assertFalse(status['writers_enabled'])
         self.stop(process)
@@ -952,7 +983,7 @@ class Desktop(unittest.TestCase):
             self.assertEqual(db.execute("SELECT count(*) FROM sqlite_schema WHERE name LIKE 'desktop_custody_%'").fetchone()[0], 0)
             db.execute('DROP INDEX desktop_commands_pending')
         process, status = self.serve()
-        self.assertEqual(status['schema'], 15)
+        self.assertEqual(status['schema'], 16)
         self.assertEqual(status['operation_queue']['undrained'], 0)
         self.assertTrue(status['operation_queue']['admissions_paused'])
         self.assertFalse((self.desktop / 'operation-custody').exists())
@@ -974,11 +1005,11 @@ class Desktop(unittest.TestCase):
             self.assertEqual(db.execute('SELECT fixture FROM desktop_producer_prepared').fetchone()[0], 'retained')
             db.execute('DROP TABLE desktop_producer_prepared')
         process, status = self.serve()
-        self.assertEqual(status['schema'], 15)
+        self.assertEqual(status['schema'], 16)
         self.assertFalse(status['writers_enabled'])
         self.stop(process)
         with closing(sqlite3.connect(database)) as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 15)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 16)
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_producer_prepared').fetchone()[0], 0)
 
     def test_schema_eleven_maintenance_migration_stays_passive(self):
@@ -990,7 +1021,7 @@ class Desktop(unittest.TestCase):
             db.execute('DROP TABLE desktop_maintenance')
             db.execute('PRAGMA user_version=11')
         process, status = self.serve()
-        self.assertEqual(status['schema'], 15)
+        self.assertEqual(status['schema'], 16)
         self.assertEqual(status['generation'], old['generation'] + 1)
         self.assertEqual(status['configuration'], old['configuration'])
         self.assertFalse(status['writers_enabled'])

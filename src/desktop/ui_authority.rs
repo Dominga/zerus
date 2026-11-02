@@ -207,12 +207,18 @@ pub(super) struct Authorized {
     instance: String,
     serial: u64,
     ownership_origin: Option<super::ownership::Origin>,
+    notification: Option<zerus_client_core::desktop::notification_control::NativeControl>,
     #[cfg(windows)]
     windows: Option<Box<WindowsFreshness>>,
 }
 /// Actor-side permit after the original peer was revalidated. It deliberately
 /// has no Clone/Deserialize or public constructor, even inside the request lane.
-pub(super) struct Validated(Request, Freshness, Option<super::ownership::Origin>);
+#[derive(Default)]
+struct Metadata {
+    ownership: Option<super::ownership::Origin>,
+    notification: Option<zerus_client_core::desktop::notification_control::NativeControl>,
+}
+pub(super) struct Validated(Request, Freshness, Metadata);
 enum Freshness {
     Native {
         caller: Process,
@@ -258,8 +264,11 @@ impl Validated {
     pub fn into_request(self) -> Result<Request> {
         self.check()?;
         ensure!(
-            !matches!(self.0, Request::DesktopOwnership { .. }),
-            "ownership requires its typed boundary"
+            !matches!(
+                self.0,
+                Request::DesktopOwnership { .. } | Request::NotificationControl { .. }
+            ),
+            "native controls require their typed boundary"
         );
         Ok(self.0)
     }
@@ -271,6 +280,7 @@ impl Validated {
         );
         let origin = self
             .2
+            .ownership
             .as_ref()
             .context("original ownership identity missing")?;
         ensure!(origin.current(), "ownership image changed");
@@ -284,7 +294,7 @@ impl Validated {
         Self(
             serde_json::from_value(value.clone()).expect("synthetic native-policy fixture"),
             Freshness::Fixture,
-            None,
+            Metadata::default(),
         )
     }
 }
@@ -481,7 +491,10 @@ impl Authorized {
                 #[cfg(windows)]
                 windows: self.windows,
             },
-            self.ownership_origin,
+            Metadata {
+                ownership: self.ownership_origin,
+                notification: self.notification,
+            },
         ))
     }
 }
@@ -559,6 +572,7 @@ pub(super) fn authenticate(location: &Scope, peer_pid: u32, value: &Value) -> Re
         instance: reply.hello.instance_epoch,
         serial: reply.request.serial,
         ownership_origin,
+        notification: reply.request.notification,
         #[cfg(windows)]
         windows: Some(Box::new(windows)),
     })
@@ -612,6 +626,31 @@ fn validate(
         ensure!(
             reply.request.ownership_mode == Some(action.mode()),
             "ownership mode does not match the native frontend"
+        );
+    }
+    if let Request::NotificationControl { scope, control } = &envelope.request {
+        let native = reply
+            .request
+            .notification
+            .as_ref()
+            .context("native notification evidence missing")?;
+        ensure!(
+            native.scope == *scope
+                && native.scope.configuration == configuration
+                && native.mode == zerus_client_core::desktop::ownership::Mode::Service
+                && match control {
+                    zerus_client_core::desktop::notification_control::Command::Configure {
+                        ..
+                    } => native.focus.is_none(),
+                    zerus_client_core::desktop::notification_control::Command::Focus { .. } =>
+                        native.focus.as_ref().is_some_and(|v| v.valid()),
+                },
+            "native notification scope/mode does not match"
+        );
+    } else {
+        ensure!(
+            reply.request.notification.is_none(),
+            "unexpected native notification evidence"
         );
     }
     if let Request::MaintenanceConfigure {
@@ -975,6 +1014,7 @@ mod tests {
             },
             request: Evidence {
                 ownership_mode: None,
+                notification: None,
                 attempt: id(1),
                 request_id: id(2),
                 fingerprint: envelope.request.fingerprint(),
@@ -1007,6 +1047,56 @@ mod tests {
             }
             assert!(validate(&request, &caller, &frontend, &reply, &config).is_err());
         }
+    }
+
+    #[test]
+    fn notification_controls_require_cached_service_mode_and_matching_native_scope() {
+        use zerus_client_core::desktop::notification_control::{
+            Command, FocusState, NativeControl, NativeFocus, Scope,
+        };
+        let (mut envelope, caller, frontend, mut reply) = fixture();
+        let scope = Scope {
+            configuration: "a".repeat(64),
+            service_epoch: id(91),
+        };
+        envelope.request = Request::NotificationControl {
+            scope: scope.clone(),
+            control: Command::Focus { request_id: id(2) },
+        };
+        reply.request.fingerprint = envelope.request.fingerprint();
+        let native = NativeControl {
+            scope,
+            mode: zerus_client_core::desktop::ownership::Mode::Service,
+            focus: Some(NativeFocus {
+                connection_id: id(92),
+                revision: 1,
+                state: FocusState::Foreground,
+            }),
+        };
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.notification = Some(native.clone());
+        validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).unwrap();
+        for changed in 0..5 {
+            let mut bad = native.clone();
+            match changed {
+                0 => bad.mode = zerus_client_core::desktop::ownership::Mode::Native,
+                1 => bad.scope.service_epoch = id(93),
+                2 => bad.scope.configuration = "b".repeat(64),
+                3 => bad.focus = None,
+                _ => bad.focus.as_mut().unwrap().revision = 0,
+            }
+            reply.request.notification = Some(bad);
+            assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        }
+        let permit = Validated::notification_fixture(
+            native.scope,
+            Command::Focus { request_id: id(94) },
+            native.focus,
+        );
+        assert!(
+            permit.into_request().is_err(),
+            "generic mutation consumes no notification authority"
+        );
     }
 
     #[test]
@@ -1046,7 +1136,7 @@ mod tests {
                 #[cfg(windows)]
                 windows: None,
             },
-            None,
+            Metadata::default(),
         );
         // Expiration refuses before attempting any lookup of these fake PIDs.
         assert!(permit.into_request().is_err());
@@ -1419,7 +1509,7 @@ mod activation_freshness_tests {
             frontend,
             until: Instant::now() - WAIT,
         };
-        assert!(Validated(request(), freshness, None)
+        assert!(Validated(request(), freshness, Metadata::default())
             .activation_wait()
             .is_err());
     }
@@ -1437,7 +1527,7 @@ mod activation_freshness_tests {
                 windows: None,
             }
         };
-        assert!(Validated(request(), live(), None)
+        assert!(Validated(request(), live(), Metadata::default())
             .activation_wait()
             .is_err());
         let receiver = ActivationReceiver::new(
@@ -1448,3 +1538,5 @@ mod activation_freshness_tests {
         assert!(!receiver.handoff_current());
     }
 }
+mod notification;
+pub(super) use notification::FocusPeer;

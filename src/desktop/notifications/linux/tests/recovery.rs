@@ -268,6 +268,8 @@ fn failed_setup_retries_with_capped_backoff_and_revocation_cancels_the_timer() {
     ledger::revoke(&root.h.store.db, "manual_revoke").unwrap();
     root.poll();
     assert!(root.runtime.status()["retry_in_ms"].is_null());
+    assert_eq!(root.runtime.status()["recovering"], false);
+    assert!(root.runtime.status()["error"].is_null());
     root.stop();
     assert!(root.location.handoff_lock().is_ok());
 }

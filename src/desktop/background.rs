@@ -247,6 +247,12 @@ impl Runtime {
     pub fn handoff(&self) -> Option<Arc<super::store::HandoffLock>> {
         self.notifications.handoff()
     }
+    pub fn revocation_epoch(&self, fallback: &str) -> String {
+        self.notifications
+            .writer_epoch()
+            .unwrap_or(fallback)
+            .to_owned()
+    }
 
     pub fn drained(&self) -> bool {
         self.drained
@@ -259,7 +265,7 @@ impl Runtime {
         self.producer.close();
         self.delivery.request_stop();
         self.maintenance.request_stop();
-        self.attention.request_stop();
+        self.attention.set_policy(attention::Policy::default());
         self.notifications.request_stop();
         if let Some(presence) = &self.presence {
             presence.request_stop();
@@ -285,6 +291,9 @@ impl Runtime {
         let mut seq = 0;
         self.notifications
             .poll(store, &mut self.attention, &mut self.activations, &mut seq);
+        if self.notifications.drained() {
+            self.attention.request_stop();
+        }
         let presence_done = match self.presence.as_mut().map(presence_worker::Runtime::stop) {
             None | Some(Ok(true)) => true,
             Some(Ok(false)) => false,

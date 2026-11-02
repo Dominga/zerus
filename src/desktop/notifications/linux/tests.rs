@@ -904,9 +904,15 @@ fn actual_restore_rebuilds_callbacks_without_notify_and_rejects_other_daemon() {
     until(|| runtime.shared.failed.load(Ordering::Acquire));
     until(|| runtime.thread.as_ref().is_some_and(JoinHandle::is_finished));
     assert!(
-        !runtime.drained(),
-        "uncertain namespace loss never reports CleanExit"
+        runtime.drained(),
+        "the original socket/executor actually closed before join"
     );
+    assert_eq!(
+        runtime.status()["clean"],
+        false,
+        "namespace loss is never a clean callback fence"
+    );
+    assert_eq!(runtime.status()["error"], true);
     assert!(replacement.called.try_recv().is_err());
     assert!(replacement.closed.try_recv().is_err());
 }
@@ -1121,6 +1127,8 @@ fn root_service_grant_attaches_original_host_posts_and_routes_click_then_release
     )
     .unwrap();
     let request = runtime.offer_for_test(&mut h.store, &intent);
+    h.store.db.execute("INSERT INTO desktop_attention_edges(logical,session,intent,identity,payload,blocked,bytes)
+        SELECT 'root_fixture','fixture',id,identity,payload,0,0 FROM desktop_intents WHERE id=?1",[&intent]).unwrap();
     server.called.recv_timeout(WAIT).unwrap();
     until(|| {
         runtime.poll(&mut h.store, &mut attention, &mut router, &mut seq);
@@ -1162,12 +1170,16 @@ fn root_service_grant_attaches_original_host_posts_and_routes_click_then_release
     assert!(click.platform_context.is_some());
     ownership::invalidate(&h.store.db).unwrap();
     ledger::revoke(&h.store.db, "fixture_revoke").unwrap();
-    attention.request_stop();
     until(|| {
         runtime.poll(&mut h.store, &mut attention, &mut router, &mut seq);
         runtime.drained()
     });
     assert!(!runtime.ready());
+    assert_eq!(
+        server.closed.recv_timeout(WAIT).unwrap(),
+        42,
+        "actual native close precedes original host join"
+    );
     assert!(location.handoff_lock().is_ok());
     assert!(
         server.called.try_recv().is_err(),

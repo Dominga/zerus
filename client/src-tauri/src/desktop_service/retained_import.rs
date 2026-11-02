@@ -315,6 +315,13 @@ impl Report {
         let report = self.clone();
         let save = journal.clone();
         let result = publisher.publish_with_receipt(bundle, move |expected| {
+            // Recheck the complete original capture again after every family
+            // has been consumed, immediately before the final record. These
+            // are endpoint checks, never a claim that Qt's writer drained.
+            captured.qt_hash(&stop)?;
+            captured
+                .settings
+                .recheck(Instant::now() + Duration::from_secs(5))?;
             report
                 .save(&save, |r| {
                     if r.attempt != attempt {

@@ -1109,9 +1109,14 @@ Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; pu
         assert!(before.contains(r"C:\Example\UserModules"));
         assert!(before.contains("inherited"));
         assert!(before.trim_end().ends_with("All"));
+        let after: Vec<_> = after.lines().collect();
+        assert_eq!(after.len(), 3);
+        // PathBuf retains literal '/' separators, while $PSHOME prints '\\'.
+        // Compare these known fixture paths with Windows path spelling rules.
         assert_eq!(
-            after.lines().collect::<Vec<_>>(),
-            [modules.as_str(), "", "None"]
+            after[0].replace('/', "\\").to_lowercase(),
+            modules.replace('/', "\\").to_lowercase()
         );
+        assert_eq!(&after[1..], ["", "None"]);
     }
 }

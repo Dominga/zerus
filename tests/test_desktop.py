@@ -23,8 +23,17 @@ HGS = Path(os.environ.get('HGS_TEST_BIN', Path(__file__).resolve().parents[1] / 
 
 
 class Desktop(unittest.TestCase):
-    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux private foreground holder')
+    @unittest.skipUnless(sys.platform.startswith(('linux', 'darwin')), 'Unix private foreground holder')
     def test_installer_retains_the_real_original_hold_through_private_passive_restart(self):
+        """Real holder in isolated non-agent CI/private foreground ancestry."""
+        if sys.platform == 'darwin':
+            from macos_ancestry import topology, unsupported_hosted_foreign
+            chain = topology()
+            print('MACOS_HOLD_TOPOLOGY ' + json.dumps(chain), file=sys.stderr, flush=True)
+            unsupported = unsupported_hosted_foreign(chain, os.geteuid(), os.environ)
+            if unsupported is not None:
+                self.skipTest('Hosted runner has unsupported foreign ancestor: ' + json.dumps(unsupported)
+                              + '; native macOS permission remains refused')
         import pty
         service, _ = self.serve()
         self.stop(service)

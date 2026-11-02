@@ -82,6 +82,9 @@ fn lock_marks(
         }
     }
 }
+fn sharing_violation(error: &std::io::Error) -> bool {
+    cfg!(windows) && error.raw_os_error() == Some(32)
+}
 impl Actions {
     pub(super) fn admit_marks(&self) -> Result<Charge, String> {
         self.mark_admissions
@@ -146,14 +149,14 @@ impl FrozenReads {
     fn checkpoint_with(
         self,
         deadline: Instant,
-        sync: impl FnOnce(&mut ReadMarks) -> std::io::Result<Checkpoint>,
+        sync: impl FnMut(&mut ReadMarks) -> std::io::Result<Checkpoint>,
     ) -> Result<Checkpoint, Refused> {
         self.checkpoint_inner(deadline, sync)
     }
     fn checkpoint_inner(
         &self,
         deadline: Instant,
-        sync: impl FnOnce(&mut ReadMarks) -> std::io::Result<Checkpoint>,
+        mut sync: impl FnMut(&mut ReadMarks) -> std::io::Result<Checkpoint>,
     ) -> Result<Checkpoint, Refused> {
         for closed in [&self.mutations, &self.native] {
             match closed.wait_until(deadline) {
@@ -167,12 +170,34 @@ impl FrozenReads {
         }
         // Read-only snapshots can hold the store too. Never block beyond the
         // drain wait or recover a poisoned store into a successful checkpoint.
-        let mut marks = lock_marks(&self.marks, deadline)?;
-        let checkpoint = sync(&mut marks).map_err(|_| Refused::Checkpoint)?;
-        if Instant::now() >= deadline {
-            return Err(Refused::Pending);
+        let mut sharing_retries = 0;
+        loop {
+            let result = {
+                let mut marks = lock_marks(&self.marks, deadline)?;
+                sync(&mut marks)
+            };
+            if Instant::now() >= deadline {
+                return Err(Refused::Pending);
+            }
+            match result {
+                Ok(checkpoint) => return Ok(checkpoint),
+                Err(error) => {
+                    if sharing_violation(&error) && sharing_retries < 20 {
+                        // Brief antivirus/indexer contention only. Release the
+                        // store borrow while sleeping; never reset the original
+                        // capture deadline or retry an unknown publication.
+                        sharing_retries += 1;
+                        std::thread::sleep(
+                            deadline
+                                .saturating_duration_since(Instant::now())
+                                .min(Duration::from_millis(10)),
+                        );
+                        continue;
+                    }
+                    return Err(Refused::Checkpoint);
+                }
+            }
         }
-        Ok(checkpoint)
     }
 }
 

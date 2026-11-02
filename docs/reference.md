@@ -4490,6 +4490,23 @@ Its `operation:preview` identifies this
 render-only operation; it makes no claim about OS registration. Maintained installer
 ownership checks and delegation are separate steps before using the definition.
 
+On Windows, `hgs desktop notification-registration install|status --json`
+manages only the owned `com.hgdev.hgs-tray` AUMID/COM registration. Install the
+passive service task first so the selected stable CLI matches the current
+installer. Status is metadata, not native notification readiness. The fixed
+cold activation entry refuses before configuration or owner acquisition. No
+worker repairs registration or enables background consent.
+
+Explicit removal uses `notification-registration remove --json --request-id UUID`
+only after the original selected service's settled manual revoke with that same
+UUID. The authenticated current-service reply must match configuration and
+original runtime epoch and have accepted/durable/revoked/checkpointed all true.
+Lost replies authorize read-only `revoke_status`, never a new revoke UUID.
+Unknown or retained offline state stays for inspection. UI-only uninstall keeps
+the service task, staged CLI and Toast identity; its separate UI login entry is
+removed normally. Active removal currently remains unavailable until root Windows Runtime drain
+attachment is integrated; metadata removal does not claim native history deletion.
+
 The proposed service names are `hgs-desktop.service` (systemd user),
 `com.hgdev.hgs-desktop` (LaunchAgent), and `hgs-desktop` (per-user Windows logon
 task). Definitions invoke the selected stable CLI with `desktop serve

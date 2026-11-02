@@ -14,6 +14,7 @@ mod activation;
 mod callbacks;
 #[cfg(windows)]
 mod native;
+pub(in crate::desktop) mod registration;
 pub(in crate::desktop) mod runtime;
 
 /// Fixed cold activation is deliberately passive; the root lifecycle parser

@@ -363,7 +363,10 @@ fn exercise_driver(chatty: bool, churn: bool) {
     } else {
         assert!(host.status()["fault"].is_null(), "{}", host.status());
     }
-    assert!(fs2::FileExt::try_lock_exclusive(&file).is_ok());
+    // The host is joined, but a concurrent fork can retain a duplicate of the
+    // shared open-file description until exec closes its CLOEXEC descriptors.
+    // Require actual lock release within the fixture deadline, not this turn.
+    wait(|| fs2::FileExt::try_lock_exclusive(&file).is_ok());
 }
 
 fn offer_fixture(

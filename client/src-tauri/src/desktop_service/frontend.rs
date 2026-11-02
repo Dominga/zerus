@@ -489,6 +489,22 @@ fn help(
     }
     Ok(())
 }
+/// Presentation gates only; never a native permission or a writer grant.
+fn submission_ready(snapshot: &Snapshot, request: &Request) -> bool {
+    if !snapshot.connected || snapshot.epoch.is_none() {
+        return false;
+    }
+    // Reducing consent must still reach the authenticated route while its
+    // background component is degraded or absent. The store commits it there.
+    if matches!(request, Request::AutomaticApprovals { enabled: false, .. }) {
+        return true;
+    }
+    snapshot.component_ready(if Operation::of(request) == Operation::AutomaticApprovals {
+        "approvals"
+    } else {
+        "fleet"
+    })
+}
 fn execute(
     shared: &Shared,
     mut reservation: Reservation,
@@ -506,12 +522,7 @@ fn execute(
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone();
-            let component = if operation == Operation::AutomaticApprovals {
-                "approvals"
-            } else {
-                "fleet"
-            };
-            if !snapshot.component_ready(component) {
+            if !submission_ready(&snapshot, &reservation.request) {
                 return Err("desktop_background_unavailable");
             }
             if shared.responder.is_none() {

@@ -79,9 +79,22 @@ native service readiness. The service status UI shows a paused transfer and its
 existing Retry action. Transfer completion means durable queued intent, not
 host acknowledgement, worker drain, approval consent or a writer handoff.
 
-Windows' freeze/checkpoint adapter remains explicitly unsupported, tracked by
-`zerus-5wmh.66.3.31.6.1`. It reports unavailable and blocks default-on acceptance;
-the synchronous disarm step and an absent capture do not imply an empty import.
+On Windows the checkpoint retains its original exclusive read/write file handle
+and pinned parent chain through capture and original helper resources. It rejects
+reparse points (including junction ancestors), multiple links, changed sources
+and ACLs outside the existing user/SYSTEM/Administrators/OWNER RIGHTS policy.
+New managed folders have protected inheritable private ACLs; prepared files
+inherit that policy and explicitly name the creating user as owner. Existing
+ACLs are verified, never repaired.
+
+Dirty/new state is bounded and flushed before renaming the original owned
+prepared-file handle, then flushed and read back through that same handle. An
+error after the rename attempt remains unknown: the source and prepared file
+are never deleted as recovery. An unchanged checkpoint does not rewrite bytes
+or unknown fields. File sharing failures retain the same freeze for Retry.
+There is no directory-flush or whole-volume durability claim on Windows.
+`zerus-5wmh.66.3.31.6.1` tracks the native Windows validation; implementing this
+adapter does not itself enable the service-mode/default-on switch.
 
 ## Observation and restart
 

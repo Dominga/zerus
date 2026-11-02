@@ -14,9 +14,9 @@ pub(super) const MARKS_CLOSED: &str = "Read marks are not accepting changes.";
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Refused {
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     Unsupported,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     Closed,
     Pending,
     Unavailable,
@@ -33,9 +33,11 @@ pub(crate) struct FrozenReads {
 }
 
 pub(crate) struct CapturedReads {
-    frozen: Arc<FrozenReads>,
     checkpoint: Checkpoint,
     pub capture: zerus_client_core::desktop::pending_reads::Capture,
+    // Drop the Windows file/parent pins before releasing the original barrier
+    // charge. An idle observation must not run ahead of those handle closes.
+    frozen: Arc<FrozenReads>,
 }
 impl CapturedReads {
     pub fn unchanged(&self, deadline: Instant) -> Result<(), Refused> {
@@ -90,11 +92,11 @@ impl Actions {
     /// Close every mark writer before cancelling native calls. A failed wait
     /// never reopens anything. Unsupported platforms refuse before any close.
     pub(crate) fn freeze_reads(&self) -> Result<FrozenReads, Refused> {
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             Err(Refused::Unsupported)
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             let charge = self
                 .checkpoint_admission
@@ -177,7 +179,7 @@ impl FrozenReads {
 #[cfg(all(test, unix))]
 mod tests;
 
-#[cfg(all(test, not(unix)))]
+#[cfg(all(test, not(any(unix, windows))))]
 #[test]
 fn unsupported_freeze_changes_no_admission() {
     let actions = Actions::new(
@@ -188,3 +190,6 @@ fn unsupported_freeze_changes_no_admission() {
     assert!(!actions.checkpoint_admission.snapshot().unwrap().closed);
     assert!(actions.read_delivery.admit().is_some());
 }
+
+#[cfg(all(test, windows))]
+mod windows_tests;

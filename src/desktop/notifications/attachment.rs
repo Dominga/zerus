@@ -277,6 +277,7 @@ pub(in crate::desktop) struct Runtime<H: Host = NativeHost> {
     stopping: bool,
     quiescing: bool,
     retirement_started: bool,
+    retirement_until: Option<Instant>,
     drained: bool,
     error: Option<String>,
 }
@@ -366,6 +367,7 @@ impl<H: Host> Runtime<H> {
             stopping: false,
             quiescing: false,
             retirement_started: false,
+            retirement_until: None,
             drained: false,
             error: None,
         })
@@ -382,6 +384,7 @@ impl<H: Host> Runtime<H> {
             self.retirement_started = true;
         }
         let activations = self.outbox.poll(store, Instant::now());
+        self.bound_retirement(attention);
         if self.stopping {
             self.drained = self.host.drained() && self.outbox.operation_drained();
             return activations;
@@ -390,6 +393,7 @@ impl<H: Host> Runtime<H> {
             self.error = Some(format!("{error:#}").chars().take(256).collect());
             self.stop_host();
         }
+        self.bound_retirement(attention);
         if self.quiescing && self.restored && !attention.retiring() && self.outbox.operations_idle()
         {
             attention.request_stop();
@@ -399,6 +403,26 @@ impl<H: Host> Runtime<H> {
             self.drained = self.host.drained() && self.outbox.operation_drained();
         }
         activations
+    }
+    fn bound_retirement(&mut self, attention: &mut attention::Runtime) {
+        if self.quiescing && !self.stopping {
+            let failed = attention.failed() || self.outbox.error.is_some();
+            let expired = self
+                .retirement_until
+                .is_some_and(|until| Instant::now() >= until);
+            if failed || expired {
+                self.error = Some(
+                    if failed {
+                        "notification_cleanup_failed"
+                    } else {
+                        "notification_cleanup_deadline"
+                    }
+                    .into(),
+                );
+                attention.request_stop();
+                self.stop_host();
+            }
+        }
     }
     fn turn(&mut self, store: &mut Store, attention: &mut attention::Runtime) -> Result<()> {
         let ready = self.host.ready()?;
@@ -441,6 +465,8 @@ impl<H: Host> Runtime<H> {
     }
     pub fn request_stop(&mut self) {
         self.quiescing = true;
+        self.retirement_until
+            .get_or_insert_with(|| Instant::now() + super::COMMAND_WAIT);
         self.outbox.retire();
     }
     fn stop_host(&mut self) {

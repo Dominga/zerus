@@ -904,9 +904,15 @@ fn actual_restore_rebuilds_callbacks_without_notify_and_rejects_other_daemon() {
     until(|| runtime.shared.failed.load(Ordering::Acquire));
     until(|| runtime.thread.as_ref().is_some_and(JoinHandle::is_finished));
     assert!(
-        !runtime.drained(),
-        "uncertain namespace loss never reports CleanExit"
+        runtime.drained(),
+        "the original socket/executor actually closed before join"
     );
+    assert_eq!(
+        runtime.status()["clean"],
+        false,
+        "namespace loss is never a clean callback fence"
+    );
+    assert_eq!(runtime.status()["error"], true);
     assert!(replacement.called.try_recv().is_err());
     assert!(replacement.closed.try_recv().is_err());
 }

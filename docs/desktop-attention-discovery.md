@@ -111,6 +111,18 @@ sent after this phase and the original operation resources settle, followed by
 the actual host join. Policy disable uses the same retirement walk and leaves
 the host connected and idle instead of stopping it.
 
+Shutdown retirement has one overall ten-second deadline from the first stop
+request. Repeated stop requests never extend it. A cleanup error or expiry stops
+discovery and sends native stop, exposing the failure rather than leaving a
+takeover waiting indefinitely. Unwithdrawn banners remain uncertain; neither a
+cleanup failure nor a timeout authorizes replay of a post or withdrawal. Original
+command/callback resources and the actual native worker still have to drain.
+
+On Linux a namespace fault remains visible even after the original socket and
+executor have actually closed and the same worker has joined. This is physical
+resource drain, not a clean callback fence. A failed teardown or a panicked
+worker supplies no such proof and still prevents settlement/replacement.
+
 The ledger remains revoked throughout cleanup. Its separate fresh withdrawal
 reservation validates the original delivered post's identity, token, native ID
 and receipt binding under the same writer/service incarnation. It cannot reserve

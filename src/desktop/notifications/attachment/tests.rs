@@ -192,6 +192,75 @@ fn settle_cleanup(
 }
 
 #[test]
+fn cleanup_failure_stops_the_host_without_replaying_or_hiding_the_error() {
+    for outbox_error in [false, true] {
+        let mut f = Fixture::new();
+        f.seed();
+        let state = Arc::new(Mutex::new(State {
+            restore: true,
+            finish: true,
+            ready: true,
+            ..State::default()
+        }));
+        let mut runtime = f.attach(state.clone(), Arc::new(()));
+        let mut attention = attention::Runtime::new(&f.session.service_epoch);
+        for _ in 0..4 {
+            runtime.poll(&mut f.store, &mut attention);
+        }
+        if outbox_error {
+            runtime.outbox.error = Some("fixture_cleanup_fault");
+        } else {
+            f.store.db.execute("UPDATE desktop_attempts SET receipt=json_set(receipt,'$.binding.seq',seq+100) WHERE state='delivered'",[]).unwrap();
+        }
+        ledger::revoke(&f.store.db, "manual_revoke").unwrap();
+        runtime.request_stop();
+        for _ in 0..4 {
+            runtime.poll(&mut f.store, &mut attention);
+        }
+        assert!(
+            state.lock().unwrap().stopping,
+            "a deterministic cleanup error cannot strand takeover"
+        );
+        assert_eq!(runtime.status()["error"], "notification_cleanup_failed");
+        assert!(!runtime.drained(), "original join is still required");
+        assert!(
+            runtime.host.endpoint.try_next().is_err(),
+            "failed cleanup grants no post or native replay"
+        );
+        assert_eq!(ledger::status(&f.store.db).unwrap()["revoked"], true);
+        state.lock().unwrap().joined = true;
+        runtime.poll(&mut f.store, &mut attention);
+        assert!(runtime.drained());
+    }
+}
+
+#[test]
+fn unready_cleanup_has_one_overall_deadline_that_repeated_stop_cannot_extend() {
+    let mut f = Fixture::new();
+    f.seed();
+    let state = Arc::new(Mutex::new(State::default()));
+    let mut runtime = f.attach(state.clone(), Arc::new(()));
+    let mut attention = attention::Runtime::new(&f.session.service_epoch);
+    ledger::revoke(&f.store.db, "manual_revoke").unwrap();
+    runtime.request_stop();
+    let original = runtime.retirement_until.unwrap();
+    for _ in 0..20 {
+        runtime.request_stop();
+        runtime.poll(&mut f.store, &mut attention);
+        assert_eq!(runtime.retirement_until, Some(original));
+    }
+    assert!(!state.lock().unwrap().stopping);
+    runtime.retirement_until = Some(Instant::now()); // The SAME original timeout expires.
+    runtime.poll(&mut f.store, &mut attention);
+    assert!(state.lock().unwrap().stopping);
+    assert_eq!(runtime.status()["error"], "notification_cleanup_deadline");
+    assert!(!runtime.drained());
+    state.lock().unwrap().joined = true;
+    runtime.poll(&mut f.store, &mut attention);
+    assert!(runtime.drained());
+}
+
+#[test]
 fn revoke_before_restore_finishes_keeps_cleanup_mappings_without_click_authority() {
     let mut f = Fixture::new();
     for _ in 0..18 {

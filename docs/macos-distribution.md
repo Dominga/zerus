@@ -162,8 +162,8 @@ checks the selected CLI's `desktop-revoke-hold-v1` help marker before recording
 one original rollback UUID or offering its revoke. Before any unload or rewrite,
 it requires that exact durable checkpointed runtime/resource drain and acquires
 the original native hold child. Its stdin writer stays private and open through
-bootout, plist/record writes, bootstrap and passive readiness. Every manager and
-CLI command checks that same child before and after; manager children receive
+bootout, plist/record writes, bootstrap and passive readiness. While held, every
+manager and CLI command checks that same child before and after; manager children receive
 DEVNULL stdin and cannot inherit the writer. Success requires its matching
 release frame, actual exit and both pipe EOFs before clearing the transition.
 See [the original hold contract](desktop-revoke-hold.md). An uncertain

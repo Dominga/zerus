@@ -356,10 +356,17 @@ GUI nor agents restart. Normal GUI installs and CLI-only refresh preserve mode.
 
 Before GUI rollback, use this helper with the same selections and `--mode
 passive --json`. It retains one original revoke UUID and requires its exact
-checkpointed runtime/resource drain before bootout/rewrite. Record
+checkpointed runtime/resource drain and the original native hold through
+bootout/rewrite/bootstrap and passive readiness. Require the matching release,
+actual child exit and both pipe EOFs before transition completion. Record
 `last_revoke_request_id`; on uncertainty, inspect `--status --json` and resume
 only its original passive transition. Authenticated Rearm is required before
 returning to background. No file clearing or new UUID substitutes for settlement.
+If a newer Grant won before acquisition, or the original revoke never took
+effect, the owner may use the Mac helper's `--cancel-rollback --request-id
+ORIGINAL_UUID --json` only with a verified current Service grant. This cancels
+registration metadata, with no manager/native ownership action; a later mode
+choice is a separate explicit intent. See the [Mac mode contract](macos-distribution.md#explicit-desktop-service-mode).
 
 ### Client cases
 

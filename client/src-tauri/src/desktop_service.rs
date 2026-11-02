@@ -40,6 +40,7 @@ pub(crate) struct Observers {
 }
 
 mod catalog;
+mod catalog_relay;
 use catalog::catalog_loop;
 mod details;
 pub mod frontend;
@@ -363,9 +364,6 @@ impl Service {
             .unwrap_or_else(PoisonError::into_inner);
         if !snapshot.connected {
             drop(snapshot);
-            if !computer.is_empty() {
-                return false;
-            }
             self.retry();
             return true;
         }
@@ -782,6 +780,7 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
             && help
                 .lines()
                 .any(|line| line.trim() == service::CHANGES_HELP)
+            && help.lines().any(|line| line.trim() == service::RELAY_HELP)
     }) {
         return Err("incompatible_service_cli");
     }
@@ -912,10 +911,10 @@ async fn connection(
     let (mut error_bytes, mut stderr_open) = (0usize, true);
     let catalog_shared = shared.clone();
     let catalog_stop = stop.clone();
-    let mut catalogs =
-        tauri::async_runtime::spawn(
-            async move { catalog_loop(catalog_shared, catalog_stop).await },
-        );
+    let catalog_configuration = configuration.clone();
+    let mut catalogs = tauri::async_runtime::spawn(async move {
+        catalog_loop(catalog_shared, catalog_stop, catalog_configuration).await
+    });
     let detail_shared = shared.clone();
     let detail_stop = stop.clone();
     let mut detail_worker =

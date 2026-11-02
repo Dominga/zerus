@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Isolated desktop-v1 fixture; never launches a real CLI, service or agent."""
 import json
+import contextlib
+import io
 import hashlib
 import base64
 import socket
@@ -21,7 +23,7 @@ abi = 'desktop-catalog-changes-v1'
 args = sys.argv[1:]
 value = json.loads(sys.stdin.readline()) if args[:2] in [['desktop', 'request'], ['desktop', 'frontend-request']] else {}
 with (root / 'calls').open('a') as log:
-    log.write(json.dumps({'args': args, 'value': value}) + '\n')
+    log.write(json.dumps({'args': args, 'value': value, 'pid': os.getpid()}) + '\n')
 
 
 def wait(path):
@@ -159,8 +161,145 @@ def change(key, revision, remove=False):
             'row': None if remove else row(key)['row']}
 
 
+def desktop_request():
+    op, request_id = value['op'], value['request_id']
+    if op in ['delivery_result', 'maintenance_result'] and config.get('lookup_unavailable') and not (root / 'lookup-back').exists():
+        raise SystemExit('fixture lookup transport unavailable')
+    common = {'request_id': request_id, 'accepted': True, 'durable': False, 'abi': 'desktop-catalog-v1',
+              'changes_abi': abi, 'epoch': epoch, 'computer': value.get('computer', ''), 'incarnation': 1,
+              'generation': 1, 'projection': projection, 'display_only': True, 'authority': False,
+              'complete': True, 'online': True, 'last_known': False, 'stale': False, 'next_cursor': None}
+    if config.get('peer_failure') and value.get('computer') == 'broken':
+        common['incarnation'] = 2
+        if (root / 'peer-scope-recovered').exists():
+            common['projection'] = 'b' * 32
+    if op == 'detail_follow':
+        if config.get('follow_timeout') and value['subscription']['topic'] == 'activity':
+            (root / 'follow-held').touch()
+            time.sleep(15)
+        if config.get('detail_refused'):
+            print(json.dumps({'request_id': request_id, 'accepted': False, 'code': 'unsupported_topic'}))
+        else:
+            print(json.dumps(detail_follow()))
+    elif op == 'detail_unfollow':
+        print(json.dumps({'request_id': request_id, 'accepted': True, 'durable': False,
+                          'lease': value['lease'], 'id': value['id'], 'state': 'unfollowed'}))
+    elif op == 'detail_source':
+        metadata = native_hello() if value['part'] == 'hello' else {'host': 'metadata-caption', 'ok': True,
+                    'machine_id': '00000000-0000-4000-8000-000000000099', 'peers': [],
+                    'metrics': {'platform': 'linux'}}
+        print(json.dumps({'request_id': request_id, 'accepted': True, 'durable': False,
+                          'lease': value['lease'], 'computer': value['computer'],
+                          'generation': value['generation'], 'part': value['part'],
+                          'native': True, 'online': True, 'complete': True, 'value': metadata}))
+    elif op == 'catalog_page':
+        number = counter('page-number')
+        page = dict(common, start_revision='0', revision='0', items=[row('row')])
+        if config.get('dirty_walk'):
+            page.update(start_revision='0', revision='2', stale=True, complete=False)
+            if number == 1:
+                (root / 'page-started').touch()
+                wait(root / 'hinted')
+                page.update(next_cursor=cursor, items=[row('first')])
+        if config.get('replace_projection') == 'early' and number == 1:
+            (root / 'page-started').touch()
+            wait(root / 'projection-replaced')
+            page.update(next_cursor=cursor)
+        elif config.get('replace_projection') and (root / 'projection-replaced').exists():
+            page.update(projection='b' * 32, items=[row('replacement')])
+        if config.get('failure') and number > 1:
+            page.update(start_revision='5', revision='5', items=[row('recovered')])
+        if config.get('offline') or config.get('coverage_offline'):
+            page.update(online=False, last_known=True, complete=False, start_revision=None)
+        if config.get('large'):
+            offset = (number - 1) * 128
+            count = config['large']
+            page.update(items=[row('row-' + str(i)) for i in range(offset, min(offset + 128, count))],
+                        next_cursor=str(uuid.UUID(int=number + 100)) if offset + 128 < count else None)
+        print(json.dumps(page))
+    elif op == 'catalog_changes':
+        number = counter('delta-number')
+        page = dict(common, projection=value['projection'], since_revision=value['since_revision'],
+                    through_revision=value['since_revision'], revision=value['since_revision'], items=[])
+        if config.get('peer_failure'):
+            if value['computer'] == 'broken':
+                if not any((root / path).exists() for path in ['peer-recovered', 'peer-scope-recovered']):
+                    page = {'request_id': request_id, 'accepted': False, 'durable': False,
+                            'code': 'catalog_changes_gap', 'reset_required': True}
+            elif (root / 'peer-hints').exists():
+                page.update(through_revision='1', revision='1', items=[change('after-peer', '1')])
+        if config.get('counts_transition') and (root / 'drop-counts').exists():
+            page.update(through_revision='1', revision='1', items=[change('after-counts', '1')])
+        if config.get('dirty_walk'):
+            if number == 1:
+                (root / 'delta-started').touch()
+                wait(root / 'delta-hinted')
+                page.update(through_revision='2', revision='3', stale=True, items=[change('inserted', '1'), change('first', '2', True)], next_cursor=cursor)
+            elif number == 2:
+                (root / 'delta-page-two').touch()
+                wait(root / 'finish-delta')
+                page.update(through_revision='2', revision='3', stale=True, items=[change('first', '2', True)])
+            else:
+                (root / 'refresh-started').touch()
+                wait(root / 'finish-refresh')
+                page.update(through_revision='3', revision='3', items=[change('fresh', '3')])
+        if config.get('delta_live') and number == 2:
+            (root / 'live-delta-started').touch()
+            wait(root / 'live-delta-hinted')
+            wait(root / 'finish-live-delta')
+            page.update(through_revision='1', revision='2', stale=True, items=[change('first-delta', '1')])
+        elif config.get('delta_live') and number == 3:
+            (root / 'next-live-delta-started').touch()
+            wait(root / 'finish-next-live-delta')
+            page.update(through_revision='2', revision='2', items=[change('second-delta', '2')])
+        if config.get('failure') == 'changed_through' and number <= 2:
+            page.update(through_revision=str(number), revision=str(number), next_cursor=cursor if number == 1 else None)
+        elif config.get('failure') and number == 1:
+            if config['failure'] == 'unknown':
+                raise SystemExit('uncertain fixture exchange')
+            page = {'request_id': request_id, 'accepted': False, 'durable': False,
+                    'code': 'catalog_changes_gap', 'reset_required': True}
+        if config.get('replace_projection') and config['replace_projection'] != 'early' and number == 1:
+            page.update(through_revision='1', revision='1', items=[change('obsolete', '1')], next_cursor=cursor)
+            (root / 'initial-complete').touch()
+            # The old final page races the new projection hint.
+            wait(root / 'projection-replaced')
+        if config.get('large'):
+            if number == 1:
+                (root / 'initial-complete').touch()
+            else:
+                page.update(through_revision='3', revision='3', items=[change('row-0', '1'), change('row-1', '2', True), change('new', '3')])
+        print(json.dumps(page))
+    elif op == 'read_intent':
+        path = root / 'read-seen'
+        confirmed = path.exists()
+        path.touch()
+        print(json.dumps({'request_id': request_id, 'accepted': True, 'durable': confirmed, 'op': op}))
+    elif op == 'delivery_result' and (root / ('receipt-' + value['original_request_id'])).exists():
+        receipt = json.loads((root / ('receipt-' + value['original_request_id'])).read_text())
+        print(json.dumps({'request_id': request_id, 'op': op, 'original_request_id': value['original_request_id'],
+                          'accepted': True, 'durable': False, 'found': True, 'result': receipt}))
+    elif op == 'maintenance_result':
+        receipt_path = root / ('receipt-' + value['original_request_id'])
+        if receipt_path.exists():
+            receipt = json.loads(receipt_path.read_text())
+            receipt['request_id'] = request_id
+            print(json.dumps(receipt))
+        else:
+            print(json.dumps({'request_id': request_id, 'original_request_id': value['original_request_id'], 'accepted': False, 'code': 'unknown_request'}))
+    elif op == 'delivery_result':
+        print(json.dumps({'request_id': request_id, 'accepted': True, 'durable': False, 'op': op,
+                          'original_request_id': value['original_request_id'], 'found': False, 'result': None}))
+    elif op == 'catalog_close':
+        print(json.dumps({'request_id': request_id, 'accepted': True, 'durable': False}))
+    else:
+        raise SystemExit('Unexpected fixture operation')
+
+
 if args == ['--help']:
     print('Desktop service ABI: desktop-v1\nDesktop catalog changes ABI: ' + abi if config.get('supported', True) else 'Older fixture CLI')
+    if config.get('catalog_relay_abi', True):
+        print('Desktop catalog relay ABI: desktop-catalog-relay-v1')
     if config.get('frontend_abi', True):
         print('Desktop frontend request ABI: desktop-ui-request-v1')
     if config.get('activation_abi', False):
@@ -310,137 +449,32 @@ elif args == ['desktop', 'watch', '--json']:
     else:
         sys.stdin.read()  # Detaches only when the owning subscriber closes stdin.
 elif args == ['desktop', 'request', '--json']:
-    op, request_id = value['op'], value['request_id']
-    if op in ['delivery_result', 'maintenance_result'] and config.get('lookup_unavailable') and not (root / 'lookup-back').exists():
-        raise SystemExit('fixture lookup transport unavailable')
-    common = {'request_id': request_id, 'accepted': True, 'durable': False, 'abi': 'desktop-catalog-v1',
-              'changes_abi': abi, 'epoch': epoch, 'computer': value.get('computer', ''), 'incarnation': 1,
-              'generation': 1, 'projection': projection, 'display_only': True, 'authority': False,
-              'complete': True, 'online': True, 'last_known': False, 'stale': False, 'next_cursor': None}
-    if config.get('peer_failure') and value.get('computer') == 'broken':
-        common['incarnation'] = 2
-        if (root / 'peer-scope-recovered').exists():
-            common['projection'] = 'b' * 32
-    if op == 'detail_follow':
-        if config.get('follow_timeout') and value['subscription']['topic'] == 'activity':
-            (root / 'follow-held').touch()
-            time.sleep(15)
-        if config.get('detail_refused'):
-            print(json.dumps({'request_id': request_id, 'accepted': False, 'code': 'unsupported_topic'}))
-        else:
-            print(json.dumps(detail_follow()))
-    elif op == 'detail_unfollow':
-        print(json.dumps({'request_id': request_id, 'accepted': True, 'durable': False,
-                          'lease': value['lease'], 'id': value['id'], 'state': 'unfollowed'}))
-    elif op == 'detail_source':
-        metadata = native_hello() if value['part'] == 'hello' else {'host': 'metadata-caption', 'ok': True,
-                    'machine_id': '00000000-0000-4000-8000-000000000099', 'peers': [],
-                    'metrics': {'platform': 'linux'}}
-        print(json.dumps({'request_id': request_id, 'accepted': True, 'durable': False,
-                          'lease': value['lease'], 'computer': value['computer'],
-                          'generation': value['generation'], 'part': value['part'],
-                          'native': True, 'online': True, 'complete': True, 'value': metadata}))
-    elif op == 'catalog_page':
-        number = counter('page-number')
-        page = dict(common, start_revision='0', revision='0', items=[row('row')])
-        if config.get('dirty_walk'):
-            page.update(start_revision='0', revision='2', stale=True, complete=False)
-            if number == 1:
-                (root / 'page-started').touch()
-                wait(root / 'hinted')
-                page.update(next_cursor=cursor, items=[row('first')])
-        if config.get('replace_projection') == 'early' and number == 1:
-            (root / 'page-started').touch()
-            wait(root / 'projection-replaced')
-            page.update(next_cursor=cursor)
-        elif config.get('replace_projection') and (root / 'projection-replaced').exists():
-            page.update(projection='b' * 32, items=[row('replacement')])
-        if config.get('failure') and number > 1:
-            page.update(start_revision='5', revision='5', items=[row('recovered')])
-        if config.get('offline') or config.get('coverage_offline'):
-            page.update(online=False, last_known=True, complete=False, start_revision=None)
-        if config.get('large'):
-            offset = (number - 1) * 128
-            count = config['large']
-            page.update(items=[row('row-' + str(i)) for i in range(offset, min(offset + 128, count))],
-                        next_cursor=str(uuid.UUID(int=number + 100)) if offset + 128 < count else None)
-        print(json.dumps(page))
-    elif op == 'catalog_changes':
-        number = counter('delta-number')
-        page = dict(common, projection=value['projection'], since_revision=value['since_revision'],
-                    through_revision=value['since_revision'], revision=value['since_revision'], items=[])
-        if config.get('peer_failure'):
-            if value['computer'] == 'broken':
-                if not any((root / path).exists() for path in ['peer-recovered', 'peer-scope-recovered']):
-                    page = {'request_id': request_id, 'accepted': False, 'durable': False,
-                            'code': 'catalog_changes_gap', 'reset_required': True}
-            elif (root / 'peer-hints').exists():
-                page.update(through_revision='1', revision='1', items=[change('after-peer', '1')])
-        if config.get('counts_transition') and (root / 'drop-counts').exists():
-            page.update(through_revision='1', revision='1', items=[change('after-counts', '1')])
-        if config.get('dirty_walk'):
-            if number == 1:
-                (root / 'delta-started').touch()
-                wait(root / 'delta-hinted')
-                page.update(through_revision='2', revision='3', stale=True, items=[change('inserted', '1'), change('first', '2', True)], next_cursor=cursor)
-            elif number == 2:
-                (root / 'delta-page-two').touch()
-                wait(root / 'finish-delta')
-                page.update(through_revision='2', revision='3', stale=True, items=[change('first', '2', True)])
-            else:
-                (root / 'refresh-started').touch()
-                wait(root / 'finish-refresh')
-                page.update(through_revision='3', revision='3', items=[change('fresh', '3')])
-        if config.get('delta_live') and number == 2:
-            (root / 'live-delta-started').touch()
-            wait(root / 'live-delta-hinted')
-            wait(root / 'finish-live-delta')
-            page.update(through_revision='1', revision='2', stale=True, items=[change('first-delta', '1')])
-        elif config.get('delta_live') and number == 3:
-            (root / 'next-live-delta-started').touch()
-            wait(root / 'finish-next-live-delta')
-            page.update(through_revision='2', revision='2', items=[change('second-delta', '2')])
-        if config.get('failure') == 'changed_through' and number <= 2:
-            page.update(through_revision=str(number), revision=str(number), next_cursor=cursor if number == 1 else None)
-        elif config.get('failure') and number == 1:
-            if config['failure'] == 'unknown':
-                raise SystemExit('uncertain fixture exchange')
-            page = {'request_id': request_id, 'accepted': False, 'durable': False,
-                    'code': 'catalog_changes_gap', 'reset_required': True}
-        if config.get('replace_projection') and config['replace_projection'] != 'early' and number == 1:
-            page.update(through_revision='1', revision='1', items=[change('obsolete', '1')], next_cursor=cursor)
-            (root / 'initial-complete').touch()
-            # The old final page races the new projection hint.
-            wait(root / 'projection-replaced')
-        if config.get('large'):
-            if number == 1:
-                (root / 'initial-complete').touch()
-            else:
-                page.update(through_revision='3', revision='3', items=[change('row-0', '1'), change('row-1', '2', True), change('new', '3')])
-        print(json.dumps(page))
-    elif op == 'read_intent':
-        path = root / 'read-seen'
-        confirmed = path.exists()
-        path.touch()
-        print(json.dumps({'request_id': request_id, 'accepted': True, 'durable': confirmed, 'op': op}))
-    elif op == 'delivery_result' and (root / ('receipt-' + value['original_request_id'])).exists():
-        receipt = json.loads((root / ('receipt-' + value['original_request_id'])).read_text())
-        print(json.dumps({'request_id': request_id, 'op': op, 'original_request_id': value['original_request_id'],
-                          'accepted': True, 'durable': False, 'found': True, 'result': receipt}))
-    elif op == 'maintenance_result':
-        receipt_path = root / ('receipt-' + value['original_request_id'])
-        if receipt_path.exists():
-            receipt = json.loads(receipt_path.read_text())
-            receipt['request_id'] = request_id
-            print(json.dumps(receipt))
-        else:
-            print(json.dumps({'request_id': request_id, 'original_request_id': value['original_request_id'], 'accepted': False, 'code': 'unknown_request'}))
-    elif op == 'delivery_result':
-        print(json.dumps({'request_id': request_id, 'accepted': True, 'durable': False, 'op': op,
-                          'original_request_id': value['original_request_id'], 'found': False, 'result': None}))
-    elif op == 'catalog_close':
-        print(json.dumps({'request_id': request_id, 'accepted': True, 'durable': False}))
-    else:
-        raise SystemExit('Unexpected fixture operation')
+    desktop_request()
+elif args == ['desktop', 'catalog-relay', '--json']:
+    print(json.dumps({'abi': 'desktop-catalog-relay-v1', 'configuration': ('b' if config.get('relay_fault') == 'configuration' else 'a') * 64}), flush=True)
+    for line in sys.stdin:
+        value = json.loads(line)
+        assert value['op'] in ['catalog_page', 'catalog_changes', 'catalog_close']
+        with (root / 'calls').open('a') as log:
+            log.write(json.dumps({'args': args, 'value': value, 'pid': os.getpid()}) + '\n')
+        fault = config.get('relay_fault')
+        if fault == 'hang':
+            (root / 'relay-held').touch()
+            wait(root / 'release-relay')
+        if fault == 'oversize':
+            print('x' * (1048576 + 4096 + 1), flush=True)
+            continue
+        if fault == 'incomplete':
+            print('{', end='', flush=True)
+            raise SystemExit(0)
+        if fault == 'stderr':
+            sys.stderr.write('x' * (64 * 1024 + 1))
+            sys.stderr.flush()
+            wait(root / 'release-relay')
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            desktop_request()
+        response = json.loads(captured.getvalue())
+        print(json.dumps({'abi': 'desktop-catalog-relay-v1', 'request_id': str(uuid.uuid4()) if fault == 'identity' else value['request_id'], 'value': response}), flush=True)
 else:
     raise SystemExit('Forbidden fallback CLI call')

@@ -1183,7 +1183,7 @@ mod tests {
         std::fs::copy("/bin/cat", &image).unwrap();
         let other = prefix.join("bin/other");
         std::fs::copy("/bin/cat", &other).unwrap();
-        let scope = Scope {
+        let mut scope = Scope {
             location: Location {
                 root: temp.path().join("state/desktop"),
                 configuration: "a".repeat(64),
@@ -1196,6 +1196,14 @@ mod tests {
         assert_eq!(selected.configuration(), scope.configuration);
         selected.revalidate().unwrap();
         assert!(scope.select_frontend(&other).is_err());
+        // HOME's maintained prefix may itself be a symlink. Its catalog entry
+        // still identifies the same file; custody pins the canonical layout.
+        let linked = temp.path().join(".local");
+        std::os::unix::fs::symlink(&prefix, &linked).unwrap();
+        scope.frontend_images.insert(0, linked.join("bin/hgs-tray"));
+        let selected = scope.select_frontend(&image).unwrap();
+        assert_eq!(selected.image(), image);
+        selected.revalidate().unwrap();
     }
 
     #[test]

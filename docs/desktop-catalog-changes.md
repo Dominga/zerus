@@ -80,3 +80,16 @@ Schema 13 follows the actual maintenance schema 12. Migration preserves retained
 rows without inventing a watermark. Shared-read-setting attention counts retain
 their existing scope and provenance and remain separate from device-local
 review-later/ack overlays and final UI badges.
+
+For a multi-page walk, `hgs desktop catalog-relay --json` amortizes CLI startup
+over serial request/response lines. Require the help marker `Desktop catalog
+relay ABI: desktop-catalog-relay-v1`. Its first line is
+`{abi:"desktop-catalog-relay-v1",configuration}`; each subsequent reply is
+`{abi,request_id,value:<original catalog reply>}`. Only `catalog_page`,
+`catalog_changes` and `catalog_close` are admitted, through the existing local
+authenticated IPC. Input retains the native control-line cap and each output
+line retains the desktop frame cap. There is one outstanding request and no
+relay cache. EOF closes the relay without starting or stopping the service.
+The client retains one original child per walk and still checks paired-image
+freshness and every original request, epoch, scope, revision and cursor fence
+on every page. Unknown outcomes retire that walk; continuations are never resent.

@@ -24,6 +24,7 @@ import sys
 import tempfile
 import time
 import unittest
+import uuid
 
 import test_windows_host as windows_host
 from test_windows_host import HIDDEN, LIMIT
@@ -42,10 +43,11 @@ def registered():
     """DisplayVersion and InstallLocation of the HKCU uninstall entry, or None."""
     import winreg
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as key:
-            return {name: winreg.QueryValueEx(key, name)[0] for name in ("DisplayVersion", "InstallLocation")}
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY)
     except FileNotFoundError:
         return None
+    with key:
+        return {name: winreg.QueryValueEx(key, name)[0] for name in ("DisplayVersion", "InstallLocation")}
 
 
 @unittest.skipUnless(os.name == "nt" and INSTALLER, "needs Windows and HGS_TEST_INSTALLER")
@@ -54,6 +56,10 @@ class Installer(windows_host.HostCase):
         super().setUp()
         for key in ("HGS_HOST_IMAGE", "HGS_HOST_ALLOW_UNSTAGED"):
             del self.env[key]
+        self.backend_tracking = False
+        self.backend_clean = True
+        self.backend_request = str(uuid.uuid4())
+        self.env['HGS_CONFIG_DIR'] = str(self.home / '.config' / 'hgs')
         self.setup_exe = Path(INSTALLER).resolve()
         self.assertTrue(self.setup_exe.is_file(), self.setup_exe)
         self.assertTrue(PORTABLE_ZIP and Path(PORTABLE_ZIP).is_file(), "HGS_TEST_PORTABLE_ZIP")
@@ -68,33 +74,91 @@ class Installer(windows_host.HostCase):
         self.marker = self.home / ".config" / "hgs" / "local-sessions"
         self.shortcut = Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Zerus.lnk"
         self.logs = 0
+        help_result = subprocess.run([str(windows_host.HGS), '--help'], env=self.env,
+                                     capture_output=True, text=True, timeout=LIMIT, creationflags=HIDDEN)
+        self.assertEqual(help_result.returncode, 0, help_result.stderr)
+        self.backend_tracking = (self.record.get('desktop') == 'tauri'
+                                 and 'desktop-notification-registration-v1' in help_result.stdout)
+        if self.backend_tracking:
+            self.assertEqual(windows_installer.sha256(windows_host.HGS), self.expected['hgs.exe'])
+            self.assertFalse(self.backend('registration', 'status')['registered'], 'Keep an existing backend task')
+            self.assertFalse(self.backend('notification-registration', 'status')['registered'], 'Keep an existing Toast registration')
         # Registered last, so it runs first: the host and its sessions stop afterwards.
+        self.addCleanup(self.cleanup_backend)
         self.addCleanup(self.uninstall_if_installed)
 
-    # The installer and the uninstaller run with the runner's own environment:
-    # Inno Setup finds the profile's folders through the shell, not HGS_*.
+    # Shell shortcuts/uninstall records still use the runner's real shell
+    # folders. Maintained CLI hooks inherit only this case's selected HGS profile.
+
+    def backend(self, command, operation):
+        args = [str(windows_host.HGS), 'desktop', command, operation, '--json']
+        if command == 'notification-registration' and operation == 'remove':
+            args += ['--request-id', self.backend_request]
+        result = subprocess.run(args, env=self.env, capture_output=True, text=True,
+                                encoding='utf-8', timeout=75, creationflags=HIDDEN)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertLessEqual(len(result.stdout.encode('utf-8')), 65536)
+        return json.loads(result.stdout)
+
+    def cleanup_backend(self):
+        if not self.backend_tracking or self.backend_clean:
+            return
+        try:
+            # No service was started in this fixture: only the maintained
+            # no-service/no-state removal is allowed. Never bypass a refusal.
+            if self.backend('notification-registration', 'status')['registered']:
+                self.assertFalse(self.backend('notification-registration', 'remove')['registered'])
+            if self.backend('registration', 'status')['registered']:
+                self.assertFalse(self.backend('registration', 'remove')['registered'])
+            self.assertFalse(self.backend('notification-registration', 'status')['registered'])
+            self.assertFalse(self.backend('registration', 'status')['registered'])
+            self.backend_clean = True
+        except Exception:
+            print('Backend cleanup uncertain; keep private CLI/profile:', self.root, file=sys.stderr)
+            raise
+
+    def cleanup_temp(self):
+        try:
+            app_kept = getattr(self, 'app', None) is not None and registered() is not None
+        except OSError:
+            app_kept = True
+        if not getattr(self, 'backend_clean', True) or app_kept:
+            self.temp._finalizer.detach()
+            print('Private profile retained for backend registration review:', self.root, file=sys.stderr)
+            if app_kept:
+                self.fail('UI uninstall is not confirmed; private installer profile retained')
+            return
+        super().cleanup_temp()
 
     def setup(self):
         """Setup's exit code and log."""
         self.logs += 1
         log = self.root / f"setup-{self.logs}.log"
+        if self.backend_tracking:
+            self.backend_clean = False  # Unknown delivery keeps the selected paths.
         result = subprocess.run([str(self.setup_exe), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
-                                 f"/DIR={self.app}", f"/LOG={log}"], stdin=subprocess.DEVNULL, capture_output=True,
+                                 f"/DIR={self.app}", f"/LOG={log}"], env=self.env, stdin=subprocess.DEVNULL, capture_output=True,
                                 timeout=SETUP_LIMIT, creationflags=HIDDEN)
         return result.returncode, log.read_text(encoding="utf-8", errors="replace") if log.is_file() else "(no log)"
 
     def install(self):
         code, text = self.setup()
         self.assertEqual(code, 0, text[-4000:])
+        if self.backend_tracking:
+            self.assertTrue(self.backend('registration', 'status')['registered'])
+            self.assertTrue(self.backend('notification-registration', 'status')['registered'])
         return text
 
     def uninstall(self):
         uninstaller = self.app / "uninstall" / "unins000.exe"
         self.assertTrue(uninstaller.is_file(), uninstaller)
         result = subprocess.run([str(uninstaller), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
-                                stdin=subprocess.DEVNULL, capture_output=True, timeout=SETUP_LIMIT,
+                                env=self.env, stdin=subprocess.DEVNULL, capture_output=True, timeout=SETUP_LIMIT,
                                 creationflags=HIDDEN)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        if self.backend_tracking:
+            self.assertTrue(self.backend('registration', 'status')['registered'])
+            self.assertTrue(self.backend('notification-registration', 'status')['registered'])
         # The uninstaller continues from a copy of itself in the temporary folder
         # and removes its own files last.
         self.wait_for("the uninstall", lambda: registered() is None and not any(
@@ -102,9 +166,7 @@ class Installer(windows_host.HostCase):
 
     def uninstall_if_installed(self):
         if registered() is not None and (self.app / "uninstall" / "unins000.exe").is_file():
-            subprocess.run([str(self.app / "uninstall" / "unins000.exe"), "/VERYSILENT", "/SUPPRESSMSGBOXES",
-                            "/NORESTART"], stdin=subprocess.DEVNULL, capture_output=True, timeout=SETUP_LIMIT,
-                           creationflags=HIDDEN)
+            self.uninstall()
 
     def run_installed(self, name, *args):
         result = subprocess.run([str(self.app / name), *args], env=self.env, stdin=subprocess.DEVNULL,

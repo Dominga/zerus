@@ -4,6 +4,7 @@ use super::*;
 pub(super) async fn catalog_loop(
     shared: Arc<Shared>,
     stop: Arc<AtomicBool>,
+    configuration: String,
 ) -> Result<(), &'static str> {
     let mut failures = BTreeMap::<String, (u64, u8)>::new();
     let mut last = None::<String>;
@@ -60,6 +61,7 @@ pub(super) async fn catalog_loop(
                 &epoch,
                 since,
                 stop.clone(),
+                &configuration,
             )
             .await;
             shared
@@ -253,8 +255,10 @@ async fn walk(
     epoch: &str,
     since: Option<Revision>,
     stop: Arc<AtomicBool>,
+    configuration: &str,
 ) -> Result<(), &'static str> {
     let mut cursor = None::<String>;
+    let mut relay = catalog_relay::Relay::default();
     let result = async {
         if since.is_none() {
             row(shared, computer, &source, epoch, &stop, Change::Computer { computer: ComputerId::from(computer), status: ComputerStatus::Reconnecting { attempt: 0 } }).await?;
@@ -267,7 +271,7 @@ async fn walk(
             loop {
                 if stop.load(Ordering::Acquire) || !shared.current(computer, &source, epoch) { return Ok(()); }
                 let id = uuid::Uuid::new_v4().to_string();
-                let value = request(shared, json!({"op":"catalog_page","request_id":id,"computer":computer,"cursor":cursor}), stop.clone()).await?;
+                let value = relay.request(shared, configuration, json!({"op":"catalog_page","request_id":id,"computer":computer,"cursor":cursor}), &stop).await?;
                 let page = CatalogPage::checked(value, &id, epoch, computer)?;
                 cursor = page.next_cursor.clone();
                 if !shared.current(computer, &source, epoch) { return Ok(()); }
@@ -294,9 +298,9 @@ async fn walk(
             loop {
                 if stop.load(Ordering::Acquire) || !shared.current(computer, &source, epoch) { return Ok(()); }
                 let id = uuid::Uuid::new_v4().to_string();
-                let value = request(shared, json!({"op":"catalog_changes","request_id":id,"epoch":epoch,"computer":computer,
+                let value = relay.request(shared, configuration, json!({"op":"catalog_changes","request_id":id,"epoch":epoch,"computer":computer,
                     "incarnation":source.incarnation,"generation":source.generation,"projection":source.projection,
-                    "since_revision":start,"cursor":cursor}), stop.clone()).await?;
+                    "since_revision":start,"cursor":cursor}), &stop).await?;
                 let page = ChangePage::checked(value, &id, epoch, computer)?;
                 cursor = page.next_cursor.clone();
                 if !shared.current(computer, &source, epoch) { return Ok(()); }
@@ -325,13 +329,15 @@ async fn walk(
             }
             through
         } else { None };
+        relay.close().await?;
         let (done, joined) = oneshot::channel();
         deliver(shared, computer, &source, epoch, &stop, CatalogValue::Finish { through, keys, done }).await?;
         tokio::time::timeout(RPC_WAIT, joined).await.map_err(|_| "catalog_view_timeout")?.map_err(|_| "catalog_invalidated")?;
         Ok(())
     }.await;
+    let drained = relay.close().await;
     if let Some(cursor) = cursor {
         let _ = request(shared, json!({"op":"catalog_close","request_id":uuid::Uuid::new_v4().to_string(),"computer":computer,"cursor":cursor}), Arc::new(AtomicBool::new(false))).await;
     }
-    result
+    result.and(drained)
 }

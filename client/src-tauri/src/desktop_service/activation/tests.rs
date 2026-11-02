@@ -5,6 +5,51 @@ use crate::desktop_service::{
 };
 use std::{sync::mpsc, time::Instant};
 
+// The native responder deliberately refuses an agent-attributed parent. Run
+// the GUI-only fixture in an exact child without mutating this harness's env.
+fn private_case(case: &'static str) -> bool {
+    const MARKER: &str = "ZERUS_ACTIVATION_CONSUMER_CASE";
+    if std::env::var(MARKER).as_deref() == Ok(case) {
+        return true;
+    }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    let call = Invocation {
+        args: [
+            "--exact",
+            case,
+            "--nocapture",
+            "--test-threads=1",
+            "--color=never",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+        stdin: None,
+        timeout: Duration::from_secs(30),
+        request_id: None,
+    };
+    let result = runner::run_without(
+        &std::env::current_exe().unwrap(),
+        &call,
+        &[(MARKER, case)],
+        &["HGS_SESSION", "HGS_RUN_ID"],
+        64 << 10,
+    )
+    .unwrap();
+    assert!(
+        matches!(&result, zerus_client_core::Exit::Code { code: 0, .. }),
+        "private GUI case {case}: {result:?}"
+    );
+    if let zerus_client_core::Exit::Code { stdout, .. } = &result {
+        assert!(
+            String::from_utf8_lossy(stdout)
+                .contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
+            "the exact private GUI case must execute once: {result:?}"
+        );
+    }
+    false
+}
+
 fn start(
     fixture: &Fixture,
     responder: Arc<zerus_client_core::desktop::Responder>,
@@ -101,6 +146,7 @@ fn consume(delivery: Delivery, available: bool) -> crate::desk::Outcome {
 }
 #[test]
 fn original_bound_child_and_one_held_delivery_keep_reads_serial_and_stop_invalidates_ui_work() {
+    if !private_case("desktop_service::activation::tests::original_bound_child_and_one_held_delivery_keep_reads_serial_and_stop_invalidates_ui_work") { return; }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let fixture = Fixture::new(json!({"ready":true,"activation_abi":true}));
@@ -151,6 +197,7 @@ fn original_bound_child_and_one_held_delivery_keep_reads_serial_and_stop_invalid
 }
 #[test]
 fn a_gone_target_notice_also_retains_the_single_delivery_until_native_ui_consumes_it() {
+    if !private_case("desktop_service::activation::tests::a_gone_target_notice_also_retains_the_single_delivery_until_native_ui_consumes_it") { return; }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let fixture = Fixture::new(json!({"ready":true,"activation_abi":true}));
@@ -173,6 +220,7 @@ fn a_gone_target_notice_also_retains_the_single_delivery_until_native_ui_consume
 
 #[test]
 fn retained_delivery_refuses_a_new_epoch_and_shutdown_does_not_wait_for_a_stalled_view() {
+    if !private_case("desktop_service::activation::tests::retained_delivery_refuses_a_new_epoch_and_shutdown_does_not_wait_for_a_stalled_view") { return; }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let fixture = Fixture::new(json!({"ready":true,"activation_abi":true}));
@@ -193,6 +241,7 @@ fn retained_delivery_refuses_a_new_epoch_and_shutdown_does_not_wait_for_a_stalle
 }
 #[test]
 fn idle_reads_use_new_ids_and_no_click_is_inferred_from_none() {
+    if !private_case("desktop_service::activation::tests::idle_reads_use_new_ids_and_no_click_is_inferred_from_none") { return; }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let fixture =
@@ -213,6 +262,7 @@ fn idle_reads_use_new_ids_and_no_click_is_inferred_from_none() {
 }
 #[test]
 fn missing_abi_and_invalid_original_reply_never_fall_back_or_replay() {
+    if !private_case("desktop_service::activation::tests::missing_abi_and_invalid_original_reply_never_fall_back_or_replay") { return; }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         for bad in [

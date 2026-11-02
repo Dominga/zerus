@@ -235,3 +235,60 @@ fn service_and_frontend_can_have_distinct_maintained_prefixes() {
     assert_eq!(selected.image(), f.prefix.join("bin/hgs-tray"));
     selected.revalidate().unwrap();
 }
+
+#[test]
+fn private_group_requires_exact_nonempty_names_and_no_listed_members() {
+    assert!(private_group_record(c"fixture", c"fixture", true));
+    assert!(!private_group_record(c"fixture", c"shared", true));
+    assert!(!private_group_record(c"fixture", c"fixture", false));
+    assert!(!private_group_record(c"", c"", true));
+    assert!(!private_group(unsafe { libc::getegid() }.wrapping_add(1)));
+}
+
+#[test]
+fn group_writable_installation_uses_only_the_actual_effective_private_group() {
+    let f = Fixture::new();
+    f.wrapper();
+    // Explicit modes reproduce umask 002 without changing process-global umask.
+    for path in [
+        f.prefix.clone(),
+        f.prefix.join("bin"),
+        f.prefix.join("share/hgs"),
+        f.prefix.join("libexec"),
+        f.cli.clone(),
+        f.prefix.join("bin/hgs-tray"),
+        f.prefix.join("libexec/hgs-tray-launch"),
+    ] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o775)).unwrap();
+    }
+    fs::set_permissions(
+        f.prefix.join("share/hgs/local-webkit.json"),
+        fs::Permissions::from_mode(0o664),
+    )
+    .unwrap();
+    let selected = SelectedFrontend::capture(
+        f.cli.clone(),
+        f.prefix.join("bin/hgs-tray"),
+        "a".repeat(64),
+        Origin::Fixture,
+    );
+    // NSS belongs to the host: on a user-private-group account this is a real
+    // positive; shared effective groups must retain the same refusal in CI.
+    if private_group(unsafe { libc::getegid() }) {
+        let selected = selected.unwrap();
+        selected.revalidate().unwrap();
+        assert_eq!(selected.entry(), f.prefix.join("libexec/hgs-tray-launch"));
+        fs::set_permissions(f.prefix.join("bin"), fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(selected.revalidate().is_err());
+    } else {
+        assert!(selected.is_err(), "shared effective group is not private");
+    }
+    fs::set_permissions(&f.prefix, fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(SelectedFrontend::capture(
+        f.cli.clone(),
+        f.prefix.join("bin/hgs-tray"),
+        "a".repeat(64),
+        Origin::Fixture
+    )
+    .is_err());
+}

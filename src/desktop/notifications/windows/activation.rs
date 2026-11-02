@@ -21,7 +21,7 @@ use ::windows::{
 use std::ffi::c_void;
 
 pub(super) const CLSID: GUID = GUID::from_u128(0x0f0f70a2_1d40_47d8_ac5e_d6a9b789605f);
-pub(super) const CLSID_TEXT: &str = "{0F0F70A2-1D40-47D8-AC5E-D6A9B789605F}";
+pub(super) const CLSID_TEXT: &str = super::registration::CLASS_ID;
 pub(in crate::desktop) const ENTRY: &str = "--desktop-notification-activation";
 
 /// A cold COM launch has no original Runtime/Endpoint. Lifecycle parsing may

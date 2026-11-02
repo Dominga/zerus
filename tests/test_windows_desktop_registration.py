@@ -19,6 +19,17 @@ if '--hgs' in sys.argv:
 
 @unittest.skipUnless(os.name == 'nt' and HGS is not None, 'explicit disposable Windows CLI required')
 class WindowsDesktopRegistration(unittest.TestCase):
+    def test_cold_notification_entry_refuses_without_loading_configuration(self):
+        with tempfile.TemporaryDirectory(prefix='zerus-toast-cold-') as directory:
+            root = Path(directory)
+            env = {key: os.environ[key] for key in ('SystemRoot', 'WINDIR', 'COMSPEC') if key in os.environ}
+            env.update(HGS_CONFIG_DIR=str(root / 'unread-config'), HGS_STATE_DIR=str(root / 'unread-state'))
+            result = subprocess.run([str(HGS), '--desktop-notification-activation', '-Embedding'],
+                                    env=env, capture_output=True, timeout=15)
+            self.assertEqual(result.returncode, 78, result.stderr)
+            self.assertEqual(result.stdout, b'')
+            self.assertEqual(list(root.iterdir()), [])
+
     def test_fixed_input_frame_finishes_while_the_writer_stays_open(self):
         source = Path(__file__).resolve().parents[1] / 'src/desktop/windows_registration.ps1'
         script = str(source).replace("'", "''")

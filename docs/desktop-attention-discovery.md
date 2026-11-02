@@ -141,6 +141,12 @@ directory identities. If the maintained local-WebKit setting exists, its exact
 setting and `libexec/hgs-tray-launch` are retained too. File/entry replacement or
 selection changes refuse; unrelated directory writes do not. The opaque handle
 exposes `image()`, `entry()`, `revalidate()` and original-child observation.
+The selected catalog path is canonicalized before pinning, including a symlinked
+installation prefix. Group-writable files/directories are accepted only for the
+effective user-private group: bounded NSS reads require its name to equal the
+user's and its listed membership to be empty. Other group write and all world
+write still refuse. Exact file ctime remains part of custody, so relabelling or
+link changes require a fresh selection shortly before launch.
 The Linux helper keeps its original `Child`, waits through wrapper exec, and
 uses `observe_original_child` / `revalidate_child` against the retained image and
 birth identity. `revalidate_for_launch` also binds the opaque Launch to the same

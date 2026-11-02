@@ -4,6 +4,7 @@
 use crate::platform::{self, FileIdentity, ProcessIdentity};
 use anyhow::{ensure, Context, Result};
 use std::{
+    ffi::CStr,
     fs::{self, File, Metadata, OpenOptions},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
@@ -14,6 +15,7 @@ use std::{
 struct Stamp {
     identity: FileIdentity,
     uid: u32,
+    gid: u32,
     mode: u32,
     bytes: u64,
     changed: (i64, i64),
@@ -28,15 +30,72 @@ impl Stamp {
                 modified_nanos: metadata.mtime_nsec(),
             },
             uid: metadata.uid(),
+            gid: metadata.gid(),
             mode: metadata.mode(),
             bytes: metadata.len(),
             changed: (metadata.ctime(), metadata.ctime_nsec()),
         }
     }
 }
+fn private_group_record(user: &CStr, group: &CStr, no_members: bool) -> bool {
+    !user.is_empty() && user == group && no_members
+}
+fn private_group(gid: u32) -> bool {
+    // A same-named, unshared effective group is the conventional user-private
+    // group used by umask 002. Supplementary/shared groups grant no exception.
+    if gid != unsafe { libc::getegid() } {
+        return false;
+    }
+    // Fixed caller-owned NSS buffers: unknown/ERANGE is a refusal, not a retry
+    // with unbounded account data. This selection/check runs off actor.
+    let mut user_bytes = vec![0u8; 64 * 1024];
+    let mut group_bytes = vec![0u8; 64 * 1024];
+    let mut user = std::mem::MaybeUninit::<libc::passwd>::uninit();
+    let mut group = std::mem::MaybeUninit::<libc::group>::uninit();
+    let mut found_user = std::ptr::null_mut();
+    let mut found_group = std::ptr::null_mut();
+    unsafe {
+        if libc::getpwuid_r(
+            libc::geteuid(),
+            user.as_mut_ptr(),
+            user_bytes.as_mut_ptr().cast(),
+            user_bytes.len(),
+            &mut found_user,
+        ) != 0
+            || found_user.is_null()
+            || libc::getgrgid_r(
+                gid,
+                group.as_mut_ptr(),
+                group_bytes.as_mut_ptr().cast(),
+                group_bytes.len(),
+                &mut found_group,
+            ) != 0
+            || found_group.is_null()
+        {
+            return false;
+        }
+        let user = user.assume_init();
+        let group = group.assume_init();
+        if user.pw_uid != libc::geteuid()
+            || group.gr_gid != gid
+            || user.pw_name.is_null()
+            || group.gr_name.is_null()
+            || group.gr_mem.is_null()
+        {
+            return false;
+        }
+        private_group_record(
+            CStr::from_ptr(user.pw_name),
+            CStr::from_ptr(group.gr_name),
+            (*group.gr_mem).is_null(),
+        )
+    }
+}
 fn owned(metadata: &Metadata) -> bool {
     let user = unsafe { libc::geteuid() };
-    (metadata.uid() == 0 || metadata.uid() == user) && metadata.mode() & 0o022 == 0
+    (metadata.uid() == 0 || metadata.uid() == user)
+        && metadata.mode() & 0o002 == 0
+        && (metadata.mode() & 0o020 == 0 || private_group(metadata.gid()))
 }
 struct Pinned {
     path: PathBuf,
@@ -81,14 +140,15 @@ impl Pinned {
 struct Directory {
     path: PathBuf,
     file: File,
-    identity: (u64, u64, u32, u32),
+    identity: (u64, u64, u32, u32, u32),
 }
 impl Directory {
-    fn identity(metadata: &Metadata) -> (u64, u64, u32, u32) {
+    fn identity(metadata: &Metadata) -> (u64, u64, u32, u32, u32) {
         (
             metadata.dev(),
             metadata.ino(),
             metadata.uid(),
+            metadata.gid(),
             metadata.mode(),
         )
     }
@@ -114,6 +174,7 @@ impl Directory {
         let path = fs::symlink_metadata(&self.path)?;
         ensure!(
             path.is_dir()
+                && owned(&path)
                 && Self::identity(&path) == self.identity
                 && Self::identity(&self.file.metadata()?) == self.identity,
             "frontend directory changed"
@@ -162,7 +223,7 @@ impl SelectedFrontend {
         let cli = std::env::current_exe()?.canonicalize()?;
         Self::capture(
             cli,
-            installed.to_owned(),
+            installed.canonicalize()?,
             scope.configuration.clone(),
             Origin::RunningService,
         )

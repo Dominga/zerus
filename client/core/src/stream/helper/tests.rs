@@ -21,8 +21,12 @@ impl Fixture {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("stream-group-{}-{stamp}", std::process::id()));
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "stream-group-{}-{stamp}-{next}",
+            std::process::id()
+        ));
         fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
         std::os::unix::fs::symlink(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_hgs_group.py"),

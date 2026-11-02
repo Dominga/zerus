@@ -4351,9 +4351,11 @@ fleet runtime. The actor applies its watch packets and publishes catalog/count
 updates through the same endpoint. It keeps each original event's ingress permit
 through the database transaction; UI-supplied feed packets cannot enter the owned
 observation path. Failed frames invalidate their exact source until resnapshot.
-The existing plain `serve` and emitted registrations stay passive during the
-UI cutover. Generic approval policy requests remain refused; read, approval and
-posting workers are integrated separately.
+Plain `serve` and fresh registrations stay passive. On Linux, the maintained
+installer supports explicit `--mode background|passive` after the authenticated
+frontend handoff; see [desktop service mode selection](linux-distribution.md#select-the-desktop-service-mode).
+Ordinary refreshes preserve the selected mode. Generic approval policy requests
+remain refused; ownership and each effect require their own authenticated grants.
 
 Background mode also owns one presence sampler/writer outside the actor. It
 samples every two seconds and uses the existing `desktop-presence.json` format.
@@ -4532,7 +4534,7 @@ guards and revocation protocol. The kernel writes no takeover marker. See the
 exact [migration contract](desktop-migration.md).
 
 `hgs desktop registration --json` previews the current platform's per-user
-registration and includes a `readiness` probe for that exact binary and
+passive registration and includes a `readiness` probe for that exact binary and
 configuration. Run its `argv` directly with the two supplied `HGS_CONFIG_DIR`
 and `HGS_STATE_DIR` values, then require the returned configuration to equal
 `expected_configuration`. `lifecycle.ipc_ready` means the private endpoint and
@@ -4541,6 +4543,14 @@ store are ready; it does not mean background writers are active. The same
 per-component readiness. Its epoch changes on service restart. The registration's
 `session` object describes the graphical login environment needed by platform
 installers; it is a requirement, not a claim that the environment is present.
+
+`lifecycle.mode` reports the running command's `passive` or `background`
+selection independently of worker admission. On Linux, `registration --json
+--background` renders the explicit background variant without installing it;
+`registration mode-check --json` checks the actual installer caller ancestry and
+foreground terminal or installed frontend, without granting service ownership.
+The maintained Linux helper's `status --json` reports the durable selected mode
+separately from the running mode and any pending restart/revoke transition.
 
 The preview also contains the per-user definition and exact configuration identity.
 It creates no files, contacts no service manager and enables no writer.

@@ -170,6 +170,30 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                 println!("{}", registration::preview(config, &location)?);
                 Ok(())
             }
+            ["registration", "--json", "--background"] => {
+                ensure!(
+                    cfg!(target_os = "linux"),
+                    "background registration switching is currently supported on Linux only"
+                );
+                println!("{}", registration::preview_mode(config, &location, true)?);
+                Ok(())
+            }
+            ["registration", "mode-check", "--json"] => {
+                #[cfg(target_os = "linux")]
+                {
+                    let scope = ui_authority::Scope::new(config, &location);
+                    let source = ui_authority::registration::caller(&scope)?;
+                    println!(
+                        "{}",
+                        json!({"schema":1,"configuration":location.configuration,"admitted":true,"source":source})
+                    );
+                    Ok(())
+                }
+                #[cfg(not(target_os = "linux"))]
+                anyhow::bail!(
+                    "desktop registration mode checks are currently supported on Linux only"
+                )
+            }
             ["registration", operation @ ("install" | "remove" | "status"), "--json"] => {
                 #[cfg(windows)]
                 {
@@ -182,7 +206,9 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                 #[cfg(not(windows))]
                 {
                     let _ = operation;
-                    anyhow::bail!("desktop registration install/remove/status is available only on Windows; use the maintained platform installer")
+                    anyhow::bail!(
+                        "desktop registration install/remove/status is available only on Windows; use the maintained platform installer"
+                    )
                 }
             }
             ["notification-registration", rest @ ..] => {
@@ -311,9 +337,12 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                     && result["handoff"] == "none"
                     && result["revoked"] == true
                     && result["nothing_written"] == true;
-                ensure!((settled || absent) && result["request_id"] == command.id()
+                ensure!(
+                    (settled || absent)
+                        && result["request_id"] == command.id()
                         && result["configuration"] == location.configuration,
-                    "desktop revocation is not settled; keep Qt stopped and inspect the same request_id");
+                    "desktop revocation is not settled; keep Qt stopped and inspect the same request_id"
+                );
                 Ok(())
             }
             ["catalog-relay", "--json"] => catalog_relay::run(&location),
@@ -593,6 +622,12 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         &reads,
                     );
                     value["frontend_read_delivery"] = frontend.status();
+                    value["lifecycle"]["mode"] = if background_mode {
+                        "background"
+                    } else {
+                        "passive"
+                    }
+                    .into();
                     value["attention_counts"] = attention_counts(&store, &epoch, seq, &feed);
                     if let Some(runtime) = &background {
                         runtime.decorate(&mut value);
@@ -931,6 +966,12 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                     &reads,
                 );
                 value["frontend_read_delivery"] = frontend.status();
+                value["lifecycle"]["mode"] = if background_mode {
+                    "background"
+                } else {
+                    "passive"
+                }
+                .into();
                 value["attention_counts"] = attention_counts(&store, &epoch, seq, &feed);
                 if let Some(runtime) = &background {
                     runtime.decorate(&mut value);

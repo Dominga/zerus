@@ -859,7 +859,15 @@ class NativeKimi(lifecycle.Harness):
         self.assertEqual(self.binding(name)['conversation_id'], conversation)
         self.assertEqual(len(self.requests), calls, 'resume replayed the initial message')
         followup = self.send(name, self.payload(name, 'Follow-up after initial launch'))
-        self.until(lambda: self.settled(name, followup), name)
+        completed = self.until(lambda: self.settled(name, followup), name)
+        starts = [event for event in completed['events'] if event['type'] == 'TurnStarted'
+                  and event.get('run_id') == completed['run_id']
+                  and event.get('detail') == 'Follow-up after initial launch']
+        self.assertEqual(len(starts), 1)
+        self.assertTrue(any(event['type'] == 'Stop' and event.get('run_id') == completed['run_id']
+                            and event.get('kimi_turn_id') == starts[0]['kimi_turn_id']
+                            and event.get('turn_identity_source') in ('kimi_wire', 'kimi_hook')
+                            for event in completed['events']), 'Stop must bind the same exact native turn')
         self.assertEqual(self.held(text), 1)
         self.assert_process(name, 'resumed')
 

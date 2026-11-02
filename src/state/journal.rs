@@ -247,7 +247,7 @@ fn turn_origin<'a>(record: &Value, event: &'a Value) -> Option<&'a str> {
 }
 
 fn kimi_turn_id(record: &Value, event: &Value) -> Option<u64> {
-    if string(record, "agent") != "kimi" || string(event, "hook_event_name") != "TurnStarted" {
+    if string(record, "agent") != "kimi" || !["TurnStarted", "Stop"].contains(&string(event, "hook_event_name")) {
         return None;
     }
     event["turn_id"].as_u64().filter(|id| *id <= i64::MAX as u64)
@@ -279,6 +279,9 @@ pub(super) fn log_event(record: &Value, event: &Value) -> Result<()> {
     if let Some(id) = kimi_turn_id(record, event) {
         data["kimi_turn_id"] = json!(id);
         data["kimi_conversation_id"] = record["conversation_id"].clone();
+        if ["kimi_wire","kimi_hook"].contains(&string(event,"turn_identity_source")) {
+            data["turn_identity_source"] = event["turn_identity_source"].clone();
+        }
     }
     if let Some(question) = questions::from_hook(record, event) {
         data["question_request"] = question;
@@ -863,6 +866,7 @@ pub(super) fn journal_name(record: &Value) -> &str {
 }
 
 pub(super) fn update_activity(record: &mut Value, event: &Value) {
+    if stale_kimi_turn(record, event) { return; }
     repair_kimi_main(record);
     repair_claude_internal(record);
     let was_busy = record["activity"] == "busy";
@@ -1281,6 +1285,34 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
     record["active_tools"] = json!(tools);
 }
 
+// Native turn IDs are monotonic, but the observation-only TurnStarted hook can
+// arrive after its blocking Stop. Keep one clock per exact run/conversation;
+// receiving an old start must neither reopen a completed turn nor erase work
+// from a genuinely newer prompt. Other agents and unbound events are unchanged.
+fn stale_kimi_turn(record: &mut Value, event: &Value) -> bool {
+    if !["", "main"].contains(&string(event, "agent_id")) { return false; }
+    let Some(id) = kimi_turn_id(record, event) else { return false };
+    let run = string(record, "run_id");
+    let conversation = string(record, "conversation_id");
+    if run.is_empty() || conversation.is_empty() { return false; }
+    let mut clock = record["kimi_turn_clock"].clone();
+    if string(&clock, "run_id") != run || string(&clock, "conversation_id") != conversation {
+        clock = json!({"run_id":run,"conversation_id":conversation});
+    }
+    let stopped = clock["stopped"].as_u64().filter(|id| *id <= i64::MAX as u64);
+    let started = clock["started"].as_u64().filter(|id| *id <= i64::MAX as u64);
+    let (key, stale) = if string(event, "hook_event_name") == "TurnStarted" {
+        ("started", stopped.is_some_and(|done| id <= done)
+            || started.is_some_and(|active| id < active))
+    } else {
+        ("stopped", started.is_some_and(|active| id < active)
+            || stopped.is_some_and(|done| id < done))
+    };
+    if !stale { clock[key] = json!(id); }
+    record["kimi_turn_clock"] = clock;
+    stale
+}
+
 // Kimi's reserved "main" agent ID describes the root, not a Swarm child.
 // Older hooks left it permanently working, even after positive Stop evidence.
 pub(super) fn repair_kimi_main(record: &mut Value) {
@@ -1372,6 +1404,8 @@ mod attention_regressions {
         assert_eq!(kimi_turn_id(&record, &event), Some(0));
         event["turn_id"] = json!(1);
         assert_eq!(kimi_turn_id(&record, &event), Some(1));
+        event["hook_event_name"] = json!("Stop");
+        assert_eq!(kimi_turn_id(&record, &event), Some(1));
         assert_eq!(kimi_turn_id(&json!({"agent":"claude"}), &event), None);
         event["hook_event_name"] = json!("UserPromptSubmit");
         assert_eq!(kimi_turn_id(&record, &event), None);
@@ -1380,6 +1414,73 @@ mod attention_regressions {
             event["turn_id"] = invalid;
             assert_eq!(kimi_turn_id(&record, &event), None);
         }
+    }
+
+    fn kimi_clock_record() -> Value {
+        json!({"agent":"kimi","run_id":"current-run","conversation_id":"current-conversation",
+            "activity":"idle","phase":"idle","active_tools":{},"subagents":{}})
+    }
+
+    #[test]
+    fn kimi_delayed_start_after_its_stop_keeps_the_completed_turn_idle_but_new_work_is_busy() {
+        let mut record=kimi_clock_record();
+        update_activity(&mut record,&json!({"hook_event_name":"UserPromptSubmit","prompt":"Follow-up after initial launch"}));
+        // Exact CI order: seq7 UserPromptSubmit, seq8 Stop, seq9 TurnStarted
+        // native turn1. Stop's ID is bound from its awaited native wire prefix.
+        update_activity(&mut record,&json!({"hook_event_name":"Stop","turn_id":1,"turn_identity_source":"kimi_wire"}));
+        assert_eq!((&record["activity"],&record["phase"],&record["main_done"]),(&json!("idle"),&json!("idle"),&json!(true)));
+        let completed=record.clone();
+        update_activity(&mut record,&json!({"hook_event_name":"TurnStarted","agent_id":"main","turn_id":1,"origin_kind":"user","prompt":"Follow-up after initial launch"}));
+        assert_eq!(record,completed,"late start must not reset timers, main_done or prompt");
+        let mut continued=completed.clone();
+        update_activity(&mut continued,&json!({"hook_event_name":"PreToolUse","tool_use_id":"same-turn-call","tool_name":"Shell"}));
+        let working=continued.clone();
+        update_activity(&mut continued,&json!({"hook_event_name":"TurnStarted","turn_id":1}));
+        assert_eq!(continued,working,"a delayed start cannot erase fresh positive work either");
+        assert_eq!(continued["phase"],"tool");
+        update_activity(&mut record,&json!({"hook_event_name":"TurnStarted","turn_id":2,"prompt":"genuinely newer"}));
+        assert_eq!((&record["activity"],&record["phase"],&record["main_done"]),(&json!("busy"),&json!("working"),&json!(false)));
+        let newer=record.clone();
+        for kind in ["TurnStarted","Stop"] {
+            update_activity(&mut record,&json!({"hook_event_name":kind,"turn_id":1}));
+            assert_eq!(record,newer,"old {kind} must not change newer work");
+        }
+        update_activity(&mut record,&json!({"hook_event_name":"Stop","turn_id":2}));
+        assert_eq!(record["phase"],"idle");
+    }
+
+    #[test]
+    fn kimi_completion_clock_is_scoped_and_does_not_turn_unknown_or_other_agent_work_idle() {
+        let mut completed=kimi_clock_record();
+        update_activity(&mut completed,&json!({"hook_event_name":"Stop","turn_id":0}));
+        let snapshot=completed.clone();
+        update_activity(&mut completed,&json!({"hook_event_name":"TurnStarted","turn_id":0}));
+        assert_eq!(completed,snapshot,"native turn zero is a real identity");
+        for key in ["run_id","conversation_id"] {
+            let mut changed=completed.clone();changed[key]=json!("replacement");
+            update_activity(&mut changed,&json!({"hook_event_name":"TurnStarted","turn_id":0}));
+            assert_eq!(changed["phase"],"working","{key}");
+        }
+        for agent in ["claude","codex","opencode","deepseek"] {
+            let mut other=completed.clone();other["agent"]=json!(agent);
+            update_activity(&mut other,&json!({"hook_event_name":"TurnStarted","turn_id":0}));
+            assert_eq!(other["phase"],"working","{agent} retains its own semantics");
+        }
+        for id in [Value::Null,json!(-1),json!("0"),json!(0.5),json!(u64::MAX)] {
+            let mut unknown=completed.clone();
+            update_activity(&mut unknown,&json!({"hook_event_name":"TurnStarted","turn_id":id}));
+            assert_eq!(unknown["phase"],"working","unknown identity is never declared complete");
+        }
+        for invalid in [json!(u64::MAX),json!("0"),json!(-1)] {
+            let mut damaged=completed.clone();damaged["kimi_turn_clock"]["stopped"]=invalid;
+            update_activity(&mut damaged,&json!({"hook_event_name":"TurnStarted","turn_id":0}));
+            assert_eq!(damaged["phase"],"working","malformed persisted bounds cannot suppress work");
+        }
+        let mut child=kimi_clock_record();
+        update_activity(&mut child,&json!({"hook_event_name":"Stop","agent_id":"child","turn_id":1}));
+        assert!(child.get("kimi_turn_clock").is_none());
+        update_activity(&mut child,&json!({"hook_event_name":"TurnStarted","turn_id":1}));
+        assert_eq!(child["phase"],"working");
     }
 
     #[test]

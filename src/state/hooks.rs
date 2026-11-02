@@ -1243,12 +1243,14 @@ fn track(name: String, token: String, mut event: Value, started: &mut bool) -> R
             event["prompt"] = json!(prompt);
         }
     }
-    let sid = event
+    let session = event
         .get("session_id")
         .and_then(Value::as_str)
         .filter(|sid| !sid.is_empty() && !sid.chars().any(char::is_whitespace))
-        .ok_or("hook did not supply a valid session_id")?;
-    let kind = string(&event, "hook_event_name");
+        .ok_or("hook did not supply a valid session_id")?.to_owned();
+    let sid = session.as_str();
+    let kind_value = string(&event, "hook_event_name").to_owned();
+    let kind = kind_value.as_str();
     let _guard = lock(None)?;
     let panes = live()?;
     let own = read_run(&name, &token)?;
@@ -1380,6 +1382,7 @@ fn track(name: String, token: String, mut event: Value, started: &mut bool) -> R
         record["session_end"] = json!({"reason": string(&event, "reason"), "at": now(),
             "run_id": record["run_id"], "conversation_id": sid});
     }
+    kimi_messages::bind_stop_turn(&record, &mut event);
     // Claude's suggested next message is no subagent and no Activity event.
     if prompt_suggestion::observe(&mut record, &event) {
         write(&mut record)?;

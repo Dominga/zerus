@@ -23,14 +23,7 @@ pub struct AppState {
 #[cfg(feature = "live")]
 #[tauri::command]
 pub fn fleet_refresh(state: State<'_, AppState>) -> usize {
-    let mut nudged = state.reconnect("") as usize;
-    if let Some(peers) = state.peers() {
-        nudged += peers
-            .iter()
-            .filter(|computer| state.reconnect(computer))
-            .count();
-    }
-    nudged
+    state.refresh()
 }
 
 #[cfg(not(feature = "live"))]
@@ -49,6 +42,11 @@ impl AppState {
     /// another fleet or changes an online source.
     pub fn reconnect(&self, computer: &str) -> bool {
         self.live.reconnect(computer)
+    }
+    /// One visible Refresh: one shared service subscription, or the legacy
+    /// Fleet's existing offline sources. Display choices never multiply it.
+    pub fn refresh(&self) -> usize {
+        self.live.refresh()
     }
 
     /// The change pump, whose mirror is the screens hub's view of the fleet.
@@ -92,7 +90,8 @@ impl AppState {
     }
 
     /// The peers this computer's listing names; None before a listing named
-    /// them, and for a replay.
+    /// them, and for a replay. Service mode supplies verified display-only
+    /// runtime names, retaining last-known choices while unavailable.
     pub fn peers(&self) -> Option<std::collections::BTreeSet<String>> {
         self.live.peers()
     }
@@ -315,6 +314,30 @@ mod live {
             }
             Ok(())
         }
+        pub fn refresh(&self) -> usize {
+            let Ok(_admission) = self.admit() else {
+                return 0;
+            };
+            match self
+                .source
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+            {
+                Some(Source::Service(service)) => service.reconnect("") as usize,
+                Some(Source::Fleet(fleet)) => {
+                    let local = fleet.reconnect(&ComputerId::local()) as usize;
+                    local
+                        + fleet
+                            .peers()
+                            .into_iter()
+                            .flatten()
+                            .filter(|peer| fleet.reconnect(&ComputerId::from(peer.as_str())))
+                            .count()
+                }
+                _ => 0,
+            }
+        }
         pub fn reconnect(&self, computer: &str) -> bool {
             let Ok(_admission) = self.admit() else {
                 return false;
@@ -501,7 +524,8 @@ mod live {
         }
 
         /// The peers this computer's listing names; None before a listing
-        /// named them, and for a replay.
+        /// named them, and for a replay. Service rosters supply choices only;
+        /// no background worker or writer permission follows from this list.
         pub fn peers(&self) -> Option<BTreeSet<String>> {
             match self
                 .source
@@ -510,6 +534,7 @@ mod live {
                 .as_ref()
             {
                 Some(Source::Fleet(fleet)) => fleet.peers(),
+                Some(Source::Service(service)) => service.peers(),
                 _ => None,
             }
         }

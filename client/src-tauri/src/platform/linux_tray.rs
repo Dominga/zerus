@@ -1023,10 +1023,7 @@ fn dispatch(app: &AppHandle, action: MenuAction, token: Option<String>) {
         MenuAction::Quit => crate::exit_flush::quit_with_flush(&target, 0),
         MenuAction::Refresh => {
             let state = target.state::<crate::commands::AppState>();
-            state.reconnect("");
-            for peer in state.peers().into_iter().flatten() {
-                state.reconnect(&peer);
-            }
+            state.refresh();
         }
     });
 }

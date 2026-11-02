@@ -334,6 +334,170 @@ fn startup_switch_selects_only_the_service_source_and_closes_legacy_read_admissi
 }
 
 #[test]
+fn service_roster_restores_settings_peer_choices_without_authorizing_legacy_marks() {
+    const CHILD: &str = "ZERUS_FIXTURE_SERVICE_PEERS_CHILD";
+    if let Some(root) = std::env::var_os(CHILD) {
+        tauri::async_runtime::block_on(async {
+            assert!(mode());
+            let root = PathBuf::from(root);
+            let config: Value =
+                serde_json::from_slice(&fs::read(root.join("fixture.json")).unwrap()).unwrap();
+            let mark_file = root.join("marks.json");
+            let actions = crate::actions::Actions::new(mark_file.clone());
+            actions
+                .queue_marks(vec![zerus_client_core::readmarks::ReadMark {
+                    computer: "offline".into(),
+                    name: "codex/example/recorded".into(),
+                    run_id: "run".into(),
+                    conversation_id: "conversation".into(),
+                    reply_id: Some("reply".into()),
+                    attention_signature: None,
+                }])
+                .unwrap();
+            actions.flush_marks();
+            actions.disarm_read_delivery().unwrap();
+            let frozen = fs::read(&mark_file).unwrap();
+            let source = crate::commands::AppState::default();
+            assert!(
+                source.peers().is_none(),
+                "not started is unknown, not empty"
+            );
+            assert_eq!(source.start_source().unwrap(), "service");
+            let service = source.desktop_service().unwrap();
+            eventually("connected without a verified roster", || {
+                service.snapshot().connected
+            })
+            .await;
+            assert!(
+                source.peers().is_none(),
+                "counts/captions do not supply peer choices"
+            );
+            fs::write(root.join("roster-known"), []).unwrap();
+            let known = BTreeSet::from(["offline".to_owned(), "waiting".to_owned()]);
+            eventually(
+                "native settings receive offline and not-yet-greeted peers",
+                || source.peers() == Some(known.clone()),
+            )
+            .await;
+            let mut page = zerus_client_core::worktree_policy::page::Page::new();
+            page.set_peers(source.peers().unwrap());
+            assert_eq!(page.view().peers, vec!["offline", "waiting"]);
+            let read = page.choose("offline").unwrap();
+            assert_eq!(read.route, "offline");
+            assert!(read.change.is_none(), "choosing a target is only a read");
+            page.answered(read.id, false, Err("Offline fixture".into()));
+            if config["roster_disconnect_early"] == true {
+                eventually("watch EOF marks service unavailable", || {
+                    !service.snapshot().connected
+                })
+                .await;
+                assert_eq!(
+                    source.peers(),
+                    Some(known),
+                    "EOF retains last-known names, not a complete zero"
+                );
+                assert_eq!(
+                    source.refresh(),
+                    1,
+                    "one shared source, not one retry per displayed peer"
+                );
+                eventually("exactly one refreshed watch", || {
+                    fs::read_to_string(root.join("calls"))
+                        .unwrap_or_default()
+                        .lines()
+                        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                        .filter(|call| call["args"] == json!(["desktop", "watch", "--json"]))
+                        .count()
+                        == 2
+                })
+                .await;
+                eventually("refreshed fixture disconnects", || {
+                    !service.snapshot().connected
+                })
+                .await;
+            } else {
+                for (stage, generation) in [("invalid", 3), ("warming", 4), ("stopping", 5)] {
+                    fs::write(root.join(format!("roster-{stage}")), []).unwrap();
+                    eventually("changed status consumed", || {
+                        service.snapshot().generation == Some(generation)
+                    })
+                    .await;
+                    assert_eq!(
+                        source.peers(),
+                        Some(known.clone()),
+                        "{stage} is not membership removal"
+                    );
+                    page.set_peers(source.peers().unwrap());
+                    assert_eq!(page.view().route, "offline");
+                }
+                fs::write(root.join("roster-removed"), []).unwrap();
+                eventually("verified roster removes only its absent peer", || {
+                    source.peers() == Some(BTreeSet::from(["waiting".to_owned()]))
+                })
+                .await;
+                page.set_peers(source.peers().unwrap());
+                assert_eq!(page.view().peers, vec!["waiting"]);
+                assert!(page.view().route.is_empty());
+                fs::write(root.join("roster-empty"), []).unwrap();
+                eventually("verified empty peer roster is known empty", || {
+                    source.peers() == Some(BTreeSet::new())
+                })
+                .await;
+                page.set_peers(source.peers().unwrap());
+                assert!(page.view().peers.is_empty());
+                fs::write(root.join("roster-end"), []).unwrap();
+                eventually("final EOF", || !service.snapshot().connected).await;
+                assert_eq!(source.peers(), Some(BTreeSet::new()));
+            }
+            let inspected = std::cell::Cell::new(false);
+            actions.drop_orphans(|| {
+                inspected.set(true);
+                source.peers()
+            });
+            let inspected = inspected.get();
+            let after = fs::read(&mark_file).unwrap();
+            service.join().await.unwrap();
+            assert!(
+                !inspected,
+                "closed mark admission refuses before inspecting peer choices"
+            );
+            assert_eq!(
+                after, frozen,
+                "the frozen pre-cutover queue is never pruned"
+            );
+        });
+        return;
+    }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    for disconnected in [false, true] {
+        let fixture = Fixture::new(
+            json!({"peer_choices":true,"counts_computer":"counts-only","roster_disconnect_early":disconnected}),
+        );
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "desktop_service::tests::service_roster_restores_settings_peer_choices_without_authorizing_legacy_marks", "--nocapture"])
+            .env(CHILD, &fixture.0).env(service::MODE_ENV, "1")
+            .env("ZERUS_CLIENT_HGS", fixture.0.join("hgs")).env_remove("ZERUS_CLIENT_REPLAY")
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let calls = fixture.calls();
+        assert_eq!(watch_calls(&calls), if disconnected { 2 } else { 1 });
+        assert!(calls
+            .iter()
+            .all(|call| call["args"] == json!(["--help"]) || call["args"][0] == "desktop"));
+        assert!(
+            !calls
+                .iter()
+                .any(|call| call["value"]["computer"] == "waiting"),
+            "an ungreeted choice does not start a GUI watcher or read"
+        );
+    }
+}
+
+#[test]
 fn approval_seam_is_an_explicit_refusal_without_a_generic_cli_policy_call() {
     tauri::async_runtime::block_on(async {
         let id = uuid::Uuid::new_v4().to_string();

@@ -3768,10 +3768,17 @@ No reverse connection is created by default. Explicit peer setup uses
 | `--open-mode MODE` | Linux auto/tab/window/clipboard; macOS terminal/clipboard; Windows auto/tab/window/console/clipboard |
 | `--selftest` | Headless hgs connectivity check |
 | `--sessions` | Open the workspace; on Windows also the default |
+| `--desktop-target JSON` | Zerus Next on Linux: open the exact `computer`, `run` and `conversation`; implies `--sessions`. Navigation data only, with no notification or writer authority |
 | `--background` | Start in the tray only; the default on Linux and macOS. Not together with `--sessions` |
 
 A single-instance socket forwards repeated launches to the running GUI: one that
 would open the workspace opens it there.
+The Linux target value is bounded to 8192 bytes and accepts only those three
+fields. It follows the exact run and conversation through a session rename and
+refuses an archived or replaced session. The service's selected-child launcher
+passes any ephemeral Wayland activation token in that child's environment, never
+in the target argument or a file. The new GUI consumes it before starting its
+workers; forwarding navigation to an already running GUI carries no token.
 On Linux and macOS, concurrent launches take turns on it, and a launch such as
 `hgs-tray --sessions` leaves it to the `hgs-tray` systemd or launchd service
 while that service runs or restarts: it waits up to 30 seconds for the

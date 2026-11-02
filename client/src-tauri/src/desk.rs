@@ -78,6 +78,12 @@ pub enum DeskInput {
     },
     #[cfg(target_os = "linux")]
     ServiceClicked(Box<crate::desktop_service::activation::Delivery>),
+    /// Public launch/instance navigation data, not callback/writer authority.
+    #[cfg(target_os = "linux")]
+    Navigate {
+        target: zerus_client_core::desktop::activation::Target,
+        activation: Option<String>,
+    },
     /// A delivery failed (`AttentionNotifier::failed`).
     Failed {
         token: String,
@@ -539,6 +545,8 @@ struct Click {
     deadline: Instant,
     #[cfg(target_os = "linux")]
     service: Option<Box<crate::desktop_service::activation::Delivery>>,
+    #[cfg(target_os = "linux")]
+    exact: Option<zerus_client_core::desktop::activation::Target>,
 }
 #[cfg(target_os = "linux")]
 fn resolve_service(
@@ -703,6 +711,8 @@ impl DeskLoop {
                             deadline: cx.now + CLICK_WAIT,
                             #[cfg(target_os = "linux")]
                             service: None,
+                            #[cfg(target_os = "linux")]
+                            exact: None,
                         });
                         outcome.show = true;
                     }
@@ -715,6 +725,8 @@ impl DeskLoop {
                             deadline: cx.now + CLICK_WAIT,
                             #[cfg(target_os = "linux")]
                             service: None,
+                            #[cfg(target_os = "linux")]
+                            exact: None,
                         });
                         outcome.show = true;
                         outcome.activation = (!activation.is_empty()).then_some(activation);
@@ -735,7 +747,21 @@ impl DeskLoop {
                     self.click = Some(Click {
                         target,
                         deadline: cx.now + CLICK_WAIT,
+                        exact: Some(delivery.open().target.clone()),
                         service: Some(delivery),
+                    });
+                }
+                #[cfg(target_os = "linux")]
+                DeskInput::Navigate { target, activation }
+                    if self.attention_completions && target.valid() =>
+                {
+                    outcome.show = true;
+                    outcome.activation = activation;
+                    self.click = Some(Click {
+                        target: Map::new(),
+                        deadline: cx.now + CLICK_WAIT,
+                        service: None,
+                        exact: Some(target),
                     });
                 }
                 DeskInput::Failed { token, detail }
@@ -754,7 +780,9 @@ impl DeskLoop {
                 }
                 DeskInput::Clicked(_) | DeskInput::Failed { .. } => {}
                 #[cfg(target_os = "linux")]
-                DeskInput::LinuxClicked { .. } | DeskInput::ServiceClicked(_) => {}
+                DeskInput::LinuxClicked { .. }
+                | DeskInput::ServiceClicked(_)
+                | DeskInput::Navigate { .. } => {}
             }
         }
         // Read once however many changes were announced.
@@ -807,12 +835,8 @@ impl DeskLoop {
             let resolution =
                 attention::resolve(&click.target, &self.desk, cx.now >= click.deadline);
             #[cfg(target_os = "linux")]
-            let resolution = click.service.as_ref().map_or(resolution, |delivery| {
-                resolve_service(
-                    &delivery.open().target,
-                    &self.desk,
-                    cx.now >= click.deadline,
-                )
+            let resolution = click.exact.as_ref().map_or(resolution, |target| {
+                resolve_service(target, &self.desk, cx.now >= click.deadline)
             });
             match resolution {
                 Resolution::Open { computer, key } => {
@@ -820,9 +844,12 @@ impl DeskLoop {
                     #[cfg(target_os = "linux")]
                     if let Some(delivery) = &click.service {
                         outcome.completion = Some(delivery.completion());
+                    }
+                    #[cfg(target_os = "linux")]
+                    if let Some(target) = &click.exact {
                         outcome.expected = Some(ExactSession {
-                            run: delivery.open().target.run.clone(),
-                            conversation: delivery.open().target.conversation.clone(),
+                            run: target.run.clone(),
+                            conversation: target.conversation.clone(),
                         });
                     }
                     self.click = None;
@@ -2223,6 +2250,47 @@ mod tests {
             SWEEP,
             "nothing to sweep"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_navigation_waits_for_exact_identity_and_never_creates_a_callback_receipt() {
+        let dir = scratch("startup-navigation");
+        let mut thread = Thread::new(&dir);
+        let target = zerus_client_core::desktop::activation::Target {
+            computer: "peer".into(),
+            run: "original-run".into(),
+            conversation: "original-conversation".into(),
+        };
+        let initial = thread.round(
+            0.0,
+            vec![DeskInput::Navigate {
+                target: target.clone(),
+                activation: Some("synthetic-wayland".into()),
+            }],
+        );
+        assert!(initial.show);
+        assert!(initial.open.is_none());
+        assert_eq!(initial.activation.as_deref(), Some("synthetic-wayland"));
+        assert!(initial.completion.is_none());
+        let mut row = asking("renamed/exact-target");
+        row.run_id = Some(target.run.clone());
+        row.conversation_id = Some(target.conversation.clone());
+        let resolved = thread.round(1.0, live("peer", vec![row]));
+        assert_eq!(
+            resolved.open,
+            Some((ComputerId::from("peer"), "run:renamed/exact-target".into()))
+        );
+        assert_eq!(
+            resolved.expected,
+            Some(ExactSession {
+                run: target.run,
+                conversation: target.conversation
+            })
+        );
+        assert!(resolved.completion.is_none());
+        assert!(thread.round(2.0, Vec::new()).open.is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[cfg(target_os = "linux")]

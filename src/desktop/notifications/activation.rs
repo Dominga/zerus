@@ -30,6 +30,14 @@ pub(in crate::desktop) struct Launch {
     configuration: String,
 }
 impl Launch {
+    #[cfg(test)]
+    pub(super) fn fixture(open: Open, configuration: String) -> Self {
+        Self {
+            open,
+            configuration,
+        }
+    }
+
     pub fn open(&self) -> &Open {
         &self.open
     }

@@ -1,6 +1,8 @@
 //! Exact Linux frontend custody for the maintained service installation.
 //! Selection reads files only. The Linux launcher owns its original Child and
 //! must separately require the target-navigation capability before launch.
+pub(in crate::desktop) mod linux;
+
 use crate::platform::{self, FileIdentity, ProcessIdentity};
 use anyhow::{ensure, Context, Result};
 use std::{

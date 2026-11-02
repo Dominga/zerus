@@ -100,11 +100,20 @@ a root `sshd-session` is unsupported; use the actual installed frontend or a
 foreground Terminal outside Zerus. Linux keeps its separate per-user-manager
 boundary.
 
+Identity comparisons include only the fixed SYSTEM, LP64, PSUGID and EXEC
+flags. App Nap, scheduling/resource-control flags and live scheduler states may
+change between reads. Tracing is a separate explicit refusal on both the first
+and final read; unavailable identities and zombie processes still refuse.
+This checks current ancestry: a same-user process reparented to launchd with its
+own controlling terminal is outside its scope, as on Linux.
+
 The Darwin caller fixture prints a bounded PID/UID/real-UID/path/session topology
 before its positive case. Only on GitHub-hosted macOS may an observed unsupported
 foreign ancestor skip that fixture with an explicit reason. Unreadable metadata
 and failures of the recognized login/launchd checks still fail; the diagnostic
 never grants native permission or establishes installed acceptance.
+Agent-marker, agent-named executable and checker-impersonation refusal cases
+run before that hosted-only skip is considered.
 
 Source `install.sh` reloads a PATH-backed desktop service when its CLI bytes
 change. An owned service with a separate runner keeps its registered backend;

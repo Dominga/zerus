@@ -57,7 +57,30 @@ enum Role {
     Init,
 }
 
+// XNU proc_info.h: SYSTEM, LP64, PSUGID and EXEC describe the identity
+// checked here. Scheduler/App Nap/resource-control flags are runtime state.
+// https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/sys/proc_info.h
+const IDENTITY_FLAGS: u32 = 0x1 | 0x10 | 0x2000 | 0x4000;
+const TRACED: u32 = 0x2;
+
+impl Snapshot {
+    fn same_identity(&self, other: &Self) -> bool {
+        self.pid == other.pid
+            && self.parent == other.parent
+            && self.group == other.group
+            && self.session == other.session
+            && self.command == other.command
+            && self.flags & IDENTITY_FLAGS == other.flags & IDENTITY_FLAGS
+            && self.uids == other.uids
+            && self.gids == other.gids
+            && self.unique == other.unique
+            && self.image == other.image
+            && self.system_image == other.system_image
+    }
+}
+
 fn classify(value: &Snapshot, owner: u32) -> Result<Role> {
+    ensure!(value.flags & TRACED == 0, "traced macOS frontend ancestor");
     ensure!(
         owner != 0
             && value.pid != 0
@@ -156,7 +179,14 @@ fn walk<T>(
             Instant::now() < until,
             "macOS ancestry verification expired"
         );
-        ensure!(read(value.pid)? == value, "macOS frontend ancestry changed");
+        let current = read(value.pid)?;
+        // Liveness and tracing are fresh refusal checks; scheduler state and
+        // dynamic flags are not process identity and may change normally.
+        ensure!(
+            value.same_identity(&current),
+            "macOS frontend ancestry changed"
+        );
+        classify(&current, owner)?;
     }
     Ok(owned)
 }

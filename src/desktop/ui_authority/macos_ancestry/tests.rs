@@ -203,6 +203,12 @@ fn every_bridge_and_terminal_identity_is_read_again_and_any_change_refuses() {
             |v| v.unique.executable[0] ^= 1,
             |v| v.parent = 2,
             |v| v.uids[1] += 1,
+            |v| v.gids[2] += 1,
+            |v| v.group += 1,
+            |v| v.session += 1,
+            |v| v.command[0] ^= 1,
+            |v| v.flags ^= IDENTITY_FLAGS,
+            |v| v.system_image.get_or_insert_with(image).inode += 1,
             |v| v.image.push_str(".changed"),
         ] {
             let values = terminal();
@@ -239,6 +245,74 @@ fn every_bridge_and_terminal_identity_is_read_again_and_any_change_refuses() {
     )
     .unwrap();
     assert!(reads.values().all(|count| *count == 2));
+}
+
+#[test]
+fn runtime_flags_and_live_scheduler_state_can_change_without_changing_identity() {
+    let values = terminal();
+    for pid in values.keys() {
+        for bit in 0..32 {
+            let flag = 1 << bit;
+            if flag & (IDENTITY_FLAGS | TRACED) != 0 {
+                continue;
+            }
+            let mut reads = BTreeMap::<u32, usize>::new();
+            let result = walk(
+                9,
+                OWNER,
+                Instant::now() + Duration::from_secs(2),
+                |id| {
+                    let mut value = values[&id].clone();
+                    let count = reads.entry(id).or_default();
+                    *count += 1;
+                    if id == *pid && *count == 2 {
+                        value.flags ^= flag;
+                        value.status = 3; // Sleeping instead of runnable.
+                    }
+                    Ok(value)
+                },
+                |v| Ok(v.pid),
+            );
+            assert_eq!(result.unwrap(), [9, 8, 7, 5], "pid {pid}, flag {flag}");
+        }
+    }
+}
+
+#[test]
+fn tracing_or_a_zombie_is_an_explicit_refusal_on_the_first_or_final_read() {
+    let values = terminal();
+    for pid in values.keys() {
+        for at in [1, 2] {
+            for traced in [true, false] {
+                let mut reads = BTreeMap::<u32, usize>::new();
+                let result = walk(
+                    9,
+                    OWNER,
+                    Instant::now() + Duration::from_secs(2),
+                    |id| {
+                        let mut value = values[&id].clone();
+                        let count = reads.entry(id).or_default();
+                        *count += 1;
+                        if id == *pid && *count == at {
+                            if traced {
+                                value.flags |= TRACED;
+                            } else {
+                                value.status = 5;
+                            }
+                        }
+                        Ok(value)
+                    },
+                    |v| Ok(v.pid),
+                );
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains(if traced {
+                    "traced macOS frontend ancestor"
+                } else {
+                    "macOS ancestry identity unavailable"
+                }));
+            }
+        }
+    }
 }
 
 #[test]

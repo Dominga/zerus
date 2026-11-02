@@ -141,10 +141,14 @@ mod tests {
         assert_eq!(process.identity.parent, own.parent);
         assert_eq!(process.executable, own.image);
         assert!(process.current());
-        assert_eq!(snapshot(pid).unwrap(), own);
+        let current = snapshot(pid).unwrap();
+        assert_eq!(classify(&current, owner).unwrap(), Role::Own);
+        assert!(own.same_identity(&current));
         let init = snapshot(1).unwrap();
         assert_eq!(classify(&init, owner).unwrap(), Role::Init);
-        assert_eq!(snapshot(1).unwrap(), init);
+        let current = snapshot(1).unwrap();
+        assert_eq!(classify(&current, owner).unwrap(), Role::Init);
+        assert!(init.same_identity(&current));
     }
 
     #[test]

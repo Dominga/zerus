@@ -1831,6 +1831,11 @@ fn claude_model(name: &str, request: &Request, model: &ModelOption) -> Result<()
             if !claude_row_is(&picker.row, &model.label) || !picker.session_only {
                 return Err("model picker selection changed; inspect Terminal".into());
             }
+            // A gateway's model (GB10) offers no effort in Zerus's catalog:
+            // Claude keeps whatever it shows for it.
+            if model.efforts.is_empty() {
+                return Ok(());
+            }
             let shown = picker.effort.ok_or("Claude's effort selection is not visible; enlarge Terminal")?;
             if shown == request.effort {
                 return Ok(());
@@ -1896,9 +1901,10 @@ fn claude_model(name: &str, request: &Request, model: &ModelOption) -> Result<()
                 // The receipt names effort only when the picker changed it; the
                 // indicator, when shown, must agree with the request.
                 let shown = claude_footer(&screen);
-                if (effort.is_empty() || effort == request.effort)
-                    && shown.as_deref().is_none_or(|shown| shown == request.effort)
-                    && input::checked_terminal(&record, true).is_ok()
+                let effort_agrees = model.efforts.is_empty()
+                    || ((effort.is_empty() || effort == request.effort)
+                        && shown.as_deref().is_none_or(|shown| shown == request.effort));
+                if effort_agrees && input::checked_terminal(&record, true).is_ok()
                 {
                     return Ok(());
                 }
@@ -2092,8 +2098,7 @@ fn apply_settings(
         // Its indicator shows effort only; history or a receipt names the model.
         let shown = claude_footer(&screen);
         if current.model == model.id
-            && (shown.as_deref() == Some(request.effort.as_str())
-                || (model.efforts.is_empty() && request.effort.is_empty()))
+            && (shown.as_deref() == Some(request.effort.as_str()) || model.efforts.is_empty())
         {
             Ok(())
         } else {

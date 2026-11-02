@@ -1,6 +1,6 @@
 import { createSignal } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
-import type { DesktopService } from "../types";
+import type { DesktopService, NotificationOwnership } from "../types";
 import { tr } from "../i18n";
 
 /** Presence of this projection is the startup mode. It never grants writer authority. */
@@ -76,3 +76,31 @@ export const serviceApprovalIntent = createServiceApprovalIntent(
   () => crypto.randomUUID(),
   () => invoke("desktop_service_frontend_result", { operation: "automatic_approvals" }),
 );
+
+
+/** The native controller retains the original intent across connection changes.
+ * Mount/Check only look it up; Rearm is an explicit user action. */
+export function createOwnershipActions(
+  rearm: () => Promise<NotificationOwnership>,
+  read: () => Promise<NotificationOwnership>,
+) {
+  const [busy, setBusy] = createSignal(false);
+  const act = async (call: () => Promise<NotificationOwnership>) => {
+    if (busy()) return;
+    setBusy(true);
+    try { return await call(); } finally { setBusy(false); }
+  };
+  return { busy, rearm: () => act(rearm), check: () => act(read) };
+}
+export const ownershipActions = createOwnershipActions(
+  () => invoke("desktop_service_ownership_rearm"),
+  () => invoke("desktop_service_ownership_result"),
+);
+export function ownershipNotice(view: NotificationOwnership | undefined): string {
+  if (!view) return "";
+  if (view.pending) return tr("Background access is unconfirmed. Check the result before making another change.");
+  if (view.status?.rearm_required) return tr("Background access was revoked. Resume it to let the service work while Zerus is closed.");
+  if (view.code || view.status?.state !== "service" || !view.status.identity_current)
+    return tr("Background access is unavailable. Retry to check the service.");
+  return "";
+}

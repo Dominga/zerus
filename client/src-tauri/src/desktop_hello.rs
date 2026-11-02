@@ -70,9 +70,8 @@ pub fn hold(
         &uuid::Uuid::new_v4().to_string(),
         &[],
     )
-    .map_err(|error| {
+    .inspect_err(|&error| {
         bootstrap_refusal("bootstrap.begin", error);
-        error
     })?;
     match held.wait_ready() {
         Ok(()) => Ok((Some(held), Some(ownership))),

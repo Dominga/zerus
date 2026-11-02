@@ -275,6 +275,8 @@ pub(in crate::desktop) struct Runtime<H: Host = NativeHost> {
     restored: bool,
     finishing: bool,
     stopping: bool,
+    quiescing: bool,
+    retirement_started: bool,
     drained: bool,
     error: Option<String>,
 }
@@ -362,6 +364,8 @@ impl<H: Host> Runtime<H> {
             restored: false,
             finishing: false,
             stopping: false,
+            quiescing: false,
+            retirement_started: false,
             drained: false,
             error: None,
         })
@@ -371,6 +375,12 @@ impl<H: Host> Runtime<H> {
         store: &mut Store,
         attention: &mut attention::Runtime,
     ) -> Vec<Activation> {
+        if self.quiescing && !self.retirement_started {
+            self.outbox.retire();
+            attention.set_policy(attention::Policy::default());
+            attention.request_retirement();
+            self.retirement_started = true;
+        }
         let activations = self.outbox.poll(store, Instant::now());
         if self.stopping {
             self.drained = self.host.drained() && self.outbox.operation_drained();
@@ -378,7 +388,15 @@ impl<H: Host> Runtime<H> {
         }
         if let Err(error) = self.turn(store, attention) {
             self.error = Some(format!("{error:#}").chars().take(256).collect());
-            self.request_stop();
+            self.stop_host();
+        }
+        if self.quiescing && self.restored && !attention.retiring() && self.outbox.operations_idle()
+        {
+            attention.request_stop();
+            self.stop_host();
+        }
+        if self.stopping {
+            self.drained = self.host.drained() && self.outbox.operation_drained();
         }
         activations
     }
@@ -416,12 +434,16 @@ impl<H: Host> Runtime<H> {
             }
             return Ok(());
         }
-        if ready {
+        if ready || attention.retiring() {
             attention.poll(store, Some(&mut self.outbox));
         }
         Ok(())
     }
     pub fn request_stop(&mut self) {
+        self.quiescing = true;
+        self.outbox.retire();
+    }
+    fn stop_host(&mut self) {
         self.stopping = true;
         self.outbox.request_stop();
         self.host.stop();
@@ -442,17 +464,18 @@ impl<H: Host> Runtime<H> {
     /// Stable restore/lifecycle admission. A temporarily busy status lock can
     /// pause an SDK turn but cannot turn the user's policy off and retire rows.
     pub fn admitting(&self) -> bool {
-        self.restored && !self.stopping && self.error.is_none()
+        self.restored && !self.quiescing && !self.stopping && self.error.is_none()
     }
     pub fn status(&self) -> Value {
         json!({"restored":self.restored,"restore_after":self.after,"restore_through":self.through,"cleanup":self.cleanup,"cleanup_through":self.cleanup_through,
-            "stopping":self.stopping,"drained":self.drained,"error":self.error,
+            "stopping":self.quiescing||self.stopping,"withdrawing":self.quiescing&&!self.stopping,
+            "native_stop_sent":self.stopping,"drained":self.drained,"error":self.error,
             "outbox":self.outbox.status(),"host":self.host.status()})
     }
 }
 impl<H: Host> Drop for Runtime<H> {
     fn drop(&mut self) {
-        self.request_stop();
+        self.stop_host(); // Abandonment is not a completed cleanup/drain.
         self.drained = self.drained || (self.host.drained() && self.outbox.operation_drained());
         if !self.drained {
             // Abandonment proves no drain. Preserve the original owner and

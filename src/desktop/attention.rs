@@ -226,7 +226,7 @@ impl Runtime {
             && mark.scope.source.service_epoch == self.epoch)
     }
     pub fn poll(&mut self, store: &mut Store, outbox: Option<&mut Outbox>) {
-        if self.stopping || self.error.is_some() {
+        if self.stopping {
             return;
         }
         if self.retiring() {
@@ -236,6 +236,9 @@ impl Runtime {
             return;
         }
         if !self.enabled() {
+            return;
+        }
+        if self.error.is_some() {
             return;
         }
         if let Err(error) = self.turn(store, outbox) {

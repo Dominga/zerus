@@ -426,7 +426,8 @@ fn lookup_uses_unique_request_and_intent_indexes_instead_of_a_journal_scan() {
                 req.lease,
                 req.retry_of,
                 IDENTITY_BYTES as i64,
-                PAYLOAD_BYTES as i64
+                PAYLOAD_BYTES as i64,
+                false,
             ],
             |r| r.get::<_, String>(3),
         )

@@ -805,18 +805,26 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                 Some("revoke" | "revoke_status")
                             ) {
                                 let handoff = runtime.handoff();
-                                if request_value["op"] == "revoke_status" && !runtime.drained() {
+                                let revoke_epoch = runtime.revocation_epoch(&epoch);
+                                let result = revoke::request_with_runtime(
+                                    &location,
+                                    &mut store,
+                                    request_value,
+                                    &revoke_epoch,
+                                    handoff.as_deref(),
+                                    |store| runtime.drain(store, Duration::from_millis(750)),
+                                );
+                                // Match the original writer incarnation first;
+                                // a rearmed runtime must not lend its drain state
+                                // to an earlier incarnation's settled receipt.
+                                if request_value["op"] == "revoke_status"
+                                    && result["revoked"] == true
+                                    && !runtime.drained()
+                                {
                                     json!({"request_id":request_value["request_id"],"accepted":false,"durable":false,
                                         "revoked":false,"checkpointed":false,"code":"drain_not_settled"})
                                 } else {
-                                    revoke::request_with_runtime(
-                                        &location,
-                                        &mut store,
-                                        request_value,
-                                        &epoch,
-                                        handoff.as_deref(),
-                                        |store| runtime.drain(store, Duration::from_millis(750)),
-                                    )
+                                    result
                                 }
                             } else if matches!(request_value["op"].as_str(), Some("read_intent")) {
                                 runtime.delivery_request(&mut store, request_value)
@@ -826,7 +834,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         } else {
                             request(&location, &mut store, hello.request.as_ref())
                         };
-                        migration = handoff::inspect(&location);
+                        let held = background.as_ref().and_then(background::Runtime::handoff);
+                        migration = handoff::inspect_held(&location, held.as_deref());
                         frame(&epoch, seq, "response", result)
                     } else {
                         frame(
@@ -910,7 +919,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
             if Instant::now() >= heartbeat {
                 store.recover_effects(&epoch);
                 seq += 1;
-                migration = handoff::inspect(&location);
+                let held = background.as_ref().and_then(background::Runtime::handoff);
+                migration = handoff::inspect_held(&location, held.as_deref());
                 let mut value = projection(
                     &location,
                     &store,

@@ -116,6 +116,23 @@ impl Fixture {
         }
     }
     fn seed(&mut self) -> String {
+        let intent = self.seed_intent();
+        let (mut outbox, endpoint) = Outbox::new(self.session.clone()).unwrap();
+        outbox
+            .offer_intent(&mut self.store, &intent, 1, Instant::now())
+            .unwrap();
+        let dispatch = endpoint.try_next().unwrap().begin().unwrap();
+        let Action::Post { token, .. } = &dispatch.command().action else {
+            panic!("fixture post")
+        };
+        let native_id = NativeId::Macos {
+            request_id: zerus_client_core::attention::request_id(token),
+        };
+        dispatch.finish(Outcome::Delivered { native_id });
+        outbox.poll(&mut self.store, Instant::now());
+        intent
+    }
+    fn seed_intent(&mut self) -> String {
         let edge = id();
         let identity = Identity {
             kind: Kind::Post,
@@ -139,21 +156,6 @@ impl Fixture {
             &serde_json::to_value(&action).unwrap(),
         )
         .unwrap();
-        let (mut outbox, endpoint) = Outbox::new(self.session.clone()).unwrap();
-        outbox
-            .offer_intent(&mut self.store, &intent, 1, Instant::now())
-            .unwrap();
-        endpoint
-            .try_next()
-            .unwrap()
-            .begin()
-            .unwrap()
-            .finish(Outcome::Delivered {
-                native_id: NativeId::Macos {
-                    request_id: zerus_client_core::attention::request_id(&token),
-                },
-            });
-        outbox.poll(&mut self.store, Instant::now());
         self.store.db.execute("INSERT INTO desktop_attention_edges(logical,session,intent,identity,payload,blocked,bytes) VALUES(?1,'fixture',?2,?3,?4,0,0)",rusqlite::params![edge,intent,serde_json::to_string(&identity).unwrap(),serde_json::to_string(&action).unwrap()]).unwrap();
         intent
     }
@@ -163,6 +165,215 @@ impl Fixture {
         })
         .unwrap()
     }
+}
+
+fn settle_cleanup(
+    f: &mut Fixture,
+    runtime: &mut Runtime<Fake>,
+    attention: &mut attention::Runtime,
+) {
+    for _ in 0..256 {
+        runtime.poll(&mut f.store, attention);
+        while let Ok(work) = runtime.host.endpoint.try_next() {
+            let Some(dispatch) = work.begin() else {
+                continue;
+            };
+            let native_id = match &dispatch.command().action {
+                Action::Withdraw { native_id, .. } => native_id.clone(),
+                _ => panic!("cleanup cannot post"),
+            };
+            dispatch.finish(Outcome::Delivered { native_id });
+        }
+        if runtime.drained() {
+            return;
+        }
+    }
+    panic!("cleanup did not settle: {}", runtime.status());
+}
+
+#[test]
+fn revoke_before_restore_finishes_keeps_cleanup_mappings_without_click_authority() {
+    let mut f = Fixture::new();
+    for _ in 0..18 {
+        f.seed();
+    }
+    let state = Arc::new(Mutex::new(State {
+        ready: true,
+        ..State::default()
+    }));
+    let mut runtime = f.attach(state.clone(), Arc::new(()));
+    let mut attention = attention::Runtime::new(&f.session.service_epoch);
+    ledger::revoke(&f.store.db, "manual_revoke").unwrap();
+    runtime.request_stop();
+    runtime.poll(&mut f.store, &mut attention);
+    assert!(!state.lock().unwrap().stopping);
+    assert_eq!(
+        f.store
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM desktop_attention_edges WHERE live=1",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        18
+    );
+    state.lock().unwrap().restore = true;
+    for _ in 0..5 {
+        runtime.poll(&mut f.store, &mut attention);
+    }
+    let restored = state.lock().unwrap().pages.concat();
+    assert_eq!(restored.len(), 18);
+    assert!(runtime.host.endpoint.try_next().is_err());
+    assert!(runtime
+        .outbox
+        .current_activation(&f.store, &restored[0])
+        .unwrap()
+        .is_none());
+    assert!(runtime
+        .host
+        .endpoint
+        .emit(super::super::Event::Clicked(restored[0].clone())));
+    assert!(runtime.poll(&mut f.store, &mut attention).is_empty());
+    state.lock().unwrap().finish = true;
+    state.lock().unwrap().joined = true;
+    settle_cleanup(&mut f, &mut runtime, &mut attention);
+    assert_eq!(f.store.db.query_row("SELECT COUNT(*) FROM desktop_attempts a JOIN desktop_intents i ON i.id=a.intent_id WHERE json_extract(i.payload,'$.op')='withdraw'", [], |r| r.get::<_, i64>(0)).unwrap(), 18);
+}
+
+#[test]
+fn revoke_waits_for_begun_post_receipt_and_resources_before_exact_withdrawal() {
+    for delivered in [true, false] {
+        let mut f = Fixture::new();
+        let state = Arc::new(Mutex::new(State {
+            restore: true,
+            finish: true,
+            ready: true,
+            ..State::default()
+        }));
+        let mut runtime = f.attach(state.clone(), Arc::new(()));
+        let mut attention = attention::Runtime::new(&f.session.service_epoch);
+        for _ in 0..4 {
+            runtime.poll(&mut f.store, &mut attention);
+        }
+        let intent = f.seed_intent();
+        runtime
+            .outbox
+            .offer_intent(&mut f.store, &intent, 1, Instant::now())
+            .unwrap();
+        let dispatch = runtime.host.endpoint.try_next().unwrap().begin().unwrap();
+        let Action::Post { token, .. } = &dispatch.command().action else {
+            panic!("original post")
+        };
+        let native_id = NativeId::Macos {
+            request_id: zerus_client_core::attention::request_id(token),
+        };
+        let hold = dispatch.resources();
+        ledger::revoke(&f.store.db, "manual_revoke").unwrap();
+        runtime.request_stop();
+        runtime.poll(&mut f.store, &mut attention);
+        assert!(
+            !dispatch.cancelled(),
+            "begun native work retains its original terminal outcome"
+        );
+        dispatch.finish(if delivered {
+            Outcome::Delivered {
+                native_id: native_id.clone(),
+            }
+        } else {
+            Outcome::Unknown {
+                code: super::super::wire::Uncertainty::HostLost,
+            }
+        });
+        for _ in 0..4 {
+            runtime.poll(&mut f.store, &mut attention);
+        }
+        assert!(runtime.host.endpoint.try_next().is_err());
+        assert!(!state.lock().unwrap().stopping);
+        drop(hold);
+        for _ in 0..4 {
+            runtime.poll(&mut f.store, &mut attention);
+        }
+        if delivered {
+            let close = runtime.host.endpoint.try_next().unwrap().begin().unwrap();
+            assert!(
+                matches!(&close.command().action, Action::Withdraw { native_id: value, .. } if *value == native_id)
+            );
+            close.finish(Outcome::Delivered { native_id });
+        } else {
+            assert!(
+                runtime.host.endpoint.try_next().is_err(),
+                "unknown post is never replayed or guessed delivered"
+            );
+        }
+        state.lock().unwrap().joined = true;
+        settle_cleanup(&mut f, &mut runtime, &mut attention);
+        assert_eq!(
+            f.store
+                .db
+                .query_row(
+                    "SELECT COUNT(*) FROM desktop_attempts WHERE intent_id=?1",
+                    [&intent],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+    }
+}
+
+#[test]
+fn revoked_runtime_withdraws_before_stopping_and_keeps_original_close_resources() {
+    let mut f = Fixture::new();
+    f.seed();
+    let state = Arc::new(Mutex::new(State {
+        restore: true,
+        finish: true,
+        ready: true,
+        ..State::default()
+    }));
+    let mut runtime = f.attach(state.clone(), Arc::new(()));
+    let mut attention = attention::Runtime::new(&f.session.service_epoch);
+    for _ in 0..4 {
+        runtime.poll(&mut f.store, &mut attention);
+    }
+    ledger::revoke(&f.store.db, "manual_revoke").unwrap();
+    runtime.request_stop();
+    for _ in 0..4 {
+        runtime.poll(&mut f.store, &mut attention);
+    }
+    assert!(
+        !state.lock().unwrap().stopping,
+        "the connected host must execute its withdrawal first"
+    );
+    let dispatch = runtime.host.endpoint.try_next().unwrap().begin().unwrap();
+    let native_id = match &dispatch.command().action {
+        Action::Withdraw { native_id, .. } => native_id.clone(),
+        _ => panic!("cleanup cannot post"),
+    };
+    let hold = dispatch.resources();
+    dispatch.finish(Outcome::Delivered { native_id });
+    for _ in 0..4 {
+        runtime.poll(&mut f.store, &mut attention);
+    }
+    assert!(
+        !state.lock().unwrap().stopping,
+        "receipt alone cannot release copied native close resources"
+    );
+    assert_eq!(ledger::status(&f.store.db).unwrap()["revoked"], true);
+    drop(hold);
+    for _ in 0..4 {
+        runtime.poll(&mut f.store, &mut attention);
+    }
+    assert!(state.lock().unwrap().stopping);
+    assert!(!runtime.drained());
+    assert!(
+        runtime.host.endpoint.try_next().is_err(),
+        "no old post or close is replayed"
+    );
+    state.lock().unwrap().joined = true;
+    runtime.poll(&mut f.store, &mut attention);
+    assert!(runtime.drained());
 }
 
 #[test]
@@ -206,9 +417,7 @@ fn restore_backpressure_and_finish_ack_precede_retirement_admission() {
     assert!(!ledger::current(&f.store.db, &first, 1).unwrap());
     runtime.request_stop();
     state.lock().unwrap().joined = true;
-    for _ in 0..2 {
-        runtime.poll(&mut f.store, &mut attention);
-    }
+    settle_cleanup(&mut f, &mut runtime, &mut attention);
     assert!(runtime.drained());
 }
 

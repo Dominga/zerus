@@ -106,7 +106,8 @@ fn verify(location: &Location, id: &str, lock: &HandoffLock) -> Result<Value> {
         Declined("writer_epoch_changed")
     );
     ensure!(
-        zerus_desktop_ledger::operations::totals(&tx)?.undrained == 0,
+        zerus_desktop_ledger::operations::totals(&tx)?.undrained == 0
+            && zerus_desktop_ledger::operations::cache::undrained(&tx)? == 0,
         Declined("operation_resources_not_drained")
     );
     let result = receipt(location, &command, &saved)?;
@@ -264,6 +265,36 @@ mod tests {
         fn hold(&self) -> Result<Held> {
             acquire(&self.location, &self.id, Instant::now())
         }
+    }
+
+    #[test]
+    fn a_settled_receipt_cannot_hide_an_original_cache_resource() {
+        let mut f = Fixture::new();
+        let original = zerus_desktop_ledger::operations::cache::Original {
+            preparation_id: uuid::Uuid::new_v4().to_string(),
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            configuration: f.location.configuration.clone(),
+            root: "/srv/example/cache".into(),
+            limit: 1,
+            defer_ms: 0,
+            policy_change: true,
+            revision: 0,
+            service_epoch: f.epoch.clone(),
+            writer_epoch: uuid::Uuid::new_v4().to_string(),
+            lease: uuid::Uuid::new_v4().to_string(),
+        };
+        let tx = f.store.db.transaction().unwrap();
+        zerus_desktop_ledger::operations::cache::begin(&tx, &original, &"f".repeat(64)).unwrap();
+        tx.commit().unwrap();
+        let Err(error) = f.hold() else {
+            panic!("cache resource must refuse held rollback");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("operation_resources_not_drained"),
+            "{error:#}"
+        );
     }
 
     #[test]

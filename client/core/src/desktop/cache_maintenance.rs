@@ -7,6 +7,20 @@ use zerus_desktop_migration::canonical_uuid;
 
 pub const ABI: &str = "desktop-cache-maintenance-v1";
 pub const HELP_MARKER: &str = "Desktop cache maintenance ABI: desktop-cache-maintenance-v1";
+fn absolute_root(root: &str) -> bool {
+    use crate::paths::{absolute, Style};
+    absolute(root, Style::Posix)
+        || absolute(root, Style::Windows)
+        || root.strip_prefix("\\\\?\\").is_some_and(|path| {
+            // std::fs::canonicalize preserves the native Windows verbatim
+            // spelling. Accept disk/UNC roots, never arbitrary device names.
+            if let Some(share) = path.strip_prefix("UNC\\") {
+                absolute(&format!("\\\\{share}"), Style::Windows)
+            } else {
+                path.as_bytes().get(1) == Some(&b':') && absolute(path, Style::Windows)
+            }
+        })
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Timing {
@@ -61,8 +75,7 @@ impl Command {
                     && *limit <= i64::MAX as u64
                     && root.len() <= 8192
                     && !root.chars().any(char::is_control)
-                    && (crate::paths::absolute(root, crate::paths::Style::Posix)
-                        || crate::paths::absolute(root, crate::paths::Style::Windows))
+                    && absolute_root(root)
             }
             Self::Execute {
                 configuration,
@@ -202,6 +215,25 @@ mod tests {
         };
         assert!(command.valid(OPERATION));
         assert!(!command.valid(PREPARE));
+    }
+    #[test]
+    fn canonical_windows_disk_and_unc_roots_do_not_admit_device_names() {
+        for root in [
+            r"C:\cache",
+            r"\\server\share\cache",
+            r"\\?\C:\cache",
+            r"\\?\UNC\server\share\cache",
+        ] {
+            assert!(absolute_root(root), "{root}");
+        }
+        for root in [
+            r"C:cache",
+            r"\\.\pipe\cache",
+            r"\\?\GLOBALROOT\Device\cache",
+            r"\\?\cache",
+        ] {
+            assert!(!absolute_root(root), "{root}");
+        }
     }
 }
 

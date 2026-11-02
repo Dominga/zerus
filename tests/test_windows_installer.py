@@ -359,6 +359,46 @@ class Script(unittest.TestCase):
         self.assertIn("CompareText(ParamStr(I), '/RELAUNCH') = 0", self.text)
 
 
+class InstallerEnvironment(unittest.TestCase):
+    def test_shell_profile_is_real_but_backend_home_and_roots_stay_private(self):
+        from test_windows_installer_survival import installer_environment
+        isolated = {'HOME': 'C:/Example/private', 'USERPROFILE': 'C:/Example/private',
+                    'APPDATA': 'C:/Example/private/roaming', 'LOCALAPPDATA': 'C:/Example/private/local',
+                    'HGS_CONFIG_DIR': 'C:/Example/private/config', 'HGS_STATE_DIR': 'C:/Example/private/state'}
+        original = {'USERPROFILE': 'C:/Users/Example', 'APPDATA': 'C:/Users/Example/AppData/Roaming',
+                    'LOCALAPPDATA': 'C:/Users/Example/AppData/Local'}
+        selected = installer_environment(isolated, original)
+        self.assertEqual({key: selected[key] for key in original}, original)
+        for key in ('HOME', 'HGS_CONFIG_DIR', 'HGS_STATE_DIR'):
+            self.assertEqual(selected[key], isolated[key])
+        self.assertEqual(isolated['USERPROFILE'], 'C:/Example/private')
+        self.assertNotIn('USERPROFILE', installer_environment(isolated, {}))
+
+    def test_setup_and_uninstall_share_the_selected_shell_environment(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from test_windows_installer_survival import Installer
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            case = Installer()
+            case.root = case.app = root
+            case.setup_exe = root / 'setup.exe'
+            (root / 'uninstall').mkdir()
+            (root / 'uninstall' / 'unins000.exe').write_bytes(b'synthetic uninstaller, never executed')
+            case.logs = 0
+            case.backend_tracking = False
+            case.installer_env = {'HOME': str(root), 'USERPROFILE': 'C:/Users/Example'}
+            case.env = {'USERPROFILE': str(root)}
+            case.wait_for = Mock()
+            with patch('test_windows_installer_survival.subprocess.run',
+                       return_value=SimpleNamespace(returncode=0, stdout=b'', stderr=b'')) as run:
+                self.assertEqual(Installer.setup(case)[0], 0)
+                Installer.uninstall(case)
+            self.assertEqual(run.call_count, 2)
+            for call in run.call_args_list:
+                self.assertIs(call.kwargs['env'], case.installer_env)
+
+
 class BackendProfileRetention(unittest.TestCase):
     def test_unknown_backend_cleanup_retains_its_selected_cli_profile(self):
         from unittest.mock import Mock

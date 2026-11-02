@@ -171,6 +171,19 @@ class LinuxDesktopService(unittest.TestCase):
                 self.instance(mode).install()
             self.assertEqual(self.destination.read_bytes(), original)
 
+    def test_helper_refuses_present_agent_markers_before_accepting_any_cli_reply(self):
+        self.instance().install()
+        original = self.destination.read_bytes()
+        for key in ("HGS_SESSION", "HGS_RUN_ID"):
+            for marker in ("", "private-fixture"):
+                with patch.dict(self.env, {key: marker}):
+                    self.manager.calls.clear()
+                    with self.assertRaisesRegex(installer.Refusal, "agent session"):
+                        self.instance("background").install()
+                self.assertEqual(self.destination.read_bytes(), original)
+                self.assertNotIn("restart", self.manager.actions())
+                self.assertFalse(any("mode-check" in args for args, _ in self.manager.calls))
+
     def test_ordinary_upgrade_session_and_refresh_preserve_background_selection(self):
         self.instance().install()
         self.instance("background").install()

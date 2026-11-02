@@ -242,6 +242,8 @@ class Installer:
         return value
 
     def caller(self):
+        require(not any(name in self.env for name in ("HGS_SESSION", "HGS_RUN_ID")),
+                "agent session cannot change desktop mode; use Settings or a terminal outside Zerus")
         value = self.cli("registration", "mode-check", "--json")
         require(value.get("schema") == 1 and value.get("configuration") == self.configuration
                 and value.get("admitted") is True

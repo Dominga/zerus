@@ -67,6 +67,13 @@ class Plans(unittest.TestCase):
         answered = codex_request(asked, {"type": "function_call", "call_id": "c"},
                                  {"type": "function_call_output", "call_id": "c", "output": '{"accepted":true}'})
         self.assertEqual((api.results(answered), api.plan(answered, "")), (['{"accepted":true}'], ("text", api.DONE)))
+        spawned = codex_request(user(api.CODEX_SUBAGENT), tools=("spawn_agent",))
+        self.assertEqual(api.plan(spawned, ""),
+                         ("tool", "spawn_agent", {"task_name": "fixture_child", "message": "Reply to the isolated child fixture.",
+                                                  "fork_turns": "none"}))
+        event = next(value for kind, value in api.responses_events(spawned, api.plan(spawned, ""), 1)
+                     if kind == "response.output_item.done")
+        self.assertEqual(event["item"]["namespace"], "functions")
 
     def test_streams_carry_the_whole_answer(self):
         message = api.anthropic_message({}, ("tool", "Write", {"file_path": "x"}), 3)

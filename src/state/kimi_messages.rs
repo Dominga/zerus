@@ -32,7 +32,16 @@ pub(super) fn bind_stop_turn(record: &Value, event: &mut Value) {
 }
 
 fn stop_turn_file(path: &Path) -> Option<u64> {
-    let mut file = File::open(path).ok()?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // A FIFO swapped in after discovery must not park the Stop hook while
+        // it holds the global state lock, before we can check the file type.
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let mut file = options.open(path).ok()?;
     let (before, metadata) = crate::platform::FileIdentity::with_metadata(&file).ok()?;
     if !metadata.is_file() { return None; }
     let length = metadata.len();
@@ -295,6 +304,34 @@ mod tests {
         std::fs::write(&path,&bytes).unwrap();
         assert_eq!(stop_turn_file(&path),Some(1));
         assert_eq!(stop_turn_file(dir.path()),None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_replaced_fifo_does_not_park_the_blocking_stop_reader() {
+        use std::os::unix::{ffi::OsStrExt,fs::OpenOptionsExt};
+        use std::{sync::mpsc,thread,time::Duration};
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("wire.jsonl");
+        std::fs::write(&path,lines(&[user_turn(1,"fixture")])).unwrap();
+        assert_eq!(stop_turn_file(&path),Some(1));
+        std::fs::remove_file(&path).unwrap();
+        let name=std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: this NUL-terminated path remains live for the syscall and
+        // names only this test's private temporary directory.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(),0o600) },0);
+        let fifo=path.clone();let (send,receive)=mpsc::channel();
+        let reader=thread::spawn(move || send.send(stop_turn_file(&fifo)).unwrap());
+        let result=receive.recv_timeout(Duration::from_secs(5));
+        // A broken blocking implementation must still leave no worker behind.
+        // Linux permits O_RDWR on a FIFO without a peer; keep its writer alive
+        // until the original reader has joined, even if that thread was late.
+        let rescue=result.is_err().then(|| std::fs::OpenOptions::new().read(true).write(true)
+            .custom_flags(libc::O_NONBLOCK).open(&path).unwrap());
+        reader.join().unwrap();drop(rescue);
+        assert_eq!(result,Ok(None),"a nonregular replacement must be refused without waiting for a writer");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path,lines(&[user_turn(2,"fixture")])).unwrap();
+        assert_eq!(stop_turn_file(&path),Some(2));
     }
 
     #[test]

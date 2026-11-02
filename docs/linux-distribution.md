@@ -140,7 +140,10 @@ A lost or unsettled result retains the original transition; inspect `status`
 and repeat **the same passive transition**, which retains its UUID. An
 unfinished rollback blocks background selection and ordinary refresh. If a new
 authenticated Grant/Rearm won before the hold, the old UUID correctly refuses.
-The owner can explicitly cancel only that pending registration record:
+The same record can remain if the helper stopped after saving the transition
+but before the original revoke took effect; the existing Service grant can
+still be current. In either case, the owner can explicitly cancel only that
+pending registration record:
 
 ```sh
 python3 scripts/install-linux-desktop-service.py cancel-rollback --hgs "$(command -v hgs)" --request-id ORIGINAL_UUID --json

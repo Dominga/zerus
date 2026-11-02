@@ -373,8 +373,9 @@ class Installer:
                 "transition": previous.get("transition") if previous else None}
 
     def cancel_rollback(self, request_id):
-        """Explicit record-only escape after a new authenticated Rearm won.
+        """Explicit record-only escape with a verified current Service grant.
 
+        Also covers interruption before the original revoke was offered.
         Never issues a revoke, clears a native revoke, changes mode or touches
         the manager. A later passive request is a new explicit owner intent.
         """

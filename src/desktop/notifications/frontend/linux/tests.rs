@@ -1,6 +1,15 @@
 use super::super::{Origin, SelectedFrontend};
 use super::*;
-use std::{fs, os::unix::fs::PermissionsExt, sync::Mutex};
+use std::{
+    ffi::CString,
+    fs::{self, File, OpenOptions},
+    io::Write,
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{FileTypeExt, OpenOptionsExt, PermissionsExt},
+    },
+    sync::Mutex,
+};
 use wire::{Open, Target};
 
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -17,7 +26,9 @@ impl Fixture {
             fs::set_permissions(prefix.join(dir), fs::Permissions::from_mode(0o755)).unwrap();
         }
         fs::set_permissions(&prefix, fs::Permissions::from_mode(0o755)).unwrap();
-        fs::copy("/bin/sleep", prefix.join("bin/hgs-tray")).unwrap();
+        fs::copy("/bin/dd", prefix.join("bin/hgs-tray")).unwrap();
+        let release = CString::new(prefix.join("fixture-exit").as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(release.as_ptr(), 0o600) }, 0);
         fs::write(prefix.join("bin/hgs"), b"private CLI image fixture").unwrap();
         fs::set_permissions(prefix.join("bin/hgs"), fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(prefix.join("share/hgs/local-webkit.json"), b"{}").unwrap();
@@ -27,7 +38,7 @@ impl Fixture {
         fs::write(prefix.join("libexec/hgs-tray-launch"), format!(
             "#!/bin/sh\nif [ \"$1\" = --help ]; then printf '%s\\n' '{help}'; exit 0; fi\n\
             [ \"$#\" = 3 ] && [ \"$1\" = --hgs ] && [ \"$2\" = '{}/bin/hgs' ] && \\\n            [ \"$3\" = --sessions ] && [ \"${{ZERUS_CLIENT_DESKTOP_TARGET-}}\" = '{target}' ] && \\\n            [ \"${{XDG_ACTIVATION_TOKEN-}}\" = synthetic-wayland ] && \\\n            [ \"${{ZERUS_CLIENT_DESKTOP_SERVICE-}}\" = 1 ] && [ -z \"${{HGS_SESSION-}}${{HGS_RUN_ID-}}\" ] || exit 31\n\
-            exec '{}/bin/hgs-tray' 0.8\n", prefix.display(), prefix.display())).unwrap();
+            exec '{}/bin/hgs-tray' 'if={}/fixture-exit' bs=1 count=1 status=none\n", prefix.display(), prefix.display(), prefix.display())).unwrap();
         fs::set_permissions(
             prefix.join("libexec/hgs-tray-launch"),
             fs::Permissions::from_mode(0o755),
@@ -37,6 +48,18 @@ impl Fixture {
             _root: root,
             prefix,
         }
+    }
+    /// One byte releases the fixture; no autonomous short sleep and no EOF
+    /// dependency on unrelated fork-before-exec descriptor aliases.
+    fn hold(&self) -> File {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(self.prefix.join("fixture-exit"))
+            .unwrap();
+        assert!(file.metadata().unwrap().file_type().is_fifo());
+        file
     }
     fn select(&self) -> SelectedFrontend {
         SelectedFrontend::capture(
@@ -75,43 +98,61 @@ fn open() -> Open {
 fn launch() -> Launch {
     Launch::fixture(open(), "a".repeat(64))
 }
-fn finish(owned: &mut OwnedFrontend) -> bool {
+fn observe_held(owned: &mut OwnedFrontend) {
     let until = Instant::now() + Duration::from_secs(5);
-    let mut observed = false;
-    while !owned.exited() {
+    while !owned.image_observed() {
         owned.poll();
-        observed |= owned.image_observed();
-        assert!(
-            Instant::now() < until,
-            "original private child did not exit"
-        );
+        assert!(!owned.error(), "held fixture failed image observation");
+        assert!(!owned.exited(), "fixture exited before explicit release");
+        assert!(Instant::now() < until, "original fixture did not exec");
         std::thread::sleep(Duration::from_millis(25));
     }
     assert!(!owned.error());
-    assert!(owned.exit.unwrap().success());
-    observed
+    assert!(owned.child.as_mut().unwrap().try_wait().unwrap().is_none());
+}
+fn release(hold: &mut File) {
+    // Keep this descriptor until actual exit. Closing the last descriptor before
+    // dd opens the FIFO would discard a byte written before its reader starts.
+    hold.write_all(b"x").unwrap();
+}
+fn finish_released(owned: &mut OwnedFrontend) {
+    let until = Instant::now() + Duration::from_secs(5);
+    while !owned.exited() {
+        owned.poll();
+        assert!(Instant::now() < until, "released fixture did not exit");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    // After release, a normal exit may race the live-child revalidation. That
+    // conservative refusal stays intact; only actual original exit settles it.
+    assert!(owned.exit_status().unwrap().success());
+    assert!(owned.child.is_none());
+}
+fn finish(owned: &mut OwnedFrontend, mut hold: File) {
+    observe_held(owned);
+    release(&mut hold);
+    finish_released(owned);
 }
 #[test]
 fn original_wrapper_exec_exact_target_and_child_only_token_are_retained_to_exit() {
     let _serial = SERIAL.lock().unwrap();
     let f = Fixture::new(wire::NAVIGATION_ENV_HELP_MARKER);
+    let hold = f.hold();
     let mut owned = OwnedFrontend::launch(f.select(), launch()).unwrap();
     assert!(
         OwnedFrontend::launch(f.select(), launch()).is_err(),
         "one original admission"
     );
-    assert!(
-        finish(&mut owned),
-        "actual held ELF observed on the original Child"
-    );
+    finish(&mut owned, hold);
     drop(owned);
+    let hold = f.hold();
     let mut next = OwnedFrontend::launch(f.select(), launch()).unwrap();
-    assert!(finish(&mut next));
+    finish(&mut next, hold);
 }
 #[test]
 fn startup_timeout_retains_original_child_until_actual_exit_without_a_second_launch() {
     let _serial = SERIAL.lock().unwrap();
     let f = Fixture::new(wire::NAVIGATION_ENV_HELP_MARKER);
+    let mut hold = f.hold();
     let mut owned = OwnedFrontend::launch(f.select(), launch()).unwrap();
     owned.until = Instant::now();
     owned.poll();
@@ -119,18 +160,36 @@ fn startup_timeout_retains_original_child_until_actual_exit_without_a_second_lau
     assert!(!owned.exited());
     assert!(owned.child.is_some());
     assert!(OwnedFrontend::launch(f.select(), launch()).is_err());
+    release(&mut hold);
+    finish_released(&mut owned);
+    drop(owned);
+    assert!(!ACTIVE.load(Ordering::Acquire));
+}
+
+#[test]
+fn normal_exit_after_a_live_sample_keeps_the_dead_child_identity_refusal() {
+    let _serial = SERIAL.lock().unwrap();
+    let f = Fixture::new(wire::NAVIGATION_ENV_HELP_MARKER);
+    let mut hold = f.hold();
+    let mut owned = OwnedFrontend::launch(f.select(), launch()).unwrap();
+    observe_held(&mut owned);
+    let child = owned.child.as_mut().unwrap();
+    assert!(child.try_wait().unwrap().is_none());
+    release(&mut hold);
     let until = Instant::now() + Duration::from_secs(5);
-    while !owned.exited() {
-        owned.poll();
+    while child.try_wait().unwrap().is_none() {
         assert!(Instant::now() < until);
         std::thread::sleep(Duration::from_millis(25));
     }
-    assert!(
-        owned.exit_status().unwrap().success(),
-        "timeout did not terminate the GUI"
-    );
-    drop(owned);
-    assert!(!ACTIVE.load(Ordering::Acquire));
+    assert!(owned
+        .hold
+        .selected
+        .revalidate_child(child, owned.observed.as_ref().unwrap())
+        .is_err());
+    owned.poll();
+    assert!(owned.exited());
+    assert!(owned.exit_status().unwrap().success());
+    assert!(owned.child.is_none());
 }
 
 #[test]

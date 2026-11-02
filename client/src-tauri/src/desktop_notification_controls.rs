@@ -1,11 +1,87 @@
-//! Native client preparation on the closed wire types. No callable transport
-//! exists here until Root's authenticated Request and Responder APIs land.
-use std::time::{Duration, Instant};
+//! Native app-window observations and the separate authenticated control sender.
+use std::{
+    sync::{Arc, Mutex, PoisonError, Weak},
+    time::{Duration, Instant},
+};
 use zerus_client_core::desktop::notification_control::{
     Command, FocusReply, FocusState, NativeFocus, Scope, FOCUS_REFRESH_MS,
 };
 
 const WINDOWS: usize = 64;
+
+pub(crate) use crate::desktop_service::notification_controls::{Controller, Setup};
+
+type Sink = Arc<dyn Fn(FocusState) + Send + Sync>;
+type Refresh = Arc<dyn Fn(Source) + Send + Sync>;
+#[derive(Default)]
+struct SourceState {
+    sink: Option<(String, Sink)>,
+    refresh: Option<Refresh>,
+}
+/// One native application source, one current service observer, no event queue.
+/// Only Rust window callbacks supply observations; reconnect asks for a NEW
+/// native enumeration rather than replaying the old connection's cached focus.
+#[derive(Clone, Default)]
+pub(crate) struct Source(Arc<Mutex<SourceState>>);
+pub(crate) struct Subscription(Weak<Mutex<SourceState>>, String);
+impl Source {
+    pub fn set_refresh(&self, refresh: Refresh) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .refresh = Some(refresh);
+    }
+    pub fn refresh(&self) {
+        let refresh = self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .refresh
+            .clone();
+        if let Some(refresh) = refresh {
+            refresh(self.clone());
+        }
+    }
+    pub fn observe(&self, state: FocusState) {
+        let sink = self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .sink
+            .as_ref()
+            .map(|(_, sink)| sink.clone());
+        if let Some(sink) = sink {
+            sink(state);
+        }
+    }
+    pub(crate) fn subscribe(&self, id: String, sink: Sink) -> Subscription {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).sink = Some((id.clone(), sink));
+        Subscription(Arc::downgrade(&self.0), id)
+    }
+}
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        if let Some(source) = self.0.upgrade() {
+            let mut state = source.lock().unwrap_or_else(PoisonError::into_inner);
+            if state.sink.as_ref().is_some_and(|(id, _)| id == &self.1) {
+                state.sink = None;
+            }
+        }
+    }
+}
+
+pub(crate) fn observe_windows(app: &tauri::AppHandle, source: &Source) {
+    use tauri::Manager;
+    source.observe(aggregate(app.webview_windows().values().map(|window| {
+        window.is_visible().ok().and_then(|visible| {
+            if visible {
+                window.is_focused().ok()
+            } else {
+                Some(false)
+            }
+        })
+    })));
+}
 
 /// Complete fresh native app-window observations, never webview focus or JS.
 /// A known focused window proves Foreground even if another query failed.

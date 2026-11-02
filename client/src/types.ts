@@ -167,6 +167,16 @@ export interface NotificationOwnership {
 }
 /** Desktop service presentation has separate provenance from device-local marks. */
 export interface DesktopService {
+  /** Native intent/current-scope presentation, never a permission. */
+  notification_preferences?: null | {
+    status: null | { abi: string; scope: { configuration: string; service_epoch: string };
+      journal: string | null; revision: number; configured: boolean; preferences: { optional_questions: boolean } };
+    pending: boolean;
+    request_id: string | null;
+    running: boolean;
+    available: boolean;
+    code: string;
+  };
   connected: boolean;
   epoch: string | null;
   generation: number | null;

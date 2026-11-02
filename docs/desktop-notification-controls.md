@@ -126,3 +126,26 @@ to suppress newly observed foreground edges without replaying them after blur.
 Required notifications still depend on the independent durable ownership
 grant and actual original host. Preferences and focus cannot rearm a revoked
 grant, start a service, authorize approvals or establish closed-UI launch mode.
+
+## Zerus Next consumer
+
+In service mode the native client creates one control connection only after
+the original verified watch hello. It probes both markers on the retained
+paired helper and pins that image through each bounded exchange. One separate
+admission slot accounts for the original child, registration and every pipe;
+disconnect invalidates native evidence before joining that worker. Metadata
+probes and transport run off the UI and watch reader.
+
+Rust observes all native toplevel windows. A fresh focused visible window means
+Foreground; failed observations mean Unknown unless another window proves
+Foreground. Reconnect asks the native main thread for a new observation and
+never replays the previous connection's focus. Background/Unknown invalidates
+older registrations immediately even when an original helper still holds pipes.
+
+Settings > Sessions sends optional-question changes through the separate typed
+native command. An unconfigured service gets at most one initialization attempt
+per connection from the existing local preference. A configured service's fresh
+status is retained instead of that local value. Pending edits disable further
+changes; Check result and reconnect query the original receipt only. A historical
+save is followed by a fresh scoped status, and unavailable status offers no local
+write fallback. Native mode retains the existing local setting path.

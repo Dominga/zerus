@@ -180,6 +180,7 @@ fn start(
         Some(responder),
         Observers {
             projections: vec![],
+            notification_controls: None,
             activation: Some(Arc::new(move |delivery| {
                 tx.try_send(delivery).ok();
             })),

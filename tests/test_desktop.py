@@ -81,12 +81,15 @@ int main(int argc, char **argv) {
         compiled = subprocess.run(['cc', '-x', 'c', '-', '-o', str(frontend)], input=source,
                                   env=self.env, capture_output=True, text=True, timeout=20)
         self.assertEqual(compiled.returncode, 0, compiled.stderr)
-        script = '''import os,sys,json,subprocess,fcntl,termios
+        script = '''import os,sys,json,subprocess,fcntl,termios,signal
 tty=None
 try:
  if sys.argv[1]!='none':
   tty=os.open(sys.argv[1],os.O_RDWR)
   fcntl.ioctl(tty,termios.TIOCSCTTY,0)
+  old=signal.signal(signal.SIGTTOU,signal.SIG_IGN)
+  try: os.tcsetpgrp(tty,os.getpgrp())
+  finally: signal.signal(signal.SIGTTOU,old)
  env=dict(os.environ)
  if sys.argv[2]=='stripped':
   env.pop('HGS_SESSION',None);env.pop('HGS_RUN_ID',None)

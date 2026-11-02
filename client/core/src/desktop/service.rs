@@ -37,6 +37,9 @@ pub struct Component {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
+    /// Native ownership controller presentation only, never a writer permit.
+    #[serde(skip_deserializing)]
+    pub notification_ownership: Option<Value>,
     /// Native-client transfer state, attached locally; never a service writer grant.
     pub pending_read_import: Option<Value>,
     pub connected: bool,
@@ -52,6 +55,7 @@ pub struct Snapshot {
 impl Default for Snapshot {
     fn default() -> Self {
         Self {
+            notification_ownership: None,
             pending_read_import: None,
             connected: false,
             epoch: None,
@@ -181,6 +185,7 @@ impl State {
         let counts = checked_counts(&value["attention_counts"], epoch).unwrap_or_default();
         self.sources = checked_sources(&value["background_runtime"], epoch);
         self.snapshot = Snapshot {
+            notification_ownership: None,
             connected: true,
             pending_read_import: None,
             epoch: Some(epoch.into()),

@@ -334,7 +334,7 @@ fn the_actual_version_suffix_alone_defines_the_gui_dev_number() {
 }
 
 #[cfg(target_os = "linux")]
-pub(in crate::desktop_service) mod native {
+pub(crate) mod native {
     use super::*;
     use crate::desktop_service::tests::Fixture;
     use std::{
@@ -344,12 +344,12 @@ pub(in crate::desktop_service) mod native {
         thread,
     };
     use zerus_client_core::desktop::{Build, Responder};
-    pub(in crate::desktop_service) struct CacheServer {
+    pub(crate) struct CacheServer {
         stop: Arc<AtomicBool>,
         thread: Option<thread::JoinHandle<()>>,
     }
     impl CacheServer {
-        pub(in crate::desktop_service) fn start(root: &Path, responder: Arc<Responder>) -> Self {
+        pub(crate) fn start(root: &Path, responder: Arc<Responder>) -> Self {
             let listener = UnixListener::bind(root.join("native-cache.sock")).unwrap();
             listener.set_nonblocking(true).unwrap();
             let stop = Arc::new(AtomicBool::new(false));
@@ -402,7 +402,7 @@ pub(in crate::desktop_service) mod native {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
-    pub(in crate::desktop_service) fn responder() -> Arc<Responder> {
+    pub(crate) fn responder() -> Arc<Responder> {
         responder_for_configuration("a".repeat(64))
     }
     fn responder_for_configuration(configuration: String) -> Arc<Responder> {

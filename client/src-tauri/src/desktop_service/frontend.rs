@@ -832,4 +832,4 @@ pub async fn desktop_service_frontend_result(
 }
 
 #[cfg(all(test, unix))]
-pub(super) mod tests;
+pub(crate) mod tests;

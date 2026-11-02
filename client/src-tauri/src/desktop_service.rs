@@ -220,6 +220,8 @@ impl CatalogDelivery {
 }
 
 struct Shared {
+    ownership: Arc<crate::desktop_ownership::Controller>,
+    ownership_supported: AtomicBool,
     hgs: PathBuf,
     configuration: Mutex<Option<String>>,
     audit_help: audit::help::Cache,
@@ -304,7 +306,14 @@ impl Service {
         responder: Option<Arc<zerus_client_core::desktop::Responder>>,
         observers: Observers,
     ) -> Arc<Self> {
+        let ownership = crate::desktop_ownership::Controller::new(
+            hgs.clone(),
+            if allowed { responder.clone() } else { None },
+            zerus_client_core::desktop::ownership::Mode::Service,
+        );
         let shared = Arc::new(Shared {
+            ownership,
+            ownership_supported: AtomicBool::new(false),
             hgs,
             relay: Mutex::new(None),
             pump,
@@ -359,6 +368,27 @@ impl Service {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+    pub(crate) async fn ownership_rearm(self: &Arc<Self>) -> crate::desktop_ownership::View {
+        let view = self
+            .shared
+            .ownership
+            .request(
+                Some(zerus_client_core::desktop::ownership::Action::Rearm),
+                None,
+                None,
+            )
+            .await;
+        self.shared.publish_ownership();
+        if self.shared.ownership.granted() {
+            self.retry();
+        }
+        view
+    }
+    pub(crate) async fn ownership_result(&self) -> crate::desktop_ownership::View {
+        let view = self.shared.ownership.request(None, None, None).await;
+        self.shared.publish_ownership();
+        view
     }
     /// Settings choices only: offline and generation-zero computers remain
     /// selectable. These names grant neither freshness nor writer authority.
@@ -545,6 +575,7 @@ impl Service {
         Ok(committed)
     }
     pub fn stop(&self) {
+        self.shared.ownership.stop();
         self.shared.stopped.store(true, Ordering::Release);
         self.shared.audit_help.clear();
         if let Some(cancel) = self
@@ -587,12 +618,16 @@ impl Service {
             join_view(drain, RPC_WAIT).await?;
         }
         let closed = self.shared.rpc.close();
+        let ownership_closed = self.shared.ownership.close();
         #[cfg(target_os = "linux")]
         let activation_closed = self.shared.activation_rpc.close();
         let drained = tauri::async_runtime::spawn_blocking(move || {
             let until = std::time::Instant::now() + RPC_WAIT;
             let drained =
                 closed.wait_until(until) == zerus_client_core::desktop::drain::Observation::Idle;
+            let drained = (ownership_closed.wait_until(until)
+                == zerus_client_core::desktop::drain::Observation::Idle)
+                && drained;
             #[cfg(target_os = "linux")]
             let drained = (activation_closed.wait_until(until)
                 == zerus_client_core::desktop::drain::Observation::Idle)
@@ -654,7 +689,14 @@ impl Shared {
             );
         }
     }
+    fn publish_ownership(&self) {
+        let view = serde_json::to_value(self.ownership.view()).ok();
+        let mut current = self.snapshot.lock().unwrap_or_else(PoisonError::into_inner);
+        current.notification_ownership = view;
+        self.pump.service(current.clone());
+    }
     fn publish(&self, mut snapshot: Snapshot) {
+        snapshot.notification_ownership = serde_json::to_value(self.ownership.view()).ok();
         snapshot.pending_read_import = Some(
             self.read_import
                 .lock()
@@ -898,6 +940,17 @@ async fn request(
 
 async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String, &'static str> {
     let help = command(shared, vec!["--help".into()], None, stop.clone()).await?;
+    shared.ownership_supported.store(
+        std::str::from_utf8(&help).ok().is_some_and(|text| {
+            [
+                zerus_client_core::desktop::ownership::HELP_MARKER,
+                zerus_client_core::desktop::ui_requests::HELP_MARKER,
+            ]
+            .iter()
+            .all(|marker| text.lines().any(|line| line.trim() == *marker))
+        }),
+        Ordering::Release,
+    );
     if !std::str::from_utf8(&help).ok().is_some_and(|help| {
         help.lines().any(|line| line.trim() == HELP)
             && help
@@ -948,6 +1001,13 @@ async fn run(shared: Arc<Shared>, mut control: watch::Receiver<Control>) {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(stop.clone());
         let result = connection(shared.clone(), &mut control, stop.clone()).await;
+        if !shared.stopped.load(Ordering::Acquire)
+            && shared.ownership_supported.load(Ordering::Acquire)
+        {
+            // A revoked stream can end while the passive authenticated endpoint
+            // remains available. Read its status; never auto-rearm at EOF.
+            shared.ownership.request(None, None, None).await;
+        }
         *shared.relay.lock().unwrap_or_else(PoisonError::into_inner) = None;
         stop.store(true, Ordering::Release);
         shared.audit_help.clear();
@@ -1007,6 +1067,19 @@ async fn connection(
     }
     *shared.relay.lock().unwrap_or_else(PoisonError::into_inner) = Some(relay.clone());
     let configuration = preflight(&shared, stop.clone()).await?;
+    if shared.ownership_supported.load(Ordering::Acquire) {
+        shared
+            .ownership
+            .request(
+                Some(zerus_client_core::desktop::ownership::Action::Grant),
+                Some(configuration.clone()),
+                Some(stop.clone()),
+            )
+            .await;
+    } else {
+        shared.ownership.unsupported();
+    }
+    shared.publish_ownership();
     if shared.stopped.load(Ordering::Acquire) || stop.load(Ordering::Acquire) {
         return Err("stopped");
     }
@@ -1166,6 +1239,25 @@ pub fn desktop_service_retry(
         source.start_source()?;
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn desktop_service_ownership_rearm(
+    source: tauri::State<'_, crate::commands::AppState>,
+) -> Result<crate::desktop_ownership::View, String> {
+    let service = source
+        .desktop_service()
+        .ok_or("ownership_service_mode_required")?;
+    Ok(service.ownership_rearm().await)
+}
+#[tauri::command]
+pub async fn desktop_service_ownership_result(
+    source: tauri::State<'_, crate::commands::AppState>,
+) -> Result<crate::desktop_ownership::View, String> {
+    let service = source
+        .desktop_service()
+        .ok_or("ownership_service_mode_required")?;
+    Ok(service.ownership_result().await)
 }
 
 #[tauri::command]

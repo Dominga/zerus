@@ -32,6 +32,8 @@ mod desk;
 ))]
 mod desktop_hello;
 #[cfg(feature = "live")]
+mod desktop_ownership;
+#[cfg(feature = "live")]
 mod desktop_service;
 mod display;
 #[cfg(feature = "live")]
@@ -187,6 +189,11 @@ pub struct Startup {
     pub desktop_responder: Option<std::sync::Arc<zerus_client_core::desktop::Responder>>,
     #[cfg(all(feature = "live", any(target_os = "linux", target_os = "macos")))]
     pub desktop_bootstrap: Option<zerus_client_core::desktop::startup::Bootstrap>,
+    #[cfg(all(
+        feature = "live",
+        any(target_os = "linux", target_os = "macos", windows)
+    ))]
+    native_ownership: Option<desktop_ownership::NativeReady>,
 }
 
 /// Parses Qt's command line and answers `--help`, `--version` and
@@ -277,6 +284,11 @@ pub fn run() {
     let mut desktop_responder = None;
     #[cfg(all(feature = "live", any(target_os = "linux", target_os = "macos")))]
     let mut desktop_bootstrap = None;
+    #[cfg(all(
+        feature = "live",
+        any(target_os = "linux", target_os = "macos", windows)
+    ))]
+    let mut native_ownership = None;
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     let instance = match identity.instance_name(identity::flag("ZERUS_CLIENT_SINGLE_INSTANCE")) {
         None => None,
@@ -311,16 +323,15 @@ pub fn run() {
                 instance::Claim::Claimed(claimed) => {
                     #[cfg(all(feature = "live", any(target_os = "linux", target_os = "macos")))]
                     {
-                        desktop_bootstrap = match desktop_hello::hold(
-                            identity.is_switch(),
-                            &responder,
-                        ) {
+                        let settled = match desktop_hello::hold(identity.is_switch(), &responder) {
                             Ok(held) => held,
                             Err(_) => {
                                 eprintln!("zerus-client: desktop startup refused before writers; use a compatible local hgs and reconcile unsettled desktop state");
                                 return;
                             }
                         };
+                        desktop_bootstrap = settled.0;
+                        native_ownership = settled.1;
                         desktop_responder = Some(responder);
                     }
                     #[cfg(all(windows, feature = "live"))]
@@ -349,6 +360,31 @@ pub fn run() {
         );
         std::env::set_var("ZERUS_CLIENT_HGS", hgs);
         platform::windows::startup::prepare(&args, &identity.bundle_id);
+        if identity.is_switch() && !replay && !desktop_service::mode() {
+            if let Some(responder) = &desktop_responder {
+                native_ownership = match desktop_ownership::native_takeover(
+                    zerus_client_core::default_hgs(),
+                    responder.clone(),
+                ) {
+                    Ok(proof) => Some(proof),
+                    Err(code) => {
+                        eprintln!("zerus-client: native ownership takeover is unconfirmed: {code}");
+                        return;
+                    }
+                };
+            }
+        }
+    }
+    #[cfg(all(
+        feature = "live",
+        any(target_os = "linux", target_os = "macos", windows)
+    ))]
+    if native_ownership
+        .as_ref()
+        .is_some_and(|proof| proof.helper().is_err())
+    {
+        eprintln!("zerus-client: native ownership helper changed before GUI startup");
+        return;
     }
     #[cfg(target_os = "macos")]
     platform::macos::raise_main_thread_qos();
@@ -370,6 +406,11 @@ pub fn run() {
             desktop_responder,
             #[cfg(all(feature = "live", any(target_os = "linux", target_os = "macos")))]
             desktop_bootstrap,
+            #[cfg(all(
+                feature = "live",
+                any(target_os = "linux", target_os = "macos", windows)
+            ))]
+            native_ownership,
         },
     );
 }
@@ -388,6 +429,11 @@ pub(crate) fn data_dir(app: &tauri::AppHandle) -> std::path::PathBuf {
 fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
     let identity = startup.identity;
     let opens_sessions = startup.opens_sessions;
+    #[cfg(all(
+        feature = "live",
+        any(target_os = "linux", target_os = "macos", windows)
+    ))]
+    let native_ownership = startup.native_ownership;
     #[cfg(all(feature = "live", target_os = "linux"))]
     let navigation = startup.navigation;
     #[cfg(all(feature = "live", target_os = "linux"))]
@@ -508,6 +554,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
             app.manage(MainWindow::default());
             // The one source of the client's data directory (Decision 5).
             app.manage(identity);
+            #[cfg(all(feature = "live", any(target_os = "linux", target_os = "macos", windows)))]
+            if let Some(proof) = native_ownership { app.manage(proof); }
             #[cfg(feature = "live")]
             {
                 let dir = data_dir(app.handle());
@@ -817,7 +865,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     // Attention notifications under the running identity: the
                     // switch bundle, or another build on request; never a replay.
                     let identity = app.state::<identity::Identity>().inner().clone();
-                    let posts = !desktop_service::mode() && identity.notifications(identity::flag("ZERUS_CLIENT_NOTIFICATIONS"), replay);
+                    let posts = !desktop_service::mode() && (!identity.is_switch() || app.try_state::<desktop_ownership::NativeReady>().is_some()) && identity.notifications(identity::flag("ZERUS_CLIENT_NOTIFICATIONS"), replay);
                     let bundled = platform::macos::bundle_identifier().is_some();
                     if posts && !bundled {
                         eprintln!("zerus-client: notifications need an app bundle; this process has none, so none post");
@@ -848,7 +896,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     let conf = desk::tray_conf();
                     platform::linux_tray::install(app.handle(), conf.as_deref());
                     let identity = app.state::<identity::Identity>().inner().clone();
-                    let posts = !desktop_service::mode() && identity.notifications(identity::flag("ZERUS_CLIENT_NOTIFICATIONS"), replay);
+                    let posts = !desktop_service::mode() && (!identity.is_switch() || app.try_state::<desktop_ownership::NativeReady>().is_some()) && identity.notifications(identity::flag("ZERUS_CLIENT_NOTIFICATIONS"), replay);
                     let switch = identity.is_switch();
                     let attention = posts.then(|| {
                         let path = dir.join(desk::ATTENTION_FILE);
@@ -879,7 +927,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     let conf = desk::tray_conf();
                     platform::windows::tray::install(app.handle(), conf.as_deref())?;
                     let identity = app.state::<identity::Identity>().inner().clone();
-                    let posts = !desktop_service::mode() && identity.notifications(identity::flag("ZERUS_CLIENT_NOTIFICATIONS"), replay);
+                    let posts = !desktop_service::mode() && (!identity.is_switch() || app.try_state::<desktop_ownership::NativeReady>().is_some()) && identity.notifications(identity::flag("ZERUS_CLIENT_NOTIFICATIONS"), replay);
                     let switch = identity.is_switch();
                     let attention = posts.then(|| {
                         let path = dir.join(desk::ATTENTION_FILE);
@@ -1230,6 +1278,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::perf_resize,
         desktop_service::desktop_service_mode,
         desktop_service::desktop_service_retry,
+        desktop_service::desktop_service_ownership_rearm,
+        desktop_service::desktop_service_ownership_result,
         desktop_service::desktop_service_read_marks,
         desktop_service::desktop_service_automatic_approvals,
         desktop_service::frontend::desktop_service_maintenance_configure,

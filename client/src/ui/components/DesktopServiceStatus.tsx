@@ -1,5 +1,5 @@
 import { Show, createMemo } from "solid-js";
-import { desktopService, pendingReadNotice, retryDesktopService } from "../../store/desktopService";
+import { desktopService, pendingReadNotice, retryDesktopService, ownershipActions, ownershipNotice } from "../../store/desktopService";
 import { toast } from "../../store/ui";
 import { tr } from "../../i18n";
 
@@ -18,6 +18,18 @@ export function DesktopServiceStatus(props: { counts?: boolean }) {
       <Show when={notice()} fallback={<span>{tr("Background service connected")}</span>}>{(text) => <span>{text()}</span>}</Show>
       <Show when={pendingReadNotice(desktopService.state())}>{(text) => <span>{text()}</span>}</Show>
       <button type="button" class="btn small ghost" onClick={() => void retryDesktopService().catch(error => toast(tr("Background service"), String(error), "error", true))}>{tr("Retry now")}</button>
+      <Show when={ownershipNotice(desktopService.state()?.notification_ownership)}>{(text) => <span>{text()}</span>}</Show>
+      <Show when={desktopService.state()?.notification_ownership?.pending} fallback={
+        <Show when={desktopService.state()?.notification_ownership?.status?.rearm_required}>
+          <button type="button" class="btn small ghost"
+            disabled={ownershipActions.busy() || desktopService.state()?.notification_ownership?.running}
+            onClick={() => void ownershipActions.rearm().catch(error => toast(tr("Background service"), String(error), "error", true))}>{tr("Resume background work")}</button>
+        </Show>
+      }>
+        <button type="button" class="btn small ghost"
+          disabled={ownershipActions.busy() || desktopService.state()?.notification_ownership?.running}
+          onClick={() => void ownershipActions.check().catch(error => toast(tr("Background service"), String(error), "error", true))}>{tr("Check result")}</button>
+      </Show>
       <Show when={props.counts}>
         <span>{tr("Shared host attention (excludes this device's review marks)")}: {counts()?.attention ?? tr("Unknown")}</span>
         <Show when={!counts()?.complete}><span>{tr("Incomplete")}</span></Show>

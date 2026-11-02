@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { createDesktopService, createServiceApprovalIntent, pendingReadNotice } from "./desktopService";
+import { createDesktopService, createServiceApprovalIntent, pendingReadNotice, ownershipNotice, createOwnershipActions } from "./desktopService";
 import { createApprovalOptIn } from "../ui/screens/settings/approval-opt-in";
-import { emptyBatch, isEmptyBatch, type DesktopService } from "../types";
+import { emptyBatch, isEmptyBatch, type DesktopService, type NotificationOwnership } from "../types";
 import { normalize } from "../bridge";
 
 export const serviceView = (patch: Partial<DesktopService> = {}): DesktopService => ({
@@ -105,4 +105,49 @@ describe("service approval intents", () => {
     expect(read).toHaveBeenCalledOnce();
   });
 
+});
+
+
+describe("notification ownership presentation", () => {
+  const view = (patch: Partial<NotificationOwnership> = {}): NotificationOwnership => ({
+    status: { abi: "desktop-ownership-v1", configuration: "a".repeat(64), journal: "journal", revision: 3,
+      state: "revoked", rearm_required: true, request_id: null, owner_epoch: null, identity_current: false },
+    request_id: null, pending: false, running: false, code: "", ...patch,
+  });
+  it("shows explicit rearm after revoke and keeps unknown intents on Check result", () => {
+    expect(ownershipNotice(view())).toContain("revoked");
+    expect(ownershipNotice(view({ pending: true }))).toContain("unconfirmed");
+    expect(ownershipNotice(undefined)).toBe("");
+    const updated = view(); updated.status = { ...updated.status!, state: "identity_changed", rearm_required: false };
+    expect(ownershipNotice(updated)).toContain("unavailable");
+    expect(ownershipNotice(updated)).not.toContain("revoked");
+    const current = view(); current.status = { ...current.status!, state: "service", rearm_required: false, identity_current: true };
+    expect(ownershipNotice(current)).toBe("");
+  });
+  it("mount and result lookups never grant or rearm; only the explicit action calls its native route", async () => {
+    const send = vi.fn(async () => view());
+    const read = vi.fn(async () => view({ pending: true }));
+    const actions = createOwnershipActions(send, read);
+    expect(send).not.toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
+    await actions.check(); await actions.check();
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(send).not.toHaveBeenCalled();
+    await actions.rearm();
+    expect(send).toHaveBeenCalledExactlyOnceWith();
+  });
+  it("serializes explicit clicks while retaining a failed result as native-owned uncertainty", async () => {
+    let release!: () => void;
+    const send = vi.fn(() => new Promise<NotificationOwnership>(resolve => { release = () => resolve(view({ pending: true })); }));
+    const read = vi.fn(async () => { throw Error("disconnected"); });
+    const actions = createOwnershipActions(send, read);
+    const first = actions.rearm();
+    expect(actions.busy()).toBe(true);
+    await actions.rearm(); await actions.check();
+    expect(send).toHaveBeenCalledOnce(); expect(read).not.toHaveBeenCalled();
+    release(); await first;
+    await expect(actions.check()).rejects.toThrow("disconnected");
+    expect(send).toHaveBeenCalledOnce();
+    expect(actions.busy()).toBe(false);
+  });
 });

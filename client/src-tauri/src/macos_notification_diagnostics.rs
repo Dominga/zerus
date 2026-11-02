@@ -1,5 +1,5 @@
 //! Fixed-content callback diagnostics. Never format native notification data.
-use objc2_foundation::{ns_string, NSString};
+use objc2_foundation::NSString;
 use objc2_user_notifications::{
     UNNotificationDefaultActionIdentifier, UNNotificationDismissActionIdentifier,
 };
@@ -10,39 +10,27 @@ pub(crate) enum Role {
     Host,
 }
 
-// Public Foundation declaration from NSObjCRuntime.h. The generated objc2
-// bindings omit this variadic API; every call below has a literal format with
-// no conversion specifiers and therefore takes no variadic arguments.
-#[link(name = "Foundation", kind = "framework")]
+// The public os_log macro performs compiler-assisted literal encoding in C.
+// Only closed numeric labels cross the bridge; no native strings or format
+// arguments do. Logs are observations, never callback/permission authority.
 unsafe extern "C" {
-    fn NSLog(format: *const NSString, ...);
+    fn zerus_macos_notification_callback(role: u32, kind: u32);
 }
 
 /// Called only by an already installed delegate, without changing its behavior.
 pub(crate) fn response(role: Role, action: &NSString) {
-    // NSLog enters unified logging even when the original host's stderr is a
-    // privately retained driver pipe. Never pass native action text as format.
-    let message = match (role, kind(action)) {
+    let role = match role {
         #[cfg(feature = "live")]
-        (Role::Gui, "default") => {
-            ns_string!("zerus-client: notification callback role=gui kind=default")
-        }
-        #[cfg(feature = "live")]
-        (Role::Gui, "dismiss") => {
-            ns_string!("zerus-client: notification callback role=gui kind=dismiss")
-        }
-        #[cfg(feature = "live")]
-        (Role::Gui, _) => ns_string!("zerus-client: notification callback role=gui kind=other"),
-        (Role::Host, "default") => {
-            ns_string!("zerus-client: notification callback role=host kind=default")
-        }
-        (Role::Host, "dismiss") => {
-            ns_string!("zerus-client: notification callback role=host kind=dismiss")
-        }
-        (Role::Host, _) => ns_string!("zerus-client: notification callback role=host kind=other"),
+        Role::Gui => 0,
+        Role::Host => 1,
     };
-    // SAFETY: static, live NSString format, with no '%' or variadic arguments.
-    unsafe { NSLog(message as *const NSString) };
+    let kind = match kind(action) {
+        "default" => 0,
+        "dismiss" => 1,
+        _ => 2,
+    };
+    // SAFETY: the bridge accepts plain numbers and logs only static literals.
+    unsafe { zerus_macos_notification_callback(role, kind) };
 }
 
 fn kind(action: &NSString) -> &'static str {

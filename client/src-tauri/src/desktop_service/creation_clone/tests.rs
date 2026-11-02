@@ -157,13 +157,52 @@ fn completed_original_child_with_held_pipes_keeps_the_creation_gate_charged() {
             service.shared.creation_rpc.admit(Role::Fleet),
             Err(zerus_client_core::desktop::drain::Refused::Capacity)
         ));
-        std::fs::write(f.0.join("clone-release"), b"").unwrap();
         assert!(!reader.await.unwrap().ok);
+        assert!(
+            matches!(
+                service.shared.creation_rpc.admit(Role::Fleet),
+                Err(zerus_client_core::desktop::drain::Refused::Capacity)
+            ),
+            "original child exit/runner failure is not its descendants' pipe EOF"
+        );
+        std::fs::write(f.0.join("clone-release"), b"").unwrap();
         eventually("original creation charge released", || {
             service.shared.creation_rpc.admit(Role::Fleet).is_ok()
         })
         .await;
         assert_eq!(calls(&f).len(), 1);
         service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn original_connection_and_helper_are_rechecked_before_each_clone_read() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _) = f.start(true);
+        eventually("clone reader connection", || service.snapshot().connected).await;
+        let read = Read::new(Some(service.clone())).unwrap();
+        assert!(read.current());
+        let original = service
+            .shared
+            .cancellation
+            .lock()
+            .unwrap()
+            .replace(Arc::new(AtomicBool::new(false)));
+        assert!(
+            !read.current(),
+            "same epoch/generation with a different original connection is stale"
+        );
+        *service.shared.cancellation.lock().unwrap() = original;
+        assert!(read.current());
+        let path = f.0.join("hgs");
+        let next = f.0.join("replacement");
+        std::fs::copy(&path, &next).unwrap();
+        std::fs::rename(next, &path).unwrap();
+        assert!(read.exchange(None, Value::Null, true, None).is_err());
+        assert!(calls(&f).is_empty());
+        service.join().await.unwrap();
+        assert!(!read.current());
     });
 }

@@ -459,6 +459,20 @@ impl Lookup {
     }
 }
 
+impl Plan {
+    pub fn invocation(&self, action: repository::Action) -> Invocation {
+        repository::invocation(
+            &ComputerId::local(),
+            action,
+            &self.url,
+            &self.parent,
+            &self.name,
+            &self.clone_request_id,
+            &self.expected_machine,
+        )
+    }
+}
+
 #[cfg(test)]
 pub(super) fn test_intent() -> Intent {
     tests::checkpoint()
@@ -695,19 +709,5 @@ mod tests {
         let mut intent = checkpoint();
         intent.original = " ".repeat(SOURCE_BYTES + 1);
         assert!(intent.verify().is_err());
-    }
-}
-
-impl Plan {
-    pub fn invocation(&self, action: repository::Action) -> Invocation {
-        repository::invocation(
-            &ComputerId::local(),
-            action,
-            &self.url,
-            &self.parent,
-            &self.name,
-            &self.clone_request_id,
-            &self.expected_machine,
-        )
     }
 }

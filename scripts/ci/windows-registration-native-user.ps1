@@ -43,7 +43,9 @@ public static class RegistrationCapture {
             using (var service = new ServiceController("seclogon")) {
                 var before = service.Status;
                 File.AppendAllText(phases, "before " + before + "\n");
-                if (before != ServiceControllerStatus.Running) service.Start();
+                if (before == ServiceControllerStatus.Stopped) service.Start();
+                else if (before != ServiceControllerStatus.Running && before != ServiceControllerStatus.StartPending)
+                    throw new InvalidOperationException("Unexpected Secondary Logon state");
                 service.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(20));
                 File.AppendAllText(phases, "running " + watch.ElapsedMilliseconds + "\n");
                 return true;

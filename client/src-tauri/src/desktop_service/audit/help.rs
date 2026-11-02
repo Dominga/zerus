@@ -70,7 +70,7 @@ struct Stamp {
     attributes: u32,
 }
 impl Image {
-    fn capture(path: &Path) -> Option<Self> {
+    pub(in crate::desktop_service) fn capture(path: &Path) -> Option<Self> {
         // A bare PATH lookup has no fixed named identity here: keep probing it.
         if !path.is_absolute() {
             return None;

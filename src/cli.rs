@@ -64,6 +64,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        Desktop approval audit ABI: desktop-approval-audit-v1
        Desktop frontend request ABI: desktop-ui-request-v1
        Desktop ownership ABI: desktop-ownership-v1
+       Notification controls ABI: desktop-notification-controls-v1
        Desktop pending read import ABI: desktop-pending-reads-v1
        Desktop activation ABI: desktop-activation-v1
        Desktop maintenance ABI: desktop-maintenance-v1

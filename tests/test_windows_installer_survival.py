@@ -16,6 +16,7 @@ inside the folder stops an upgrade before anything changes, and never leads
 its clean-up to files outside. Run it outside the CI step's job
 (scripts/ci/outside-job.py), as the host suites run.
 """
+import base64
 import json
 import os
 from pathlib import Path
@@ -196,12 +197,35 @@ class Installer(windows_host.HostCase):
         self.keys(pane, {"literal": f"echo {marker}"}, {"named": "Enter"})
         self.wait_for(marker, lambda: self.capture(pane).count(marker) >= 2)
 
+    def check_shortcut_identity(self):
+        # Test-only Shell automation reads the real Inno-created link. hgs
+        # never creates a shortcut or invokes an interpreter for registration.
+        folder=str(self.shortcut.parent).replace("'","''")
+        name=self.shortcut.name.replace("'","''")
+        script=("$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);$s=New-Object -ComObject Shell.Application;"
+                "$i=$s.Namespace('"+folder+"').ParseName('"+name+"');"
+                "[Console]::WriteLine($i.ExtendedProperty('System.AppUserModel.ID'));"
+                "[Console]::WriteLine($i.ExtendedProperty('System.AppUserModel.ToastActivatorCLSID'))")
+        command=[str(Path(os.environ['SystemRoot'])/'System32/WindowsPowerShell/v1.0/powershell.exe'),
+                 '-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',
+                 base64.b64encode(script.encode('utf-16le')).decode('ascii')]
+        result=subprocess.run(command,stdin=subprocess.DEVNULL,capture_output=True,timeout=20,env=self.installer_env)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertLessEqual(len(result.stdout),4096)
+        lines=result.stdout.decode('utf-8-sig').splitlines()
+        self.assertEqual(len(lines),2,lines)
+        self.assertEqual(lines[0],'com.hgdev.hgs-tray')
+        self.assertEqual(lines[1].strip('{}').upper(),'0F0F70A2-1D40-47D8-AC5E-D6A9B789605F')
+
     def test_upgrade_and_uninstall_leave_the_session_host_and_staged_files_alone(self):
         version = self.record["version"]
         setup_log = self.install()
         self.assertEqual(windows_installer.problems(self.app, self.expected), [])
         self.assertEqual(registered(), {"DisplayVersion": version, "InstallLocation": str(self.app) + "\\"})
         self.assertTrue(self.shortcut.is_file(), f"{self.shortcut}\n{setup_log[-8000:]}")
+        if self.record.get("desktop") == "tauri":
+            self.check_shortcut_identity()
+
         record = json.loads((self.app / windows_installer.INSTALLATION).read_text(encoding="utf-8"))
         self.assertEqual((record["kind"], record["version"]), ("installer", version))
         self.assertEqual(self.run_installed("hgs-tray.exe", "--version"), f"Zerus {self.record['product_version']}")

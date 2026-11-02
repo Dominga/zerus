@@ -166,7 +166,7 @@ class Catalog(unittest.TestCase):
             kernel.Desktop.remove_changes_schema(db)
             db.execute('PRAGMA user_version=12')
         _, status = self.serve()
-        self.assertEqual(status['schema'], 15)
+        self.assertEqual(status['schema'], 16)
         value = self.page()
         self.assertEqual(len(value['items']), 128)
         self.assertFalse(value['complete'])

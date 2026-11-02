@@ -1,11 +1,13 @@
 //! Closed notification settings and native foreground observations.
 //!
-//! Wire foundation only. A compiled DTO does not advertise a callable route.
-//! Ownership, native provenance and store admission remain Root checks.
+//! Ownership, native provenance and store admission remain Root checks. A
+//! client checks the actual selected CLI marker before using these types.
 use super::digest;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zerus_desktop_migration::canonical_uuid;
+
+pub mod native;
 
 pub const ABI: &str = "desktop-notification-controls-v1";
 pub const HELP_MARKER: &str = "Notification controls ABI: desktop-notification-controls-v1";
@@ -249,6 +251,15 @@ pub struct NativeFocus {
     pub connection_id: String,
     pub revision: u64,
     pub state: FocusState,
+}
+/// Original-child evidence from the canonical native Responder, never a
+/// Configure/Focus request field. The service also verifies its kernel origin.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeControl {
+    pub scope: Scope,
+    pub mode: super::ownership::Mode,
+    pub focus: Option<NativeFocus>,
 }
 impl NativeFocus {
     pub fn valid(&self) -> bool {

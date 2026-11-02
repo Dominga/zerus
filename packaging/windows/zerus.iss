@@ -82,7 +82,11 @@ Name: "login"; Description: "Start Zerus at login"; Flags: unchecked
 #endif
 
 [Icons]
+#if TauriDesktop
+Name: "{autoprograms}\Zerus"; Filename: "{app}\hgs-tray.exe"; WorkingDir: "{app}"; AppUserModelID: "com.hgdev.hgs-tray"; AppUserModelToastActivatorCLSID: "0F0F70A2-1D40-47D8-AC5E-D6A9B789605F"
+#else
 Name: "{autoprograms}\Zerus"; Filename: "{app}\hgs-tray.exe"; WorkingDir: "{app}"
+#endif
 
 [Run]
 #if TauriDesktop

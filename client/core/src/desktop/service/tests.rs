@@ -38,6 +38,20 @@ fn one_explicit_startup_switch_is_off_by_default() {
 }
 
 #[test]
+fn notification_preferences_can_only_be_attached_by_the_native_client() {
+    let forged = json!({"available":true,"pending":false,"status":{"configured":true,"preferences":{"optional_questions":true}}});
+    let mut input = serde_json::to_value(Snapshot::default()).unwrap();
+    input["notification_preferences"] = forged.clone();
+    let snapshot: Snapshot = serde_json::from_value(input).unwrap();
+    assert!(snapshot.notification_preferences.is_none());
+    let mut value = status();
+    value["notification_preferences"] = forged;
+    let mut state = state();
+    state.status(&value).unwrap();
+    assert!(state.snapshot().notification_preferences.is_none());
+}
+
+#[test]
 fn status_and_heartbeat_preserve_the_original_lease_and_refresh_component_readiness() {
     let mut initial = status();
     initial["details"] = json!({"abi":details::ABI,"epoch":EPOCH,"lease":REQUEST,"limits":{"demands_per_subscriber":64}});

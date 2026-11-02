@@ -52,6 +52,8 @@ mod instance;
 mod lifecycle;
 #[cfg(feature = "live")]
 mod login_item;
+#[cfg(target_os = "macos")]
+mod macos_notification_diagnostics;
 mod metrics;
 #[cfg(feature = "live")]
 mod mobile;

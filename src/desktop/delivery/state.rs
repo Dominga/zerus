@@ -118,7 +118,7 @@ pub(super) fn policy_receipt(db: &Connection, id: &str, enabled: bool) -> Result
     ensure!(canonical(id), "invalid delivery request ID");
     let old: Option<(String, String)> = db
         .query_row(
-            "SELECT fingerprint,substr(receipt,1,4097) FROM desktop_delivery_requests WHERE request_id=?1",
+            "SELECT substr(fingerprint,1,65),substr(receipt,1,4097) FROM desktop_delivery_requests WHERE request_id=?1",
             [id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )

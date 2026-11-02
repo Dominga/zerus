@@ -59,6 +59,16 @@ pub(super) fn result_request(store: &Store, value: &Value) -> Value {
         .unwrap_or_else(|_| refused("delivery_store_refused"))
 }
 
+pub(super) fn decorate_passive(store: &Store, value: &mut Value) {
+    let enabled = state::policy(&store.db).ok().map(|policy| policy.enabled);
+    value["automatic_approvals"] = json!(enabled);
+    value["lifecycle"]["background"]["approvals"]["enabled"] = json!(enabled);
+    for component in ["reads", "approvals"] {
+        // No runtime is not evidence that an older owner has drained.
+        value["lifecycle"]["background"][component]["drained"] = false.into();
+    }
+}
+
 /// A reachable authenticated frontend can turn the durable opt-in OFF even
 /// without background workers. No enable, generic JSON or writer grant here.
 pub(super) fn passive_frontend_request(

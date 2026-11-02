@@ -85,6 +85,9 @@ each with `ready`, `code` and conservative original-runtime `drained` values.
 Approvals also exposes nullable `enabled`, independently of readiness; disabled
 policy can be ready for an authenticated enable request. `automatic_approvals`
 reports that durable opt-in, not an assumption that workers are healthy.
+Passive status preserves the stored opt-in with both readiness slots false;
+absence of the runtime does not imply that consent was revoked or an older
+owner drained.
 Component-local failures remain `unavailable`; stopping uses `draining` or
 `drained`, and a missing writer uses `awaiting_handoff`. Readiness grants no
 writer authority. The actor rechecks current writer identity and the opaque

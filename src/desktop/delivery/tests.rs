@@ -44,8 +44,8 @@ struct Fixture {
     generation: u64,
 }
 impl Fixture {
-    fn projection(&self) -> Value {
-        let mut value = crate::desktop::projection(
+    fn passive_projection(&self) -> Value {
+        crate::desktop::projection(
             &self.location,
             &self.store,
             &self.runtime.epoch,
@@ -53,7 +53,10 @@ impl Fixture {
             &Value::Null,
             &self.feed,
             &crate::desktop::catalog_read::Reader::default(),
-        );
+        )
+    }
+    fn projection(&self) -> Value {
+        let mut value = self.passive_projection();
         self.runtime.decorate(&mut value);
         value
     }
@@ -366,6 +369,21 @@ fn degraded_runtime_returns_original_receipt_without_reapplying_old_enable() {
 fn passive_disable_requires_typed_authentication_and_an_actual_store_commit() {
     let mut f = Fixture::new(quiet());
     state::set_policy(&mut f.store.db, &id(), true).unwrap();
+    let passive = f.passive_projection();
+    assert_eq!(passive["automatic_approvals"], true);
+    assert_eq!(
+        passive["lifecycle"]["background"]["approvals"]["enabled"],
+        true
+    );
+    assert_eq!(
+        passive["lifecycle"]["background"]["approvals"]["ready"],
+        false
+    );
+    let mut client =
+        zerus_client_core::desktop::service::State::new(f.location.configuration.clone()).unwrap();
+    client.status(&passive).unwrap();
+    assert_eq!(client.snapshot().automatic_approvals, Some(true));
+    assert!(!client.snapshot().component_ready("approvals"));
     let request = |enabled| json!({"op":"automatic_approvals","request_id":id(),"enabled":enabled});
     let apply = |store: &mut Store, request: &Value| {
         passive_frontend_request(

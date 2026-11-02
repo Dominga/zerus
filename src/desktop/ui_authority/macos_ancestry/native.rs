@@ -15,8 +15,8 @@ struct NativeUnique {
     birth: u64,
     parent_birth: u64,
     version: i32,
-    original_parent_version: i32,
-    reserved: [u64; 2],
+    _original_parent_version: i32,
+    _reserved: [u64; 2],
 }
 const _: [(); 56] = [(); size_of::<NativeUnique>()];
 
@@ -24,7 +24,13 @@ fn info<T>(pid: u32, flavor: i32) -> Result<T> {
     let mut value = MaybeUninit::<T>::uninit();
     // SAFETY: exactly sized native output, read only after a complete result.
     let used = unsafe {
-        libc::proc_pidinfo(pid as i32, flavor, 0, value.as_mut_ptr().cast(), size_of::<T>() as i32)
+        libc::proc_pidinfo(
+            pid as i32,
+            flavor,
+            0,
+            value.as_mut_ptr().cast(),
+            size_of::<T>() as i32,
+        )
     };
     let error = std::io::Error::last_os_error();
     ensure!(
@@ -61,7 +67,8 @@ fn snapshot(pid: u32) -> Result<Snapshot> {
     let unique: NativeUnique = info(pid, PROC_PIDUNIQIDENTIFIERINFO)?;
     let mut path = [0u8; 4096];
     // SAFETY: bounded writable native path buffer for this PID.
-    let used = unsafe { libc::proc_pidpath(pid as i32, path.as_mut_ptr().cast(), path.len() as u32) };
+    let used =
+        unsafe { libc::proc_pidpath(pid as i32, path.as_mut_ptr().cast(), path.len() as u32) };
     ensure!(
         used > 0 && (used as usize) < path.len() && path[used as usize] == 0,
         "macOS ancestry native image unavailable (pid {pid})"
@@ -69,7 +76,10 @@ fn snapshot(pid: u32) -> Result<Snapshot> {
     let image = std::str::from_utf8(&path[..used as usize])?.to_owned();
     // SAFETY: read-only native session lookup; no caller-supplied session ID.
     let session = unsafe { libc::getsid(pid as i32) };
-    ensure!(short.pbsi_pid == pid && session > 0, "macOS ancestry session unavailable");
+    ensure!(
+        short.pbsi_pid == pid && session > 0,
+        "macOS ancestry session unavailable"
+    );
     let protected = system_image(&image)?;
     Ok(Snapshot {
         pid,
@@ -92,7 +102,10 @@ fn snapshot(pid: u32) -> Result<Snapshot> {
     })
 }
 
-pub(super) fn inspect(pid: u32, until: Instant) -> Result<Vec<super::super::Process>> {
+pub(in crate::desktop::ui_authority) fn inspect(
+    pid: u32,
+    until: Instant,
+) -> Result<Vec<super::super::Process>> {
     let owned = walk(pid, unsafe { libc::geteuid() }, until, snapshot, |value| {
         let process = super::super::Process::read(value.pid)?;
         ensure!(
@@ -112,4 +125,30 @@ pub(super) fn inspect(pid: u32, until: Instant) -> Result<Vec<super::super::Proc
         "macOS own-user ancestry changed"
     );
     Ok(owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn actual_native_own_and_system_init_metadata_have_the_declared_identities() {
+        let pid = std::process::id();
+        let owner = unsafe { libc::geteuid() };
+        let own = snapshot(pid).unwrap();
+        assert_eq!(classify(&own, owner).unwrap(), Role::Own);
+        let process = super::super::super::Process::read(pid).unwrap();
+        assert_eq!(process.identity.parent, own.parent);
+        assert_eq!(process.executable, own.image);
+        assert!(process.current());
+        assert_eq!(snapshot(pid).unwrap(), own);
+        let init = snapshot(1).unwrap();
+        assert_eq!(classify(&init, owner).unwrap(), Role::Init);
+        assert_eq!(snapshot(1).unwrap(), init);
+    }
+
+    #[test]
+    fn unavailable_native_identity_is_an_error_never_an_ancestry_boundary() {
+        assert!(snapshot(u32::MAX).is_err());
+    }
 }

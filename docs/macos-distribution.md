@@ -81,6 +81,31 @@ service label identifies an owned registration even when its old CLI path or def
 installer checks a loaded job against that old argv before replacing or
 removing it.
 
+Native frontend requests, including ownership Grant/Rearm, and explicit service
+mode changes share one macOS ancestry check. Every own-user process keeps its
+full native identity, executable, environment and agent-marker checks. Foreign
+ancestors are classified using short BSD metadata and the native executable
+path: full BSD metadata can be inaccessible for root-owned processes.
+
+The root-owned `/usr/bin/login` used by Terminal is only a bridge. It must be
+the protected system image, have effective and saved UID zero, real UID equal
+to the desktop user, and matching PID, process group and session ID. The walk
+checks the original child-parent generation identities and continues through
+Terminal; an agent above the bridge still refuses. It ends only at the verified
+root `/sbin/launchd` PID 1 with parent 0. Native process generations, executable
+UUIDs, versions, credentials and protected image metadata are re-read after the
+walk, including the bridge and Terminal. Changed or unavailable evidence and
+every other foreign ancestor refuse. In particular, an SSH ancestry containing
+a root `sshd-session` is unsupported; use the actual installed frontend or a
+foreground Terminal outside Zerus. Linux keeps its separate per-user-manager
+boundary.
+
+The Darwin caller fixture prints a bounded PID/UID/real-UID/path/session topology
+before its positive case. Only on GitHub-hosted macOS may an observed unsupported
+foreign ancestor skip that fixture with an explicit reason. Unreadable metadata
+and failures of the recognized login/launchd checks still fail; the diagnostic
+never grants native permission or establishes installed acceptance.
+
 Source `install.sh` reloads a PATH-backed desktop service when its CLI bytes
 change. An owned service with a separate runner keeps its registered backend;
 the CLI-only install refreshes its ordinary runner without selecting a different

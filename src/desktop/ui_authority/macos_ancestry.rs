@@ -11,6 +11,7 @@ pub(super) use native::inspect;
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Unique {
     executable: [u8; 16],
+    // Kernel process generations, not wall-clock timestamps or bare PIDs.
     birth: u64,
     parent_birth: u64,
     version: i32,
@@ -61,7 +62,6 @@ fn classify(value: &Snapshot, owner: u32) -> Result<Role> {
         owner != 0
             && value.pid != 0
             && value.unique.birth != 0
-            && value.unique.version > 0
             && (1..=6).contains(&value.status)
             && value.status != 5,
         "macOS ancestry identity unavailable"
@@ -70,7 +70,10 @@ fn classify(value: &Snapshot, owner: u32) -> Result<Role> {
         return Ok(Role::Own);
     }
     ensure!(
-        value.system_image.as_ref().is_some_and(SystemImage::protected),
+        value
+            .system_image
+            .as_ref()
+            .is_some_and(SystemImage::protected),
         "unverified foreign macOS ancestor"
     );
     if value.pid == 1
@@ -127,14 +130,18 @@ fn walk<T>(
             Role::Login => {
                 let child = retained.last().filter(|v| v.uids[0] == owner);
                 ensure!(
-                    child.is_some_and(|v| v.parent == value.pid
-                        && v.unique.parent_birth == value.unique.birth),
+                    child
+                        .is_some_and(|v| v.parent == value.pid
+                            && v.unique.parent_birth == value.unique.birth),
                     "macOS login original child-parent edge changed"
                 );
                 login_parent = Some((value.parent, value.unique.parent_birth));
             }
             Role::Init => {
-                ensure!(!owned.is_empty(), "macOS frontend ancestry has no owned caller");
+                ensure!(
+                    !owned.is_empty(),
+                    "macOS frontend ancestry has no owned caller"
+                );
                 retained.push(value);
                 break;
             }
@@ -145,7 +152,10 @@ fn walk<T>(
     // Recheck every original short/unique/image identity, including the bridge
     // and its Terminal parent. A copied path, PID reuse or reparent is no proof.
     for value in retained {
-        ensure!(Instant::now() < until, "macOS ancestry verification expired");
+        ensure!(
+            Instant::now() < until,
+            "macOS ancestry verification expired"
+        );
         ensure!(read(value.pid)? == value, "macOS frontend ancestry changed");
     }
     Ok(owned)

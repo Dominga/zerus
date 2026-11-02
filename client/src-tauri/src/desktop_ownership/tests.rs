@@ -4,6 +4,7 @@ use serde_json::json;
 
 #[test]
 fn startup_diagnostics_select_only_closed_codes_and_never_child_content() {
+    use super::{failure_code, OwnedError};
     assert_eq!(
         failure_code(
             &OwnedError::ChildFailed,

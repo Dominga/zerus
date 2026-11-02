@@ -4,6 +4,7 @@ import json
 import contextlib
 import io
 import hashlib
+import base64
 import socket
 import struct
 import os
@@ -301,6 +302,8 @@ if args == ['--help']:
         print('Desktop catalog relay ABI: desktop-catalog-relay-v1')
     if config.get('frontend_abi', True):
         print('Desktop frontend request ABI: desktop-ui-request-v1')
+    if config.get('activation_abi', False):
+        print('Desktop activation ABI: desktop-activation-v1')
     if config.get('maintenance_abi', True):
         print('Desktop maintenance ABI: desktop-maintenance-v1')
 elif args == ['desktop', 'frontend-request', '--json']:
@@ -324,6 +327,27 @@ elif args == ['desktop', 'frontend-request', '--json']:
     (root / 'original-child-bound').touch()
     if config.get('frontend_hold'):
         wait(root / 'release-frontend')
+    if request['op'] == 'activation_wait':
+        n = counter('activation-waits')
+        if n > (2 if config.get('activation_idle_first') else 1):
+            wait(root / 'release-activation')
+        target = {'computer': '', 'run': 'exact-run', 'conversation': 'exact-conversation'}
+        token = base64.urlsafe_b64encode(json.dumps(dict(host='', name='fixture', notice='reply',
+            run=target['run'], conversation=target['conversation'])).encode()).rstrip(b'=').decode()
+        activation = {'activation_id': '11111111-1111-4111-8111-111111111111',
+                      'post_request_id': '22222222-2222-4222-8222-222222222222', 'target': target,
+                      'token': token, 'platform_context': {'platform': 'wayland', 'activation_token': 'ephemeral-fixture'}}
+        answer = {'abi': 'desktop-activation-v1', 'request_id': request['request_id'],
+                  'configuration': 'a' * 64, 'service_epoch': epoch,
+                  'activation': None if config.get('activation_idle_first') and n == 1 else activation}
+        bad = config.get('activation_invalid')
+        if bad == 'transport': raise SystemExit('fixture lost activation reply')
+        if bad == 'request': answer['request_id'] = str(uuid.uuid4())
+        if bad == 'epoch': answer['service_epoch'] = str(uuid.uuid4())
+        if bad == 'configuration': answer['configuration'] = 'b' * 64
+        if bad == 'target': answer['activation']['target']['conversation'] = 'other'
+        print(json.dumps(answer), flush=True)
+        raise SystemExit(0)
     if config.get('frontend_refuse'):
         print(json.dumps({'request_id': request['request_id'], 'accepted': False, 'durable': False,
                           'code': 'frontend_authentication_refused'}))

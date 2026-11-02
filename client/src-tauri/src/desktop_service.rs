@@ -29,6 +29,16 @@ const SOURCES: usize = 64;
 const KEY_BYTES: usize = 32 << 20;
 const CATALOG_KEYS: usize = 1_000_000;
 
+#[cfg(target_os = "linux")]
+pub(crate) mod activation;
+
+#[derive(Default)]
+pub(crate) struct Observers {
+    pub projections: Vec<Projection>,
+    #[cfg(target_os = "linux")]
+    pub activation: Option<activation::Sink>,
+}
+
 mod catalog;
 mod catalog_relay;
 use catalog::catalog_loop;
@@ -226,6 +236,8 @@ struct Shared {
     organization: Mutex<Option<zerus_client_core::OrganizationSnapshot>>,
     frontend: frontend::Frontend,
     projections: Vec<Projection>,
+    #[cfg(target_os = "linux")]
+    activation: Option<activation::Sink>,
 }
 
 struct ReadIntent {
@@ -242,6 +254,7 @@ pub struct Service {
 }
 
 impl Service {
+    #[cfg(all(test, unix))]
     pub fn start(
         hgs: PathBuf,
         pump: crate::pump::Pump,
@@ -250,6 +263,29 @@ impl Service {
         drain: std::thread::JoinHandle<()>,
         responder: Option<Arc<zerus_client_core::desktop::Responder>>,
         projections: Vec<Projection>,
+    ) -> Arc<Self> {
+        Self::start_observed(
+            hgs,
+            pump,
+            sink,
+            allowed,
+            drain,
+            responder,
+            Observers {
+                projections,
+                #[cfg(target_os = "linux")]
+                activation: None,
+            },
+        )
+    }
+    pub(crate) fn start_observed(
+        hgs: PathBuf,
+        pump: crate::pump::Pump,
+        sink: SyncSender<Data>,
+        allowed: bool,
+        drain: std::thread::JoinHandle<()>,
+        responder: Option<Arc<zerus_client_core::desktop::Responder>>,
+        observers: Observers,
     ) -> Arc<Self> {
         let shared = Arc::new(Shared {
             hgs,
@@ -269,7 +305,9 @@ impl Service {
             details_changed: Notify::new(),
             organization: Mutex::new(None),
             frontend: frontend::Frontend::default(),
-            projections,
+            projections: observers.projections,
+            #[cfg(target_os = "linux")]
+            activation: observers.activation,
         });
         let (control, receiver) = watch::channel(Control::Retry(0));
         let (finished, join) = oneshot::channel();
@@ -873,13 +911,21 @@ async fn connection(
     let (mut error_bytes, mut stderr_open) = (0usize, true);
     let catalog_shared = shared.clone();
     let catalog_stop = stop.clone();
+    let catalog_configuration = configuration.clone();
     let mut catalogs = tauri::async_runtime::spawn(async move {
-        catalog_loop(catalog_shared, catalog_stop, configuration).await
+        catalog_loop(catalog_shared, catalog_stop, catalog_configuration).await
     });
     let detail_shared = shared.clone();
     let detail_stop = stop.clone();
     let mut detail_worker =
         tauri::async_runtime::spawn(async move { details::run(detail_shared, detail_stop).await });
+    #[cfg(target_os = "linux")]
+    let activation_worker = {
+        let (state, cancelled) = (shared.clone(), stop.clone());
+        tauri::async_runtime::spawn(async move {
+            activation::run(state, configuration, cancelled).await;
+        })
+    };
     let mut last_frame = tokio::time::Instant::now();
     let result = async {
         loop {
@@ -950,6 +996,8 @@ async fn connection(
     shared.changed.notify_one();
     shared.details_changed.notify_one();
     drop(stdin);
+    #[cfg(target_os = "linux")]
+    let _ = activation_worker.await;
     // Only this owned local proxy is stopped; the desktop service and native agents remain untouched.
     if child.kill().await.is_err() && child.wait().await.is_err() {
         shared.stopped.store(true, Ordering::Release);

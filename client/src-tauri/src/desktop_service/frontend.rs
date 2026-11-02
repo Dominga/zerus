@@ -736,4 +736,4 @@ pub async fn desktop_service_frontend_result(
 }
 
 #[cfg(all(test, unix))]
-mod tests;
+pub(super) mod tests;

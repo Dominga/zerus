@@ -192,16 +192,157 @@ fn first_import_adopts_an_existing_settled_intent_without_new_delivery() {
 }
 
 #[test]
-fn historical_import_never_overwrites_a_different_current_read() {
+fn conflicting_frozen_mark_is_durably_superseded_without_blocking_the_page() {
     let mut f = Fixture::new();
     let old = mark(0);
     let mut current = old.clone();
     current.reply_id = Some("newer-reply".into());
     reads::enqueue(&mut f.store.db, &id(), &current, 0).unwrap();
-    let capture = Capture::from_bytes(&serde_json::to_vec(&vec![old]).unwrap()).unwrap();
-    assert_eq!(f.apply(&capture.page(0).unwrap())["accepted"], false);
-    let pending = reads::page(&f.store.db, 0, reads::watermark(&f.store.db).unwrap(), 1).unwrap();
+    let capture =
+        Capture::from_bytes(&serde_json::to_vec(&vec![old.clone(), mark(1)]).unwrap()).unwrap();
+    let page = capture.page(0).unwrap();
+    assert_eq!(f.apply(&page)["accepted"], true);
+    assert_eq!(f.apply(&page)["superseded"], 1);
+    assert_eq!(f.lookup(&page)["result"]["superseded"], 1);
+    let original = reads::receipt(
+        &f.store.db,
+        &pending_reads::intent_id(&f.location.configuration, &old).unwrap(),
+        &old,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(original.superseded);
+    let pending = reads::page(&f.store.db, 0, reads::watermark(&f.store.db).unwrap(), 128).unwrap();
     assert_eq!(pending[0].mark, current);
+    assert_eq!(
+        pending.len(),
+        2,
+        "the conflicting row does not block later marks"
+    );
+    // A repeat remains superseded even if the current row subsequently retires.
+    reads::observe(
+        &mut f.store.db,
+        &pending[0],
+        &reads::Snapshot {
+            computer: &current.computer,
+            name: &current.name,
+            run: Some(&current.run_id),
+            conversation: Some(&current.conversation_id),
+            reply: current.reply_id.as_deref(),
+            signature: None,
+            read_reply: current.reply_id.as_deref(),
+            read_signature: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(f.apply(&page)["superseded"], 1);
+    assert_eq!(reads::status(&f.store.db).unwrap()["pending"], 1);
+    assert_eq!(
+        reads::receipt(&f.store.db, &original.request_id, &old).unwrap(),
+        Some(original)
+    );
+}
+
+#[test]
+fn a_different_frozen_part_after_settlement_is_new_intent() {
+    let mut f = Fixture::new();
+    let old = mark(0);
+    let initial = reads::enqueue(&mut f.store.db, &id(), &old, 0).unwrap();
+    let service: String = f
+        .store
+        .db
+        .query_row("SELECT epoch FROM service WHERE id=1", [], |r| r.get(0))
+        .unwrap();
+    let writer = id();
+    zerus_desktop_ledger::authorize(&mut f.store.db, &writer, &service).unwrap();
+    let original = reads::reserve(&mut f.store.db, &writer, &service, &id(), 0)
+        .unwrap()
+        .unwrap();
+    reads::observe(
+        &mut f.store.db,
+        &original.pending,
+        &reads::Snapshot {
+            computer: &old.computer,
+            name: &old.name,
+            run: Some(&old.run_id),
+            conversation: Some(&old.conversation_id),
+            reply: old.reply_id.as_deref(),
+            signature: None,
+            read_reply: old.reply_id.as_deref(),
+            read_signature: None,
+        },
+    )
+    .unwrap();
+    let mut newer = old.clone();
+    newer.reply_id = Some("reply-after-native-mode".into());
+    let capture = Capture::from_bytes(&serde_json::to_vec(&vec![newer.clone()]).unwrap()).unwrap();
+    let page = capture.page(0).unwrap();
+    assert_eq!(f.apply(&page)["superseded"], 0);
+    let pending = reads::page(&f.store.db, 0, reads::watermark(&f.store.db).unwrap(), 1)
+        .unwrap()
+        .remove(0);
+    assert_eq!(pending.revision, initial.revision + 1);
+    assert_eq!(pending.mark, newer);
+    assert_eq!(reads::status(&f.store.db).unwrap()["in_flight"], 1);
+    let stable_id = pending_reads::intent_id(&f.location.configuration, &newer).unwrap();
+    let receipt = reads::receipt(&f.store.db, &stable_id, &newer)
+        .unwrap()
+        .unwrap();
+    assert!(!receipt.superseded);
+    assert_eq!(f.apply(&page)["superseded"], 0);
+    assert_eq!(
+        reads::receipt(&f.store.db, &stable_id, &newer).unwrap(),
+        Some(receipt)
+    );
+}
+
+#[test]
+fn a_conflicting_frozen_mark_preserves_the_original_in_flight_ticket() {
+    let mut f = Fixture::new();
+    let current = mark(0);
+    reads::enqueue(&mut f.store.db, &id(), &current, 0).unwrap();
+    let service: String = f
+        .store
+        .db
+        .query_row("SELECT epoch FROM service WHERE id=1", [], |r| r.get(0))
+        .unwrap();
+    let writer = id();
+    zerus_desktop_ledger::authorize(&mut f.store.db, &writer, &service).unwrap();
+    let original = reads::reserve(&mut f.store.db, &writer, &service, &id(), 0)
+        .unwrap()
+        .unwrap();
+    let mut frozen = current.clone();
+    frozen.reply_id = Some("different-frozen-reply".into());
+    let capture = Capture::from_bytes(&serde_json::to_vec(&vec![frozen.clone()]).unwrap()).unwrap();
+    let page = capture.page(0).unwrap();
+    assert_eq!(f.apply(&page)["superseded"], 1);
+    assert_eq!(f.apply(&page)["durable"], true);
+    assert_eq!(
+        reads::page(&f.store.db, 0, reads::watermark(&f.store.db).unwrap(), 1).unwrap(),
+        vec![original.pending.clone()]
+    );
+    assert_eq!(reads::status(&f.store.db).unwrap()["in_flight"], 1);
+    let ticket: String = f
+        .store
+        .db
+        .query_row(
+            "SELECT attempt FROM desktop_reads WHERE seq=?1",
+            [original.pending.seq],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ticket, original.id);
+    let request = pending_reads::intent_id(&f.location.configuration, &frozen).unwrap();
+    let receipt = reads::receipt(&f.store.db, &request, &frozen)
+        .unwrap()
+        .unwrap();
+    assert!(receipt.superseded);
+    reads::finish(&mut f.store.db, &original, reads::Outcome::NotSent, 1).unwrap();
+    assert_eq!(f.apply(&page)["superseded"], 1);
+    assert_eq!(
+        reads::receipt(&f.store.db, &request, &frozen).unwrap(),
+        Some(receipt)
+    );
 }
 
 #[test]

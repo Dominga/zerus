@@ -298,19 +298,17 @@ fn original_frozen_capture_retains_its_charge_and_refuses_source_drift() {
     let f = Fixture::new();
     f.actions.queue_marks(vec![mark()]).unwrap();
     let captured = std::sync::Arc::new(
-        f.actions
-            .freeze_reads()
-            .unwrap()
+        Arc::new(f.actions.freeze_reads().unwrap())
             .capture(deadline())
             .unwrap(),
     );
     assert_eq!(captured.capture.source().rows, 1);
-    assert!(captured.unchanged().is_ok());
+    assert!(captured.unchanged(deadline()).is_ok());
     let closed = f.actions.checkpoint_admission.close();
     assert_eq!(closed.wait_until(Instant::now()), Observation::Pending);
     // The original managed source remains intact until an explicit test mutation.
     std::fs::write(f.path(), b"[]").unwrap();
-    assert_eq!(captured.unchanged(), Err(Refused::Checkpoint));
+    assert_eq!(captured.unchanged(deadline()), Err(Refused::Checkpoint));
     drop(captured);
     assert_eq!(closed.wait_until(deadline()), Observation::Idle);
 }
@@ -330,7 +328,7 @@ fn an_invalid_last_managed_mark_never_exposes_an_import_capture() {
     zerus_client_core::fsx::write_private_atomic(&f.path(), &bytes, true).unwrap();
     f.actions = Actions::new(f.path());
     assert!(matches!(
-        f.actions.freeze_reads().unwrap().capture(deadline()),
+        Arc::new(f.actions.freeze_reads().unwrap()).capture(deadline()),
         Err(Refused::Checkpoint)
     ));
     assert_eq!(std::fs::read(f.path()).unwrap(), bytes);
@@ -408,4 +406,91 @@ fn direct_native_output_holders_pin_the_barrier_until_actual_eof() {
         std::fs::write(release, []).unwrap();
         assert_eq!(frozen.checkpoint(deadline()).unwrap().marks, 1);
     }
+}
+
+#[test]
+fn snapshot_store_contention_waits_without_losing_the_original_freeze() {
+    let f = Fixture::new();
+    f.actions.queue_marks(vec![mark()]).unwrap();
+    let frozen = Arc::new(f.actions.freeze_reads().unwrap());
+    let a = f.actions.clone();
+    let (entered, started) = mpsc::sync_channel(1);
+    let (release, released) = mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        let _guard = a.marks.lock().unwrap();
+        entered.send(()).unwrap();
+        released.recv().unwrap();
+    });
+    started.recv_timeout(Duration::from_secs(2)).unwrap();
+    let original = frozen.clone();
+    let (finished, result) = mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || finished.send(original.capture(deadline())).unwrap());
+    assert!(matches!(
+        result.recv_timeout(Duration::from_millis(25)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    release.send(()).unwrap();
+    reader.join().unwrap();
+    let captured = result
+        .recv_timeout(Duration::from_secs(3))
+        .unwrap()
+        .unwrap();
+    worker.join().unwrap();
+    assert_eq!(captured.capture.source().rows, 1);
+    assert!(captured.unchanged(deadline()).is_ok());
+    assert!(
+        matches!(f.actions.freeze_reads(), Err(Refused::Closed)),
+        "the original barrier was not reopened"
+    );
+}
+
+#[test]
+fn a_capture_deadline_keeps_the_same_frozen_source_available_for_retry() {
+    let f = Fixture::new();
+    f.actions.queue_marks(vec![mark()]).unwrap();
+    let frozen = Arc::new(f.actions.freeze_reads().unwrap());
+    let guard = f.actions.marks.lock().unwrap();
+    assert!(matches!(
+        frozen.capture(Instant::now() + Duration::from_millis(25)),
+        Err(Refused::Pending)
+    ));
+    assert!(
+        !f.path().exists(),
+        "the refused capture did not checkpoint any mutation"
+    );
+    assert_eq!(
+        f.actions.checkpoint_admission.snapshot().unwrap().admitted,
+        1
+    );
+    drop(guard);
+    let captured = frozen.capture(deadline()).unwrap();
+    assert_eq!(captured.capture.source().rows, 1);
+    assert!(f.actions.queue_marks(vec![mark()]).is_err());
+}
+
+#[test]
+fn source_verification_waits_for_readers_and_can_retry_its_original_capture() {
+    let f = Fixture::new();
+    f.actions.queue_marks(vec![mark()]).unwrap();
+    let captured = Arc::new(
+        Arc::new(f.actions.freeze_reads().unwrap())
+            .capture(deadline())
+            .unwrap(),
+    );
+    let guard = f.actions.marks.lock().unwrap();
+    assert_eq!(
+        captured.unchanged(Instant::now() + Duration::from_millis(25)),
+        Err(Refused::Pending)
+    );
+    let original = captured.clone();
+    let (finished, result) = mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || finished.send(original.unchanged(deadline())).unwrap());
+    assert!(matches!(
+        result.recv_timeout(Duration::from_millis(25)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    drop(guard);
+    assert_eq!(result.recv_timeout(Duration::from_secs(3)).unwrap(), Ok(()));
+    worker.join().unwrap();
+    assert_eq!(ReadMarks::load(f.path()).pending(), [mark()]);
 }

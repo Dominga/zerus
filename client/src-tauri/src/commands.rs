@@ -67,7 +67,7 @@ impl AppState {
         self.live.desktop_service()
     }
     pub(crate) fn set_pending_read_source(&self, actions: crate::actions::Actions) {
-        let _=self.live.pending_read_source.set(actions);
+        let _ = self.live.pending_read_source.set(actions);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
@@ -399,7 +399,7 @@ mod live {
                         activation: self.service_activation.get().cloned(),
                     },
                 );
-                if let Some(actions)=self.pending_read_source.get() {
+                if let Some(actions) = self.pending_read_source.get() {
                     service.start_pending_read_import(actions.clone());
                 }
                 if let Some(organization) = &organization {

@@ -359,6 +359,7 @@ elif args == ['desktop', 'frontend-request', '--json']:
             receipt = {'request_id': request['request_id'], 'op': request['op'],
                        'accepted': True, 'durable': True, 'source': page['source'],
                        'after': page['after'], 'through': page['after'] + len(page['marks']),
+                       'superseded': len(page['marks']) if config.get('pending_reads_superseded') else 0,
                        'delivered': False}
         elif request['op'] == 'automatic_approvals':
             receipt = {'request_id': request['request_id'], 'op': request['op'], 'enabled': request['enabled'],

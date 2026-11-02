@@ -717,6 +717,9 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
                 || value["source"] != json!(page.source)
                 || value["after"] != page.after
                 || value["through"] != page.through()
+                || !value["superseded"]
+                    .as_u64()
+                    .is_some_and(|count| count <= page.marks.len() as u64)
                 || value["delivered"] != false
             {
                 return None;

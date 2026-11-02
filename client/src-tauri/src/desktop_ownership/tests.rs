@@ -279,6 +279,53 @@ mod native {
     }
 
     #[test]
+    fn never_service_native_start_consumes_only_its_original_authenticated_noop_reply() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        let f = Fixture::new(Mode::Native, json!({"never_service":true}));
+        let proof =
+            native_takeover(f.root.join("hgs"), f.owner.responder.clone().unwrap()).unwrap();
+        assert_eq!(proof._receipt.outcome, Outcome::NativeAbsent);
+        assert!(!proof._receipt.durable);
+        assert!(proof._receipt.journal.is_none());
+        assert_eq!(f.calls("frontend-request").len(), 1);
+        assert!(f.calls("ownership-result").is_empty());
+
+        let lost = Fixture::new(Mode::Native, json!({"never_service":true,"lost":true}));
+        let original = lost.run(Some(Action::NativeTakeover));
+        assert!(original.pending);
+        // Even a correctly-shaped original no-op is forbidden in lookup.
+        lost.config(json!({"never_service":true}));
+        assert!(lost.run(None).pending);
+        assert!(lost
+            .owner
+            .state()
+            .intent
+            .as_ref()
+            .unwrap()
+            .receipt
+            .is_none());
+        lost.config(json!({"never_service":true,"missing":true,"definitive":true}));
+        assert!(
+            lost.run(None).pending,
+            "an unjournaled missing original cannot settle"
+        );
+        assert_eq!(lost.calls("frontend-request").len(), 1);
+    }
+
+    #[test]
+    fn an_original_reply_with_a_different_scope_or_fingerprint_remains_unconfirmed() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        for field in ["request_id", "configuration", "fingerprint"] {
+            let f = Fixture::new(Mode::Native, json!({"bad_receipt":field}));
+            let view = f.run(Some(Action::NativeTakeover));
+            assert!(view.pending, "{field}: {view:?}");
+            assert_eq!(view.code, "ownership_receipt_mismatch");
+            assert!(f.owner.state().intent.as_ref().unwrap().receipt.is_none());
+            assert_eq!(f.calls("frontend-request").len(), 1);
+        }
+    }
+
+    #[test]
     fn an_original_descendants_pipe_delays_native_ready_without_replaying_takeover() {
         let _process = crate::PROCESS_TREE.read().unwrap();
         let f = Fixture::new(Mode::Native, json!({"held_pipe":true}));

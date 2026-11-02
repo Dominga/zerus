@@ -26,7 +26,8 @@ def status():
     if (root / 'current.json').exists():
         return json.loads((root / 'current.json').read_text())
     return dict(abi=abi, configuration=config.get('configuration', 'a' * 64),
-                journal=journal, revision=3, state=config.get('state', 'passive'),
+                journal=None if config.get('never_service') else journal,
+                revision=0 if config.get('never_service') else 3, state=config.get('state', 'passive'),
                 rearm_required=config.get('rearm_required', False), request_id=None,
                 owner_epoch=None, identity_current=False)
 
@@ -49,6 +50,11 @@ def receipt(request):
                   journal=journal, fingerprint=hashlib.sha256(json.dumps(request, separators=(',', ':')).encode()).hexdigest(),
                   action=request['action'], revision=revision, accepted=True, durable=True,
                   outcome=outcome, current=current)
+    if config.get('never_service') and native:
+        current.update(journal=None, revision=0, state='native', owner_epoch=None)
+        answer.update(journal=None, revision=0, durable=False, outcome=dict(state='native_absent'))
+    if config.get('bad_receipt'):
+        answer[config['bad_receipt']] = 'b' * 64 if config['bad_receipt'] != 'request_id' else epoch
     (root / 'current.json').write_text(json.dumps(current))
     return answer
 

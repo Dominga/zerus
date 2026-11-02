@@ -253,7 +253,16 @@ impl Job {
                 return self.settle(receipt, &request, &configuration);
             }
             let mut state = self.owner.state();
-            if lookup.definitive && exit_confirmed {
+            if lookup.definitive
+                && exit_confirmed
+                && matches!(
+                    &request,
+                    Request::DesktopOwnership {
+                        journal: Some(_),
+                        ..
+                    }
+                )
+            {
                 if let Some(intent) = &mut state.intent {
                     intent.complete = true;
                 }

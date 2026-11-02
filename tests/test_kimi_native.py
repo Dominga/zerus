@@ -56,6 +56,24 @@ def settled_recovery(state):
             and settled_turn(state, job['receipt']))
 
 
+def settled_recorded_turn(state, receipt, text):
+    """Wait for both callback observations in the same settled snapshot."""
+    if not settled_turn(state, receipt):
+        return None
+    events = [event for event in state.get('events', [])
+              if event.get('run_id') == state.get('run_id')
+              and event.get('kimi_conversation_id') == state.get('conversation_id')
+              and event.get('agent_id', '') in ('', 'main')]
+    starts = [event for event in events if event.get('type') == 'TurnStarted' and event.get('detail') == text]
+    if len(starts) != 1 or type(starts[0].get('kimi_turn_id')) is not int or starts[0]['kimi_turn_id'] < 0:
+        return None
+    return state if any(event.get('type') == 'Stop'
+                        and type(event.get('kimi_turn_id')) is int
+                        and event.get('kimi_turn_id') == starts[0]['kimi_turn_id']
+                        and event.get('turn_identity_source') in ('kimi_wire', 'kimi_hook')
+                        for event in events) else None
+
+
 KIMI = os.environ.get('HGS_KIMI_TEST_BIN')
 GUARDS = [Path(path).resolve() for path in os.environ.get('ZERUS_KIMI_GUARD', '').split(os.pathsep) if path]
 # Where KIMI_CODE_BASE_URL points: Kimi asks its platform there for a banner
@@ -859,15 +877,8 @@ class NativeKimi(lifecycle.Harness):
         self.assertEqual(self.binding(name)['conversation_id'], conversation)
         self.assertEqual(len(self.requests), calls, 'resume replayed the initial message')
         followup = self.send(name, self.payload(name, 'Follow-up after initial launch'))
-        completed = self.until(lambda: self.settled(name, followup), name)
-        starts = [event for event in completed['events'] if event['type'] == 'TurnStarted'
-                  and event.get('run_id') == completed['run_id']
-                  and event.get('detail') == 'Follow-up after initial launch']
-        self.assertEqual(len(starts), 1)
-        self.assertTrue(any(event['type'] == 'Stop' and event.get('run_id') == completed['run_id']
-                            and event.get('kimi_turn_id') == starts[0]['kimi_turn_id']
-                            and event.get('turn_identity_source') in ('kimi_wire', 'kimi_hook')
-                            for event in completed['events']), 'Stop must bind the same exact native turn')
+        self.until(lambda: settled_recorded_turn(self.inspect(name), followup,
+                                                'Follow-up after initial launch'), name)
         self.assertEqual(self.held(text), 1)
         self.assert_process(name, 'resumed')
 
@@ -1588,6 +1599,24 @@ class FixtureControls(unittest.TestCase):
             with self.subTest(label=label):
                 self.assertFalse(settled_recovery(state))
         self.assertIs(settled_recovery(ready), ready)
+
+    def test_recorded_turn_waits_for_its_async_start_and_bound_stop_without_weakening_settlement(self):
+        receipt = dict(submitted_at=100.0)
+        start = dict(type='TurnStarted', run_id='run', kimi_conversation_id='conversation',
+                     kimi_turn_id=1, detail='Follow-up')
+        stop = dict(start, type='Stop', detail='', turn_identity_source='kimi_wire')
+        ready = dict(run_id='run', conversation_id='conversation', activity='idle', phase='idle',
+                     reply_at=101.0, allowed_actions=['pause'], events=[stop, start])
+        self.assertIs(settled_recorded_turn(ready, receipt, 'Follow-up'), ready)
+        for events in ([stop], [start], [stop, start, start],
+                       [dict(stop, kimi_turn_id=2), start],
+                       [dict(stop, kimi_turn_id=True), start],
+                       [dict(stop, run_id='previous'), start],
+                       [dict(stop, kimi_conversation_id='other'), start],
+                       [dict(stop, agent_id='child'), start],
+                       [dict(stop, turn_identity_source=None), start]):
+            self.assertFalse(settled_recorded_turn(dict(ready, events=events), receipt, 'Follow-up'))
+        self.assertFalse(settled_recorded_turn(dict(ready, phase='working'), receipt, 'Follow-up'))
 
     def test_a_turn_settles_only_with_a_reply_after_its_submission_while_pause_is_allowed(self):
         receipt = dict(request_id=str(uuid.uuid4()), status='submitted', submitted_at=100.0)

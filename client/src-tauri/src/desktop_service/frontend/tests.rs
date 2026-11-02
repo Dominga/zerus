@@ -5,6 +5,52 @@ fn approval(enabled: bool) -> Request {
         enabled,
     }
 }
+#[test]
+fn actual_root_status_controls_client_readiness_but_never_blocks_connected_disable() {
+    // Produced by the root private Store/Runtime projection and decorator test.
+    // Regenerate/check with client/scripts/generate-delivery-status-fixture.py.
+    let cases: Vec<Value> = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../fixtures/desktop-delivery-status.json"
+    )))
+    .unwrap();
+    assert_eq!(cases.len(), 7);
+    for case in cases {
+        let label = case["case"].as_str().unwrap();
+        let status = &case["status"];
+        let (reads, approvals, enabled) = match label {
+            "awaiting_handoff" => (false, false, None),
+            "disabled_but_ready" | "read_degraded" => (label != "read_degraded", true, Some(false)),
+            "enabled" => (true, true, Some(true)),
+            "approval_degraded" => (true, false, Some(true)),
+            "disabled_while_degraded" => (true, false, Some(false)),
+            "drained" => (false, false, Some(false)),
+            _ => panic!("unexpected real root case"),
+        };
+        let mut state =
+            service::State::new(status["configuration"].as_str().unwrap().into()).unwrap();
+        state.status(status).unwrap();
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.component_ready("reads"), reads, "{label}");
+        assert_eq!(snapshot.component_ready("approvals"), approvals, "{label}");
+        assert_eq!(snapshot.automatic_approvals, enabled, "{label}");
+        assert!(
+            submission_ready(snapshot, &approval(false)),
+            "connected disable: {label}"
+        );
+        assert_eq!(
+            submission_ready(snapshot, &approval(true)),
+            approvals,
+            "enable: {label}"
+        );
+        let mut disconnected = snapshot.clone();
+        disconnected.connected = false;
+        assert!(!submission_ready(&disconnected, &approval(false)));
+        let mut unknown_epoch = snapshot.clone();
+        unknown_epoch.epoch = None;
+        assert!(!submission_ready(&unknown_epoch, &approval(false)));
+    }
+}
 
 fn imported() -> Request {
     let source=zerus_client_core::desktop::pending_reads::Capture::from_bytes(br#"[{"computer":"example","name":"agent/project/test","run_id":"run","conversation_id":"conversation","reply_id":"reply","attention_signature":null}]"#).unwrap();
@@ -339,6 +385,9 @@ pub(in crate::desktop_service) mod native {
         }
     }
     pub(in crate::desktop_service) fn responder() -> Arc<Responder> {
+        responder_for_configuration("a".repeat(64))
+    }
+    fn responder_for_configuration(configuration: String) -> Arc<Responder> {
         let build = crate::cli::build_info(&crate::cli::BUILD);
         let responder = Arc::new(Responder::new(
             "com.hgdev.hgs-tray".into(),
@@ -351,8 +400,66 @@ pub(in crate::desktop_service) mod native {
             true,
             false,
         ));
-        responder.configure_once("a".repeat(64));
+        responder.configure_once(configuration);
         responder
+    }
+    #[test]
+    fn degraded_root_status_still_uses_the_original_child_disable_route() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        tauri::async_runtime::block_on(async {
+            let cases: Vec<Value> = serde_json::from_str(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../fixtures/desktop-delivery-status.json"
+            )))
+            .unwrap();
+            let status = &cases
+                .iter()
+                .find(|case| case["case"] == "approval_degraded")
+                .unwrap()["status"];
+            let fixture = Fixture::new(json!({"produced_status":status}));
+            std::fs::write(
+                fixture.0.join("runtime-epoch"),
+                status["epoch"].as_str().unwrap(),
+            )
+            .unwrap();
+            let responder =
+                responder_for_configuration(status["configuration"].as_str().unwrap().into());
+            let _cache = CacheServer::start(&fixture.0, responder.clone());
+            let (service, _) = fixture.start_with_responder(true, Some(responder));
+            eventually("actual root degraded policy is observed", || {
+                service.snapshot().connected && service.snapshot().automatic_approvals == Some(true)
+            })
+            .await;
+            assert!(!service.snapshot().component_ready("approvals"));
+            let enable = service
+                .automatic_approvals(uuid::Uuid::new_v4().to_string(), true)
+                .await
+                .unwrap();
+            let disable = service
+                .automatic_approvals(uuid::Uuid::new_v4().to_string(), false)
+                .await
+                .unwrap();
+            service.join().await.unwrap();
+            assert_eq!(enable["code"], "desktop_background_unavailable");
+            assert_eq!(disable["accepted"], true);
+            assert_eq!(disable["durable"], true);
+            assert_eq!(disable["enabled"], false);
+            assert!(fixture.0.join("original-child-bound").exists());
+            let calls = fixture.calls();
+            let writes: Vec<_> = calls
+                .iter()
+                .filter(|call| call["args"] == json!(["desktop", "frontend-request", "--json"]))
+                .collect();
+            assert_eq!(
+                writes.len(),
+                1,
+                "no enable or replay reaches the native relay"
+            );
+            assert_eq!(writes[0]["value"]["request"]["enabled"], false);
+            assert!(!calls
+                .iter()
+                .any(|call| call["value"]["op"] == "automatic_approvals"));
+        });
     }
     // Exercise the production startup producer through its original child and
     // native cache registration. The private fake service supplies receipts;

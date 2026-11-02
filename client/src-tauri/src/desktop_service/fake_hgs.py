@@ -377,8 +377,20 @@ elif args == ['desktop', 'frontend-request', '--json']:
         wait(root / 'release-frontend')
     if request['op'] == 'activation_wait':
         n = counter('activation-waits')
-        if n > (2 if config.get('activation_idle_first') else 1):
+        first_failure = config.get('activation_fail_first')
+        if n > (2 if config.get('activation_idle_first') or first_failure else 1):
             wait(root / 'release-activation')
+        if first_failure and n == 1:
+            wait(root / 'release-first-activation')
+            if first_failure == 'pipe' and os.fork() == 0:
+                # This private descendant holds only inherited stdout/stderr.
+                # The original registered CLI exits; release without PID signals.
+                (root / 'activation-pipe-held').touch()
+                until = time.monotonic() + 15
+                while not (root / 'release-activation-pipe').exists() and time.monotonic() < until:
+                    time.sleep(.005)
+                os._exit(0)
+            raise SystemExit('fixture lost its first activation reply')
         target = {'computer': '', 'run': 'exact-run', 'conversation': 'exact-conversation'}
         token = base64.urlsafe_b64encode(json.dumps(dict(host='', name='fixture', notice='reply',
             run=target['run'], conversation=target['conversation'])).encode()).rstrip(b'=').decode()

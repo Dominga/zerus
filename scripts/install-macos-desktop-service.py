@@ -429,8 +429,18 @@ def _install(binary, home, source, restart=False, check_only=False, remove=False
     desired_mode = mode or old_mode
     if desired_mode == "background":
         value, destination, content = registration(binary, home, env, command, desired_mode)
-    if mode is not None and runner_hgs is None and previous_definition is not None:
-        runner_hgs = previous_definition.get("EnvironmentVariables", {}).get("HGS_EXECUTABLE")
+    if previous_definition is not None:
+        old_environment = previous_definition.get("EnvironmentVariables", {})
+        if mode is not None:
+            require(isinstance(old_environment, dict), "Custom desktop environment kept; review before changing mode.")
+            old_runner = old_environment.get("HGS_EXECUTABLE")
+            require(runner_hgs is None or str(Path(os.path.abspath(runner_hgs))) == old_runner,
+                    "A mode transition cannot change the independent runner; reconcile the ordinary installation first.")
+        # An unchanged paired backend must not lose its runner merely because
+        # a GUI-only refresh omitted an already selected --runner-hgs.
+        if runner_hgs is None and isinstance(old_environment, dict) and (
+                mode is not None or previous_definition["ProgramArguments"][0] == str(binary)):
+            runner_hgs = old_environment.get("HGS_EXECUTABLE")
     if runner_hgs is not None:
         runner_hgs = Path(os.path.abspath(runner_hgs))
         ordinary(runner_hgs)

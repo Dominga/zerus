@@ -147,7 +147,7 @@ class MacDesktopService(unittest.TestCase):
         self.assertEqual(definition["ProgramArguments"][0], str(self.binary))
         self.assertEqual(definition["EnvironmentVariables"], {"HGS_EXECUTABLE": str(runner)})
         self.command.calls.clear()
-        self.install(runner_hgs=runner)
+        self.install()
         self.assertEqual(self.command.mutations(), [])
         stable = Commands(self.home, runner)
         def command(argv, **kwargs):
@@ -232,6 +232,27 @@ class MacDesktopService(unittest.TestCase):
         with self.assertRaisesRegex(installer.Refusal, "Custom desktop"):
             self.install(mode="background")
         self.assertEqual(self.command.destination.read_bytes(), changed)
+        self.assertEqual(self.command.mutations(), [])
+
+    def test_custom_environment_is_actionable_and_mode_cannot_change_the_paired_runner(self):
+        self.install()
+        definition = plistlib.loads(self.command.destination.read_bytes())
+        definition["EnvironmentVariables"] = "unverified"
+        raw = plistlib.dumps(definition).replace(b"?>", b"?>\n<!-- " + installer.MARKER.encode()
+            + b"; configuration=" + self.command.config.encode() + b" -->", 1)
+        self.command.destination.write_bytes(raw)
+        with self.assertRaisesRegex(installer.Refusal, "Custom desktop environment"):
+            self.install(mode="background")
+        self.assertEqual(self.command.destination.read_bytes(), raw)
+        self.command.destination.write_text(self.command.plan["definition"])
+        runner = self.root / "stable-hgs"; runner.write_text("runner"); runner.chmod(0o755)
+        other = self.root / "other-hgs"; other.write_text("other"); other.chmod(0o755)
+        self.install(runner_hgs=runner)
+        raw = self.command.destination.read_bytes()
+        self.command.calls.clear()
+        with self.assertRaisesRegex(installer.Refusal, "cannot change the independent runner"):
+            self.install(mode="background", runner_hgs=other)
+        self.assertEqual(self.command.destination.read_bytes(), raw)
         self.assertEqual(self.command.mutations(), [])
 
     def test_status_is_read_only_and_distinguishes_selection_from_running_mode(self):

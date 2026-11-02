@@ -70,7 +70,8 @@ pub fn run_limited(
 
 /// Console-free Windows helper with bounded termination cleanup. A pending
 /// original child remains retained and prevents another helper in this process;
-/// an error never proves physical exit or authorizes replay.
+/// an error never proves physical exit or authorizes replay. Only the supplied
+/// environment is passed to this fixed helper; the parent's profile is omitted.
 #[cfg(windows)]
 pub fn run_hidden_limited(
     program: &Path,
@@ -91,6 +92,7 @@ pub fn run_hidden_limited(
                 command.creation_flags(CREATE_NO_WINDOW).spawn()
             })),
             hidden_stop: Some(stop.clone()),
+            clear_environment: true,
             ..Pipes::default()
         },
     );
@@ -228,6 +230,7 @@ struct Pipes {
     retain_all: bool,
     stderr_cap: Option<usize>,
     child_exited: Option<Arc<AtomicBool>>,
+    clear_environment: bool,
     #[cfg(any(windows, test))]
     hidden_stop: Option<Arc<hidden::State>>,
 }
@@ -520,13 +523,18 @@ fn run_inner(
     let _cancel_output = CancelOutput(pipes.stop);
     let mut command = Command::new(hgs);
     command.args(&inv.args);
+    if pipes.clear_environment {
+        command.env_clear();
+    }
     for (key, value) in parent_env {
         command.env(key, value);
     }
     for key in remove {
         command.env_remove(key);
     }
-    crate::child_environment::restore(&mut command);
+    if !pipes.clear_environment {
+        crate::child_environment::restore(&mut command);
+    }
     command
         .env_remove("HGS_SESSION")
         .env_remove("HGS_RUN_ID")
@@ -904,6 +912,32 @@ mod stream_tests {
     }
 
     #[test]
+    fn an_explicit_helper_environment_omits_every_parent_variable() {
+        let call = Invocation {
+            args: vec![],
+            stdin: None,
+            timeout: Duration::from_secs(5),
+            request_id: None,
+        };
+        let result = run_inner(
+            Path::new("/usr/bin/env"),
+            &call,
+            &[("ZERUS_TEST_ONLY", "explicit")],
+            &[],
+            1024,
+            None,
+            Pipes {
+                clear_environment: true,
+                ..Pipes::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(result, Exit::Code { code: 0, stdout, .. } if stdout == b"ZERUS_TEST_ONLY=explicit\n")
+        );
+    }
+
+    #[test]
     fn streamed_eof_and_both_exact_output_limits_are_preserved() {
         let code = "import sys,os; assert sys.stdin.buffer.read() == b'bounded input'; assert 'HGS_SESSION' not in os.environ; sys.stdout.write('x'*16384); sys.stderr.write('y'*16384)";
         let exit = run_streamed(
@@ -972,10 +1006,24 @@ mod hidden_tests {
 
     #[test]
     fn a_hidden_helper_has_no_console_and_receives_exact_input_through_eof() {
-        let program = std::env::var_os("SystemRoot")
-            .map(std::path::PathBuf::from)
-            .expect("Windows has SystemRoot")
+        let system_root = std::env::var("SystemRoot").expect("Windows has Unicode SystemRoot");
+        let program = std::path::PathBuf::from(&system_root)
             .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let modules = program
+            .parent()
+            .unwrap()
+            .join("Modules")
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let temp = std::env::temp_dir().to_str().unwrap().to_owned();
+        let environment = [
+            ("SystemRoot", system_root.as_str()),
+            ("WINDIR", system_root.as_str()),
+            ("PSModulePath", modules.as_str()),
+            ("TEMP", temp.as_str()),
+            ("TMP", temp.as_str()),
+        ];
         let script = r#"$ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false,$true)
 Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class QuietHelper { [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); }'
@@ -998,7 +1046,7 @@ Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; pu
             timeout: Duration::from_secs(15),
             request_id: None,
         };
-        let result = run_hidden_limited(&program, &call, &[], 1024).unwrap();
+        let result = run_hidden_limited(&program, &call, &environment, 1024).unwrap();
         match result {
             Exit::Code {
                 code: 0, stdout, ..
@@ -1008,5 +1056,62 @@ Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; pu
             ),
             other => panic!("{other:?}"),
         }
+
+        let body = "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);[Console]::WriteLine($env:PSModulePath);[Console]::WriteLine($env:ZERUS_TEST_PARENT_PROFILE);[Console]::WriteLine([string]$PSModuleAutoLoadingPreference)";
+        let probe = |source: &str| Invocation {
+            args: vec![
+                "-NoLogo".into(),
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-EncodedCommand".into(),
+                STANDARD.encode(
+                    source
+                        .encode_utf16()
+                        .flat_map(u16::to_le_bytes)
+                        .collect::<Vec<_>>(),
+                ),
+            ],
+            stdin: Some(Vec::new()),
+            timeout: Duration::from_secs(15),
+            request_id: None,
+        };
+        let inherited = run_limited(
+            &program,
+            &probe(&format!("$PSModuleAutoLoadingPreference='All';{body}")),
+            &[
+                ("PSModulePath", r"C:\Example\UserModules"),
+                ("ZERUS_TEST_PARENT_PROFILE", "inherited"),
+            ],
+            4096,
+        )
+        .unwrap();
+        let minimal = run_hidden_limited(&program, &probe(&format!(
+            "$PSModuleAutoLoadingPreference='None';$env:PSModulePath=[IO.Path]::Combine($PSHOME,'Modules');{body}"
+        )), &environment, 4096).unwrap();
+        let Exit::Code {
+            code: 0,
+            stdout: before,
+            ..
+        } = inherited
+        else {
+            panic!("inherited probe: {inherited:?}")
+        };
+        let Exit::Code {
+            code: 0,
+            stdout: after,
+            ..
+        } = minimal
+        else {
+            panic!("minimal probe: {minimal:?}")
+        };
+        let before = String::from_utf8(before).unwrap();
+        let after = String::from_utf8(after).unwrap();
+        assert!(before.contains(r"C:\Example\UserModules"));
+        assert!(before.contains("inherited"));
+        assert!(before.trim_end().ends_with("All"));
+        assert_eq!(
+            after.lines().collect::<Vec<_>>(),
+            [modules.as_str(), "", "None"]
+        );
     }
 }

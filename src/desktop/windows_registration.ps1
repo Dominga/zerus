@@ -1,3 +1,10 @@
+# Explicitly initialized only by the maintained helper entry. Importing these
+# function definitions for policy controls does not change the caller session.
+function Initialize-RegistrationEnvironment {
+    $script:PSModuleAutoLoadingPreference='None'
+    $env:PSModulePath=[IO.Path]::Combine($PSHOME,'Modules')
+}
+
 function Require-Registration([bool]$condition,[string]$message) {
     if (-not $condition) { throw $message }
 }

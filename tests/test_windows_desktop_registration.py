@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 
@@ -19,6 +20,88 @@ if '--hgs' in sys.argv:
 
 @unittest.skipUnless(os.name == 'nt' and HGS is not None, 'explicit disposable Windows CLI required')
 class WindowsDesktopRegistration(unittest.TestCase):
+    def test_inherited_module_autoload_versus_explicit_minimal_environment(self):
+        # A controlled fresh-profile experiment, not a replay of a stuck PC
+        # operation. The only user module is this private synthetic probe.
+        root = Path(tempfile.mkdtemp(prefix='zerus-registration-environment-'))
+        source = Path(__file__).resolve().parents[1] / 'src/desktop/windows_registration.ps1'
+        program = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+        system_modules = program.parent / 'Modules'
+        module = root / 'modules' / 'ZerusEnvironmentProbe'
+        module.mkdir(parents=True)
+        (module / 'ZerusEnvironmentProbe.psm1').write_text(
+            "function Invoke-ZerusEnvironmentProbe { return 'loaded' }\n", encoding='utf-8')
+        (module / 'ZerusEnvironmentProbe.psd1').write_text(
+            "@{RootModule='ZerusEnvironmentProbe.psm1';ModuleVersion='1.0.0';"
+            "FunctionsToExport=@('Invoke-ZerusEnvironmentProbe')}\n", encoding='utf-8')
+        safe = {'SystemRoot': os.environ['SystemRoot'], 'WINDIR': os.environ['SystemRoot'],
+                'COMSPEC': str(program.parents[2] / 'cmd.exe'), 'PATH': str(program.parents[2]),
+                'TEMP': str(root), 'TMP': str(root)}
+        escaped = str(source).replace("'", "''")
+        script = ("$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';"
+                  "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);"
+                  ". ([ScriptBlock]::Create([IO.File]::ReadAllText('" + escaped + "')));"
+                  "if($env:ZERUS_TEST_PARENT_PROFILE){$PSModuleAutoLoadingPreference='All'}"
+                  "else{Initialize-RegistrationEnvironment};"
+                  "try{$probe=Invoke-ZerusEnvironmentProbe}"
+                  "catch [System.Management.Automation.CommandNotFoundException]{$probe='refused'};"
+                  "[Console]::WriteLine((Get-RegistrationJson).Serialize([ordered]@{"
+                  "probe=$probe;autoload=[string]$PSModuleAutoLoadingPreference;"
+                  "module_path=$env:PSModulePath;parent_marker=$env:ZERUS_TEST_PARENT_PROFILE}))")
+        command = [str(program), '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
+                   base64.b64encode(script.encode('utf-16le')).decode('ascii')]
+        pending = False
+        results = {}
+        try:
+            for mode in ('inherited', 'minimal'):
+                env = dict(safe, PSModulePath=str(root / 'modules') if mode == 'inherited' else str(system_modules))
+                if mode == 'inherited':
+                    env['ZERUS_TEST_PARENT_PROFILE'] = 'controlled-parent'
+                with (root / (mode + '.out')).open('wb') as out, (root / (mode + '.err')).open('wb') as err:
+                    started = time.monotonic()
+                    process = subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL,
+                                               stdout=out, stderr=err, creationflags=subprocess.CREATE_NO_WINDOW)
+                    exited = False
+                    try:
+                        code = process.wait(timeout=15)
+                        exited = True
+                    except subprocess.TimeoutExpired:
+                        try:
+                            process.kill()
+                        except OSError:
+                            pass  # A failed request still requires the original physical wait.
+                        try:
+                            process.wait(timeout=2)
+                            exited = True
+                        except subprocess.TimeoutExpired:
+                            pending = True
+                        raise
+                    finally:
+                        pending = pending or not exited
+                    with (root / (mode + '.err')).open('rb') as error:
+                        self.assertEqual(code, 0, error.read(4096))
+                with (root / (mode + '.out')).open('rb') as captured:
+                    output = captured.read(65537)
+                self.assertLessEqual(len(output), 65536)
+                value = json.loads(output)
+                value['elapsed_ms'] = round((time.monotonic() - started) * 1000)
+                results[mode] = value
+                print('registration environment experiment:', mode, json.dumps(value), flush=True)
+            self.assertEqual(results['inherited']['probe'], 'loaded')
+            self.assertEqual(results['inherited']['autoload'], 'All')
+            self.assertEqual(results['inherited']['parent_marker'], 'controlled-parent')
+            self.assertIn(str(root / 'modules'), results['inherited']['module_path'])
+            self.assertEqual(results['minimal']['probe'], 'refused')
+            self.assertEqual(results['minimal']['autoload'], 'None')
+            self.assertIsNone(results['minimal']['parent_marker'])
+            self.assertEqual(results['minimal']['module_path'].casefold(), str(system_modules).casefold())
+        finally:
+            if pending:
+                print('Environment experiment termination pending; original PID/root retained:',
+                      process.pid, root, file=sys.stderr)
+            else:
+                shutil.rmtree(root)
+
     def test_cold_notification_entry_refuses_without_loading_configuration(self):
         with tempfile.TemporaryDirectory(prefix='zerus-toast-cold-') as directory:
             root = Path(directory)

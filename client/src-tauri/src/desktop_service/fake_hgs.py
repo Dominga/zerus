@@ -42,6 +42,8 @@ def counter(name):
 
 
 def status():
+    if config.get('produced_status') is not None:
+        return config['produced_status']
     online = not config.get('offline', False)
     catalog_online = online and not config.get('coverage_offline', False)
     counts = {'epoch': epoch, 'scope': 'shared_host_state', 'display_only': True, 'authority': False,

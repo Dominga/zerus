@@ -191,6 +191,12 @@ jobs:
           key: msrv-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: msrv-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
       - run: cargo +1.99.1 test --locked
+      - name: Client readiness fixture matches root service status
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +1.99.1 test --locked --bin hgs desktop::delivery::tests::actual_root_projection_is_consumed_by_the_client_without_ready_json_fixtures -- --exact --nocapture |
+            python3 client/scripts/generate-delivery-status-fixture.py --check
       - name: Replica crates (format, lints, tests, golden vectors, the mobile binding surface)
         run: |
           rustup component add --toolchain 1.99.1 rustfmt clippy

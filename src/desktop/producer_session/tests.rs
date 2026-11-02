@@ -85,6 +85,8 @@ fn serve_canonical(listener: UnixListener, responder: Arc<Responder>) -> thread:
             }
         };
         assert!(desktop::same_user(&stream));
+        // BSD accepts may inherit the listener's nonblocking flag.
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
@@ -93,6 +95,7 @@ fn serve_canonical(listener: UnixListener, responder: Arc<Responder>) -> thread:
             .unwrap();
         let mut query = Vec::new();
         BufReader::new(&mut stream)
+            .take(64)
             .read_until(b'\n', &mut query)
             .unwrap();
         let reply = responder.reply(query.strip_suffix(b"\n").unwrap()).unwrap();

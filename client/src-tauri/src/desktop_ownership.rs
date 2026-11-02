@@ -484,7 +484,9 @@ impl Job {
         let mut state = self.owner.state();
         // A fresh logical request gets its own first diagnostic. Read-only
         // lookups of an uncertain original keep that original's first failure.
-        state.diagnostic = None;
+        if self.owner.mode == Mode::Service {
+            state.diagnostic = None;
+        }
         state.intent = Some(Intent {
             request: request.clone(),
             configuration: status.configuration.clone(),

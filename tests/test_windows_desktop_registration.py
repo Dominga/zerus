@@ -26,7 +26,7 @@ class WindowsDesktopRegistration(unittest.TestCase):
         script = ("$ProgressPreference='SilentlyContinue';. ([ScriptBlock]::Create([IO.File]::ReadAllText('" + script + "')))\n"
                   "$s=[Console]::OpenStandardInput();"
                   "try { $v=Read-RegistrationRequest $s " + str(len(body)) + ";"
-                  "[Console]::WriteLine(($v|ConvertTo-Json -Compress)) } finally {$s.Dispose()}")
+                  "[Console]::WriteLine((Get-RegistrationJson).Serialize($v)) } finally {$s.Dispose()}")
         program = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
         process = subprocess.Popen([str(program), '-NoLogo', '-NoProfile', '-NonInteractive',
                                     '-EncodedCommand', base64.b64encode(script.encode('utf-16le')).decode('ascii')],

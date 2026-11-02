@@ -213,6 +213,29 @@ class PackagerVersions(unittest.TestCase):
             self.main("--version", "0.99.0", "--stage-only", str(staged), "--output", str(self.root / "setup.exe"))
         self.assertEqual(list(staged.iterdir()), [])
 
+    def test_compiled_ci_metadata_binds_both_stable_and_nightly_payloads(self):
+        import windows_installer_release
+        before = self.archive.read_bytes()
+        for index, version in enumerate(["0.45.0", f"0.45.0.r812.g{COMMIT[:7]}.n42"]):
+            with self.subTest(version=version):
+                output = self.root / f"setup-{index}.exe"
+                info = self.root / f"setup-{index}.json"
+                def compile_(command, **kwargs):
+                    definitions = dict(arg[2:].split("=", 1) for arg in command[2:-1])
+                    record = json.loads((Path(definitions["PayloadDir"]) / "installation.json").read_text())
+                    self.assertEqual(definitions["AppVersion"], version)
+                    self.assertEqual(record["version"], version)
+                    output.write_bytes(b"MZsynthetic compiled installer")
+                with patch.object(self.packager, "compiler", return_value=Path("ISCC.exe")), \
+                        patch.object(self.packager.subprocess, "run", side_effect=compile_):
+                    self.main("--version", version, "--output", str(output), "--info", str(info))
+                windows_installer_release.require_build(output, self.archive, info, version, "0.45.0", COMMIT)
+                self.assertEqual(self.archive.read_bytes(), before)
+                with patch.object(self.packager.subprocess, "run") as compile_:
+                    with self.assertRaisesRegex(ValueError, "fresh compiled"):
+                        self.main("--version", version, "--output", str(output), "--info", str(info))
+                    compile_.assert_not_called()
+
     def test_the_compiler_receives_the_version_installation_json_records(self):
         nightly = f"0.45.0.r812.g{COMMIT[:7]}.n42"
         staged = self.root / "staged"

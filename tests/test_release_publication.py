@@ -20,6 +20,8 @@ from windows_portable_fixture import pinned_pair, portable_zip
 import conpty_pair
 import release_common as common
 import windows_portable
+import windows_installer_release
+from windows_installer_fixture import installer_files
 
 
 def load(name, filename):
@@ -366,8 +368,10 @@ class PublicationTests(unittest.TestCase):
             (root / "usr/share/doc/zerus/build-info.json").write_text(
                 json.dumps({"source_commit": COMMIT, "version": product}))
             (root / ".BUILDINFO").write_text(buildinfo)
+        installer, build = installer_files(self.directory, portable, product, product, COMMIT)
         arguments = ["prepare-release.py", "--version", product, "--package", "arch.pkg.tar.zst",
                      "--windows-zip", str(portable), "--output", str(output)]
+        arguments += ["--windows-installer", str(installer), "--windows-installer-info", str(build)]
         with patch.object(prepare.subprocess, "check_output", side_effect=check_output), \
                 patch.object(prepare.subprocess, "run", side_effect=run), patch.object(sys, "argv", arguments):
             prepare.main()
@@ -380,6 +384,9 @@ class PublicationTests(unittest.TestCase):
         info = json.loads((output / "release-info.json").read_text())
         self.assertEqual(info["windows_portable"], f"zerus-{product}-windows-x86_64.zip")
         self.assertEqual((output / info["windows_portable"]).read_bytes(), portable.read_bytes())
+        setup = output / info["windows_installer"]["asset"]
+        self.assertTrue(setup.is_file())
+        self.assertEqual(info["windows_installer"]["portable_sha256"], common.sha256(portable))
         self.assertEqual(info["source_commit"], COMMIT)
         # The zip of another commit or version, or an unsafe one, leaves no candidate.
         for name, options in (("commit", {"commit": "b" * 40, "version": product}), ("version", {"version": "0.0.1"}),

@@ -60,7 +60,8 @@ class Installer(windows_host.HostCase):
         self.assertIsNone(registered(), "Zerus is already installed for this user")
         expected = tempfile.TemporaryDirectory(prefix="zerus-expected-")
         self.addCleanup(expected.cleanup)
-        self.record, self.expected = windows_installer.stage(PORTABLE_ZIP, Path(expected.name))
+        self.record, self.expected = windows_installer.stage(
+            PORTABLE_ZIP, Path(expected.name), os.environ.get("HGS_TEST_INSTALLER_VERSION") or None)
         self.app = self.root / "Zerus"
         self.cli = self.home / ".local" / "bin" / "hgs.exe"
         self.images = self.home / ".local" / "share" / "hgs" / "host"

@@ -11,6 +11,15 @@ function Trace-Registration($p) {
     }
 }
 
+function Get-RegistrationJson {
+    if ($null -eq $script:json) {
+        $a=[Reflection.Assembly]::Load('System.Web.Extensions, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35')
+        $script:json=[Activator]::CreateInstance($a.GetType('System.Web.Script.Serialization.JavaScriptSerializer',$true))
+        $script:json.MaxJsonLength=65536;$script:json.RecursionLimit=32
+    }
+    return $script:json
+}
+
 function Get-DesktopTask($folder,[string]$name) {
     Trace-Registration task
     try { $v=$folder.GetTask($name);Trace-Registration found;return $v }
@@ -102,8 +111,6 @@ function Invoke-RegistrationOperation($request,$scheduler,[string]$sid) {
     return [ordered]@{schema=1;operation=$request.operation;task_name=$plan.task_name;configuration=$plan.configuration;registered=($null -ne $task);task_state=$taskState;changed=$changed}
 }
 
-# The fixed encoded invocation supplies the exact byte length, independently of
-# pipe EOF (which an inherited write handle can delay). Never read a second frame.
 function Read-RegistrationRequest([IO.Stream]$stream,[int]$length) {
     Require-Registration ($length -gt 0 -and $length -le 65536) 'Invalid registration input length.'
     $bytes=[byte[]]::new($length);$offset=0
@@ -116,8 +123,8 @@ function Read-RegistrationRequest([IO.Stream]$stream,[int]$length) {
     Trace-Registration bytes
     $text=([Text.UTF8Encoding]::new($false,$true)).GetString($bytes)
     Trace-Registration decoded
-    $request=$text|ConvertFrom-Json
-    Require-Registration ($null -ne $request -and $request.GetType().FullName -ceq 'System.Management.Automation.PSCustomObject') 'Registration input must be a JSON object.'
+    $request=(Get-RegistrationJson).DeserializeObject($text)
+    Require-Registration ($request -is [Collections.IDictionary]) 'Registration input must be a JSON object.'
     return $request
 }
 
@@ -138,15 +145,18 @@ function Invoke-RegistrationMain([int]$length) {
         $held=$mutex.WaitOne(2000)
         Require-Registration $held 'Another desktop registration operation is in progress.'
         Trace-Registration mutex
-        $scheduler=New-Object -ComObject 'Schedule.Service'
+        $scheduler=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service',$true))
         Trace-Registration created
         [void]$scheduler.Connect()
         Trace-Registration connected
         $result=Invoke-RegistrationOperation $request $scheduler $sid
         Trace-Registration done
-        [Console]::WriteLine(($result|ConvertTo-Json -Compress -Depth 5))
+        [Console]::WriteLine((Get-RegistrationJson).Serialize($result))
     } catch {
-        [Console]::WriteLine((@{schema=1;error=$_.Exception.Message}|ConvertTo-Json -Compress))
+        if ($null -eq $script:json) {
+            [Console]::Error.WriteLine($_.Exception.Message)
+            [Console]::WriteLine('{"schema":1,"error":"Windows JSON support unavailable"}')
+        } else { [Console]::WriteLine($script:json.Serialize(@{schema=1;error=$_.Exception.Message})) }
         exit 1
     } finally {
         if ($held) { $mutex.ReleaseMutex() }

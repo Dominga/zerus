@@ -80,12 +80,21 @@ pub enum Update {
     Catalog { computer: String, removed: bool },
     Other,
 }
+/// Source identities from the service runtime, independent of display counts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogSource {
+    pub computer: String,
+    pub incarnation: u64,
+    pub generation: u64,
+    pub online: bool,
+}
 
 /// One stream and one current projection. A reconnect must greet again.
 pub struct State {
     configuration: String,
     snapshot: Snapshot,
     seq: Option<u64>,
+    sources: Option<Vec<CatalogSource>>,
 }
 impl State {
     pub fn new(configuration: String) -> Result<Self, &'static str> {
@@ -96,10 +105,14 @@ impl State {
             configuration,
             snapshot: Snapshot::default(),
             seq: None,
+            sources: None,
         })
     }
     pub fn snapshot(&self) -> &Snapshot {
         &self.snapshot
+    }
+    pub fn sources(&self) -> Option<&[CatalogSource]> {
+        self.sources.as_deref()
     }
     pub fn disconnect(&mut self, code: &str) {
         self.snapshot = Snapshot {
@@ -107,6 +120,7 @@ impl State {
             ..Snapshot::default()
         };
         self.seq = None;
+        self.sources = None;
     }
     pub fn status(&mut self, value: &Value) -> Result<(), &'static str> {
         let result = self.status_inner(value);
@@ -159,7 +173,10 @@ impl State {
                 },
             );
         }
-        let counts = checked_counts(&value["attention_counts"], epoch)?;
+        // A display projection failure is not a lifecycle/transport failure.
+        // Quarantine it as unknown; it never supplies source discovery.
+        let counts = checked_counts(&value["attention_counts"], epoch).unwrap_or_default();
+        self.sources = checked_sources(&value["background_runtime"], epoch);
         self.snapshot = Snapshot {
             connected: true,
             epoch: Some(epoch.into()),
@@ -178,6 +195,8 @@ impl State {
             "explicit_handoff_required"
         } else if !self.snapshot.background_ready() {
             "background_unready"
+        } else if self.sources.is_none() {
+            "catalog_sources_unavailable"
         } else {
             ""
         }
@@ -236,7 +255,8 @@ impl State {
                 self.snapshot.attention_counts = checked_counts(
                     &body["attention_counts"],
                     self.snapshot.epoch.as_deref().unwrap(),
-                )?;
+                )
+                .unwrap_or_default();
                 Ok(Update::Catalog {
                     computer: computer.into(),
                     removed: body["removed"] == true,
@@ -246,6 +266,46 @@ impl State {
             _ => Ok(Update::Other),
         }
     }
+}
+
+fn checked_sources(value: &Value, epoch: &str) -> Option<Vec<CatalogSource>> {
+    if value["epoch"] != epoch || value["display_only"] != true || value["authority"] != false {
+        return None;
+    }
+    let rows = value["computers"]
+        .as_array()
+        .filter(|rows| rows.len() <= 64)?;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut sources = Vec::with_capacity(rows.len());
+    for row in rows {
+        let computer = row["computer"]
+            .as_str()
+            .filter(|name| valid_computer(name))?;
+        if !seen.insert(computer) {
+            return None;
+        }
+        let incarnation = row["incarnation"]
+            .as_u64()
+            .filter(|n| *n > 0 && *n <= i64::MAX as u64)?;
+        let generation = row["generation"]
+            .as_u64()
+            .filter(|n| *n <= i64::MAX as u64)?;
+        let accepting = row["accepting"].as_bool()?;
+        let status = row["status"].as_str()?;
+        if !matches!(
+            status,
+            "live" | "polled" | "probing" | "unsupported" | "reconnecting" | "ended"
+        ) {
+            return None;
+        }
+        sources.push(CatalogSource {
+            computer: computer.into(),
+            incarnation,
+            generation,
+            online: accepting && matches!(status, "live" | "polled"),
+        });
+    }
+    Some(sources)
 }
 
 pub fn valid_computer(name: &str) -> bool {

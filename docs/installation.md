@@ -386,12 +386,14 @@ Install and start:
    The Zerus window opens. Closing it keeps Zerus running in the notification
    area, where Windows 11 first hides a new icon behind the **^** arrow; run
    `hgs-tray.exe` again to bring the window back.
-   The per-user installer currently built and tested in CI from the same zip
-   checks this prerequisite and
+   Alternatively, download `zerus-<version>-windows-x86_64-setup.exe` from the
+   same Stable or Nightly release, verify its own `SHA256SUMS` entry and run it
+   as your normal desktop user. The per-user installer contains the same tested
+   ZIP payload, checks the WebView2 prerequisite and
    offers **Start Zerus at login**, off by default. It preserves configuration,
    drafts and native host images when upgrading. Its login choice applies only
-   to the desktop app; local agent hosting remains a separate opt-in. Public
-   installer publication is separate release work. Its desktop-service setup hook
+   to the desktop app; local agent hosting remains a separate opt-in.
+   Its desktop-service setup hook
    awaits the maintained Windows G1 command; `hgs.exe desktop registration --json`
    previews that service definition and readiness interface.
 4. To manage remote machines, add them in **Machines**. Accept a new host key once

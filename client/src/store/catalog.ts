@@ -183,6 +183,8 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     baseSummary: text(v.summary),
     baseMuted: !!v.muted,
     readReplyId: optional(v.read_reply_id),
+    localReadReply: !!v.local_read_reply,
+    localReadAttention: !!v.local_read_attention,
     readAttentionSignature: optional(v.read_attention_signature),
     sharedNotifications: !!v.shared_notifications,
     notificationRevision: typeof v.notification_revision === "number" ? v.notification_revision : undefined,

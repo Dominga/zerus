@@ -17,6 +17,8 @@ import macos_release
 import nightly_common as nightly
 import release_common as common
 import windows_portable
+import windows_installer_release
+from windows_installer_fixture import installer_files
 
 
 def load(name, filename):
@@ -340,8 +342,11 @@ class NightlyTests(unittest.TestCase):
                 {key: value for key, value in self.info.items() if key not in {"version", "product_version"}}))
         def check_output(command, **kwargs):
             return {"rev-parse": COMMIT + "\n", "rev-list": "60\n"}[command[1]]
+        installer, build = installer_files(self.directory, portable,
+            nightly.nightly_version(product, 60, COMMIT, 7), product, COMMIT)
         arguments = ["prepare-nightly.py", "--package", "arch.pkg.tar.zst", "--windows-zip", str(portable),
                      "--output", str(output), "--run-id", "123", "--run-number", "7"]
+        arguments += ["--windows-installer", str(installer), "--windows-installer-info", str(build)]
         with patch.object(prepare.subprocess, "run", side_effect=run), \
                 patch.object(prepare.subprocess, "check_output", side_effect=check_output), \
                 patch.object(sys, "argv", arguments):
@@ -355,6 +360,9 @@ class NightlyTests(unittest.TestCase):
         info = json.loads((output / "release-info.json").read_text())
         self.assertEqual(info["windows_portable"], f"zerus-{info['version']}-windows-x86_64.zip")
         self.assertEqual((output / info["windows_portable"]).read_bytes(), portable.read_bytes())
+        setup = output / info["windows_installer"]["asset"]
+        self.assertTrue(setup.is_file())
+        self.assertEqual(info["windows_installer"]["portable_sha256"], common.sha256(portable))
         for name, options in (("commit", {"commit": "b" * 40}), ("version", {"version": "0.0.1"}),
                               ("layout", {"version": product, "entries": [("outside", "x")]})):
             with self.subTest(mismatch=name), self.assertRaises(ValueError):

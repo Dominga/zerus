@@ -161,6 +161,8 @@ export interface Session {
   baseMuted: boolean;
   /** The host's read mark of this conversation. */
   readReplyId?: string;
+  localReadReply?: boolean;
+  localReadAttention?: boolean;
   readAttentionSignature?: string;
   /** The notification preferences pass Qt's validation, and their revision. */
   sharedNotifications: boolean;

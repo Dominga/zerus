@@ -41,16 +41,30 @@ def counter(name):
 
 def status():
     online = not config.get('offline', False)
+    catalog_online = online and not config.get('coverage_offline', False)
     counts = {'epoch': epoch, 'scope': 'shared_host_state', 'display_only': True, 'authority': False,
               'local_marks_included': False, 'computers': [{'computer': '', 'incarnation': 1, 'generation': 1,
-              'online': online, 'complete': online, 'total': 2, 'attention': None}],
+              'online': catalog_online, 'complete': catalog_online, 'total': 2, 'attention': None}],
               'aggregate': {'complete': False, 'total': 2, 'attention': None, 'known_total': 2, 'known_attention': 0}}
+    if config.get('counts_degraded'):
+        counts = {'epoch': epoch, 'scope': 'shared_host_state', 'display_only': True, 'authority': False,
+                  'local_marks_included': False, 'aggregate': {'complete': False, 'attention': None}, 'error': 'counts_unavailable'}
+    elif config.get('counts_null'):
+        counts = None
+    elif config.get('counts_computer'):
+        counts['computers'][0]['computer'] = config['counts_computer']
     background = {name: {'ready': config.get('ready', False), 'code': 'fixture'}
                   for name in ['fleet', 'presence', 'reads', 'attention', 'approvals']}
+    sources = [{'computer': '', 'incarnation': 1, 'generation': 1,
+                'status': 'live' if online else 'reconnecting', 'accepting': online}]
+    if config.get('peer_failure'):
+        sources.append(dict(sources[0], computer='broken', incarnation=2))
     return {'abi': 'desktop-v1', 'configuration': 'a' * 64, 'epoch': epoch, 'generation': 1,
             'lifecycle': {'abi': 'desktop-lifecycle-v1', 'phase': 'serving', 'ipc_ready': True,
                           'configuration': 'a' * 64, 'epoch': epoch, 'generation': 1, 'background': background},
             'attention_counts': counts, 'automatic_approvals': False, 'catalog_reads': {'changes_abi': abi},
+            'background_runtime': {'epoch': epoch, 'display_only': True, 'authority': False, 'state': 'running',
+                                   'computers': sources},
             'detail_subscriptions': {'abi': 'desktop-details-v1', 'stopping': False} if config.get('details') else None}
 
 
@@ -130,8 +144,8 @@ def frame(seq, kind, body):
     print(json.dumps({'abi': 'desktop-v1', 'epoch': epoch, 'seq': seq, 't': kind, 'value': body}), flush=True)
 
 
-def hint(seq, revision, selected=projection):
-    frame(seq, 'catalog_changed', {'computer': '', 'incarnation': 1, 'generation': 1,
+def hint(seq, revision, selected=projection, computer=''):
+    frame(seq, 'catalog_changed', {'computer': computer, 'incarnation': 2 if computer else 1, 'generation': 1,
           'projection': selected, 'revision': revision, 'online': True, 'last_known': False,
           'complete': True, 'reset_required': False, 'changes_abi': abi, 'attention_counts': status()['attention_counts']})
 
@@ -230,6 +244,23 @@ elif args == ['desktop', 'watch', '--json']:
                               'lease': '00000000-0000-4000-8000-000000000003',
                               'limits': {'demands_per_subscriber': 64}}
     frame(0, 'hello', initial)
+    if config.get('coverage_offline'):
+        wait(root / 'repeat-status')
+        for seq in [1, 2]:
+            repeated = status()
+            repeated['generation'] = seq + 1
+            repeated['lifecycle']['generation'] = seq + 1
+            frame(seq, 'status', repeated)
+    if config.get('counts_transition'):
+        wait(root / 'drop-counts')
+        degraded = status()
+        degraded['attention_counts'] = {'aggregate': {'complete': False}, 'error': 'counts_unavailable'}
+        frame(1, 'status', degraded)
+        frame(2, 'catalog_changed', {'computer': '', 'incarnation': 1, 'generation': 1,
+                                    'projection': projection, 'revision': '1', 'online': True,
+                                    'attention_counts': degraded['attention_counts']})
+        wait(root / 'restore-counts')
+        frame(3, 'heartbeat', status())
     if config.get('details'):
         frame(7, 'status', status())  # No replacement lease on ordinary status.
     if config.get('dirty_walk'):
@@ -254,6 +285,16 @@ elif args == ['desktop', 'watch', '--json']:
     if config.get('large'):
         wait(root / 'initial-complete')
         hint(1, '3')
+    if config.get('peer_failure'):
+        wait(root / 'peer-hints')
+        hint(1, '1')
+        for seq in range(2, 6):
+            hint(seq, str(seq), computer='broken')
+        repeated = status()
+        repeated['generation'] = repeated['lifecycle']['generation'] = 2
+        frame(6, 'status', repeated)
+        wait(root / 'peer-scope-recovered')
+        hint(7, '0', selected='b' * 32, computer='broken')
     if config.get('details'):
         seq = 100
         seen = set()
@@ -276,6 +317,10 @@ elif args == ['desktop', 'request', '--json']:
               'changes_abi': abi, 'epoch': epoch, 'computer': value.get('computer', ''), 'incarnation': 1,
               'generation': 1, 'projection': projection, 'display_only': True, 'authority': False,
               'complete': True, 'online': True, 'last_known': False, 'stale': False, 'next_cursor': None}
+    if config.get('peer_failure') and value.get('computer') == 'broken':
+        common['incarnation'] = 2
+        if (root / 'peer-scope-recovered').exists():
+            common['projection'] = 'b' * 32
     if op == 'detail_follow':
         if config.get('follow_timeout') and value['subscription']['topic'] == 'activity':
             (root / 'follow-held').touch()
@@ -312,7 +357,7 @@ elif args == ['desktop', 'request', '--json']:
             page.update(projection='b' * 32, items=[row('replacement')])
         if config.get('failure') and number > 1:
             page.update(start_revision='5', revision='5', items=[row('recovered')])
-        if config.get('offline'):
+        if config.get('offline') or config.get('coverage_offline'):
             page.update(online=False, last_known=True, complete=False, start_revision=None)
         if config.get('large'):
             offset = (number - 1) * 128
@@ -324,6 +369,15 @@ elif args == ['desktop', 'request', '--json']:
         number = counter('delta-number')
         page = dict(common, projection=value['projection'], since_revision=value['since_revision'],
                     through_revision=value['since_revision'], revision=value['since_revision'], items=[])
+        if config.get('peer_failure'):
+            if value['computer'] == 'broken':
+                if not any((root / path).exists() for path in ['peer-recovered', 'peer-scope-recovered']):
+                    page = {'request_id': request_id, 'accepted': False, 'durable': False,
+                            'code': 'catalog_changes_gap', 'reset_required': True}
+            elif (root / 'peer-hints').exists():
+                page.update(through_revision='1', revision='1', items=[change('after-peer', '1')])
+        if config.get('counts_transition') and (root / 'drop-counts').exists():
+            page.update(through_revision='1', revision='1', items=[change('after-counts', '1')])
         if config.get('dirty_walk'):
             if number == 1:
                 (root / 'delta-started').touch()

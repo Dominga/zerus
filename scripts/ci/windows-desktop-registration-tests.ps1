@@ -168,4 +168,4 @@ Check 'system caller is refused' {$s=[FixtureScheduler]::new();Refuses {Invoke-R
 Check 'plan cannot select another user' {$s=[FixtureScheduler]::new();$p=New-Plan;$p.user_sid='S-1-5-21-1001';Refuses {Call-Policy $s install $p};Assert ($s.Folder.Creates -eq 0)}
 Check 'plan cannot enable background writers' {$s=[FixtureScheduler]::new();$p=New-Plan;$p.argv+='--background';Refuses {Call-Policy $s install $p};Assert ($s.Folder.Creates -eq 0)}
 Check 'plan cannot permit Session 0' {$s=[FixtureScheduler]::new();$p=New-Plan;$p.session.allow_session_zero=$true;Refuses {Call-Policy $s install $p};Assert ($s.Folder.Creates -eq 0)}
-Write-Output ("Registration policy controls: $script:count passed; actual scheduler/registry/process operations=0")
+Write-Output ("Registration policy controls: $script:count passed; explicit scheduler/registry/service mutations=0")

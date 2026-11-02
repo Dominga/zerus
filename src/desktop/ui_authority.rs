@@ -7,6 +7,7 @@ use crate::{config::Config, platform};
 use anyhow::{ensure, Context, Result};
 use serde_json::Value;
 use std::{
+    cell::Cell,
     collections::BTreeMap,
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -24,6 +25,7 @@ use zerus_client_core::desktop::windows::{
 #[cfg(any(not(windows), test))]
 const ANCESTORS: usize = 32;
 const WAIT: Duration = Duration::from_secs(2);
+const ACTIVATION_PROOF_INTERVAL: Duration = Duration::from_millis(500);
 
 pub(super) struct Scope {
     location: Location,
@@ -81,12 +83,24 @@ impl Scope {
         }
     }
     fn selected_frontend(&self, image: &Path) -> bool {
-        let Some(identity) = platform::file_identity(image) else {
-            return false;
-        };
+        self.installed_frontend(image).is_some()
+    }
+    pub(super) fn installed_frontend(&self, image: &Path) -> Option<&Path> {
+        let identity = platform::file_identity(image)?;
         self.frontend_images
             .iter()
-            .any(|path| platform::file_identity(path) == Some(identity))
+            .find(|path| platform::file_identity(path) == Some(identity))
+            .map(PathBuf::as_path)
+    }
+    /// Bind an explicit maintained-image choice; this never discovers one from
+    /// PATH or turns an inbound path check into a launch/worker permission.
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)] // Consumed by the following Linux UI-closed launch slice.
+    pub fn select_frontend(
+        &self,
+        image: &Path,
+    ) -> Result<super::notifications::frontend::SelectedFrontend> {
+        super::notifications::frontend::SelectedFrontend::select(self, image)
     }
 }
 
@@ -250,11 +264,14 @@ impl Validated {
 pub(super) struct ActivationReceiver {
     freshness: Freshness,
     until: Instant,
+    next_full_check: Cell<Instant>,
+    #[cfg(test)]
+    probe: Option<std::sync::Arc<ActivationProbe>>,
 }
 impl Freshness {
-    // Read-only receiver checks retain the original evidence but use their own
-    // bounded deadline. This never alters the mutation permit's `until`.
-    fn activation_current(&self, until: Instant) -> bool {
+    // Held caller/frontend and canonical-peer handles, without ancestry or
+    // environment reads. Missing Windows evidence still refuses every turn.
+    fn activation_live(&self, until: Instant) -> bool {
         if Instant::now() >= until {
             return false;
         }
@@ -272,7 +289,7 @@ impl Freshness {
                 #[cfg(windows)]
                 if windows
                     .as_ref()
-                    .is_none_or(|proof| proof.check(until).is_err())
+                    .is_none_or(|proof| !proof.canonical.current())
                 {
                     return false;
                 }
@@ -282,11 +299,100 @@ impl Freshness {
             Freshness::Fixture => true,
         }
     }
+    // Full read-only proof checks never alter the mutation permit's `until`.
+    fn activation_current(&self, until: Instant) -> bool {
+        if !self.activation_live(until) {
+            return false;
+        }
+        #[cfg(windows)]
+        match self {
+            Freshness::Native { windows, .. } => {
+                if windows
+                    .as_ref()
+                    .is_none_or(|proof| proof.check(until).is_err())
+                {
+                    return false;
+                }
+            }
+            #[cfg(test)]
+            Freshness::Fixture => (),
+        }
+        Instant::now() < until
+    }
 }
 impl ActivationReceiver {
+    fn new(freshness: Freshness, until: Instant) -> Self {
+        Self {
+            freshness,
+            until,
+            // Admission just validated the full original proof.
+            next_full_check: Cell::new(Instant::now() + ACTIVATION_PROOF_INTERVAL),
+            #[cfg(test)]
+            probe: None,
+        }
+    }
+    fn live(&self) -> bool {
+        #[cfg(test)]
+        if let Some(probe) = &self.probe {
+            probe
+                .live_checks
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return Instant::now() < self.until
+                && probe.live.load(std::sync::atomic::Ordering::SeqCst);
+        }
+        self.freshness.activation_live(self.until)
+    }
     pub fn current(&self) -> bool {
-        self.freshness
-            .activation_current(self.until.min(Instant::now() + WAIT))
+        if !self.live() {
+            return false;
+        }
+        Instant::now() < self.next_full_check.get() || self.handoff_current()
+    }
+    /// Every actual click handoff bypasses the periodic proof cache.
+    pub fn handoff_current(&self) -> bool {
+        if !self.live() {
+            return false;
+        }
+        let until = self.until.min(Instant::now() + WAIT);
+        #[cfg(test)]
+        let valid = if let Some(probe) = &self.probe {
+            probe
+                .full_checks
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            probe.valid.load(std::sync::atomic::Ordering::SeqCst)
+        } else {
+            self.freshness.activation_current(until)
+        };
+        #[cfg(not(test))]
+        let valid = self.freshness.activation_current(until);
+        if valid {
+            self.next_full_check
+                .set(Instant::now() + ACTIVATION_PROOF_INTERVAL);
+        }
+        valid
+    }
+    #[cfg(test)]
+    pub fn set_probe(&mut self, probe: std::sync::Arc<ActivationProbe>, next_full_check: Instant) {
+        self.probe = Some(probe);
+        self.next_full_check.set(next_full_check);
+    }
+}
+#[cfg(test)]
+pub(super) struct ActivationProbe {
+    pub live: std::sync::atomic::AtomicBool,
+    pub valid: std::sync::atomic::AtomicBool,
+    pub live_checks: std::sync::atomic::AtomicUsize,
+    pub full_checks: std::sync::atomic::AtomicUsize,
+}
+#[cfg(test)]
+impl Default for ActivationProbe {
+    fn default() -> Self {
+        Self {
+            live: std::sync::atomic::AtomicBool::new(true),
+            valid: std::sync::atomic::AtomicBool::new(true),
+            live_checks: std::sync::atomic::AtomicUsize::new(0),
+            full_checks: std::sync::atomic::AtomicUsize::new(0),
+        }
     }
 }
 impl Validated {
@@ -306,10 +412,10 @@ impl Validated {
         };
         Ok((
             request_id,
-            ActivationReceiver {
+            ActivationReceiver::new(
                 freshness,
-                until: Instant::now() + zerus_client_core::desktop::activation::PEER_WAIT,
-            },
+                Instant::now() + zerus_client_core::desktop::activation::PEER_WAIT,
+            ),
         ))
     }
 }
@@ -1063,6 +1169,35 @@ mod tests {
         assert!(marked(&injected));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn frontend_custody_uses_the_explicit_installed_catalog_choice() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let prefix = temp.path().canonicalize().unwrap().join("selected");
+        std::fs::create_dir_all(prefix.join("bin")).unwrap();
+        std::fs::set_permissions(&prefix, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(prefix.join("bin"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let image = prefix.join("bin/hgs-tray");
+        std::fs::copy("/bin/cat", &image).unwrap();
+        let other = prefix.join("bin/other");
+        std::fs::copy("/bin/cat", &other).unwrap();
+        let scope = Scope {
+            location: Location {
+                root: temp.path().join("state/desktop"),
+                configuration: "a".repeat(64),
+            },
+            frontend_images: vec![image.clone()],
+        };
+        // Synthetic catalog and private files, not an installed GUI claim.
+        let selected = scope.select_frontend(&image).unwrap();
+        assert_eq!(selected.image(), image);
+        assert_eq!(selected.configuration(), scope.configuration);
+        selected.revalidate().unwrap();
+        assert!(scope.select_frontend(&other).is_err());
+    }
+
     #[test]
     fn a_native_looking_filename_does_not_select_the_installed_frontend() {
         let temp = tempfile::tempdir().unwrap();
@@ -1095,11 +1230,53 @@ mod activation_freshness_tests {
     }
     #[test]
     fn an_expired_receiver_stays_expired() {
-        let receiver = ActivationReceiver {
-            freshness: Freshness::Fixture,
-            until: Instant::now() - WAIT,
-        };
+        let receiver = ActivationReceiver::new(Freshness::Fixture, Instant::now() - WAIT);
         assert!(!receiver.current());
+    }
+    #[test]
+    fn busy_turns_keep_live_checks_but_full_proof_waits_for_its_deadline() {
+        use std::sync::{atomic::Ordering, Arc};
+        let mut receiver = ActivationReceiver::new(
+            Freshness::Fixture,
+            Instant::now() + Duration::from_secs(3600),
+        );
+        let probe = Arc::new(ActivationProbe::default());
+        receiver.set_probe(probe.clone(), Instant::now() + Duration::from_secs(3600));
+        // Control the cached-check deadline rather than rely on wall time.
+        receiver
+            .next_full_check
+            .set(Instant::now() + Duration::from_secs(3600));
+        for _ in 0..10_000 {
+            assert!(receiver.current());
+        }
+        assert_eq!(probe.live_checks.load(Ordering::SeqCst), 10_000);
+        assert_eq!(probe.full_checks.load(Ordering::SeqCst), 0);
+        receiver.next_full_check.set(Instant::now() - WAIT);
+        assert!(receiver.current());
+        assert_eq!(probe.full_checks.load(Ordering::SeqCst), 1);
+        probe.live.store(false, Ordering::SeqCst);
+        assert!(!receiver.current());
+        assert_eq!(probe.full_checks.load(Ordering::SeqCst), 1);
+    }
+    #[test]
+    fn every_handoff_bypasses_the_cached_proof_and_detects_revocation() {
+        use std::sync::{atomic::Ordering, Arc};
+        let mut receiver = ActivationReceiver::new(
+            Freshness::Fixture,
+            Instant::now() + Duration::from_secs(3600),
+        );
+        let probe = Arc::new(ActivationProbe::default());
+        receiver.set_probe(probe.clone(), Instant::now() + Duration::from_secs(3600));
+        assert!(receiver.handoff_current());
+        assert!(receiver.handoff_current());
+        assert_eq!(probe.full_checks.load(Ordering::SeqCst), 2);
+        receiver
+            .next_full_check
+            .set(Instant::now() + Duration::from_secs(3600));
+        probe.valid.store(false, Ordering::SeqCst);
+        assert!(receiver.current(), "periodic cache is still recent");
+        assert!(!receiver.handoff_current());
+        assert_eq!(probe.full_checks.load(Ordering::SeqCst), 3);
     }
     #[cfg(not(windows))]
     #[test]
@@ -1129,10 +1306,11 @@ mod activation_freshness_tests {
             }
         };
         assert!(Validated(request(), live()).activation_wait().is_err());
-        let receiver = ActivationReceiver {
-            freshness: live(),
-            until: Instant::now() + zerus_client_core::desktop::activation::PEER_WAIT,
-        };
+        let receiver = ActivationReceiver::new(
+            live(),
+            Instant::now() + zerus_client_core::desktop::activation::PEER_WAIT,
+        );
         assert!(!receiver.current());
+        assert!(!receiver.handoff_current());
     }
 }

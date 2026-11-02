@@ -123,7 +123,9 @@ jobs:
           macos=()
           if [ "$MACOS_CASK" = true ]; then macos=(--macos artifacts/macos-signed); fi
           runuser -u user -- python3 scripts/prepare-release.py --version "$RELEASE_VERSION" --package "${packages[0]}" \
-            --windows-zip "${portables[0]}" --output dist "${macos[@]}"
+            --windows-zip "${portables[0]}" \
+            --windows-installer artifacts/windows/installer/zerus-windows-x86_64-setup.exe \
+            --windows-installer-info artifacts/windows/installer/windows-installer-info.json --output dist "${macos[@]}"
           runuser -u user -- bash scripts/check-release-packages.sh dist
       - name: Retain release packaging logs
         if: always()

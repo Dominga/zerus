@@ -52,7 +52,8 @@ impl Drop for Fixture {
     }
 }
 pub(super) async fn eventually(label: &str, check: impl Fn() -> bool) {
-    let until = Instant::now() + Duration::from_secs(10);
+    // A loaded hosted macOS runner missed 10 s for an initial live baseline.
+    let until = Instant::now() + Duration::from_secs(30);
     while !check() {
         assert!(Instant::now() < until, "{label}");
         tokio::time::sleep(Duration::from_millis(5)).await;

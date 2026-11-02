@@ -7,6 +7,8 @@ use zerus_client_core::{
     run as runner, Invocation,
 };
 
+const RETRY: Duration = Duration::from_secs(60);
+
 pub(crate) type Sink = Arc<dyn Fn(Delivery) + Send + Sync>;
 
 /// Only this module can create a delivery, after the original reply matches.
@@ -79,12 +81,38 @@ async fn admit(shared: &Shared, stop: &AtomicBool) -> Option<Charge> {
         if shared.stopped.load(Ordering::Acquire) || stop.load(Ordering::Acquire) {
             return None;
         }
-        if let Ok(charge) = shared.rpc.admit(Role::Fleet) {
+        if let Ok(charge) = shared.activation_rpc.admit(Role::Fleet) {
             return Some(charge);
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
+async fn backoff(shared: &Shared, stop: &AtomicBool) -> bool {
+    #[cfg(test)]
+    shared.activation_backoffs.fetch_add(1, Ordering::Release);
+    // Test-only clock seam; production always waits a full minute. This is not
+    // a configurable poll interval or an automatic replay of a previous UUID.
+    #[cfg(test)]
+    let delay = shared
+        .activation_retry
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .unwrap_or(RETRY);
+    #[cfg(not(test))]
+    let delay = RETRY;
+    let until = tokio::time::Instant::now() + delay;
+    loop {
+        if shared.stopped.load(Ordering::Acquire) || stop.load(Ordering::Acquire) {
+            return false;
+        }
+        let remaining = until.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return true;
+        }
+        tokio::time::sleep(remaining.min(Duration::from_millis(50))).await;
+    }
+}
+
 fn invocation(args: &[&str], input: Vec<u8>, timeout: Duration) -> Invocation {
     Invocation {
         args: args.iter().map(|s| (*s).into()).collect(),
@@ -230,7 +258,12 @@ pub(super) async fn run(shared: Arc<Shared>, configuration: String, stop: Arc<At
                 if !stop.load(Ordering::Acquire) && !shared.stopped.load(Ordering::Acquire) {
                     eprintln!("zerus-client: desktop activation unavailable");
                 }
-                return;
+                if !backoff(&shared, &stop).await {
+                    return;
+                }
+                // A new admission is still required. Unknown child/pipe guards
+                // keep this dedicated slot occupied until their real release.
+                continue;
             }
         };
         let (done, mut received) = oneshot::channel();

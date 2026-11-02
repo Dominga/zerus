@@ -233,6 +233,13 @@ struct Shared {
     dirty: Mutex<Dirty>,
     changed: Notify,
     rpc: Gate,
+    // Long activation reads never consume fleet/details admission capacity.
+    #[cfg(target_os = "linux")]
+    activation_rpc: Gate,
+    #[cfg(all(test, target_os = "linux"))]
+    activation_retry: Mutex<Option<Duration>>,
+    #[cfg(all(test, target_os = "linux"))]
+    activation_backoffs: std::sync::atomic::AtomicUsize,
     allowed: bool,
     stopped: AtomicBool,
     cancellation: Mutex<Option<Arc<AtomicBool>>>,
@@ -305,6 +312,12 @@ impl Service {
             dirty: Mutex::new(Dirty::default()),
             changed: Notify::new(),
             rpc: Gate::new(4).unwrap(),
+            #[cfg(target_os = "linux")]
+            activation_rpc: Gate::new(1).unwrap(),
+            #[cfg(all(test, target_os = "linux"))]
+            activation_retry: Mutex::new(None),
+            #[cfg(all(test, target_os = "linux"))]
+            activation_backoffs: std::sync::atomic::AtomicUsize::new(0),
             allowed,
             stopped: AtomicBool::new(false),
             cancellation: Mutex::new(None),
@@ -545,6 +558,8 @@ impl Service {
             .unwrap_or_else(PoisonError::into_inner)
             .take();
         self.shared.rpc.close();
+        #[cfg(target_os = "linux")]
+        self.shared.activation_rpc.close();
         let _ = self.control.send(Control::Stop);
     }
     pub async fn join(&self) -> Result<(), String> {
@@ -568,12 +583,21 @@ impl Service {
             join_view(drain, RPC_WAIT).await?;
         }
         let closed = self.shared.rpc.close();
+        #[cfg(target_os = "linux")]
+        let activation_closed = self.shared.activation_rpc.close();
         let drained = tauri::async_runtime::spawn_blocking(move || {
-            closed.wait_until(std::time::Instant::now() + RPC_WAIT)
+            let until = std::time::Instant::now() + RPC_WAIT;
+            let drained =
+                closed.wait_until(until) == zerus_client_core::desktop::drain::Observation::Idle;
+            #[cfg(target_os = "linux")]
+            let drained = (activation_closed.wait_until(until)
+                == zerus_client_core::desktop::drain::Observation::Idle)
+                && drained;
+            drained
         })
         .await
         .map_err(|error| error.to_string())?;
-        if drained != zerus_client_core::desktop::drain::Observation::Idle {
+        if !drained {
             return Err("The service connection still has unconfirmed helper work.".into());
         }
         Ok(())

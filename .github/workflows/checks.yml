@@ -1479,7 +1479,7 @@ jobs:
         shell: powershell
         timeout-minutes: 5
         run: |
-          & scripts/ci/windows-registration-native-user.ps1 -Hgs target/release/hgs.exe -Stage (Join-Path $env:RUNNER_TEMP ('zerus-native-registration-' + [Guid]::NewGuid().ToString('N')))
+          & scripts/ci/windows-registration-native-user.ps1 -Hgs target/release/hgs.exe -Stage (Join-Path $env:ProgramData ('ZerusNativeRegistrationCI-' + [Guid]::NewGuid().ToString('N')))
       - name: Windows mobile connector build and native filesystem contracts
         run: |
           cargo +1.99.1 clippy --locked --manifest-path services/mobile/connector/Cargo.toml --target-dir target --all-targets -- -D warnings

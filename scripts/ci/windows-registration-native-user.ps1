@@ -36,8 +36,13 @@ public static class RegistrationCapture {
             throw new InvalidDataException("capture exceeded 64 KiB");
         });
     }
-    public static Task<bool> Start(Process child) {
-        return Task.Run(() => child.Start());
+    public static Task<bool> Start(Process child, string phases) {
+        return Task.Run(() => {
+            File.AppendAllText(phases, "start_enter\n");
+            bool started = child.Start();
+            File.AppendAllText(phases, "start_return\n");
+            return started;
+        });
     }
     public static Task Stop(Process child) {
         // A native termination request can itself stall. Keep it off the
@@ -211,7 +216,7 @@ try {
     $launch = [ordered]@{ phase='spawn'; physical_wait=$false }
     $launchPath = Join-Path $env:GITHUB_WORKSPACE ('artifacts/test-results/registration-' + $Layout + '-launch.json')
     Write-Report $launchPath $launch
-    $starting = [RegistrationCapture]::Start($outer)
+    $starting = [RegistrationCapture]::Start($outer, (Join-Path $Stage 'launch-native-phases.txt'))
     if (-not $starting.Wait(20000)) {
         $launch.phase = 'spawn-pending'
         Write-Report $launchPath $launch
@@ -264,6 +269,26 @@ try {
     }
     if (-not $complete) { throw 'Standard-user native release lifecycle failed; retained only on disposable VM' }
 } finally {
+    # Retain the ORIGINAL child evidence even when credentialed Start itself
+    # never returned. Its absence is not evidence that the child never ran.
+    foreach ($entry in @(@('launch-native-phases.txt',1024), @('child-phases.txt',1024), @('result.json',200000))) {
+        $path = Join-Path $Stage $entry[0]
+        if ([IO.File]::Exists($path)) {
+            $file=[IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+            try {
+                if ($file.Length -gt $entry[1]) { throw 'Original fixture evidence exceeds its bound' }
+                $buffer=[byte[]]::new([int]$file.Length)
+                $offset=0
+                while ($offset -lt $buffer.Length) {
+                    $read=$file.Read($buffer,$offset,$buffer.Length-$offset)
+                    if ($read -le 0) { throw 'Original fixture evidence is incomplete' }
+                    $offset+=$read
+                }
+                $destination=Join-Path $env:GITHUB_WORKSPACE ('artifacts/test-results/registration-' + $Layout + '-' + $entry[0])
+                [IO.File]::WriteAllBytes($destination,$buffer)
+            } finally { $file.Dispose() }
+        }
+    }
     if ($complete) {
         $profileDeadline = [DateTime]::UtcNow.AddSeconds(5)
         do {

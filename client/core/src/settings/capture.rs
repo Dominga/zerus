@@ -40,7 +40,7 @@ pub struct CapturedQt {
     #[cfg(unix)]
     original: Option<(File, PathBuf)>,
     #[cfg(windows)]
-    original: Mutex<crate::fsx::windows::Opened>,
+    original: Mutex<crate::fsx::windows::qt::Source>,
 }
 impl QtStore {
     pub fn capture_for_migration(
@@ -54,7 +54,7 @@ impl QtStore {
             if cancel.load(Ordering::Acquire) || !matches!(self, QtStore::Ini(_)) {
                 return Err(SourceError::UnsupportedSource);
             }
-            let Some(mut original) = crate::fsx::windows::capture_with_deadline(
+            let Some(mut original) = crate::fsx::windows::qt::capture_with_deadline(
                 self.path(),
                 super::MAX_QT_STORE as usize,
                 Instant::now() + Duration::from_secs(30),

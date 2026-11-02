@@ -1,5 +1,7 @@
 //! Shared Windows managed-file primitives extracted from the read-marks checkpoint.
 //! Local no-reparse parent pins, private ACL, single-link exclusive original handles.
+pub(crate) mod qt;
+
 use std::{
     fs::{File, OpenOptions},
     io::{self, Read, Seek, Write},

@@ -69,7 +69,7 @@ fn native_settings_capture_keeps_exact_bytes_and_original_writer_lease() {
     assert!(settings.flush_within(Duration::from_secs(5)));
 }
 #[test]
-fn native_qt_capture_rechecks_through_its_same_read_only_exclusive_handle() {
+fn native_qt_capture_keeps_a_read_only_handle_without_blocking_concurrent_qt_access() {
     let scratch = Scratch::new();
     let data = b"[workspace]\nlanguage=en\n[future]\nopaque=7\n";
     let path = scratch.write("hgs-tray.ini", data);
@@ -82,8 +82,13 @@ fn native_qt_capture_rechecks_through_its_same_read_only_exclusive_handle() {
     assert_eq!(captured.snapshot().sha256, sha256(data));
     assert_eq!(captured.snapshot().source, "qt-ini");
     assert_eq!(captured.recheck(Arc::new(()), &stop).unwrap(), sha256(data));
-    assert!(fs::remove_file(&path).is_err());
-    assert!(OpenOptions::new().write(true).open(&path).is_err());
+    let concurrent = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    assert_eq!(fs::read(&path).unwrap(), data);
+    drop(concurrent);
     // Capture opened read-only, even its original handle cannot write the source.
     assert!(captured
         .original
@@ -98,6 +103,85 @@ fn native_qt_capture_rechecks_through_its_same_read_only_exclusive_handle() {
     drop(captured);
     assert_eq!(fs::read(&path).unwrap(), data);
     fs::rename(&path, path.with_extension("kept")).unwrap();
+}
+#[test]
+fn native_qt_atomic_replacement_succeeds_while_capture_is_held_and_recheck_refuses() {
+    let scratch = Scratch::new();
+    let data = b"[workspace]\nlanguage=en\n";
+    let path = scratch.write("hgs-tray.ini", data);
+    let temporary = scratch.write("qt-save.tmp", data);
+    let captured = QtStore::Ini(path.clone())
+        .capture_for_migration(Arc::new(()), &AtomicBool::new(false))
+        .unwrap()
+        .unwrap();
+    let writer_path = path.clone();
+    std::thread::spawn(move || {
+        // Qt can read its settings and replace the leaf with its completed
+        // save while the report keeps the original source handle alive.
+        let concurrent = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&writer_path)
+            .unwrap();
+        drop(concurrent);
+        fs::rename(temporary, writer_path).unwrap();
+    })
+    .join()
+    .unwrap();
+    assert_eq!(fs::read(&path).unwrap(), data);
+    assert_eq!(
+        captured.recheck(Arc::new(()), &AtomicBool::new(false)),
+        Err(SourceError::SourceChanged)
+    );
+}
+#[test]
+fn native_qt_same_bytes_with_original_leaf_still_linked_cannot_replace_its_identity() {
+    let scratch = Scratch::new();
+    let data = b"[workspace]\nlanguage=en\n";
+    let path = scratch.write("hgs-tray.ini", data);
+    let replacement = scratch.write("qt-save.tmp", data);
+    let captured = QtStore::Ini(path.clone())
+        .capture_for_migration(Arc::new(()), &AtomicBool::new(false))
+        .unwrap()
+        .unwrap();
+    // The retained handle still has nlink=1, original bytes/size/mtime and
+    // permissions. Only the exact-path volume/file-index probe detects this.
+    fs::rename(&path, scratch.0.join("original.ini")).unwrap();
+    fs::rename(replacement, &path).unwrap();
+    assert_eq!(
+        captured.recheck(Arc::new(()), &AtomicBool::new(false)),
+        Err(SourceError::SourceChanged)
+    );
+}
+#[test]
+fn native_qt_in_place_data_or_last_write_changes_refuse_without_blocking_the_writer() {
+    for metadata_only in [false, true] {
+        let scratch = Scratch::new();
+        let data = b"[workspace]\nlanguage=en\n";
+        let path = scratch.write("hgs-tray.ini", data);
+        let captured = QtStore::Ini(path.clone())
+            .capture_for_migration(Arc::new(()), &AtomicBool::new(false))
+            .unwrap()
+            .unwrap();
+        let mut writer = OpenOptions::new().write(true).open(&path).unwrap();
+        if metadata_only {
+            // Fixed distinct timestamp, independent of the runner's resolution.
+            writer
+                .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_000_000))
+                .unwrap();
+        } else {
+            writer.write_all(b"[workspace]\nlanguage=ru\n").unwrap();
+        }
+        writer.sync_all().unwrap();
+        drop(writer);
+        if metadata_only {
+            assert_eq!(fs::read(&path).unwrap(), data);
+        }
+        assert_eq!(
+            captured.recheck(Arc::new(()), &AtomicBool::new(false)),
+            Err(SourceError::SourceChanged)
+        );
+    }
 }
 #[test]
 fn native_busy_and_expired_settings_capture_leave_mutations_and_source_intact() {

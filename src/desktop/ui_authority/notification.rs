@@ -42,7 +42,14 @@ impl FocusPeer {
                         return false;
                     }
                     if now >= self.next_full.get() {
-                        if proof.check(self.until.min(now + WAIT)).is_err() {
+                        let until = self.until.min(now + WAIT);
+                        let Some(original) = &frontend.original else {
+                            return false;
+                        };
+                        if proof.ancestry.validate_parent(original, until).is_err()
+                            || !proof.canonical.current()
+                            || Instant::now() >= until
+                        {
                             return false;
                         }
                         self.next_full.set(now + ACTIVATION_PROOF_INTERVAL);

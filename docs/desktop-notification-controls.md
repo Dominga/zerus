@@ -105,6 +105,9 @@ connection or reply cannot renew it: the last Foreground snapshot expires on a
 monotonic deadline within five seconds. The actor checks cheap held-process
 liveness every turn, bounded full proof periodically, and full proof before
 accepting a replacement lease. The original mutation deadline is not extended.
+On Windows the periodic hint check uses the same retained frontend and ancestor
+objects after the original relay exits; admission still checks that relay's
+liveness and the original two-second deadline.
 A stale native revision or a former connection cannot replace a newer lease.
 
 The client compares the returned native connection ID/revision with the exact

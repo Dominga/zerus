@@ -18,6 +18,14 @@ pub fn prepare(identity: &crate::identity::Identity) -> (crate::instance::Reply,
         true,
         std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|v| !v.is_empty()),
     ));
+    // Native startup decides once, before canonical claim. Only ownership
+    // original-child evidence carries this binding; ordinary Hello is unchanged.
+    let mode = if crate::desktop_service::mode() {
+        zerus_client_core::desktop::ownership::Mode::Service
+    } else {
+        zerus_client_core::desktop::ownership::Mode::Native
+    };
+    responder.configure_ownership_mode_once(mode);
     let cached = Arc::clone(&responder);
     let reply: crate::instance::Reply = Arc::new(move |stream, line| {
         #[cfg(unix)]

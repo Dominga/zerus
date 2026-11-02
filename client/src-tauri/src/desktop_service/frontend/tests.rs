@@ -6,6 +6,24 @@ fn approval(enabled: bool) -> Request {
     }
 }
 #[test]
+fn ownership_is_not_admitted_through_the_generic_policy_command_or_receipt_parser() {
+    use zerus_client_core::desktop::ownership::Action;
+    assert!(serde_json::from_value::<Operation>(json!("desktop_ownership")).is_err());
+    let request = Request::DesktopOwnership {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        action: Action::Grant,
+        journal: None,
+        revision: 0,
+    };
+    assert!(checked(
+        &request,
+        json!({"request_id":request.id(),"op":"desktop_ownership","accepted":true,"durable":true}),
+        false
+    )
+    .is_none());
+    assert!(checked(&request, json!({"request_id":request.id(),"accepted":false,"durable":false,"code":"frontend_authentication_refused"}), false).is_none());
+}
+#[test]
 fn actual_root_status_controls_client_readiness_but_never_blocks_connected_disable() {
     // Produced by the root private Store/Runtime projection and decorator test.
     // Regenerate/check with client/scripts/generate-delivery-status-fixture.py.

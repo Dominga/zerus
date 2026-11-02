@@ -34,6 +34,7 @@ pub(in crate::desktop) struct Runtime {
     recovering: bool,
     retry_at: Option<Instant>,
     failures: usize,
+    preferences: zerus_client_core::desktop::notification_control::Preferences,
     #[cfg(all(test, target_os = "linux"))]
     test_bus: Option<String>,
     #[cfg(target_os = "linux")]
@@ -77,6 +78,7 @@ impl Runtime {
             recovering: false,
             retry_at: None,
             failures: 0,
+            preferences: Default::default(),
             #[cfg(all(test, target_os = "linux"))]
             test_bus: None,
             #[cfg(target_os = "linux")]
@@ -85,6 +87,12 @@ impl Runtime {
     }
     pub fn handoff(&self) -> Option<Arc<HandoffLock>> {
         self.owner.as_ref().map(|o| o.handoff())
+    }
+    pub fn set_preferences(
+        &mut self,
+        preferences: zerus_client_core::desktop::notification_control::Preferences,
+    ) {
+        self.preferences = preferences;
     }
     pub fn writer_epoch(&self) -> Option<&str> {
         self.grant.as_ref().map(ownership::Grant::writer_epoch)
@@ -217,7 +225,7 @@ impl Runtime {
             if self.stopping || native.admitting() && !self.recovering {
                 attention.set_policy(attention::Policy {
                     enabled: !self.stopping,
-                    optional_questions: false,
+                    optional_questions: !self.stopping && self.preferences.optional_questions,
                 });
             }
             let callbacks = native.poll(store, attention);
@@ -349,6 +357,8 @@ impl Runtime {
     }
     pub fn request_stop(&mut self) {
         self.stopping = true;
+        self.recovering = false;
+        self.error = None;
         self.retry_at = None;
         #[cfg(target_os = "linux")]
         self.closed.stop();

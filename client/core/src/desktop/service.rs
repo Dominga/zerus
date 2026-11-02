@@ -37,6 +37,9 @@ pub struct Component {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
+    /// Native original-intent presentation only, never accepted from Root input.
+    #[serde(skip_deserializing)]
+    pub notification_preferences: Option<Value>,
     /// Native ownership controller presentation only, never a writer permit.
     #[serde(skip_deserializing)]
     pub notification_ownership: Option<Value>,
@@ -55,6 +58,7 @@ pub struct Snapshot {
 impl Default for Snapshot {
     fn default() -> Self {
         Self {
+            notification_preferences: None,
             notification_ownership: None,
             pending_read_import: None,
             connected: false,
@@ -123,6 +127,7 @@ impl State {
     }
     pub fn disconnect(&mut self, code: &str) {
         self.snapshot = Snapshot {
+            notification_preferences: None,
             code: code.into(),
             ..Snapshot::default()
         };
@@ -186,6 +191,7 @@ impl State {
         self.sources = checked_sources(&value["background_runtime"], epoch);
         self.snapshot = Snapshot {
             notification_ownership: None,
+            notification_preferences: None,
             connected: true,
             pending_read_import: None,
             epoch: Some(epoch.into()),

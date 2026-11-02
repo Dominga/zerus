@@ -67,6 +67,12 @@ impl AppState {
     pub(crate) fn set_pending_read_source(&self, actions: crate::actions::Actions) {
         let _ = self.live.pending_read_source.set(actions);
     }
+    pub(crate) fn register_notification_controls(
+        &self,
+        setup: crate::desktop_notification_controls::Setup,
+    ) {
+        let _ = self.live.notification_controls.set(setup);
+    }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     pub fn set_desktop_responder(&self, responder: Arc<zerus_client_core::desktop::Responder>) {
@@ -177,6 +183,7 @@ mod live {
         pub creations: OnceLock<crate::creations::CreationHost>,
         pub(super) desktop_responder: OnceLock<Arc<zerus_client_core::desktop::Responder>>,
         pub(super) pending_read_source: OnceLock<crate::actions::Actions>,
+        pub(super) notification_controls: OnceLock<crate::desktop_notification_controls::Setup>,
         service_projections: Mutex<Vec<crate::desktop_service::Projection>>,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         service_activation: OnceLock<crate::desktop_service::activation::Sink>,
@@ -198,6 +205,7 @@ mod live {
                 desktop_responder: OnceLock::new(),
                 pending_read_source: OnceLock::new(),
                 service_projections: Mutex::new(Vec::new()),
+                notification_controls: OnceLock::new(),
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 service_activation: OnceLock::new(),
                 tasks_project: Mutex::new(None),
@@ -413,6 +421,7 @@ mod live {
                     drain,
                     self.desktop_responder.get().cloned(),
                     crate::desktop_service::Observers {
+                        notification_controls: self.notification_controls.get().cloned(),
                         projections: self
                             .service_projections
                             .lock()

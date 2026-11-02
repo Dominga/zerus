@@ -1,22 +1,23 @@
-//! Explicit per-user Task Scheduler registration, never a service start/stop.
+//! Explicit per-user native registration, isolated in this exact CLI image.
 use super::registration::trace;
 use super::{registration, store::Location};
 use crate::config::Config;
 use anyhow::{bail, ensure, Context, Result};
-use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
-use std::{ffi::OsString, os::windows::ffi::OsStringExt, path::PathBuf, time::Duration};
+use std::{ffi::OsString, os::windows::ffi::OsStringExt, time::Duration};
 use zerus_client_core::actions::{Exit, Invocation};
 
-const CAP: usize = 64 * 1024;
-// Functions only: hgs appends Invoke-RegistrationMain and the exact byte length.
-// TASK_CREATE | TASK_IGNORE_REGISTRATION_TRIGGERS never overwrites a task which
-// appeared after the ownership check. Removal never calls Run, Stop or End.
-// The input is one bounded frame, independent of delayed pipe EOF.
-const SCRIPT: &str = include_str!("windows_registration.ps1");
+mod native;
+const CAP: usize = super::windows_registration_policy::CAP;
+const ENTRY: &str = "__desktop-registration-native";
+const ABI: &str = "desktop-native-registration-v1";
 
-fn powershell() -> Result<PathBuf> {
-    let mut path = [0u16; 32_768];
+pub(super) fn entry(args: &[String]) -> Option<i32> {
+    (args.first().map(String::as_str) == Some(ENTRY)).then(|| native::serve(&args[1..]))
+}
+
+fn helper_environment(trace_path: &str) -> Result<Vec<(String, String)>> {
+    let mut path = [0u16; 32768];
     let length = unsafe {
         windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW(
             path.as_mut_ptr(),
@@ -25,50 +26,32 @@ fn powershell() -> Result<PathBuf> {
     } as usize;
     ensure!(
         length > 0 && length < path.len(),
-        "Windows system directory is unavailable"
+        "Windows system directory unavailable"
     );
-    Ok(PathBuf::from(OsString::from_wide(&path[..length]))
-        .join("WindowsPowerShell/v1.0/powershell.exe"))
-}
-
-fn helper_environment(
-    program: &std::path::Path,
-    trace_path: &str,
-) -> Result<Vec<(String, String)>> {
-    let ps_home = program
-        .parent()
-        .context("Windows PowerShell home unavailable")?;
-    let system = ps_home
-        .parent()
-        .and_then(|path| path.parent())
-        .context("Windows system directory unavailable")?;
+    let system = std::path::PathBuf::from(OsString::from_wide(&path[..length]));
     let windows = system.parent().context("Windows directory unavailable")?;
     let temp = std::env::temp_dir();
-    let entries = [
+    let mut result = Vec::new();
+    for (key, path) in [
         ("SystemRoot", windows.to_path_buf()),
         ("WINDIR", windows.to_path_buf()),
-        ("COMSPEC", system.join("cmd.exe")),
-        ("PATH", system.to_path_buf()),
-        ("PSModulePath", ps_home.join("Modules")),
+        ("PATH", system.clone()),
         ("TEMP", temp.clone()),
         ("TMP", temp),
-    ];
-    let mut environment = Vec::with_capacity(entries.len() + 1);
-    for (key, path) in entries {
-        environment.push((
+    ] {
+        result.push((
             key.into(),
             path.to_str()
                 .context("Windows helper path is not Unicode")?
                 .to_owned(),
         ));
     }
-    environment.push((
+    result.push((
         "HGS_DESKTOP_REGISTRATION_TRACE_FILE".into(),
         trace_path.into(),
     ));
-    Ok(environment)
+    Ok(result)
 }
-
 fn invocation(operation: &str, plan: &Value) -> Result<Invocation> {
     ensure!(
         matches!(operation, "check" | "status" | "install" | "remove"),
@@ -76,55 +59,26 @@ fn invocation(operation: &str, plan: &Value) -> Result<Invocation> {
     );
     let request = serde_json::to_vec(&json!({"schema":1,"operation":operation,"plan":plan}))?;
     ensure!(
-        request.len() <= CAP,
+        !request.is_empty() && request.len() <= CAP,
         "desktop registration request exceeds its bound"
     );
-    // No here-strings: trim only source indentation, never request data.
-    let source = SCRIPT
-        .lines()
-        .map(str::trim_start)
-        .collect::<Vec<_>>()
-        .join("\n");
-    // Windows PowerShell may expand PSModulePath at startup. Reset it before
-    // any operation and disable implicit module discovery. This helper uses
-    // language constructs and explicit .NET assembly loading, with no modules.
-    let script = format!(
-        "{source}\nInitialize-RegistrationEnvironment\nInvoke-RegistrationMain {}\n",
-        request.len()
-    );
-    let encoded = STANDARD.encode(
-        script
-            .encode_utf16()
-            .flat_map(u16::to_le_bytes)
-            .collect::<Vec<_>>(),
-    );
-    ensure!(
-        encoded.len() < 30_000,
-        "desktop registration helper exceeds the Windows command-line bound"
-    );
     Ok(Invocation {
-        args: vec![
-            "-NoLogo".into(),
-            "-NoProfile".into(),
-            "-NonInteractive".into(),
-            "-EncodedCommand".into(),
-            encoded,
-        ],
+        args: vec![ENTRY.into(), request.len().to_string()],
         stdin: Some(request),
         timeout: Duration::from_secs(15),
         request_id: None,
     })
 }
-
 fn exchange(operation: &str, plan: &Value) -> Result<Value> {
     let invocation = invocation(operation, plan)?;
-    let program = powershell()?;
+    // The selected service CLI may be a maintained copy or custom selector.
+    // The implementation worker is always this original caller's own image.
+    let program = std::env::current_exe()?;
     let trace = trace::Trace::new();
-    // Never forward a caller-supplied trace path to the helper.
-    let environment = helper_environment(&program, trace.path().unwrap_or(""))?;
+    let environment = helper_environment(trace.path().unwrap_or(""))?;
     let environment: Vec<_> = environment
         .iter()
-        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
     let result =
         zerus_client_core::run::run_hidden_limited(&program, &invocation, &environment, CAP);
@@ -132,35 +86,30 @@ fn exchange(operation: &str, plan: &Value) -> Result<Value> {
     let result = result.map_err(|error| {
         use zerus_client_core::run::HiddenError;
         match error {
-            HiddenError::OutputTooLarge(_) => anyhow::anyhow!(
-                "desktop registration helper output exceeded its bound; inspect status before retrying"
-            ),
-            HiddenError::TerminationPending { child } => anyhow::anyhow!(
-                "desktop registration helper termination is pending (original pid {}, creation FILETIME {:?}); outcome unavailable, preserve its identity and inspect before retrying",
-                child.pid, child.creation_filetime
-            ),
-            HiddenError::PreviousExchangePending { child } => anyhow::anyhow!(
-                "desktop registration previous helper is still unsettled ({child:?}); no new helper was started"
-            ),
+            HiddenError::OutputTooLarge(_) => anyhow::anyhow!("desktop registration helper output exceeded its bound; inspect status before retrying"),
+            HiddenError::TerminationPending { child } => anyhow::anyhow!("desktop registration helper termination is pending (original pid {}, creation FILETIME {:?}); outcome unavailable, preserve its identity and inspect before retrying", child.pid, child.creation_filetime),
+            HiddenError::PreviousExchangePending { child } => anyhow::anyhow!("desktop registration previous helper is still unsettled ({child:?}); no new helper was started"),
         }
     })?;
-    let value = match result {
-        Exit::Code {
-            code: 0, stdout, ..
-        } => serde_json::from_slice::<Value>(&stdout)
-            .context("invalid desktop registration receipt; inspect status before retrying")?,
-        Exit::Code { stdout, .. } => {
-            let value = serde_json::from_slice::<Value>(&stdout).ok();
-            bail!(
-                "desktop registration refused: {}",
-                value
-                    .as_ref()
-                    .and_then(|v| v["error"].as_str())
-                    .unwrap_or("helper failed; inspect status before retrying")
-            );
-        }
+    let (code, stdout) = match result {
+        Exit::Code { code, stdout, .. } => (code, stdout),
         _ => bail!("desktop registration outcome is unavailable; inspect status before retrying"),
     };
+    let envelope: Value = serde_json::from_slice(&stdout)
+        .context("invalid native registration receipt; inspect status before retrying")?;
+    ensure!(
+        envelope["abi"] == ABI,
+        "native registration implementation changed; inspect status before retrying"
+    );
+    if code != 0 {
+        bail!(
+            "desktop registration refused: {}",
+            envelope["error"]
+                .as_str()
+                .unwrap_or("helper failed; inspect status before retrying")
+        );
+    }
+    let value = envelope["reply"].clone();
     ensure!(
         value["schema"] == 1
             && value["operation"] == operation
@@ -213,74 +162,20 @@ pub(super) fn command(config: &Config, location: &Location, operation: &str) -> 
 mod tests {
     use super::*;
     #[test]
-    fn fixed_helper_has_bounded_input_and_never_passes_shell_arguments() {
-        assert!(!SCRIPT.contains("@'"));
-        assert!(!SCRIPT.contains("@\""));
-        for cmdlet in ["ConvertFrom-Json", "ConvertTo-Json", "New-Object"] {
-            assert!(
-                !SCRIPT.contains(cmdlet),
-                "helper must not auto-load a module"
-            );
-        }
+    fn native_worker_uses_fixed_argv_and_the_original_framed_request() {
         let plan =
             json!({"argv":["C:/Example/CLI & tools/hgs.exe"],"configuration":"a".repeat(64)});
-        let call = invocation("status", &plan).unwrap();
+        let inv = invocation("status", &plan).unwrap();
         assert_eq!(
-            &call.args[..4],
-            [
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-EncodedCommand"
-            ]
+            inv.args,
+            [ENTRY, &inv.stdin.as_ref().unwrap().len().to_string()]
         );
-        assert!(!call.args.iter().any(|arg| arg.contains("CLI & tools")));
-        let body: Value = serde_json::from_slice(call.stdin.as_ref().unwrap()).unwrap();
-        assert_eq!(body["plan"], plan);
-        let script = String::from_utf16(
-            &STANDARD
-                .decode(&call.args[4])
-                .unwrap()
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-                .collect::<Vec<_>>(),
-        )
-        .unwrap();
-        assert!(script.ends_with(&format!(
-            "Invoke-RegistrationMain {}\n",
-            call.stdin.as_ref().unwrap().len()
-        )));
-        assert!(script.contains("\nInitialize-RegistrationEnvironment\nInvoke-RegistrationMain "));
-        assert_eq!(call.timeout, Duration::from_secs(15));
+        assert_eq!(
+            serde_json::from_slice::<Value>(inv.stdin.as_ref().unwrap()).unwrap()["plan"],
+            plan
+        );
+        assert_eq!(inv.timeout, Duration::from_secs(15));
         assert!(invocation("start", &plan).is_err());
         assert!(invocation("install", &json!({"oversize":"x".repeat(CAP)})).is_err());
-    }
-
-    #[test]
-    fn helper_environment_is_explicit_and_does_not_copy_a_user_profile() {
-        let program =
-            std::path::Path::new(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe");
-        let environment = helper_environment(program, r"C:\Example\phase").unwrap();
-        let keys: Vec<_> = environment.iter().map(|(key, _)| key.as_str()).collect();
-        assert_eq!(
-            keys,
-            [
-                "SystemRoot",
-                "WINDIR",
-                "COMSPEC",
-                "PATH",
-                "PSModulePath",
-                "TEMP",
-                "TMP",
-                "HGS_DESKTOP_REGISTRATION_TRACE_FILE"
-            ]
-        );
-        assert_eq!(
-            environment[4].1,
-            r"C:\Windows\System32\WindowsPowerShell\v1.0\Modules"
-        );
-        assert_eq!(environment[7].1, r"C:\Example\phase");
     }
 }

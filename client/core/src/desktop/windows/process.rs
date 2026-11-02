@@ -679,9 +679,29 @@ impl Ancestry {
         }
     }
     pub fn validate(&self, until: Instant) -> io::Result<()> {
-        let child = self.chain.last().ok_or(io::ErrorKind::InvalidData)?;
+        self.validate_chain(&self.chain, until)
+    }
+
+    /// A read-only hint may outlive its original relay. Retain the same
+    /// inspected objects, but require the exact original direct parent and
+    /// revalidate every ancestor from that parent. Mutation admission continues
+    /// to use validate(), including the original relay's liveness.
+    pub fn validate_parent(&self, parent: &Original, until: Instant) -> io::Result<()> {
+        let (relay, ancestors) = self.chain.split_first().ok_or(io::ErrorKind::InvalidData)?;
+        let retained = ancestors.first().ok_or(io::ErrorKind::InvalidData)?;
+        require(
+            relay.parent == parent.pid
+                && retained.pid == parent.pid
+                && retained.birth == parent.birth
+                && parent.current(),
+        )?;
+        self.validate_chain(ancestors, until)
+    }
+
+    fn validate_chain(&self, chain: &[Arc<Original>], until: Instant) -> io::Result<()> {
+        let child = chain.last().ok_or(io::ErrorKind::InvalidData)?;
         self.boundary.validate(child, until)?;
-        for original in &self.chain {
+        for original in chain {
             require(
                 Instant::now() < until
                     && original.current()
@@ -1008,6 +1028,39 @@ mod tests {
             .environment(Instant::now() + Duration::from_secs(2))
             .is_err());
         assert!(Original::open(0).is_err());
+    }
+    #[test]
+    fn native_parent_hint_proof_keeps_original_ancestors_after_only_the_relay_exits() {
+        let mut relay = child();
+        let parent = Original::open(std::process::id()).unwrap();
+        let proof =
+            Ancestry::inspect(relay.0.id(), Instant::now() + Duration::from_secs(2)).unwrap();
+        let wrong_parent = child();
+        let wrong = Original::open(wrong_parent.0.id()).unwrap();
+        assert!(proof
+            .validate_parent(&wrong, Instant::now() + Duration::from_secs(2))
+            .is_err());
+        // Exit/reap only the original fixture relay. The hint's retained parent
+        // and ancestry still exist; a mutation permit must fail on that exit.
+        relay
+            .0
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"continue\n")
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if relay.0.try_wait().unwrap().is_some() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "original relay did not exit");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let until = Instant::now() + Duration::from_secs(2);
+        assert!(proof.validate(until).is_err());
+        proof.validate_parent(&parent, until).unwrap();
+        assert!(proof.validate_parent(&parent, Instant::now()).is_err());
     }
     #[test]
     fn native_clean_ancestry_ends_only_at_the_approved_unix_parity_boundaries() {

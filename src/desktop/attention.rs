@@ -128,6 +128,9 @@ impl Runtime {
     pub fn suppress_foreground(&mut self, now: Instant) {
         self.foreground_until = Some(now + FOCUS_TTL);
     }
+    pub fn set_foreground_until(&mut self, until: Option<Instant>) {
+        self.foreground_until = until;
+    }
 
     /// The actor calls this only after OWN successful Broker::apply, while the
     /// original ingress permit is held. A passive feed has no FleetEvent owner.

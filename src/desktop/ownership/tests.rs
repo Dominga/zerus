@@ -1,6 +1,39 @@
 use super::*;
 use std::cell::Cell;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn held_original_rollback_excludes_a_real_rearm_and_refuses_when_rearm_already_won() {
+    let mut f = Fixture::new();
+    let request = f.request(Action::Grant);
+    assert!(f.apply(request).service_granted());
+    let id = uuid::Uuid::new_v4().to_string();
+    let result = super::super::revoke::request(
+        &f.location,
+        &mut f.store,
+        &serde_json::json!({"op":"revoke","request_id":id,"reason":"rollback"}),
+    );
+    assert_eq!(result["checkpointed"], true);
+    let held = super::super::revoke::hold::acquire_for_test(&f.location, &id).unwrap();
+    let request = f.request(Action::Rearm);
+    assert!(apply(
+        &f.location,
+        &mut f.store,
+        &f.epoch,
+        request,
+        f.origin.clone(),
+        None,
+        |_| Ok(())
+    )
+    .is_err());
+    assert_eq!(f.current().state, State::Revoked);
+    drop(held);
+    let request = f.request(Action::Rearm);
+    assert!(f.apply(request).service_granted());
+    assert!(super::super::revoke::hold::acquire_for_test(&f.location, &id).is_err());
+    assert!(service_granted(&f.store, &f.location.configuration).unwrap());
+}
+
 #[test]
 fn reconnect_keeps_ownership_epoch_but_new_image_and_explicit_rearm_rotate_it() {
     let mut f = Fixture::new();

@@ -288,7 +288,9 @@ pub(super) fn perform(
     let mut changed = false;
     match plan.operation.as_str() {
         "install" if task.is_none() => {
-            scheduler.create_only(plan)?;
+            scheduler
+                .create_only(plan)
+                .context("Task creation was not confirmed; inspect status before retrying.")?;
             task = scheduler.read(&plan.name)?;
             task.as_ref()
                 .context("Created task could not be read back; inspect status before retrying.")?
@@ -296,7 +298,9 @@ pub(super) fn perform(
             changed = true;
         }
         "remove" if task.is_some() => {
-            scheduler.delete(&plan.name)?;
+            scheduler
+                .delete(&plan.name)
+                .context("Task removal was not confirmed; inspect status before retrying.")?;
             ensure!(
                 scheduler.read(&plan.name)?.is_none(),
                 "Removed task is still present; inspect status before retrying."

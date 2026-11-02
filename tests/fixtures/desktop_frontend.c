@@ -2,7 +2,13 @@
  * The native parent owns the canonical socket and the exact unreaped CLI child.
  * Python supplies closed cached bytes only after observing that child's birth.
  */
+/* Darwin libproc headers require BSD types even with strict C11 enabled. */
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1
+#else
 #define _POSIX_C_SOURCE 200809L
+#endif
+#include <sys/types.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -12,7 +18,6 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>

@@ -5,6 +5,8 @@ use crate::desktop::store::{Location, Store};
 use std::sync::atomic::{AtomicU32, AtomicU8};
 use zerus_desktop_ledger::{self as ledger, Identity, Kind, Reserve, Target};
 
+mod recovery;
+
 fn session() -> Session {
     Session {
         configuration: "a".repeat(64),
@@ -324,10 +326,13 @@ struct Server {
 }
 impl Server {
     fn new(bus: &bus::Bus) -> Self {
+        Self::at(&bus.address)
+    }
+    fn at(address: &str) -> Self {
         let (called, calls) = mpsc::sync_channel(8);
         let (closed, closes) = mpsc::sync_channel(8);
         let mode = Arc::new(AtomicU8::new(0));
-        let connection = zbus::blocking::connection::Builder::address(bus.address.as_str())
+        let connection = zbus::blocking::connection::Builder::address(address)
             .unwrap()
             .name(zerus_freedesktop_notify::SERVICE)
             .unwrap()

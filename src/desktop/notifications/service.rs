@@ -11,7 +11,12 @@ use crate::{
 };
 use anyhow::{ensure, Context, Result};
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+const BACKOFF: [u64; 5] = [1, 2, 5, 10, 30];
 
 pub(in crate::desktop) struct Runtime {
     config: Config,
@@ -26,10 +31,27 @@ pub(in crate::desktop) struct Runtime {
     stopping: bool,
     drained: bool,
     error: Option<String>,
+    recovering: bool,
+    retry_at: Option<Instant>,
+    failures: usize,
+    #[cfg(all(test, target_os = "linux"))]
+    test_bus: Option<String>,
     #[cfg(target_os = "linux")]
     closed: super::closed::Runtime,
 }
 impl Runtime {
+    #[cfg(all(test, target_os = "linux"))]
+    pub(in crate::desktop) fn retry_now_for_test(&mut self) {
+        assert!(
+            self.retry_at.is_some(),
+            "original resources must drain before a retry exists"
+        );
+        self.retry_at = Some(Instant::now());
+    }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(in crate::desktop) fn hold_owner_for_test(&self) -> Arc<dyn Send + Sync> {
+        self.owner.as_ref().unwrap().clone()
+    }
     pub fn new(
         config: &Config,
         location: &Location,
@@ -52,6 +74,11 @@ impl Runtime {
             stopping: false,
             drained: false,
             error: None,
+            recovering: false,
+            retry_at: None,
+            failures: 0,
+            #[cfg(all(test, target_os = "linux"))]
+            test_bus: None,
             #[cfg(target_os = "linux")]
             closed: super::closed::Runtime::new(config, location),
         }
@@ -63,6 +90,17 @@ impl Runtime {
         self.grant.as_ref().map(ownership::Grant::writer_epoch)
     }
     fn begin(&mut self, store: &mut Store) -> Result<()> {
+        #[cfg(all(test, target_os = "linux"))]
+        if let Some(address) = self.test_bus.clone() {
+            return self.begin_with(store, |_, location, grant, service| {
+                preparation::Preparation::selected_for_test(
+                    service,
+                    location,
+                    grant,
+                    attachment::Selection::Linux { address },
+                )
+            });
+        }
         self.begin_with(store, preparation::Preparation::start)
     }
     fn begin_with(
@@ -79,7 +117,7 @@ impl Runtime {
             return Ok(());
         };
         ensure!(grant.current(store)?, "notification ownership changed");
-        self.attempted = true; // No timer/actor-turn retry after an unknown start.
+        self.attempted = true;
         let preparation = select(
             &self.config,
             &self.location,
@@ -153,7 +191,7 @@ impl Runtime {
         {
             self.request_stop();
         }
-        if !self.stopping && !self.attempted {
+        if !self.stopping && !self.recovering && !self.attempted {
             if let Err(error) = self.begin(store) {
                 self.fail(error);
             }
@@ -164,37 +202,59 @@ impl Runtime {
             .and_then(preparation::Preparation::poll);
         if let Some(selected) = selected {
             self.preparing = None; // Original worker was joined by poll().
-            if !self.stopping {
+            if !self.stopping && !self.recovering {
                 if let Err(error) = selected.and_then(|prepared| self.attach(store, prepared)) {
                     self.fail(error);
                 }
             }
         }
+        let mut fault = None;
         if let Some(native) = &mut self.native {
             // Native readiness can briefly be unknown (for example a busy
             // status mutex). That pauses dispatch, not the ownership policy.
-            attention.set_policy(attention::Policy {
-                enabled: native.admitting() && !self.stopping,
-                optional_questions: false,
-            });
+            // A transport outage pauses discovery effects; it is not a user
+            // policy change and cannot retire all previously shown mappings.
+            if self.stopping || native.admitting() && !self.recovering {
+                attention.set_policy(attention::Policy {
+                    enabled: !self.stopping,
+                    optional_questions: false,
+                });
+            }
             let callbacks = native.poll(store, attention);
             for value in callbacks {
-                if !self.stopping {
+                if !self.stopping && !self.recovering && native.fault().is_none() {
                     if let Err(error) = activations.offer(store, native.outbox(), value) {
                         self.error = Some(bounded(error));
                     }
                 }
             }
-            activations.poll(store, Some(native.outbox()), seq);
+            activations.poll(
+                store,
+                (!self.recovering && native.fault().is_none()).then_some(native.outbox()),
+                seq,
+            );
             #[cfg(target_os = "linux")]
-            if !self.stopping && native.ready() {
+            if !self.stopping && !self.recovering && native.ready() {
                 if let (Some(grant), Some(owner)) = (&self.grant, &self.owner) {
                     self.closed
                         .poll(store, grant, owner, native.outbox(), activations);
                 }
             }
+            fault = native.fault().map(str::to_owned);
+            if native.ready() && !self.recovering {
+                self.error = None;
+                self.failures = 0;
+            }
         } else {
             activations.poll(store, None, seq);
+        }
+        if !self.stopping && !self.recovering {
+            if let Some(fault) = fault {
+                self.fail(anyhow::anyhow!(fault));
+            }
+        }
+        if self.recovering && !self.stopping {
+            self.poll_recovery(store);
         }
         if self.stopping {
             attention.set_policy(attention::Policy {
@@ -231,12 +291,65 @@ impl Runtime {
     }
     fn fail(&mut self, error: anyhow::Error) {
         self.error = Some(bounded(error));
-        // A returned worker still owns the original locks until real join.
-        // SDK failure is visible, never a new factory admission on the next turn.
-        self.request_stop();
+        self.recovering = true;
+        self.retry_at = None;
+        #[cfg(target_os = "linux")]
+        self.closed.stop();
+        if let Some(preparing) = &self.preparing {
+            preparing.stop();
+        }
+        // A failed attachment has already stopped its original host. It must
+        // keep polling the same handles; no retry is admitted by this error.
+    }
+    fn poll_recovery(&mut self, store: &mut Store) {
+        if self.retry_at.is_none() {
+            let selected_done = self
+                .preparing
+                .as_ref()
+                .is_none_or(preparation::Preparation::drained);
+            let native_done = self
+                .native
+                .as_ref()
+                .is_none_or(attachment::Runtime::drained);
+            #[cfg(target_os = "linux")]
+            let closed_done = self.closed.drained();
+            #[cfg(not(target_os = "linux"))]
+            let closed_done = true;
+            if !selected_done || !native_done || !closed_done {
+                return;
+            }
+            self.native = None;
+            self.preparing = None;
+            if self
+                .owner
+                .as_ref()
+                .is_some_and(|owner| Arc::strong_count(owner) != 1)
+            {
+                return;
+            }
+            self.owner = None;
+            let seconds = BACKOFF[self.failures.min(BACKOFF.len() - 1)];
+            self.failures = self.failures.saturating_add(1);
+            self.retry_at = Some(Instant::now() + Duration::from_secs(seconds));
+        }
+        if self.retry_at.is_some_and(|at| Instant::now() >= at) {
+            // Re-read the grant and both exclusions. A timer never re-arms a
+            // revoked/native-owned configuration or replays a ledger effect.
+            self.retry_at = None;
+            self.recovering = false;
+            self.attempted = false;
+            #[cfg(target_os = "linux")]
+            {
+                self.closed = super::closed::Runtime::new(&self.config, &self.location);
+            }
+            if let Err(error) = self.begin(store) {
+                self.fail(error);
+            }
+        }
     }
     pub fn request_stop(&mut self) {
         self.stopping = true;
+        self.retry_at = None;
         #[cfg(target_os = "linux")]
         self.closed.stop();
         if let Some(preparing) = &self.preparing {
@@ -251,11 +364,14 @@ impl Runtime {
     }
     pub fn ready(&self) -> bool {
         !self.stopping
+            && !self.recovering
             && self.error.is_none()
             && self.native.as_ref().is_some_and(attachment::Runtime::ready)
     }
     pub fn status(&self) -> Value {
         let value = json!({"ready":self.ready(),"stopping":self.stopping,"drained":self.drained,"attempted":self.attempted,"error":self.error,
+        "recovering":self.recovering,"retry_in_ms":self.retry_at.map(|at| at.saturating_duration_since(Instant::now()).as_millis() as u64),
+        "failed_attempts":self.failures,
         "selection":self.preparing.as_ref().map(preparation::Preparation::status),"attachment":self.native.as_ref().map(attachment::Runtime::status)});
         #[cfg(target_os = "linux")]
         let value = {
@@ -271,6 +387,7 @@ impl Runtime {
 impl Runtime {
     #[cfg(target_os = "linux")]
     pub(in crate::desktop) fn begin_on_test_bus(&mut self, store: &mut Store, address: String) {
+        self.test_bus = Some(address.clone());
         self.begin_with(store, |_, location, grant, service| {
             preparation::Preparation::selected_for_test(
                 service,

@@ -132,6 +132,25 @@ revocation; a read-only inspection cannot reconstruct that authority. Restoratio
 can load these mappings for cleanup after revoke, while click checks still
 refuse them immediately.
 
+An attachment failure is visible in notification service status, separately
+from its readiness and physical drain. The service keeps polling the same
+original host, operation resources and selectors until their actual teardown
+and join, then selects a fresh attachment under the still-current grant with
+backoff of 1, 2, 5, 10 and at most 30 seconds. Revoke/native takeover cancels
+retry; a timer cannot rearm ownership. Recovery does not replay prior posts or
+withdrawals, and an outage does not turn the user's policy off and retire all
+shown mappings. Successful attachment clears the error and resets backoff.
+
+On Linux an absent notification daemon can be activated only through the bus's
+fixed `StartServiceByName("org.freedesktop.Notifications", 0)` after an
+authenticated `NameHasNoOwner` reply. Setup stays bounded by the original
+deadline. An owner/namespace loss faults the original worker and starts recovery
+only after its socket/executor teardown and actual thread join; its status still
+reports an unclean callback fence even when these resources have drained. A
+fresh attachment ignores valid mappings from a foreign bus/owner namespace and
+never redirects their numeric IDs. Incomplete teardown or a panicked worker
+retains the original owner and prevents replacement.
+
 ## Authenticated activation handoff
 
 The native frontend consumer checks both `Desktop frontend request ABI:

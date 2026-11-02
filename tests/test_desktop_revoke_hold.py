@@ -3,9 +3,12 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import uuid
 
@@ -15,7 +18,7 @@ protocol = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(protocol)
 
 CHILD = r'''
-import json,os,sys
+import json,os,sys,subprocess
 receipt=json.loads(os.environ['RECEIPT'])
 mode=os.environ['MODE']
 def send(value):
@@ -29,10 +32,20 @@ if mode=='overflow':
     sys.stdout.write('x'*10000);sys.stdout.flush();sys.exit(0)
 if mode=='wrong_epoch':
     receipt['writer_epoch']='00000000-0000-4000-8000-000000000000'
-if mode!='silent':
+if mode=='numeric_receipt':
+    receipt['accepted']=1
+if mode=='numeric_held':
+    send(dict(abi='desktop-revoke-hold-v1',held=1,receipt=receipt))
+elif mode=='held_pipe':
+    subprocess.Popen([sys.executable,'-c',"import os; open(os.environ['GATE'],'rb',buffering=0).read(1)",],
+                     env=os.environ,stdin=subprocess.DEVNULL,close_fds=True)
     send(dict(abi='desktop-revoke-hold-v1',held=True,receipt=receipt))
-if mode=='early_release':
-    send(dict(abi='desktop-revoke-hold-v1',held=False,released=True,receipt=receipt))
+elif mode in ('early_release','trailing'):
+    ready=json.dumps(dict(abi='desktop-revoke-hold-v1',held=True,receipt=receipt))+'\n'
+    extra='{' if mode=='trailing' else json.dumps(dict(abi='desktop-revoke-hold-v1',held=False,released=True,receipt=receipt))+'\n'
+    sys.stdout.write(ready+extra);sys.stdout.flush()
+elif mode!='silent':
+    send(dict(abi='desktop-revoke-hold-v1',held=True,receipt=receipt))
 sys.stdin.buffer.read()
 if mode=='stderr':
     sys.stderr.write('bounded private fixture stderr\n')
@@ -96,8 +109,24 @@ class DesktopRevokeHold(unittest.TestCase):
                 self.hold(**change)
         self.assertEqual(self.children, [])
 
+    def test_installed_helper_loads_its_sibling_protocol_outside_the_source_checkout(self):
+        helper = self.root / "lib/zerus/install-linux-desktop-service.py"
+        helper.parent.mkdir(parents=True)
+        library = helper.with_name("desktop-revoke-hold.py")
+        shutil.copy2(ROOT / "scripts/install-linux-desktop-service.py", helper)
+        shutil.copy2(ROOT / "scripts/desktop-revoke-hold.py", library)
+        argv = [sys.executable, str(helper), "--help"]
+        env = {"HOME": str(self.root), "PATH": "/usr/bin:/bin"}
+        result = subprocess.run(argv, cwd=self.root, env=env, capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertIn(b"cancel-rollback", result.stdout)
+        library.unlink()
+        missing = subprocess.run(argv, cwd=self.root, env=env, capture_output=True, timeout=5)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn(b"desktop-revoke-hold.py", missing.stderr)
+
     def test_refused_partial_oversize_and_changed_epoch_frames_never_acquire_a_hold(self):
-        for mode in ("refuse", "partial", "overflow", "wrong_epoch", "early_release"):
+        for mode in ("refuse", "partial", "overflow", "wrong_epoch", "early_release", "trailing", "numeric_receipt", "numeric_held"):
             with self.subTest(mode=mode), self.assertRaises(protocol.Refusal):
                 self.hold(mode).acquire()
             self.assertIsNotNone(self.children[-1].returncode)
@@ -126,6 +155,40 @@ class DesktopRevokeHold(unittest.TestCase):
             hold.check()
         self.assertIs(hold.child, original)
         self.assertEqual(hold.frames[0]["receipt"], self.receipt)
+
+    def test_logical_release_deadline_keeps_original_pipes_until_actual_eof(self):
+        gate = self.root / "pipe-gate"
+        os.mkfifo(gate)
+        fd = os.open(gate, os.O_RDWR | os.O_NONBLOCK)
+        hold = self.hold("held_pipe", env={"PATH": "/usr/bin:/bin", "HOME": str(self.root),
+                         "RECEIPT": json.dumps(self.receipt), "MODE": "held_pipe", "GATE": str(gate)}).acquire()
+        hold.timeout = 0.05  # Only the close phase; startup still has its full bound.
+        errors = []
+        def close():
+            try:
+                hold.close()
+            except protocol.Refusal as error:
+                errors.append(str(error))
+        thread = threading.Thread(target=close)
+        thread.start()
+        try:
+            until = time.monotonic() + 2
+            while hold.child.poll() is None and time.monotonic() < until:
+                time.sleep(0.005)
+            self.assertEqual(hold.child.returncode, 0)
+            time.sleep(0.1)  # Exceed ONLY the deliberate close-failure bound.
+            self.assertTrue(thread.is_alive())
+            self.assertFalse(hold.finished)
+            self.assertFalse(hold.child.stdout.closed)
+        finally:
+            os.write(fd, b"x")
+            thread.join(timeout=3)
+            os.close(fd)
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(hold.finished)
+        self.assertTrue(hold.child.stdout.closed)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("did not drain", errors[0])
 
 
 if __name__ == "__main__":

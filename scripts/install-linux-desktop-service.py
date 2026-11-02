@@ -317,6 +317,9 @@ class Installer:
                 last = record.get("last_revoke_request_id")
                 require(last is None or str(uuid.UUID(last)) == last,
                         "invalid original revoke identity; kept")
+                cancelled = record.get("last_cancelled_rollback_request_id")
+                require(cancelled is None or (isinstance(cancelled, str) and str(uuid.UUID(cancelled)) == cancelled),
+                        "invalid cancelled rollback identity; kept")
                 # A crash after replacing our unit but before saving its new
                 # digest can leave the old record. Recover only this selected
                 # CLI's exact emitted definition under an otherwise valid owned
@@ -366,9 +369,56 @@ class Installer:
                 "running_mode": lifecycle.get("mode"), "ipc_ready": lifecycle.get("ipc_ready", False),
                 "pending_restart": previous.get("pending_restart", False) if previous else False,
                 "last_revoke_request_id": previous.get("last_revoke_request_id") if previous else None,
+                "last_cancelled_rollback_request_id": previous.get("last_cancelled_rollback_request_id") if previous else None,
                 "transition": previous.get("transition") if previous else None}
 
+    def cancel_rollback(self, request_id):
+        """Explicit record-only escape after a new authenticated Rearm won.
+
+        Never issues a revoke, clears a native revoke, changes mode or touches
+        the manager. A later passive request is a new explicit owner intent.
+        """
+        require(self.requested_mode is None, "rollback cancellation cannot select a mode")
+        try:
+            require(str(uuid.UUID(request_id)) == request_id, "pass the original pending rollback UUID")
+        except (TypeError, ValueError, AttributeError):
+            raise Refusal("pass --request-id with the original pending rollback UUID") from None
+        require(self.ownership() is not None, "no owned desktop registration to reconcile")
+        parent = self.destination.parent.stat()
+        require(parent.st_uid == os.geteuid() and not parent.st_mode & 0o022,
+                "desktop unit directory is writable by another user; kept")
+        fd = os.open(self.destination.with_name(".hgs-desktop.registration.lock"),
+                     os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            info = os.fstat(fd)
+            require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and info.st_nlink == 1
+                    and stat.S_IMODE(info.st_mode) == 0o600, "invalid desktop installer lock")
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            previous = self.ownership()
+            require(previous is not None, "owned registration disappeared")
+            transition = previous.get("transition")
+            require((transition is not None and transition["request_id"] == request_id)
+                    or (transition is None and previous.get("last_cancelled_rollback_request_id") == request_id),
+                    "pending rollback UUID changed; inspect status before cancellation")
+            self.caller()
+            self.grant()  # An actual current Service grant, never background_permitted alone.
+            original = read_file(self.destination)
+            require(self.ownership() == previous, "registration changed during cancellation")
+            self.caller()
+            self.grant()
+            require(read_file(self.destination) == original, "unit changed during cancellation")
+            if transition is not None:
+                record = dict(previous, last_cancelled_rollback_request_id=request_id)
+                record.pop("transition")
+                self.save(record)
+            return "Pending rollback metadata cancelled. Native receipts and selected mode were kept; no service-manager action."
+        finally:
+            os.close(fd)
+
     def rollback(self, previous):
+        help_text = self.run([self.hgs, "--help"], self.env)
+        require(_hold.MARKER in (line.strip() for line in help_text.splitlines()),
+                "selected CLI lacks the native rollback hold; update the CLI before changing mode")
         # Persist before the first effect. An interrupted attempt can only use
         # this SAME revoke ID; it cannot silently become a fresh permission.
         transition = previous.get("transition")
@@ -383,8 +433,12 @@ class Installer:
                 "original rollback revoke has not settled; keep the same pending transition")
         hold = self.hold_factory(self.hgs, dict(self.env, **self.registration["readiness"]["environment"]),
                                  self.configuration, transition["request_id"], value,
-                                 self.run([self.hgs, "--help"], self.env))
-        self.rollback_hold = hold.acquire()
+                                 help_text)
+        try:
+            self.rollback_hold = hold.acquire()
+        except Refusal as error:
+            raise Refusal(f"{error} If a new frontend Grant/Rearm won, explicitly cancel-rollback "
+                          f"--request-id {transition['request_id']} before choosing a new mode.") from error
         return transition
 
     def install(self, *, check=False, no_start=False, session=False, refresh=False):
@@ -450,6 +504,8 @@ class Installer:
             last_revoke = transition["request_id"] if transition else (previous or {}).get("last_revoke_request_id")
             if last_revoke:
                 record["last_revoke_request_id"] = last_revoke
+            if previous and previous.get("last_cancelled_rollback_request_id"):
+                record["last_cancelled_rollback_request_id"] = previous["last_cancelled_rollback_request_id"]
             if session:
                 require(previous is not None, "register the desktop service before starting its session")
             if explicit:
@@ -522,7 +578,7 @@ class Installer:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("install", "session", "refresh", "status"), nargs="?", default="install")
+    parser.add_argument("action", choices=("install", "session", "refresh", "status", "cancel-rollback"), nargs="?", default="install")
     parser.add_argument("--hgs", default=shutil.which("hgs"))
     parser.add_argument("--config-dir")
     parser.add_argument("--state-dir")
@@ -530,6 +586,7 @@ def main():
     parser.add_argument("--no-start", action="store_true", help="register for the next graphical login without starting/restarting")
     parser.add_argument("--mode", choices=("passive", "background"), help="explicit owner selection; omitted preserves the registered mode")
     parser.add_argument("--json", action="store_true", help="stable configuration-scoped receipt for the native Settings action")
+    parser.add_argument("--request-id", help="with cancel-rollback: the original pending rollback UUID to cancel")
     args = parser.parse_args()
     instance = None
     def failed(code, error):
@@ -559,6 +616,10 @@ def main():
                 env[name] = value
         require(args.mode is None or args.action in ("install", "session"),
                 "only install/session can explicitly select a mode; status and refresh preserve it")
+        require((args.action == "cancel-rollback") == (args.request_id is not None),
+                "cancel-rollback requires its original --request-id; other operations cannot supply it")
+        require(args.action != "cancel-rollback" or not (args.check or args.no_start),
+                "rollback cancellation cannot use check/no-start")
         # A deliberate CLI upgrade must not discover/adopt a service merely
         # because the new CLI can render one. No manager or CLI probe if absent.
         record = destination_for(env).with_name(".hgs-desktop.zerus-registration.json")
@@ -570,8 +631,8 @@ def main():
         if args.action == "status":
             print(json.dumps(instance.status()))
         else:
-            result = instance.install(check=args.check, no_start=args.no_start,
-                                      session=args.action == "session", refresh=args.action == "refresh")
+            result = instance.cancel_rollback(args.request_id) if args.action == "cancel-rollback" else instance.install(
+                check=args.check, no_start=args.no_start, session=args.action == "session", refresh=args.action == "refresh")
             if args.json:
                 print(json.dumps(dict(instance.status(), operation=args.action, ok=True, message=result)))
             else:

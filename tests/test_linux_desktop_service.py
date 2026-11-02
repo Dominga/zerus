@@ -45,6 +45,8 @@ class Manager:
         self.before_hold = None
         self.after_revoke_check = None
         self.holds = []
+        self.after_action = None
+        self.release_failure = False
 
     def rearm(self):
         if self.held:
@@ -72,8 +74,12 @@ class Manager:
                     raise installer.Refusal("original rollback hold exited")
 
             def close(self):
+                if self.finished:
+                    return
                 manager.held = False
                 self.finished = True
+                if manager.release_failure:
+                    raise installer.Refusal("original rollback release unverified")
         return Held()
 
     def run(self, args, env, timeout=10):
@@ -104,6 +110,10 @@ class Manager:
                 self.test.assertEqual(args[-2:], ["--reason", "rollback"])
                 if self.revoke_failure:
                     raise installer.Refusal("original revoke result unavailable")
+                old = self.revoke_receipts.get(request)
+                if (old is not None and "writer_epoch" in old and self.grant["state"] == "service"
+                        and old["writer_epoch"] != self.grant["owner_epoch"]):
+                    raise installer.Refusal("writer_authority_changed")
                 result = self.revoke_receipts.setdefault(request, {"request_id": request,
                     "configuration": "a" * 64, "accepted": True, "durable": True,
                     "revoked": True, "checkpointed": True, "writer_epoch": self.grant["owner_epoch"]})
@@ -128,6 +138,10 @@ class Manager:
         if action in ("start", "restart"):
             self.active = True
             self.lifecycle["mode"] = "background" if '"--background"' in self.test.destination.read_text() else "passive"
+        if self.after_action is not None and self.after_action[0] == action:
+            _, callback = self.after_action
+            self.after_action = None
+            callback()
         return ""
 
     def actions(self):
@@ -211,6 +225,106 @@ class LinuxDesktopService(unittest.TestCase):
         self.assertEqual(self.manager.actions(), ["show", "show"])
         self.assertIsNotNone(json.loads(self.instance().record_path.read_bytes())["transition"])
         self.assertFalse(self.manager.held)
+
+    def test_explicit_cancellation_of_obsolete_rollback_keeps_native_state_then_new_owner_intent_can_finish(self):
+        self.instance().install()
+        self.instance("background").install()
+        original = self.destination.read_bytes()
+        self.manager.before_hold = lambda: self.assertTrue(self.manager.rearm())
+        with self.assertRaisesRegex(installer.Refusal, "cancel-rollback"):
+            self.instance("passive").install()
+        request = next(iter(self.manager.revoke_receipts))
+        grant, receipts = copy.deepcopy(self.manager.grant), copy.deepcopy(self.manager.revoke_receipts)
+        with self.assertRaisesRegex(installer.Refusal, "writer_authority_changed"):
+            self.instance("passive").install()  # Same stale UUID cannot revoke the new runtime.
+        self.assertEqual(self.manager.grant, grant)
+        self.assertEqual(self.manager.revoke_receipts, receipts)
+        self.manager.calls.clear()
+        self.instance().cancel_rollback(request)
+        self.instance().cancel_rollback(request)  # Same metadata receipt, no native replay.
+        self.assertEqual(self.manager.actions(), [])
+        self.assertFalse(any("revoke" in argv for argv, _ in self.manager.calls))
+        self.assertEqual(self.manager.grant, grant)
+        self.assertEqual(self.manager.revoke_receipts, receipts)
+        self.assertEqual(self.destination.read_bytes(), original)
+        record = json.loads(self.instance().record_path.read_bytes())
+        self.assertNotIn("transition", record)
+        self.assertEqual(record["last_cancelled_rollback_request_id"], request)
+        self.manager.before_hold = None
+        self.instance("passive").install()  # A NEW explicit owner request, never an automatic retry.
+        self.assertEqual(len(self.manager.revoke_receipts), 2)
+        self.assertNotEqual(self.instance().status()["last_revoke_request_id"], request)
+        self.assertEqual(self.instance().status()["running_mode"], "passive")
+        self.assertEqual(self.instance().status()["last_cancelled_rollback_request_id"], request)
+
+    def test_cancellation_requires_exact_original_uuid_current_service_grant_and_real_caller(self):
+        self.instance().install()
+        self.instance("background").install()
+        value = self.instance()
+        record = value.ownership()
+        request = str(uuid.uuid4())
+        record["transition"] = {"target": "passive", "request_id": request}
+        value.save(record)
+        raw = value.record_path.read_bytes()
+        unit = self.destination.read_bytes()
+        for change in ({"state": "revoked", "rearm_required": True},
+                       {"state": "passive"}, {"identity_current": False},
+                       {"configuration": "b" * 64}, {"owner_epoch": None}):
+            with self.subTest(change=change), patch.dict(self.manager.grant, change):
+                with self.assertRaisesRegex(installer.Refusal, "Grant/Rearm"):
+                    value.cancel_rollback(request)
+        self.manager.caller_refused = True
+        with self.assertRaisesRegex(installer.Refusal, "agent-descended"):
+            value.cancel_rollback(request)
+        self.manager.caller_refused = False
+        for wrong in (str(uuid.uuid4()), "invalid", None):
+            with self.subTest(wrong=wrong), self.assertRaises(installer.Refusal):
+                value.cancel_rollback(wrong)
+        self.assertEqual(value.record_path.read_bytes(), raw)
+        self.assertEqual(self.destination.read_bytes(), unit)
+        self.assertFalse(any("revoke" in argv for argv, _ in self.manager.calls))
+
+    def test_lost_hold_after_manager_result_stops_before_the_next_manager_step(self):
+        self.instance().install()
+        self.instance("background").install()
+        self.manager.calls.clear()
+        self.manager.after_action = ("daemon-reload", lambda: setattr(self.manager, "hold_alive", False))
+        with self.assertRaisesRegex(installer.Refusal, "hold exited"):
+            self.instance("passive").install()
+        self.assertEqual(self.manager.actions(), ["show", "show", "daemon-reload"])
+        record = json.loads(self.instance().record_path.read_bytes())
+        self.assertEqual(record["transition"]["request_id"], next(iter(self.manager.revoke_receipts)))
+        self.assertTrue(record["pending_restart"])
+        self.assertFalse(self.manager.held)
+
+    def test_unknown_release_keeps_original_pending_uuid_after_passive_readiness(self):
+        self.instance().install()
+        self.instance("background").install()
+        self.manager.release_failure = True
+        with self.assertRaisesRegex(installer.Refusal, "release unverified"):
+            self.instance("passive").install()
+        record = json.loads(self.instance().record_path.read_bytes())
+        original = record["transition"]["request_id"]
+        self.assertEqual(original, next(iter(self.manager.revoke_receipts)))
+        self.assertTrue(record["pending_restart"])
+        self.assertEqual(self.manager.lifecycle["mode"], "passive")
+        self.manager.release_failure = False
+        self.instance("passive").install()
+        self.assertEqual(list(self.manager.revoke_receipts), [original])
+        self.assertIsNone(self.instance().status()["transition"])
+
+    def test_old_cli_marker_refuses_before_revoke_or_pending_record_creation(self):
+        self.instance().install()
+        self.instance("background").install()
+        instance = self.instance("passive")
+        unit, record = self.destination.read_bytes(), instance.record_path.read_bytes()
+        run = instance.run
+        instance.run = lambda argv, env, **kwargs: "hgs desktop registration --json" if argv[1:] == ["--help"] else run(argv, env, **kwargs)
+        with self.assertRaisesRegex(installer.Refusal, "native rollback hold"):
+            instance.install()
+        self.assertEqual(self.manager.revoke_receipts, {})
+        self.assertEqual(self.destination.read_bytes(), unit)
+        self.assertEqual(instance.record_path.read_bytes(), record)
 
     def test_explicit_background_requires_grant_then_restarts_only_the_owned_service(self):
         self.instance().install()

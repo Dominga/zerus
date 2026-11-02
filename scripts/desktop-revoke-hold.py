@@ -40,15 +40,30 @@ class Hold:
             raise Refusal("Invalid original rollback identity.") from None
         self.receipt = dict(receipt)
         self.timeout = timeout
-        self.child = popen([str(hgs), "desktop", "revoke-hold", "--json", "--request-id", request_id],
-                           env=dict(env), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                           stderr=subprocess.PIPE, close_fds=True)
         self.selector = selectors.DefaultSelector()
         self.frames, self.pending = [], bytearray()
         self.total, self.error, self.ready, self.finished = 0, None, False, False
-        for stream, name in ((self.child.stdout, "out"), (self.child.stderr, "err")):
-            os.set_blocking(stream.fileno(), False)
-            self.selector.register(stream, selectors.EVENT_READ, name)
+        try:
+            self.child = popen([str(hgs), "desktop", "revoke-hold", "--json", "--request-id", request_id],
+                               env=dict(env), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, close_fds=True)
+            for stream, name in ((self.child.stdout, "out"), (self.child.stderr, "err")):
+                os.set_blocking(stream.fileno(), False)
+                self.selector.register(stream, selectors.EVENT_READ, name)
+        except BaseException:
+            if hasattr(self, "child"):
+                self.close(validate=False)
+            else:
+                self.selector.close()
+            raise
+
+    def matches(self, frame, released=False):
+        keys = {"abi", "held", "receipt"} | ({"released"} if released else set())
+        receipt = frame.get("receipt")
+        return (set(frame) == keys and frame.get("abi") == ABI and frame.get("held") is (not released)
+                and (not released or frame.get("released") is True)
+                and isinstance(receipt, dict) and set(receipt) == set(self.receipt)
+                and all(type(receipt[k]) is type(v) and receipt[k] == v for k, v in self.receipt.items()))
 
     def pump(self, timeout):
         for key, _ in self.selector.select(timeout):
@@ -61,7 +76,7 @@ class Hold:
                 if key.data == "out" and self.pending:
                     self.error = "Partial rollback hold frame; inspect the pending transition."
                 continue
-            self.total += len(raw)
+            self.total = min(OUTPUT + 1, self.total + len(raw))
             if self.total > OUTPUT:
                 self.error = "Rollback hold output exceeded 64 KiB."
             if key.data != "out" or self.error:
@@ -91,7 +106,7 @@ class Hold:
                 require(remaining > 0, "Native rollback hold did not become ready; keep its original UUID.")
                 self.pump(min(remaining, 0.1))
             require(not self.error, self.error)
-            require(self.frames and self.frames[0] == {"abi": ABI, "held": True, "receipt": self.receipt},
+            require(self.frames and self.matches(self.frames[0]),
                     "Original rollback hold refused or changed; do not alter the service manager.")
             self.ready = True
             self.check()
@@ -107,7 +122,7 @@ class Hold:
         self.pump(0)
         require(not self.error, self.error)
         require(self.child.poll() is None and len(self.frames) == 1
-                and self.child.stdout in self.selector.get_map(),
+                and not self.pending and self.child.stdout in self.selector.get_map(),
                 "Original rollback hold exited or released; stop and inspect the pending transition.")
 
     def close(self, *, validate=True):
@@ -126,16 +141,25 @@ class Hold:
             code = self.child.wait(timeout=max(0.01, deadline - time.monotonic()))
             if validate:
                 require(not self.error, self.error)
-                require(self.ready and code == 0 and self.frames == [
-                    {"abi": ABI, "held": True, "receipt": self.receipt},
-                    {"abi": ABI, "held": False, "released": True, "receipt": self.receipt}],
+                require(self.ready and code == 0 and len(self.frames) == 2
+                        and self.matches(self.frames[0]) and self.matches(self.frames[1], released=True),
                     "Original rollback release/exit is unverified; transition remains pending.")
         finally:
             # On a protocol failure no further manager steps are admitted.
             # Cleanup targets this original CLI child alone, never a group.
             if self.child.poll() is None:
                 self.child.kill()
-                self.child.wait(timeout=2)
+            # A logical deadline is not pipe EOF or a reap. Keep the exact
+            # originals (and the caller's installer lock) until both happen,
+            # even if an outer bounded caller has already reported Unknown.
+            # No further manager steps run on this path.
+            while self.selector.get_map():
+                try:
+                    self.pump(0.2)
+                except OSError:
+                    self.error = "Original rollback pipe is unavailable; transition remains pending."
+                    time.sleep(0.2)
+            self.child.wait()
             self.selector.close()
             self.child.stdin.close()
             self.child.stdout.close()

@@ -91,7 +91,7 @@ fn incompatible_cli_stays_unavailable_until_one_explicit_retry_without_fallback(
         .await;
         assert_eq!(fixture.calls().len(), 1);
         fs::write(fixture.0.join("fixture.json"), json!({}).to_string()).unwrap();
-        service.retry();
+        assert!(service.reconnect("peer")); // Composer Refresh can retry a disconnected service.
         eventually("new CLI connected", || service.snapshot().connected).await;
         eventually("one watch", || watch_calls(&fixture.calls()) == 1).await;
         assert!(!service.snapshot().background_ready());
@@ -218,7 +218,7 @@ fn uncertain_read_keeps_its_uuid_and_only_durable_actor_commit_acknowledges() {
     });
 }
 #[test]
-fn queued_catalog_rows_are_discarded_after_source_replacement_and_removal() {
+fn queued_catalog_rows_are_discarded_after_walk_retirement_source_replacement_and_removal() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let fixture = Fixture::new(json!({"supported":false}));
@@ -239,11 +239,11 @@ fn queued_catalog_rows_are_discarded_after_source_replacement_and_removal() {
         };
         service.shared.dirty("", old).unwrap();
         let old = service.shared.dirty.lock().unwrap().sources[""].clone();
-        let delivery = |key: &str| CatalogDelivery {
+        let delivery = |key: &str, source: &SourceVersion| CatalogDelivery {
             shared: Arc::downgrade(&service.shared),
             computer: "".into(),
             epoch: "epoch".into(),
-            source: old.clone(),
+            source: source.clone(),
             stopped: Arc::new(AtomicBool::new(false)),
             value: CatalogValue::Row(Box::new(Change::Upsert {
                 computer: ComputerId::local(),
@@ -251,7 +251,12 @@ fn queued_catalog_rows_are_discarded_after_source_replacement_and_removal() {
                 row: zerus_client_core::view::row(&json!({"name":"codex/example/row"})),
             })),
         };
-        let queued = delivery("stale");
+        let queued = delivery("retired", &old);
+        service.shared.dirty.lock().unwrap().restart("").unwrap();
+        queued.apply(&pump, &|_| {});
+        assert!(pump.row("", "retired").is_none());
+        let current = service.shared.dirty.lock().unwrap().sources[""].clone();
+        let queued = delivery("stale", &current);
         service
             .shared
             .dirty(
@@ -266,7 +271,8 @@ fn queued_catalog_rows_are_discarded_after_source_replacement_and_removal() {
         queued.apply(&pump, &|_| {});
         assert!(pump.row("", "stale").is_none());
         service.shared.dirty("", old.clone()).unwrap();
-        let queued = delivery("removed");
+        let current = service.shared.dirty.lock().unwrap().sources[""].clone();
+        let queued = delivery("removed", &current);
         service.shared.invalidate();
         queued.apply(&pump, &|_| {});
         assert!(pump.row("", "removed").is_none());
@@ -461,9 +467,10 @@ fn twenty_thousand_rows_need_only_one_three_key_delta_after_the_baseline() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let fixture = Fixture::new(json!({"large":20000}));
+        let started = Instant::now();
         let (service, pump) = fixture.start(true);
-        // The bounded serial walk spawns one isolated CLI per page; 158 spawns
-        // took over 30 s on a hosted macOS runner.
+        // Keep a generous fixture deadline for hosted runners; the process
+        // count below, rather than a timing threshold, guards spawn overhead.
         let deadline = Instant::now() + Duration::from_secs(120);
         while pump.row("", "new").is_none() {
             assert!(Instant::now() < deadline);
@@ -473,6 +480,16 @@ fn twenty_thousand_rows_need_only_one_three_key_delta_after_the_baseline() {
         assert!(pump.row("", "row-1").is_none());
         service.join().await.unwrap();
         let calls = fixture.calls();
+        let relays: BTreeSet<_> = calls
+            .iter()
+            .filter(|call| call["args"] == json!(["desktop", "catalog-relay", "--json"]))
+            .filter_map(|call| call["pid"].as_u64())
+            .collect();
+        assert_eq!(relays.len(), 2, "one original child per walk, not per page");
+        assert!(!calls
+            .iter()
+            .any(|call| call["args"] == json!(["desktop", "request", "--json"])));
+        eprintln!("20k catalog baseline + delta: {:?}, 157 baseline pages, 2 delta reads, {} relay children", started.elapsed(), relays.len());
         assert_eq!(
             calls
                 .iter()
@@ -941,5 +958,252 @@ fn temporary_rpc_admission_pressure_retries_follow_without_halting_the_view() {
         assert!(service.snapshot().connected);
         assert_eq!(watch_calls(&fixture.calls()), 1);
         service.join().await.unwrap();
+    });
+}
+#[test]
+fn service_source_roster_bootstraps_catalogs_independently_of_shared_counts() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        for config in [
+            json!({"counts_degraded":true}),
+            json!({"counts_null":true}),
+            json!({"counts_computer":"counts-only"}),
+        ] {
+            let fixture = Fixture::new(config);
+            let (service, pump) = fixture.start(true);
+            eventually(
+                "catalog delivered from the independent source roster",
+                || pump.row("", "row").is_some(),
+            )
+            .await;
+            assert!(service.snapshot().connected);
+            assert_eq!(watch_calls(&fixture.calls()), 1);
+            assert!(fixture
+                .calls()
+                .iter()
+                .filter(|call| call["value"]["op"] == "catalog_page")
+                .all(|call| call["value"]["computer"] == ""));
+            service.join().await.unwrap();
+        }
+    });
+}
+#[test]
+fn count_failures_during_status_and_catalog_hints_keep_the_current_catalog_and_transport_live() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({"counts_transition":true}));
+        let (service, pump) = fixture.start(true);
+        eventually("baseline applied", || {
+            pump.row("", "row").is_some()
+                && service
+                    .shared
+                    .dirty
+                    .lock()
+                    .unwrap()
+                    .progress
+                    .contains_key("")
+        })
+        .await;
+        let _ = pump.take(Duration::ZERO);
+        fs::write(fixture.0.join("drop-counts"), []).unwrap();
+        eventually("contiguous delta after degraded counts", || {
+            pump.row("", "after-counts").is_some()
+        })
+        .await;
+        assert!(service.snapshot().connected);
+        assert!(service.snapshot().attention_counts.is_none());
+        let batch = pump.take(Duration::ZERO);
+        assert!(batch
+            .computers
+            .iter()
+            .all(|computer| !matches!(computer.status.as_str(), "reconnecting" | "probing")));
+        fs::write(fixture.0.join("restore-counts"), []).unwrap();
+        eventually("count projection recovers", || {
+            service.snapshot().attention_counts.is_some()
+        })
+        .await;
+        assert_eq!(watch_calls(&fixture.calls()), 1);
+        assert_eq!(
+            fixture
+                .calls()
+                .iter()
+                .filter(|call| call["value"]["op"] == "catalog_page")
+                .count(),
+            1
+        );
+        service.join().await.unwrap();
+    });
+}
+#[test]
+fn runtime_transport_readiness_does_not_rewalk_a_last_known_catalog_on_every_status() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({"coverage_offline":true}));
+        let (service, pump) = fixture.start(true);
+        eventually("last-known baseline finished", || {
+            pump.row("", "row").is_some()
+                && service
+                    .shared
+                    .rpc
+                    .snapshot()
+                    .is_ok_and(|rpc| rpc.admitted == 0)
+                && !service.shared.dirty.lock().unwrap().pending.contains("")
+        })
+        .await;
+        let before = service.shared.dirty.lock().unwrap().sources[""].clone();
+        assert!(
+            !before.online,
+            "catalog coverage, rather than transport, supplies currentness"
+        );
+        let pages = fixture
+            .calls()
+            .iter()
+            .filter(|call| call["value"]["op"] == "catalog_page")
+            .count();
+        fs::write(fixture.0.join("repeat-status"), []).unwrap();
+        eventually("both runtime status frames processed", || {
+            service.snapshot().generation == Some(3)
+        })
+        .await;
+        assert!(
+            service.shared.dirty.lock().unwrap().sources[""] == before,
+            "runtime transport metadata cannot restart the last-known catalog"
+        );
+        assert_eq!(
+            fixture
+                .calls()
+                .iter()
+                .filter(|call| call["value"]["op"] == "catalog_page")
+                .count(),
+            pages
+        );
+        assert!(service.snapshot().connected);
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn repeated_catalog_failure_retires_only_its_peer_until_manual_retry_or_a_new_scope() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        for scope_change in [false, true] {
+            let fixture = Fixture::new(json!({"peer_failure":true}));
+            let (service, pump) = fixture.start(true);
+            pump.push(Change::Upsert {
+                computer: ComputerId::from("broken"),
+                key: "cached".into(),
+                row: zerus_client_core::view::row(&json!({"name":"codex/example/cached"})),
+            });
+            let statuses = Arc::new(Mutex::new(Vec::new()));
+            let observed = statuses.clone();
+            pump.tap(Box::new(move |change| {
+                if let Change::Computer { computer, status } = change {
+                    observed.lock().unwrap().push((computer.clone(), *status));
+                }
+            }));
+            eventually("only broken catalog exhausted its two walks", || {
+                statuses.lock().unwrap().contains(&(
+                    ComputerId::from("broken"),
+                    ComputerStatus::Reconnecting { attempt: 2 },
+                ))
+            })
+            .await;
+            assert!(service.snapshot().connected);
+            assert!(
+                pump.row("broken", "cached").is_some(),
+                "failed baseline cannot prune last-known rows"
+            );
+            assert!(pump.row("", "row").is_some());
+            let peer_pages = || {
+                fixture
+                    .calls()
+                    .iter()
+                    .filter(|call| {
+                        call["value"]["op"] == "catalog_page"
+                            && call["value"]["computer"] == "broken"
+                    })
+                    .count()
+            };
+            assert_eq!(peer_pages(), 2);
+            statuses.lock().unwrap().clear();
+            fs::write(fixture.0.join("peer-hints"), []).unwrap();
+            eventually(
+                "healthy local delta and all repeated peer hints consumed",
+                || service.snapshot().generation == Some(2) && pump.row("", "after-peer").is_some(),
+            )
+            .await;
+            // The serial walker has processed its pending work; no time-based
+            // assertion can accidentally pass before the final peer hint.
+            eventually("pending work drained without another peer RPC", || {
+                let drained = {
+                    let dirty = service.shared.dirty.lock().unwrap();
+                    dirty.pending.is_empty()
+                        && dirty.progress.get("")
+                            == Some(&Revision::try_from("1".to_owned()).unwrap())
+                };
+                drained
+                    && service
+                        .shared
+                        .rpc
+                        .snapshot()
+                        .is_ok_and(|rpc| rpc.admitted == 0)
+            })
+            .await;
+            assert_eq!(
+                peer_pages(),
+                2,
+                "ordinary hints cannot restart a halted peer"
+            );
+            assert!(statuses
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(computer, status)| !computer.is_local() || *status == ComputerStatus::Live));
+            assert_eq!(watch_calls(&fixture.calls()), 1);
+            if scope_change {
+                fs::write(fixture.0.join("peer-scope-recovered"), []).unwrap();
+            } else {
+                fs::write(fixture.0.join("peer-recovered"), []).unwrap();
+                // Retry now and both native tray Refresh paths call local
+                // reconnect first; service mode has no GUI peer listing.
+                assert!(service.reconnect(""));
+                assert!(!service.reconnect(""), "pending Refresh is not restarted");
+            }
+            eventually("only recovered peer finishes a new baseline", || {
+                pump.row("broken", "cached").is_none()
+                    && service
+                        .shared
+                        .dirty
+                        .lock()
+                        .unwrap()
+                        .progress
+                        .contains_key("broken")
+            })
+            .await;
+            assert!(pump.row("", "after-peer").is_some());
+            assert!(service.snapshot().connected);
+            assert!(!service.reconnect(""), "Refresh leaves live catalogs alone");
+            assert!(!service.reconnect("not-listed"));
+            assert!(statuses
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(computer, status)| !computer.is_local() || *status == ComputerStatus::Live));
+            assert_eq!(
+                watch_calls(&fixture.calls()),
+                1,
+                "peer Retry keeps the shared subscription"
+            );
+            assert_eq!(
+                fixture
+                    .calls()
+                    .iter()
+                    .filter(|call| call["value"]["op"] == "catalog_page"
+                        && call["value"]["computer"] == "")
+                    .count(),
+                1
+            );
+            service.join().await.unwrap();
+        }
     });
 }

@@ -4,9 +4,10 @@
 ; script with Inno Setup 6. Nothing here changes a payload file: third-party
 ; DLLs and EXEs keep their bytes and signatures.
 ;
-; The installer never touches the staged CLI (%USERPROFILE%\.local\bin), the
-; session host images (.local\share\hgs\host), configuration, state, desktop
-; settings or drafts. Restart Manager closes only processes that use files in
+; Payload cleanup never touches the staged CLI, session host images,
+; configuration, state, desktop settings or drafts. The maintained passive
+; registration command stages the stable CLI before registering its own task.
+; Restart Manager closes only processes that use files in
 ; the install folder; the session host runs from its staged image, so it and its
 ; sessions keep running through an upgrade.
 
@@ -119,16 +120,34 @@ begin
       Result := True;
 end;
 
-{ G1 Windows service registration hook. The Windows service lane owns the
-  maintained CLI install/remove command and interactive-user verification.
-  Wire that command here once available; never synthesize a scheduled task in
-  Setup or infer active background ownership from desktop IPC readiness. }
+{ Only the maintained CLI may stage/register the passive service and Toast
+  companion. Neither command starts a task, grants background consent or runs
+  native agents. A failed/unknown result is kept for manual status inspection. }
 procedure DesktopServiceRegistration(const Installing: Boolean);
+var
+  Code: Integer;
 begin
-  if Installing then
-    Log('Desktop service registration hook pending the maintained G1 install command; no task changed.')
-  else
-    Log('Desktop service removal hook pending the maintained G1 remove command; no task changed.');
+  if not Installing then
+  begin
+    Log('UI-only removal keeps the staged CLI, desktop service logon task and Toast registration. UI login is removed separately.');
+    Exit;
+  end;
+  if not Exec(ExpandConstant('{app}\hgs.exe'), 'desktop registration install --json',
+      ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, Code) then
+  begin
+    Log('Desktop registration could not be invoked; inspect its original status before retrying.');
+    Exit;
+  end;
+  if Code <> 0 then
+  begin
+    Log('Desktop registration is unavailable (exit ' + IntToStr(Code) + '); selected CLI/state kept.');
+    Exit;
+  end;
+  if not Exec(ExpandConstant('{app}\hgs.exe'), 'desktop notification-registration install --json',
+      ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, Code) then
+    Log('Toast registration could not be invoked; inspect status before retrying.')
+  else if Code <> 0 then
+    Log('Toast registration is unavailable (exit ' + IntToStr(Code) + '); selected CLI/state kept.');
 end;
 
 { WebView2 Evergreen is a shared Microsoft runtime. Detect only its documented

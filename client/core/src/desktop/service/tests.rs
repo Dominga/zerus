@@ -90,6 +90,60 @@ fn null_and_incomplete_shared_counts_never_become_local_zero_counts() {
     assert!(!state.snapshot().connected);
 }
 #[test]
+fn unavailable_shared_counts_do_not_disconnect_a_valid_lifecycle() {
+    let mut value = status();
+    value["attention_counts"] = json!({"epoch":EPOCH,"scope":"shared_host_state","display_only":true,
+        "authority":false,"local_marks_included":false,"aggregate":{"complete":false,"attention":null},"error":"counts_unavailable"});
+    let mut current = state();
+    assert_eq!(
+        current.frame(&frame(0, "hello", value.clone())),
+        Ok(Update::Status)
+    );
+    assert!(current.snapshot().connected);
+    assert!(current.snapshot().attention_counts.is_none());
+    value["attention_counts"] = counts();
+    current.frame(&frame(1, "heartbeat", value)).unwrap();
+    assert_eq!(current.snapshot().attention_counts, Some(counts()));
+}
+#[test]
+fn source_roster_is_independent_bounded_and_fenced_to_its_epoch() {
+    let mut value = status();
+    value["attention_counts"] = Value::Null;
+    let roster = json!({"epoch":EPOCH,"display_only":true,"authority":false,"computers":[
+        {"computer":"","incarnation":1,"generation":2,"status":"live","accepting":true},
+        {"computer":"peer","incarnation":2,"generation":3,"status":"reconnecting","accepting":false}]});
+    value["background_runtime"] = roster.clone();
+    let mut current = state();
+    current.status(&value).unwrap();
+    let sources = current.sources().unwrap();
+    assert_eq!(sources.len(), 2);
+    assert_eq!(sources[0].computer, "");
+    assert!(sources[0].online);
+    assert!(!sources[1].online);
+    for key in ["epoch", "authority", "computers"] {
+        let mut invalid = roster.clone();
+        invalid[key] = match key {
+            "epoch" => json!(REQUEST),
+            "authority" => json!(true),
+            _ => json!([
+                roster["computers"][0].clone(),
+                roster["computers"][0].clone()
+            ]),
+        };
+        value["background_runtime"] = invalid;
+        current.status(&value).unwrap();
+        assert!(current.snapshot().connected);
+        assert!(current.sources().is_none());
+    }
+    let mut oversized = roster.clone();
+    oversized["computers"] = json!((0..65).map(|i| json!({"computer":format!("peer-{i}"),"incarnation":1,"generation":1,"status":"live","accepting":true})).collect::<Vec<_>>());
+    value["background_runtime"] = oversized;
+    current.status(&value).unwrap();
+    assert!(current.sources().is_none());
+    current.disconnect("offline");
+    assert!(current.sources().is_none());
+}
+#[test]
 fn shared_projection_cannot_claim_local_marks_or_authority() {
     for (key, value) in [
         ("local_marks_included", json!(true)),
@@ -99,8 +153,12 @@ fn shared_projection_cannot_claim_local_marks_or_authority() {
         let mut input = status();
         input["attention_counts"][key] = value;
         let mut state = state();
-        assert_eq!(state.status(&input), Err("invalid_attention_projection"));
-        assert!(!state.snapshot().connected);
+        assert_eq!(state.status(&input), Ok(()));
+        assert!(state.snapshot().connected);
+        assert!(
+            state.snapshot().attention_counts.is_none(),
+            "invalid display data is quarantined"
+        );
     }
 }
 #[test]

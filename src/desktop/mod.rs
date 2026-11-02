@@ -3,6 +3,7 @@
 mod attention;
 mod background;
 mod catalog_read;
+mod catalog_relay;
 mod counts;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod custody;
@@ -60,7 +61,7 @@ use std::{
 use store::{Location, Store};
 use transport::{Listener, Stream, TIMEOUT};
 
-const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] [--background] | status [--json] | startup --json | owner-status --json | watch --json | feed --json | request --json | registration --json | registration install|remove|status --json (Windows) | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
+const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] [--background] | status [--json] | startup --json | owner-status --json | watch --json | feed --json | request --json | catalog-relay --json | registration --json | registration install|remove|status --json (Windows) | notification-registration install|status --json | notification-registration remove --json --request-id UUID (Windows) | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
 const HEARTBEAT: Duration = Duration::from_secs(10);
 pub const STARTUP_REFUSED: i32 = 78;
 
@@ -72,6 +73,12 @@ impl std::fmt::Display for StartupRefused {
     }
 }
 impl std::error::Error for StartupRefused {}
+
+#[cfg(windows)]
+pub(crate) fn windows_notification_activation(first: Option<&str>) -> Option<i32> {
+    (first == Some(notifications::windows::ACTIVATION_ENTRY))
+        .then(notifications::windows::cold_entry)
+}
 
 pub fn registered_command(args: &[String]) -> bool {
     let args = if args.len() == 7 && args[6] == "--background" {
@@ -175,6 +182,28 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                     anyhow::bail!("desktop registration install/remove/status is available only on Windows; use the maintained platform installer")
                 }
             }
+            ["notification-registration", rest @ ..] => {
+                let (operation, request_id) = match rest {
+                    [operation @ ("install" | "status"), "--json"] => (*operation, None),
+                    ["remove", "--json", "--request-id", id] => ("remove", Some(*id)),
+                    _ => anyhow::bail!(USAGE),
+                };
+                #[cfg(windows)]
+                {
+                    println!(
+                        "{}",
+                        notifications::windows::registration::command(
+                            config, operation, request_id
+                        )?
+                    );
+                    Ok(())
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = (operation, request_id);
+                    anyhow::bail!("Windows Toast registration is available only on Windows")
+                }
+            }
             ["import-evidence", "--json"] => {
                 println!("{}", import_evidence::cli(&location)?);
                 Ok(())
@@ -256,6 +285,7 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                     "desktop revocation is not settled; keep Qt stopped and inspect the same request_id");
                 Ok(())
             }
+            ["catalog-relay", "--json"] => catalog_relay::run(&location),
             ["request", "--json"] | ["frontend-request", "--json"] => {
                 let mut bytes = Vec::new();
                 std::io::stdin()

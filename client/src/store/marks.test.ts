@@ -726,6 +726,18 @@ describe("service read intents", () => {
     await store.load(); await flush();
     return { port, store, ...data, row: () => data.catalog.rows[id()] };
   }
+  it("shows retained exact local read overlays without claiming host acknowledgement or starting a writer", async () => {
+    const f = await fixture(false, { local_read_reply: true, local_read_attention: true, attention_signature: "s1" });
+    expect(f.row().unread).toBe(false);
+    expect(f.row().readReplyId).toBeUndefined();
+    expect(f.row().readAttentionSignature).toBeUndefined();
+    expect(f.port.queueReadMarks).not.toHaveBeenCalled();
+    f.applyBatch(batchOf({ upserts: [rowOut({ reply_id: "new-reply", attention_signature: "new-attention" })] }));
+    expect(f.row().unread).toBe(true);
+    expect(f.row().localReadReply).toBe(false);
+    expect(f.row().localReadAttention).toBe(false);
+    expect(f.port.queueReadMarks).not.toHaveBeenCalled();
+  });
   it("does not migrate or mark locally when the service read component is unavailable", async () => {
     const f = await fixture(false);
     expect(f.store.markRead(snapshotOf(f.row()))).toBe(false);

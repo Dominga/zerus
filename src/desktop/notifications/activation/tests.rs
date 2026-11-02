@@ -212,3 +212,41 @@ fn policy_permit_and_detached_receiver_do_not_consume_activation() {
     router.poll(&f.store, Some(&f.outbox), &mut 0);
     assert_eq!(router.pending.len(), 1);
 }
+
+#[test]
+fn a_changed_full_proof_cannot_deliver_a_click_during_the_cache_interval() {
+    use std::sync::atomic::Ordering;
+    let f = Fixture::new();
+    let mut router = f.router();
+    router.offer(&f.store, &f.outbox, f.value.clone()).unwrap();
+    let (_, queue) = f.wait(&mut router);
+    let probe = Arc::new(ui_authority::ActivationProbe::default());
+    router.waiting.as_mut().unwrap().peer.set_probe(
+        probe.clone(),
+        Instant::now() + std::time::Duration::from_secs(3600),
+    );
+    // Cheap handles remain live, but the original ancestry proof has changed
+    // since admission. The periodic cache must not authorize this handoff.
+    let original_id = router.pending.front().unwrap().id.clone();
+    let original_until = router.pending.front().unwrap().until;
+    probe.valid.store(false, Ordering::SeqCst);
+    router.poll(&f.store, Some(&f.outbox), &mut 0);
+    assert!(queue.closed());
+    assert!(queue.take().is_none());
+    assert_eq!(probe.full_checks.load(Ordering::SeqCst), 1);
+    assert_eq!(router.pending.front().unwrap().until, original_until);
+    assert_eq!(
+        router.pending.len(),
+        1,
+        "known-unsent click survives proof refusal"
+    );
+    let (_, next_queue) = f.wait(&mut router);
+    router.poll(&f.store, Some(&f.outbox), &mut 0);
+    let frame: Value = serde_json::from_slice(&next_queue.take().unwrap()).unwrap();
+    assert_eq!(frame["value"]["activation"]["activation_id"], original_id);
+    assert_eq!(
+        frame["value"]["activation"]["post_request_id"],
+        f.value.request_id
+    );
+    assert!(router.pending.is_empty());
+}

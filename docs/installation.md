@@ -386,14 +386,17 @@ Install and start:
    The Zerus window opens. Closing it keeps Zerus running in the notification
    area, where Windows 11 first hides a new icon behind the **^** arrow; run
    `hgs-tray.exe` again to bring the window back.
-   The per-user installer currently built and tested in CI from the same zip
-   checks this prerequisite and
+   Alternatively, download `zerus-<version>-windows-x86_64-setup.exe` from the
+   same Stable or Nightly release, verify its own `SHA256SUMS` entry and run it
+   as your normal desktop user. The per-user installer contains the same tested
+   ZIP payload, checks the WebView2 prerequisite and
    offers **Start Zerus at login**, off by default. It preserves configuration,
    drafts and native host images when upgrading. Its login choice applies only
-   to the desktop app; local agent hosting remains a separate opt-in. Public
-   installer publication is separate release work. Its desktop-service setup hook
-   awaits the maintained Windows G1 command; `hgs.exe desktop registration --json`
-   previews that service definition and readiness interface.
+   to the desktop app; local agent hosting remains a separate opt-in. Service
+   setup invokes the maintained passive registration command, then registers the
+   owned Windows Toast identity. Neither step starts the service or grants
+   background consent. UI-only uninstall removes the separate UI login entry
+   and preserves the staged CLI, service task and Toast identity.
 4. To manage remote machines, add them in **Machines**. Accept a new host key once
    with **Open SSH terminal**, then use **Test connection**.
    **Install / update HGS…** builds `hgs` on the remote machine from a Zerus source
@@ -537,6 +540,35 @@ stops an idle session host without disabling anything.
   local sessions. A foreign or changed task is kept for manual review. If a
   command reports an uncertain outcome, inspect `status` before trying again.
   This service task is separate from the UI's Startup shortcut or Run value.
+- For service-owned Windows alerts, install the passive service registration
+  first, then run `hgs.exe desktop notification-registration install --json`.
+  `status --json` reports only registration, not service readiness or delivered
+  alerts. These commands keep the `com.hgdev.hgs-tray` identity and bind its COM
+  activation registration to the exact selected stable CLI/configuration. A
+  foreign, partial or changed registration is kept. The worker never repairs it.
+  The three current-user keys are `HKCU\Software\Classes\AppUserModelId\com.hgdev.hgs-tray`,
+  `HKCU\Software\Classes\CLSID\{0F0F70A2-1D40-47D8-AC5E-D6A9B789605F}`,
+  and `HKCU\Software\Classes\CLSID\{0F0F70A2-1D40-47D8-AC5E-D6A9B789605F}\LocalServer32`.
+  After an interrupted install, inspect all three before manually removing
+  only an owned partial set; the
+  commands refuse partial sets rather than repairing or deleting them.
+  Cold COM activation is passive and refuses without acquiring a service owner.
+  Root service attachment and native alert/click acceptance remain separate.
+
+  UI-only uninstall preserves this backend registration. Explicit backend
+  removal first needs a settled manual revoke with a fresh UUID retained for
+  that operation: `hgs.exe desktop revoke --json --request-id UUID --reason manual`.
+  Then use `hgs.exe desktop notification-registration remove --json --request-id UUID`
+  with that **same** UUID, followed by `hgs.exe desktop registration remove --json`.
+  The Toast command only queries the original revoke; it does not issue or replay
+  it. It requires the selected configuration, original runtime epoch and all
+  accepted/durable/revoked/checkpointed fields. Busy, changed, missing or unknown
+  evidence keeps the registration and stable CLI. An absent service with retained
+  state is unavailable rather than substituted with a new baseline. Verified
+  no-service/no-state is a separate path, not a live-runtime drain claim. Active
+  removal currently refuses while Windows Runtime drain attachment is missing;
+  a generic service receipt, component fixture or CLI exit zero is insufficient. Native notification-history
+  deletion is not asserted.
 - Without SSH connection sharing, every poll of every machine is a full SSH
   handshake: about 150 ms per machine on a LAN. The app lists this computer at
   most once every 15 seconds, or every 5 seconds with local sessions enabled.

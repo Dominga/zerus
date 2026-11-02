@@ -59,5 +59,6 @@ cp tests/windows_frontend_auth.py tests/test_desktop.py artifacts/zerus-next-win
 # Run independent runtime suites after preserving exact compiled bytes.
 # Any failure remains the shell step's exit status and the job stays failed.
 HGS_DESKTOP_REGISTRATION_TRACE=1 python tests/test_windows_desktop_registration.py --hgs "$CARGO_TARGET_DIR/debug/hgs.exe" || native_status=1
+python tests/test_windows_notification_registration.py --hgs "$CARGO_TARGET_DIR/debug/hgs.exe" || native_status=1
 python -m unittest discover -s tests -p windows_frontend_auth.py -v || native_status=1
 exit "$native_status"

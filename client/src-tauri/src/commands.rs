@@ -321,10 +321,7 @@ mod live {
                 .as_ref()
             {
                 Some(Source::Fleet(fleet)) => fleet.reconnect(&ComputerId::from(computer)),
-                Some(Source::Service(service)) => {
-                    service.retry();
-                    true
-                }
+                Some(Source::Service(service)) => service.reconnect(computer),
                 Some(Source::Replay(_)) | None => false,
             }
         }
@@ -820,6 +817,9 @@ pub async fn next_batch(
         // The host's rows settle pending read marks, whether they arrive as
         // single upserts or inside a computer's snapshot.
         actions.observe(&batch);
+        if crate::desktop_service::mode() {
+            actions.overlay_retained_reads(&mut batch);
+        }
         // The followed session's Activity state and its row feed the
         // composer's block reason, before its view is taken.
         composers.observe(&batch);

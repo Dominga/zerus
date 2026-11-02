@@ -130,6 +130,12 @@ pub struct ViewRow {
     /// The read mark of this conversation, None when it belongs to another one.
     pub read_reply_id: Option<String>,
     pub read_attention_signature: Option<String>,
+    /// Device-local retained queue overlays, supplied only at the IPC boundary.
+    /// These never assert that the host has applied a shared read mark.
+    #[serde(skip_deserializing, skip_serializing_if = "is_false")]
+    pub local_read_reply: bool,
+    #[serde(skip_deserializing, skip_serializing_if = "is_false")]
+    pub local_read_attention: bool,
     /// The operations the computer reports as allowed, None when it reports none.
     pub allowed_actions: Option<Vec<String>>,
     pub action_reasons: BTreeMap<String, String>,
@@ -1254,6 +1260,8 @@ pub fn row(value: &Value) -> ViewRow {
         shared_read: session.shared_read(),
         read_reply_id: some(session.read_mark("reply_id")),
         read_attention_signature: some(session.read_mark("attention_signature")),
+        local_read_reply: false,
+        local_read_attention: false,
         allowed_actions: value
             .get("allowed_actions")
             .and_then(Value::as_array)
@@ -1294,6 +1302,18 @@ pub fn row(value: &Value) -> ViewRow {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn a_host_cannot_supply_device_local_read_overlays() {
+        let value =
+            json!({"name":"codex/example/one","local_read_reply":true,"local_read_attention":true});
+        for row in [
+            row(&value),
+            serde_json::from_value::<ViewRow>(value).unwrap(),
+        ] {
+            assert!(!row.local_read_reply);
+            assert!(!row.local_read_attention);
+        }
+    }
 
     #[test]
     fn account_binding_comes_from_the_listing_even_when_the_provider_is_presented_differently() {

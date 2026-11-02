@@ -115,7 +115,7 @@ def finish_candidate(directory, packages=PACKAGES):
                         bundled.addfile(member, content)
     # Containers are sealed too; validation accepts only declared platform assets.
     assets = sorted([*directory.glob("*.tar.gz"), *directory.glob("*.pkg.tar.zst"), *directory.glob("*.zip"),
-                     *directory.glob("*.dmg"), directory / "release-info.json"])
+                     *directory.glob("*.dmg"), *directory.glob("*.exe"), directory / "release-info.json"])
     (directory / "SHA256SUMS").write_text("".join(f"{sha256(path)}  {path.name}\n" for path in assets))
 
 
@@ -154,6 +154,10 @@ def validate_candidate(directory, version, commit=None):
     if windows is not None:
         require(windows == windows_portable.asset_name(version), "Invalid Windows stable asset.")
         required.add(windows)
+    installer = info.get("windows_installer")
+    if installer is not None:
+        import windows_installer_release
+        required.add(windows_installer_release.validate_metadata(installer, version, windows, sums))
     package_files = {name for name in sums if name.endswith(".pkg.tar.zst")}
     patterns = [re.fullmatch(rf"(zerus|zerus-ade-bin)-{re.escape(version)}-\d+-x86_64\.pkg\.tar\.zst", name) for name in package_files]
     require(len(package_files) == 2 and all(patterns) and {match[1] for match in patterns if match} == {"zerus", "zerus-ade-bin"}, "Expected checked stable source and binary x86_64 pacman packages.")

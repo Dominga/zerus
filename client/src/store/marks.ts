@@ -239,11 +239,11 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     } else {
       const queued = pending.size ? pending.get(pendingKey(s.computer, s.name)) : undefined;
       const sameRun = !!queued?.run_id && queued.run_id === (s.runId ?? "") && queued.conversation_id === (s.conversationId ?? "");
-      unreadReply = current && !((s.readReplyId ?? "") === reply || (sameRun && (queued!.reply_id ?? "") === reply));
+      unreadReply = current && !(s.localReadReply || (s.readReplyId ?? "") === reply || (sameRun && (queued!.reply_id ?? "") === reply));
       const signature = s.attentionSignature ?? "";
       // Recovery-only attention has no host signature and stays a local choice.
       ack = !signature ? localAck
-        : signature === (s.readAttentionSignature ?? "") || (sameRun && (queued!.attention_signature ?? "") === signature);
+        : !!s.localReadAttention || signature === (s.readAttentionSignature ?? "") || (sameRun && (queued!.attention_signature ?? "") === signature);
     }
     // Shown unread once the reply is finished (Qt's visibleUnreadReply); a
     // projection without the field keeps the row's own value.
@@ -665,8 +665,9 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     return true;
   }
 
+  // Cutover requires importing every frozen next_pending_reads mark (zerus-5wmh.66.3.31.6); this overlay never delivers it.
   const sharedReadNeeded = (s: Session) => s.sharedRead && !!(
-    (s.replyId && s.readReplyId !== s.replyId) || (s.attentionSignature && s.readAttentionSignature !== s.attentionSignature)
+    (s.replyId && !s.localReadReply && s.readReplyId !== s.replyId) || (s.attentionSignature && !s.localReadAttention && s.readAttentionSignature !== s.attentionSignature)
   );
 
   /** A current row can be unread because the service is unavailable; that is

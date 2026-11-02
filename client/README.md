@@ -182,7 +182,13 @@ identity, coalesces hints, and restarts a baseline on a gap, unknown cursor outc
 or scope replacement. Only a fully consumed delta walk establishes membership;
 provisional/offline rows remain incomplete. Quit bounds the service join to five
 seconds after its draft flush. Shared host attention counts remain separate from
-this device's review marks; incomplete/null counts remain unknown. Read intents
+this device's review marks; incomplete/null counts remain unknown. An unavailable
+or invalid count projection does not disconnect a valid lifecycle or catalog.
+Catalog bootstrap uses the bounded, epoch-bound runtime source roster instead
+of the counts' computer list. Retained pre-cutover read marks are projected by
+indexed exact-identity lookups into outgoing rows as device-local flags; the host
+acknowledgement fields and shared counts remain unchanged. The GUI read-delivery
+gate stays closed, and the webview does not mirror that entire legacy queue. Read intents
 are acknowledged only after a durable actor receipt, retaining their request UUID
 through an uncertain result. Activity, processes, project tasks and organization use
 the existing subscriber's bounded detail lease. Each view retains its exact consumer

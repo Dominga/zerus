@@ -19,6 +19,10 @@ on:
       run_windows:
         type: boolean
         default: false
+      windows_installer_version:
+        description: Installer release version (empty uses the ZIP product version)
+        type: string
+        default: ''
       run_ios:
         type: boolean
         default: false
@@ -1410,6 +1414,7 @@ jobs:
       run:
         shell: bash
     env:
+      WINDOWS_INSTALLER_VERSION: ${{ inputs.windows_installer_version }}
       CARGO_TERM_COLOR: always
       # Line tables keep test backtraces readable and bound the cached target size.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
@@ -1559,10 +1564,12 @@ jobs:
             </dev/null 2>&1 | tee artifacts/test-results/portable.log
       # The per-user installer (packaging/windows/zerus.iss) from that zip, with
       # the runner image's Inno Setup 6: its payload is the zip's files byte for
-      # byte. Release assembly takes only the zip at the top of this artifact.
+      # byte. Assembly carries both unchanged and checks their CI build metadata.
       - name: Per-user installer from the portable zip
         run: |
           python scripts/package-windows-installer.py artifacts/zerus-windows-x86_64.zip \
+            --version "${WINDOWS_INSTALLER_VERSION:-$(cat VERSION)}" \
+            --info artifacts/installer/windows-installer-info.json \
             --output artifacts/installer/zerus-windows-x86_64-setup.exe </dev/null 2>&1 | tee artifacts/test-results/installer-package.log
       # Install, upgrade over it and uninstall while a session host of the
       # installed build runs from its staged image, outside the step's job as the
@@ -1573,7 +1580,8 @@ jobs:
           HGS_TEST_BIN=$(cygpath -w "$PWD/target/release/hgs.exe")
           HGS_TEST_INSTALLER=$(cygpath -w "$PWD/artifacts/installer/zerus-windows-x86_64-setup.exe")
           HGS_TEST_PORTABLE_ZIP=$(cygpath -w "$PWD/artifacts/zerus-windows-x86_64.zip")
-          export HGS_TEST_BIN HGS_TEST_INSTALLER HGS_TEST_PORTABLE_ZIP
+          HGS_TEST_INSTALLER_VERSION="${WINDOWS_INSTALLER_VERSION:-$(cat VERSION)}"
+          export HGS_TEST_BIN HGS_TEST_INSTALLER HGS_TEST_PORTABLE_ZIP HGS_TEST_INSTALLER_VERSION
           cd tests
           python ../scripts/ci/outside-job.py --timeout 600 --end "$HGS_TEST_BIN" --end '*\hgs-host-*\hgs.exe' \
             --log ../artifacts/test-results/installer.log -- \

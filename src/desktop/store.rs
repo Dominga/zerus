@@ -707,6 +707,54 @@ mod tests {
         assert!(location.handoff_lock().is_err());
         assert!(!foreign.join(HANDOFF_LOCK).exists());
     }
+    #[cfg(windows)]
+    #[test]
+    fn windows_verbatim_locations_keep_identity_and_do_not_create_missing_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut parent = temp.path().canonicalize().unwrap();
+        // Cover both the ordinary short temp path and an extended-length path.
+        for long in [false, true] {
+            if long {
+                for _ in 0..8 {
+                    parent.push("synthetic-long-desktop-folder-component");
+                }
+                fs::create_dir_all(&parent).unwrap();
+                assert!(parent.as_os_str().len() > 260);
+            }
+            let root = fs::canonicalize(&parent).unwrap();
+            assert!(
+                matches!(root.components().next(), Some(std::path::Component::Prefix(prefix))
+                if matches!(prefix.kind(), std::path::Prefix::VerbatimDisk(_) | std::path::Prefix::VerbatimUNC(_, _)))
+            );
+            let text = root.to_str().unwrap();
+            let ordinary = if let Some(share) = text.strip_prefix(r"\\?\UNC\") {
+                PathBuf::from(format!(r"\\{share}"))
+            } else {
+                PathBuf::from(text.strip_prefix(r"\\?\").unwrap())
+            };
+            let config = |root: &Path| Config {
+                home: root.to_str().unwrap().into(),
+                dir: root.join("missing-config"),
+                state: root.join("missing-state"),
+                selves: vec![],
+                peers: vec![],
+                base_peers: vec![],
+                peers_from_environment: false,
+                machines: Default::default(),
+                tab: false,
+                tab_colors: String::new(),
+            };
+            let direct = Location::new(&config(&root)).unwrap();
+            let alias = Location::new(&config(&ordinary)).unwrap();
+            assert_eq!(direct.root, root.join("missing-state").join("desktop"));
+            assert_eq!(direct.root, alias.root);
+            assert_eq!(direct.configuration, alias.configuration);
+            assert_eq!(canonical(&root).unwrap(), root);
+            assert!(!root.join("missing-state").exists());
+            assert!(!root.join("missing-config").exists());
+        }
+    }
+
     #[test]
     fn canonical_aliases_share_the_os_lock() {
         let temp = tempfile::tempdir().unwrap();

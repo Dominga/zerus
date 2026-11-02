@@ -1037,7 +1037,7 @@ fn root_service_grant_attaches_original_host_posts_and_routes_click_then_release
         notifications::{activation, attachment, preparation, service},
         ownership, ui_authority,
     };
-    let _prepare = preparation::TEST_SERIAL.lock().unwrap();
+    let _prepare = preparation::TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let _attach = attachment::TEST_SERIAL.lock().unwrap();
     let bus = bus::Bus::new();
     let server = Server::new(&bus);

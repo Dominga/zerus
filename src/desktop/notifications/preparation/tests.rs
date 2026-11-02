@@ -11,7 +11,7 @@ fn fixture() -> (tempfile::TempDir, Location) {
 }
 #[test]
 fn stopped_selection_keeps_the_original_service_and_handoff_locks_until_real_join() {
-    let _serial = TEST_SERIAL.lock().unwrap();
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (_temp, location) = fixture();
     let service = Arc::new(location.lock().unwrap());
     let owner = Owner::acquire(service, &location).unwrap();
@@ -46,7 +46,7 @@ fn stopped_selection_keeps_the_original_service_and_handoff_locks_until_real_joi
 }
 #[test]
 fn a_busy_handoff_does_not_leak_a_preparation_admission() {
-    let _serial = TEST_SERIAL.lock().unwrap();
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (_temp, location) = fixture();
     let service = Arc::new(location.lock().unwrap());
     let handoff = location.handoff_lock().unwrap();

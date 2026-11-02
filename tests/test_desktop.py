@@ -147,6 +147,12 @@ finally:
         The positive TTY case deliberately refuses inside an agent tree even
         when child markers are cleared; a private pty is not a bypass.
         """
+        unsupported = None
+        if sys.platform == 'darwin':
+            from macos_ancestry import topology, unsupported_hosted_foreign
+            chain = topology()
+            print('MACOS_CALLER_TOPOLOGY ' + json.dumps(chain), file=sys.stderr, flush=True)
+            unsupported = unsupported_hosted_foreign(chain, os.geteuid(), os.environ)
         import shutil
         # This helper is a private fixture executable, not the owner's GUI.
         frontend = Path(self.env['HOME']) / '.local/bin/hgs-tray'
@@ -220,12 +226,7 @@ finally:
             finally:
                 if master is not None:
                     os.close(master); os.close(slave)
-        foreground = case(sys.executable, terminal=True)
-        self.assertEqual(foreground['code'], 0, foreground)
-        self.assertEqual(json.loads(foreground['out'])['source'], 'interactive_terminal')
-        gui = case(frontend, native=True)
-        self.assertEqual(gui['code'], 0, gui)
-        self.assertEqual(json.loads(gui['out'])['source'], 'installed_frontend')
+        # These refusals must run even on an unsupported hosted topology.
         headless = case(sys.executable)
         self.assertNotEqual(headless['code'], 0)
         agent = case(sys.executable, terminal=True, marker=True)
@@ -233,14 +234,30 @@ finally:
         self.assertIn('agent-descended', agent['error'])
         named = frontend.with_name('claude')
         shutil.copy2(frontend, named)
-        self.assertNotEqual(case(named, native=True)['code'], 0)
+        named_agent = case(named, native=True)
+        self.assertNotEqual(named_agent['code'], 0)
+        self.assertIn('agent-descended', named_agent['error'])
         # The checker itself cannot impersonate its own frontend ancestor.
-        shutil.copy2(HGS, frontend)
-        own = subprocess.run([str(frontend), 'desktop', 'registration', 'mode-check', '--json'],
-                             env=self.env, start_new_session=True, stdin=subprocess.DEVNULL,
-                             capture_output=True, text=True, timeout=5)
-        self.assertNotEqual(own.returncode, 0)
+        native_frontend = frontend.read_bytes()
+        try:
+            shutil.copy2(HGS, frontend)
+            own = subprocess.run([str(frontend), 'desktop', 'registration', 'mode-check', '--json'],
+                                 env=self.env, start_new_session=True, stdin=subprocess.DEVNULL,
+                                 capture_output=True, text=True, timeout=5)
+            self.assertNotEqual(own.returncode, 0)
+        finally:
+            frontend.write_bytes(native_frontend)
         self.assertFalse(self.desktop.exists())
+        if unsupported is not None:
+            print('MACOS_CALLER_REFUSALS_COMPLETED', file=sys.stderr, flush=True)
+            self.skipTest('Hosted runner has unsupported foreign ancestor: ' + json.dumps(unsupported)
+                          + '; native macOS permission remains refused; refusal cases passed')
+        foreground = case(sys.executable, terminal=True)
+        self.assertEqual(foreground['code'], 0, foreground)
+        self.assertEqual(json.loads(foreground['out'])['source'], 'interactive_terminal')
+        gui = case(frontend, native=True)
+        self.assertEqual(gui['code'], 0, gui)
+        self.assertEqual(json.loads(gui['out'])['source'], 'installed_frontend')
 
     def test_approval_audit_is_selected_scoped_and_does_not_create_a_journal(self):
         self.serve()

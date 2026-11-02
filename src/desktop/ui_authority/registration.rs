@@ -16,6 +16,9 @@ pub(in crate::desktop) fn caller(scope: &Scope) -> Result<&'static str> {
         "agent session cannot change desktop mode; use Settings or a terminal outside Zerus"
     );
     let until = Instant::now() + WAIT;
+    #[cfg(target_os = "macos")]
+    let owned = macos_ancestry::inspect(std::process::id(), until)?;
+    #[cfg(not(target_os = "macos"))]
     check_ancestry(std::process::id(), until)?;
     if let Ok(tty) = std::fs::OpenOptions::new()
         .read(true)
@@ -30,24 +33,38 @@ pub(in crate::desktop) fn caller(scope: &Scope) -> Result<&'static str> {
             return Ok("interactive_terminal");
         }
     }
-    let original = Process::read(std::process::id())?;
-    ensure!(original.current(), "installer caller changed");
-    let mut pid = original.identity.parent;
-    let mut seen = BTreeSet::new();
-    while pid != 0 {
+    #[cfg(target_os = "macos")]
+    for process in owned.iter().skip(1) {
         ensure!(
-            seen.len() < ANCESTORS && Instant::now() < until && seen.insert(pid),
-            "installer caller ancestry unavailable"
+            Instant::now() < until && process.current(),
+            "installer caller changed"
         );
-        if !same_user(pid)? {
-            break;
-        }
-        let process = Process::read(pid)?;
-        ensure!(process.current(), "installer caller changed");
         if scope.selected_frontend(Path::new(&process.executable)) {
+            ensure!(process.current(), "installer frontend changed");
             return Ok("installed_frontend");
         }
-        pid = process.identity.parent;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let original = Process::read(std::process::id())?;
+        ensure!(original.current(), "installer caller changed");
+        let mut pid = original.identity.parent;
+        let mut seen = BTreeSet::new();
+        while pid != 0 {
+            ensure!(
+                seen.len() < ANCESTORS && Instant::now() < until && seen.insert(pid),
+                "installer caller ancestry unavailable"
+            );
+            if !same_user(pid)? {
+                break;
+            }
+            let process = Process::read(pid)?;
+            ensure!(process.current(), "installer caller changed");
+            if scope.selected_frontend(Path::new(&process.executable)) {
+                return Ok("installed_frontend");
+            }
+            pid = process.identity.parent;
+        }
     }
     anyhow::bail!("desktop mode changes require Settings or a foreground terminal outside Zerus")
 }

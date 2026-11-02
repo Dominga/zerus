@@ -4548,8 +4548,11 @@ installers; it is a requirement, not a claim that the environment is present.
 `lifecycle.mode` reports the running command's `passive` or `background`
 selection independently of worker admission. On Linux/macOS, `registration --json
 --background` renders the explicit background variant without installing it;
-`registration mode-check --json` checks the actual installer caller ancestry and
-foreground terminal or installed frontend, without granting service ownership.
+On Linux and macOS, `registration mode-check --json` checks the actual installer
+caller ancestry and foreground terminal or installed frontend, without granting
+service ownership.
+The [macOS ancestry boundary](macos-distribution.md) verifies Terminal's system
+login bridge and launchd PID 1; SSH through a foreign session process refuses.
 The maintained Linux helper's `status --json` reports the durable selected mode
 separately from the running mode and any pending restart/revoke transition.
 

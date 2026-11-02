@@ -210,7 +210,7 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                 }
                 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
                 anyhow::bail!(
-                    "desktop registration mode checks are currently supported on Linux and macOS"
+                    "desktop registration mode checks are supported on Linux and macOS only"
                 )
             }
             ["registration", operation @ ("install" | "remove" | "status"), "--json"] => {

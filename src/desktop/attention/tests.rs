@@ -1232,11 +1232,29 @@ fn fleet_rows(count: usize) -> Vec<Value> {
         })
         .collect()
 }
-fn assert_single_reply(f: &mut Fixture, reply: &str) {
-    let dispatch = f.host.try_next().unwrap().begin().unwrap();
-    let target = attention::target(dispatch.command().action.token()).unwrap();
-    assert_eq!(target["reply"], reply);
-    assert!(f.host.try_next().is_err());
+fn assert_single_reply(f: &mut Fixture, reply: &str, turns: usize) {
+    let mut observed = false;
+    for _ in 0..turns {
+        f.tick();
+        // This synchronous fixture is also the native receiver. Claim the
+        // original work before the next SQL turn, not after the whole walk:
+        // catalog logical time does not suspend the real outbox deadline.
+        if let Ok(work) = f.host.try_next() {
+            let dispatch = work.begin().expect("newly offered fixture work must admit");
+            assert!(!observed, "duplicate reply post");
+            assert!(matches!(dispatch.command().action, Action::Post { .. }));
+            let target = attention::target(dispatch.command().action.token()).unwrap();
+            assert_eq!(target["reply"], reply);
+            assert!(f.host.try_next().is_err());
+            observed = true;
+        }
+    }
+    // Continue the complete original pass after the first post, so a late
+    // duplicate is still a failure rather than an early successful return.
+    assert!(
+        observed,
+        "expected reply was not posted within {turns} turns"
+    );
 }
 
 #[test]
@@ -1261,8 +1279,7 @@ fn focus_refresh_never_restarts_a_multi_page_baseline_or_loses_a_later_reply() {
     let mut changed = rows[199].clone();
     changed["reply_id"] = json!("new-199");
     f.delta(changed);
-    f.ticks(400);
-    assert_single_reply(&mut f, "new-199");
+    assert_single_reply(&mut f, "new-199", 400);
 }
 
 #[test]
@@ -1277,20 +1294,19 @@ fn initial_baseline_consumes_first_observation_before_admitting_later_replies() 
         let mut changed = rows[position].clone();
         changed["reply_id"] = json!(format!("new-{position}"));
         f.delta(changed);
-        f.ticks(400);
         if position == 100 {
             // The queued page still has the old start value, so it can first
             // consume reply-1 and then admit the delta's genuinely new reply.
-            assert_single_reply(&mut f, &format!("new-{position}"));
+            assert_single_reply(&mut f, &format!("new-{position}"), 400);
         } else {
             // No before-image exists for this unread page. Conservatively
             // consume its first value; do not invent an empty start-state.
+            f.ticks(400);
             assert!(f.host.try_next().is_err());
             let mut after = rows[position].clone();
             after["reply_id"] = json!("after-first-observation");
             f.delta(after);
-            f.ticks(10);
-            assert_single_reply(&mut f, "after-first-observation");
+            assert_single_reply(&mut f, "after-first-observation", 10);
         }
     }
 }
@@ -1310,8 +1326,7 @@ fn policy_baseline_preserves_a_later_page_reply_newer_than_its_start_revision() 
     let mut changed = rows[199].clone();
     changed["reply_id"] = json!("after-policy");
     f.delta(changed);
-    f.ticks(400);
-    assert_single_reply(&mut f, "after-policy");
+    assert_single_reply(&mut f, "after-policy", 400);
 }
 
 #[test]
@@ -1334,8 +1349,7 @@ fn retention_gap_baseline_preserves_replies_after_its_new_start() {
     let mut changed = rows[199].clone();
     changed["reply_id"] = json!("after-gap");
     f.delta(changed);
-    f.ticks(400);
-    assert_single_reply(&mut f, "after-gap");
+    assert_single_reply(&mut f, "after-gap", 400);
 }
 
 #[test]
@@ -1360,8 +1374,7 @@ fn losing_journal_coverage_mid_baseline_resets_before_consuming_an_unproven_row(
     let mut changed = rows[0].clone();
     changed["reply_id"] = json!("new-after-reset");
     f.delta(changed);
-    f.ticks(400);
-    assert_single_reply(&mut f, "new-after-reset");
+    assert_single_reply(&mut f, "new-after-reset", 400);
 }
 
 #[test]
@@ -1383,8 +1396,7 @@ fn a_reply_observed_while_focused_stays_consumed_after_focus_expires() {
     assert!(f.host.try_next().is_err());
     changed["reply_id"] = json!("new-background");
     f.delta(changed);
-    f.ticks(10);
-    assert_single_reply(&mut f, "new-background");
+    assert_single_reply(&mut f, "new-background", 10);
 }
 
 #[test]
@@ -1567,8 +1579,7 @@ fn an_empty_saved_tracker_is_known_state_and_allows_new_delta_edges() {
     let mut changed = rows[150].clone();
     changed["reply_id"] = json!("first-new-reply");
     f.delta(changed);
-    f.ticks(400);
-    assert_single_reply(&mut f, "first-new-reply");
+    assert_single_reply(&mut f, "first-new-reply", 400);
 }
 
 #[cfg(unix)]
@@ -1600,6 +1611,5 @@ fn foreground_ttl_expires_at_the_logical_deadline_without_sleeping() {
     f.focus();
     f.advance(FOCUS_TTL);
     f.delta(row());
-    f.ticks(4);
-    assert_single_reply(&mut f, "reply-1");
+    assert_single_reply(&mut f, "reply-1", 4);
 }

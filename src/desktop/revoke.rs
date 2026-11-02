@@ -203,6 +203,11 @@ fn execute_scoped(
         zerus_desktop_ledger::operations::totals(&store.db)?.undrained == 0,
         Declined("operation_resources_not_drained")
     );
+    #[cfg(unix)]
+    let _native_host = step(
+        location.notification_host_exclusion(),
+        "notification_host_not_drained",
+    )?;
     if let Some(marker) = marker {
         step(
             handoff::write_revoked(location, lock, &marker),
@@ -270,13 +275,14 @@ fn receipt(location: &Location, command: &Command, record: &Record) -> Result<Va
 /// An indexed, read-only lookup. A pending reservation remains pending until
 /// the exact command is explicitly reconciled; a query never drains or writes.
 fn query(location: &Location, store: &Store, id: &str) -> Result<Value> {
-    query_scoped(location, store, id, None)
+    query_scoped(location, store, id, None, None)
 }
 fn query_scoped(
     location: &Location,
     store: &Store,
     id: &str,
     runtime_epoch: Option<&str>,
+    held: Option<&HandoffLock>,
 ) -> Result<Value> {
     ensure!(
         runtime_epoch.is_none_or(canonical_id),
@@ -292,8 +298,16 @@ fn query_scoped(
         record.fingerprint == command.fingerprint(location),
         "invalid audit fingerprint"
     );
-    let lock = step(location.handoff_lock(), "handoff_unavailable")?;
-    let marker = step(handoff::marker(location, &lock), "unsupported_handoff")?;
+    let acquired = if held.is_none() {
+        Some(step(location.handoff_lock(), "handoff_unavailable")?)
+    } else {
+        None
+    };
+    let lock = held
+        .or(acquired.as_ref())
+        .context("missing original handoff lock")?;
+    lock.verify(location)?;
+    let marker = step(handoff::marker(location, lock), "unsupported_handoff")?;
     ensure!(
         record.writer_epoch
             == runtime_epoch
@@ -309,6 +323,15 @@ fn query_scoped(
         Declined("revocation_pending")
     );
     ensure!(record.state == "settled", Declined("revocation_pending"));
+    ensure!(
+        zerus_desktop_ledger::operations::totals(&store.db)?.undrained == 0,
+        Declined("operation_resources_not_drained")
+    );
+    #[cfg(unix)]
+    let _native_host = step(
+        location.notification_host_exclusion(),
+        "notification_host_not_drained",
+    )?;
     receipt(location, &command, &record)
 }
 
@@ -317,6 +340,7 @@ pub(super) fn request_with_runtime(
     store: &mut Store,
     value: &Value,
     runtime_epoch: &str,
+    held: Option<&HandoffLock>,
     drain: impl FnOnce(&mut Store) -> Result<()>,
 ) -> Value {
     let result = if value["op"] == "revoke_status" {
@@ -328,12 +352,18 @@ pub(super) fn request_with_runtime(
         }
         match serde_json::from_value::<Query>(value.clone()) {
             Ok(query) if query.op == "revoke_status" && canonical_id(&query.request_id) => {
-                query_scoped(location, store, &query.request_id, Some(runtime_epoch))
+                query_scoped(
+                    location,
+                    store,
+                    &query.request_id,
+                    Some(runtime_epoch),
+                    held,
+                )
             }
             _ => Err(anyhow::anyhow!("invalid revoke query")),
         }
     } else if let Ok(command) = serde_json::from_value::<Command>(value.clone()) {
-        execute_scoped(location, store, &command, None, Some(runtime_epoch), drain)
+        execute_scoped(location, store, &command, held, Some(runtime_epoch), drain)
     } else {
         Err(anyhow::anyhow!("invalid revoke request"))
     };
@@ -538,10 +568,10 @@ mod tests {
         .unwrap();
         assert_eq!(receipt["writer_epoch"], first);
         assert_eq!(
-            query_scoped(&f.location, &f.store, command.id(), Some(&first)).unwrap(),
+            query_scoped(&f.location, &f.store, command.id(), Some(&first), None).unwrap(),
             receipt
         );
-        assert!(query_scoped(&f.location, &f.store, command.id(), Some(&next)).is_err());
+        assert!(query_scoped(&f.location, &f.store, command.id(), Some(&next), None).is_err());
         let error = execute_scoped(
             &f.location,
             &mut f.store,
@@ -567,6 +597,7 @@ mod tests {
             &mut f.store,
             &json!({"op":"revoke_status","request_id":id,"extra":true}),
             &epoch,
+            None,
             |_| panic!("query cannot drain"),
         );
         assert_eq!(result["revoked"], false);
@@ -616,6 +647,33 @@ mod tests {
             .unwrap();
             marker
         }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn historical_revoke_lookup_cannot_ignore_a_retained_native_host() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = Fixture::new();
+        let command = f.command();
+        assert_eq!(
+            response(&f.location, &mut f.store, &command)["checkpointed"],
+            true
+        );
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(f.location.root.join("notification-host.lock"))
+            .unwrap();
+        fs2::FileExt::try_lock_exclusive(&file).unwrap();
+        let blocked = query_result(&f.location, &f.store, &command.request_id);
+        assert_eq!(blocked["checkpointed"], false);
+        assert_eq!(blocked["code"], "notification_host_not_drained");
+        drop(file);
+        assert_eq!(
+            query_result(&f.location, &f.store, &command.request_id)["checkpointed"],
+            true
+        );
     }
     #[test]
     fn revokes_only_phase_and_drains_after_the_policy_fence() {

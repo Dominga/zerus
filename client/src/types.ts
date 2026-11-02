@@ -298,6 +298,7 @@ export type Action =
   | { kind: "archive" }
   | { kind: "terminate" }
   | { kind: "kill" }
+  | { kind: "terminate_shell"; identity: UntrackedShellIdentity }
   | { kind: "start_fresh" }
   | { kind: "forget" }
   | { kind: "forget_binding" }
@@ -309,6 +310,11 @@ export type Action =
   | { kind: "recovery"; job_id: string; action: "now" | "cancel" };
 
 export interface WorktreeCleanup { status: string; path: string; common_dir: string; reason?: string | null }
+export interface UntrackedShellIdentity {
+  version: number; socket: string; socket_dev: string; socket_ino: string;
+  server_pid: number; server_start: string; session_id: string; session_created: number;
+  pane_id: string; pane_pid: number; pane_start: string; shell: string;
+}
 
 export type Outcome =
   | { outcome: "done"; receipt: unknown; cleanup: WorktreeCleanup | null; cleanup_capture?: import("./store/terminationCleanup").RetainedCapture | null }
@@ -708,7 +714,7 @@ export interface LocalMessage {
   submitted_at: number; error: string; uncertain: boolean; message_id: string | null; submitted_text: string | null; source: string | null; voice: Record<string, unknown> | null;
 }
 /** The native queue (core input_queue::QueueView), kept separate from local messages. */
-export interface QueueView { id: string; text: string; hint: string; can_send_now: boolean; enabled: boolean; label: string }
+export interface QueueView { id: string; text: string; hint: string; can_send_now: boolean; enabled: boolean; label: string; run_id?: string; conversation_id?: string }
 export interface ComposerView {
   handle: number; key: string; subagent?: { agent_id: string; send_supported: boolean; hint: string } | null; loaded: boolean; rev: number; text_epoch: number; text: string; position: number; anchor: number;
   attachments: AttachmentView[]; removed: string | null; attaching: boolean; sending: boolean; recording?: boolean; waiting: string | null; uncertain: boolean;

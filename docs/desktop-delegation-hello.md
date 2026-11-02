@@ -125,8 +125,37 @@ revision, plus the newest 4096 settled command receipts and at most one pending
 takeover. Revoke/rollback invalidates the grant in the same transaction as the
 writer fence; a pending takeover superseded by revoke closes as refused, never
 as NativeReady. Rearm cannot replace an undrained original runtime. Initial
-Grant and explicit Rearm do not enable a notification host or import approval
-consent; host attachment remains the next lifecycle stage.
+Grant and explicit Rearm do not import approval consent. An already admitted
+background service attaches its original platform host only under the retained
+grant and actual serve/handoff exclusions; passive serve never starts it. The
+ownership epoch is stable across same-image/same-build reconnect Grants, and
+rotates on a new-image authenticated Grant or explicit Rearm. The service process
+epoch stays separate. Losing only image identity still permits background work
+but refuses closed-UI launch until the new canonical frontend grants.
+
+A replacement drain that exceeds the request's bounded wait keeps the SAME
+stop-requested runtime. Normal actor turns continue its original joins without
+a client retry. Only after actual drain can an already admitted background
+service replace it under the still-current grant; revoke/native takeover still
+block restart. No old request or native effect is replayed to replace a runtime.
+
+The Linux closed-instance path probes canonical absence off actor, selects the
+same maintained frontend bound to the grant, then rechecks the original live
+delivered mapping and grant on actor before consuming a Launch. Its click keeps
+the original thirty-second deadline through help/selection. The help child and
+uncertain pipes retain the real owner; after spawn, the GUI lifetime is separate
+from the backend drain and is never killed on service stop. A pure observer retains
+the SAME original GUI Child through eventual exit/reap across backend revoke,
+without retaining any Root exclusion or native effect resource. Its navigation and
+Wayland token stay in the original child's environment. A failed or uncertain
+launch does not authorize replay. A running frontend receives only the existing
+authenticated ActivationWait route.
+
+Settled takeover/revoke requires original platform/operation/callback joins. A
+Mac host's existing FD3 exclusion can outlive Root; it also blocks settlement
+until actually released. Read-only revoke lookup cannot advertise a settled
+receipt while the current runtime or operation/native host resources remain
+undrained. Status is display only, never an independently supplied drain proof.
 
 Independent status/result reads do not create or migrate an absent database.
 NativeTakeover can authenticate its original CLI child and acquire the original

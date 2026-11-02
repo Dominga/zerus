@@ -19,7 +19,7 @@ const LOOKUP: &str = "SELECT a.seq,
     AND a.intent_id=?3 AND a.revision=?4 AND a.epoch=?5 AND a.service_epoch=?6
     AND a.adapter=?7 AND a.lease=?8 AND a.retry_of IS ?9
     AND a.state='reserved' AND a.receipt IS NULL
-    AND w.revoked=0 AND w.epoch=a.epoch AND w.service_epoch=a.service_epoch
+    AND (w.revoked=0 OR ?12) AND w.epoch=a.epoch AND w.service_epoch=a.service_epoch
     AND i.revision=a.revision AND i.withdrawn=0 AND i.blocked=0";
 
 /// Immutable local data, deliberately neither Clone nor serde-Serialize.
@@ -80,8 +80,9 @@ impl OriginalSnapshot {
 /// Duplicate/coalesced responses have no private origin, even if their public
 /// `fresh`/`attempt` fields are changed. Errors consume the response too; they
 /// never authorize replay or restore the original commit result after restart.
-/// There is no production caller. A future actor must choose the correct store
-/// and reverify its live configuration/profile/lease and actual resources.
+/// The actor chooses the correct store and rechecks its original live lease and
+/// actual resources. Only the private fresh withdrawal origin admits cleanup
+/// after revocation; an ordinary read cannot reconstruct it.
 pub fn inspect_original(db: &mut Connection, reservation: Reservation) -> Result<OriginalSnapshot> {
     let origin = reservation
         .origin
@@ -95,7 +96,7 @@ pub fn inspect_original(db: &mut Connection, reservation: Reservation) -> Result
             && reservation.attempt.state == State::Reserved,
         "original reservation response changed"
     );
-    let snapshot = inspect(db, &origin.request)?;
+    let snapshot = inspect_scoped(db, &origin.request, origin.withdrawal)?;
     ensure!(
         snapshot.seq == origin.seq,
         "original reservation sequence changed"
@@ -135,6 +136,9 @@ fn fingerprint(request: &Reserve) -> Result<String> {
 /// profile drain, original fresh=true, native owner/category and tombstone proof
 /// remain the future actor's separate requirements. There is no production caller.
 pub fn inspect(db: &mut Connection, request: &Reserve) -> Result<Snapshot> {
+    inspect_scoped(db, request, false)
+}
+fn inspect_scoped(db: &mut Connection, request: &Reserve, withdrawal: bool) -> Result<Snapshot> {
     let fingerprint = fingerprint(request)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Deferred)?;
     let row: Option<(i64, Option<String>, Option<String>)> = tx
@@ -151,7 +155,8 @@ pub fn inspect(db: &mut Connection, request: &Reserve) -> Result<Snapshot> {
                 request.lease,
                 request.retry_of,
                 IDENTITY_BYTES as i64,
-                PAYLOAD_BYTES as i64
+                PAYLOAD_BYTES as i64,
+                withdrawal,
             ],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
@@ -174,6 +179,9 @@ pub fn inspect(db: &mut Connection, request: &Reserve) -> Result<Snapshot> {
     );
     serde_json::from_str::<serde::de::IgnoredAny>(&payload)
         .map_err(|_| anyhow!("invalid native reservation payload data"))?;
+    if withdrawal {
+        super::withdrawal_source(&tx, &parsed, &payload)?;
+    }
     let payload_sha256 = hash(payload.as_bytes());
     tx.commit()?;
     Ok(Snapshot {

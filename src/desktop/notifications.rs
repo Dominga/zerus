@@ -20,6 +20,8 @@ use zerus_client_core::{
 use zerus_desktop_ledger::{self as ledger, Attempt, Identity, Kind, Reserve, State, Target};
 
 #[cfg(target_os = "linux")]
+mod closed;
+#[cfg(target_os = "linux")]
 pub(super) mod frontend;
 #[cfg(target_os = "linux")]
 pub(super) mod linux;
@@ -34,6 +36,8 @@ pub(super) mod activation;
 pub(super) mod attachment;
 #[cfg(unix)]
 pub(super) mod host;
+pub(super) mod preparation;
+pub(super) mod service;
 #[cfg(any(windows, test))]
 pub(super) mod windows;
 
@@ -251,6 +255,7 @@ pub(super) struct Outbox {
     pending: Vec<Pending>,
     error: Option<&'static str>,
     owner: Option<Arc<dyn Send + Sync>>,
+    retiring: bool,
 }
 impl Outbox {
     /// No native constructor, OS call, writer grant or delivery happens here.
@@ -285,6 +290,7 @@ impl Outbox {
                 pending: Vec::new(),
                 error: None,
                 owner: owner.clone(),
+                retiring: false,
             },
             Endpoint {
                 receive,
@@ -373,7 +379,11 @@ impl Outbox {
                 && request.lease == self.session.lease,
             "notification host lease changed"
         );
-        let reserved = ledger::reserve(&mut store.db, &request)?;
+        let reserved = if self.retiring {
+            ledger::reserve_withdrawal(&mut store.db, &request)?
+        } else {
+            ledger::reserve(&mut store.db, &request)?
+        };
         if !reserved.fresh {
             return Ok(Offered::Existing(reserved.attempt));
         }
@@ -612,14 +622,15 @@ impl Outbox {
              FROM desktop_attempts a JOIN desktop_intents i ON i.id=a.intent_id
              JOIN desktop_writer w ON w.id=1 WHERE a.request_id=?1 AND a.state='delivered'
              AND i.revision=a.revision AND (i.withdrawn=0 OR ?6) AND i.blocked=0
-             AND w.revoked=0 AND w.service_epoch=?2 AND w.epoch=?3",
+             AND (w.revoked=0 OR ?7) AND w.service_epoch=?2 AND w.epoch=?3",
                 params![
                     value.request_id,
                     self.session.service_epoch,
                     self.session.writer_epoch,
                     ledger::PAYLOAD_BYTES,
                     ledger::RECEIPT_BYTES,
-                    cleanup
+                    cleanup,
+                    cleanup && self.retiring,
                 ],
                 |r| {
                     Ok((
@@ -737,7 +748,12 @@ impl Outbox {
                 native_id,
                 platform_context: None,
             };
-            if self.current_activation(store, &activation)?.is_some() {
+            // Revocation ends click authority immediately, but restoration
+            // must still load the original mappings for the cleanup phase.
+            if self
+                .activation_binding(store, &activation, self.retiring)?
+                .is_some()
+            {
                 mappings.push(activation);
             }
         }
@@ -903,7 +919,10 @@ impl Outbox {
                 native_id,
                 platform_context: None,
             };
-            if self.current_activation(store, &value)?.is_some() {
+            if self
+                .activation_binding(store, &value, self.retiring)?
+                .is_some()
+            {
                 mappings.push(value);
             }
         }
@@ -917,8 +936,8 @@ impl Outbox {
 
     fn require_current_writer(&self, store: &Store) -> Result<()> {
         let current: bool = store.db.query_row(
-            "SELECT revoked=0 AND service_epoch=?1 AND epoch=?2 FROM desktop_writer WHERE id=1",
-            params![self.session.service_epoch, self.session.writer_epoch],
+            "SELECT (revoked=0 OR ?3) AND service_epoch=?1 AND epoch=?2 FROM desktop_writer WHERE id=1",
+            params![self.session.service_epoch, self.session.writer_epoch,self.retiring],
             |r| r.get(0),
         )?;
         ensure!(
@@ -933,6 +952,10 @@ impl Outbox {
         for pending in &self.pending {
             pending.shared.cancel.store(true, Ordering::Release);
         }
+    }
+    pub fn retire(&mut self) {
+        self.retiring = true;
+        self.cancel_queued_posts();
     }
     /// Operation resources only. The platform must also join its original host
     /// worker/child and callback/pipe resources before lifecycle drain succeeds.

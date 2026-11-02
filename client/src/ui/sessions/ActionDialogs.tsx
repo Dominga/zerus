@@ -15,6 +15,8 @@ import { setSetting } from "../../store/settings";
 import { sessionForks } from "../../store/sessionForks";
 import { FORK_CHECKING, FORK_HINT } from "./fork-ui";
 import { tr } from "../../i18n";
+import { captureUntrackedShell, untrackedShell, UNVERIFIED_SHELL } from "../../store/untrackedShell";
+import type { Action } from "../../types";
 
 const ForkDialog = lazy(() => import("./ForkDialog"));
 
@@ -196,10 +198,18 @@ function RenameDialog(props: { row: ActionRow; close: () => void }) {
 
 function TerminateDialog(props: { row: ActionRow; close: () => void }) {
   const copy = terminateCopy(props.row);
+  const shell = untrackedShell(props.row);
+  const [terminal, setTerminal] = createSignal<Extract<Action, { kind: "terminate_shell" }>>();
+  const [terminalError, setTerminalError] = createSignal("");
   const [offer, setOffer] = createSignal<string>();
   const [remove, setRemove] = createSignal(false);
   let closed = false, consumed = false;
   onMount(() => {
+    if (shell) {
+      void captureUntrackedShell(props.row).then((action) => { if (!closed) setTerminal(action); })
+        .catch(() => { if (!closed) setTerminalError(UNVERIFIED_SHELL); });
+      return;
+    }
     const target = targetOf(props.row, "terminate");
     if (copy.action !== "terminate" || !target) return;
     void terminationCleanupOffer(target).then((value) => {
@@ -210,17 +220,22 @@ function TerminateDialog(props: { row: ActionRow; close: () => void }) {
   });
   onCleanup(() => { closed = true; const id = offer(); if (id && !consumed) void terminationCleanupCancel(id); });
   const submit = () => {
+    if (shell && !terminal()) return;
     const id = remove() ? offer() : undefined;
     consumed = !!id;
     if (offer() && !remove()) void setSetting("workspace/removeWorktreeAfterTermination", false);
-    props.close(); void end(props.row, copy.action, id);
+    props.close(); void end(props.row, terminal() ?? copy.action, id);
   };
   return (
     <>
       <div class="dlg-head"><Icon name="triangle-alert" size={18} class="accent" /><h2 id="action-dlg-title">{copy.title}</h2></div>
       <div class="dlg-body">
-        <div class="confirm-body" id="action-dlg-body">{copy.text}</div>
+        <div class="confirm-body" id="action-dlg-body">{shell ? tr("Close the verified shell terminal for %1? Its working folder will be kept; no archive will be created.", props.row.name) : copy.text}</div>
         <div class="dlg-detail">{copy.detail}</div>
+        <Show when={shell}>
+          <p class="hint">{tr("The working folder will be kept. Detached jobs may continue after this shell terminal closes.")}</p>
+          <Show when={terminalError()}><p class="dlg-error">{tr(terminalError())}</p></Show>
+        </Show>
         <Show when={offer()}>
           <label class="check" style={{ "margin-top": "10px" }}><input type="checkbox" checked={remove()} onChange={(e) => setRemove(e.currentTarget.checked)} /> {tr("Remove the working folder after stopping")}</label>
           <p class="hint" style={{ "margin-top": "6px" }}>{tr("Removal runs in the background after exact successful termination, only for a verified generated worktree. Unknown local data keeps the folder for review. Computer: %1", props.row.machine)}</p>
@@ -228,7 +243,7 @@ function TerminateDialog(props: { row: ActionRow; close: () => void }) {
       </div>
       <div class="dlg-foot">
         <span class="spacer" />
-        <button type="button" class="btn solid-danger" onClick={submit}>{offer() ? remove() ? tr("Stop and remove folder") : tr("Stop and archive") : copy.confirm}</button>
+        <button type="button" class="btn solid-danger" onClick={submit} disabled={shell && !terminal()}>{offer() ? remove() ? tr("Stop and remove folder") : tr("Stop and archive") : copy.confirm}</button>
         <button type="button" class="btn primary" data-initial autofocus onClick={props.close}>{tr("Cancel")}</button>
       </div>
     </>

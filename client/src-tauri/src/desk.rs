@@ -76,7 +76,7 @@ pub enum DeskInput {
         token: String,
         activation: String,
     },
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     ServiceClicked(Box<crate::desktop_service::activation::Delivery>),
     /// Public launch/instance navigation data, not callback/writer authority.
     #[cfg(target_os = "linux")]
@@ -543,12 +543,12 @@ pub fn observe_round(
 struct Click {
     target: Map<String, Value>,
     deadline: Instant,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     service: Option<Box<crate::desktop_service::activation::Delivery>>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     exact: Option<zerus_client_core::desktop::activation::Target>,
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn resolve_service(
     target: &zerus_client_core::desktop::activation::Target,
     desk: &Desk,
@@ -603,9 +603,9 @@ pub struct Outcome {
     pub show: bool,
     #[cfg(target_os = "linux")]
     pub activation: Option<String>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     completion: Option<crate::desktop_service::activation::Completion>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     expected: Option<ExactSession>,
     /// Banners to withdraw, then post.
     pub changes: Changes,
@@ -709,9 +709,9 @@ impl DeskLoop {
                         self.click = Some(Click {
                             target,
                             deadline: cx.now + CLICK_WAIT,
-                            #[cfg(target_os = "linux")]
+                            #[cfg(any(target_os = "linux", target_os = "macos"))]
                             service: None,
-                            #[cfg(target_os = "linux")]
+                            #[cfg(any(target_os = "linux", target_os = "macos"))]
                             exact: None,
                         });
                         outcome.show = true;
@@ -732,16 +732,19 @@ impl DeskLoop {
                         outcome.activation = (!activation.is_empty()).then_some(activation);
                     }
                 }
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
                 DeskInput::ServiceClicked(delivery)
                     if self.attention_completions && delivery.current() =>
                 {
                     let open = delivery.open();
                     let target =
                         attention::target(&open.token).expect("validated activation token");
-                    outcome.activation = open.platform_context.as_ref().map(|context| match context {
-                        zerus_client_core::desktop::notifications::PlatformContext::Wayland { activation_token } => activation_token.clone(),
-                    });
+                    #[cfg(target_os = "linux")]
+                    {
+                        outcome.activation = open.platform_context.as_ref().map(|context| match context {
+                            zerus_client_core::desktop::notifications::PlatformContext::Wayland { activation_token } => activation_token.clone(),
+                        });
+                    }
                     outcome.completion = Some(delivery.completion());
                     outcome.show = true;
                     self.click = Some(Click {
@@ -780,9 +783,9 @@ impl DeskLoop {
                 }
                 DeskInput::Clicked(_) | DeskInput::Failed { .. } => {}
                 #[cfg(target_os = "linux")]
-                DeskInput::LinuxClicked { .. }
-                | DeskInput::ServiceClicked(_)
-                | DeskInput::Navigate { .. } => {}
+                DeskInput::LinuxClicked { .. } | DeskInput::Navigate { .. } => {}
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                DeskInput::ServiceClicked(_) => {}
             }
         }
         // Read once however many changes were announced.
@@ -822,7 +825,7 @@ impl DeskLoop {
         }
         // A live stream is the current listing Qt asks for at the click; a
         // stale one waits for its rows up to `CLICK_WAIT` (`TrayAgent.cpp:188-192`).
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if self
             .click
             .as_ref()
@@ -834,18 +837,18 @@ impl DeskLoop {
         if let Some(click) = &self.click {
             let resolution =
                 attention::resolve(&click.target, &self.desk, cx.now >= click.deadline);
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             let resolution = click.exact.as_ref().map_or(resolution, |target| {
                 resolve_service(target, &self.desk, cx.now >= click.deadline)
             });
             match resolution {
                 Resolution::Open { computer, key } => {
                     outcome.open = Some((computer, key));
-                    #[cfg(target_os = "linux")]
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
                     if let Some(delivery) = &click.service {
                         outcome.completion = Some(delivery.completion());
                     }
-                    #[cfg(target_os = "linux")]
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
                     if let Some(target) = &click.exact {
                         outcome.expected = Some(ExactSession {
                             run: target.run.clone(),
@@ -855,7 +858,7 @@ impl DeskLoop {
                     self.click = None;
                 }
                 Resolution::Gone(name) => {
-                    #[cfg(target_os = "linux")]
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
                     if let Some(delivery) = &click.service {
                         outcome.completion = Some(delivery.completion());
                     }
@@ -972,10 +975,10 @@ fn apply(app: &AppHandle, outcome: Outcome) {
     deliver(app, outcome.changes);
     if outcome.show {
         let handle = app.clone();
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let completion = outcome.completion.clone();
         let _ = app.run_on_main_thread(move || {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             if completion
                 .as_ref()
                 .is_some_and(|completion| !completion.current())
@@ -991,7 +994,7 @@ fn apply(app: &AppHandle, outcome: Outcome) {
         });
     }
     if let Some((computer, key)) = outcome.open {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let completion = outcome.completion.clone();
         open_if(
             app,
@@ -999,13 +1002,13 @@ fn apply(app: &AppHandle, outcome: Outcome) {
                 computer: computer.0,
                 key,
                 attention: true,
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
                 expected: outcome.expected,
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
                 expected: None,
             },
             move || {
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
                 if completion
                     .as_ref()
                     .is_some_and(|completion| !completion.current())
@@ -1017,10 +1020,10 @@ fn apply(app: &AppHandle, outcome: Outcome) {
         );
     }
     for text in outcome.notices {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let completion = outcome.completion.clone();
         window_notice_if(app, "Zerus", &text, move || {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             if completion
                 .as_ref()
                 .is_some_and(|completion| !completion.current())
@@ -1152,7 +1155,7 @@ pub fn open_updates(app: &AppHandle) {
 fn open(app: &AppHandle, target: OpenSession) {
     open_if(app, target, || true);
 }
-fn open_if(app: &AppHandle, target: OpenSession, current: impl FnOnce() -> bool + Send + 'static) {
+fn open_if(app: &AppHandle, target: OpenSession, current: impl Fn() -> bool + Send + 'static) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         if !current() {
@@ -1169,6 +1172,9 @@ fn open_if(app: &AppHandle, target: OpenSession, current: impl FnOnce() -> bool 
             Some(state) => lock(&state.inbox).open(target, send),
             None => send(target),
         }
+        // Keep the original service delivery through the last native-main
+        // action, rather than consuming its guard before window/navigation I/O.
+        drop(current);
     });
 }
 
@@ -1180,7 +1186,7 @@ fn window_notice_if(
     app: &AppHandle,
     title: &str,
     text: &str,
-    current: impl FnOnce() -> bool + Send + 'static,
+    current: impl Fn() -> bool + Send + 'static,
 ) {
     let notice = Notice {
         title: title.to_owned(),
@@ -1199,6 +1205,9 @@ fn window_notice_if(
             Some(state) => lock(&state.inbox).notice(notice, send),
             None => send(notice),
         }
+        // Keep the original service delivery through the last native-main
+        // action, rather than consuming its guard before window/navigation I/O.
+        drop(current);
     });
 }
 
@@ -2293,7 +2302,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn service_click_requires_both_original_run_and_conversation_without_name_fallback() {
         let mut desk = Desk::default();

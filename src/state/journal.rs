@@ -621,6 +621,13 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
             .unwrap()
             .extend(telemetry::unavailable().as_object().unwrap().clone());
         workspace::enrich(std::slice::from_mut(&mut value), &cwds);
+        match untracked_shell::capture(name) {
+            Ok(identity) => value["untracked_terminal"] = json!(identity),
+            Err(_) => {
+                value["untracked_terminal_reason"] =
+                    json!(zerus_client_core::untracked_shell::UNVERIFIED)
+            }
+        }
         value
     };
     if archive_id.is_none() && !record_path(name).exists() {

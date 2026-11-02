@@ -2,7 +2,7 @@
 //! frontend child can wait here; generic requests and display watches cannot.
 #![allow(dead_code)] // Callback/launcher attachment follows the platform lifecycle.
 use super::{Activation, Identity, Outbox, Target};
-use crate::desktop::{fanout::Queue, store::Store, ui_authority};
+use crate::desktop::{fanout::Queue, ownership, store::Store, ui_authority};
 use anyhow::{ensure, Context, Result};
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
@@ -28,6 +28,9 @@ struct Wait {
 pub(in crate::desktop) struct Launch {
     open: Open,
     configuration: String,
+    until: Instant,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    preparation: Option<Arc<dyn Send + Sync>>,
 }
 impl Launch {
     #[cfg(test)]
@@ -35,6 +38,9 @@ impl Launch {
         Self {
             open,
             configuration,
+            until: Instant::now() + wire::MAX_AGE,
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            preparation: None,
         }
     }
 
@@ -43,6 +49,27 @@ impl Launch {
     }
     pub fn configuration(&self) -> &str {
         &self.configuration
+    }
+    #[cfg(target_os = "linux")]
+    pub fn current(&self) -> bool {
+        Instant::now() < self.until && !self.cancelled.load(std::sync::atomic::Ordering::Acquire)
+    }
+    #[cfg(target_os = "linux")]
+    pub fn bind_preparation(
+        &mut self,
+        resources: Arc<dyn Send + Sync>,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        self.preparation = Some(resources);
+        self.cancelled = cancelled;
+    }
+    #[cfg(target_os = "linux")]
+    pub fn preparation_resources(&self) -> Option<Arc<dyn Send + Sync>> {
+        self.preparation.clone()
+    }
+    #[cfg(target_os = "linux")]
+    pub fn release_preparation(&mut self) {
+        self.preparation = None;
     }
 }
 pub(in crate::desktop) struct Router {
@@ -123,7 +150,7 @@ impl Router {
             None => Ok(None),
         };
         let activation = match activation {
-            Ok(value) => value,
+            Ok(value) => value.map(|(open, _)| open),
             Err(_) => {
                 self.waiting.take().unwrap().queue.close();
                 return;
@@ -155,14 +182,19 @@ impl Router {
         }
         wait.queue.close();
     }
-    /// Canonical absence is necessary but cannot grant a mode-changing launch.
-    /// The durable authenticated notification handoff is not implemented yet;
-    /// structural import evidence and the service environment cannot replace it.
+    pub fn needs_frontend(&self) -> bool {
+        !self.stopping
+            && self.waiting.is_none()
+            && self.pending.iter().any(|p| Instant::now() < p.until)
+    }
+    /// Absence is only a routing observation. The original durable native grant
+    /// supplies mode/identity; none of the observation's JSON grants authority.
     pub fn closed_frontend(
         &mut self,
-        _store: &Store,
-        _outbox: &Outbox,
+        store: &Store,
+        outbox: &Outbox,
         observation: &desktop::Observation,
+        grant: Option<&ownership::Grant>,
     ) -> Result<Option<Launch>> {
         self.expire();
         if self.stopping
@@ -172,13 +204,17 @@ impl Router {
         {
             return Ok(None);
         }
-        // The Linux mechanics force service mode, which also freezes/imports
-        // the native read store. Until a SERVICE-MODE frontend has granted
-        // notification ownership for this configuration and selected image,
-        // refuse without popping the known-unsent click or extending its age.
-        anyhow::bail!("authenticated notification ownership handoff required")
+        let grant = grant.context("authenticated notification ownership handoff required")?;
+        grant.permits_launch(store, &self.configuration, &outbox.session.writer_epoch)?;
+        Ok(self.next(store, outbox)?.map(|(open, until)| Launch {
+            open,
+            configuration: self.configuration.clone(),
+            until,
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            preparation: None,
+        }))
     }
-    fn next(&mut self, store: &Store, outbox: &Outbox) -> Result<Option<Open>> {
+    fn next(&mut self, store: &Store, outbox: &Outbox) -> Result<Option<(Open, Instant)>> {
         ensure!(
             outbox.session.configuration == self.configuration
                 && outbox.session.service_epoch == self.epoch,
@@ -224,7 +260,7 @@ impl Router {
                 platform_context: pending.value.platform_context,
             };
             ensure!(open.valid(), "activation target invalid");
-            return Ok(Some(open));
+            return Ok(Some((open, pending.until)));
         }
         Ok(None)
     }

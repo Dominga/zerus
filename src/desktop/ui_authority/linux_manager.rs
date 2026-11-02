@@ -1,4 +1,4 @@
-//! The non-dumpable per-user service manager is a kernel-identified ancestry
+//! The ptrace-inaccessible per-user service manager is a kernel-identified ancestry
 //! boundary. Names, command lines and arbitrary unreadable ancestors are not.
 use crate::platform;
 use std::{fs, io::Read};
@@ -38,6 +38,9 @@ fn matches(errno: Option<i32>, uid: u32, status: Option<&str>, cgroup: Option<&s
         return false;
     }
     let Some(status) = status else { return false };
+    if !super::tracer_absent(status.as_bytes()) {
+        return false;
+    }
     let mut parent = status.lines().filter_map(|l| l.strip_prefix("PPid:"));
     if parent.next().map(str::trim) != Some("1") || parent.next().is_some() {
         return false;
@@ -60,7 +63,8 @@ fn matches(errno: Option<i32>, uid: u32, status: Option<&str>, cgroup: Option<&s
 #[cfg(test)]
 mod tests {
     use super::*;
-    const STATUS: &str = "Name:\tuntrusted-name\nPPid:\t1\nUid:\t1000\t1000\t1000\t1000\n";
+    const STATUS: &str =
+        "Name:\tuntrusted-name\nPPid:\t1\nUid:\t1000\t1000\t1000\t1000\nTracerPid:\t0\n";
     const GROUP: &str = concat!(
         "0::/user.slice/user-1000.slice/user",
         "@",
@@ -77,6 +81,17 @@ mod tests {
             assert!(!matches(errno, 1000, Some(STATUS), Some(GROUP)));
         }
         for status in [
+            STATUS.replace("TracerPid:\t0", "TracerPid:\t42"),
+            STATUS.replace("TracerPid:\t0\n", ""),
+        ] {
+            assert!(!matches(
+                Some(libc::EACCES),
+                1000,
+                Some(&status),
+                Some(GROUP)
+            ));
+        }
+        for status in [
             None,
             Some(""),
             Some("PPid: 1\nUid: 1000 1000 1000\n"),
@@ -87,7 +102,13 @@ mod tests {
             Some("PPid: 1\nUid: 1000 1000 1000 1000\nUid: 1000 1000 1000 1000\n"),
             Some("PPid: 1\nPPid: 1\nUid: 1000 1000 1000 1000\n"),
         ] {
-            assert!(!matches(Some(libc::EACCES), 1000, status, Some(GROUP)));
+            let status = status.map(|text| format!("{text}TracerPid:\t0\n"));
+            assert!(!matches(
+                Some(libc::EACCES),
+                1000,
+                status.as_deref(),
+                Some(GROUP)
+            ));
         }
         assert!(!matches(
             Some(libc::EACCES),

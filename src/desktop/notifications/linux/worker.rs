@@ -250,23 +250,56 @@ impl Bus {
         deadline: Instant,
         cancelled: impl Fn() -> bool,
     ) -> std::result::Result<Namespace, ()> {
-        self.drive(deadline, cancelled, Self::lookup(self.connection.clone()))?
+        self.drive(
+            deadline,
+            cancelled,
+            Self::lookup(self.connection.clone(), false),
+        )?
     }
-    async fn lookup(connection: Connection) -> Result<Namespace, ()> {
+    async fn lookup(connection: Connection, activate: bool) -> Result<Namespace, ()> {
         let bus = connection
             .call_method(Some(BUS), BUS_PATH, Some(BUS), "GetId", &())
             .await
             .map_err(|_| ())?;
-        let owner = connection
-            .call_method(
-                Some(BUS),
-                BUS_PATH,
-                Some(BUS),
-                "GetNameOwner",
-                &(native::SERVICE,),
-            )
-            .await
-            .map_err(|_| ())?;
+        async fn get_owner(connection: &Connection) -> zbus::Result<zbus::Message> {
+            connection
+                .call_method(
+                    Some(BUS),
+                    BUS_PATH,
+                    Some(BUS),
+                    "GetNameOwner",
+                    &(native::SERVICE,),
+                )
+                .await
+        }
+        let owner = match get_owner(&connection).await {
+            Ok(owner) => owner,
+            Err(zbus::Error::MethodError(name, _, reply))
+                if activate
+                    && name.as_str() == "org.freedesktop.DBus.Error.NameHasNoOwner"
+                    && reply.header().sender().map(|s| s.as_str()) == Some(BUS) =>
+            {
+                // Only the bus may activate this fixed desktop service. This
+                // is setup readiness, never a notification or an ID redirect.
+                let started = connection
+                    .call_method(
+                        Some(BUS),
+                        BUS_PATH,
+                        Some(BUS),
+                        "StartServiceByName",
+                        &(native::SERVICE, 0_u32),
+                    )
+                    .await
+                    .map_err(|_| ())?;
+                if !reply_from(&started, BUS)
+                    || !matches!(started.body().deserialize::<u32>(), Ok(1 | 2))
+                {
+                    return Err(());
+                }
+                get_owner(&connection).await.map_err(|_| ())?
+            }
+            Err(_) => return Err(()),
+        };
         if [bus.header(), owner.header()]
             .iter()
             .any(|h| h.sender().map(|s| s.as_str()) != Some(BUS))
@@ -359,7 +392,7 @@ impl Bus {
         let mut lookup = self
             .lookup
             .take()
-            .unwrap_or_else(|| Box::pin(Self::lookup(self.connection.clone())));
+            .unwrap_or_else(|| Box::pin(Self::lookup(self.connection.clone(), false)));
         #[cfg(test)]
         if let Some(pause) = self.batch_pause.take() {
             pause.reached.send(()).unwrap();
@@ -458,7 +491,7 @@ impl Bus {
         mut mappings: Option<&mut Mappings>,
         endpoint: &Endpoint,
         deadline: Instant,
-    ) -> bool {
+    ) -> Exit {
         let mut good = was_good && self.matched == RULES.len();
         // Cancel only a read-only lookup. No native operation is replayed;
         // its pending reply still drains on the same original connection.
@@ -552,7 +585,7 @@ impl Bus {
             self.gate.removals_acked.store(true, Ordering::Release);
         }
         let connection = self.connection.clone();
-        good &= matches!(
+        let closed = matches!(
             self.drive(deadline, || false, connection.close()),
             Ok(Ok(()))
         );
@@ -568,8 +601,12 @@ impl Bus {
                 Poll::Pending
             }
         });
-        good &= self.drive(deadline, || false, finished).is_ok();
-        good && self.executor.is_empty() && !self.gate.refused()
+        let finished = self.drive(deadline, || false, finished).is_ok();
+        let drained = closed && finished && self.executor.is_empty();
+        Exit {
+            clean: good && drained && !self.gate.refused(),
+            drained,
+        }
     }
 }
 
@@ -589,6 +626,7 @@ pub(super) fn test_close_with_queued_callbacks(
     assert!(mappings.restore(vec![value]));
     emit();
     bus.close(true, Some(&mut mappings), &endpoint, Instant::now() + WAIT)
+        .clean
 }
 
 pub(super) fn run(
@@ -598,15 +636,23 @@ pub(super) fn run(
     controls: mpsc::Receiver<Control>,
     shared: Arc<Shared>,
     setup: Instant,
-) -> bool {
+) -> Exit {
     let cancelled = || shared.stop.load(Ordering::Acquire) || endpoint.stopping();
     let Ok(mut bus) = Bus::connect(address, setup, cancelled) else {
         shared.failed.store(true, Ordering::Release);
-        return false;
+        // No Bus/SDK executor was returned; the original setup future and its
+        // socket captures have been destroyed before this worker can join.
+        return Exit {
+            clean: false,
+            drained: true,
+        };
     };
     let mut good = bus.matches(true, setup, cancelled);
     let namespace = good
-        .then(|| bus.namespace(setup, cancelled))
+        .then(|| {
+            bus.drive(setup, cancelled, Bus::lookup(bus.connection.clone(), true))
+                .and_then(|v| v)
+        })
         .and_then(std::result::Result::ok);
     let Some(namespace) = namespace else {
         shared.failed.store(true, Ordering::Release);
@@ -800,15 +846,15 @@ pub(super) fn run(
         good &= !bus.driver.broken && !bus.gate.refused();
     }
     shared.ready.store(false, Ordering::Release);
-    let clean = bus.close(
+    let exit = bus.close(
         good,
         Some(&mut mappings),
         &endpoint,
         shared.cleanup_deadline(),
     );
     drop(mappings);
-    shared.failed.store(!clean, Ordering::Release);
-    clean
+    shared.failed.store(!exit.clean, Ordering::Release);
+    exit
 }
 
 pub(super) fn reply_from(message: &zbus::Message, owner: &str) -> bool {

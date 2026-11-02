@@ -48,7 +48,7 @@ impl OwnedFrontend {
     /// Synchronous bounded preparation: run OFF the service actor. One original
     /// launch admission includes its help child and any incomplete pipe drain.
     /// An error consumes this Launch; it never authorizes a retry.
-    pub fn launch(selected: SelectedFrontend, launch: Launch) -> Result<Self> {
+    pub fn launch(selected: SelectedFrontend, mut launch: Launch) -> Result<Self> {
         let until = Instant::now() + START;
         selected.revalidate_for_launch(&launch)?;
         ensure!(launch.open().valid(), "invalid original launch");
@@ -69,6 +69,9 @@ impl OwnedFrontend {
             stdin: Some(Vec::new()),
             timeout: until.saturating_duration_since(Instant::now()),
         };
+        // The actual Root owner survives an uncertain help-child/pipe drain,
+        // but is not charged to the GUI's potentially unbounded lifetime.
+        let resources = Arc::new((hold.clone(), launch.preparation_resources()));
         let help = zerus_client_core::run::run_owned(
             hold.selected.entry(),
             &invocation,
@@ -85,7 +88,7 @@ impl OwnedFrontend {
                 })
                 .map(|(child, ())| child)
             },
-            hold.clone(),
+            resources,
         )
         .map_err(|_| anyhow::anyhow!("frontend navigation capability unavailable"))?;
         ensure!(help.len() <= 64 * 1024, "frontend help too large");
@@ -103,6 +106,7 @@ impl OwnedFrontend {
                 .map_err(std::io::Error::other)?;
             Ok((command, ()))
         })?;
+        launch.release_preparation();
         // No fallible construction after spawn may drop the original Child.
         Ok(Self {
             hold,

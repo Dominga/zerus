@@ -71,6 +71,21 @@ mod native {
                 .filter(|call| call["args"][1] == command)
                 .collect()
         }
+        fn service(&self) -> (Arc<crate::desktop_service::Service>, crate::pump::Pump) {
+            let pump = crate::pump::Pump::default();
+            let (sink, rx) = std::sync::mpsc::sync_channel(256);
+            let drain = pump.drain_service(rx, |_| {});
+            let service = crate::desktop_service::Service::start(
+                self.root.join("hgs"),
+                pump.clone(),
+                sink,
+                true,
+                drain,
+                self.owner.responder.clone(),
+                vec![],
+            );
+            (service, pump)
+        }
     }
     impl Drop for Fixture {
         fn drop(&mut self) {
@@ -289,6 +304,23 @@ mod native {
     }
 
     #[test]
+    fn a_fresh_revoked_scope_or_read_failure_cannot_reuse_an_old_transient_refusal() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        for changed in [
+            json!({"state":"revoked","rearm_required":true}),
+            json!({"configuration":"b".repeat(64)}),
+        ] {
+            let f = Fixture::new(Mode::Service, json!({"refuse":"ownership_drain_pending"}));
+            f.run(Some(Action::Grant));
+            assert!(f.owner.retryable_grant());
+            f.config(changed);
+            f.run(None);
+            assert!(!f.owner.retryable_grant());
+            assert_eq!(f.calls("frontend-request").len(), 1);
+        }
+    }
+
+    #[test]
     fn the_actual_service_connection_retries_slow_drain_and_preserves_explicit_rearm() {
         let _process = crate::PROCESS_TREE.read().unwrap();
         tauri::async_runtime::block_on(async {
@@ -338,6 +370,128 @@ mod native {
                 }
                 service.join().await.unwrap();
             }
+        });
+    }
+
+    async fn until(label: &str, check: impl Fn() -> bool) {
+        let until = Instant::now() + Duration::from_secs(20);
+        while !check() {
+            assert!(Instant::now() < until, "{label}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[test]
+    fn long_grant_recovery_keeps_watch_and_catalog_live_until_a_later_fresh_grant() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        tauri::async_runtime::block_on(async {
+            let f = Fixture::new(
+                Mode::Service,
+                json!({"ready":true,"refuse":"ownership_drain_pending","refuse_count":4}),
+            );
+            let (service, pump) = f.service();
+            until(
+                "initial prompt attempts end but watch and catalog stay live",
+                || {
+                    f.calls("frontend-request").len() >= 3
+                        && f.calls("watch").len() == 1
+                        && pump.row("", "row").is_some()
+                },
+            )
+            .await;
+            assert!(service.snapshot().connected);
+            until(
+                "a later capped-backoff intent grants without user Retry",
+                || {
+                    service
+                        .snapshot()
+                        .notification_ownership
+                        .as_ref()
+                        .is_some_and(|v| v["status"]["state"] == "service" && v["code"] == "")
+                },
+            )
+            .await;
+            let calls = f.calls("frontend-request");
+            assert_eq!(calls.len(), 5);
+            let ids: std::collections::BTreeSet<_> = calls
+                .iter()
+                .map(|c| c["value"]["request"]["request_id"].as_str().unwrap())
+                .collect();
+            assert_eq!(ids.len(), 5);
+            assert_eq!(f.calls("ownership-status").len(), 5);
+            assert_eq!(
+                f.calls("watch").len(),
+                1,
+                "the connection is not replaced to retry a grant"
+            );
+            assert!(pump.row("", "row").is_some());
+            service.join().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn long_grant_recovery_stops_when_a_new_original_becomes_unknown() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        tauri::async_runtime::block_on(async {
+            let f = Fixture::new(
+                Mode::Service,
+                json!({"ready":true,"refuse":"ownership_resources_pending"}),
+            );
+            let (service, _) = f.service();
+            until("watch is open after the initial three refusals", || {
+                f.calls("watch").len() == 1
+            })
+            .await;
+            assert_eq!(f.calls("frontend-request").len(), 3);
+            f.config(json!({"ready":true,"lost":true}));
+            until("the fourth original is uncertain", || {
+                service
+                    .snapshot()
+                    .notification_ownership
+                    .as_ref()
+                    .is_some_and(|v| v["pending"] == true && v["running"] == false)
+            })
+            .await;
+            assert_eq!(f.calls("frontend-request").len(), 4);
+            tokio::time::sleep(Duration::from_millis(2200)).await;
+            assert_eq!(
+                f.calls("frontend-request").len(),
+                4,
+                "unknown is never a transient refusal"
+            );
+            service.join().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn connection_close_joins_a_long_grant_backoff_without_another_attempt() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        tauri::async_runtime::block_on(async {
+            let f = Fixture::new(
+                Mode::Service,
+                json!({"ready":true,"refuse":"ownership_drain_pending"}),
+            );
+            let (service, _) = f.service();
+            until("fourth refusal enters the next long backoff", || {
+                let calls = f.calls("frontend-request");
+                calls.len() == 4
+                    && service
+                        .snapshot()
+                        .notification_ownership
+                        .as_ref()
+                        .is_some_and(|v| {
+                            v["running"] == false
+                                && v["request_id"] == calls[3]["value"]["request"]["request_id"]
+                        })
+            })
+            .await;
+            tokio::time::timeout(Duration::from_secs(5), service.join())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(f.calls("frontend-request").len(), 4);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert_eq!(f.calls("frontend-request").len(), 4);
         });
     }
 

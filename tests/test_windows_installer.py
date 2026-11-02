@@ -301,7 +301,10 @@ class Script(unittest.TestCase):
         self.assertEqual(re.findall(r"(?m)^Source: (.*)$", self.text),
                          ['"{#PayloadDir}\\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs'])
         self.assertEqual(re.findall(r"(?m)^Name: (.*)$", self.text.split("[Icons]", 1)[1].split("\n[", 1)[0]),
-                         ['"{autoprograms}\\Zerus"; Filename: "{app}\\hgs-tray.exe"; WorkingDir: "{app}"'])
+                         ['"{autoprograms}\\Zerus"; Filename: "{app}\\hgs-tray.exe"; WorkingDir: "{app}"; '
+                          'AppUserModelID: "com.hgdev.hgs-tray"; '
+                          'AppUserModelToastActivatorCLSID: "0F0F70A2-1D40-47D8-AC5E-D6A9B789605F"',
+                          '"{autoprograms}\\Zerus"; Filename: "{app}\\hgs-tray.exe"; WorkingDir: "{app}"'])
 
     def procedure(self, name):
         """The body of a [Code] function or procedure, up to the next one."""

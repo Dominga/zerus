@@ -5983,6 +5983,7 @@ version = "0.1.0"
 dependencies = [
  "async-io",
  "block2",
+ "cc",
  "chrono",
  "dunce",
  "embed-resource",

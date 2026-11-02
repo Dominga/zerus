@@ -1,5 +1,5 @@
 # Policy and owned trace-file controls: no real Task Scheduler, registry, service or process.
-param([string]$RegistrationSource=(Join-Path $PSScriptRoot '../../src/desktop/windows_registration.ps1'))
+param([string]$RegistrationSource=(Join-Path $PSScriptRoot 'fixtures/windows-desktop-registration-legacy.ps1'))
 $ErrorActionPreference='Stop'
 . ([ScriptBlock]::Create([IO.File]::ReadAllText($RegistrationSource)))
 $script:sid='S-1-5-21-1000'

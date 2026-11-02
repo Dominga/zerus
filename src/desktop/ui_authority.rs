@@ -16,6 +16,8 @@ use zerus_client_core::desktop::ui_requests::{Envelope, Reply, Request};
 
 #[cfg(target_os = "linux")]
 mod linux_manager;
+#[cfg(target_os = "linux")]
+pub(super) mod registration;
 
 #[cfg(any(not(windows), test))]
 use std::collections::BTreeSet;

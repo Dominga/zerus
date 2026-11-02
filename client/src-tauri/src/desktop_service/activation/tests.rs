@@ -57,10 +57,18 @@ fn private_case_as(case: &'static str, agent: bool) -> bool {
             64 << 10,
         )
         .unwrap();
-        assert!(
-            matches!(&result, zerus_client_core::Exit::Code { code: 0, .. }),
-            "private GUI case {case}: {result:?}"
-        );
+        match &result {
+            zerus_client_core::Exit::Code { code: 0, .. } => {}
+            zerus_client_core::Exit::Code {
+                code,
+                stdout,
+                stderr,
+            } => panic!(
+                "private GUI case {case} exited {code}\nstderr:\n{stderr}\nstdout:\n{}",
+                String::from_utf8_lossy(stdout)
+            ),
+            other => panic!("private GUI case {case}: {other:?}"),
+        }
         let zerus_client_core::Exit::Code { stdout, .. } = result else {
             unreachable!()
         };

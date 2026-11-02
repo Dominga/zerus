@@ -49,6 +49,77 @@ class Desktop(unittest.TestCase):
         with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_notification_preferences_requests').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_attempts').fetchone()[0], 0)
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux registration mode')
+    def test_registration_variant_is_read_only_and_service_reports_its_requested_mode(self):
+        passive = self.cli('desktop', 'registration', '--json')
+        background = self.cli('desktop', 'registration', '--json', '--background')
+        self.assertEqual(passive['mode'], 'passive')
+        self.assertEqual(background['mode'], 'background')
+        self.assertEqual(background['argv'], passive['argv'] + ['--background'])
+        self.assertEqual(background['configuration'], passive['configuration'])
+        self.assertFalse(self.desktop.exists())
+        process, status = self.serve()
+        self.assertEqual(status['lifecycle']['mode'], 'passive')
+        self.stop(process)
+        process, status = self.serve(background=True)
+        self.assertEqual(status['lifecycle']['mode'], 'background')
+        self.stop(process)
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux native caller boundary')
+    def test_mode_caller_requires_foreground_tty_or_the_actual_installed_frontend_and_refuses_agent_ancestry(self):
+        import shutil
+        # This helper is a private fixture executable, not the owner's GUI.
+        frontend = Path(self.env['HOME']) / '.local/bin/hgs-tray'
+        frontend.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(sys.executable, frontend)
+        script = '''import os,sys,json,subprocess,fcntl,termios
+tty=None
+try:
+ if sys.argv[1]!='none':
+  tty=os.open(sys.argv[1],os.O_RDWR)
+  fcntl.ioctl(tty,termios.TIOCSCTTY,0)
+ env=dict(os.environ)
+ if sys.argv[2]=='stripped':
+  env.pop('HGS_SESSION',None);env.pop('HGS_RUN_ID',None)
+ child=subprocess.run([sys.argv[3],'desktop','registration','mode-check','--json'],env=env,
+                      stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=5)
+ print(json.dumps(dict(code=child.returncode,out=child.stdout.decode(),error=child.stderr.decode())))
+finally:
+ if tty is not None: os.close(tty)
+'''
+        def case(image, terminal=False, marker=False):
+            import pty
+            env = dict(self.env)
+            if marker:
+                env['HGS_SESSION'] = 'private-agent-fixture'
+            master = slave = None
+            try:
+                if terminal:
+                    master, slave = pty.openpty()
+                child = subprocess.run([str(image), '-c', script,
+                    os.ttyname(slave) if terminal else 'none', 'stripped', str(HGS)],
+                    env=env, start_new_session=True, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=8, text=True)
+                self.assertEqual(child.returncode, 0, child.stderr)
+                return json.loads(child.stdout)
+            finally:
+                if master is not None:
+                    os.close(master); os.close(slave)
+        foreground = case(sys.executable, terminal=True)
+        self.assertEqual(foreground['code'], 0, foreground)
+        self.assertEqual(json.loads(foreground['out'])['source'], 'interactive_terminal')
+        gui = case(frontend)
+        self.assertEqual(gui['code'], 0, gui)
+        self.assertEqual(json.loads(gui['out'])['source'], 'installed_frontend')
+        headless = case(sys.executable)
+        self.assertNotEqual(headless['code'], 0)
+        agent = case(sys.executable, terminal=True, marker=True)
+        self.assertNotEqual(agent['code'], 0)
+        self.assertIn('agent-descended', agent['error'])
+        named = frontend.with_name('claude')
+        shutil.copy2(sys.executable, named)
+        self.assertNotEqual(case(named, terminal=True)['code'], 0)
+        self.assertFalse(self.desktop.exists())
 
     def test_approval_audit_is_selected_scoped_and_does_not_create_a_journal(self):
         self.serve()

@@ -72,6 +72,10 @@ define_class!(
             response: &UNNotificationResponse,
             completion: &block2::DynBlock<dyn Fn()>,
         ) {
+            crate::macos_notification_diagnostics::response(
+                crate::macos_notification_diagnostics::Role::Gui,
+                &response.actionIdentifier(),
+            );
             if let Some(token) = clicked_token(response) {
                 let _ = self.ivars().app.run_on_main_thread(activate);
                 if zerus_client_core::updates::is_update_token(&token) {

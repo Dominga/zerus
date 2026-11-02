@@ -10,6 +10,7 @@ import { questions } from "../store/questions";
 import { selectedKey, setDetailTab, setSelectedKey, subagentOpen } from "../store/ui";
 import { flag, setSetting } from "../store/settings";
 import type { Session } from "../ui/sessions/types";
+import type { ActivityEvent } from "../types";
 import { activityReadingRows } from "../ui/sessions/activity-anchor";
 import { activityGeometry, activityGeometryValid, activitySelectionText, activityVirtualOffset, type ActivityGeometryReport } from "../ui/sessions/activity-virtual";
 
@@ -810,6 +811,131 @@ async function activityGeometryStep() {
   }
 }
 
+/** Exercise real WebKit scroll clamping, not only settled row measurements. */
+async function activityBottomStep() {
+  await setSetting("workspace/reduceMotion", false, { persist: false });
+  await select(RELEASE);
+  const target = activity.target()!, scroller = document.querySelector<HTMLDivElement>(".act-scroll")!;
+  const nativeWheel = new URLSearchParams(location.search).get("phase4-native-wheel") === "1";
+  const words = "A wrapping Markdown paragraph with **emphasis** and `inline code`. ";
+  const markdown = (index: number) => `## Mixed reply ${index}\n\n` + (words.repeat(5 + index % 11)
+    + "\n\n- First item\n- Second item\n\n```rust\nfn example() {\n    println!(\"mixed layout\");\n}\n```\n\n| Name | Description |\n| --- | --- |\n| Short | A table cell with wrapping words |\n\n").repeat(1 + index % 4);
+  let seq = 1, marker = "BOTTOM LAST MARKER";
+  const files = (index: number) => [{ request_id: `req-bottom-${index}`, index: 0, reference: "[Image #1]", name: "late-image.png", mime: "image/png", bytes: 68 }];
+  const events: ActivityEvent[] = Array.from({ length: 100 }, (_, index) => ({ seq: seq++,
+    type: index % 5 === 4 ? "UserPromptSubmit" : "AgentMessage", source: index % 5 === 4 ? "hgs_delivery" : "claude_transcript",
+    attachments: index % 5 === 4 ? files(index) : undefined, message_id: `bottom-${index}`, at: 1793000000 + index,
+    detail: markdown(index) + (index === 99 ? marker : "") }));
+  activity.applyActivity([{ computer: target.computer, key: target.key, kind: "replace", payload: { events } },
+    { computer: target.computer, key: target.key, kind: "state", payload: { rev: Number.MAX_SAFE_INTEGER,
+      value: { provider_messages: [], message_events: [], conversation_id: target.conversationId } } }]);
+  await until(() => scroller.querySelector<HTMLElement>(".act-col")?.style.visibility === "visible" && scroller.scrollHeight > 20000,
+    15000, "mixed Activity did not place");
+  await sleep(700);
+  const failures: string[] = [];
+  const geometry = (phase: string, atEnd = true) => {
+    const edge = scroller.getBoundingClientRect().top + scroller.clientTop;
+    const row = [...scroller.querySelectorAll<HTMLElement>(".act-virtual-row")].at(-1), rect = row?.getBoundingClientRect();
+    const gap = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+    const visible = !!rect && rect.bottom > edge && rect.bottom <= edge + scroller.clientHeight + 1;
+    const value = { phase, top: scroller.scrollTop, height: scroller.scrollHeight, viewport: scroller.clientHeight, gap,
+      lastIndex: row?.dataset.index, lastBottom: rect ? rect.bottom - edge : null, visible,
+      marker: !!row?.textContent?.includes(marker), rows: scroller.querySelectorAll(".act-virtual-row").length };
+    log(`phase4-bottom ${JSON.stringify(value)}`);
+    if (atEnd && (gap > 1.5 || !visible || !value.marker)) failures.push(`${phase}:gap=${gap},last=${value.lastIndex}`);
+    return value;
+  };
+  const move = (top: number) => {
+    scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true }));
+    scroller.scrollTo({ top, behavior: "instant" });
+  };
+  const end = async (phase: string) => {
+    scroller.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
+    scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" });
+    await sleep(700); geometry(phase);
+  };
+  geometry("initial");
+  if (!document.querySelector(".act-queue") || !editor()) throw new Error("queue/composer missing from the bottom fixture");
+
+  // Reproduce one intermediate range swap: remove an overscan row before its
+  // spacer is updated and force layout, then restore it in the same task.
+  // A virtual sizer must preserve the extent even at this intermediate read.
+  move(scroller.scrollHeight - scroller.clientHeight - 100);
+  await sleep(60);
+  const overscan = scroller.querySelector<HTMLElement>(".act-virtual-row")!;
+  const before = { top: scroller.scrollTop, height: scroller.scrollHeight };
+  const display = overscan.style.display;
+  overscan.style.display = "none";
+  const interim = { top: scroller.scrollTop, height: scroller.scrollHeight };
+  overscan.style.display = display;
+  const restored = { top: scroller.scrollTop, height: scroller.scrollHeight };
+  log(`phase4-bottom-range-swap ${JSON.stringify({ before, interim, restored })}`);
+  if (Math.abs(restored.top - before.top) > 1) failures.push("range swap clamped native scrollTop");
+  await sleep(400);
+
+  if (nativeWheel) {
+    move(scroller.scrollHeight - scroller.clientHeight - 5000);
+    await sleep(500);
+    let writes = 0;
+    const original = scroller.scrollTo;
+    scroller.scrollTo = function (...args: Parameters<HTMLElement["scrollTo"]>) { writes++; return original.apply(scroller, args); } as HTMLElement["scrollTo"];
+    const box = scroller.getBoundingClientRect();
+    log(`phase4-native-wheel-ready ${JSON.stringify({ bottomReach: true, x: Math.round(box.left + box.width * .7), y: Math.round(box.top + box.height * .5) })}`);
+    try {
+      await until(() => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 1.5, 30000, "native wheel never reached scroll max");
+    } catch (error) {
+      geometry("wheel-timeout"); log(`phase4-bottom-writes ${writes}`); throw error;
+    } finally { log("phase4-native-wheel-complete"); scroller.scrollTo = original; }
+    await sleep(900); geometry("trusted-wheel");
+    if (writes) failures.push(`application scroll writes during native wheel:${writes}`);
+    move(scroller.scrollHeight / 3); await sleep(450);
+    scroller.focus({ preventScroll: true }); log("phase4-native-end-ready");
+    await until(() => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 1.5, 10000, "native End never reached scroll max");
+    await sleep(700); geometry("trusted-end");
+  } else await end("scrollbar-max");
+
+  const append = () => {
+    marker = `BOTTOM APPEND ${seq}`;
+    const event: ActivityEvent = { seq: seq++, type: "UserPromptSubmit", source: "hgs_delivery", at: 1793001000 + seq,
+      message_id: `bottom-append-${seq}`, detail: markdown(seq) + marker, attachments: files(seq) };
+    activity.applyActivity([{ computer: target.computer, key: target.key, kind: "events", payload: { events: [event], cursor: event.seq } }]);
+  };
+  move(scroller.scrollHeight / 3); await sleep(450);
+  const anchor = activityReadingRows(scroller).visible()[0];
+  for (let index = 0; index < 3; index++) { append(); await sleep(60); }
+  await sleep(500);
+  const offset = anchor && activityReadingRows(scroller).offset(anchor.key);
+  if (offset === undefined || Math.abs(offset - anchor.offset) > 1) failures.push("streaming below moved the reading anchor");
+  await end("after-reading-appends");
+  for (let index = 0; index < 3; index++) { append(); await sleep(120); }
+  await sleep(700); geometry("streaming-pinned");
+  await until(() => {
+    const last = [...scroller.querySelectorAll<HTMLElement>(".act-virtual-row")].at(-1);
+    const image = last?.querySelector<HTMLImageElement>(".att-thumb img");
+    return !!image && image.complete && image.naturalWidth === 1;
+  }, 10000, "late attachment did not load");
+  geometry("late-attachment");
+  const body = scroller.querySelector<HTMLElement>(".act-virtual-row:last-child .act-body")!;
+  const late = document.createElement("pre"); late.className = "act-code"; body.append(late);
+  await sleep(50); late.textContent = "Late code layout after measurement\n".repeat(32);
+  await sleep(700); geometry("late-content");
+  const size = { width: innerWidth, height: innerHeight };
+  const column = scroller.querySelector<HTMLElement>(".act-col")!;
+  let font: FontFace | undefined;
+  try {
+    await invoke("perf_resize", { width: 950, height: 700 }); await sleep(700); geometry("resize");
+    await end("resize-max");
+    font = new FontFace("Activity Bottom Smoke", 'local("Noto Sans Mono")');
+    document.fonts.add(font); column.style.fontFamily = '"Activity Bottom Smoke"';
+    await font.load(); await sleep(900); geometry("late-font"); await end("font-max");
+  } finally {
+    column.style.fontFamily = ""; if (font) document.fonts.delete(font);
+    await invoke("perf_resize", size);
+  }
+  await sleep(800); geometry("restored-size");
+  if (failures.length) throw new Error(`bottom reachability failed: ${failures.join("; ")}`);
+}
+
 async function coldStep() {
   await select(PAGINATION);
   type("cold cache smoke");
@@ -1115,6 +1241,7 @@ export async function phase4Smoke(allowed: boolean, smokeFile?: string) {
     ["select-all-copy", selectAllCopyStep],
     ["media-playback", mediaPlaybackStep],
     ["activity-geometry", activityGeometryStep],
+    ["activity-bottom", activityBottomStep],
   ];
   let current = "start";
   try {

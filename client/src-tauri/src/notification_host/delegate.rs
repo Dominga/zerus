@@ -52,6 +52,10 @@ define_class!(
             response: &UNNotificationResponse,
             completion: &block2::DynBlock<dyn Fn()>,
         ) {
+            crate::macos_notification_diagnostics::response(
+                crate::macos_notification_diagnostics::Role::Host,
+                &response.actionIdentifier(),
+            );
             if let Some(envelope) = envelope(response) {
                 if self.ivars().input.try_send(envelope).is_err() {
                     self.ivars().failed.store(true, Ordering::Release);

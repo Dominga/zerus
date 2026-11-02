@@ -52,6 +52,67 @@ complete these routes or the native checks with Next closed. Keep this row pendi
 until the coordinator's maintained owner route verifies readiness, presentation,
 click routing, stale/withdrawn refusal and Wayland behavior.
 
+### Recorded Arch passive cutover subchecks — 2026-11-02
+
+The admitted main-account run used the existing canonical source installation
+`a1023d4142d1efcffada146d9d1ad68f9596e6a6`, not the Qt-deletion draft.
+webkit-c held the display lock for its 18:53–19:01:45 MSK client checks;
+migrate-u performed the nondisplay checks. The coordinator verified restoration
+and closed the window. **These are scoped subchecks; every Linux platform
+checkbox above remains pending.**
+
+| Subcheck | Result | Actual evidence and limit |
+|---|---|---|
+| Installed identity and dependencies | PASS, existing source install | GUI/CLI image hashes match the installed provenance for `a1023d4`; GUI reports Tauri and `com.hgdev.hgs-tray`. Direct ELF dependencies and the resolved `ldd` closure contain no Qt/KF/WebEngine or missing libraries. This was not a clean install or a package transaction. |
+| Existing service registration and IPC | PASS, passive scope | The maintained installer `--check` succeeds. The owned user unit has no drop-ins; its selected image/configuration/PID and actual Wayland, runtime-directory and session-bus environment agree. The same service serves schema 15 with IPC ready. This does not establish background readiness. |
+| Custom-unit refusal | PENDING | No owner unit or drop-in was changed to manufacture a negative case. |
+| Service-mode startup, explicit Rearm and restart | PASS, passive scope | Startup respected the native/rearm fence. The explicit UI Resume obtained service ownership at revision 13; normal Quit retained it, and a fresh service-mode GUI obtained its original Grant at revision 14. The UI remained unavailable with zero Fleet source rows and no GUI Fleet fallback; no background runtime started. |
+| Native restore | PASS, passive prior runtime | Normal native startup found its original accepted, durable `native_takeover` receipt with `native_ready` and revoked/checkpointed/drained fields. Ownership returned to native revision 15 with current identity. This is not evidence that an active notification or delivery runtime drained. |
+| Existing drafts and sampled process continuity | PASS, sampled scope | webkit-c retained byte-identical contents for 37 nonempty draft files and unchanged original PID/birth identities for 24 sampled agent/tmux processes through Quit/restart/native restore. This is not an all-process census or a Qt-upgrade result. |
+| Existing preference import | PASS, handled-family subcheck | Nine schema-1 preference families are handled, three with zero source keys; no family is quarantined. All nine recorded source hashes match the current Qt file. Its bytes, mtime and file identity, all nine family records and the original seed are unchanged after cutover/restart/restore; layout presentation metadata is present. No reseed or source write was performed. |
+| Current approval policy and generic agent refusal | PASS, passive subcheck | The existing policy stayed OFF. A generic agent-shell OFF request was refused with `handoff_required`. This proves that passive refusal only, not active frontend authentication, ENABLE delivery or a clean default-OFF origin. |
+| Active background readiness and UI-closed duties | BLOCKED: `.66.3.27.5` | The registered command is `hgs desktop serve` without `--background`; no maintained switch starts the active runtime. Ownership Grant/Rearm alone does not start it. Fleet, presence and read delivery therefore remain untested while the UI is closed. |
+| Frozen transfer, raw host read and active approval delivery | BLOCKED: `.66.3.27.5` | No synthetic target or genuine mark was created. No transfer or exact-target raw host acknowledgement was inferred from the overlay, queue, IPC or ownership receipt. No approval ENABLE was submitted. |
+| Service banner/click, active withdrawal and Qt rollback | BLOCKED: `.66.3.27.5` | No notification, active withdrawal/drain, Qt rollout or rollback was performed. |
+| Optional-question preference and foreground suppression | KNOWN GAP: `.66.3.30.11.13` | The typed transport is not merged. These cases were excluded without failing unrelated passive subchecks. |
+| Clean/default state and complete migration acceptance | PENDING | Existing owner state was never cleared or reseeded. Clean install, original default OFF, malformed-source recovery, last-Qt upgrade and rollback/forward idempotence remain unproved. |
+
+The GUI returned through its maintained launcher with the same installed image
+and native startup mode; the temporary mode flag was absent from both GUI and
+manager. The desktop service retained its original PID and definition, remained
+passive and IPC-ready, and kept approvals OFF. No install, service restart, unit
+edit, notification, or agent/tmux/DeepSeek signal was performed. Opened test
+windows were closed and webkit-c released the display lock. The coordinator then
+resumed the rollout watcher; later replacements are outside this recorded run.
+
+Selected nondisplay evidence is retained privately by migrate-u under
+`.ci-build/migrate-u/arch-installed-acceptance-a1023d4/` (under 100 KiB at close).
+webkit-c's bounded commands, receipts, draft/process comparisons and restoration
+are in `.ci-build/installed-cutover-20261102/ledger.json` (8,110 bytes) and adjacent
+selected records. Exact private identities stay there; this document contains no
+message bodies or owner settings dump.
+
+### Remaining G3 source work at this run
+
+The whole `.66.5` migration is still incomplete. The preference/organization and
+Windows-folder callers are merged through [#870](https://github.com/ufna/zerus/pull/870).
+The separate active Next pending-read transfer is wired by
+[#973](https://github.com/ufna/zerus/pull/973),
+[#992](https://github.com/ufna/zerus/pull/992) and
+[#999](https://github.com/ufna/zerus/pull/999).
+The remaining Qt/interim source adapters and `migration::Bundle`/`Publisher`
+still lack production discovery/capture/publication callers: their presence and
+tests do not produce a complete private import/quarantine record.
+
+migrate-u owns this remaining work with desktop-u's handoff seam: discover the
+managed sources, freeze and freshly recheck their actual writers/snapshots, then
+publish bounded immutable evidence using the existing adapters and publisher.
+Preserve original identities and unknown/partial state without replay. This is
+several focused source PRs (`.66.5.2.1`, `.66.5.2`, `.66.5.4`), and blocks the
+complete one-time-import and upgrade acceptance rows. The completed service
+read/approval implementation `.66.3.29` is separate; its closure does not close
+G3 or installed acceptance.
+
 ## macOS
 
 Use the signed/notarized Next bundle/cask and the maintained local installer for

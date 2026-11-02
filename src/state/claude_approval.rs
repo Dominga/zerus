@@ -834,13 +834,21 @@ pub(super) fn decide_group(record:&Value,question:&Value,answers:&Value) {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn hand_over(record:&Value,question:&Value,calls:&[String],waiting:&[String],missing:&[String],
     verdict:&subagents_confirm::Verdict,carry_rule:bool,answered:bool)->Result<()> {
+    hand_over_within(record,question,calls,waiting,missing,verdict,carry_rule,answered,std::time::Duration::from_secs(3))
+}
+
+// Protocol tests can wait for their stand-in hooks without changing the
+// production acknowledgement deadline or the uncertain-delivery contract.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn hand_over_within(record:&Value,question:&Value,calls:&[String],waiting:&[String],missing:&[String],
+    verdict:&subagents_confirm::Verdict,carry_rule:bool,answered:bool,within:std::time::Duration)->Result<()> {
     let carrier=waiting.first().map(String::as_str).filter(|_|carry_rule);
     subagents_confirm::decide(string(record,"conversation_id"),calls,verdict,carrier);
     // After the group's answer: a hook that saw the session allowance first
     // printed a bare allow, without the rule it carries (fork build 97).
     if verdict.remember {let _ = subagents_confirm::allow_session(record);}
     let ends_turn=!verdict.allow&&verdict.message.is_empty();
-    let delivered=answer_channel::batch_delivered(record,waiting,std::time::Duration::from_secs(3),ends_turn)?;
+    let delivered=answer_channel::batch_delivered(record,waiting,within,ends_turn)?;
     if delivered==0&&!answered {
         return Err("delivery uncertain: no subagent's permission hook reported handing the answer over; inspect Terminal before answering again".into());
     }

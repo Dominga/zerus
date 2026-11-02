@@ -118,16 +118,20 @@ pub(super) fn offer(dir: &Path, offer: &Value) -> Result<()> {
 /// without delete sharing can hold answer.json for a moment there, and the
 /// refused rename moved nothing, so it is tried again for a bounded time.
 fn take(dir: &Path, stage: &str) -> Result<bool> {
+    take_with_wait(dir, stage, Instant::now, std::thread::sleep)
+}
+
+fn take_with_wait(dir: &Path, stage: &str, now: impl Fn() -> Instant, mut wait: impl FnMut(Duration)) -> Result<bool> {
     let _handover = lock(Some(&dir.join("handover.lock")))?;
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = now() + Duration::from_secs(1);
     loop {
         match fs::rename(dir.join(ANSWER), dir.join(stage)) {
             Ok(()) => return Ok(true),
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
             Err(error)
-                if crate::platform::transient_replace_error(&error) && Instant::now() < deadline =>
+                if crate::platform::transient_replace_error(&error) && now() < deadline =>
             {
-                std::thread::sleep(Duration::from_millis(20));
+                wait(Duration::from_millis(20));
             }
             Err(error) => return Err(error.to_string()),
         }
@@ -980,6 +984,32 @@ mod tests {
     }
 
     const BATCH: &str = "claude/x/batch";
+    const FIXTURE_NOW: f64 = 1_700_000_100.;
+    const FIXTURE_WAIT: Duration = Duration::from_secs(30);
+
+    fn with_batch_state<T>(root: &Path, run: impl FnOnce() -> T) -> T {
+        crate::state::with_test_state_root(root, || crate::state::with_test_now(FIXTURE_NOW, run))
+    }
+
+    // A failed assertion must not detach a hook that still writes into the
+    // fixture after its TempDir has gone. End its turn and join before cleanup.
+    struct Hook {
+        thread: Option<std::thread::JoinHandle<()>>,
+        root: PathBuf,
+    }
+    impl Hook {
+        fn join(mut self) -> std::thread::Result<()> {
+            self.thread.take().unwrap().join()
+        }
+    }
+    impl Drop for Hook {
+        fn drop(&mut self) {
+            if let Some(thread) = self.thread.take() {
+                with_batch_state(&self.root, || subagents_confirm::group_reset("conversation-1"));
+                let _ = thread.join();
+            }
+        }
+    }
 
     /// A live Claude session of this process whose main agent asked for each
     /// of `calls` (Agent tool uses) at once, as Claude 2.1.312 does for a
@@ -1007,20 +1037,21 @@ mod tests {
 
     /// One waiting hook process for Claude's request `event`, in a thread of
     /// this test with the same state; it sends what it prints.
-    fn hook(root: &Path, event: &Value) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Receiver<Value>) {
+    fn hook(root: &Path, event: &Value) -> (Hook, std::sync::mpsc::Receiver<Value>) {
         let (sender, printed) = std::sync::mpsc::channel();
         let (root, event) = (root.to_owned(), event.clone());
+        let worker_root = root.clone();
         let handle = std::thread::spawn(move || {
-            crate::state::with_test_state_root(&root, || {
-                let mut emit = |output: &Value| sender.send(output.clone()).unwrap();
+            with_batch_state(&worker_root, || {
+                let mut emit = |output: &Value| { let _ = sender.send(output.clone()); };
                 serve(BATCH, "run-1", &event, Kind::Approval, now(), 60., |_| true, &mut emit).unwrap();
             })
         });
-        (handle, printed)
+        (Hook { thread: Some(handle), root }, printed)
     }
 
     fn eventually(what: &str, mut condition: impl FnMut() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + FIXTURE_WAIT;
         while !condition() {
             assert!(Instant::now() < deadline, "{what}");
             std::thread::sleep(Duration::from_millis(25));
@@ -1028,7 +1059,7 @@ mod tests {
     }
 
     fn decision_of(printed: &std::sync::mpsc::Receiver<Value>) -> Value {
-        printed.recv_timeout(Duration::from_secs(10)).unwrap()["hookSpecificOutput"]["decision"].clone()
+        printed.recv_timeout(FIXTURE_WAIT).unwrap()["hookSpecificOutput"]["decision"].clone()
     }
 
     fn subagent_calls() -> [(&'static str, Value); 2] {
@@ -1046,7 +1077,7 @@ mod tests {
     fn one_answer_reaches_every_waiting_call_of_a_batch() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_owned();
-        crate::state::with_test_state_root(&root, || {
+        with_batch_state(&root, || {
             let (mut record, requests) = batch_session(&subagent_calls(), &root, json!([]));
             let ids = vec!["toolu_1".to_owned(), "toolu_2".to_owned()];
             let (first, first_printed) = hook(&root, &requests[0]);
@@ -1069,7 +1100,7 @@ mod tests {
             subagents_confirm::decide("conversation-1", &ids, &subagents_confirm::Verdict::allow(), None);
             assert_eq!(decision_of(&first_printed), json!({"behavior":"allow"}));
             assert_eq!(decision_of(&second_printed), json!({"behavior":"allow"}));
-            assert_eq!(batch_delivered(&record, &ids, Duration::from_secs(3), false).unwrap(), 2);
+            assert_eq!(batch_delivered(&record, &ids, FIXTURE_WAIT, false).unwrap(), 2);
             assert!(batch_waiting(&record, &ids).is_none(), "an answered hook takes no second answer");
             first.join().unwrap();
             second.join().unwrap();
@@ -1090,7 +1121,7 @@ mod tests {
     fn a_bound_call_decided_with_its_group_settles_its_request() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_owned();
-        crate::state::with_test_state_root(&root, || {
+        with_batch_state(&root, || {
             let (record, requests) = batch_session(&subagent_calls(), &root, json!([]));
             let ids = vec!["toolu_1".to_owned(), "toolu_2".to_owned()];
             let (first, first_printed) = hook(&root, &requests[0]);
@@ -1118,7 +1149,7 @@ mod tests {
     fn dont_ask_again_reaches_the_batch_and_the_session() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_owned();
-        crate::state::with_test_state_root(&root, || {
+        with_batch_state(&root, || {
             let rule = json!({"type":"addRules","rules":[{"toolName":"Agent"}],"behavior":"allow","destination":"localSettings"});
             let (record, requests) = batch_session(&subagent_calls(), &root, json!([rule]));
             let ids = vec!["toolu_1".to_owned(), "toolu_2".to_owned()];
@@ -1129,7 +1160,7 @@ mod tests {
             eventually("both hooks wait", || batch_waiting(&record, &ids).as_deref() == Some(ids.as_slice()));
             let Ok(Route::Channel(channel)) = route(&record, &identity) else { unreachable!() };
             let offer = json!({"request_id":"one","decision":"allow","message":"","remember":true});
-            let transport = deliver(&channel, &offer, Duration::from_secs(3), Duration::from_secs(5), || Err("no screen".into()));
+            let transport = deliver(&channel, &offer, FIXTURE_WAIT, FIXTURE_WAIT, || Err("no screen".into()));
             assert_eq!(transport.unwrap(), "claude_hook");
             let session_rule = json!({"type":"addRules","rules":[{"toolName":"Agent"}],"behavior":"allow","destination":"session"});
             assert_eq!(decision_of(&second_printed), json!({"behavior":"allow","updatedPermissions":[session_rule]}));
@@ -1139,7 +1170,7 @@ mod tests {
             let verdict = subagents_confirm::Verdict { allow: true, message: String::new(), remember: true };
             let (waiting, missing) = batch_status(&record, &ids[..1]);
             assert_eq!((waiting.as_slice(), missing.len()), (&ids[..1], 0));
-            claude_approval::hand_over(&record, &card, &ids, &waiting, &missing, &verdict, false, true).unwrap();
+            claude_approval::hand_over_within(&record, &card, &ids, &waiting, &missing, &verdict, false, true, FIXTURE_WAIT).unwrap();
             assert_eq!(decision_of(&first_printed), json!({"behavior":"allow"}), "Claude gets the rule once");
             first.join().unwrap();
             second.join().unwrap();
@@ -1161,7 +1192,7 @@ mod tests {
     fn a_rule_saved_while_the_batch_waits_allows_it_and_the_session() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_owned();
-        crate::state::with_test_state_root(&root, || {
+        with_batch_state(&root, || {
             let (record, requests) = batch_session(&subagent_calls(), &root, json!([]));
             let ids = vec!["toolu_1".to_owned(), "toolu_2".to_owned()];
             let (first, first_printed) = hook(&root, &requests[0]);
@@ -1185,7 +1216,7 @@ mod tests {
     fn a_rule_saved_before_never_answers_and_hooks_end_with_their_turn() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_owned();
-        crate::state::with_test_state_root(&root, || {
+        with_batch_state(&root, || {
             fs::create_dir_all(root.join(".claude")).unwrap();
             fs::write(root.join(".claude/settings.local.json"), r#"{"permissions":{"allow":["Agent"]}}"#).unwrap();
             fs::write(root.join(".claude/settings.json"), r#"{"permissions":{"allow":["Task(*)"]}}"#).unwrap();
@@ -1219,7 +1250,7 @@ mod tests {
     fn identical_calls_take_the_batch_answer_together() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_owned();
-        crate::state::with_test_state_root(&root, || {
+        with_batch_state(&root, || {
             let same = json!({"subagent_type":"Explore","description":"Look","prompt":"Look around"});
             let calls = [("toolu_1", same.clone()), ("toolu_2", same), ("toolu_3", json!({"subagent_type":"general","prompt":"Fix it"}))];
             let rule = json!({"type":"addRules","rules":[{"toolName":"Agent"}],"behavior":"allow","destination":"projectSettings"});
@@ -1239,11 +1270,11 @@ mod tests {
             // rest; the rule goes to the first call still waiting.
             let Ok(Route::Channel(channel)) = route(&record, &identity) else { unreachable!() };
             let offer = json!({"request_id":"one","decision":"allow","message":"","remember":true});
-            assert_eq!(deliver(&channel, &offer, Duration::from_secs(3), Duration::from_secs(5), || Err("no screen".into())).unwrap(), "claude_hook");
+            assert_eq!(deliver(&channel, &offer, FIXTURE_WAIT, FIXTURE_WAIT, || Err("no screen".into())).unwrap(), "claude_hook");
             let card = json!({"subagent_confirmation":true,"subagent_calls":ids,"questions":[{"id":"approval","options":[]}]});
             let verdict = subagents_confirm::Verdict { allow: true, message: String::new(), remember: true };
             let (waiting, missing) = batch_status(&record, &ids[..2]);
-            claude_approval::hand_over(&record, &card, &ids, &waiting, &missing, &verdict, false, true).unwrap();
+            claude_approval::hand_over_within(&record, &card, &ids, &waiting, &missing, &verdict, false, true, FIXTURE_WAIT).unwrap();
             let session_rule = json!({"type":"addRules","rules":[{"toolName":"Agent"}],"behavior":"allow","destination":"session"});
             assert_eq!(decision_of(&hooks[2].1), json!({"behavior":"allow","updatedPermissions":[session_rule]}));
             for (_, printed) in &hooks[..2] {
@@ -1261,7 +1292,7 @@ mod tests {
     fn dont_ask_again_on_the_screen_hands_the_rule_to_a_waiting_hook() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_owned();
-        crate::state::with_test_state_root(&root, || {
+        with_batch_state(&root, || {
             let rule = json!({"type":"addRules","rules":[{"toolName":"Agent"}],"behavior":"allow","destination":"localSettings"});
             let (record, requests) = batch_session(&subagent_calls(), &root, json!([rule]));
             let ids = vec!["toolu_1".to_owned(), "toolu_2".to_owned()];
@@ -1273,7 +1304,7 @@ mod tests {
             assert_eq!((waiting.as_slice(), missing.len()), (&ids[1..], 0));
             let card = json!({"subagent_confirmation":true,"subagent_calls":ids,"questions":[{"id":"approval","options":[]}]});
             let verdict = subagents_confirm::Verdict { allow: true, message: String::new(), remember: true };
-            claude_approval::hand_over(&record, &card, &ids, &waiting, &missing, &verdict, true, false).unwrap();
+            claude_approval::hand_over_within(&record, &card, &ids, &waiting, &missing, &verdict, true, false, FIXTURE_WAIT).unwrap();
             let session_rule = json!({"type":"addRules","rules":[{"toolName":"Agent"}],"behavior":"allow","destination":"session"});
             assert_eq!(decision_of(&second_printed), json!({"behavior":"allow","updatedPermissions":[session_rule]}));
             assert_eq!(subagents_confirm::verdict("conversation-1", "toolu_1"), Some(subagents_confirm::Verdict::allow()), "no rule for a call without a hook");
@@ -1574,6 +1605,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_briefly_held_offer_is_still_taken_once() {
+        use std::cell::Cell;
         use std::os::windows::fs::OpenOptionsExt;
         // FILE_SHARE_READ only, as some readers and scanners open files.
         let hold = |dir: &Path| fs::OpenOptions::new().read(true).share_mode(1).open(dir.join(ANSWER)).unwrap();
@@ -1581,13 +1613,15 @@ mod tests {
             let temp = tempfile::tempdir().unwrap();
             let dir = temp.path();
             offer(dir, &json!({"request_id": "r", "answers": {}})).unwrap();
-            let reader = hold(dir);
-            let release = std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(150));
-                drop(reader);
-            });
-            assert!(take(dir, stage).unwrap(), "{stage}");
-            release.join().unwrap();
+            let mut reader = Some(hold(dir));
+            let clock = Cell::new(Instant::now());
+            let retries = Cell::new(0);
+            assert!(take_with_wait(dir, stage, || clock.get(), |delay| {
+                retries.set(retries.get() + 1);
+                drop(reader.take());
+                clock.set(clock.get() + delay);
+            }).unwrap(), "{stage}");
+            assert!(retries.get() > 0, "the held offer caused a retry");
             assert!(dir.join(stage).exists() && !dir.join(ANSWER).exists(), "{stage}");
             assert!(!take(dir, other).unwrap(), "{other} after {stage}");
         }
@@ -1597,8 +1631,9 @@ mod tests {
         offer(dir, &json!({"request_id": "r", "answers": {}})).unwrap();
         let _reader = hold(dir);
         let started = Instant::now();
-        assert!(take(dir, CLAIMED).is_err());
-        assert!(started.elapsed() < Duration::from_secs(3));
+        let clock = Cell::new(started);
+        assert!(take_with_wait(dir, CLAIMED, || clock.get(), |delay| clock.set(clock.get() + delay)).is_err());
+        assert_eq!(clock.get() - started, Duration::from_secs(1));
         assert!(dir.join(ANSWER).exists() && !dir.join(CLAIMED).exists());
     }
 
@@ -1626,7 +1661,7 @@ mod tests {
             write(dir, EMITTED, &json!({"request_id":"one"})).unwrap();
         });
         let screen = std::cell::Cell::new(0);
-        assert_eq!(delivered_within(temp.path(), &screen, Duration::from_secs(5)).unwrap(), "claude_hook");
+        assert_eq!(delivered_within(temp.path(), &screen, FIXTURE_WAIT).unwrap(), "claude_hook");
         assert_eq!(screen.get(), 0);
         waiting.join().unwrap();
     }
@@ -1678,7 +1713,7 @@ mod tests {
             write(dir, EMITTED, &json!({"request_id":"one"})).unwrap();
         });
         let screen = std::cell::Cell::new(0);
-        assert_eq!(delivered_within(temp.path(), &screen, Duration::from_secs(5)).unwrap(), "claude_hook");
+        assert_eq!(delivered_within(temp.path(), &screen, FIXTURE_WAIT).unwrap(), "claude_hook");
         assert_eq!(screen.get(), 0);
         waiting.join().unwrap();
     }

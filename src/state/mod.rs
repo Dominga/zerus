@@ -261,10 +261,32 @@ pub(super) fn home_var(agent: &str) -> Result<&'static str> {
 }
 
 pub(super) fn now() -> f64 {
+    #[cfg(test)]
+    if let Some(at) = TEST_NOW.with(std::cell::Cell::get) {
+        return at;
+    }
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_NOW: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Freeze protocol timestamps on this fixture thread, not monotonic wait budgets.
+#[cfg(test)]
+pub(super) fn with_test_now<T>(at: f64, run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<f64>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_NOW.with(|clock| clock.set(self.0));
+        }
+    }
+    let _restore = Restore(TEST_NOW.with(|clock| clock.replace(Some(at))));
+    run()
 }
 
 /// H2, N34: JSON piped from PowerShell 5.1 starts with a UTF-8 BOM; every

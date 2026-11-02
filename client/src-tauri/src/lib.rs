@@ -497,7 +497,12 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(mobile::start(app.handle()));
                 // A replay never touches the real read or attention marks.
                 let actions = actions::Actions::new(dir.join(actions::marks_file(replay)));
-                if desktop_service::mode() { actions.disarm_read_delivery()?; }
+                if desktop_service::mode() {
+                    actions.disarm_read_delivery()?;
+                    if !replay {
+                        app.state::<commands::AppState>().set_pending_read_source(actions.clone());
+                    }
+                }
                 let notice_app = app.handle().clone();
                 if desktop_service::mode() {
                     app.manage(actions.read_delivery.clone());

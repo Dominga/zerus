@@ -22,6 +22,10 @@ pub const LIFETIME: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
+    ImportPendingReads {
+        request_id: String,
+        page: Box<super::pending_reads::Page>,
+    },
     ActivationWait {
         request_id: String,
     },
@@ -56,12 +60,14 @@ impl Request {
     pub fn id(&self) -> &str {
         match self {
             Self::ActivationWait { request_id }
+            | Self::ImportPendingReads { request_id, .. }
             | Self::AutomaticApprovals { request_id, .. }
             | Self::MaintenanceConfigure { request_id, .. } => request_id,
         }
     }
     pub fn operation(&self) -> &'static str {
         match self {
+            Self::ImportPendingReads { .. } => "import_pending_reads",
             Self::ActivationWait { .. } => "activation_wait",
             Self::AutomaticApprovals { .. } => "automatic_approvals",
             Self::MaintenanceConfigure { .. } => "maintenance_configure",
@@ -69,6 +75,7 @@ impl Request {
     }
     fn valid(&self) -> bool {
         match self {
+            Self::ImportPendingReads { page, .. } => page.valid(),
             Self::ActivationWait { .. } | Self::AutomaticApprovals { .. } => true,
             Self::MaintenanceConfigure {
                 update, recovery, ..

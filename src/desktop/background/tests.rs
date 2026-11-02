@@ -4,7 +4,9 @@ use std::sync::mpsc;
 
 #[test]
 fn slow_replacement_keeps_draining_on_actor_turns_without_a_client_retry() {
-    let _serial = preparation::TEST_SERIAL.lock().unwrap();
+    let _serial = preparation::TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     let config = Config {

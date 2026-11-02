@@ -12,10 +12,10 @@ use zerus_client_core::desktop::{
 use zerus_desktop_ledger::reads;
 use zerus_desktop_migration::canonical_uuid;
 
-fn response(id: &str, page: &Page) -> Value {
+fn response(id: &str, page: &Page, superseded: usize) -> Value {
     json!({"op":"import_pending_reads","request_id":id,"accepted":true,
         "durable":true,"source":page.source,"after":page.after,
-        "through":page.through(),"delivered":false})
+        "through":page.through(),"superseded":superseded,"delivered":false})
 }
 
 pub(super) fn frontend(store: &mut Store, authority: Validated) -> Value {
@@ -40,6 +40,7 @@ fn materialize(store: &mut Store, id: &str, page: &Page) -> Result<Value> {
         tx.query_row("SELECT configuration FROM service WHERE id=1", [], |r| {
             r.get(0)
         })?;
+    let mut superseded = 0;
     for mark in &page.marks {
         let id = pending_reads::intent_id(&configuration, mark).map_err(anyhow::Error::msg)?;
         let occupied: bool = tx.query_row(
@@ -48,10 +49,11 @@ fn materialize(store: &mut Store, id: &str, page: &Page) -> Result<Value> {
             |r| r.get(0),
         )?;
         ensure!(!occupied, "read ID belongs to another intent");
-        reads::adopt_in(&tx, &id, mark, chrono::Utc::now().timestamp_millis())?;
+        let receipt = reads::adopt_in(&tx, &id, mark, chrono::Utc::now().timestamp_millis())?;
+        superseded += usize::from(receipt.superseded);
     }
     tx.commit()?;
-    Ok(response(id, page))
+    Ok(response(id, page, superseded))
 }
 
 #[derive(Deserialize)]
@@ -85,14 +87,18 @@ fn lookup(store: &Store, value: &Value) -> Result<Value> {
                 r.get(0)
             })?;
     let mut found = true;
+    let mut superseded = 0;
     for mark in &request.page.marks {
         let id = pending_reads::intent_id(&configuration, mark).map_err(anyhow::Error::msg)?;
-        found &= reads::receipt(&store.db, &id, mark)?.is_some();
+        match reads::receipt(&store.db, &id, mark)? {
+            Some(receipt) => superseded += usize::from(receipt.superseded),
+            None => found = false,
+        }
     }
     Ok(
         json!({"op":"pending_reads_import_result","request_id":request.request_id,
         "original_request_id":request.original_request_id,"accepted":true,
-        "durable":false,"found":found,"result":found.then(|| response(&request.original_request_id,&request.page))}),
+        "durable":false,"found":found,"result":found.then(|| response(&request.original_request_id,&request.page,superseded))}),
     )
 }
 

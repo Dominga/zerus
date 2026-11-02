@@ -18,7 +18,7 @@ fn imported_receipt(request: &Request) -> Value {
         panic!("import")
     };
     json!({"request_id":request_id,"op":"import_pending_reads","accepted":true,"durable":true,
-        "source":page.source,"after":page.after,"through":page.through(),"delivered":false})
+        "source":page.source,"after":page.after,"through":page.through(),"superseded":0,"delivered":false})
 }
 
 #[test]
@@ -29,6 +29,7 @@ fn imported_page_requires_its_original_source_cursor_and_durable_transfer_receip
     for (field, wrong) in [
         ("after", json!(1)),
         ("through", json!(999)),
+        ("superseded", json!(2)),
         ("source", json!({})),
         ("durable", json!(false)),
         ("delivered", json!(true)),
@@ -269,7 +270,7 @@ fn the_actual_version_suffix_alone_defines_the_gui_dev_number() {
 }
 
 #[cfg(target_os = "linux")]
-mod native {
+pub(in crate::desktop_service) mod native {
     use super::*;
     use crate::desktop_service::tests::Fixture;
     use std::{
@@ -279,12 +280,12 @@ mod native {
         thread,
     };
     use zerus_client_core::desktop::{Build, Responder};
-    struct CacheServer {
+    pub(in crate::desktop_service) struct CacheServer {
         stop: Arc<AtomicBool>,
         thread: Option<thread::JoinHandle<()>>,
     }
     impl CacheServer {
-        fn start(root: &Path, responder: Arc<Responder>) -> Self {
+        pub(in crate::desktop_service) fn start(root: &Path, responder: Arc<Responder>) -> Self {
             let listener = UnixListener::bind(root.join("native-cache.sock")).unwrap();
             listener.set_nonblocking(true).unwrap();
             let stop = Arc::new(AtomicBool::new(false));
@@ -337,7 +338,7 @@ mod native {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
-    fn responder() -> Arc<Responder> {
+    pub(in crate::desktop_service) fn responder() -> Arc<Responder> {
         let build = crate::cli::build_info(&crate::cli::BUILD);
         let responder = Arc::new(Responder::new(
             "com.hgdev.hgs-tray".into(),
@@ -356,8 +357,10 @@ mod native {
     // Exercise the production startup producer through its original child and
     // native cache registration. The private fake service supplies receipts;
     // the service/ledger tests separately verify their real SQL commits.
-    async fn native_startup_import(lost_replies: bool) {
-        let fixture = Fixture::new(json!({"ready":false,"frontend_uncertain":lost_replies}));
+    async fn native_startup_import(lost_replies: bool, superseded: bool) {
+        let fixture = Fixture::new(
+            json!({"ready":false,"frontend_uncertain":lost_replies,"pending_reads_superseded":superseded}),
+        );
         let responder = responder();
         let _cache = CacheServer::start(&fixture.0, responder.clone());
         let (service, _) = fixture.start_with_responder(true, Some(responder));
@@ -425,6 +428,11 @@ mod native {
         let import = status.pending_read_import.as_ref().unwrap();
         assert_eq!(import["complete"], true);
         assert_eq!(import["through"], 193);
+        assert_eq!(import["superseded"], if superseded { 193 } else { 0 });
+        assert!(
+            service.read_marks(vec![]).await.is_ok(),
+            "completed conflicts release the read gate"
+        );
         assert_eq!(import["delivered"], false);
         assert!(
             !status.component_ready("reads"),
@@ -479,8 +487,9 @@ mod native {
             return;
         }
         tauri::async_runtime::block_on(async {
-            native_startup_import(false).await;
-            native_startup_import(true).await;
+            native_startup_import(false, false).await;
+            native_startup_import(true, false).await;
+            native_startup_import(true, true).await;
             for case in [
                 "success",
                 "unknown",

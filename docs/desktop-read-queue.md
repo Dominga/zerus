@@ -51,7 +51,9 @@ In service mode the native Next startup path first disarms legacy read delivery.
 One owned background job freezes the managed read-mark store and checkpoints it,
 then fully consumes `next_pending_reads` before sending any mutation. The whole
 source is limited to 16 MiB and 50,000 entries; an invalid final entry refuses
-the capture, including its valid prefix. The original file is retained.
+the capture, including its valid prefix. The original file is retained. Read-only overlay borrows are retried within the
+same 30-second capture deadline; a timed-out capture retains its original freeze
+handle for Retry without reopening mark writers.
 
 The job waits for the canonical responder, selected configuration and CLI ABI.
 It submits the closed native `import_pending_reads` request through the existing
@@ -63,15 +65,18 @@ the underlying capture adapter's 1 MiB pages are never truncated.
 The actor commits each page into the existing read ledger, even while passive.
 Mark request UUIDs depend on configuration and the exact normalized target,
 including run, conversation, reply and attention identity, never retry, service
-epoch or page cursor. The original receipts survive retirement. Historical
-transfer cannot overwrite a different current intent or revive an identical
-settled row still retained by an original in-flight dispatch.
+epoch or page cursor. The original receipts survive retirement. An identical settled row is not revived. A different frozen part after settlement
+becomes new intent at the next revision. A conflicting unsettled/in-flight mark
+stays current; the frozen mark receives a durable superseded receipt so it cannot
+block the page or overwrite the current intent. Replays return that original
+receipt, including after the current row retires.
 
 `pending_reads_import_result` checks at most one page of those indexed receipts
 without mutating anything. A lost reply is looked up before the producer advances;
 partial or unknown transfer retains its original source and resource bindings.
 The client exposes bounded progress as `pending_read_import`, independently of
-native service readiness. Transfer completion means durable queued intent, not
+native service readiness. The service status UI shows a paused transfer and its
+existing Retry action. Transfer completion means durable queued intent, not
 host acknowledgement, worker drain, approval consent or a writer handoff.
 
 Windows' freeze/checkpoint adapter remains explicitly unsupported, tracked by

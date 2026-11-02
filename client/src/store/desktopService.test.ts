@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createDesktopService, createServiceApprovalIntent } from "./desktopService";
+import { createDesktopService, createServiceApprovalIntent, pendingReadNotice } from "./desktopService";
 import { createApprovalOptIn } from "../ui/screens/settings/approval-opt-in";
 import { emptyBatch, isEmptyBatch, type DesktopService } from "../types";
 import { normalize } from "../bridge";
@@ -9,6 +9,13 @@ export const serviceView = (patch: Partial<DesktopService> = {}): DesktopService
   automatic_approvals: null, details_available: false, code: "background_unready", ...patch,
 });
 describe("desktop service presentation", () => {
+  it("shows blocked read transfer and its existing Retry path until durable completion", () => {
+    expect(pendingReadNotice(undefined)).toBe("");
+    const pending = { required: true, complete: false, running: true, code: "pending_read_import_waiting", through: 0, superseded: 0, delivered: false as const };
+    expect(pendingReadNotice(serviceView({ pending_read_import: pending }))).toContain("Transferring saved read marks");
+    expect(pendingReadNotice(serviceView({ pending_read_import: { ...pending, running: false } }))).toContain("Retry to continue");
+    expect(pendingReadNotice(serviceView({ pending_read_import: { ...pending, running: false, complete: true, superseded: 1 } }))).toBe("");
+  });
   it("is off until the native startup mode publishes a projection; IPC alone enables no component", () => {
     const service = createDesktopService();
     expect(service.enabled()).toBe(false);

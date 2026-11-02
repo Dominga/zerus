@@ -58,6 +58,10 @@ pub struct Queued {
     pub key: String,
     pub seq: i64,
     pub revision: i64,
+    /// A frozen mark that conflicted with an unsettled current intent was
+    /// consumed without replacing that intent. Old receipts default to false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub superseded: bool,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Delivery {
@@ -170,9 +174,9 @@ fn enqueue_encoded(
     enqueue_new(tx, request_id, mark, encoded, now, false)
 }
 
-/// Historical frozen intent must not revive an identical settled row or
-/// overwrite a conflicting current part. Its stable import receipt is still
-/// committed in the caller's original transaction.
+/// Historical frozen intent never revives an identical settled row. A changed
+/// settled mark is new intent; an unsettled conflicting mark stays current and
+/// the frozen mark receives a superseded receipt in the original transaction.
 pub fn adopt_in(
     tx: &Transaction<'_>,
     request_id: &str,
@@ -241,6 +245,7 @@ fn enqueue_new(
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
+    let mut superseded = false;
     let revision = if let Some((old, revision, settled)) = old {
         let old: ReadMark = serde_json::from_str(&old)?;
         ensure!(
@@ -250,20 +255,26 @@ fn enqueue_new(
                 && old.conversation_id == mark.conversation_id,
             "stored read identity changed"
         );
-        let merged = ReadMark::merged(&old, mark.clone());
-        if historical {
-            for (previous, incoming) in [
+        let conflict = historical
+            && !settled
+            && [
                 (&old.reply_id, &mark.reply_id),
                 (&old.attention_signature, &mark.attention_signature),
-            ] {
+            ]
+            .into_iter()
+            .any(|(previous, incoming)| {
                 let previous = previous.as_deref().filter(|s| !s.is_empty());
                 let incoming = incoming.as_deref().filter(|s| !s.is_empty());
-                ensure!(
-                    previous.is_none() || incoming.is_none() || previous == incoming,
-                    "frozen read conflicts with current intent"
-                );
-            }
-        }
+                previous.is_some() && incoming.is_some() && previous != incoming
+            });
+        // Consume the whole conflicting frozen mark; none of its parts may
+        // replace or delay the current unsettled/in-flight intent.
+        superseded = conflict;
+        let merged = if conflict {
+            old.clone()
+        } else {
+            ReadMark::merged(&old, mark.clone())
+        };
         if old != merged || (settled && !historical) {
             let revision = revision
                 .checked_add(1)
@@ -287,6 +298,7 @@ fn enqueue_new(
         key,
         seq,
         revision,
+        superseded,
     };
     tx.execute(
         "INSERT INTO desktop_read_requests VALUES(?1,?2,?3)",

@@ -1,18 +1,19 @@
 //! One native startup producer; no JS source paths/rows, second read worker,
 //! writer activation, source cleanup or delivery acknowledgement.
 use super::*;
-use crate::actions::{Actions, CapturedReads};
+use crate::actions::{Actions, CapturedReads, FrozenReads};
 use std::time::Instant;
 use zerus_client_core::desktop::pending_reads::Source;
 
 #[derive(Default)]
 pub(super) struct State {
     actions: Option<Actions>,
+    frozen: Option<Arc<FrozenReads>>,
     captured: Option<Arc<CapturedReads>>,
     source: Option<Source>,
     configuration: Option<String>,
     after: usize,
-    attempted: bool,
+    superseded: usize,
     running: bool,
     complete: bool,
     pages_done: bool,
@@ -25,7 +26,7 @@ impl State {
     pub fn status(&self) -> Value {
         json!({"required":self.actions.is_some(),"complete":self.complete,
             "running":self.running,"source":self.source,"through":self.after,
-            "code":self.code,"delivered":false})
+            "code":self.code,"superseded":self.superseded,"delivered":false})
     }
 }
 impl Service {
@@ -75,24 +76,19 @@ pub(super) fn retry(shared: Arc<Shared>) {
     let Ok(charge) = shared.rpc.admit(Role::ReadDelivery) else {
         return;
     };
-    let (actions, captured) = {
+    let (actions, captured, frozen) = {
         let mut state = shared
             .read_import
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if shared.stopped.load(Ordering::Acquire)
-            || state.running
-            || state.complete
-            || (state.attempted && state.captured.is_none())
-        {
+        if shared.stopped.load(Ordering::Acquire) || state.running || state.complete {
             return;
         }
         let Some(actions) = state.actions.clone() else {
             return;
         };
-        state.attempted = true;
         state.running = true;
-        (actions, state.captured.clone())
+        (actions, state.captured.clone(), state.frozen.clone())
     };
     publish(&shared);
     tauri::async_runtime::spawn(async move {
@@ -103,12 +99,23 @@ pub(super) fn retry(shared: Arc<Shared>) {
             Some(captured) => captured,
             None => {
                 let retained = hold.clone();
+                let source = shared.clone();
                 let capture_deadline = Instant::now() + Duration::from_secs(30);
                 let result = tauri::async_runtime::spawn_blocking(move || {
                     let _retained = retained;
-                    actions
-                        .freeze_reads()
-                        .and_then(|frozen| frozen.capture(capture_deadline))
+                    let frozen = match frozen {
+                        Some(frozen) => frozen,
+                        None => {
+                            let frozen = Arc::new(actions.freeze_reads()?);
+                            source
+                                .read_import
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .frozen = Some(frozen.clone());
+                            frozen
+                        }
+                    };
+                    frozen.capture(capture_deadline)
                 })
                 .await;
                 match result {
@@ -121,6 +128,7 @@ pub(super) fn retry(shared: Arc<Shared>) {
                                 .unwrap_or_else(PoisonError::into_inner);
                             state.source = Some(captured.capture.source().clone());
                             state.captured = Some(captured.clone());
+                            state.frozen = None; // CapturedReads retains the same original handle.
                         }
                         captured
                     }
@@ -221,6 +229,10 @@ pub(super) fn retry(shared: Arc<Shared>) {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
                 state.after = through;
+                state.superseded += response["superseded"]
+                    .as_u64()
+                    .expect("validated import receipt")
+                    as usize;
                 state.pages_done = through == total;
             }
             publish(&shared);
@@ -245,9 +257,10 @@ pub(super) fn retry(shared: Arc<Shared>) {
     });
 }
 async fn unchanged(captured: Arc<CapturedReads>, hold: Arc<dyn Send + Sync>) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(30);
     tauri::async_runtime::spawn_blocking(move || {
         let _hold = hold;
-        captured.unchanged().is_ok()
+        captured.unchanged(deadline).is_ok()
     })
     .await
     .unwrap_or(false)

@@ -946,6 +946,27 @@ fn actual_stop_drains_ordered_closed_callbacks_but_never_opens_a_late_click() {
                     &(42_u32, 2_u32),
                 )
                 .unwrap();
+            // emit_signal only writes this producer's socket. Fence it on the
+            // SAME connection before the consumer sends RemoveMatch: otherwise
+            // the bus can remove the match before forwarding these callbacks.
+            let reply = server
+                .connection
+                .call_method(
+                    Some("org.freedesktop.DBus"),
+                    "/org/freedesktop/DBus",
+                    Some("org.freedesktop.DBus"),
+                    "GetId",
+                    &(),
+                )
+                .unwrap();
+            assert_eq!(
+                reply.header().sender().map(|s| s.as_str()),
+                Some("org.freedesktop.DBus")
+            );
+            let bus_id: String = reply.body().deserialize().unwrap();
+            assert!(
+                matches!(&original.native_id, NativeId::Linux { bus_id: expected, .. } if *expected == bus_id)
+            );
         }
     ));
     assert_eq!(h.outbox.status()["callbacks"], 1);

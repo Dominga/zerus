@@ -91,7 +91,7 @@ fn incompatible_cli_stays_unavailable_until_one_explicit_retry_without_fallback(
         .await;
         assert_eq!(fixture.calls().len(), 1);
         fs::write(fixture.0.join("fixture.json"), json!({}).to_string()).unwrap();
-        service.retry();
+        assert!(service.reconnect("peer")); // Composer Refresh can retry a disconnected service.
         eventually("new CLI connected", || service.snapshot().connected).await;
         eventually("one watch", || watch_calls(&fixture.calls()) == 1).await;
         assert!(!service.snapshot().background_ready());
@@ -467,9 +467,10 @@ fn twenty_thousand_rows_need_only_one_three_key_delta_after_the_baseline() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let fixture = Fixture::new(json!({"large":20000}));
+        let started = Instant::now();
         let (service, pump) = fixture.start(true);
-        // The bounded serial walk spawns one isolated CLI per page; 158 spawns
-        // took over 30 s on a hosted macOS runner.
+        // Keep a generous fixture deadline for hosted runners; the process
+        // count below, rather than a timing threshold, guards spawn overhead.
         let deadline = Instant::now() + Duration::from_secs(120);
         while pump.row("", "new").is_none() {
             assert!(Instant::now() < deadline);
@@ -479,6 +480,16 @@ fn twenty_thousand_rows_need_only_one_three_key_delta_after_the_baseline() {
         assert!(pump.row("", "row-1").is_none());
         service.join().await.unwrap();
         let calls = fixture.calls();
+        let relays: BTreeSet<_> = calls
+            .iter()
+            .filter(|call| call["args"] == json!(["desktop", "catalog-relay", "--json"]))
+            .filter_map(|call| call["pid"].as_u64())
+            .collect();
+        assert_eq!(relays.len(), 2, "one original child per walk, not per page");
+        assert!(!calls
+            .iter()
+            .any(|call| call["args"] == json!(["desktop", "request", "--json"])));
+        eprintln!("20k catalog baseline + delta: {:?}, 157 baseline pages, 2 delta reads, {} relay children", started.elapsed(), relays.len());
         assert_eq!(
             calls
                 .iter()

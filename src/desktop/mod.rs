@@ -3,6 +3,7 @@
 mod attention;
 mod background;
 mod catalog_read;
+mod catalog_relay;
 mod counts;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod custody;
@@ -60,7 +61,7 @@ use std::{
 use store::{Location, Store};
 use transport::{Listener, Stream, TIMEOUT};
 
-const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] [--background] | status [--json] | startup --json | owner-status --json | watch --json | feed --json | request --json | registration --json | registration install|remove|status --json (Windows) | notification-registration install|status --json | notification-registration remove --json --request-id UUID (Windows) | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
+const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] [--background] | status [--json] | startup --json | owner-status --json | watch --json | feed --json | request --json | catalog-relay --json | registration --json | registration install|remove|status --json (Windows) | notification-registration install|status --json | notification-registration remove --json --request-id UUID (Windows) | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
 const HEARTBEAT: Duration = Duration::from_secs(10);
 pub const STARTUP_REFUSED: i32 = 78;
 
@@ -284,6 +285,7 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                     "desktop revocation is not settled; keep Qt stopped and inspect the same request_id");
                 Ok(())
             }
+            ["catalog-relay", "--json"] => catalog_relay::run(&location),
             ["request", "--json"] | ["frontend-request", "--json"] => {
                 let mut bytes = Vec::new();
                 std::io::stdin()

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 mod catalog;
 pub use catalog::{
     CatalogIdentity, CatalogItem, CatalogPage, ChangeItem, ChangePage, Revision, CHANGES_ABI,
-    CHANGES_HELP,
+    CHANGES_HELP, RELAY_ABI, RELAY_HELP,
 };
 pub mod details;
 

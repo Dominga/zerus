@@ -30,6 +30,7 @@ const KEY_BYTES: usize = 32 << 20;
 const CATALOG_KEYS: usize = 1_000_000;
 
 mod catalog;
+mod catalog_relay;
 use catalog::catalog_loop;
 mod details;
 pub mod frontend;
@@ -325,9 +326,6 @@ impl Service {
             .unwrap_or_else(PoisonError::into_inner);
         if !snapshot.connected {
             drop(snapshot);
-            if !computer.is_empty() {
-                return false;
-            }
             self.retry();
             return true;
         }
@@ -744,6 +742,7 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
             && help
                 .lines()
                 .any(|line| line.trim() == service::CHANGES_HELP)
+            && help.lines().any(|line| line.trim() == service::RELAY_HELP)
     }) {
         return Err("incompatible_service_cli");
     }
@@ -868,16 +867,15 @@ async fn connection(
     let stdin = child.stdin.take();
     let mut stdout = child.stdout.take().ok_or("service_unavailable")?;
     let mut stderr = child.stderr.take().ok_or("service_unavailable")?;
-    let mut state = service::State::new(configuration)?;
+    let mut state = service::State::new(configuration.clone())?;
     let mut buffer = Vec::new();
     let (mut out, mut err) = ([0u8; 8192], [0u8; 4096]);
     let (mut error_bytes, mut stderr_open) = (0usize, true);
     let catalog_shared = shared.clone();
     let catalog_stop = stop.clone();
-    let mut catalogs =
-        tauri::async_runtime::spawn(
-            async move { catalog_loop(catalog_shared, catalog_stop).await },
-        );
+    let mut catalogs = tauri::async_runtime::spawn(async move {
+        catalog_loop(catalog_shared, catalog_stop, configuration).await
+    });
     let detail_shared = shared.clone();
     let detail_stop = stop.clone();
     let mut detail_worker =

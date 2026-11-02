@@ -556,6 +556,12 @@ function LocalDeleteDialog() {
   );
 }
 
+/** The native queue shares the outgoing Markdown/attachment renderer and its
+ * guarded file-reference context, without adding sent/delivery actions. */
+export function OutgoingMessage(props: { item: ActivityItem; scope?: AttachmentScope; session?: Session }) {
+  return <ActivitySession.Provider value={() => props.session}><ItemBody item={props.item} scope={props.scope} /></ActivitySession.Provider>;
+}
+
 function ItemBody(props: { item: ActivityItem; scope?: AttachmentScope }) {
   const it = () => props.item;
   return (

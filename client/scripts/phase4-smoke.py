@@ -113,6 +113,17 @@ def main():
     shutil.copy2(CLIENT / "src-tauri/tests/support/fake_hgs_phase4.py", hgs)
     hgs.chmod(0o755)
     frames = [json.loads(line) for line in (CLIENT / "fixtures/replay.ndjson").read_text(encoding="utf-8").splitlines()]
+    # Exercise both exact own-receipt rendering and an unmatched native entry.
+    for frame in frames:
+        value = frame.get("value", {})
+        if frame.get("t") == "state" and frame.get("topic") == "activity" and value.get("name") == "codex/sample-project/release-notes":
+            original = "**Queued review** [Image #1]"
+            submitted = original + ' (Inspect the attached image at "/synthetic/attachments/message-queue/01-pasted-image.png")'
+            value["input_queue"]["text"] = "• Queued follow-up inputs\n  ↳ " + submitted + "\n  ↳ also update the changelog"
+            value["attachment_messages"] = [{"source": "hgs_delivery", "type": "UserPromptSubmit", "agent_id": "",
+                "message_id": "req-fixture-echo-image", "detail": original, "submitted_text": submitted,
+                "attachments": [{"request_id": "req-fixture-echo-image", "index": 0, "reference": "[Image #1]",
+                                 "name": "pasted-image.png", "mime": "image/png", "bytes": 68}]}]
     activity_events = [event for frame in frames if frame.get("topic") == "activity" for event in frame.get("events", [])]
     media = {"seq": max(event["seq"] for event in activity_events) + 1, "type": "UserPromptSubmit", "source": "hgs_voice",
              "message_id": "m-media-smoke", "voice": {"id": "m-media-smoke", "state": "submitted",

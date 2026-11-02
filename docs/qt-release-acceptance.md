@@ -119,27 +119,30 @@ maintained preview identity when using the preview route.
 | Platform | Maintained route in the admitted profile | Interpretation |
 |---|---|---|
 | Linux | Exact AUR/package route for the package row; source evaluation uses `bash ./install.sh`, then `HGS_LINUX_GUI=client bash ./tray/install.sh`. | The installer/updater owns replacement, drafts, rollback and service refresh. Root install can update connector/recovery/swarm/voice workers too; it is not a sandbox. |
-| macOS | Native checkout: `bash ./install.sh`, then `HGS_MAC_GUI=client bash ./tray/install.sh`; the existing remote route is `HGS_MAC_GUI=client ./mac-install.sh "$MAC_ALIAS"`. | The alias must select the admitted login. The SSH wrapper also maintains configuration/tmux setup. Preserve the installed signed pair, existing signing identity and independent runner. |
+| macOS | Native checkout: `bash ./install.sh`, then `HGS_MAC_GUI=client bash ./tray/install.sh`; the existing remote route is `HGS_MAC_GUI=client ./mac-install.sh "$MAC_ALIAS"`. | The alias must select the admitted login. The SSH wrapper copies `tmux.conf` over `~/.config/tmux/tmux.conf` and runs `tmux source-file` to reload configuration; it does not restart tmux. Preserve the installed signed pair, existing signing identity and independent runner. |
 
 Let the Mac installer perform `prepare-local-macos.py`, `sign-local-macos.py`
 and `update-installed.py` in their maintained order. Register the **installed**
 bundled service `hgs`, not a build/staging copy. The independent ordinary runner
 may differ after signing; do not require its bytes to equal the bundled helper.
-Published bundle setup is explicitly `"$APP/Contents/Resources/zerus/zerus-setup"`;
+Published bundle setup is explicitly `"$APP/Contents/Resources/bin/zerus-setup"`;
 cask installation alone is not setup, registration or readiness. Autostart is a
 separate opt-in.
 
-`HGS_INSTALL_PREFIX` is Linux file staging and skips service/worker refresh.
-`DESTDIR` does not redirect these installers; it only suppresses the root Linux
-desktop refresh. Mac tray ignores the Linux GUI prefix. `HGS_TRAY_RESTART=0` is
+On both platforms, setting `HGS_INSTALL_PREFIX` makes the root installer stage
+the CLI there and skip worker/service refresh. The Linux tray uses it for file staging; the
+Mac tray ignores it. `DESTDIR` does not redirect these installers; it only
+suppresses the root Linux desktop refresh. `HGS_TRAY_RESTART=0` is
 not isolation: definitions can still be written and an absent GUI can start.
 None of these paths supplies positive registration or a running canonical UI.
 
 For the actual client cases, set exactly `ZERUS_CLIENT_DESKTOP_SERVICE=1` for a
 **new trusted GUI process** in the admitted profile. The flag is startup-only;
 a second start forwards to the existing process and cannot change its mode.
-Record and later restore the profile's previous launch environment. With the
-original owned launcher present, after the old GUI's normal draft-safe Quit:
+Record the previous value or absence before setting it. These manager settings
+apply to every later unit/agent launched in that login until removed or restored,
+not just Zerus. With the original owned launcher present, after the old GUI's
+normal draft-safe Quit:
 
 ```bash
 # Linux, only in the admitted private login with the maintained GUI unit:
@@ -173,12 +176,12 @@ preview itself is not registration or writer permission.
 "$GUI" --build-info
 "$SERVICE_HGS" --version
 
-desktop_read() {
+desktop_cli() {
   env HGS_CONFIG_DIR="$CFG" HGS_STATE_DIR="$STATE" "$SERVICE_HGS" desktop "$@"
 }
-desktop_read registration --json
-desktop_read status --json
-desktop_read owner-status --json
+desktop_cli registration --json
+desktop_cli status --json
+desktop_cli owner-status --json
 
 # Linux manager identity; run only the platform's applicable command:
 systemctl --user show hgs-desktop.service --property=LoadState,ActiveState,MainPID,FragmentPath,DropInPaths --no-pager
@@ -236,7 +239,7 @@ The GUI rollback path is its actual installed path, not a staged copy.
 
 ```bash
 : "${REVOKE_ID:?saved original UUID}" "${INSTALLED_GUI:?actual installed GUI}"
-desktop_read revoke --json --request-id "$REVOKE_ID" --reason rollback
+desktop_cli revoke --json --request-id "$REVOKE_ID" --reason rollback
 
 # Only if the first result was uncertain, read its original receipt:
 printf '{"op":"revoke_status","request_id":"%s"}\n' "$REVOKE_ID" |
@@ -272,12 +275,23 @@ public results. Record:
   the admitted fresh rearm result. No source-only test counts as installed PASS.
 
 G6 records outcomes in its result ledger; leave every platform checkbox pending
-until that actual step passes and the coordinator accepts it. Restore the prior
-private launch environment (including prior absence), close opened windows, and
-remove only owned test entries through their maintained teardown after confirmed
-exit/drain. If teardown is unavailable or uncertain, retain the private profile,
-registration and frozen source and report the blocker; never hand-delete units,
-markers, stores or a GUI copy. Do not stop agents or unrelated services.
+until that actual step passes and the coordinator accepts it. After the admitted
+shutdown/revoke/drain sequence, restore the prior private launch environment:
+
+- Linux: if previously absent, `systemctl --user unset-environment ZERUS_CLIENT_DESKTOP_SERVICE`;
+  if present, `systemctl --user set-environment "ZERUS_CLIENT_DESKTOP_SERVICE=$PREVIOUS_MODE"`
+  with its recorded previous value.
+- macOS: if previously absent, `launchctl unsetenv ZERUS_CLIENT_DESKTOP_SERVICE`;
+  if present, `launchctl setenv ZERUS_CLIENT_DESKTOP_SERVICE "$PREVIOUS_MODE"`
+  with its recorded previous value.
+
+These commands affect future launches, not the startup-cached mode of a running
+GUI. Do not launch a legacy writer while the service still owns its duties.
+Close opened windows and remove only owned test entries through their maintained
+teardown after confirmed exit/drain. If teardown is unavailable or uncertain,
+retain the private profile, registration and frozen source and report the
+blocker; never hand-delete units, markers, stores or a GUI copy. Do not stop
+agents or unrelated services.
 
 ## Windows — va-kids
 

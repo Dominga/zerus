@@ -173,6 +173,25 @@ fn an_unknown_schema_is_not_migrated_by_an_audit_read() {
         0
     );
 }
+
+#[test]
+fn sqlite_connection_must_match_the_original_guard_even_if_its_path_is_unchanged() {
+    let mut f = Fixture::new();
+    let _original = f.rows(1);
+    let first = f.send(&f.query());
+    let other = Fixture::new();
+    let _other = other.rows(2);
+    // Deterministic open-race control: the guard still owns A, while SQLite
+    // opened B. A path-only check of the separate guard would miss this.
+    f.reader.journal.as_mut().unwrap().db = Connection::open_with_flags(
+        other.reader.root.join("journal.sqlite3"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let detail = json!({"op":"approval_audit_detail","request_id":uuid::Uuid::new_v4().to_string(),
+        "configuration":f.reader.configuration,"epoch":f.reader.epoch,"journal":first["journal"],"id":1});
+    assert_eq!(f.send(&detail)["accepted"], false);
+}
 #[cfg(unix)]
 #[test]
 fn replacement_cannot_rebind_an_old_detail_id_or_cursor() {

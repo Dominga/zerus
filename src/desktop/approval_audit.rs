@@ -74,9 +74,73 @@ impl Journal {
             (current.device, current.inode) == self.identity && key(&self.file)? == self.identity,
             "audit journal replaced"
         );
+        self.connection_current()?;
         let version: i64 = self.db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         ensure!(version == 1, "audit schema changed");
         Ok(())
+    }
+    #[cfg(unix)]
+    fn connection_current(&self) -> Result<()> {
+        use std::{ffi::CStr, os::unix::ffi::OsStrExt};
+        // SQLite's public file control checks its OWN open file against its
+        // filename. Also join that filename to our retained descriptor, so
+        // swapping a parent path during open cannot select a different DB.
+        let name =
+            unsafe { rusqlite::ffi::sqlite3_db_filename(self.db.handle(), c"main".as_ptr()) };
+        ensure!(!name.is_null(), "audit SQLite file unavailable");
+        let path = Path::new(std::ffi::OsStr::from_bytes(
+            unsafe { CStr::from_ptr(name) }.to_bytes(),
+        ));
+        let identity = platform::file_identity(path)
+            .ok_or_else(|| anyhow::anyhow!("audit SQLite file unavailable"))?;
+        let mut moved: std::ffi::c_int = 1;
+        let code = unsafe {
+            rusqlite::ffi::sqlite3_file_control(
+                self.db.handle(),
+                c"main".as_ptr(),
+                rusqlite::ffi::SQLITE_FCNTL_HAS_MOVED,
+                (&mut moved as *mut std::ffi::c_int).cast(),
+            )
+        };
+        ensure!(
+            code == rusqlite::ffi::SQLITE_OK
+                && moved == 0
+                && (identity.device, identity.inode) == self.identity,
+            "audit SQLite file changed"
+        );
+        Ok(())
+    }
+    #[cfg(windows)]
+    fn connection_current(&self) -> Result<()> {
+        use std::{
+            mem::ManuallyDrop,
+            os::windows::io::{FromRawHandle, RawHandle},
+        };
+        let mut handle: RawHandle = std::ptr::null_mut();
+        let code = unsafe {
+            rusqlite::ffi::sqlite3_file_control(
+                self.db.handle(),
+                c"main".as_ptr(),
+                rusqlite::ffi::SQLITE_FCNTL_WIN32_GET_HANDLE,
+                (&mut handle as *mut RawHandle).cast(),
+            )
+        };
+        ensure!(
+            code == rusqlite::ffi::SQLITE_OK && !handle.is_null(),
+            "audit SQLite handle unavailable"
+        );
+        // SQLite retains ownership; this temporary read-only metadata view
+        // must never close or adopt its original handle, including on error.
+        let borrowed = ManuallyDrop::new(unsafe { File::from_raw_handle(handle) });
+        ensure!(
+            key(&borrowed)? == self.identity,
+            "audit SQLite file changed"
+        );
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
+    fn connection_current(&self) -> Result<()> {
+        anyhow::bail!("audit file identity unavailable")
     }
 }
 

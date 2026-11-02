@@ -40,10 +40,15 @@ def main():
     private_display()
     x = c.CDLL("libX11.so.6")
     xt = c.CDLL("libXtst.so.6")
+    if not x.XInitThreads():
+        raise RuntimeError("private Xlib thread initialization failed")
     x.XOpenDisplay.argtypes = [c.c_char_p]
     x.XOpenDisplay.restype = c.c_void_p
     x.XFlush.argtypes = [c.c_void_p]
     x.XCloseDisplay.argtypes = [c.c_void_p]
+    x.XKeysymToKeycode.argtypes = [c.c_void_p, c.c_ulong]
+    x.XKeysymToKeycode.restype = c.c_uint
+    xt.XTestFakeKeyEvent.argtypes = [c.c_void_p, c.c_uint, c.c_int, c.c_ulong]
     xt.XTestFakeMotionEvent.argtypes = [c.c_void_p, c.c_int, c.c_int, c.c_int, c.c_ulong]
     xt.XTestFakeButtonEvent.argtypes = [c.c_void_p, c.c_uint, c.c_int, c.c_ulong]
     display = x.XOpenDisplay(None)
@@ -52,24 +57,34 @@ def main():
     stopped = threading.Event()
     app = subprocess.Popen(sys.argv[1:], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     worker = None
+    wheel_done = threading.Event()
 
     def wheel(point):
         xt.XTestFakeMotionEvent(display, -1, point["x"], point["y"], 0)
         x.XFlush(display)
-        for index in range(64 if point.get("staticWheel") else 160):
-            if stopped.is_set():
+        for index in range(1000 if point.get("bottomReach") else 64 if point.get("staticWheel") else 160):
+            if stopped.is_set() or wheel_done.is_set():
                 return
             xt.XTestFakeButtonEvent(display, 5, 1, 0)
             xt.XTestFakeButtonEvent(display, 5, 0, 0)
             x.XFlush(display)
             delay = .9 if point.get("staticWheel") and index % 4 == 3 else .04
-            if not point.get("staticWheel"):
+            if point.get("bottomReach"):
+                delay = .02
+            elif not point.get("staticWheel"):
                 delay = .04 + index % 3 * .005 if index % 7 else .27 + index % 9 * .008
             stopped.wait(delay)
 
     try:
         for line in app.stdout:
             print(line, end="", flush=True)
+            if "phase4-native-end-ready" in line:
+                key = x.XKeysymToKeycode(display, 0xff57)  # XK_End, original private display only.
+                xt.XTestFakeKeyEvent(display, key, 1, 0)
+                xt.XTestFakeKeyEvent(display, key, 0, 0)
+                x.XFlush(display)
+            if "phase4-native-wheel-complete" in line:
+                wheel_done.set()
             marker = "phase4-native-wheel-ready "
             if marker in line and worker is None:
                 point = json.loads(line.split(marker, 1)[1])

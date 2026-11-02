@@ -59,6 +59,28 @@ pub(super) fn result_request(store: &Store, value: &Value) -> Value {
         .unwrap_or_else(|_| refused("delivery_store_refused"))
 }
 
+/// A reachable authenticated frontend can turn the durable opt-in OFF even
+/// without background workers. No enable, generic JSON or writer grant here.
+pub(super) fn passive_frontend_request(
+    store: &mut Store,
+    authority: super::ui_authority::Validated,
+) -> Value {
+    let id = authority.id().to_owned();
+    let refused = |code| json!({"request_id":id,"accepted":false,"durable":false,"code":code});
+    if authority.operation() != "automatic_approvals" {
+        return refused("desktop_background_unavailable");
+    }
+    match authority.into_request() {
+        Ok(zerus_client_core::desktop::ui_requests::Request::AutomaticApprovals {
+            enabled: false,
+            ..
+        }) => state::set_policy(&mut store.db, &id, false)
+            .unwrap_or_else(|_| refused("delivery_store_refused")),
+        Ok(_) => refused("desktop_background_unavailable"),
+        Err(_) => refused("frontend_identity_expired"),
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Read,
@@ -289,8 +311,19 @@ impl Runtime {
         if !state::canonical(&request_id) {
             return refused("invalid_request_id");
         }
-        if self.stopping {
-            return refused("delivery_stopping");
+        match state::policy_receipt(&store.db, &request_id, enabled) {
+            Ok(Some(receipt)) => return receipt,
+            Err(_) => return refused("delivery_store_refused"),
+            Ok(None) => (),
+        }
+        if enabled
+            && (!self.approvals_ready()
+                || self.writer_epoch(store).ok().flatten().as_ref() != self.writer_token.as_ref())
+        {
+            return refused("desktop_background_unavailable");
+        }
+        if !enabled {
+            self.cancel_approvals();
         }
         let result = state::set_policy(&mut store.db, &request_id, enabled);
         if result.is_err() {
@@ -720,6 +753,43 @@ impl Runtime {
         self.stopping
             && self.jobs.is_empty()
             && self.leases.iter().all(|lease| lease.strong_count() == 0)
+    }
+    fn reads_ready(&self) -> bool {
+        self.writer
+            && !self.stopping
+            && self.read_error.is_none()
+            && self.read_status["recovery_error"] == false
+    }
+    fn approvals_ready(&self) -> bool {
+        self.writer && !self.stopping && self.policy.is_some() && self.approval_error.is_none()
+    }
+    fn component(&self, ready: bool, policy: Option<bool>) -> Value {
+        let code = if self.stopping {
+            if self.drained() {
+                "drained"
+            } else {
+                "draining"
+            }
+        } else if !self.writer {
+            "awaiting_handoff"
+        } else if !ready {
+            "unavailable"
+        } else if policy == Some(false) {
+            "disabled"
+        } else {
+            "running"
+        };
+        json!({"ready":ready,"code":code,"drained":self.drained()})
+    }
+    /// Canonical display projection consumed by Next. Mutation admission uses
+    /// the typed proof and current writer query, never these JSON booleans.
+    pub fn decorate(&self, value: &mut Value) {
+        value["lifecycle"]["background"]["reads"] = self.component(self.reads_ready(), None);
+        let enabled = self.policy.map(|policy| policy.enabled);
+        let mut approvals = self.component(self.approvals_ready(), enabled);
+        approvals["enabled"] = json!(enabled);
+        value["lifecycle"]["background"]["approvals"] = approvals;
+        value["automatic_approvals"] = json!(enabled);
     }
     pub fn status(&self) -> Value {
         let active = self.jobs.len();

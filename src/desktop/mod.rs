@@ -581,10 +581,17 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                 hello.request.as_ref(),
                                 "frontend_authentication_refused",
                             ),
-                            (_, None) => frontend_refused(
-                                hello.request.as_ref(),
-                                "desktop_background_unavailable",
-                            ),
+                            (Some(authority), None) => {
+                                match authority.into_request(&mut frontend_order) {
+                                    Ok(request) => {
+                                        delivery::passive_frontend_request(&mut store, request)
+                                    }
+                                    Err(_) => frontend_refused(
+                                        hello.request.as_ref(),
+                                        "frontend_identity_expired",
+                                    ),
+                                }
+                            }
                         };
                         frame(&epoch, seq, "response", result)
                     } else if hello.op == "request" {

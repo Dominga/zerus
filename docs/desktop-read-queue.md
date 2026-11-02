@@ -80,6 +80,16 @@ the synchronous disarm step and an absent capture do not imply an empty import.
 
 ## Observation and restart
 
+The canonical client slots are `lifecycle.background.reads` and `approvals`,
+each with `ready`, `code` and conservative original-runtime `drained` values.
+Approvals also exposes nullable `enabled`, independently of readiness; disabled
+policy can be ready for an authenticated enable request. `automatic_approvals`
+reports that durable opt-in, not an assumption that workers are healthy.
+Component-local failures remain `unavailable`; stopping uses `draining` or
+`drained`, and a missing writer uses `awaiting_handoff`. Readiness grants no
+writer authority. The actor rechecks current writer identity and the opaque
+frontend proof at mutation time.
+
 A successful delivery receipt never retires a mark. `observe` accepts a fresh
 authoritative catalog row in source order and the exact pending revision. It
 uses the shared client settlement policy: changed run/conversation, a superseded
@@ -144,6 +154,10 @@ The component uses these closed request shapes:
   policy does not import the old Qt or UI opt-in. The
   policy update and immutable request receipt commit together. Replaying an old
   request returns that receipt without undoing a newer setting.
+  A new Enable requires the actual ready delivery runtime and a freshly checked
+  current writer. An authenticated Disable can commit with degraded, stopping
+  or absent background workers while the route and store remain writable;
+  generic requests still refuse it. A failed commit never reports success.
 - `delivery_result`: a new canonical UUID `request_id` and the canonical
   `original_request_id`. This indexed lookup returns the original acceptance
   receipt after a transport timeout; it neither replays nor proves delivery.

@@ -104,17 +104,19 @@ pub(super) fn enqueue(db: &mut Connection, id: &str, mark: &ReadMark, now: i64) 
     )
 }
 
-pub(super) fn set_policy(db: &mut Connection, id: &str, enabled: bool) -> Result<Value> {
-    ensure!(canonical(id), "invalid delivery request ID");
-    let fingerprint = format!(
+fn policy_fingerprint(enabled: bool) -> String {
+    format!(
         "{:x}",
-        Sha256::digest(serde_json::to_vec(&json!([
-            "automatic_approvals",
-            enabled
-        ]))?)
-    );
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let old: Option<(String, String)> = tx
+        Sha256::digest(
+            serde_json::to_vec(&json!(["automatic_approvals", enabled]))
+                .expect("closed policy fingerprint")
+        )
+    )
+}
+/// Returning an original committed receipt grants no new policy mutation.
+pub(super) fn policy_receipt(db: &Connection, id: &str, enabled: bool) -> Result<Option<Value>> {
+    ensure!(canonical(id), "invalid delivery request ID");
+    let old: Option<(String, String)> = db
         .query_row(
             "SELECT fingerprint,substr(receipt,1,4097) FROM desktop_delivery_requests WHERE request_id=?1",
             [id],
@@ -122,9 +124,21 @@ pub(super) fn set_policy(db: &mut Connection, id: &str, enabled: bool) -> Result
         )
         .optional()?;
     if let Some((hash, receipt)) = old {
-        ensure!(hash == fingerprint, "request ID changed its intent");
+        ensure!(
+            hash == policy_fingerprint(enabled),
+            "request ID changed its intent"
+        );
         ensure!(receipt.len() <= 4096, "invalid delivery receipt");
-        return Ok(serde_json::from_str(&receipt)?);
+        return Ok(Some(serde_json::from_str(&receipt)?));
+    }
+    Ok(None)
+}
+pub(super) fn set_policy(db: &mut Connection, id: &str, enabled: bool) -> Result<Value> {
+    ensure!(canonical(id), "invalid delivery request ID");
+    let fingerprint = policy_fingerprint(enabled);
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if let Some(receipt) = policy_receipt(&tx, id, enabled)? {
+        return Ok(receipt);
     }
     let used: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM desktop_read_requests WHERE request_id=?1)",

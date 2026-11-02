@@ -333,13 +333,19 @@ fn a_reported_unknown_after_native_publication_is_sticky_even_when_bytes_match()
     marks.add_all([mark(0)]);
     // Real native publication succeeds, then the caller receives a synthetic
     // uncertain completion. This tests recovery policy, not disk-fault coverage.
-    assert!(checkpoint_with(&mut marks, |path, data, old| {
+    let error = checkpoint_with(&mut marks, |path, data, old| {
         drop(publish(path, data, old)?);
-        Err(PublicationFailure::Unknown(io::Error::other(
-            "synthetic lost completion",
+        Err(PublicationFailure::Unknown(io::Error::from_raw_os_error(
+            32,
         )))
     })
-    .is_err());
+    .unwrap_err();
+    assert_eq!(
+        error.raw_os_error(),
+        None,
+        "unknown is never sharing-retryable"
+    );
+    assert!(error.to_string().contains("outcome is unknown"));
     let published = identity(&t.path());
     assert!(checkpoint_with(&mut marks, |_, _, _| panic!("unknown source was rewritten")).is_err());
     assert_eq!(identity(&t.path()), published);
@@ -349,4 +355,56 @@ fn a_reported_unknown_after_native_publication_is_sticky_even_when_bytes_match()
     let checkpoint = reloaded.checkpoint().unwrap();
     drop(checkpoint);
     assert_eq!(identity(&t.path()), published);
+}
+
+#[test]
+fn native_failed_preparation_discards_only_its_owned_unpublished_temporary() {
+    let t = Temp::new();
+    t.write(b"[]");
+    let original = identity(&t.path());
+    let error = publish_with(
+        &t.path(),
+        b"new data",
+        current(&t.path()).unwrap(),
+        |file, _| {
+            file.write_all(b"partial")?;
+            Err(io::Error::other("synthetic preparation failure"))
+        },
+    )
+    .unwrap_err();
+    let PublicationFailure::Before(error) = error else {
+        panic!("preparation did not attempt publication")
+    };
+    assert_eq!(error.to_string(), "synthetic preparation failure");
+    assert_eq!(std::fs::read(t.path()).unwrap(), b"[]");
+    assert_eq!(identity(&t.path()), original);
+    let entries: Vec<_> = std::fs::read_dir(&t.0).unwrap().collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "failed temp was deleted on original close"
+    );
+}
+
+#[test]
+fn native_failed_disposition_retains_primary_and_cleanup_errors_without_path_fallback() {
+    let t = Temp::new();
+    t.write(b"[]");
+    let path = t.0.join("own-unpublished.tmp");
+    let own = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .share_mode(0)
+        .open(&path)
+        .unwrap();
+    // This freshly owned fixture handle deliberately lacks DELETE access.
+    let error = cleanup_failed_temporary(&own, io::Error::from_raw_os_error(32));
+    assert_eq!(error.raw_os_error(), None, "failed cleanup cannot retry");
+    assert!(error
+        .to_string()
+        .contains("owned checkpoint temporary cleanup failed"));
+    drop(own);
+    assert!(path.is_file(), "no path-selected cleanup fallback");
+    assert_eq!(std::fs::read(t.path()).unwrap(), b"[]");
 }

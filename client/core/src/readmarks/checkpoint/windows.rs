@@ -321,8 +321,41 @@ fn file(path: &Path, create: bool) -> io::Result<File> {
     let raw = owned(raw)?;
     // SAFETY: ownership passes directly from the successful original handle.
     let file = File::from(raw);
-    verify(&file, false)?;
+    if let Err(error) = verify(&file, false) {
+        return Err(if create {
+            cleanup_failed_temporary(&file, error)
+        } else {
+            error
+        });
+    }
     Ok(file)
+}
+
+// Only for an unpublished CREATE_NEW file whose original DELETE-capable
+// handle we still own. Never select a cleanup target by a later path lookup.
+// https://learn.microsoft.com/windows/win32/api/winbase/ns-winbase-file_disposition_info
+fn cleanup_failed_temporary(file: &File, primary: io::Error) -> io::Error {
+    let mut disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    // SAFETY: initialized native input; this synchronous call borrows the
+    // original owned handle. The caller closes it after this function returns.
+    if unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileDispositionInfo,
+            (&mut disposition as *mut FILE_DISPOSITION_INFO).cast(),
+            std::mem::size_of_val(&disposition) as u32,
+        )
+    } == 0
+    {
+        // Keep both failures. A failed cleanup is not retryable sharing
+        // contention, and never authorizes another delete or a path fallback.
+        io::Error::other(format!(
+            "{primary}; owned checkpoint temporary cleanup failed: {}",
+            io::Error::last_os_error()
+        ))
+    } else {
+        primary
+    }
 }
 fn bytes(file: &mut File, limit: usize) -> io::Result<Vec<u8>> {
     verify(file, false)?;
@@ -416,6 +449,18 @@ impl From<io::Error> for PublicationFailure {
     }
 }
 fn publish(path: &Path, data: &[u8], old: Option<Opened>) -> Result<Opened, PublicationFailure> {
+    publish_with(path, data, old, |file, data| {
+        file.write_all(data)?;
+        file.sync_all()?;
+        verify(file, false)
+    })
+}
+fn publish_with(
+    path: &Path,
+    data: &[u8],
+    old: Option<Opened>,
+    prepare: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
+) -> Result<Opened, PublicationFailure> {
     filename(path)?;
     let parents = Parents::open(
         path.parent()
@@ -435,11 +480,14 @@ fn publish(path: &Path, data: &[u8], old: Option<Opened>) -> Result<Opened, Publ
         }
     }
     let mut file = created.ok_or_else(|| refused("checkpoint temporary-name capacity"))?;
-    // Any failed write/flush keeps the original source and owned temp. After a
-    // rename attempt even an error may be unknown: never delete by handle/path.
-    file.write_all(data)?;
-    file.sync_all()?;
-    verify(&file, false)?;
+    // Before publication, preserve the primary failure and delete only this
+    // newly created temp via its original handle. Once rename is attempted the
+    // outcome may be unknown: neither source nor temp may be deleted as recovery.
+    if let Err(error) = prepare(&mut file, data) {
+        return Err(PublicationFailure::Before(cleanup_failed_temporary(
+            &file, error,
+        )));
+    }
     let replace = old.is_some();
     drop(old);
     rename(&file, path, replace).map_err(PublicationFailure::Unknown)?;
@@ -491,14 +539,22 @@ fn checkpoint_with(
                 // A rename/flush outcome cannot authorize another rewrite,
                 // even if a later hash happens to equal the old source.
                 marks.checkpoint.source = Source::Unavailable;
-                return Err(error);
+                // Do not expose a retryable native sharing code for an
+                // uncertain publication, even if the underlying error was 32.
+                return Err(io::Error::other(format!(
+                    "checkpoint publication outcome is unknown: {error}"
+                )));
             }
         });
         marks.checkpoint.saved(&data);
         marks.unsaved = false;
     }
     let disk = disk.ok_or_else(|| refused("pending read checkpoint missing file"))?;
-    disk.file.sync_all()?;
+    // Only pre-publication sharing contention can request an automatic retry.
+    // A completed checkpoint's final sync failure stays an explicit refusal.
+    disk.file
+        .sync_all()
+        .map_err(|error| io::Error::other(format!("checkpoint final sync failed: {error}")))?;
     Ok(Checkpoint {
         sha256: disk.hash.clone(),
         bytes: disk.bytes,

@@ -374,6 +374,22 @@ fn checkpoint_io_keeps_its_charge_and_a_late_success_is_refused() {
 }
 
 #[test]
+fn a_unix_error_number_is_never_retried_as_windows_sharing_contention() {
+    let f = Fixture::new();
+    let frozen = f.actions.freeze_reads().unwrap();
+    let mut calls = 0;
+    assert!(matches!(
+        frozen.checkpoint_with(deadline(), |_| {
+            calls += 1;
+            Err(std::io::Error::from_raw_os_error(32))
+        }),
+        Err(Refused::Checkpoint)
+    ));
+    assert_eq!(calls, 1);
+    assert!(!f.path().exists());
+}
+
+#[test]
 fn direct_native_output_holders_pin_the_barrier_until_actual_eof() {
     let _process_tree = crate::PROCESS_TREE.read().unwrap();
     use std::os::unix::fs::PermissionsExt;

@@ -151,7 +151,7 @@ pub struct Evidence {
     pub child_pid: u32,
     pub child_birth: String,
     pub serial: u64,
-    /// Cached native startup mode, emitted only for ownership intents. It is
+    /// Cached native startup mode, emitted for ownership/cache intents. It is
     /// not an input field on Request and is checked by the service's original
     /// kernel-peer/cached-child proof before any ownership mutation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -217,6 +217,10 @@ impl Cache {
         }
         if let Request::DesktopOwnership { action, .. } = &envelope.request {
             if ownership_mode != Some(action.mode()) {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+        } else if matches!(envelope.request, Request::CacheMaintenance { .. }) {
+            if ownership_mode != Some(super::ownership::Mode::Service) {
                 return Err(io::ErrorKind::PermissionDenied.into());
             }
         } else if ownership_mode.is_some() {
@@ -334,6 +338,13 @@ impl Responder {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
         let mode = match &request {
+            Request::CacheMaintenance { .. } => {
+                let mode = self.ownership_mode.get().copied();
+                if mode != Some(super::ownership::Mode::Service) {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                mode
+            }
             Request::DesktopOwnership { action, .. } => {
                 let mode = self.ownership_mode.get().copied();
                 if mode != Some(action.mode()) {
@@ -567,6 +578,38 @@ mod tests {
         assert!(responder.ui_reply(&id(99)).is_some());
         connection.invalidate();
         assert!(responder.ui_reply(&id(99)).is_none());
+    }
+
+    #[test]
+    fn cache_requires_the_original_native_service_mode() {
+        use crate::desktop::{
+            cache_maintenance::{Command, Timing},
+            ownership::Mode,
+        };
+        let cache = Cache::default();
+        let mut value = envelope(1);
+        value.request = Request::CacheMaintenance {
+            request_id: id(101),
+            command: Box::new(Command::Prepare {
+                operation_id: id(102),
+                configuration: "a".repeat(64),
+                root: "/srv/example/cache".into(),
+                limit: 1,
+                revision: 0,
+                timing: Timing::Immediate,
+                policy_change: true,
+            }),
+        };
+        assert!(cache.prepare(value.clone()).is_err());
+        assert!(cache
+            .prepare_with_mode(value.clone(), Some(Mode::Native))
+            .is_err());
+        let slot = cache.prepare_with_mode(value, Some(Mode::Service)).unwrap();
+        *slot.0.child.lock().unwrap() = Some((24, "synthetic-birth".into()));
+        assert_eq!(
+            cache.evidence(&id(1)).unwrap().ownership_mode,
+            Some(Mode::Service)
+        );
     }
 
     #[test]

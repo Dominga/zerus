@@ -25,6 +25,7 @@ pub(super) struct Runtime {
     delivery: delivery::Runtime,
     details: details::Adapter,
     maintenance: maintenance::Runtime,
+    cache: super::cache_maintenance::Runtime,
     attention: attention::Runtime,
     activations: activation::Router,
     drained: bool,
@@ -65,6 +66,7 @@ impl Runtime {
                 delivery,
                 details: details::Adapter::new(epoch),
                 maintenance,
+                cache: super::cache_maintenance::Runtime::new(&location, epoch, owner.clone()),
                 attention: attention::Runtime::new(epoch),
                 activations: activation::Router::new(&location.configuration, epoch),
                 drained: false,
@@ -137,6 +139,7 @@ impl Runtime {
         }
         self.delivery.poll(store);
         self.maintenance.poll(store);
+        self.cache.poll(store);
         self.notifications
             .poll(store, &mut self.attention, &mut self.activations, seq);
         // Disabled discovery must not accumulate permanent edge/baseline rows.
@@ -170,6 +173,9 @@ impl Runtime {
         if authority.operation() == "automatic_approvals" {
             return self.delivery.frontend_request(store, authority);
         }
+        if authority.operation() == "cache_maintenance" {
+            return self.cache.frontend_request(store, authority);
+        }
         self.maintenance.frontend_request(store, authority)
     }
 
@@ -196,6 +202,8 @@ impl Runtime {
             "code":if self.notifications.drained() {"drained"} else if self.notifications.ready() {"running"} else {"awaiting_native_handoff"},
             "status":value["notification_runtime"]});
         value["maintenance"] = self.maintenance.status();
+        value["cache_maintenance"] = self.cache.status();
+        value["lifecycle"]["background"]["cache_maintenance"] = self.cache.status();
         value["components"]["maintenance"] = if value["maintenance"]["ready"] == true {
             "running"
         } else {
@@ -222,6 +230,7 @@ impl Runtime {
         value["ownership"] = if code == "drained"
             && delivery["drained"] == true
             && self.maintenance.drained()
+            && self.cache.drained()
             && self.attention.drained()
             && presence.as_ref().is_none_or(|p| p["drained"] == true)
         {
@@ -273,6 +282,7 @@ impl Runtime {
         self.producer.close();
         self.delivery.request_stop();
         self.maintenance.request_stop();
+        self.cache.request_stop(store)?;
         self.attention.set_policy(attention::Policy::default());
         self.notifications.request_stop();
         if let Some(presence) = &self.presence {
@@ -296,6 +306,7 @@ impl Runtime {
         let fleet_done = self.fleet.stop();
         self.delivery.poll(store);
         self.maintenance.poll(store);
+        self.cache.poll(store);
         let mut seq = 0;
         self.notifications
             .poll(store, &mut self.attention, &mut self.activations, &mut seq);
@@ -311,6 +322,7 @@ impl Runtime {
             && presence_done
             && self.delivery.drained()
             && self.maintenance.drained()
+            && self.cache.drained()
             && self.attention.drained()
             && self.notifications.drained();
         Ok(self.drained)

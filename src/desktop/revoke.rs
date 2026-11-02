@@ -200,7 +200,7 @@ fn execute_scoped(
     ensure!(record.state == "prepared", "invalid revoke state");
     step(drain(store), "drain_not_settled")?;
     ensure!(
-        zerus_desktop_ledger::operations::totals(&store.db)?.undrained == 0,
+        store.operation_undrained()? == 0,
         Declined("operation_resources_not_drained")
     );
     #[cfg(unix)]
@@ -324,7 +324,7 @@ fn query_scoped(
     );
     ensure!(record.state == "settled", Declined("revocation_pending"));
     ensure!(
-        zerus_desktop_ledger::operations::totals(&store.db)?.undrained == 0,
+        store.operation_undrained()? == 0,
         Declined("operation_resources_not_drained")
     );
     #[cfg(unix)]

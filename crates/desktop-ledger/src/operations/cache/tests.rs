@@ -26,6 +26,8 @@ fn original(n: usize) -> Original {
         configuration: "a".repeat(64),
         root: "/srv/example/cache".into(),
         limit: 1,
+        defer_ms: 0,
+        policy_change: true,
         revision: 0,
         service_epoch: EPOCH.into(),
         writer_epoch: id(100),
@@ -40,9 +42,11 @@ fn binding(original: &Original) -> Binding {
         root: original.root.clone(),
         directory: directory.clone(),
         index_sha256: "d".repeat(64),
+        index_identity: "e".repeat(64),
         limit: 1,
         candidates: vec![Candidate {
-            content_id: content_id(&directory, &name, &sha256),
+            content_id: content_id(&"f".repeat(64), &sha256),
+            object: "f".repeat(64),
             name,
             sha256,
             bytes: 5,
@@ -155,7 +159,8 @@ fn root_policy_changes_and_global_revoke_block_new_effects_without_releasing_wor
     assert!(reserve(&tx, &first, &hash).is_err());
     tx.rollback().unwrap();
     assert_eq!(undrained(&db).unwrap(), 1);
-    let second = original(2);
+    let mut second = original(2);
+    second.revision = 1;
     let tx = db.transaction().unwrap();
     assert!(begin(&tx, &second, &"f".repeat(64)).is_err());
     tx.rollback().unwrap();
@@ -242,4 +247,38 @@ fn nondestructive_preparation_recovery_is_refused_and_never_promoted() {
     );
     let tx = db.transaction().unwrap();
     assert!(reserve(&tx, &first, row.binding_sha256.as_ref().unwrap()).is_err());
+}
+
+#[test]
+fn explicit_policy_commit_is_separate_from_effects_and_refresh_cannot_change_it() {
+    let mut db = Connection::open_in_memory().unwrap();
+    database(&mut db);
+    let mut automatic = original(1);
+    automatic.policy_change = false;
+    let tx = db.transaction().unwrap();
+    assert!(begin(&tx, &automatic, &"f".repeat(64)).is_err());
+    tx.rollback().unwrap();
+    let explicit = original(2);
+    let tx = db.transaction().unwrap();
+    assert!(begin(&tx, &explicit, &"f".repeat(64)).unwrap());
+    tx.commit().unwrap();
+    // A missing/invalid cache can retain an explicit preference. No file
+    // reservation exists and a refresh cannot manufacture a different cap.
+    join(&mut db, &explicit, None);
+    let mut refresh = original(3);
+    refresh.policy_change = false;
+    refresh.revision = 1;
+    let mut changed = refresh.clone();
+    changed.limit = 2;
+    let tx = db.transaction().unwrap();
+    assert!(begin(&tx, &changed, &"e".repeat(64)).is_err());
+    tx.rollback().unwrap();
+    let hash = prepare(&mut db, &refresh, &binding(&refresh));
+    assert_eq!(admit(&mut db, &refresh, &hash), [true]);
+    assert_eq!(
+        db.query_row("SELECT revision FROM desktop_cache_roots", [], |r| r
+            .get::<_, u64>(0))
+            .unwrap(),
+        1
+    );
 }

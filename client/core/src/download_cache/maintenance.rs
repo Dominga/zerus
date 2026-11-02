@@ -21,9 +21,10 @@ pub struct Candidate {
     pub name: String,
     pub bytes: u64,
     pub sha256: String,
+    pub object: String,
     pub identity: String,
     /// Stable across requests and unrelated index edits. An unknown removal
-    /// of this original name/content must fence a later request too.
+    /// of this original file/content must fence a later request, even if moved.
     pub content_id: String,
 }
 
@@ -33,6 +34,7 @@ pub struct Binding {
     pub root: String,
     pub directory: String,
     pub index_sha256: String,
+    pub index_identity: String,
     pub limit: u64,
     pub candidates: Vec<Candidate>,
 }
@@ -43,13 +45,15 @@ impl Binding {
             && !self.root.chars().any(char::is_control)
             && digest(&self.directory)
             && digest(&self.index_sha256)
+            && digest(&self.index_identity)
             && self.candidates.len() <= CANDIDATES
             && self.candidates.iter().all(|c| {
                 safe_name(&c.name)
                     && c.name.len() <= 1024
                     && digest(&c.sha256)
                     && digest(&c.identity)
-                    && c.content_id == content_id(&self.directory, &c.name, &c.sha256)
+                    && digest(&c.object)
+                    && c.content_id == content_id(&c.object, &c.sha256)
             })
             && self
                 .candidates
@@ -64,10 +68,10 @@ fn digest(value: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
-fn content_id(directory: &str, name: &str, sha256: &str) -> String {
+fn content_id(object: &str, sha256: &str) -> String {
     let mut hash = Sha256::new();
     hash.update(b"desktop-cache-content-v1\0");
-    for field in [directory, name, sha256] {
+    for field in [object, sha256] {
         hash.update((field.len() as u64).to_be_bytes());
         hash.update(field.as_bytes());
     }
@@ -106,6 +110,10 @@ impl Prepared {
     pub fn binding(&self) -> &Binding {
         &self.binding
     }
+    /// A known pre-unlink refusal of this exact original frozen pass.
+    pub fn kept_receipt(&self) -> Receipt {
+        self.receipt(vec![State::Kept; self.files.len()])
+    }
 
     /// No directory creation, index rewrite, hashing of cached content or
     /// deletion. Refuses oversized legacy indexes without truncating them.
@@ -134,6 +142,7 @@ impl Prepared {
             root: root.to_str().ok_or(REFUSED)?.into(),
             directory: directory_id,
             index_sha256,
+            index_identity: identity(&index, false)?,
             limit,
             candidates: Vec::new(),
         };
@@ -158,12 +167,14 @@ impl Prepared {
             {
                 let name = text(entry, "name").to_owned();
                 let sha256 = text(entry, "sha256").to_owned();
+                let (object, identity) = identities(&file, false)?;
                 binding.candidates.push(Candidate {
-                    content_id: content_id(&binding.directory, &name, &sha256),
+                    content_id: content_id(&object, &sha256),
+                    object,
                     name,
                     sha256,
                     bytes: meta.len(),
-                    identity: identity(&file, false)?,
+                    identity,
                 });
                 files.push(file);
             }
@@ -191,6 +202,7 @@ impl Prepared {
         if fs::canonicalize(root).ok().as_deref() != Some(root)
             || identity(&self.directory, true)? != self.binding.directory
             || identity(&named, true)? != self.binding.directory
+            || identity(&self.index, false)? != self.binding.index_identity
             || !same_file(&self.index, &root.join(INDEX))
             || hex(&Sha256::digest(read_index(&self.index)?)) != self.binding.index_sha256
         {
@@ -233,9 +245,10 @@ impl Prepared {
                     live(cancel, self.at)?;
                     // One byte beyond the frozen length detects a grown file;
                     // allocation and hashing remain strictly bounded.
-                    let take = buffer
-                        .len()
-                        .min((candidate.bytes.saturating_sub(bytes) + 1).min(65536) as usize);
+                    let take = buffer.len().min(
+                        (candidate.bytes.saturating_sub(bytes).saturating_add(1)).min(65536)
+                            as usize,
+                    );
                     let count = file.read(&mut buffer[..take]).map_err(|_| REFUSED)?;
                     if count == 0 {
                         break;
@@ -381,6 +394,9 @@ fn open(path: &Path, directory: bool) -> Result<File, String> {
     Ok(file)
 }
 fn identity(file: &File, directory: bool) -> Result<String, String> {
+    Ok(identities(file, directory)?.1)
+}
+fn identities(file: &File, directory: bool) -> Result<(String, String), String> {
     let meta = file.metadata().map_err(|_| REFUSED)?;
     if meta.is_dir() != directory || (!directory && !meta.is_file()) {
         return Err(REFUSED.into());
@@ -391,8 +407,9 @@ fn identity(file: &File, directory: bool) -> Result<String, String> {
         if !directory && meta.nlink() != 1 {
             return Err(REFUSED.into());
         }
+        let object = format!("{}:{}", meta.dev(), meta.ino());
         let value = if directory {
-            format!("{}:{}", meta.dev(), meta.ino())
+            object.clone()
         } else {
             format!(
                 "{}:{}:{}:{}:{}:{}:{}",
@@ -405,7 +422,10 @@ fn identity(file: &File, directory: bool) -> Result<String, String> {
                 meta.ctime_nsec()
             )
         };
-        Ok(hex(&Sha256::digest(value.as_bytes())))
+        Ok((
+            hex(&Sha256::digest(object.as_bytes())),
+            hex(&Sha256::digest(value.as_bytes())),
+        ))
     }
     #[cfg(windows)]
     {
@@ -422,6 +442,7 @@ fn identity(file: &File, directory: bool) -> Result<String, String> {
             "{}:{}:{}",
             info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow
         );
+        let object = value.clone();
         if !directory {
             value.push_str(&format!(
                 ":{}:{}:{}:{}",
@@ -431,7 +452,10 @@ fn identity(file: &File, directory: bool) -> Result<String, String> {
                 info.dwFileAttributes
             ));
         }
-        Ok(hex(&Sha256::digest(value.as_bytes())))
+        Ok((
+            hex(&Sha256::digest(object.as_bytes())),
+            hex(&Sha256::digest(value.as_bytes())),
+        ))
     }
 }
 

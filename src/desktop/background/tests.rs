@@ -56,6 +56,7 @@ fn slow_replacement_keeps_draining_on_actor_turns_without_a_client_retry() {
         delivery: delivery::Runtime::start(&config, &epoch).unwrap(),
         details: details::Adapter::new(&epoch),
         maintenance: maintenance::Runtime::start(&config, &epoch).unwrap(),
+        cache: crate::desktop::cache_maintenance::Runtime::new(&location, &epoch, owner.clone()),
         attention: attention::Runtime::new(&epoch),
         activations: activation::Router::new(&location.configuration, &epoch),
         drained: false,

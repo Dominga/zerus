@@ -244,3 +244,37 @@ fn real_unlink_denial_is_unknown_and_not_a_verified_refusal() {
     assert_eq!(result.files, [State::Unknown]);
     assert_eq!(fs::read(folder.0.join("keep.txt")).unwrap(), b"content");
 }
+
+#[test]
+fn renaming_the_same_unknown_original_cannot_change_its_content_fence() {
+    let folder = Folder::new();
+    folder.save("old.txt", b"content", 90_000);
+    let original = folder.prepare(1).binding().clone();
+    fs::rename(folder.0.join("old.txt"), folder.0.join("moved.txt")).unwrap();
+    let mut index = folder.index();
+    index["files"][0]["name"] = json!("moved.txt");
+    fs::write(folder.0.join(INDEX), serde_json::to_vec(&index).unwrap()).unwrap();
+    let prepared = folder.prepare(1);
+    assert_eq!(
+        prepared.binding().candidates[0].content_id,
+        original.candidates[0].content_id
+    );
+    assert_eq!(
+        prepared.execute(&[false], &AtomicBool::new(false)).files,
+        [State::Kept]
+    );
+    assert!(folder.0.join("moved.txt").is_file());
+}
+
+#[test]
+fn byte_equal_index_replacement_is_a_different_frozen_generation() {
+    let folder = Folder::new();
+    folder.save("keep.txt", b"content", 90_000);
+    let original = folder.prepare(1).binding().clone();
+    let raw = fs::read(folder.0.join(INDEX)).unwrap();
+    fs::write(folder.0.join("replacement"), raw).unwrap();
+    fs::rename(folder.0.join("replacement"), folder.0.join(INDEX)).unwrap();
+    let next = folder.prepare(1);
+    assert_eq!(next.binding().index_sha256, original.index_sha256);
+    assert_ne!(next.binding().index_identity, original.index_identity);
+}

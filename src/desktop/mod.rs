@@ -3,6 +3,7 @@ mod approval_audit;
 #[allow(dead_code)] // Discovery is bound to the original notification factory at cutover.
 mod attention;
 mod background;
+mod cache_maintenance;
 mod catalog_read;
 mod catalog_relay;
 mod counts;
@@ -22,7 +23,6 @@ mod notification_controls;
 mod notifications;
 #[allow(dead_code)]
 mod operations;
-mod cache_maintenance;
 mod owner;
 mod ownership;
 mod pending_reads;
@@ -789,6 +789,26 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         frame(&epoch, seq, "response", result)
                     } else if hello.op == "request" {
                         let result = if hello.request.as_ref().is_some_and(|v| {
+                            matches!(
+                                v["op"].as_str(),
+                                Some("cache_maintenance_result" | "cache_maintenance_policy")
+                            )
+                        }) {
+                            cache_maintenance::query(
+                                &store,
+                                &location.configuration,
+                                hello.request.as_ref().unwrap(),
+                            )
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "cache_maintenance")
+                        {
+                            frontend_refused(
+                                hello.request.as_ref(),
+                                "frontend_authentication_required",
+                            )
+                        } else if hello.request.as_ref().is_some_and(|v| {
                             matches!(
                                 v["op"].as_str(),
                                 Some("detail_follow" | "detail_unfollow" | "detail_source")

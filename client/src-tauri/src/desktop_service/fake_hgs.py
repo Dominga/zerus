@@ -59,6 +59,8 @@ def status():
         counts['computers'][0]['computer'] = config['counts_computer']
     background = {name: {'ready': config.get('ready', False), 'code': 'fixture'}
                   for name in ['fleet', 'presence', 'reads', 'attention', 'approvals']}
+    if config.get('cache'):
+        background['cache_maintenance'] = {'ready': True, 'code': 'running'}
     sources = [{'computer': '', 'incarnation': 1, 'generation': 1,
                 'status': 'live' if online else 'reconnecting', 'accepting': online}]
     if config.get('peer_failure'):
@@ -165,6 +167,12 @@ def change(key, revision, remove=False):
 
 def desktop_request():
     op, request_id = value['op'], value['request_id']
+    if op == 'cache_maintenance_policy':
+        path = root / 'cache-policy'
+        revision, limit = json.loads(path.read_text()) if path.exists() else (0, 0)
+        print(json.dumps(dict(request_id=request_id, abi='desktop-cache-maintenance-v1', configuration='a' * 64,
+                              root=value['root'], revision=revision, limit=limit, configured=revision > 0)))
+        return
     if op in ['approval_audit_list', 'approval_audit_detail']:
         journal = '00000000-0000-4000-8000-00000000000' + ('4' if (root / 'audit-replaced').exists() else '3')
         if config.get('audit_hold'):
@@ -321,7 +329,7 @@ def desktop_request():
         confirmed = path.exists()
         path.touch()
         print(json.dumps({'request_id': request_id, 'accepted': True, 'durable': confirmed, 'op': op}))
-    elif op in ['delivery_result', 'pending_reads_import_result'] and (root / ('receipt-' + value['original_request_id'])).exists():
+    elif op in ['delivery_result', 'pending_reads_import_result', 'cache_maintenance_result'] and (root / ('receipt-' + value['original_request_id'])).exists():
         receipt = json.loads((root / ('receipt-' + value['original_request_id'])).read_text())
         print(json.dumps({'request_id': request_id, 'op': op, 'original_request_id': value['original_request_id'],
                           'accepted': True, 'durable': False, 'found': True, 'result': receipt}))
@@ -333,7 +341,7 @@ def desktop_request():
             print(json.dumps(receipt))
         else:
             print(json.dumps({'request_id': request_id, 'original_request_id': value['original_request_id'], 'accepted': False, 'code': 'unknown_request'}))
-    elif op in ['delivery_result', 'pending_reads_import_result']:
+    elif op in ['delivery_result', 'pending_reads_import_result', 'cache_maintenance_result']:
         print(json.dumps({'request_id': request_id, 'accepted': True, 'durable': False, 'op': op,
                           'original_request_id': value['original_request_id'], 'found': False, 'result': None}))
     elif op == 'catalog_close':
@@ -343,6 +351,7 @@ def desktop_request():
 
 
 if args == ['--help']:
+    print('Desktop cache maintenance ABI: desktop-cache-maintenance-v1')
     if config.get('audit_help_hold') and counter('audit-help-number') > 1:
         (root / 'audit-help-held').touch()
         wait(root / 'audit-help-release')
@@ -437,6 +446,24 @@ elif args == ['desktop', 'frontend-request', '--json']:
                        'after': page['after'], 'through': page['after'] + len(page['marks']),
                        'superseded': len(page['marks']) if config.get('pending_reads_superseded') else 0,
                        'delivered': False}
+        elif request['op'] == 'cache_maintenance':
+            assert evidence['ownership_mode'] == 'service'
+            command = request['command']
+            if command['phase'] == 'prepare':
+                receipt = dict(abi='desktop-cache-maintenance-v1', request_id=request['request_id'], op=request['op'],
+                    accepted=False, durable=True, pending=True, configuration=command['configuration'],
+                    preparation_id=request['request_id'], operation_id=command['operation_id'],
+                    revision=command['revision'] + int(command['policy_change']), limit=command['limit'], policy_saved=command['policy_change'],
+                    phase='prepared', binding_sha256='b' * 64, removed=0, kept=0, unknown=0, drained=False)
+                (root / 'cache-policy').write_text(json.dumps([receipt['revision'], command['limit']]))
+            else:
+                receipt = json.loads((root / ('receipt-' + command['preparation_id'])).read_text())
+                assert receipt['binding_sha256'] == command['binding_sha256']
+                assert receipt['operation_id'] == request['request_id']
+                receipt.update(request_id=request['request_id'], accepted=True, phase='settled', pending=False,
+                               removed=1, drained=True)
+            for original in [receipt['preparation_id'], receipt['operation_id']]:
+                (root / ('receipt-' + original)).write_text(json.dumps(receipt))
         elif request['op'] == 'automatic_approvals':
             receipt = {'request_id': request['request_id'], 'op': request['op'], 'enabled': request['enabled'],
                        'accepted': True, 'durable': True, 'revision': 1}

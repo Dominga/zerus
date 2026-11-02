@@ -41,6 +41,7 @@ pub(crate) struct Observers {
 }
 
 pub(crate) mod audit;
+mod cache;
 mod catalog;
 mod catalog_relay;
 use catalog::catalog_loop;
@@ -239,6 +240,8 @@ struct Shared {
     dirty: Mutex<Dirty>,
     changed: Notify,
     rpc: Gate,
+    cache_rpc: Gate,
+    cache: Mutex<Option<cache::Pending>>,
     // Long activation reads never consume fleet/details admission capacity.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     activation_rpc: Gate,
@@ -332,6 +335,8 @@ impl Service {
             dirty: Mutex::new(Dirty::default()),
             changed: Notify::new(),
             rpc: Gate::new(4).unwrap(),
+            cache_rpc: Gate::new(1).unwrap(),
+            cache: Mutex::new(None),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             activation_rpc: Gate::new(1).unwrap(),
             #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
@@ -613,6 +618,7 @@ impl Service {
             .unwrap_or_else(PoisonError::into_inner)
             .take();
         self.shared.rpc.close();
+        self.shared.cache_rpc.close();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.shared.activation_rpc.close();
         let _ = self.control.send(Control::Stop);
@@ -638,6 +644,7 @@ impl Service {
             join_view(drain, RPC_WAIT).await?;
         }
         let closed = self.shared.rpc.close();
+        let cache_closed = self.shared.cache_rpc.close();
         let ownership_closed = self.shared.ownership.close();
         let notification_closed = self.shared.notification_controls.close();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -646,6 +653,9 @@ impl Service {
             let until = std::time::Instant::now() + RPC_WAIT;
             let drained =
                 closed.wait_until(until) == zerus_client_core::desktop::drain::Observation::Idle;
+            let drained = (cache_closed.wait_until(until)
+                == zerus_client_core::desktop::drain::Observation::Idle)
+                && drained;
             let drained = (ownership_closed.wait_until(until)
                 == zerus_client_core::desktop::drain::Observation::Idle)
                 && drained;
@@ -964,7 +974,7 @@ async fn request(
     // This lane never acquires frontend approval-setting authority.
     if matches!(
         value["op"].as_str(),
-        Some("automatic_approvals" | "maintenance_configure")
+        Some("automatic_approvals" | "maintenance_configure" | "cache_maintenance")
     ) {
         return Err("frontend_route_required");
     }

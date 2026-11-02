@@ -19,6 +19,7 @@ pub struct Candidate {
     pub name: String,
     pub bytes: u64,
     pub sha256: String,
+    pub object: String,
     pub identity: String,
     pub content_id: String,
 }
@@ -28,6 +29,7 @@ pub struct Binding {
     pub root: String,
     pub directory: String,
     pub index_sha256: String,
+    pub index_identity: String,
     pub limit: u64,
     pub candidates: Vec<Candidate>,
 }
@@ -38,6 +40,8 @@ pub struct Original {
     pub configuration: String,
     pub root: String,
     pub limit: u64,
+    pub defer_ms: u64,
+    pub policy_change: bool,
     /// The original native policy revision, before this operation's admission.
     pub revision: u64,
     pub service_epoch: String,
@@ -82,10 +86,10 @@ fn digest(s: &str) -> bool {
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
-fn content_id(directory: &str, name: &str, sha256: &str) -> String {
+fn content_id(object: &str, sha256: &str) -> String {
     let mut hash = Sha256::new();
     hash.update(b"desktop-cache-content-v1\0");
-    for field in [directory, name, sha256] {
+    for field in [object, sha256] {
         hash.update((field.len() as u64).to_be_bytes());
         hash.update(field.as_bytes());
     }
@@ -116,7 +120,8 @@ fn validate(original: &Original) -> Result<()> {
             && original.root.len() <= 8192
             && !original.root.chars().any(char::is_control)
             && original.revision < i64::MAX as u64
-            && original.limit <= i64::MAX as u64,
+            && original.limit <= i64::MAX as u64
+            && matches!(original.defer_ms, 0 | 65_000),
         "invalid cache original"
     );
     Ok(())
@@ -144,12 +149,14 @@ fn service(tx: &Transaction<'_>, original: &Original) -> Result<()> {
 pub fn migrate(tx: &Transaction<'_>) -> Result<()> {
     tx.execute_batch("CREATE TABLE desktop_cache_roots(
         root TEXT PRIMARY KEY CHECK(length(CAST(root AS BLOB))<=8192),
-        revision INTEGER NOT NULL CHECK(revision>=0), revoked INTEGER NOT NULL CHECK(revoked IN(0,1)));
+        revision INTEGER NOT NULL CHECK(revision>=0), revoked INTEGER NOT NULL CHECK(revoked IN(0,1)), bytes_limit INTEGER NOT NULL);
         CREATE TABLE desktop_cache_operations(
         seq INTEGER PRIMARY KEY AUTOINCREMENT,
         preparation_id TEXT NOT NULL UNIQUE, operation_id TEXT NOT NULL UNIQUE,
         configuration TEXT NOT NULL, root TEXT NOT NULL REFERENCES desktop_cache_roots(root),
         bytes_limit INTEGER NOT NULL, revision INTEGER NOT NULL, fingerprint TEXT NOT NULL,
+        defer_ms INTEGER NOT NULL CHECK(defer_ms IN(0,65000)),
+        policy_change INTEGER NOT NULL CHECK(policy_change IN(0,1)),
         service_epoch TEXT NOT NULL, writer_epoch TEXT NOT NULL, lease TEXT NOT NULL,
         state TEXT NOT NULL CHECK(state IN('preparing','prepared','reserved','settled','refused','unknown')),
         binding TEXT CHECK(length(CAST(binding AS BLOB))<=32768), binding_sha256 TEXT,
@@ -191,6 +198,15 @@ pub fn begin(tx: &Transaction<'_>, original: &Original, fingerprint: &str) -> Re
         return Ok(false);
     }
     ensure!(
+        !tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM desktop_cache_operations
+        WHERE operation_id=?1 OR preparation_id=?2 OR operation_id=?2)",
+            params![original.preparation_id, original.operation_id],
+            |r| r.get::<_, bool>(0)
+        )?,
+        "cache identity is already used"
+    );
+    ensure!(
         tx.query_row("SELECT count(*) FROM desktop_cache_operations", [], |r| r
             .get::<_, i64>(
             0
@@ -207,55 +223,81 @@ pub fn begin(tx: &Transaction<'_>, original: &Original, fingerprint: &str) -> Re
     );
     let old = tx
         .query_row(
-            "SELECT revision FROM desktop_cache_roots WHERE root=?1",
+            "SELECT revision,bytes_limit FROM desktop_cache_roots WHERE root=?1",
             [&original.root],
-            |r| r.get::<_, u64>(0),
+            |r| Ok((r.get::<_, u64>(0)?, r.get::<_, u64>(1)?)),
         )
         .optional()?;
-    if let Some(revision) = old {
+    if let Some((revision, limit)) = old {
         ensure!(revision == original.revision, "cache policy changed");
+        ensure!(
+            original.policy_change || (revision > 0 && limit == original.limit),
+            "cache policy is not configured"
+        );
     } else {
         ensure!(
-            original.revision == 0
+            original.policy_change
+                && original.revision == 0
                 && tx.query_row("SELECT count(*) FROM desktop_cache_roots", [], |r| r
                     .get::<_, i64>(0))?
                     < ROOTS,
             "cache policy is unavailable"
         );
         tx.execute(
-            "INSERT INTO desktop_cache_roots VALUES(?1,0,1)",
+            "INSERT INTO desktop_cache_roots VALUES(?1,0,1,0)",
+            [&original.root],
+        )?;
+    }
+    if original.policy_change {
+        // Persist the explicit preference even when read-only preparation
+        // later refuses. This data commit never reserves a destructive effect.
+        ensure!(tx.execute("UPDATE desktop_cache_roots SET revision=revision+1,bytes_limit=?3,revoked=0 WHERE root=?1 AND revision=?2",
+            params![original.root,original.revision,original.limit])?==1,"cache policy changed");
+    } else {
+        tx.execute(
+            "UPDATE desktop_cache_roots SET revoked=0 WHERE root=?1",
             [&original.root],
         )?;
     }
     tx.execute("INSERT INTO desktop_cache_operations(preparation_id,operation_id,configuration,root,bytes_limit,revision,
-        fingerprint,service_epoch,writer_epoch,lease,state,revoked,undrained) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'preparing',0,1)",
+        fingerprint,service_epoch,writer_epoch,lease,state,revoked,undrained,defer_ms,policy_change) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'preparing',0,1,?11,?12)",
         params![original.preparation_id,original.operation_id,original.configuration,original.root,original.limit,
-            original.revision,fingerprint,original.service_epoch,original.writer_epoch,original.lease])?;
+            original.revision,fingerprint,original.service_epoch,original.writer_epoch,original.lease,original.defer_ms,original.policy_change])?;
     Ok(true)
 }
 pub fn load(db: &rusqlite::Connection, id: &str) -> Result<Option<Record>> {
     uuid(id)?;
     db.query_row("SELECT preparation_id,operation_id,configuration,root,bytes_limit,revision,service_epoch,writer_epoch,lease,
-        state,binding,binding_sha256,receipt,undrained FROM desktop_cache_operations WHERE preparation_id=?1 OR operation_id=?1", [id], |r| {
+        state,binding,binding_sha256,receipt,undrained,defer_ms,policy_change FROM desktop_cache_operations WHERE preparation_id=?1 OR operation_id=?1", [id], |r| {
         Ok((Original { preparation_id:r.get(0)?,operation_id:r.get(1)?,configuration:r.get(2)?,root:r.get(3)?,limit:r.get(4)?,revision:r.get(5)?,
-            service_epoch:r.get(6)?,writer_epoch:r.get(7)?,lease:r.get(8)? }, r.get::<_,String>(9)?, r.get::<_,Option<String>>(10)?,
+            service_epoch:r.get(6)?,writer_epoch:r.get(7)?,lease:r.get(8)?,defer_ms:r.get(14)?,policy_change:r.get(15)? }, r.get::<_,String>(9)?, r.get::<_,Option<String>>(10)?,
             r.get::<_,Option<String>>(11)?,r.get::<_,Option<String>>(12)?,r.get::<_,bool>(13)?))
     }).optional()?.map(|(original,state,binding,binding_sha256,receipt,undrained)| {
         validate(&original)?;
         ensure!(binding.as_ref().is_none_or(|v|v.len()<=BINDING_BYTES) && receipt.as_ref().is_none_or(|v|v.len()<=BINDING_BYTES), "invalid cache row");
+        let binding:Option<Binding>=binding.map(|v|serde_json::from_str(&v)).transpose()?;
+        if let Some(binding)=&binding {
+            validate_binding(&original,binding)?;
+            ensure!(binding_sha256.as_deref()==Some(hash(encoded(binding)?.as_bytes()).as_str()),"cache stored freeze changed");
+        } else {ensure!(binding_sha256.is_none(),"cache stored freeze missing");}
+        let receipt:Option<Receipt>=receipt.map(|v|serde_json::from_str(&v)).transpose()?;
+        if let Some(receipt)=&receipt {
+            let binding=binding.as_ref().context("cache receipt has no original freeze")?;
+            ensure!(receipt.index_sha256==binding.index_sha256 && receipt.files.len()==binding.candidates.len()
+                && receipt.count<=1024,"cache stored receipt changed");
+        }
         Ok(Record { original,phase:serde_json::from_value(serde_json::Value::String(state))?,
-            binding:binding.map(|v|serde_json::from_str(&v)).transpose()?,binding_sha256,
-            receipt:receipt.map(|v|serde_json::from_str(&v)).transpose()?,undrained })
+            binding,binding_sha256,receipt,undrained })
     }).transpose()
 }
-pub fn prepared(tx: &Transaction<'_>, original: &Original, binding: &Binding) -> Result<String> {
-    service(tx, original)?;
+fn validate_binding(original: &Original, binding: &Binding) -> Result<()> {
     ensure!(
         binding.root == original.root
             && binding.limit == original.limit
             && binding.candidates.len() <= FILES
             && digest(&binding.directory)
-            && digest(&binding.index_sha256),
+            && digest(&binding.index_sha256)
+            && digest(&binding.index_identity),
         "cache freeze changed"
     );
     for file in &binding.candidates {
@@ -266,10 +308,16 @@ pub fn prepared(tx: &Transaction<'_>, original: &Original, binding: &Binding) ->
                 && !matches!(file.name.as_str(), "." | "..")
                 && digest(&file.sha256)
                 && digest(&file.identity)
-                && file.content_id == content_id(&binding.directory, &file.name, &file.sha256),
+                && digest(&file.object)
+                && file.content_id == content_id(&file.object, &file.sha256),
             "invalid cache file"
         );
     }
+    Ok(())
+}
+pub fn prepared(tx: &Transaction<'_>, original: &Original, binding: &Binding) -> Result<String> {
+    service(tx, original)?;
+    validate_binding(original, binding)?;
     let bytes = encoded(binding)?;
     let hash = hash(bytes.as_bytes());
     ensure!(tx.execute("UPDATE desktop_cache_operations SET binding=?2,binding_sha256=?3,state='prepared'
@@ -302,8 +350,8 @@ pub fn reserve(
         "cache lease revoked"
     );
     let binding = row.binding.context("cache binding missing")?;
-    ensure!(tx.execute("UPDATE desktop_cache_roots SET revision=revision+1,revoked=0 WHERE root=?1 AND revision=?2",
-        params![original.root,original.revision])? == 1, "cache policy changed");
+    ensure!(tx.query_row("SELECT revision=?2 AND bytes_limit=?3 AND revoked=0 FROM desktop_cache_roots WHERE root=?1",
+        params![original.root,original.revision+u64::from(original.policy_change),original.limit],|r|r.get::<_,bool>(0))?, "cache policy changed");
     let mut allowed = Vec::new();
     for (index, file) in binding.candidates.iter().enumerate() {
         let blocked = tx.query_row(
@@ -340,6 +388,15 @@ pub fn finish_joined(
         row.original == *original && row.undrained,
         "cache completion changed"
     );
+    if matches!(row.phase, Phase::Unknown | Phase::Refused) {
+        // A deadline already recorded a terminal outcome. A late native result
+        // can drain its original resource, never turn Unknown into success.
+        tx.execute(
+            "UPDATE desktop_cache_operations SET undrained=0 WHERE operation_id=?1",
+            [&original.operation_id],
+        )?;
+        return Ok(());
+    }
     let (phase, receipt) = if row.phase == Phase::Reserved {
         let binding = row.binding.context("cache binding missing")?;
         if let Some(receipt) = receipt {
@@ -407,6 +464,30 @@ pub fn revoke(tx: &Transaction<'_>) -> Result<()> {
         "UPDATE desktop_cache_roots SET revoked=1 WHERE revoked=0",
         [],
     )?;
+    Ok(())
+}
+/// A bounded caller deadline does not release a still-running original worker.
+/// Known pre-execution preparation is refused; reserved effects stay Unknown
+/// even if their late worker eventually reports a successful unlink.
+pub fn expire(tx: &Transaction<'_>, original: &Original) -> Result<()> {
+    let row = load(tx, &original.operation_id)?.context("cache original missing")?;
+    ensure!(
+        row.original == *original && row.undrained,
+        "cache timeout changed"
+    );
+    match row.phase {
+        Phase::Preparing | Phase::Prepared => {
+            tx.execute("UPDATE desktop_cache_operations SET state='refused',revoked=1 WHERE operation_id=?1", [&original.operation_id])?;
+        }
+        Phase::Reserved => {
+            tx.execute("INSERT OR IGNORE INTO desktop_cache_unknown SELECT content_id,operation_id FROM desktop_cache_files
+                WHERE operation_id=?1 AND state='reserved'", [&original.operation_id])?;
+            tx.execute("UPDATE desktop_cache_files SET state='unknown' WHERE operation_id=?1 AND state='reserved'", [&original.operation_id])?;
+            tx.execute("UPDATE desktop_cache_operations SET state='unknown',revoked=1 WHERE operation_id=?1", [&original.operation_id])?;
+        }
+        Phase::Refused | Phase::Unknown => (),
+        Phase::Settled => anyhow::bail!("cache result already settled"),
+    }
     Ok(())
 }
 pub fn undrained(db: &rusqlite::Connection) -> Result<u64> {

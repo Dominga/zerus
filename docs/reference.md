@@ -4533,6 +4533,27 @@ cannot enable writers or approvals without the later live delegation, effect
 guards and revocation protocol. The kernel writes no takeover marker. See the
 exact [migration contract](desktop-migration.md).
 
+In service mode, Settings > Files > Apply saves the selected folder's cache
+limit in the service. Imported UI preferences remain display data until that
+explicit action. Refresh and download completion use the saved service policy;
+they never fall back to UI-owned deletion if the service is unavailable. A
+native request first prepares a bounded plan under the existing Qt folder lock.
+A fresh original frontend child must then admit that exact plan before the
+service reserves any removal. The original two-second native permit is never
+extended to cover slow filesystem preparation.
+
+One pass considers at most 16 files from an index of at most 1 MiB and 1024
+entries, and verifies at most 64 MiB of content. Edited, linked, replaced and
+unindexed files remain intact. Download completion admits fixed work with a
+65-second opening grace; the folder lock is released while waiting, and any
+change to its frozen index or files keeps the original copies. The admitted
+pass can finish after the UI closes. Revoke stops new effects and remains
+unsettled until the original worker physically joins. A lost removal result is
+terminal unknown for that original file/content identity, including after a
+rename or an unrelated index edit. Another request ID cannot clear that fence.
+The read-only `cache_maintenance_result` request accepts the original request ID
+and returns its bounded receipt; it cannot prepare, retry or authorize work.
+
 `hgs desktop registration --json` previews the current platform's per-user
 passive registration and includes a `readiness` probe for that exact binary and
 configuration. Run its `argv` directly with the two supplied `HGS_CONFIG_DIR`

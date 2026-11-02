@@ -343,6 +343,7 @@ fn restart_keeps_preferences_and_receipts_but_uses_fresh_scope_without_focus() {
 #[test]
 fn schema_fifteen_migration_is_atomic_and_creates_no_writer_permission() {
     let f = Fixture::new();
+    crate::desktop::cache_maintenance::remove_from_downgraded_fixture(&f.store.db);
     let location = Location {
         root: f._dir.path().canonicalize().unwrap().join("state/desktop"),
         configuration: f.runtime.scope.configuration.clone(),
@@ -375,7 +376,7 @@ fn schema_fifteen_migration_is_atomic_and_creates_no_writer_permission() {
             .db
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        16
+        crate::desktop::store::SCHEMA
     );
     assert_eq!(
         zerus_desktop_ledger::status(&store.db).unwrap()["revoked"],

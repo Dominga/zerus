@@ -293,9 +293,18 @@ impl Validated {
     pub fn check_ownership(self) -> Result<()> {
         self.ownership_parts().map(|_| ())
     }
-    pub fn cache_parts(&self) -> Result<(String, zerus_client_core::desktop::cache_maintenance::Command)> {
+    pub fn cache_parts(
+        &self,
+    ) -> Result<(
+        String,
+        zerus_client_core::desktop::cache_maintenance::Command,
+    )> {
         self.check()?;
-        let Request::CacheMaintenance { request_id, command } = &self.0 else {
+        let Request::CacheMaintenance {
+            request_id,
+            command,
+        } = &self.0
+        else {
             anyhow::bail!("not cache maintenance");
         };
         ensure!(command.valid(request_id), "invalid cache maintenance");
@@ -641,6 +650,24 @@ fn validate(
         ensure!(
             reply.request.ownership_mode == Some(action.mode()),
             "ownership mode does not match the native frontend"
+        );
+    }
+    if let Request::CacheMaintenance { command, .. } = &envelope.request {
+        let selected = match command.as_ref() {
+            zerus_client_core::desktop::cache_maintenance::Command::Prepare {
+                configuration,
+                ..
+            }
+            | zerus_client_core::desktop::cache_maintenance::Command::Execute {
+                configuration,
+                ..
+            } => configuration,
+        };
+        ensure!(
+            reply.request.ownership_mode
+                == Some(zerus_client_core::desktop::ownership::Mode::Service)
+                && selected == configuration,
+            "cache mode/configuration does not match the native frontend"
         );
     }
     if let Request::NotificationControl { scope, control } = &envelope.request {
@@ -1136,6 +1163,42 @@ mod tests {
         order
             .observe(instance, "notification_focus", 2, now)
             .unwrap();
+    }
+
+    #[test]
+    fn cache_native_mode_and_selected_configuration_cannot_be_claimed_by_the_request() {
+        use zerus_client_core::desktop::{
+            cache_maintenance::{Command, Timing},
+            ownership::Mode,
+        };
+        let (mut request, caller, frontend, mut reply) = fixture();
+        request.request = Request::CacheMaintenance {
+            request_id: id(2),
+            command: Box::new(Command::Prepare {
+                operation_id: id(10),
+                configuration: "a".repeat(64),
+                root: "/srv/example/cache".into(),
+                limit: 1,
+                revision: 0,
+                timing: Timing::Immediate,
+                policy_change: true,
+            }),
+        };
+        reply.request.fingerprint = request.request.fingerprint();
+        for mode in [None, Some(Mode::Native), Some(Mode::Service)] {
+            reply.request.ownership_mode = mode;
+            assert_eq!(
+                validate(&request, &caller, &frontend, &reply, &"a".repeat(64)).is_ok(),
+                mode == Some(Mode::Service)
+            );
+        }
+        if let Request::CacheMaintenance { command, .. } = &mut request.request {
+            if let Command::Prepare { configuration, .. } = command.as_mut() {
+                *configuration = "b".repeat(64);
+            }
+        }
+        reply.request.fingerprint = request.request.fingerprint();
+        assert!(validate(&request, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
     }
 
     #[test]

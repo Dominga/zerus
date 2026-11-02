@@ -27,10 +27,22 @@ URL and the checksum.
 | `objc2` | https://github.com/madsmtm/objc2/blob/d7d2fa23ceaa5e6096c923b081040e5d81b3b9df/LICENSE.md | `7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54` |
 | `objc2-app-kit` | MIT.txt (see below) | `b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5` |
 | `objc2-app-kit` | https://github.com/madsmtm/objc2/blob/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md | `7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54` |
+| `objc2-audio-toolbox` | MIT.txt (see below) | `b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5` |
+| `objc2-audio-toolbox` | https://github.com/madsmtm/objc2/blob/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md | `7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54` |
+| `objc2-av-foundation` | MIT.txt (see below) | `b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5` |
+| `objc2-av-foundation` | https://github.com/madsmtm/objc2/blob/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md | `7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54` |
+| `objc2-core-audio` | MIT.txt (see below) | `b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5` |
+| `objc2-core-audio` | https://github.com/madsmtm/objc2/blob/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md | `7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54` |
+| `objc2-core-audio-types` | MIT.txt (see below) | `b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5` |
+| `objc2-core-audio-types` | https://github.com/madsmtm/objc2/blob/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md | `7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54` |
 | `objc2-core-foundation` | MIT.txt (see below) | `b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5` |
 | `objc2-core-foundation` | https://github.com/madsmtm/objc2/blob/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md | `7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54` |
 | `objc2-core-graphics` | MIT.txt (see below) | `b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5` |
 | `objc2-core-graphics` | https://github.com/madsmtm/objc2/blob/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md | `7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54` |
+| `objc2-core-media` | MIT.txt (see below) | `b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5` |
+| `objc2-core-media` | https://github.com/madsmtm/objc2/blob/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md | `7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54` |
+| `objc2-core-video` | MIT.txt (see below) | `b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5` |
+| `objc2-core-video` | https://github.com/madsmtm/objc2/blob/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md | `7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54` |
 | `objc2-encode` | MIT.txt (see below) | `b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5` |
 | `objc2-encode` | https://github.com/madsmtm/objc2/blob/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.md | `7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54` |
 | `objc2-exception-helper` | MIT.txt (see below) | `b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5` |

@@ -379,7 +379,9 @@ impl Service {
                 None,
             )
             .await;
-        self.shared.publish_ownership();
+        self.shared
+            .publish_ownership(crate::desktop_ownership::Phase::Rearm)
+            .await;
         if self.shared.ownership.granted() {
             self.retry();
         }
@@ -387,7 +389,9 @@ impl Service {
     }
     pub(crate) async fn ownership_result(&self) -> crate::desktop_ownership::View {
         let view = self.shared.ownership.request(None, None, None).await;
-        self.shared.publish_ownership();
+        self.shared
+            .publish_ownership(crate::desktop_ownership::Phase::Result)
+            .await;
         view
     }
     /// Settings choices only: offline and generation-zero computers remain
@@ -689,8 +693,12 @@ impl Shared {
             );
         }
     }
-    fn publish_ownership(&self) {
-        let view = serde_json::to_value(self.ownership.view()).ok();
+    async fn publish_ownership(&self, phase: crate::desktop_ownership::Phase) {
+        let owner = self.ownership.clone();
+        let view = tauri::async_runtime::spawn_blocking(move || owner.record_view(phase))
+            .await
+            .unwrap_or_else(|_| self.ownership.view());
+        let view = serde_json::to_value(view).ok();
         let mut current = self.snapshot.lock().unwrap_or_else(PoisonError::into_inner);
         current.notification_ownership = view;
         self.pump.service(current.clone());
@@ -1008,6 +1016,9 @@ async fn run(shared: Arc<Shared>, mut control: watch::Receiver<Control>) {
             // remains available. Read its status; never auto-rearm at EOF.
             shared.ownership.request(None, None, None).await;
         }
+        shared
+            .publish_ownership(crate::desktop_ownership::Phase::ConnectionClosed)
+            .await;
         *shared.relay.lock().unwrap_or_else(PoisonError::into_inner) = None;
         stop.store(true, Ordering::Release);
         shared.audit_help.clear();
@@ -1054,6 +1065,9 @@ async fn connection(
     control: &mut watch::Receiver<Control>,
     stop: Arc<AtomicBool>,
 ) -> Result<(), &'static str> {
+    shared
+        .publish_ownership(crate::desktop_ownership::Phase::Connecting)
+        .await;
     let ordinary = shared.hgs.clone();
     let relay = Arc::new(
         tauri::async_runtime::spawn_blocking(move || {
@@ -1075,7 +1089,9 @@ async fn connection(
     } else {
         shared.ownership.unsupported();
     }
-    shared.publish_ownership();
+    shared
+        .publish_ownership(crate::desktop_ownership::Phase::StartupGrant)
+        .await;
     if shared.stopped.load(Ordering::Acquire) || stop.load(Ordering::Acquire) {
         return Err("stopped");
     }
@@ -1269,7 +1285,9 @@ async fn recover_grant(
                 Some(stop.clone()),
             )
             .await;
-        shared.publish_ownership();
+        shared
+            .publish_ownership(crate::desktop_ownership::Phase::RetryGrant)
+            .await;
         step = (step + 1).min(DELAYS.len() - 1);
     }
 }

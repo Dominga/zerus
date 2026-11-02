@@ -24,6 +24,9 @@ const WAIT: Duration = Duration::from_secs(5);
 const GRANT_RETRIES: usize = 2;
 const GRANT_BACKOFF: Duration = Duration::from_millis(250);
 
+mod diagnostic;
+pub(crate) use diagnostic::Phase;
+
 #[derive(Clone, Default, Debug, Serialize)]
 pub(crate) struct View {
     pub status: Option<Status>,
@@ -61,6 +64,7 @@ pub(crate) struct Controller {
     gate: Gate,
     stop: Arc<AtomicBool>,
     state: Mutex<State>,
+    diagnostic_publication: Mutex<()>,
 }
 impl Controller {
     pub(crate) fn new(hgs: PathBuf, responder: Option<Arc<Responder>>, mode: Mode) -> Arc<Self> {
@@ -71,6 +75,7 @@ impl Controller {
             gate: Gate::new(2).unwrap(),
             stop: Arc::new(AtomicBool::new(false)),
             state: Mutex::new(State::default()),
+            diagnostic_publication: Mutex::new(()),
         })
     }
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -78,6 +83,9 @@ impl Controller {
     }
     pub(crate) fn view(&self) -> View {
         let state = self.state();
+        Self::state_view(&state)
+    }
+    fn state_view(state: &State) -> View {
         View {
             status: state.status.clone(),
             request_id: state.intent.as_ref().map(|i| i.request.id().into()),
@@ -85,6 +93,22 @@ impl Controller {
             running: state.running,
             code: state.code.clone(),
         }
+    }
+    /// Called only by the existing blocking ownership worker/publication task.
+    /// This private record is an observation and cannot admit any operation.
+    pub(crate) fn record_view(&self, phase: Phase) -> View {
+        // Serialize capture plus replacement so a delayed older publication
+        // cannot overwrite a newer observation from this controller.
+        let _publication = self
+            .diagnostic_publication
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let state = self.state();
+        let view = Self::state_view(&state);
+        let first = state.diagnostic;
+        drop(state);
+        diagnostic::record(phase, &view, first);
+        view
     }
     pub(crate) fn stop(&self) {
         self.stop.store(true, Ordering::Release);
@@ -281,6 +305,9 @@ impl Job {
         Ok(result)
     }
     fn run(&self) {
+        if self.owner.mode == Mode::Service {
+            self.owner.record_view(Phase::WorkerStarted);
+        }
         if let Err(code) = self.execute() {
             self.owner.state().code = code.into();
         }
@@ -454,7 +481,13 @@ impl Job {
             revision: status.revision,
         };
         // Reserve the exact logical intent before any original mutating child.
-        self.owner.state().intent = Some(Intent {
+        let mut state = self.owner.state();
+        // A fresh logical request gets its own first diagnostic. Read-only
+        // lookups of an uncertain original keep that original's first failure.
+        if self.owner.mode == Mode::Service {
+            state.diagnostic = None;
+        }
+        state.intent = Some(Intent {
             request: request.clone(),
             configuration: status.configuration.clone(),
             route: route.clone(),
@@ -462,6 +495,10 @@ impl Job {
             complete: false,
             receipt: None,
         });
+        drop(state);
+        if self.owner.mode == Mode::Service {
+            self.owner.record_view(Phase::FrontendRequestPrepared);
+        }
         let registration =
             match responder.prepare_ui_request(uuid::Uuid::new_v4().to_string(), request.clone()) {
                 Ok(registration) => registration,

@@ -33,7 +33,7 @@ def main():
                 f"usr/share/licenses/{args.package_name}/codex-LICENSE.txt",
                 f"usr/share/licenses/{args.package_name}/rust/inventory.json", "usr/share/doc/zerus/build-info.json",
                 CONNECTOR, CONNECTOR_UNIT, "usr/lib/zerus/install-mobile-connector-service.py",
-                "usr/lib/zerus/install-linux-desktop-service.py"]
+                "usr/lib/zerus/install-linux-desktop-service.py", "usr/lib/zerus/desktop-revoke-hold.py"]
     for name in required:
         if not (root / name).is_file():
             raise SystemExit(f"Missing package file: {name}")

@@ -12,11 +12,12 @@ const WINDOWS: usize = 64;
 pub(crate) use crate::desktop_service::notification_controls::{Controller, Setup};
 
 type Sink = Arc<dyn Fn(FocusState) + Send + Sync>;
-type Refresh = Arc<dyn Fn(Source) + Send + Sync>;
+type Refresh = Arc<dyn Fn(Source, tokio::sync::watch::Sender<bool>) + Send + Sync>;
 #[derive(Default)]
 struct SourceState {
     sink: Option<(String, Sink)>,
     refresh: Option<Refresh>,
+    refreshing: Option<tokio::sync::watch::Receiver<bool>>,
 }
 /// One native application source, one current service observer, no event queue.
 /// Only Rust window callbacks supply observations; reconnect asks for a NEW
@@ -24,6 +25,12 @@ struct SourceState {
 #[derive(Clone, Default)]
 pub(crate) struct Source(Arc<Mutex<SourceState>>);
 pub(crate) struct Subscription(Weak<Mutex<SourceState>>, String);
+pub(crate) struct RefreshPending(tokio::sync::watch::Receiver<bool>);
+impl RefreshPending {
+    pub async fn wait(mut self) -> bool {
+        self.0.wait_for(|complete| *complete).await.is_ok()
+    }
+}
 impl Source {
     pub fn set_refresh(&self, refresh: Refresh) {
         self.0
@@ -31,16 +38,21 @@ impl Source {
             .unwrap_or_else(PoisonError::into_inner)
             .refresh = Some(refresh);
     }
-    pub fn refresh(&self) {
-        let refresh = self
-            .0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .refresh
-            .clone();
-        if let Some(refresh) = refresh {
-            refresh(self.clone());
+    /// At most one queued main-thread enumeration, including across reconnects.
+    /// Its acknowledgement follows native observation, never mere scheduling.
+    pub fn refresh(&self) -> Option<RefreshPending> {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let refresh = state.refresh.clone()?;
+        if let Some(pending) = &state.refreshing {
+            if !*pending.borrow() && pending.has_changed().is_ok() {
+                return Some(RefreshPending(pending.clone()));
+            }
         }
+        let (complete, pending) = tokio::sync::watch::channel(false);
+        state.refreshing = Some(pending.clone());
+        drop(state);
+        refresh(self.clone(), complete);
+        Some(RefreshPending(pending))
     }
     pub fn observe(&self, state: FocusState) {
         let sink = self
@@ -189,6 +201,32 @@ mod tests {
             aggregate(std::iter::repeat_n(Some(false), WINDOWS + 1)),
             FocusState::Unknown
         );
+    }
+
+    #[test]
+    fn refresh_waits_for_native_completion_and_coalesces_an_unrun_callback() {
+        tauri::async_runtime::block_on(async {
+            let source = Source::default();
+            assert!(source.refresh().is_none());
+            let completion = Arc::new(Mutex::new(None));
+            let held = completion.clone();
+            source.set_refresh(Arc::new(move |_, done| {
+                assert!(held.lock().unwrap().replace(done).is_none());
+            }));
+            let first = source.refresh().unwrap();
+            let second = source.refresh().unwrap();
+            let done = completion.lock().unwrap().take().unwrap();
+            assert!(!*first.0.borrow());
+            done.send(true).unwrap();
+            assert!(first.wait().await);
+            assert!(second.wait().await);
+            let failed = source.refresh().unwrap();
+            drop(completion.lock().unwrap().take().unwrap());
+            assert!(
+                !failed.wait().await,
+                "a dropped callback is not an observation"
+            );
+        });
     }
 
     #[test]

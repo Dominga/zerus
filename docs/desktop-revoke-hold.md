@@ -67,3 +67,18 @@ lock, selected/running mode record, original pending UUID, exact owned unit/plis
 checks and manager-result handling remain independently required. It changes no
 notification, writer, approval or rearm policy. Windows mode switching is a
 separate native integration.
+
+The Linux installer retains this child across its entire passive transition,
+including manager results and IPC readiness. Initial marker failure occurs
+before issuing the revoke. A child exit, partial/changed frame or unknown
+result fences further manager steps and keeps the original pending UUID.
+Cleanup retains the original pipes and child through actual drain/reap even
+when a logical deadline has expired; the installer lock is not an exit receipt.
+
+If a fresh authenticated Rearm wins before acquisition, the owner can use the
+Linux helper's explicit `cancel-rollback --request-id ORIGINAL_UUID --json`.
+It requires the exact pending ID, native caller admission and a current actual
+Service grant. It cancels only installer metadata: the native revoke/receipt,
+unit, mode and manager remain untouched. Repeating this cancellation never
+submits a native revoke or ownership mutation. Choosing passive later is a new explicit intent; an
+unknown original result is never automatically replayed or assigned a new UUID.

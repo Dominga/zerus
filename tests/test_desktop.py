@@ -24,6 +24,66 @@ CURRENT_SCHEMA = 17
 
 
 class Desktop(unittest.TestCase):
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux private foreground holder')
+    def test_installer_retains_the_real_original_hold_through_private_passive_restart(self):
+        import pty
+        service, _ = self.serve()
+        self.stop(service)
+        # A pre-existing private native-host lock is also retained by Root.
+        fd = os.open(self.desktop / 'notification-host.lock', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(fd)
+        request = str(uuid.uuid4())
+        receipt = self.cli('desktop', 'revoke', '--json', '--request-id', request, '--reason', 'rollback')
+        protocol = Path(__file__).resolve().parents[1] / 'scripts/desktop-revoke-hold.py'
+        script = r'''import fcntl,importlib.util,json,os,signal,subprocess,sys,termios,time
+tty=os.open(sys.argv[1],os.O_RDWR)
+fcntl.ioctl(tty,termios.TIOCSCTTY,0)
+old=signal.signal(signal.SIGTTOU,signal.SIG_IGN)
+os.tcsetpgrp(tty,os.getpgrp());signal.signal(signal.SIGTTOU,old)
+spec=importlib.util.spec_from_file_location('hold',sys.argv[2]);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+hgs=sys.argv[3];receipt=json.loads(sys.argv[4]);locks=json.loads(sys.argv[5])
+help_text=subprocess.check_output([hgs,'--help'],timeout=5).decode()
+hold=module.Hold(hgs,os.environ,receipt['configuration'],receipt['request_id'],receipt,help_text).acquire()
+service=None
+try:
+ for path in locks:
+  with open(path,'rb') as lock:
+   try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+   except BlockingIOError:pass
+   else:raise AssertionError('original native exclusion is not held')
+ service=subprocess.Popen([hgs,'desktop','serve'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,close_fds=True)
+ until=time.monotonic()+8
+ while True:
+  result=subprocess.run([hgs,'desktop','status','--json'],capture_output=True,timeout=2)
+  if result.returncode==0 and json.loads(result.stdout).get('lifecycle',{}).get('ipc_ready'):break
+  assert service.poll() is None and time.monotonic()<until
+  time.sleep(.02)
+ hold.check()
+ service.terminate();_,error=service.communicate(timeout=5);assert len(error)<=65536
+ hold.check();hold.close()
+ assert hold.child.returncode==0 and hold.finished
+ for path in locks:
+  with open(path,'rb') as lock:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+ print(json.dumps(dict(passive_ready_while_held=True,original_holder_reaped=True,pipes_drained=True)))
+finally:
+ if service is not None and service.poll() is None:
+  service.terminate();service.communicate(timeout=5)
+ hold.close(validate=False);os.close(tty)
+'''
+        master, slave = pty.openpty()
+        try:
+            locks = [str(self.desktop / name) for name in ('handoff.lock', 'notification-host.lock')]
+            result = subprocess.run([sys.executable, '-c', script, os.ttyname(slave), str(protocol),
+                                     str(HGS), json.dumps(receipt), json.dumps(locks)],
+                                    env=self.env, start_new_session=True, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=25)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(json.loads(result.stdout), dict(passive_ready_while_held=True,
+                             original_holder_reaped=True, pipes_drained=True))
+        finally:
+            os.close(master)
+            os.close(slave)
+
     @unittest.skipUnless(sys.platform.startswith(('linux', 'darwin')), 'Unix rollback hold')
     def test_rollback_hold_agent_refusal_is_structured_and_creates_no_state(self):
         selected = dict(self.env, HGS_SESSION='private-agent-fixture')

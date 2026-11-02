@@ -25,10 +25,16 @@ struct Wait {
 }
 /// Passed only by the service's verified-absence decision to the selected native
 /// launch mechanics. It is not Clone/Deserialize and has no public constructor.
-pub(in crate::desktop) struct Launch(Open);
+pub(in crate::desktop) struct Launch {
+    open: Open,
+    configuration: String,
+}
 impl Launch {
     pub fn open(&self) -> &Open {
-        &self.0
+        &self.open
+    }
+    pub fn configuration(&self) -> &str {
+        &self.configuration
     }
 }
 pub(in crate::desktop) struct Router {
@@ -156,7 +162,10 @@ impl Router {
         {
             return Ok(None);
         }
-        Ok(self.next(store, outbox)?.map(Launch))
+        Ok(self.next(store, outbox)?.map(|open| Launch {
+            open,
+            configuration: self.configuration.clone(),
+        }))
     }
     fn next(&mut self, store: &Store, outbox: &Outbox) -> Result<Option<Open>> {
         ensure!(
@@ -184,6 +193,14 @@ impl Router {
             else {
                 continue;
             };
+            if let Some(wait) = &self.waiting {
+                // No frame was offered yet. Keep a refused click under its
+                // ORIGINAL age so a newly authenticated receiver can take it.
+                if wait.queue.closed() || !wait.peer.handoff_current() {
+                    self.pending.push_front(pending);
+                    anyhow::bail!("activation receiver changed");
+                }
+            }
             let open = Open {
                 activation_id: pending.id,
                 post_request_id: pending.value.request_id,
@@ -196,14 +213,6 @@ impl Router {
                 platform_context: pending.value.platform_context,
             };
             ensure!(open.valid(), "activation target invalid");
-            if let Some(wait) = &self.waiting {
-                // A running frontend must pass its full original proof at
-                // handoff, even when the periodic poll check was cached.
-                ensure!(
-                    !wait.queue.closed() && wait.peer.handoff_current(),
-                    "activation receiver changed"
-                );
-            }
             return Ok(Some(open));
         }
         Ok(None)

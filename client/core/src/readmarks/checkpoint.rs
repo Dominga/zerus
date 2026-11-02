@@ -76,8 +76,31 @@ fn serialized(marks: &ReadMarks, limit: usize) -> io::Result<Vec<u8>> {
     Ok(writer.bytes)
 }
 impl ReadMarks {
+    /// Read the exact managed source again after the caller's original closed
+    /// writer barrier/checkpoint. This neither chooses a new path nor writes.
+    pub fn checkpoint_bytes(&self, checkpoint: &Checkpoint) -> io::Result<Vec<u8>> {
+        if !cfg!(unix) {
+            return Err(io::ErrorKind::Unsupported.into());
+        }
+        let mut disk = current(&self.path, CHECKPOINT_BYTES)?
+            .ok_or_else(|| refused("pending read checkpoint disappeared"))?;
+        if disk.hash != checkpoint.sha256 || disk.bytes != checkpoint.bytes {
+            return Err(refused("pending read checkpoint changed"));
+        }
+        let mut bytes = Vec::with_capacity(disk.bytes);
+        use std::io::{Read, Seek};
+        disk.file.rewind()?;
+        disk.file
+            .take(CHECKPOINT_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() != checkpoint.bytes || sha256(&bytes) != checkpoint.sha256 {
+            return Err(refused("pending read checkpoint changed during capture"));
+        }
+        Ok(bytes)
+    }
     /// Call off-thread, under the old owner's store mutex, AFTER closing and
-    /// draining all of its writer admissions. No production caller exists yet.
+    /// draining all of its writer admissions. The native service-mode importer
+    /// retains that barrier through complete capture and original helper I/O.
     /// Unchanged bytes/unknown fields stay untouched. A failure grants nothing;
     /// a directory-sync failure can follow the atomic rename, so it is unknown.
     /// Windows is explicitly unqualified and refuses before checkpoint I/O.

@@ -420,6 +420,9 @@ impl Validated {
     }
 }
 impl Authorized {
+    pub fn operation(&self) -> &'static str {
+        self.envelope.request.operation()
+    }
     pub fn into_request(self, order: &mut Order) -> Result<Validated> {
         ensure!(
             Instant::now() < self.until && self.caller.current() && self.frontend.current(),
@@ -612,7 +615,10 @@ impl Order {
         now: Instant,
     ) -> Result<()> {
         ensure!(
-            matches!(operation, "automatic_approvals" | "maintenance_configure"),
+            matches!(
+                operation,
+                "automatic_approvals" | "maintenance_configure" | "import_pending_reads"
+            ),
             "unknown frontend operation"
         );
         self.retired.retain(|_, until| now < *until);

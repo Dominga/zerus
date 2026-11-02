@@ -155,8 +155,9 @@ manager state, and records `last_cancelled_rollback_request_id`. A later
 `install --mode passive` is a new explicit owner intent with a new UUID; no
 unknown operation is automatically replayed. Never delete records or the
 database to recover. Returning to background requires a fresh authenticated
-frontend Rearm. Mac and Windows mode switching remain separate platform work; their
-registration defaults are unchanged.
+frontend Rearm. The [Mac helper](macos-distribution.md#explicit-desktop-service-mode)
+provides the corresponding LaunchAgent route. Windows mode switching remains
+separate work; all fresh registration defaults are passive.
 
 ## Qualify in a scratch prefix
 

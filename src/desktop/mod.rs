@@ -191,8 +191,8 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
             }
             ["registration", "--json", "--background"] => {
                 ensure!(
-                    cfg!(target_os = "linux"),
-                    "background registration switching is currently supported on Linux only"
+                    cfg!(any(target_os = "linux", target_os = "macos")),
+                    "background registration switching is currently supported on Linux and macOS"
                 );
                 println!("{}", registration::preview_mode(config, &location, true)?);
                 Ok(())

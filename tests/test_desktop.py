@@ -123,13 +123,14 @@ finally:
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_notification_preferences_requests').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_attempts').fetchone()[0], 0)
 
-    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux registration mode')
+    @unittest.skipUnless(sys.platform.startswith('linux') or sys.platform == 'darwin', 'Unix registration mode')
     def test_registration_variant_is_read_only_and_service_reports_its_requested_mode(self):
         passive = self.cli('desktop', 'registration', '--json')
         background = self.cli('desktop', 'registration', '--json', '--background')
         self.assertEqual(passive['mode'], 'passive')
         self.assertEqual(background['mode'], 'background')
-        self.assertEqual(background['argv'], passive['argv'] + ['--background'])
+        self.assertEqual(background['argv'], (passive['argv'][:-1] + ['--background', '--launchd'])
+                         if sys.platform == 'darwin' else passive['argv'] + ['--background'])
         self.assertEqual(background['configuration'], passive['configuration'])
         self.assertFalse(self.desktop.exists())
         process, status = self.serve()

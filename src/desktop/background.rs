@@ -258,9 +258,9 @@ impl Runtime {
     pub fn publication_owner(
         &self,
         store: &Store,
-    ) -> Option<Arc<super::notifications::preparation::Owner>> {
+    ) -> Result<Option<Arc<super::notifications::preparation::Owner>>> {
         if self.stopping || self.drained {
-            return None;
+            return Ok(None);
         }
         self.notifications.publication_owner(store)
     }

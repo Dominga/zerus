@@ -642,17 +642,21 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                     let owner = if configuration == location.configuration {
                         background
                             .as_ref()
-                            .and_then(|runtime| runtime.publication_owner(&store))
+                            .map(|runtime| runtime.publication_owner(&store))
+                            .unwrap_or(Ok(None))
                     } else {
-                        None
+                        Ok(None)
                     };
                     // The initially empty one-shot never blocks the actor. A
                     // dropped caller/shutdown drops the original owner loan.
-                    let _ = reply.try_send(import_evidence::held::Loan {
-                        owner,
-                        epoch: epoch.clone(),
-                        seq,
-                    });
+                    if let Ok(owner) = owner {
+                        let _ = reply.try_send(import_evidence::held::Loan {
+                            owner,
+                            epoch: epoch.clone(),
+                            seq,
+                        });
+                    } // An owner-query error closes the reply as unknown,
+                      // never as the closed pre-reservation negative.
                 }
                 Ok(Event::Command(hello, queue, authority)) => {
                     let mut value = projection(

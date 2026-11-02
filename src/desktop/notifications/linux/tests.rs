@@ -1155,11 +1155,21 @@ fn root_service_grant_attaches_original_host_posts_and_routes_click_then_release
         &location,
         runtime
             .publication_owner(&h.store)
+            .unwrap()
             .expect("original current granted owner"),
     );
     assert!(publication.owned.join("record-v1.json").is_file());
     let report = publication.finish_connected();
     assert_eq!(report["published"], true);
+    h.store.db.execute_batch("SAVEPOINT unavailable_owner; ALTER TABLE desktop_ownership RENAME TO unavailable_ownership;").unwrap();
+    assert!(
+        runtime.publication_owner(&h.store).is_err(),
+        "a failed original-grant query remains unknown, never a known ownerless refusal"
+    );
+    h.store
+        .db
+        .execute_batch("ROLLBACK TO unavailable_owner; RELEASE unavailable_owner;")
+        .unwrap();
     runtime.poll(&mut h.store, &mut attention, &mut router, &mut seq);
     assert!(
         runtime.ready(),
@@ -1227,6 +1237,7 @@ fn root_service_grant_attaches_original_host_posts_and_routes_click_then_release
         &location,
         runtime
             .publication_owner(&h.store)
+            .unwrap()
             .expect("same still-current granted owner"),
     );
     let published_id = publication.import_id.clone();
@@ -1235,7 +1246,7 @@ fn root_service_grant_attaches_original_host_posts_and_routes_click_then_release
     publication.disconnect();
     runtime.poll(&mut h.store, &mut attention, &mut router, &mut seq);
     assert!(
-        runtime.publication_owner(&h.store).is_none(),
+        runtime.publication_owner(&h.store).unwrap().is_none(),
         "revoke refuses new publication jobs"
     );
     assert!(

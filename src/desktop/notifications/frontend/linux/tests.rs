@@ -26,7 +26,7 @@ impl Fixture {
         let target = wire::encode_navigation(&open().target).unwrap();
         fs::write(prefix.join("libexec/hgs-tray-launch"), format!(
             "#!/bin/sh\nif [ \"$1\" = --help ]; then printf '%s\\n' '{help}'; exit 0; fi\n\
-            [ \"$#\" = 5 ] && [ \"$1\" = --hgs ] && [ \"$2\" = '{}/bin/hgs' ] && \\\n            [ \"$3\" = --sessions ] && [ \"$4\" = --desktop-target ] && [ \"$5\" = '{target}' ] && \\\n            [ \"${{XDG_ACTIVATION_TOKEN-}}\" = synthetic-wayland ] && \\\n            [ \"${{ZERUS_CLIENT_DESKTOP_SERVICE-}}\" = 1 ] && [ -z \"${{HGS_SESSION-}}${{HGS_RUN_ID-}}\" ] || exit 31\n\
+            [ \"$#\" = 3 ] && [ \"$1\" = --hgs ] && [ \"$2\" = '{}/bin/hgs' ] && \\\n            [ \"$3\" = --sessions ] && [ \"${{ZERUS_CLIENT_DESKTOP_TARGET-}}\" = '{target}' ] && \\\n            [ \"${{XDG_ACTIVATION_TOKEN-}}\" = synthetic-wayland ] && \\\n            [ \"${{ZERUS_CLIENT_DESKTOP_SERVICE-}}\" = 1 ] && [ -z \"${{HGS_SESSION-}}${{HGS_RUN_ID-}}\" ] || exit 31\n\
             exec '{}/bin/hgs-tray' 0.8\n", prefix.display(), prefix.display())).unwrap();
         fs::set_permissions(
             prefix.join("libexec/hgs-tray-launch"),
@@ -94,7 +94,7 @@ fn finish(owned: &mut OwnedFrontend) -> bool {
 #[test]
 fn original_wrapper_exec_exact_target_and_child_only_token_are_retained_to_exit() {
     let _serial = SERIAL.lock().unwrap();
-    let f = Fixture::new(wire::NAVIGATION_HELP_MARKER);
+    let f = Fixture::new(wire::NAVIGATION_ENV_HELP_MARKER);
     let mut owned = OwnedFrontend::launch(f.select(), launch()).unwrap();
     assert!(
         OwnedFrontend::launch(f.select(), launch()).is_err(),
@@ -111,7 +111,7 @@ fn original_wrapper_exec_exact_target_and_child_only_token_are_retained_to_exit(
 #[test]
 fn startup_timeout_retains_original_child_until_actual_exit_without_a_second_launch() {
     let _serial = SERIAL.lock().unwrap();
-    let f = Fixture::new(wire::NAVIGATION_HELP_MARKER);
+    let f = Fixture::new(wire::NAVIGATION_ENV_HELP_MARKER);
     let mut owned = OwnedFrontend::launch(f.select(), launch()).unwrap();
     owned.until = Instant::now();
     owned.poll();
@@ -138,7 +138,8 @@ fn missing_or_inexact_navigation_abi_refuses_before_target_start() {
     let _serial = SERIAL.lock().unwrap();
     for help in [
         "Usage: old frontend",
-        "prefix Desktop target navigation ABI: desktop-target-v1",
+        wire::NAVIGATION_HELP_MARKER,
+        "prefix Desktop target environment ABI: desktop-target-env-v1",
     ] {
         let f = Fixture::new(help);
         assert!(OwnedFrontend::launch(f.select(), launch()).is_err());
@@ -148,15 +149,31 @@ fn missing_or_inexact_navigation_abi_refuses_before_target_start() {
 #[test]
 fn changed_selection_or_configuration_refuses_and_no_token_enters_argv() {
     let _serial = SERIAL.lock().unwrap();
-    let f = Fixture::new(wire::NAVIGATION_HELP_MARKER);
+    let f = Fixture::new(wire::NAVIGATION_ENV_HELP_MARKER);
     let selected = f.select();
     let event = launch();
     let command = command(&selected, &event).unwrap();
     let args: Vec<_> = command.get_args().map(|v| v.to_str().unwrap()).collect();
-    assert_eq!(args.len(), 5);
+    assert_eq!(args.len(), 3);
+    for id in [
+        &event.open().target.computer,
+        &event.open().target.run,
+        &event.open().target.conversation,
+    ] {
+        assert!(
+            !args.join(" ").contains(id),
+            "target identifier in process arguments"
+        );
+    }
     assert!(!args.join(" ").contains("synthetic-wayland"));
     assert!(!args.join(" ").contains(&event.open().post_request_id));
     let env: std::collections::BTreeMap<_, _> = command.get_envs().collect();
+    assert_eq!(
+        env[std::ffi::OsStr::new(wire::NAVIGATION_ENV)]
+            .and_then(|v| v.to_str())
+            .and_then(wire::decode_navigation),
+        Some(event.open().target.clone())
+    );
     assert_eq!(
         env[std::ffi::OsStr::new("XDG_ACTIVATION_TOKEN")],
         Some(std::ffi::OsStr::new("synthetic-wayland"))

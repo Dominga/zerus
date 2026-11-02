@@ -248,6 +248,15 @@ pub fn run() {
             std::process::exit(2);
         }
     };
+    #[cfg(all(feature = "live", target_os = "linux"))]
+    let options = {
+        let mut options = options;
+        if let Err(error) = cli::take_navigation_environment(&mut options) {
+            eprint!("zerus-client: {error}\n\n{}", cli::usage());
+            std::process::exit(2);
+        }
+        options
+    };
     for option in &options.ignored {
         eprintln!("zerus-client: {option} is accepted for the Qt GUI's command line and not used");
     }

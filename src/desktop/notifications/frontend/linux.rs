@@ -76,7 +76,9 @@ impl OwnedFrontend {
             &AtomicBool::new(false),
             move |command| {
                 proof.selected.revalidate().map_err(std::io::Error::other)?;
-                command.env_remove("XDG_ACTIVATION_TOKEN");
+                command
+                    .env_remove("XDG_ACTIVATION_TOKEN")
+                    .env_remove(wire::NAVIGATION_ENV);
                 platform::spawn_prepared_in_turn_before(until, || {
                     proof.selected.revalidate().map_err(std::io::Error::other)?;
                     Ok((std::mem::replace(command, Command::new("")), ()))
@@ -90,7 +92,7 @@ impl OwnedFrontend {
         let help = std::str::from_utf8(&help).context("invalid frontend help")?;
         ensure!(
             help.lines()
-                .any(|line| line == wire::NAVIGATION_HELP_MARKER),
+                .any(|line| line == wire::NAVIGATION_ENV_HELP_MARKER),
             "frontend target navigation unsupported"
         );
         hold.selected.revalidate_for_launch(&launch)?;
@@ -184,8 +186,7 @@ fn command(selected: &SelectedFrontend, launch: &Launch) -> Result<Command> {
         .arg("--hgs")
         .arg(selected.service_image())
         .arg("--sessions")
-        .arg(wire::NAVIGATION_ARG)
-        .arg(target)
+        .env(wire::NAVIGATION_ENV, target)
         .env_remove("HGS_SESSION")
         .env_remove("HGS_RUN_ID")
         .env_remove("XDG_ACTIVATION_TOKEN")

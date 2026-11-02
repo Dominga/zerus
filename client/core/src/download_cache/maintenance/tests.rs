@@ -97,6 +97,126 @@ fn a_same_size_edit_after_freeze_is_preserved_with_its_original_index_entry() {
 }
 
 #[test]
+fn a_replaced_name_preserves_both_the_pinned_original_and_the_new_file() {
+    let folder = Folder::new();
+    folder.save("old.txt", b"original", 90_000);
+    let prepared = folder.prepare(1);
+    let original_index = fs::read(folder.0.join(INDEX)).unwrap();
+    fs::rename(folder.0.join("old.txt"), folder.0.join("moved.txt")).unwrap();
+    fs::write(folder.0.join("old.txt"), b"replaced").unwrap();
+    assert!(!same_file(&prepared.files[0], &folder.0.join("old.txt")));
+    #[cfg(windows)]
+    assert_eq!(
+        identity(&prepared.files[0], false).unwrap(),
+        prepared.binding().candidates[0].identity,
+        "Windows rename leaves the snapshot unchanged: same_file must protect the replacement"
+    );
+    assert_eq!(
+        prepared.execute(&[true], &AtomicBool::new(false)).files,
+        [State::Kept]
+    );
+    assert_eq!(fs::read(folder.0.join("moved.txt")).unwrap(), b"original");
+    assert_eq!(fs::read(folder.0.join("old.txt")).unwrap(), b"replaced");
+    assert_eq!(fs::read(folder.0.join(INDEX)).unwrap(), original_index);
+}
+
+#[test]
+fn a_same_size_edit_with_restored_write_time_still_requires_the_original_hash() {
+    let folder = Folder::new();
+    folder.save("edited.txt", b"old", 90_000);
+    let prepared = folder.prepare(1);
+    let path = folder.0.join("edited.txt");
+    let before = fs::metadata(&path).unwrap().modified().unwrap();
+    let original_index = fs::read(folder.0.join(INDEX)).unwrap();
+    {
+        let mut writer = OpenOptions::new().write(true).open(&path).unwrap();
+        writer.write_all(b"NEW").unwrap();
+        writer.sync_all().unwrap();
+    }
+    // Restore after closing the writer so the test observes the original
+    // timestamp, including on Windows where a writer close can update it.
+    OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(before))
+        .unwrap();
+    assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), before);
+    #[cfg(windows)]
+    assert_eq!(
+        identity(&prepared.files[0], false).unwrap(),
+        prepared.binding().candidates[0].identity,
+        "Windows snapshot equality must not substitute for the original content hash"
+    );
+    assert_eq!(
+        prepared.execute(&[true], &AtomicBool::new(false)).files,
+        [State::Kept]
+    );
+    assert_eq!(fs::read(&path).unwrap(), b"NEW");
+    assert_eq!(fs::read(folder.0.join(INDEX)).unwrap(), original_index);
+}
+
+#[cfg(windows)]
+#[test]
+fn a_viewer_without_delete_sharing_is_kept_without_a_permanent_unknown_outcome() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::{
+        Foundation::ERROR_SHARING_VIOLATION,
+        Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE},
+    };
+    let folder = Folder::new();
+    folder.save("open.pdf", b"cached document", 90_000);
+    let path = folder.0.join("open.pdf");
+    let viewer = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(&path)
+        .unwrap();
+    // Prove the real OS cut, without inferring a failed unlink from existence.
+    let error = fs::remove_file(&path).unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(ERROR_SHARING_VIOLATION as i32));
+    let original_index = fs::read(folder.0.join(INDEX)).unwrap();
+    let receipt = folder.prepare(1).execute(&[true], &AtomicBool::new(false));
+    assert_eq!(receipt.files, [State::Kept]);
+    assert_eq!(fs::read(&path).unwrap(), b"cached document");
+    assert_eq!(fs::read(folder.0.join(INDEX)).unwrap(), original_index);
+    drop(viewer);
+    // Kept is a verified no-effect refusal. A newly admitted pass after the
+    // viewer closes can remove it; no unknown result is ever retried here.
+    assert_eq!(
+        folder
+            .prepare(1)
+            .execute(&[true], &AtomicBool::new(false))
+            .files,
+        [State::Removed]
+    );
+    assert!(!path.exists());
+}
+
+#[test]
+fn only_the_exact_windows_sharing_error_is_a_verified_no_effect_refusal() {
+    assert_eq!(unlink_outcome(Ok(())), State::Removed);
+    assert_eq!(
+        unlink_outcome(Err(io::Error::from_raw_os_error(32))),
+        if cfg!(windows) {
+            State::Kept
+        } else {
+            State::Unknown
+        }
+    );
+    for code in [2, 5, 33] {
+        assert_eq!(
+            unlink_outcome(Err(io::Error::from_raw_os_error(code))),
+            State::Unknown
+        );
+    }
+    assert_eq!(
+        unlink_outcome(Err(io::Error::other("unconfirmed unlink"))),
+        State::Unknown
+    );
+}
+
+#[test]
 fn a_changed_index_or_cancelled_or_expired_pass_never_unlinks() {
     for cause in ["index", "cancelled", "expired"] {
         let folder = Folder::new();

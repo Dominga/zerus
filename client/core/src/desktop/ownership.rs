@@ -170,6 +170,19 @@ impl Receipt {
             && journal.as_deref().is_none_or(|id| id == self.journal)
             && (matches!(self.outcome, Outcome::Refused { .. }) || self.revision > *revision)
     }
+    /// A historical grant receipt is readable but cannot stand in for the
+    /// fresh current ownership observation attached by the actor.
+    pub fn service_granted(&self) -> bool {
+        self.valid()
+            && matches!(&self.outcome, Outcome::Granted { owner_epoch }
+                if self.current.owner_epoch.as_ref() == Some(owner_epoch))
+            && self.current.state == State::Service
+            && self.current.identity_current
+            && !self.current.rearm_required
+            && self.current.journal.as_deref() == Some(self.journal.as_str())
+            && self.current.revision == self.revision
+            && self.current.request_id.as_deref() == Some(self.request_id.as_str())
+    }
     /// Call only AFTER matches() on the selected original relay's reply. A
     /// granted service epoch or a display status cannot release native writers.
     pub fn native_ready(&self) -> bool {
@@ -177,6 +190,7 @@ impl Receipt {
             && self.action == Action::NativeTakeover
             && matches!(self.outcome, Outcome::NativeReady { .. })
             && self.current.state == State::Native
+            && self.current.identity_current
             && self.current.journal.as_deref() == Some(self.journal.as_str())
             && self.current.revision == self.revision
             && self.current.request_id.as_deref() == Some(self.request_id.as_str())

@@ -57,9 +57,9 @@ probe result substitutes for that proof.
 
 The closed source contract is `desktop::ownership` in the shared core. Its ABI
 is `desktop-ownership-v1` and its help marker is exactly `Desktop ownership ABI:
-desktop-ownership-v1`. The shared types/cache mode binding alone do not advertise
-that CLI capability or implement a positive handoff. Client callers remain
-unavailable until the root status/result/actor routes land in the same stage.
+desktop-ownership-v1`. The selected CLI advertises it only with the root
+status/result/actor routes. The client companion must bind its native startup
+mode and original-child registration before using these routes.
 
 Before canonical instance claim and writer creation, native startup calls
 `Responder::configure_ownership_mode_once(Mode::Service | Mode::Native)`.
@@ -70,7 +70,7 @@ ordinary evidence omits it. Missing or wrong mode refuses registration and the
 root independently joins it to the canonical peer/original-child proof. The
 intent has no mode, role, build, PID or confirmation field.
 
-The intended root entries are `desktop ownership-status --json` (bounded
+The root entries are `desktop ownership-status --json` (bounded
 read-only `Status` without a subscription), the existing authenticated
 `desktop frontend-request --json`, and `desktop ownership-result --json` with
 the closed `Query` on stdin. All require the ownership and frontend help markers
@@ -104,6 +104,25 @@ alone is not proof of not-applied. Only an explicit root `definitive` negative
 AND confirmed original-child exit may retire that logical request and allow a
 new intent; the old mutating request is never replayed automatically. Refusal,
 pending/unknown and stale scope leave the relevant writer admissions fenced.
+
+Schema 15 stores one ownership row with a stable journal ID and increasing
+revision, plus the newest 4096 settled command receipts and at most one pending
+takeover. Revoke/rollback invalidates the grant in the same transaction as the
+writer fence; a pending takeover superseded by revoke closes as refused, never
+as NativeReady. Rearm cannot replace an undrained original runtime. Initial
+Grant and explicit Rearm do not enable a notification host or import approval
+consent; host attachment remains the next lifecycle stage.
+
+Independent status/result reads do not create or migrate an absent database.
+NativeTakeover can authenticate its original CLI child and acquire the original
+owner lock while the service is absent; it does not start a service. Existing
+operation custody remains a drain prerequisite. Only a missing request under
+the same nonempty journal and unchanged original revision is a definitive
+negative. Missing/replaced state or an initial unjournaled request stays unknown.
+For an unknown outcome, the client must first confirm its original child exited
+and then obtain a fresh definitive lookup before retiring that logical operation;
+a negative observed while that child was still live is not terminal. The service rechecks the original two-second native permit
+after acquiring the SQLite write transaction and before committing a new intent.
 
 The selected CLI advertises `Desktop frontend request ABI: desktop-ui-request-v1`.
 After its confirmation UI, Next prepares a closed `AutomaticApprovals` request

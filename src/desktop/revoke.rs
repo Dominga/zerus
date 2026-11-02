@@ -97,6 +97,13 @@ fn record(store: &Store, id: &str) -> Result<Option<Record>> {
 /// including an interrupted one, blocks restart. Historical handoff state also
 /// requires explicit reconciliation; a login must not reinterpret it as consent.
 pub(super) fn background_permitted(location: &Location, store: &Store) -> Result<bool> {
+    if super::ownership::service_granted(store, &location.configuration)? {
+        return Ok(true);
+    }
+    let ownership = super::ownership::status(store, &location.configuration)?;
+    if ownership.rearm_required {
+        return Ok(false);
+    }
     let lock = location.handoff_lock()?;
     let marker = handoff::marker(location, &lock)?;
     let revoked: bool = store.db.query_row(
@@ -156,6 +163,7 @@ fn execute_scoped(
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute("INSERT INTO desktop_commands(request_id,fingerprint,reason,writer_epoch,state,at) VALUES(?1,?2,?3,?4,'prepared',?5)",params![command.request_id,fingerprint,command.reason.name(),current_epoch,chrono::Utc::now().timestamp_millis()])?;
+        super::ownership::invalidate(&tx)?;
         zerus_desktop_ledger::revoke(&tx, command.reason.code())?;
         tx.commit()?;
         Record {

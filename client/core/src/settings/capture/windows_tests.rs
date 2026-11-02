@@ -5,6 +5,7 @@ use std::{
     fs,
     fs::OpenOptions,
     io::Write,
+    os::windows::{ffi::OsStrExt, fs::OpenOptionsExt},
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -39,6 +40,20 @@ impl Drop for Scratch {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
+// QSaveFile uses only classic replacement. Rust fs::rename may fall back to
+// FileRenameInfoEx POSIX semantics and cannot prove this Qt operation works.
+fn qt_replace(from: &std::path::Path, to: &std::path::Path) {
+    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING};
+    let from: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+    let result = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_REPLACE_EXISTING) };
+    assert_ne!(
+        result,
+        0,
+        "Qt-style replacement failed: {}",
+        std::io::Error::last_os_error()
+    );
+}
 const ORIGINAL: &[u8] = br#"{
  "future-root":{"opaque":7},"version":1,"values":{}
 }
@@ -69,7 +84,7 @@ fn native_settings_capture_keeps_exact_bytes_and_original_writer_lease() {
     assert!(settings.flush_within(Duration::from_secs(5)));
 }
 #[test]
-fn native_qt_capture_keeps_a_read_only_handle_without_blocking_concurrent_qt_access() {
+fn native_qt_capture_keeps_parent_pins_but_no_leaf_handle_between_reads() {
     let scratch = Scratch::new();
     let data = b"[workspace]\nlanguage=en\n[future]\nopaque=7\n";
     let path = scratch.write("hgs-tray.ini", data);
@@ -89,14 +104,15 @@ fn native_qt_capture_keeps_a_read_only_handle_without_blocking_concurrent_qt_acc
         .unwrap();
     assert_eq!(fs::read(&path).unwrap(), data);
     drop(concurrent);
-    // Capture opened read-only, even its original handle cannot write the source.
-    assert!(captured
-        .original
-        .lock()
-        .unwrap()
-        .file
-        .write_all(b"changed")
-        .is_err());
+    // An exclusive competing open proves no report-owned leaf survived the
+    // bounded capture/recheck calls, even though parent pins remain held.
+    let exclusive = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(0)
+        .open(&path)
+        .unwrap();
+    drop(exclusive);
     assert!(fs::rename(&scratch.0, scratch.0.with_extension("moved")).is_err());
     stop.store(true, Ordering::Release);
     assert!(captured.recheck(Arc::new(()), &stop).is_err());
@@ -116,15 +132,15 @@ fn native_qt_atomic_replacement_succeeds_while_capture_is_held_and_recheck_refus
         .unwrap();
     let writer_path = path.clone();
     std::thread::spawn(move || {
-        // Qt can read its settings and replace the leaf with its completed
-        // save while the report keeps the original source handle alive.
+        // Qt can read its settings and commit with its exact classic rename
+        // while the report retains parent pins, stamp/hash and no leaf handle.
         let concurrent = OpenOptions::new()
             .read(true)
             .write(true)
             .open(&writer_path)
             .unwrap();
         drop(concurrent);
-        fs::rename(temporary, writer_path).unwrap();
+        qt_replace(&temporary, &writer_path);
     })
     .join()
     .unwrap();
@@ -140,14 +156,26 @@ fn native_qt_same_bytes_with_original_leaf_still_linked_cannot_replace_its_ident
     let data = b"[workspace]\nlanguage=en\n";
     let path = scratch.write("hgs-tray.ini", data);
     let replacement = scratch.write("qt-save.tmp", data);
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    OpenOptions::new()
+        .write(true)
+        .open(&replacement)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    assert_eq!(
+        fs::metadata(&replacement).unwrap().modified().unwrap(),
+        modified
+    );
+    assert_eq!(fs::read(&replacement).unwrap(), data);
     let captured = QtStore::Ini(path.clone())
         .capture_for_migration(Arc::new(()), &AtomicBool::new(false))
         .unwrap()
         .unwrap();
-    // The retained handle still has nlink=1, original bytes/size/mtime and
-    // permissions. Only the exact-path volume/file-index probe detects this.
-    fs::rename(&path, scratch.0.join("original.ini")).unwrap();
-    fs::rename(replacement, &path).unwrap();
+    // Keep the old file linked at another name; the new leaf has identical
+    // bytes/size/mtime. Only its different volume/file-index stamp detects it.
+    qt_replace(&path, &scratch.0.join("original.ini"));
+    qt_replace(&replacement, &path);
     assert_eq!(
         captured.recheck(Arc::new(()), &AtomicBool::new(false)),
         Err(SourceError::SourceChanged)

@@ -165,13 +165,15 @@ not proof that Qt or the whole desktop drained. Every helper, writer and pipe
 retains its original resources through actual completion. Shutdown reports
 unconfirmed work rather than declaring an outstanding resource group drained.
 On Windows source captures require local disk paths, pinned no-reparse
-ancestors, private ACL and single-link checks. The foreign Qt INI handle is
-read-only and allows read/write/delete sharing: the report must not block Qt's
-own reads, in-place writes or atomic saves. Parsing and hash rechecks read the
-retained handle. A separate no-reparse attributes-only exact-path probe compares
-volume serial, file index, size and last-write time with the original stamp;
-replacement or concurrent changes quarantine the report without adopting a new
-source. Next's own Settings, journal and pending-read checkpoint keep exclusive
+ancestors, private ACL and single-link checks. The foreign Qt INI is read-only
+with read/write/delete sharing during each bounded read, then its leaf handle
+closes. Only its parent pins, original volume serial/file index, size, last-write
+time and hash remain during report publication and receipt waits. Recheck opens
+the exact path no-reparse, repeats verification and stamp/hash comparison, and
+closes before returning. No leaf handle remains during report/helper waits to
+block Qt's classic `MoveFileExW(..., MOVEFILE_REPLACE_EXISTING)` save.
+Replacement or in-place changes quarantine the report without adopting a new source.
+Next's own Settings, journal and pending-read checkpoint keep exclusive
 leaf handles. Settings mutations remain paused by its original writer lease until
 all original capture references drop. A pre-open sharing violation can retry at
 most twenty times at ten milliseconds within the original deadline; other

@@ -73,12 +73,7 @@ impl QtStore {
                 values: super::qt::read_ini(&bytes),
                 source: "qt-ini",
                 sha256: sha256(&bytes),
-                modified_at: original
-                    .file
-                    .metadata()
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(super::seconds),
+                modified_at: original.modified_at.and_then(super::seconds),
             };
             Ok(Some(CapturedQt {
                 snapshot,

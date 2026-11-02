@@ -585,9 +585,12 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 if desktop_service::mode() {
                     let source=desktop_notification_controls::Source::default();
                     let handle=app.handle().clone();
-                    source.set_refresh(std::sync::Arc::new(move|source| {
+                    source.set_refresh(std::sync::Arc::new(move|source,complete| {
                         let app=handle.clone();
-                        let _=handle.run_on_main_thread(move||desktop_notification_controls::observe_windows(&app,&source));
+                        let _=handle.run_on_main_thread(move|| {
+                            desktop_notification_controls::observe_windows(&app,&source);
+                            let _=complete.send(true);
+                        });
                     }));
                     app.state::<commands::AppState>().register_notification_controls(desktop_notification_controls::Setup {
                         source:source.clone(),settings:app.state::<settings::Store>().0.clone()

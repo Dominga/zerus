@@ -1195,7 +1195,7 @@ fn schema_fourteen_migrates_an_existing_thirteen_without_changing_prior_effects(
         .db
         .query_row("SELECT count(*) FROM desktop_intents", [], |r| r.get(0))
         .unwrap();
-    f.store.db.execute_batch("DROP TABLE desktop_ownership_requests; DROP TABLE desktop_ownership; DROP INDEX desktop_attention_changed_key; DROP INDEX desktop_attention_catalog_identity; DROP TABLE desktop_attention_edges; DROP TABLE desktop_attention_sessions; DROP TABLE desktop_attention_totals; PRAGMA user_version=13;").unwrap();
+    f.store.db.execute_batch("DROP TABLE desktop_notification_preferences_requests; DROP TABLE desktop_notification_preferences; DROP TABLE desktop_ownership_requests; DROP TABLE desktop_ownership; DROP INDEX desktop_attention_changed_key; DROP INDEX desktop_attention_catalog_identity; DROP TABLE desktop_attention_edges; DROP TABLE desktop_attention_sessions; DROP TABLE desktop_attention_totals; PRAGMA user_version=13;").unwrap();
     let location = Location {
         root: std::path::Path::new(&root).parent().unwrap().to_owned(),
         configuration: "a".repeat(64),

@@ -63,12 +63,16 @@ pub fn hold(
     )
     .map_err(|_| desktop::startup::Refused::Unknown)?;
     let mut held = desktop::startup::Bootstrap::begin(
-        ownership
-            .helper()
-            .map_err(|_| desktop::startup::Refused::Unknown)?,
+        ownership.helper().map_err(|code| {
+            crate::startup_error::record("native_takeover.helper", code);
+            desktop::startup::Refused::Unknown
+        })?,
         &uuid::Uuid::new_v4().to_string(),
         &[],
-    )?;
+    )
+    .inspect_err(|&error| {
+        bootstrap_refusal("bootstrap.begin", error);
+    })?;
     match held.wait_ready() {
         Ok(()) => Ok((Some(held), Some(ownership))),
         Err(desktop::startup::Refused::Unsupported) => {
@@ -85,8 +89,26 @@ pub fn hold(
                 });
             Ok((None, Some(ownership)))
         }
-        Err(error) => Err(error),
+        Err(error) => {
+            bootstrap_refusal("bootstrap.ready", error);
+            Err(error)
+        }
     }
+}
+
+#[cfg(unix)]
+fn bootstrap_refusal(step: &'static str, error: desktop::startup::Refused) {
+    use desktop::startup::Refused;
+    crate::startup_error::record(
+        step,
+        match error {
+            Refused::Unsupported => "unsupported",
+            Refused::Invalid => "invalid",
+            Refused::Unavailable => "unavailable",
+            Refused::TimedOut => "timed_out",
+            Refused::Unknown => "unknown",
+        },
+    );
 }
 
 /// Request release after setup registered its writers, then retain and actually

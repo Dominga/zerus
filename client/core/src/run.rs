@@ -311,13 +311,31 @@ pub fn run_owned(
     spawn: impl FnOnce(&mut Command) -> std::io::Result<Child> + Send + 'static,
     resources: Arc<dyn Send + Sync>,
 ) -> Result<Vec<u8>, OwnedError> {
+    run_owned_observed(hgs, inv, parent_env, cancel, spawn, resources, |_, _| {})
+}
+
+/// The same owned exchange, with a failure-only diagnostic observer. Standard
+/// error is bounded to 16 KiB and remains untrusted: callers must select fixed
+/// codes rather than persist child text. Observation changes no result, custody
+/// or permission and never makes an uncertain exchange safe to replay.
+pub fn run_owned_observed(
+    hgs: &Path,
+    inv: &Invocation,
+    parent_env: &[(&str, &str)],
+    cancel: &AtomicBool,
+    spawn: impl FnOnce(&mut Command) -> std::io::Result<Child> + Send + 'static,
+    resources: Arc<dyn Send + Sync>,
+    observe: impl FnOnce(&OwnedError, Option<&str>),
+) -> Result<Vec<u8>, OwnedError> {
     if cancel.load(Ordering::Acquire) {
+        observe(&OwnedError::Cancelled, None);
         return Err(OwnedError::Cancelled);
     }
     if inv.stdin.as_ref().is_none_or(|bytes| bytes.len() > 1 << 20)
         || inv.timeout.is_zero()
         || inv.timeout > Duration::from_secs(30)
     {
+        observe(&OwnedError::InvalidInput, None);
         return Err(OwnedError::InvalidInput);
     }
     let child_exited = Arc::new(AtomicBool::new(false));
@@ -348,26 +366,35 @@ pub fn run_owned(
         child_exited.store(true, Ordering::Release);
     }
     if !child_exited.load(Ordering::Acquire) {
+        observe(&OwnedError::ExitUnverified, None);
         return Err(OwnedError::ExitUnverified);
     }
     // A cancellation/deadline racing completion cannot grant success.
     if cancel.load(Ordering::Acquire) {
+        observe(&OwnedError::Cancelled, None);
         return Err(OwnedError::Cancelled);
     }
     if Instant::now() >= until {
+        observe(&OwnedError::TimedOut, None);
         return Err(OwnedError::TimedOut);
     }
     match exit {
         Ok(Exit::Code {
             code: 0, stdout, ..
         }) => Ok(stdout),
-        Ok(Exit::Code { .. }) => Err(OwnedError::ChildFailed),
-        Ok(Exit::TimedOut) => Err(OwnedError::TimedOut),
-        Ok(Exit::StartFailed(_)) => Err(OwnedError::StartFailed),
-        Ok(Exit::WriteFailed) => Err(OwnedError::WriteFailed),
-        Ok(Exit::Abnormal { .. }) => Err(OwnedError::Incomplete),
-        Err(Stopped::Cancelled) => Err(OwnedError::Cancelled),
-        Err(Stopped::TooLarge(_)) => Err(OwnedError::OutputTooLarge),
+        other => {
+            let (error, stderr) = match other {
+                Ok(Exit::Code { stderr, .. }) => (OwnedError::ChildFailed, Some(stderr)),
+                Ok(Exit::TimedOut) => (OwnedError::TimedOut, None),
+                Ok(Exit::StartFailed(_)) => (OwnedError::StartFailed, None),
+                Ok(Exit::WriteFailed) => (OwnedError::WriteFailed, None),
+                Ok(Exit::Abnormal { stderr }) => (OwnedError::Incomplete, Some(stderr)),
+                Err(Stopped::Cancelled) => (OwnedError::Cancelled, None),
+                Err(Stopped::TooLarge(_)) => (OwnedError::OutputTooLarge, None),
+            };
+            observe(&error, stderr.as_deref());
+            Err(error)
+        }
     }
 }
 

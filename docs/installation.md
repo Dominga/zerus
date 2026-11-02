@@ -540,6 +540,13 @@ stops an idle session host without disabling anything.
   local sessions. A foreign or changed task is kept for manual review. If a
   command reports an uncertain outcome, inspect `status` before trying again.
   This service task is separate from the UI's Startup shortcut or Run value.
+  Registration uses native Task Scheduler COM in a bounded helper of the same
+  `hgs.exe`; it does not launch PowerShell or load user scripts. User shell
+  sessions and vendor installers can still use PowerShell.
+  The installer owns the Start menu shortcut and gives it the same
+  `com.hgdev.hgs-tray` AppUserModelID and Toast activator as the native registry
+  registration. `hgs` does not create or modify shortcuts; portable ZIP users
+  use the existing registry-based notification registration.
 - For service-owned Windows alerts, install the passive service registration
   first, then run `hgs.exe desktop notification-registration install --json`.
   `status --json` reports only registration, not service readiness or delivered

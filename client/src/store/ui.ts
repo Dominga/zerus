@@ -57,7 +57,8 @@ export const setCompactRows = rowDensity.set;
 export const expandCompactRows = rowDensity.expandAll;
 export const hasCompactRows = rowDensity.any;
 export const [stripMode, setStripMode] = createSignal(params.get("strip") === "1");
-type Menu = { x: number; y: number; items: MenuEntry[] };
+// sessionKey is a transient highlight, independent of conversation selection.
+type Menu = { x: number; y: number; items: MenuEntry[]; sessionKey?: string };
 // Keep the logical snapshot synchronous for guarded asynchronous menu reads.
 // Only its painted layer waits for the native child to acknowledge hiding.
 export const [menu, rememberMenu] = createSignal<Menu | undefined>();

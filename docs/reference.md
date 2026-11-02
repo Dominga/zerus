@@ -1278,6 +1278,14 @@ send. Saving failures are shown in the editor and retried locally; sending start
 only after its recovery snapshot has been saved.
 
 Delivery verifies the exact run, process, conversation and native input state.
+A busy Claude or Codex session can accept a message through its native queue
+when its empty composer is recognized. An unknown busy layout or a draft refuses
+with `agent busy` before submission; wait or inspect Terminal rather than typing
+through that refusal. Deliberate send refusals keep only the latest private
+`input_diagnostics/codex.json` or `claude.json` under the session state directory.
+Each sample is at most 16 KiB: cursor coordinates, bounded cursor-row text and
+structural metadata for at most eight nearby rows. Text from other rows and the
+attempted message is omitted. Listing sessions does not create samples.
 For Claude and Kimi messages ending in a literal backslash, the paste includes a
 final newline so the single Enter submits the unchanged message instead of
 activating the agent's backslash-Enter line continuation. This is verified
@@ -4251,6 +4259,35 @@ retiring the old binding, in shared-read writer order. If a confirmed native tit
 change is followed by a local persistence failure, the scoped action remains
 uncertain; inspect the retained bindings before choosing another action. An
 uncertain receipt never authorizes another native rename automatically.
+
+For a current journal-backed main session, `hgs inspect NAME --read-observation` or
+`hgs [@configured-alias] inspect '<reference>'` also returns the host's **raw**
+`read` object (or `null`) and `read_observation`. Direct-name inspection without
+`--read-observation`, including Activity/Processes polling with `--after` or
+`--skip-processes`, does not invoke this reader or add either field. The
+reference route opts in automatically. This does not enrich the mark
+with the current reply or acknowledge anything. Check `read_observation.complete`
+and `freshness: "observed"`, then match both its `target` and the inspection's
+current name/run/conversation to the intended target. A portable reference may
+resolve a resumed conversation with a different run; that is not acknowledgement
+of the original run.
+
+The observation records `observed_at` (host Unix seconds), `source_state` and a
+`sha256:` content `generation` of the observed `read-marks.json`; a missing file
+has `source_state: "absent"`, null generation and null read. Marks are stored by
+stable journal owner and conversation, not by run, so the target's current run
+binding is reported separately rather than invented in the stored mark. Each
+private regular file read is capped at 16 MiB, with a one-second cooperative
+budget shared by the observation and exact selected binding checks. Only the
+selected owner/conversation is materialized; unrelated marks are skipped during
+parsing. The original file and its path are checked for replacement/change.
+A busy, malformed, oversized, leaf-linked, nonprivate, changed or mismatched source
+returns `complete: false`, `freshness: "unknown"`, a short `code` and null read;
+this is not evidence of an unread or acknowledged part. An observation is a
+point-in-time read, not a promise that the source stays unchanged afterward.
+These fields are not supplied for archives, subagents or other provider-specific
+inspection paths. No shared-read file, lock, delivery or background worker is
+created or changed by this observer.
 
 `inspect` includes conversation, phase/activity, prompt/last message, tools,
 subagents, events and cursor. Initial reads return recent events; `--after` advances

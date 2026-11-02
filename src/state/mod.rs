@@ -694,6 +694,9 @@ pub(crate) fn inspect_reference(reference: &crate::session_reference::Reference)
     if !reference.agent.is_empty() && output["parent_conversation_id"].as_str() != Some(reference.conversation.as_str()) {
         return Err("Parent conversation changed while resolving its child reference".into());
     }
+    if reference.archive.is_empty() && reference.agent.is_empty() && !opencode::exists(&name) && !dsh::exists(&name) {
+        read_marks::observation::enrich(&mut output);
+    }
     output["session_reference"] = json!({"machine_id":reference.machine,"host":reference.host,"original_name":reference.name,
         "name":name,"conversation_id":reference.conversation,"agent_id":reference.agent});
     Ok(output)
@@ -917,14 +920,16 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
         "inspect" => {
             let name = args
                 .first()
-                .ok_or("usage: hgs inspect <session> [--archive ID] [--after cursor] [--skip-processes]")?;
+                .ok_or("usage: hgs inspect <session> [--archive ID] [--after cursor] [--skip-processes] [--read-observation]")?;
             let mut after = 0;
             let mut archive_id = None;
             let mut agent_id = None;
             let mut include_processes = true;
+            let mut read_observation = false;
             let mut index = 1;
             while index < args.len() {
                 if args[index] == "--skip-processes" { include_processes = false; index += 1; continue; }
+                if args[index] == "--read-observation" { read_observation = true; index += 1; continue; }
                 let value = args.get(index + 1).ok_or("missing inspect option value")?;
                 match args[index].as_str() {
                     "--after" => {
@@ -941,14 +946,15 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
             if after < 0 {
                 return Err("cursor must be nonnegative".into());
             }
-            println!(
-                "{}",
-                if let Some(id) = agent_id {
-                    subagents::inspection(name, id, archive_id)?
-                } else {
-                    journal::inspection(name, after, archive_id, include_processes)?
-                }
-            );
+            let mut output = if let Some(id) = agent_id {
+                subagents::inspection(name, id, archive_id)?
+            } else {
+                journal::inspection(name, after, archive_id, include_processes)?
+            };
+            if read_observation && archive_id.is_none() && agent_id.is_none() {
+                read_marks::observation::enrich(&mut output);
+            }
+            println!("{output}");
         }
         "archive" => {
             if args.len() != 1 {

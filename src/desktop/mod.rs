@@ -356,7 +356,7 @@ fn projection(
     feed: &feed::Broker,
     reads: &catalog_read::Reader,
 ) -> Value {
-    json!({"abi":ABI,"version":env!("CARGO_PKG_VERSION"),"schema":store::SCHEMA,
+    let mut value = json!({"abi":ABI,"version":env!("CARGO_PKG_VERSION"),"schema":store::SCHEMA,
         "configuration":location.configuration,"generation":store.generation,"epoch":epoch,
         "lifecycle":lifecycle::status(&location.configuration,epoch,store.generation),
         "running":true,"ownership":"passive","writers_enabled":false,"handoff":"required",
@@ -367,7 +367,9 @@ fn projection(
         "limits":{"subscribers":protocol::SUBSCRIBERS,"queue_bytes":protocol::QUEUE_BYTES,
             "frame_bytes":protocol::FRAME_BYTES,"control_bytes":protocol::CONTROL_BYTES,"ingress_bytes":feed::INGRESS_BYTES,
             "feed_producers":1,"feed_frame_bytes":feed::LINE_BYTES,"connections":protocol::CONNECTIONS},
-        "components":{"fleet":"awaiting_handoff","presence":"awaiting_handoff","reads":"awaiting_handoff","attention":"awaiting_handoff","approvals":"awaiting_handoff"}})
+        "components":{"fleet":"awaiting_handoff","presence":"awaiting_handoff","reads":"awaiting_handoff","attention":"awaiting_handoff","approvals":"awaiting_handoff"}});
+    delivery::decorate_passive(store, &mut value);
+    value
 }
 
 enum Event {
@@ -581,10 +583,17 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                 hello.request.as_ref(),
                                 "frontend_authentication_refused",
                             ),
-                            (_, None) => frontend_refused(
-                                hello.request.as_ref(),
-                                "desktop_background_unavailable",
-                            ),
+                            (Some(authority), None) => {
+                                match authority.into_request(&mut frontend_order) {
+                                    Ok(request) => {
+                                        delivery::passive_frontend_request(&mut store, request)
+                                    }
+                                    Err(_) => frontend_refused(
+                                        hello.request.as_ref(),
+                                        "frontend_identity_expired",
+                                    ),
+                                }
+                            }
                         };
                         frame(&epoch, seq, "response", result)
                     } else if hello.op == "request" {

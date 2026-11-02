@@ -168,6 +168,95 @@ fn restore_precedes_effects_and_native_return_and_actual_join_bound_drain() {
     assert_eq!(state, "unknown");
     assert_eq!(posts.load(Ordering::Acquire), 1);
 }
+
+#[test]
+fn root_host_retains_restore_progress_and_waits_for_worker_and_callback_drain() {
+    use crate::desktop::notifications::attachment::{Host, NativeHost};
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let scope = session();
+    let mut store = store(&temp, &scope);
+    let (mut actor, endpoint) = Outbox::new(scope.clone()).unwrap();
+    let owner = Arc::new(());
+    let weak = Arc::downgrade(&owner);
+    let posts = Arc::new(AtomicUsize::new(0));
+    let (opened, slot_rx) = mpsc::sync_channel(1);
+    let (release, release_rx) = mpsc::sync_channel(1);
+    let page: Vec<_> = (1..=16).map(|n| activation(&post(&scope, n))).collect();
+    let closed = page[0].request_id.clone();
+    let runtime = Runtime::start_with(scope.clone(), endpoint, owner.clone(), {
+        let posts = posts.clone();
+        move |_, slot| {
+            opened.send(slot.clone()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            Ok(Fake {
+                posts,
+                close: Arc::new(AtomicBool::new(true)),
+                slot,
+                release: None,
+                entered: None,
+                close_event: Some(closed),
+                callback_allowed: true,
+            })
+        }
+    })
+    .unwrap();
+    drop(owner);
+    let slot = slot_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let mut host = NativeHost::windows(runtime);
+    assert!(!host.ready().unwrap());
+    // The original eight-entry FIFO is full while native setup is held. A
+    // retry must retain the first unaccepted index of this same bounded page.
+    assert!(!host.restore(&page).unwrap());
+    assert!(!host.restore(&page).unwrap());
+    assert!(!slot.accepting_activations());
+    release.send(()).unwrap();
+    until(|| host.restore(&page).unwrap());
+    until(|| host.finish().unwrap());
+    assert!(host.ready().unwrap());
+    assert!(slot.accepting_activations());
+    assert_eq!(host.status()["mappings"], 16);
+    assert_eq!(posts.load(Ordering::Acquire), 0);
+
+    let delegate = slot.hold().unwrap();
+    actor.request_stop();
+    host.stop();
+    until(|| !slot.accepting_activations());
+    assert!(!host.drained(), "a retained native delegate prevents join");
+    assert!(weak.upgrade().is_some());
+    drop(delegate);
+    until(|| host.drained());
+    assert_eq!(actor.status()["callbacks"], 1);
+    assert!(
+        !actor.operation_drained(),
+        "native join does not consume the original queued Closed callback"
+    );
+    actor.poll(&mut store, Instant::now());
+    assert!(actor.operation_drained());
+    assert!(weak.upgrade().is_some());
+    drop(slot);
+    drop(host);
+    assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn root_host_refuses_native_setup_fault_and_still_joins_the_original_worker() {
+    use crate::desktop::notifications::attachment::{Host, NativeHost};
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let scope = session();
+    let (_actor, endpoint) = Outbox::new(scope.clone()).unwrap();
+    let runtime = Runtime::start_with(scope, endpoint, Arc::new(()), |_, _| {
+        Err::<Fake, _>("fixture_native_refused")
+    })
+    .unwrap();
+    let mut host = NativeHost::windows(runtime);
+    until(|| host.status()["fault"] == "fixture_native_refused");
+    assert!(host.ready().is_err());
+    assert!(host.finish().is_err());
+    host.stop();
+    until(|| host.drained());
+    assert_eq!(host.status()["joined"], true);
+}
 #[test]
 fn invalid_restore_stops_before_native_work_and_closes_real_worker() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());

@@ -618,13 +618,81 @@ struct Bound {
     listener: std::os::unix::net::UnixListener,
     responder: std::sync::Arc<zerus_client_core::desktop::Responder>,
 }
+fn configure_probe_io(stream: &std::os::unix::net::UnixStream) {
+    use std::time::Duration;
+    // BSD accepts may inherit O_NONBLOCK. Timeouts only bound blocking I/O.
+    stream.set_nonblocking(false).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+}
+
+#[test]
+fn accepted_canonical_probe_normalizes_nonblocking_before_bounded_reads() {
+    use std::{
+        io::{BufRead, BufReader, Read, Write},
+        os::{
+            fd::AsRawFd,
+            unix::net::{UnixListener, UnixStream},
+        },
+        time::Duration,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("canonical");
+    let listener = UnixListener::bind(&path).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut peer = UnixStream::connect(&path).unwrap();
+    let (mut stream, _) = listener.accept().unwrap();
+    // Force the inherited state on every Unix platform, including Linux.
+    // With no query written yet, the old timeout-only setup returns WouldBlock.
+    stream.set_nonblocking(true).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    assert_eq!(
+        stream.read(&mut [0]).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    configure_probe_io(&stream);
+    let flags = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) };
+    assert!(flags >= 0, "accepted stream flags unavailable");
+    assert_eq!(
+        flags & libc::O_NONBLOCK,
+        0,
+        "accepted probe must use blocking timeout I/O"
+    );
+    let listener_flags = unsafe { libc::fcntl(listener.as_raw_fd(), libc::F_GETFL) };
+    assert!(listener_flags >= 0, "listener flags unavailable");
+    assert_ne!(
+        listener_flags & libc::O_NONBLOCK,
+        0,
+        "accept remains nonblocking"
+    );
+    assert_eq!(stream.read_timeout().unwrap(), Some(Duration::from_secs(1)));
+    assert_eq!(
+        stream.write_timeout().unwrap(),
+        Some(Duration::from_secs(1))
+    );
+    let query = zerus_client_core::desktop::query(REQUEST).unwrap();
+    peer.write_all(&query).unwrap();
+    let mut received = Vec::new();
+    BufReader::new(&mut stream)
+        .take(64)
+        .read_until(b'\n', &mut received)
+        .unwrap();
+    assert_eq!(received, query);
+}
+
 fn answer_probe(
     listener: &std::os::unix::net::UnixListener,
     responder: &zerus_client_core::desktop::Responder,
     changed: usize,
 ) {
     use std::{
-        io::{BufRead, BufReader, Write},
+        io::{BufRead, BufReader, Read, Write},
         time::{Duration, Instant},
     };
     let end = Instant::now() + Duration::from_secs(3);
@@ -637,14 +705,10 @@ fn answer_probe(
             result => panic!("private canonical accept {result:?}"),
         }
     };
-    canonical
-        .set_read_timeout(Some(Duration::from_secs(1)))
-        .unwrap();
-    canonical
-        .set_write_timeout(Some(Duration::from_secs(1)))
-        .unwrap();
+    configure_probe_io(&canonical);
     let mut query = Vec::new();
     BufReader::new(&mut canonical)
+        .take(64)
         .read_until(b'\n', &mut query)
         .unwrap();
     let reply = responder.reply(query.strip_suffix(b"\n").unwrap()).unwrap();

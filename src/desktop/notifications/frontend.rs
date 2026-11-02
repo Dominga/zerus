@@ -294,6 +294,10 @@ impl SelectedFrontend {
     }
     pub fn revalidate_for_launch(&self, launch: &super::activation::Launch) -> Result<()> {
         ensure!(
+            launch.current(),
+            "original notification click expired or cancelled"
+        );
+        ensure!(
             self.configuration == launch.configuration(),
             "frontend belongs to another service configuration"
         );

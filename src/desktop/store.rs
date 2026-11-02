@@ -102,6 +102,25 @@ impl Location {
             configuration: self.configuration.clone(),
         })
     }
+    /// A Mac host can outlive its service while original native callback copies
+    /// drain. Its FD3 holds this separate flock; owner.lock absence is not drain.
+    #[cfg(unix)]
+    pub(super) fn notification_host_exclusion(&self) -> Result<Option<platform::FileLock>> {
+        self.check_existing()?;
+        let file = match private_file(&self.root.join("notification-host.lock"), false) {
+            Ok(file) => file,
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                return Ok(None)
+            }
+            Err(error) => return Err(error),
+        };
+        fs2::FileExt::try_lock_exclusive(&file)?;
+        Ok(Some(platform::FileLock::held(file)))
+    }
 }
 
 fn private_file(path: &Path, create: bool) -> Result<fs::File> {

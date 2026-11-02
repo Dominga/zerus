@@ -16,6 +16,33 @@ struct Fixture {
     intent: String,
 }
 impl Fixture {
+    fn grant(&mut self) -> (std::path::PathBuf, ownership::Grant) {
+        let image = self._temp.path().join("hgs-tray");
+        std::fs::write(&image, b"original native image").unwrap();
+        let origin = ownership::Origin::capture(
+            &image,
+            desktop::Build {
+                version: "1.2.3".into(),
+                source_commit: "a".repeat(40),
+                source_dirty: Some(false),
+            },
+        )
+        .unwrap();
+        self.store
+            .db
+            .execute(
+                "UPDATE desktop_ownership SET state='service',owner_epoch=?1,origin=?2 WHERE id=1",
+                rusqlite::params![
+                    &self.outbox.session.writer_epoch,
+                    serde_json::to_string(&origin).unwrap()
+                ],
+            )
+            .unwrap();
+        let grant = ownership::grant(&self.store, &self.outbox.session.configuration)
+            .unwrap()
+            .unwrap();
+        (image, grant)
+    }
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let location = Location {
@@ -100,6 +127,78 @@ impl Fixture {
         (request_id, queue)
     }
 }
+
+#[test]
+fn only_current_service_mode_grant_can_spend_an_absence_bound_click() {
+    let mut f = Fixture::new();
+    let (_, grant) = f.grant();
+    let mut router = f.router();
+    router.offer(&f.store, &f.outbox, f.value.clone()).unwrap();
+    let until = router.pending[0].until;
+    let id = router.pending[0].id.clone();
+    let launch = router
+        .closed_frontend(
+            &f.store,
+            &f.outbox,
+            &desktop::Observation::Absent,
+            Some(&grant),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(launch.until, until);
+    assert_eq!(launch.open().activation_id, id);
+    assert_eq!(launch.open().target.conversation, "conversation");
+    assert!(router.pending.is_empty());
+    assert!(router
+        .closed_frontend(
+            &f.store,
+            &f.outbox,
+            &desktop::Observation::Absent,
+            Some(&grant)
+        )
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn revoked_native_takeover_configuration_and_image_change_keep_known_unsent_clicks() {
+    for change in ["revoke", "native", "configuration", "image"] {
+        let mut f = Fixture::new();
+        let (image, grant) = f.grant();
+        let mut router = f.router();
+        router.offer(&f.store, &f.outbox, f.value.clone()).unwrap();
+        let id = router.pending[0].id.clone();
+        let until = router.pending[0].until;
+        match change {
+            "revoke" => ownership::invalidate(&f.store.db).unwrap(),
+            "native" => {
+                f.store
+                    .db
+                    .execute(
+                        "UPDATE desktop_ownership SET state='native',rearm_required=1",
+                        [],
+                    )
+                    .unwrap();
+            }
+            "configuration" => router.configuration = "b".repeat(64),
+            "image" => std::fs::write(image, b"a replacement native image").unwrap(),
+            _ => unreachable!(),
+        }
+        assert!(
+            router
+                .closed_frontend(
+                    &f.store,
+                    &f.outbox,
+                    &desktop::Observation::Absent,
+                    Some(&grant)
+                )
+                .is_err(),
+            "{change}"
+        );
+        assert_eq!(router.pending[0].id, id);
+        assert_eq!(router.pending[0].until, until);
+    }
+}
 #[test]
 fn only_original_live_mapping_reaches_the_authenticated_wait_and_never_replays() {
     let mut f = Fixture::new();
@@ -147,7 +246,7 @@ fn canonical_absence_without_an_ownership_grant_never_switches_mode_or_spends_th
         desktop::Observation::LiveLegacyOrUnknown,
     ] {
         assert!(router
-            .closed_frontend(&f.store, &f.outbox, &state)
+            .closed_frontend(&f.store, &f.outbox, &state, None)
             .unwrap()
             .is_none());
     }
@@ -155,7 +254,7 @@ fn canonical_absence_without_an_ownership_grant_never_switches_mode_or_spends_th
     let original_until = router.pending[0].until;
     for _ in 0..2 {
         assert!(router
-            .closed_frontend(&f.store, &f.outbox, &desktop::Observation::Absent)
+            .closed_frontend(&f.store, &f.outbox, &desktop::Observation::Absent, None)
             .is_err());
         assert_eq!(router.pending.len(), 1);
         assert_eq!(router.pending[0].id, original_id);
@@ -190,7 +289,7 @@ fn queue_wait_lifetime_stop_and_configuration_are_bounded() {
         )
         .is_err());
     assert!(router
-        .closed_frontend(&f.store, &f.outbox, &desktop::Observation::Absent)
+        .closed_frontend(&f.store, &f.outbox, &desktop::Observation::Absent, None)
         .unwrap()
         .is_none());
     router

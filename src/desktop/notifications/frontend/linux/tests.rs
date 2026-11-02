@@ -98,6 +98,87 @@ fn open() -> Open {
 fn launch() -> Launch {
     Launch::fixture(open(), "a".repeat(64))
 }
+
+#[test]
+fn preparation_owner_is_released_after_spawn_not_charged_to_the_gui_lifetime() {
+    let _serial = SERIAL.lock().unwrap();
+    let fixture = Fixture::new(wire::NAVIGATION_ENV_HELP_MARKER);
+    let mut release = fixture.hold();
+    let resources = Arc::new(AtomicBool::new(false));
+    let mut intent = launch();
+    intent.bind_preparation(resources.clone(), Arc::new(AtomicBool::new(false)));
+    let mut owned = OwnedFrontend::launch(fixture.select(), intent).unwrap();
+    observe_held(&mut owned);
+    assert_eq!(
+        Arc::strong_count(&resources),
+        1,
+        "a live GUI cannot retain the Root handoff exclusion"
+    );
+    release.write_all(b"x").unwrap();
+    finish_released(&mut owned);
+}
+
+#[test]
+fn a_cancelled_original_launch_never_starts_its_help_or_frontend_child() {
+    let _serial = SERIAL.lock().unwrap();
+    let fixture = Fixture::new(wire::NAVIGATION_ENV_HELP_MARKER);
+    let stopped = Arc::new(AtomicBool::new(true));
+    let mut intent = launch();
+    intent.bind_preparation(Arc::new(()), stopped);
+    assert!(OwnedFrontend::launch(fixture.select(), intent).is_err());
+    assert!(!ACTIVE.load(Ordering::Acquire));
+}
+
+#[test]
+fn backend_handoff_keeps_the_original_gui_observer_until_actual_exit_without_killing_it() {
+    use crate::{
+        config::Config,
+        desktop::{notifications::closed, store::Location},
+    };
+    let _serial = SERIAL.lock().unwrap();
+    let fixture = Fixture::new(wire::NAVIGATION_ENV_HELP_MARKER);
+    let mut release = fixture.hold();
+    let mut frontend = OwnedFrontend::launch(fixture.select(), launch()).unwrap();
+    observe_held(&mut frontend);
+    let config = Config {
+        home: fixture.prefix.to_str().unwrap().into(),
+        dir: fixture.prefix.join("config"),
+        state: fixture.prefix.join("state"),
+        selves: vec![],
+        peers: vec![],
+        base_peers: vec![],
+        peers_from_environment: false,
+        machines: Default::default(),
+        tab: false,
+        tab_colors: String::new(),
+    };
+    let location = Location {
+        root: config.state.join("desktop"),
+        configuration: "a".repeat(64),
+    };
+    let mut runtime = closed::Runtime::new(&config, &location);
+    runtime.observe_for_test(frontend);
+    let until = Instant::now() + Duration::from_secs(5);
+    while runtime.status()["observing_gui"] != true {
+        assert!(Instant::now() < until);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    runtime.stop();
+    assert!(runtime.drained());
+    assert!(
+        ACTIVE.load(Ordering::Acquire),
+        "the same live GUI still owns its admission"
+    );
+    drop(runtime);
+    release.write_all(b"x").unwrap();
+    while ACTIVE.load(Ordering::Acquire) {
+        assert!(
+            Instant::now() < until,
+            "original GUI was not reaped after explicit release"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
 fn observe_held(owned: &mut OwnedFrontend) {
     let until = Instant::now() + Duration::from_secs(5);
     while !owned.image_observed() {

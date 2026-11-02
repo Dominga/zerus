@@ -15,6 +15,8 @@ use std::sync::{
 use std::time::Instant;
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+#[cfg(all(test, target_os = "linux"))]
+pub(in crate::desktop) static TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 struct Admission;
 impl Admission {
     fn acquire() -> Result<Self> {
@@ -426,6 +428,21 @@ impl<H: Host> Runtime<H> {
     }
     pub fn drained(&self) -> bool {
         self.drained
+    }
+    pub fn outbox(&self) -> &Outbox {
+        &self.outbox
+    }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(in crate::desktop) fn outbox_mut_for_test(&mut self) -> &mut Outbox {
+        &mut self.outbox
+    }
+    pub fn ready(&self) -> bool {
+        self.admitting() && self.host.ready().unwrap_or(false)
+    }
+    /// Stable restore/lifecycle admission. A temporarily busy status lock can
+    /// pause an SDK turn but cannot turn the user's policy off and retire rows.
+    pub fn admitting(&self) -> bool {
+        self.restored && !self.stopping && self.error.is_none()
     }
     pub fn status(&self) -> Value {
         json!({"restored":self.restored,"restore_after":self.after,"restore_through":self.through,"cleanup":self.cleanup,"cleanup_through":self.cleanup_through,

@@ -3,11 +3,11 @@ use super::{
     attention, delivery, details,
     fanout::Queue,
     feed, fleet,
-    notifications::activation,
+    notifications::{activation, service as notification_service},
     presence_worker,
     store::{maintenance, Location, Store},
 };
-use crate::config::Config;
+use crate::{config::Config, platform};
 use anyhow::{ensure, Result};
 use serde_json::{json, Value};
 use std::{
@@ -28,10 +28,31 @@ pub(super) struct Runtime {
     attention: attention::Runtime,
     activations: activation::Router,
     drained: bool,
+    stopping: bool,
+    notifications: notification_service::Runtime,
 }
 
+/// The actor can replace only an already admitted background runtime after its
+/// actual original drain. A display-ready slot or client retry grants nothing.
+pub(super) fn replacement_permitted(
+    background_mode: bool,
+    drained: bool,
+    location: &Location,
+    store: &Store,
+) -> Result<bool> {
+    Ok(background_mode && drained && super::revoke::background_permitted(location, store)?)
+}
+
+#[cfg(test)]
+mod tests;
+
 impl Runtime {
-    pub fn start(config: &Config, epoch: &str, broker: &mut feed::Broker) -> Result<Self> {
+    pub fn start(
+        config: &Config,
+        epoch: &str,
+        broker: &mut feed::Broker,
+        owner: Arc<platform::FileLock>,
+    ) -> Result<Self> {
         let location = Location::new(config)?;
         let delivery = delivery::Runtime::start(config, epoch)?;
         let maintenance = maintenance::Runtime::start(config, epoch)?;
@@ -47,6 +68,8 @@ impl Runtime {
                 attention: attention::Runtime::new(epoch),
                 activations: activation::Router::new(&location.configuration, epoch),
                 drained: false,
+                stopping: false,
+                notifications: notification_service::Runtime::new(config, &location, epoch, owner),
             }),
             Err(error) => {
                 producer.close();
@@ -68,6 +91,10 @@ impl Runtime {
         broker: &mut feed::Broker,
         seq: &mut u64,
     ) -> (Vec<Value>, bool) {
+        if self.stopping {
+            let _ = self.poll_drain(store);
+            return (Vec::new(), false);
+        }
         let fleet = &self.fleet;
         self.details.tick(
             &mut |computer, generation, controls| fleet.controls(computer, generation, controls),
@@ -110,10 +137,11 @@ impl Runtime {
         }
         self.delivery.poll(store);
         self.maintenance.poll(store);
-        self.activations.poll(store, None, seq);
+        self.notifications
+            .poll(store, &mut self.attention, &mut self.activations, seq);
         // Disabled discovery must not accumulate permanent edge/baseline rows.
         // Enabling resets the baseline before later observations may post.
-        if self.attention.enabled() || self.attention.retiring() {
+        if !self.notifications.ready() && self.attention.retiring() {
             self.attention.poll(store, None);
         }
         (
@@ -162,9 +190,11 @@ impl Runtime {
         value["detail_subscriptions"] = self.details.status();
         value["attention_discovery"] = self.attention.status();
         value["activation_transport"] = self.activations.status();
+        value["notification_runtime"] = self.notifications.status();
         value["lifecycle"]["background"]["attention"] = json!({
-            "ready":false,"drained":self.attention.drained(),"code":if self.attention.drained() {"drained"} else {"discovery_only"},
-            "status":value["attention_discovery"]});
+            "ready":self.notifications.ready(),"drained":self.notifications.drained(),
+            "code":if self.notifications.drained() {"drained"} else if self.notifications.ready() {"running"} else {"awaiting_native_handoff"},
+            "status":value["notification_runtime"]});
         value["maintenance"] = self.maintenance.status();
         value["components"]["maintenance"] = if value["maintenance"]["ready"] == true {
             "running"
@@ -214,43 +244,30 @@ impl Runtime {
         }
     }
 
+    pub fn handoff(&self) -> Option<Arc<super::store::HandoffLock>> {
+        self.notifications.handoff()
+    }
+
     pub fn drained(&self) -> bool {
         self.drained
     }
 
     pub fn drain(&mut self, store: &mut Store, timeout: Duration) -> Result<()> {
+        self.stopping = true;
         self.activations.stop();
         self.details.stop();
         self.producer.close();
         self.delivery.request_stop();
         self.maintenance.request_stop();
         self.attention.request_stop();
+        self.notifications.request_stop();
         if let Some(presence) = &self.presence {
             presence.request_stop();
         }
         let end = Instant::now() + timeout;
-        let mut failure = None;
         loop {
-            let fleet_done = self.fleet.stop();
-            self.delivery.poll(store);
-            self.maintenance.poll(store);
-            let delivery_done = self.delivery.drained();
-            let maintenance_done = self.maintenance.drained();
-            let attention_done = self.attention.drained();
-            let presence_done = match self.presence.as_mut().map(presence_worker::Runtime::stop) {
-                None | Some(Ok(true)) => true,
-                Some(Ok(false)) => false,
-                Some(Err(error)) => {
-                    failure = Some(error);
-                    true // join failed, but still finish draining the fleet
-                }
-            };
-            if fleet_done && presence_done && delivery_done && maintenance_done && attention_done {
-                let result = failure.map_or(Ok(()), Err);
-                if result.is_ok() {
-                    self.drained = true;
-                }
-                return result;
+            if self.poll_drain(store)? {
+                return Ok(());
             }
             ensure!(
                 Instant::now() < end,
@@ -258,5 +275,27 @@ impl Runtime {
             );
             thread::sleep(Duration::from_millis(10));
         }
+    }
+    /// Used both by the bounded takeover wait and subsequent actor turns. A
+    /// slow replacement continues draining without another frontend request.
+    fn poll_drain(&mut self, store: &mut Store) -> Result<bool> {
+        let fleet_done = self.fleet.stop();
+        self.delivery.poll(store);
+        self.maintenance.poll(store);
+        let mut seq = 0;
+        self.notifications
+            .poll(store, &mut self.attention, &mut self.activations, &mut seq);
+        let presence_done = match self.presence.as_mut().map(presence_worker::Runtime::stop) {
+            None | Some(Ok(true)) => true,
+            Some(Ok(false)) => false,
+            Some(Err(error)) => return Err(error),
+        };
+        self.drained = fleet_done
+            && presence_done
+            && self.delivery.drained()
+            && self.maintenance.drained()
+            && self.attention.drained()
+            && self.notifications.drained();
+        Ok(self.drained)
     }
 }

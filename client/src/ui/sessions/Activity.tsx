@@ -1128,7 +1128,11 @@ export function ActivityView(props: { source?: ActivitySource }) {
           <Show when={!states().archived} fallback={<div class="notice"><Icon name="archive" size={14} /><div>{tr("This conversation is archived.")}</div></div>}>
             <Show when={view.loaded || view.items.length} fallback={<div class="act-older hint">{tr("Reading activity…")}</div>}>
               <Show when={view.items.length} fallback={<div class="act-older hint">{tr("No recorded activity yet.")}</div>}>
-                <div class="act-virtual">
+                {/* Reserve the current virtual extent through range swaps. Without
+                    it, a synchronous layout between removing rows and updating
+                    spacers makes WebKit clamp scrollTop even during a gesture.
+                    A minimum still lets late, unmeasured content grow naturally. */}
+                <div class="act-virtual" style={{ "min-height": `${virtualizer.getTotalSize()}px` }}>
                   <div class="act-virtual-spacer" style={{ height: `${flow().padding}px` }} />
                   <div class="act-virtual-flow">
                   <For each={virtualKeys()}>{(id) => {

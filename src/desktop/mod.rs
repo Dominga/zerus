@@ -457,6 +457,7 @@ fn projection(
 }
 
 enum Event {
+    ImportOwner(String, mpsc::SyncSender<import_evidence::held::Loan>),
     Command(Hello, Arc<Queue>, Option<Box<ui_authority::Authorized>>),
     FeedOpen(Hello, mpsc::SyncSender<feed::Opened>),
     FeedData(feed::Data),
@@ -636,6 +637,23 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
             } else {
                 Duration::from_millis(200)
             }) {
+                Ok(Event::ImportOwner(configuration, reply)) => {
+                    seq += 1;
+                    let owner = if configuration == location.configuration {
+                        background
+                            .as_ref()
+                            .and_then(|runtime| runtime.publication_owner(&store))
+                    } else {
+                        None
+                    };
+                    // The initially empty one-shot never blocks the actor. A
+                    // dropped caller/shutdown drops the original owner loan.
+                    let _ = reply.try_send(import_evidence::held::Loan {
+                        owner,
+                        epoch: epoch.clone(),
+                        seq,
+                    });
+                }
                 Ok(Event::Command(hello, queue, authority)) => {
                     let mut value = projection(
                         &location,
@@ -1110,6 +1128,12 @@ fn client(
     if hello.op == "feed" {
         return feed::client(stream, reader, hello, send, stopped, ingress);
     }
+    if hello.op == import_evidence::held::OP {
+        // The finalizer's Session owns the only original connection handle;
+        // its stream cleanup precedes release of the runtime Owner loan.
+        drop(reader);
+        return import_evidence::held::client(stream, hello, send, stopped, location);
+    }
     let watching = hello.op == "watch"
         || (hello.op == "frontend_request"
             && hello
@@ -1223,7 +1247,9 @@ fn exchange(location: &Location, op: &str, request: Option<Value>) -> Result<Opt
     };
     // Revocation includes a bounded SQLite busy wait and durable filesystem I/O.
     // A timeout remains an unknown result, never permission to start Qt.
-    if revoking || op == "frontend_request" {
+    if op == import_evidence::held::OP {
+        stream.set_read_timeout(Some(import_evidence::TOTAL))?;
+    } else if revoking || op == "frontend_request" {
         stream.set_read_timeout(Some(if activation_wait {
             zerus_client_core::desktop::activation::CLIENT_WAIT
         } else {

@@ -102,23 +102,6 @@ impl Location {
             configuration: self.configuration.clone(),
         })
     }
-    /// Contention is recognized only at this exact OS try-lock call. Opening,
-    /// path/privacy validation and every other failure remain ordinary errors.
-    pub(super) fn try_handoff_lock(&self) -> Result<Option<HandoffLock>> {
-        self.check_existing()?;
-        let file = private_file(&self.root.join(HANDOFF_LOCK), true)?;
-        if let Err(error) = fs2::FileExt::try_lock_exclusive(&file) {
-            if platform::lock_contended(&error) {
-                return Ok(None);
-            }
-            return Err(error).context("desktop handoff is unavailable");
-        }
-        Ok(Some(HandoffLock {
-            _lock: platform::FileLock::held(file),
-            root: self.root.clone(),
-            configuration: self.configuration.clone(),
-        }))
-    }
     /// Distinguish an actual flock contender from path/identity/open failures.
     /// Neither branch creates authority or repairs an existing state path.
     #[cfg_attr(windows, allow(dead_code))] // Also used by G3's cross-platform import transport.

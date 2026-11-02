@@ -1151,6 +1151,20 @@ fn root_service_grant_attaches_original_host_posts_and_routes_click_then_release
         runtime.ready(),
         "a deferred Staged report leaves the live host ready"
     );
+    let publication = crate::desktop::import_evidence::held::pending_for_test(
+        &location,
+        runtime
+            .publication_owner(&h.store)
+            .expect("original current granted owner"),
+    );
+    assert!(publication.owned.join("record-v1.json").is_file());
+    let report = publication.finish_connected();
+    assert_eq!(report["published"], true);
+    runtime.poll(&mut h.store, &mut attention, &mut router, &mut seq);
+    assert!(
+        runtime.ready(),
+        "admitted report does not stop the granted runtime"
+    );
     let action = command(session()).action;
     let intent = ledger::put_intent(
         &mut h.store.db,
@@ -1209,8 +1223,33 @@ fn root_service_grant_attaches_original_host_posts_and_routes_click_then_release
     assert_eq!(click.post_request_id, request);
     assert_eq!(click.target.conversation, "conversation-1");
     assert!(click.platform_context.is_some());
+    let mut publication = crate::desktop::import_evidence::held::pending_for_test(
+        &location,
+        runtime
+            .publication_owner(&h.store)
+            .expect("same still-current granted owner"),
+    );
+    let published_id = publication.import_id.clone();
     ownership::invalidate(&h.store.db).unwrap();
     ledger::revoke(&h.store.db, "fixture_revoke").unwrap();
+    publication.disconnect();
+    runtime.poll(&mut h.store, &mut attention, &mut router, &mut seq);
+    assert!(
+        runtime.publication_owner(&h.store).is_none(),
+        "revoke refuses new publication jobs"
+    );
+    assert!(
+        !runtime.drained(),
+        "the SAME original owner is still charged by the admitted worker"
+    );
+    assert!(location.handoff_lock().is_err());
+    assert!(
+        publication.owned.join("record-v1.json").is_file(),
+        "caller disconnect never deletes the admitted input"
+    );
+    publication.finish();
+    assert_eq!(crate::desktop::import_evidence::status(&location, &published_id).unwrap()["record_present"], true,
+        "the original admitted finalization can finish while revoke waits; its lost reply is lookup-only");
     until(|| {
         runtime.poll(&mut h.store, &mut attention, &mut router, &mut seq);
         runtime.drained()

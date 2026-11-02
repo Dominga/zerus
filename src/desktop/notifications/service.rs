@@ -94,6 +94,18 @@ impl Runtime {
     ) {
         self.preferences = preferences;
     }
+    /// Actor-only loan of this original owner, not a serialized role/lease or
+    /// a new writer grant. Its strong resource count also fences actual drain.
+    pub fn publication_owner(&self, store: &Store) -> Option<Arc<preparation::Owner>> {
+        if self.stopping
+            || self.drained
+            || self.recovering
+            || !self.grant.as_ref()?.current(store).ok()?
+        {
+            return None;
+        }
+        self.owner.clone()
+    }
     pub fn writer_epoch(&self) -> Option<&str> {
         self.grant.as_ref().map(ownership::Grant::writer_epoch)
     }

@@ -85,7 +85,12 @@ a destination path. Existing private-directory and no-follow single-link file
 checks apply; unsafe leaves are refused without repair.
 
 After complete input, validation and file sync, the publisher takes the short
-OS-backed `handoff.lock`. A held active-writer/import lock refuses publication.
+OS-backed `handoff.lock`. If it is busy, the same-user private service IPC can
+ask the actor for its actual current notification-runtime owner. One bounded
+finalizer on the existing client thread may use that original owner's lock;
+there is no new listener, caller-supplied owner, effect or writer grant. A
+rollback hold, stopping/recovering runtime, mismatched grant or unavailable
+owner cannot lend it and publication remains deferred.
 An exclusive UUID directory creation reserves that import ID permanently.
 Private synced snapshot/page directories move into it, and the final synced
 manifest is published last; parent directories are synced before success.
@@ -101,7 +106,9 @@ counts. Compare all identities before accepting the result. Reports contain no
 snapshot bodies or source paths. Errors are nonzero and redacted.
 
 There is one closed negative response: after all input and the final manifest
-have been validated, contention from the actual `try_lock_exclusive` call may
+have been validated, contention from the actual `try_lock_exclusive` call,
+without an admitted current service owner,
+may
 return exit zero with `published:false`, `code:"handoff_busy"`,
 `this_attempt_not_committed:true`, and the exact ABI, configuration, import UUID
 and `import_record:{version:1,sha256}`. This invocation has not attempted the
@@ -170,14 +177,28 @@ and the GUI shows deferred and review-needed reports independently of connection
 readiness. Normal preference edits remain available after completed failures;
 a later explicit known-negative retry must freshly capture the same source bytes.
 
+For owner-assisted finalization the CLI relinquishes automatic stage deletion
+before the request can become uncertain. The closed request carries only its
+managed stage nonce, original import UUID, configuration, expected record hash,
+directory identity and finite byte budget. The finalizer pins and renames the
+input into a new private service-owned stage, revalidates the exact bounded
+inventory, no-follow private single-link files, original identities and hashes,
+and feeds the same Staged parser before reserving the UUID. The whole original
+runtime owner and separate one-slot finalizer admission remain charged through
+filesystem work and original stream cleanup. Revoke closes new admissions and
+waits for this same resource; disconnect does not remove its input or release
+its charge early. Lost replies and all post-reservation uncertainty remain
+original-ID lookup only. Unknown or malformed stages are retained, never
+automatically replayed or repaired.
+
 This report does not replace the existing frozen pending-read capture or its
 separate authenticated safe-passive page transfer. That transfer may wait for
-the connected service and need not complete before Grant. If a prior runtime
-holds the handoff lock (including a rollback hold), report publication is durably
-deferred with `retained_import_handoff_busy` while the connection continues. It
-does not post through the in-process lock owner or retry automatically. A later
-explicit Retry may publish the same record only after an independently settled
-handoff/revoke has freed that lock and same-source checks pass. The caller never
+the connected service and need not complete before Grant. An already-granted
+service can publish under its actual in-process lock owner without stopping it.
+If that original owner cannot admit work (including a rollback hold), publication
+is durably deferred with `retained_import_handoff_busy` while the connection
+continues. Only an explicit known-negative Retry may submit the same record
+after fresh same-source checks; it never retries an unknown result. The caller never
 silently revokes a runtime or treats status as permission. Rearm makes at most
 one report attempt; its following reconnect is not another report retry.
 Remaining interim operation,

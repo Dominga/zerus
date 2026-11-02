@@ -30,7 +30,9 @@ pub(in crate::desktop) fn caller(scope: &Scope) -> Result<&'static str> {
             return Ok("interactive_terminal");
         }
     }
-    let mut pid = std::process::id();
+    let original = Process::read(std::process::id())?;
+    ensure!(original.current(), "installer caller changed");
+    let mut pid = original.identity.parent;
     let mut seen = BTreeSet::new();
     while pid != 0 {
         ensure!(

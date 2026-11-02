@@ -179,6 +179,17 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                 println!("{}", registration::preview(config, &location)?);
                 Ok(())
             }
+            ["revoke-hold", "--json", "--request-id", id] => {
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                {
+                    revoke::hold::cli(config, &location, id)
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                {
+                    let _ = id;
+                    anyhow::bail!("desktop revoke hold is supported on Linux and macOS only")
+                }
+            }
             ["registration", "--json", "--background"] => {
                 ensure!(
                     cfg!(target_os = "linux"),

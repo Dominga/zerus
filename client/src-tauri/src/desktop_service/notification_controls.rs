@@ -268,7 +268,7 @@ impl Controller {
             .subscription
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(subscription);
-        setup.source.refresh();
+        let _ = setup.source.refresh();
         self.publish();
         Some(session)
     }
@@ -636,6 +636,51 @@ fn call(
     )
 }
 
+async fn due_focus(
+    owner: &Controller,
+    session: &Arc<Session>,
+    schedule: &Schedule,
+) -> Option<wire::NativeFocus> {
+    let focus = session.native.snapshot()?;
+    if !schedule.due(&focus, Instant::now()) {
+        return None;
+    }
+    if focus.state == FocusState::Foreground {
+        let refresh = owner.setup.as_ref()?.source.refresh();
+        let observed = if let Some(refresh) = refresh {
+            let wait = refresh.wait();
+            tokio::pin!(wait);
+            loop {
+                tokio::select! {
+                    complete = &mut wait => break complete,
+                    _ = owner.changed.notified() => (),
+                    _ = tokio::time::sleep(Duration::from_millis(250)) => (),
+                }
+                if !owner.current(session) {
+                    return None;
+                }
+                // Native loss invalidates Foreground immediately, even while
+                // a queued enumeration has not yet run on the main thread.
+                if session.native.snapshot()?.state != FocusState::Foreground {
+                    break true;
+                }
+            }
+        } else {
+            false
+        };
+        if !observed {
+            let _ = session.native.observe(FocusState::Unknown);
+        }
+    }
+    if !owner.current(session) {
+        return None;
+    }
+    session
+        .native
+        .snapshot()
+        .filter(|v| schedule.due(v, Instant::now()))
+}
+
 pub(crate) async fn run(owner: Arc<Controller>, session: Arc<Session>) {
     let mut schedule = Schedule::default();
     loop {
@@ -643,10 +688,7 @@ pub(crate) async fn run(owner: Arc<Controller>, session: Arc<Session>) {
         if !owner.current(&session) {
             break;
         }
-        let focus = session
-            .native
-            .snapshot()
-            .filter(|v| schedule.due(v, Instant::now()));
+        let focus = due_focus(&owner, &session, &schedule).await;
         if focus.is_none() && !owner.has_work(&session) {
             tokio::select! {_ = changed=>(),_ = tokio::time::sleep(Duration::from_millis(wire::FOCUS_REFRESH_MS))=>()};
             continue;

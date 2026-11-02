@@ -23,6 +23,19 @@ HGS = Path(os.environ.get('HGS_TEST_BIN', Path(__file__).resolve().parents[1] / 
 
 
 class Desktop(unittest.TestCase):
+    @unittest.skipUnless(sys.platform.startswith(('linux', 'darwin')), 'Unix rollback hold')
+    def test_rollback_hold_agent_refusal_is_structured_and_creates_no_state(self):
+        selected = dict(self.env, HGS_SESSION='private-agent-fixture')
+        result = subprocess.run([str(HGS), 'desktop', 'revoke-hold', '--json', '--request-id', str(uuid.uuid4())],
+                                input=b'', stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                env=selected, timeout=5)
+        self.assertNotEqual(result.returncode, 0)
+        value = json.loads(result.stdout)
+        self.assertEqual(value['abi'], 'desktop-revoke-hold-v1')
+        self.assertIs(value['held'], False)
+        self.assertEqual(value['code'], 'revoke_hold_refused')
+        self.assertFalse(self.desktop.exists())
+
     def test_notification_controls_are_scoped_reads_and_generic_mutation_is_refused(self):
         self.serve()
         current = self.cli('desktop', 'status', '--json')
@@ -49,6 +62,7 @@ class Desktop(unittest.TestCase):
         with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_notification_preferences_requests').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_attempts').fetchone()[0], 0)
+
     @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux registration mode')
     def test_registration_variant_is_read_only_and_service_reports_its_requested_mode(self):
         passive = self.cli('desktop', 'registration', '--json')

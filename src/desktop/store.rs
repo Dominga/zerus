@@ -102,6 +102,22 @@ impl Location {
             configuration: self.configuration.clone(),
         })
     }
+    /// Distinguish an actual flock contender from path/identity/open failures.
+    /// Neither branch creates authority or repairs an existing state path.
+    #[cfg_attr(windows, allow(dead_code))] // Also used by G3's cross-platform import transport.
+    pub(super) fn try_handoff_lock(&self) -> Result<Option<HandoffLock>> {
+        self.check_existing()?;
+        let file = private_file(&self.root.join(HANDOFF_LOCK), true)?;
+        match fs2::FileExt::try_lock_exclusive(&file) {
+            Ok(()) => Ok(Some(HandoffLock {
+                _lock: platform::FileLock::held(file),
+                root: self.root.clone(),
+                configuration: self.configuration.clone(),
+            })),
+            Err(error) if platform::lock_contended(&error) => Ok(None),
+            Err(error) => Err(error).context("desktop handoff lock failed"),
+        }
+    }
     /// A Mac host can outlive its service while original native callback copies
     /// drain. Its FD3 holds this separate flock; owner.lock absence is not drain.
     #[cfg(unix)]

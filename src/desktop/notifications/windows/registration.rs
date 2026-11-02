@@ -115,8 +115,8 @@ impl Plan {
                 changed: false,
             });
         }
-        // Native create is create-only. Each removal rechecks the complete original
-        // key under the retained handle. Failure never rolls back or deletes evidence.
+        // Native create is create-only. Each removal snapshots the opened key, then
+        // deletes its fixed path. Failure never rolls back or deletes evidence.
         if operation == "install" {
             for (path, contents) in &self.keys {
                 registry

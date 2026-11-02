@@ -546,6 +546,12 @@ stops an idle session host without disabling anything.
   alerts. These commands keep the `com.hgdev.hgs-tray` identity and bind its COM
   activation registration to the exact selected stable CLI/configuration. A
   foreign, partial or changed registration is kept. The worker never repairs it.
+  The three current-user keys are `HKCU\Software\Classes\AppUserModelId\com.hgdev.hgs-tray`,
+  `HKCU\Software\Classes\CLSID\{0F0F70A2-1D40-47D8-AC5E-D6A9B789605F}`,
+  and `HKCU\Software\Classes\CLSID\{0F0F70A2-1D40-47D8-AC5E-D6A9B789605F}\LocalServer32`.
+  After an interrupted install, inspect all three before manually removing
+  only an owned partial set; the
+  commands refuse partial sets rather than repairing or deleting them.
   Cold COM activation is passive and refuses without acquiring a service owner.
   Root service attachment and native alert/click acceptance remain separate.
 

@@ -191,7 +191,9 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                 {
                     println!(
                         "{}",
-                        notifications::windows::registration::command(config, operation, request_id)?
+                        notifications::windows::registration::command(
+                            config, operation, request_id
+                        )?
                     );
                     Ok(())
                 }

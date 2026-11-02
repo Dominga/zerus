@@ -223,7 +223,7 @@ fn pending_takeover_is_not_ready_until_actual_drain_and_stale_settlement_never_r
 }
 
 #[test]
-fn replacement_image_invalidates_launch_grant_and_requires_new_explicit_rearm() {
+fn replacement_image_refuses_launch_but_background_and_new_startup_grant_continue() {
     let mut f = Fixture::new();
     let request = f.request(Action::Grant);
     f.apply(request);
@@ -233,10 +233,11 @@ fn replacement_image_invalidates_launch_grant_and_requires_new_explicit_rearm() 
     assert_eq!(f.current().state, State::IdentityChanged);
     assert!(!service_granted(&f.store, &f.location.configuration).unwrap());
     f.origin = Origin::capture(&f.origin.image, f.origin.build.clone()).unwrap();
+    assert!(!f.current().rearm_required);
+    assert!(super::super::revoke::background_permitted(&f.location, &f.store).unwrap());
     let request = f.request(Action::Grant);
-    assert!(matches!(f.apply(request).outcome, Outcome::Refused { .. }));
-    let request = f.request(Action::Rearm);
-    f.apply(request);
+    let receipt = f.apply(request);
+    assert!(receipt.service_granted());
     assert!(service_granted(&f.store, &f.location.configuration).unwrap());
 }
 
@@ -435,4 +436,121 @@ fn old_grant_receipt_cannot_hide_a_later_manual_revoke() {
     assert!(receipt.matches(&grant, &f.location.configuration));
     assert!(matches!(receipt.outcome, Outcome::Granted { .. }));
     assert!(!receipt.service_granted());
+}
+
+#[test]
+fn identity_update_after_an_explicit_rearm_does_not_resurrect_old_revoke_history() {
+    let mut f = Fixture::new();
+    let first = f.request(Action::Grant);
+    f.apply(first);
+    let id = uuid::Uuid::new_v4().to_string();
+    super::super::revoke::request(
+        &f.location,
+        &mut f.store,
+        &serde_json::json!({"op":"revoke","request_id":id}),
+    );
+    let rearm = f.request(Action::Rearm);
+    f.apply(rearm);
+    let old = f.current();
+    let other = f.temp.path().join("new-image");
+    std::fs::write(&other, b"updated frontend").unwrap();
+    std::fs::rename(other, &f.origin.image).unwrap();
+    assert!(!f.current().rearm_required);
+    assert_eq!(f.current().state, State::IdentityChanged);
+    assert!(!service_granted(&f.store, &f.location.configuration).unwrap());
+    assert!(super::super::revoke::background_permitted(&f.location, &f.store).unwrap());
+    f.origin = Origin::capture(&f.origin.image, f.origin.build.clone()).unwrap();
+    let request = f.request(Action::Grant);
+    let receipt = f.apply(request);
+    assert!(receipt.service_granted());
+    assert!(receipt.revision > old.revision);
+}
+
+#[test]
+fn absent_native_takeover_is_a_definitive_noop_without_creating_any_desktop_store() {
+    let f = Fixture::new();
+    // Keep the selected image but remove the private fixture's unused service
+    // state to model a never-service native startup, not a live owner.
+    let location = Location {
+        root: f.temp.path().join("never-service/desktop"),
+        configuration: f.location.configuration.clone(),
+    };
+    let request = Request::DesktopOwnership {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        action: Action::NativeTakeover,
+        journal: None,
+        revision: 0,
+    };
+    let absent = absent_takeover(&location, &request, &f.origin)
+        .unwrap()
+        .unwrap();
+    assert!(absent.receipt.matches(&request, &location.configuration));
+    assert!(absent.receipt.native_ready());
+    assert!(!absent.receipt.durable);
+    assert!(matches!(absent.receipt.outcome, Outcome::NativeAbsent));
+    assert!(!location.root.parent().unwrap().exists());
+    drop(absent);
+    assert!(
+        serde_json::from_value::<Status>(offline_read(&location, None).unwrap())
+            .unwrap()
+            .journal
+            .is_none()
+    );
+    // No retained revoke/ownership row has been manufactured by this no-op.
+    assert!(!location.root.exists());
+    location.prepare().unwrap();
+    let epoch = uuid::Uuid::new_v4().to_string();
+    let mut first_service = Store::open(&location, &epoch).unwrap();
+    let request = Request::DesktopOwnership {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        action: Action::Grant,
+        journal: None,
+        revision: 0,
+    };
+    let granted = apply(
+        &location,
+        &mut first_service,
+        &epoch,
+        request,
+        f.origin.clone(),
+        None,
+        |_| Ok(()),
+    )
+    .unwrap();
+    assert!(
+        granted.service_granted(),
+        "the native no-op did not manufacture a revoke requiring rearm"
+    );
+}
+
+#[test]
+fn unknown_absence_and_a_live_owner_cannot_supply_an_absent_takeover_receipt() {
+    let f = Fixture::new();
+    let request = Request::DesktopOwnership {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        action: Action::NativeTakeover,
+        journal: None,
+        revision: 0,
+    };
+    let location = Location {
+        root: f.temp.path().join("unknown/desktop"),
+        configuration: f.location.configuration.clone(),
+    };
+    location.prepare().unwrap();
+    let owner = location.lock().unwrap();
+    assert!(absent_takeover(&location, &request, &f.origin).is_err());
+    drop(owner);
+    std::fs::write(
+        location.root.join("notification-host.lock"),
+        b"unknown original native host",
+    )
+    .unwrap();
+    assert!(absent_takeover(&location, &request, &f.origin).is_err());
+    assert!(!location.root.join("state.sqlite3").exists());
+    let mut old_scope = request;
+    if let Request::DesktopOwnership { journal, .. } = &mut old_scope {
+        *journal = Some(uuid::Uuid::new_v4().to_string());
+    }
+    std::fs::remove_file(location.root.join("notification-host.lock")).unwrap();
+    assert!(absent_takeover(&location, &old_scope, &f.origin).is_err());
 }

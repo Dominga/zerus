@@ -104,6 +104,11 @@ pub(super) fn background_permitted(location: &Location, store: &Store) -> Result
     if ownership.rearm_required {
         return Ok(false);
     }
+    // A still-current grant supersedes old revoke/marker history. Losing only
+    // its launch-image identity cannot revoke unrelated background work.
+    if ownership.state == zerus_client_core::desktop::ownership::State::IdentityChanged {
+        return Ok(true);
+    }
     let lock = location.handoff_lock()?;
     let marker = handoff::marker(location, &lock)?;
     let revoked: bool = store.db.query_row(

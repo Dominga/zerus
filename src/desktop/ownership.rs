@@ -121,7 +121,7 @@ fn row(db: &Connection, configuration: &str) -> Result<Row> {
         journal: Some(journal),
         revision,
         state,
-        rearm_required: rearm_required || state == State::IdentityChanged,
+        rearm_required,
         request_id,
         owner_epoch,
         identity_current,
@@ -175,7 +175,10 @@ fn original(db: &Connection, id: &str) -> Result<Option<(Receipt, Origin)>> {
         .map(|(receipt, origin)| {
             let receipt: Receipt = serde_json::from_str(&receipt)?;
             ensure!(
-                receipt.valid() && receipt.request_id == id,
+                receipt.valid()
+                    && receipt.request_id == id
+                    && receipt.durable
+                    && receipt.journal.is_some(),
                 "invalid ownership receipt"
             );
             Ok((receipt, serde_json::from_str(&origin)?))
@@ -213,10 +216,7 @@ fn refused(request: &Request, current: Status, code: &str) -> Result<Receipt> {
         abi: wire::ABI.into(),
         request_id: request.id().into(),
         configuration: current.configuration.clone(),
-        journal: current
-            .journal
-            .clone()
-            .context("missing ownership journal")?,
+        journal: current.journal.clone(),
         fingerprint: request.fingerprint(),
         action: *action,
         revision: current.revision,
@@ -323,15 +323,14 @@ fn apply_guarded(
     )?;
     if *action == Action::Grant
         && (old.status.rearm_required
-            || (old.status.state != State::Service && (historical_revoke || marker.is_some())))
+            || (old.status.state == State::Passive && (historical_revoke || marker.is_some())))
     {
         return refused(&request, old.status, "ownership_rearm_required");
     }
-    if *action == Action::Grant && old.origin.as_ref().is_some_and(|old| old != &origin) {
-        return refused(&request, old.status, "ownership_identity_changed");
-    }
     let mut drain = Some(drain);
-    if *action == Action::Rearm && drain.take().unwrap()(store).is_err() {
+    let replacing_image =
+        *action == Action::Grant && old.origin.as_ref().is_some_and(|old| old != &origin);
+    if (*action == Action::Rearm || replacing_image) && drain.take().unwrap()(store).is_err() {
         return refused(&request, old.status, "ownership_drain_pending");
     }
     if *action != Action::NativeTakeover
@@ -371,7 +370,7 @@ fn apply_guarded(
         abi: wire::ABI.into(),
         request_id: request.id().into(),
         configuration: location.configuration.clone(),
-        journal: old.status.journal.context("missing ownership journal")?,
+        journal: old.status.journal,
         fingerprint: request.fingerprint(),
         action: *action,
         revision: next,
@@ -503,7 +502,9 @@ fn lookup_db(db: &Connection, configuration: &str, query: Query) -> Result<Looku
         .map(|(receipt, _)| {
             ensure!(
                 receipt.fingerprint == fingerprint
-                    && journal.as_ref().is_none_or(|id| id == &receipt.journal),
+                    && journal
+                        .as_ref()
+                        .is_none_or(|id| Some(id) == receipt.journal.as_ref()),
                 "ownership query conflict"
             );
             current_receipt(db, receipt)
@@ -647,12 +648,28 @@ pub(super) fn offline_frontend(
         authority.operation() == "desktop_ownership",
         "service is not running"
     );
+    let mut order = ui_authority::Order::default();
+    let permit = authority.into_request(&mut order)?;
+    let (request, origin) = permit.ownership_parts()?;
+    ensure!(
+        matches!(
+            request,
+            Request::DesktopOwnership {
+                action: Action::NativeTakeover,
+                ..
+            }
+        ),
+        "service grant requires a running service"
+    );
+    if let Some(absent) = absent_takeover(location, &request, &origin)? {
+        permit.check_ownership()?;
+        // Serialize while the original existing-owner exclusion is still held.
+        return Ok(serde_json::to_value(&absent.receipt)?);
+    }
     location.prepare()?;
     let _owner = location.lock()?;
     let epoch = uuid::Uuid::new_v4().to_string();
     let mut store = Store::open(location, &epoch)?;
-    let mut order = ui_authority::Order::default();
-    let permit = authority.into_request(&mut order)?;
     // Native mode is checked before this path can create increasing authority.
     // Consume/recheck the original two-second permit immediately before commit.
     // Existing custody must be confirmed by its original recovery, not assumed
@@ -687,6 +704,77 @@ pub(super) fn offline_frontend(
         |_| Ok(()),
         || permit.check_ownership(),
     )?)?)
+}
+
+struct AbsentTakeover {
+    receipt: Receipt,
+    _owner: Option<platform::FileLock>,
+}
+/// No authority increase and no file/directory creation. Unknown retained state
+/// or a live but unreachable service never becomes an absence observation.
+fn absent_takeover(
+    location: &Location,
+    request: &Request,
+    origin: &Origin,
+) -> Result<Option<AbsentTakeover>> {
+    let owner = location.existing_lock()?;
+    let exists = |name: &str| -> Result<bool> {
+        match std::fs::symlink_metadata(location.root.join(name)) {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    };
+    if exists("state.sqlite3")? {
+        return Ok(None);
+    }
+    for name in [
+        "state.sqlite3-wal",
+        "state.sqlite3-shm",
+        "state.sqlite3-journal",
+        zerus_desktop_migration::HANDOFF_FILE,
+        "notification-host.lock",
+    ] {
+        ensure!(!exists(name)?, "ownership state is incomplete");
+    }
+    ensure!(
+        matches!(
+            request,
+            Request::DesktopOwnership {
+                action: Action::NativeTakeover,
+                journal: None,
+                revision: 0,
+                ..
+            }
+        ),
+        "original ownership state is missing"
+    );
+    ensure!(origin.current(), "native frontend changed");
+    let mut current = absent(&location.configuration);
+    current.state = State::Native;
+    current.request_id = Some(request.id().into());
+    current.identity_current = true;
+    let receipt = Receipt {
+        abi: wire::ABI.into(),
+        request_id: request.id().into(),
+        configuration: location.configuration.clone(),
+        journal: None,
+        revision: 0,
+        fingerprint: request.fingerprint(),
+        action: Action::NativeTakeover,
+        accepted: true,
+        durable: false,
+        outcome: Outcome::NativeAbsent,
+        current,
+    };
+    ensure!(
+        receipt.matches(request, &location.configuration) && receipt.native_ready(),
+        "invalid absent takeover receipt"
+    );
+    Ok(Some(AbsentTakeover {
+        receipt,
+        _owner: owner,
+    }))
 }
 
 #[cfg(test)]

@@ -367,7 +367,19 @@ elif args == ['desktop', 'frontend-request', '--json']:
     with socket.socket(socket.AF_UNIX) as stream:
         stream.settimeout(2)
         stream.connect(str(root / 'native-cache.sock'))
-        pid, uid, _ = struct.unpack('3i', stream.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        if sys.platform == 'darwin':
+            import ctypes
+            library = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+            peer = library.getpeereid
+            peer.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint)]
+            peer.restype = ctypes.c_int
+            uid_value, gid_value = ctypes.c_uint(), ctypes.c_uint()
+            assert peer(stream.fileno(), ctypes.byref(uid_value), ctypes.byref(gid_value)) == 0
+            # Darwin SDK sys/un.h: SOL_LOCAL=0, LOCAL_PEERPID=2.
+            pid = struct.unpack('i', stream.getsockopt(0, 2, 4))[0]
+            uid = uid_value.value
+        else:
+            pid, uid, _ = struct.unpack('3i', stream.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
         assert pid == os.getppid() and uid == os.getuid()
         stream.sendall(('desktop-ui-request-v1 ' + value['attempt'] + '\n').encode())
         reply = json.loads(stream.makefile('rb').readline(4097))

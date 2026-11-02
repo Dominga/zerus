@@ -13,6 +13,8 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::time::Duration;
 
+mod diagnostic;
+
 const MAX_TEXT: usize = 64 * 1024;
 const MAX_FILE: usize = 10 * 1024 * 1024;
 const MAX_TOTAL: usize = 20 * 1024 * 1024;
@@ -549,6 +551,15 @@ fn codex_status_row(plain: &str, model: Option<&str>) -> bool {
         })
 }
 
+fn codex_warning_footer(row: &str) -> bool {
+    let plain: String = styled_row(row).iter().map(|(ch, _)| ch).collect();
+    let Some(rest) = plain.trim().strip_prefix("⚠ ") else { return false; };
+    let Some((count, tail)) = rest.split_once(' ') else { return false; };
+    !count.is_empty() && count.len() <= 9 && count.bytes().all(|ch| ch.is_ascii_digit())
+        && count.parse::<u32>().is_ok_and(|value| value > 0)
+        && matches!(tail, "warning · f2 to view" | "warnings · f2 to view")
+}
+
 fn codex_footer_model(record: &Value) -> Option<&str> {
     if let Some(model) = record["model"].as_str().filter(|model| !model.is_empty()) {
         return Some(model);
@@ -657,7 +668,7 @@ fn composer_empty_for_model(agent: &str, screen: &str, cursor_x: usize, cursor_y
                 // model/path shape; drafts never retain that placeholder.
                 // Windows Codex prints `~\…` or a drive path (`shown_path`).
                 let single_line_footer = placeholder
-                    && lines[index + 1..].iter().all(|line| line.trim().is_empty())
+                    && lines[index + 1..].iter().all(|line| line.trim().is_empty() || codex_warning_footer(line))
                     && codex_status_row(&plain, model);
                 return input_background || single_line_footer
                     || lines.last().is_some_and(|line| {
@@ -672,6 +683,14 @@ fn composer_empty_for_model(agent: &str, screen: &str, cursor_x: usize, cursor_y
 }
 
 pub(super) fn checked_terminal(record: &Value, empty: bool) -> Result<()> {
+    terminal_check(record, empty, false)
+}
+
+fn checked_send_terminal(record: &Value) -> Result<()> {
+    terminal_check(record, true, true)
+}
+
+fn terminal_check(record: &Value, empty: bool, sending: bool) -> Result<()> {
     let pane = string(record, "pane");
     if !pane
         .strip_prefix('%')
@@ -680,13 +699,14 @@ pub(super) fn checked_terminal(record: &Value, empty: bool) -> Result<()> {
         return Err("invalid tracked pane".into());
     }
     let terminal = backend::current();
-    let state = terminal.input_state(&backend::InputClaim {
+    let claim = backend::InputClaim {
         pane,
         name: string(record, "name"),
         run_id: string(record, "run_id"),
         agent: string(record, "agent"),
         pid: record["pid"].as_u64(),
-    })?;
+    };
+    let state = terminal.input_state(&claim)?;
     if empty {
         let screen = terminal.capture(pane, backend::Capture::Styled)?;
         let screen = String::from_utf8_lossy(&screen);
@@ -698,13 +718,28 @@ pub(super) fn checked_terminal(record: &Value, empty: bool) -> Result<()> {
             .cursor_x
             .parse()
             .map_err(|_| "invalid terminal cursor")?;
-        if !composer_empty_for_model(
+        // A native redraw may move the composer between cursor and screen
+        // reads. Never type using coordinates from a different frame.
+        let stable = if sending && matches!(string(record, "agent"), "codex" | "claude") {
+            let after = terminal.input_state(&claim)?;
+            state.cursor_x == after.cursor_x && state.cursor_y == after.cursor_y
+        } else { true };
+        if !stable || !composer_empty_for_model(
             string(record, "agent"),
             &screen,
             cursor_x,
             cursor_y,
             codex_footer_model(record),
         ) {
+            if sending {
+                diagnostic::save(record, &screen, cursor_x, cursor_y, stable);
+                if matches!(string(record, "agent"), "codex" | "claude")
+                    && string(record, "activity") == "busy"
+                    && matches!(string(record, "phase"), "idle" | "working" | "tool" | "compacting")
+                {
+                    return Err("agent busy: terminal queue prompt is unrecognized or contains a draft; wait for the agent or open Terminal; nothing was submitted".into());
+                }
+            }
             return Err(DRAFT.into());
         }
     }
@@ -858,7 +893,7 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
     }
     let mut record = effort::apply_pending(name, checked_record(name, &request)?)?;
     if let Some(id) = recovery_id { recovery::check_submission(&record, id)?; }
-    checked_terminal(&record, true)?;
+    checked_send_terminal(&record)?;
     let attachments_root = root.join("attachments");
     private_dir(&attachments_root)?;
     let attachments = tempfile::Builder::new()
@@ -905,7 +940,7 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
     let cleanup = || terminal.discard(&buffer);
     // Recheck immediately before the first input byte. All concurrent hgs writes
     // share this lock; a crash/exit can still race the PTY, so receipts are durable.
-    if let Err(error) = checked_record(name, &request).and_then(|r| checked_terminal(&r, true)) {
+    if let Err(error) = checked_record(name, &request).and_then(|r| checked_send_terminal(&r)) {
         cleanup();
         return Err(error);
     }
@@ -1235,6 +1270,20 @@ mod tests {
             2
         ));
     }
+    #[test]
+    fn codex_warning_footer_does_not_turn_an_empty_queue_composer_into_a_draft() {
+        // Codex 0.166's separate warning row can occupy the shortcuts row.
+        let screen = "Working\n\n\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n  GPT-6.1-Sol default · /fixture\n    ⚠ \x1b[33m2 warnings\x1b[0m · \x1b[1mf2\x1b[0m to view";
+        assert!(composer_empty("codex", screen, 2, 2));
+        for row in ["⚠ 2 warnings · enter to approve", "⚠ 0 warnings · f2 to view", "⚠ 2 warnings · f2 to view draft", "unknown footer"] {
+            assert!(!composer_empty("codex", &screen.replace("    ⚠ \x1b[33m2 warnings\x1b[0m · \x1b[1mf2\x1b[0m to view", row), 2, 2));
+        }
+        for draft in ["", "my draft", "\n  another draft line"] {
+            assert!(!composer_empty("codex", &screen.replace("\x1b[2mAsk Codex to do anything\x1b[0m", draft), 2, 2));
+        }
+        assert!(!composer_empty("codex", screen, 3, 2));
+    }
+
     #[test]
     fn codex_ultra_composer_keeps_cursor_draft_and_footer_guards() {
         let screen = "\x1b[1m\x1b[38;2;186;130;255m»\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n  GPT-6.1-Sol ultra · /fixture\n  ? for shortcuts";

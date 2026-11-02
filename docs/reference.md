@@ -1278,6 +1278,14 @@ send. Saving failures are shown in the editor and retried locally; sending start
 only after its recovery snapshot has been saved.
 
 Delivery verifies the exact run, process, conversation and native input state.
+A busy Claude or Codex session can accept a message through its native queue
+when its empty composer is recognized. An unknown busy layout or a draft refuses
+with `agent busy` before submission; wait or inspect Terminal rather than typing
+through that refusal. Deliberate send refusals keep only the latest private
+`input_diagnostics/codex.json` or `claude.json` under the session state directory.
+Each sample is at most 16 KiB: cursor coordinates, bounded cursor-row text and
+structural metadata for at most eight nearby rows. Text from other rows and the
+attempted message is omitted. Listing sessions does not create samples.
 For Claude and Kimi messages ending in a literal backslash, the paste includes a
 final newline so the single Enter submits the unchanged message instead of
 activating the agent's backslash-Enter line continuation. This is verified

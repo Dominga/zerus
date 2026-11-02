@@ -73,6 +73,12 @@ impl AppState {
     ) {
         let _ = self.live.notification_controls.set(setup);
     }
+    pub(crate) fn set_retained_import_source(
+        &self,
+        inputs: crate::desktop_service::retained_import::Inputs,
+    ) {
+        let _ = self.live.retained_import_source.set(inputs);
+    }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     pub fn set_desktop_responder(&self, responder: Arc<zerus_client_core::desktop::Responder>) {
@@ -184,6 +190,8 @@ mod live {
         pub(super) desktop_responder: OnceLock<Arc<zerus_client_core::desktop::Responder>>,
         pub(super) pending_read_source: OnceLock<crate::actions::Actions>,
         pub(super) notification_controls: OnceLock<crate::desktop_notification_controls::Setup>,
+        pub(super) retained_import_source:
+            OnceLock<crate::desktop_service::retained_import::Inputs>,
         service_projections: Mutex<Vec<crate::desktop_service::Projection>>,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         service_activation: OnceLock<crate::desktop_service::activation::Sink>,
@@ -204,6 +212,7 @@ mod live {
                 creations: OnceLock::new(),
                 desktop_responder: OnceLock::new(),
                 pending_read_source: OnceLock::new(),
+                retained_import_source: OnceLock::new(),
                 service_projections: Mutex::new(Vec::new()),
                 notification_controls: OnceLock::new(),
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -422,6 +431,7 @@ mod live {
                     self.desktop_responder.get().cloned(),
                     crate::desktop_service::Observers {
                         notification_controls: self.notification_controls.get().cloned(),
+                        retained_sources: self.retained_import_source.get().cloned(),
                         projections: self
                             .service_projections
                             .lock()

@@ -255,6 +255,15 @@ impl Runtime {
         self.notifications.set_preferences(preferences);
         self.attention.set_foreground_until(foreground_until);
     }
+    pub fn publication_owner(
+        &self,
+        store: &Store,
+    ) -> Result<Option<Arc<super::notifications::preparation::Owner>>> {
+        if self.stopping || self.drained {
+            return Ok(None);
+        }
+        self.notifications.publication_owner(store)
+    }
     pub fn revocation_epoch(&self, fallback: &str) -> String {
         self.notifications
             .writer_epoch()

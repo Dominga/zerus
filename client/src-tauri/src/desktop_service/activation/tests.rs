@@ -189,6 +189,7 @@ fn start(
         Observers {
             projections: vec![],
             notification_controls: None,
+            retained_sources: None,
             activation: Some(Arc::new(move |delivery| {
                 tx.try_send(delivery).ok();
             })),

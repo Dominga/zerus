@@ -1,5 +1,9 @@
 //! Runs one [`Invocation`] and reports how it ended as an [`Exit`].
+#[cfg(any(windows, test))]
+mod hidden;
 pub(crate) mod startup;
+#[cfg(windows)]
+pub use hidden::{HiddenError, ProcessIdentity};
 
 use crate::actions::{Exit, Invocation};
 use std::io::{ErrorKind, Read, Write};
@@ -64,18 +68,20 @@ pub fn run_limited(
     limited(hgs, inv, parent_env, stdout_cap, Pipes::default())
 }
 
-/// Console-free Windows child for noninteractive system helpers. This changes
-/// only process creation: the same input, output, timeout and error rules apply.
+/// Console-free Windows helper with bounded termination cleanup. A pending
+/// original child remains retained and prevents another helper in this process;
+/// an error never proves physical exit or authorizes replay.
 #[cfg(windows)]
 pub fn run_hidden_limited(
     program: &Path,
     inv: &Invocation,
     parent_env: &[(&str, &str)],
     stdout_cap: usize,
-) -> Result<Exit, TooLarge> {
+) -> Result<Exit, HiddenError> {
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
-    limited(
+    let stop = hidden::State::admit()?;
+    let result = limited(
         program,
         inv,
         parent_env,
@@ -84,9 +90,11 @@ pub fn run_hidden_limited(
             spawn: Some(Box::new(|command| {
                 command.creation_flags(CREATE_NO_WINDOW).spawn()
             })),
+            hidden_stop: Some(stop.clone()),
             ..Pipes::default()
         },
-    )
+    );
+    stop.finish(result)
 }
 
 fn limited(
@@ -220,6 +228,14 @@ struct Pipes {
     retain_all: bool,
     stderr_cap: Option<usize>,
     child_exited: Option<Arc<AtomicBool>>,
+    #[cfg(any(windows, test))]
+    hidden_stop: Option<Arc<hidden::State>>,
+}
+
+struct StopContext {
+    exited: Option<Arc<AtomicBool>>,
+    #[cfg(any(windows, test))]
+    hidden: Option<Arc<hidden::State>>,
 }
 
 pub(crate) struct ChildCharge {
@@ -488,6 +504,11 @@ fn run_inner(
     cancel: Option<&AtomicBool>,
     pipes: Pipes,
 ) -> Result<Exit, Stopped> {
+    let stop_context = StopContext {
+        exited: pipes.child_exited.clone(),
+        #[cfg(any(windows, test))]
+        hidden: pipes.hidden_stop.clone(),
+    };
     let consumed = pipes.output.is_some();
     let retain_all = pipes.require_complete || pipes.retain_all;
     let strict_outputs = pipes.input.is_some() || consumed || pipes.require_complete;
@@ -530,7 +551,7 @@ fn run_inner(
             Exit::Abnormal {
                 stderr: "owned exchange requires all three pipes".into(),
             },
-            pipes.child_exited.as_deref(),
+            &stop_context,
         ));
     }
     let deadline = Instant::now() + inv.timeout;
@@ -621,13 +642,13 @@ fn run_inner(
             }
         }
         if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-            let _ = stop(child, Exit::TimedOut, pipes.child_exited.as_deref());
+            let _ = stop(child, Exit::TimedOut, &stop_context);
             drain(&done_rx);
             return Err(Stopped::Cancelled);
         }
         if over.load(Ordering::Relaxed) {
             // Ended for its output: the exit that gives is not reported.
-            let _ = stop(child, Exit::TimedOut, pipes.child_exited.as_deref());
+            let _ = stop(child, Exit::TimedOut, &stop_context);
             drain(&done_rx);
             return Err(too_large(&err));
         }
@@ -637,7 +658,7 @@ fn run_inner(
                 Exit::Abnormal {
                     stderr: "stdout decoder failed".into(),
                 },
-                pipes.child_exited.as_deref(),
+                &stop_context,
             );
             drain(&done_rx);
             return Ok(exit);
@@ -656,20 +677,16 @@ fn run_inner(
                     Exit::Abnormal {
                         stderr: error.to_string(),
                     },
-                    pipes.child_exited.as_deref(),
+                    &stop_context,
                 ))
             }
         }
         let now = Instant::now();
         if write_failed_until.is_some_and(|until| now >= until) {
-            return Ok(stop(
-                child,
-                Exit::WriteFailed,
-                pipes.child_exited.as_deref(),
-            ));
+            return Ok(stop(child, Exit::WriteFailed, &stop_context));
         }
         if now >= deadline {
-            let exit = stop(child, Exit::TimedOut, pipes.child_exited.as_deref());
+            let exit = stop(child, Exit::TimedOut, &stop_context);
             if consumed {
                 drain(&done_rx);
             }
@@ -769,10 +786,14 @@ fn drain(done: &Receiver<bool>) {
     }
 }
 
-fn stop(mut child: Child, exit: Exit, exited: Option<&AtomicBool>) -> Exit {
+fn stop(mut child: Child, exit: Exit, context: &StopContext) -> Exit {
+    #[cfg(any(windows, test))]
+    if let Some(state) = &context.hidden {
+        return state.stop(child, exit, context.exited.clone());
+    }
     let _ = child.kill();
     if child.wait().is_ok() {
-        if let Some(exited) = exited {
+        if let Some(exited) = &context.exited {
             exited.store(true, Ordering::Release);
         }
     }

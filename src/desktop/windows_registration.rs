@@ -84,10 +84,20 @@ fn exchange(operation: &str, plan: &Value) -> Result<Value> {
     let result =
         zerus_client_core::run::run_hidden_limited(&program, &invocation, &environment, CAP);
     trace.finish();
-    let result = result.map_err(|_| {
-        anyhow::anyhow!(
-            "desktop registration helper output exceeded its bound; inspect status before retrying"
-        )
+    let result = result.map_err(|error| {
+        use zerus_client_core::run::HiddenError;
+        match error {
+            HiddenError::OutputTooLarge(_) => anyhow::anyhow!(
+                "desktop registration helper output exceeded its bound; inspect status before retrying"
+            ),
+            HiddenError::TerminationPending { child } => anyhow::anyhow!(
+                "desktop registration helper termination is pending (original pid {}, creation FILETIME {:?}); outcome unavailable, preserve its identity and inspect before retrying",
+                child.pid, child.creation_filetime
+            ),
+            HiddenError::PreviousExchangePending { child } => anyhow::anyhow!(
+                "desktop registration previous helper is still unsettled ({child:?}); no new helper was started"
+            ),
+        }
     })?;
     let value = match result {
         Exit::Code {

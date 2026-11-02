@@ -81,6 +81,14 @@ Mac selection is supplied as the opaque native selection made off actor, and
 Linux takes an explicit Unix bus address. This component does not change the
 background registration, policy admission or client switch.
 
+Windows takes the selected service configuration and passes the same original
+owner resource to its in-process worker and native delegates. Restore retries
+retain the current page offset through its bounded FIFO. Finish waits for the
+worker's restored/ready acknowledgement, and stop waits for `try_join` plus
+native drain. The actor must continue polling original Closed callbacks through
+that join; a joined worker alone cannot settle the attachment. Native setup
+faults remain unavailable, and no registry repair occurs here.
+
 Before allowing discovery effects, attachment restores at most sixteen indexed
 candidates per turn, then waits for the platform's original restoration
 acknowledgement or ordered FIFO completion. A second fixed-highwater walk over
@@ -122,10 +130,17 @@ its original 30-second age for a newly authenticated receiver. Once a handoff is
 attempted, a disconnected/uncertain outcome is not replayed automatically; the
 next wait is a new read and another native click is a distinct event.
 
-The service's `Router::closed_frontend` consumes a fresh canonical instance
-observation made off actor. Only `Absent`, with no authenticated waiting
-receiver, can produce the opaque one-use `Launch` for the selected installed
-frontend mechanics. Unknown, live and legacy observations do not launch.
+The service's `Router::closed_frontend` checks a fresh canonical instance
+observation made off actor. Absence alone cannot authorize a launch: the Linux
+mechanics force service mode and would also freeze/import the native read store.
+Until the authenticated notification ownership handoff exists, this decision
+refuses without consuming the queued click or extending its original age.
+The handoff must durably record a SERVICE-MODE frontend's grant for the exact
+configuration and selected frontend build/identity; revoke, rollback and native
+notification takeover end that grant. Missing, unknown or mismatched grants
+refuse. This is ownership state, not a separate mode preference. Unknown, live
+and legacy observations also do not launch. A future admitted decision supplies
+the opaque one-use `Launch` to the selected installed frontend mechanics.
 Linux owns the exact-target GUI consumer and launch implementation: the Wayland
 token goes only into that child environment as `XDG_ACTIVATION_TOKEN`, never
 process-global state, argv or disk. The parent lifecycle still owns callback

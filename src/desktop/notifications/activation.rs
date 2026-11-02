@@ -155,25 +155,28 @@ impl Router {
         }
         wait.queue.close();
     }
-    /// Called with a fresh canonical instance probe made off actor. Unknown or
-    /// legacy/live peers never establish UI absence and never trigger a launch.
+    /// Canonical absence is necessary but cannot grant a mode-changing launch.
+    /// The durable authenticated notification handoff is not implemented yet;
+    /// structural import evidence and the service environment cannot replace it.
     pub fn closed_frontend(
         &mut self,
-        store: &Store,
-        outbox: &Outbox,
+        _store: &Store,
+        _outbox: &Outbox,
         observation: &desktop::Observation,
     ) -> Result<Option<Launch>> {
         self.expire();
         if self.stopping
             || self.waiting.is_some()
             || !matches!(observation, desktop::Observation::Absent)
+            || self.pending.is_empty()
         {
             return Ok(None);
         }
-        Ok(self.next(store, outbox)?.map(|open| Launch {
-            open,
-            configuration: self.configuration.clone(),
-        }))
+        // The Linux mechanics force service mode, which also freezes/imports
+        // the native read store. Until a SERVICE-MODE frontend has granted
+        // notification ownership for this configuration and selected image,
+        // refuse without popping the known-unsent click or extending its age.
+        anyhow::bail!("authenticated notification ownership handoff required")
     }
     fn next(&mut self, store: &Store, outbox: &Outbox) -> Result<Option<Open>> {
         ensure!(

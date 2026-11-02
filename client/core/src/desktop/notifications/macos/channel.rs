@@ -162,11 +162,19 @@ mod tests {
         ));
         service.write_all(b"{").unwrap();
         drop(service);
-        assert!(matches!(channel.read_turn(), Ok(Input::Progress)));
-        assert!(matches!(
-            channel.read_turn(),
-            Err("partial_notification_frame")
-        ));
+        // Nonblocking reads may consume the byte and observe peer EOF on
+        // separate turns, with WouldBlock/Interrupted between them.
+        let until = Instant::now() + std::time::Duration::from_secs(2);
+        let eof = loop {
+            match channel.read_turn() {
+                Ok(Input::Pending | Input::Progress) => {
+                    assert!(Instant::now() < until, "partial-frame EOF not observed");
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                terminal => break terminal,
+            }
+        };
+        assert!(matches!(eof, Err("partial_notification_frame")));
         let (socket, mut service) = UnixStream::pair().unwrap();
         let mut channel = Channel::new(socket).unwrap();
         let writer = std::thread::spawn(move || {

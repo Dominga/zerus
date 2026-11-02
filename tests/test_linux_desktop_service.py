@@ -47,6 +47,7 @@ class Manager:
         self.holds = []
         self.after_action = None
         self.release_failure = False
+        self.during_probe = None
 
     def rearm(self):
         if self.held:
@@ -122,6 +123,8 @@ class Manager:
             self.test.assertEqual(args[1:], ["desktop", "status", "--json"])
             self.test.assertEqual(env["HGS_CONFIG_DIR"], self.test.scope["HGS_CONFIG_DIR"])
             self.test.assertEqual(env["HGS_STATE_DIR"], self.test.scope["HGS_STATE_DIR"])
+            if self.during_probe:
+                self.during_probe()
             return json.dumps({"lifecycle": self.lifecycle})
         self.test.assertEqual(args[:2], ["systemctl", "--user"])
         action = args[2]
@@ -213,6 +216,33 @@ class LinuxDesktopService(unittest.TestCase):
         self.assertEqual(record["transition"]["request_id"], next(iter(self.manager.revoke_receipts)))
         self.assertEqual(self.manager.grant["state"], "service")
 
+    def test_original_hold_survives_both_pending_and_ready_passive_probes(self):
+        self.instance().install()
+        self.instance("background").install()
+        observed = []
+
+        def probe():
+            if self.manager.lifecycle["mode"] != "passive":
+                return  # The pre-transition check still observes background.
+            self.assertTrue(self.manager.held, "rollback hold released before passive readiness")
+            self.assertEqual(len(self.manager.holds), 1)
+            original = self.manager.holds[0]
+            self.assertFalse(original.finished)
+            self.assertFalse(self.manager.rearm())
+            observed.append(original)
+            self.manager.lifecycle["ipc_ready"] = len(observed) > 1
+
+        self.manager.during_probe = probe
+        self.instance("passive").install()
+        self.manager.during_probe = None
+        self.assertEqual(observed, [self.manager.holds[0]] * 2)
+        self.assertTrue(observed[0].finished)
+        self.assertFalse(self.manager.held)
+        status = self.instance().status()
+        self.assertEqual(status["running_mode"], "passive")
+        self.assertFalse(status["pending_restart"])
+        self.assertIsNone(status["transition"])
+
     def test_lost_original_hold_admits_no_manager_steps_or_transition_completion(self):
         self.instance().install()
         self.instance("background").install()
@@ -283,6 +313,27 @@ class LinuxDesktopService(unittest.TestCase):
         self.assertEqual(value.record_path.read_bytes(), raw)
         self.assertEqual(self.destination.read_bytes(), unit)
         self.assertFalse(any("revoke" in argv for argv, _ in self.manager.calls))
+
+    def test_cancellation_before_the_original_revoke_keeps_the_existing_service_grant(self):
+        self.instance().install()
+        self.instance("background").install()
+        value = self.instance()
+        record = value.ownership()
+        request = str(uuid.uuid4())
+        record["transition"] = {"target": "passive", "request_id": request}
+        value.save(record)  # The helper stopped before offering any revoke.
+        unit, grant = self.destination.read_bytes(), copy.deepcopy(self.manager.grant)
+        self.manager.calls.clear()
+        value.cancel_rollback(request)
+        self.assertEqual(self.manager.actions(), [])
+        self.assertFalse(any("revoke" in argv for argv, _ in self.manager.calls))
+        self.assertEqual(self.manager.revoke_receipts, {})
+        self.assertEqual(self.manager.grant, grant)
+        self.assertEqual(self.destination.read_bytes(), unit)
+        saved = value.ownership()
+        self.assertNotIn("transition", saved)
+        self.assertEqual(saved["mode"], "background")
+        self.assertEqual(saved["last_cancelled_rollback_request_id"], request)
 
     def test_lost_hold_after_manager_result_stops_before_the_next_manager_step(self):
         self.instance().install()

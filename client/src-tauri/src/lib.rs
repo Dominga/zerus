@@ -173,6 +173,10 @@ pub struct Startup {
     pub identity: identity::Identity,
     /// Started with `--sessions`, or a build that opens its window by default.
     pub opens_sessions: bool,
+    #[cfg(all(feature = "live", target_os = "linux"))]
+    navigation: Option<zerus_client_core::desktop::activation::Target>,
+    #[cfg(all(feature = "live", target_os = "linux"))]
+    activation_token: Option<String>,
     /// The claimed single-instance socket and the activations it receives.
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     pub instance: Option<instance::Claimed>,
@@ -251,6 +255,10 @@ pub fn run() {
     if let Some(hgs) = &options.hgs {
         std::env::set_var("ZERUS_CLIENT_HGS", hgs);
     }
+    // Consume the new process's startup token before any worker can inherit it.
+    // Instance forwarding carries navigation only, never a notification token.
+    #[cfg(all(feature = "live", target_os = "linux"))]
+    let activation_token = cli::take_activation_token(options.target.is_some());
     let identity = identity::current(&context.config().identifier);
     let opens_sessions = options.opens_sessions(identity.is_switch());
     #[cfg(all(
@@ -269,6 +277,12 @@ pub fn run() {
             } else {
                 instance::Activation::Show
             };
+            #[cfg(all(feature = "live", target_os = "linux"))]
+            let activation = options
+                .target
+                .clone()
+                .map(instance::Activation::Navigation)
+                .unwrap_or(activation);
             #[cfg(all(
                 feature = "live",
                 any(target_os = "linux", target_os = "macos", windows)
@@ -334,6 +348,10 @@ pub fn run() {
         Startup {
             identity,
             opens_sessions,
+            #[cfg(all(feature = "live", target_os = "linux"))]
+            navigation: options.target,
+            #[cfg(all(feature = "live", target_os = "linux"))]
+            activation_token,
             #[cfg(any(target_os = "linux", target_os = "macos", windows))]
             instance,
             #[cfg(all(
@@ -361,6 +379,10 @@ pub(crate) fn data_dir(app: &tauri::AppHandle) -> std::path::PathBuf {
 fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
     let identity = startup.identity;
     let opens_sessions = startup.opens_sessions;
+    #[cfg(all(feature = "live", target_os = "linux"))]
+    let navigation = startup.navigation;
+    #[cfg(all(feature = "live", target_os = "linux"))]
+    let activation_token = startup.activation_token;
     #[cfg(all(feature = "live", any(target_os = "linux", target_os = "macos")))]
     let desktop_bootstrap = startup.desktop_bootstrap;
     #[cfg(all(feature = "live", any(target_os = "linux", target_os = "macos")))]
@@ -822,6 +844,11 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                         })) as desk::LoadAttention
                     });
                     desk::start(app.handle(), &pump, dir.clone(), desk::load_linux_mode(&dir, conf.as_deref()), attention);
+                    if let Some(target) = navigation {
+                        if let Some(sender) = desk::sender(app.handle()) {
+                            let _ = sender.send(desk::DeskInput::Navigate { target, activation: activation_token });
+                        }
+                    }
                     if desktop_service::mode() {
                         if let Some(sender) = desk::sender(app.handle()) {
                             app.state::<commands::AppState>().register_service_activation(std::sync::Arc::new(move |delivery| {
@@ -1012,7 +1039,16 @@ fn forward_activations(
         .name("zerus-client-activations".into())
         .spawn(move || {
             for activation in activations {
-                eprintln!("zerus-client: activation {activation:?}");
+                #[cfg(all(feature = "live", target_os = "linux"))]
+                if let instance::Activation::Navigation(target) = activation {
+                    if let Some(sender) = desk::sender(&app) {
+                        let _ = sender.send(desk::DeskInput::Navigate {
+                            target,
+                            activation: None,
+                        });
+                    }
+                    continue;
+                }
                 if activation == instance::Activation::Sessions {
                     let target = app.clone();
                     let _ = app.run_on_main_thread(move || {

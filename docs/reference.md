@@ -4252,9 +4252,12 @@ change is followed by a local persistence failure, the scoped action remains
 uncertain; inspect the retained bindings before choosing another action. An
 uncertain receipt never authorizes another native rename automatically.
 
-For a current journal-backed main session, explicit `hgs inspect NAME` or
+For a current journal-backed main session, `hgs inspect NAME --read-observation` or
 `hgs [@configured-alias] inspect '<reference>'` also returns the host's **raw**
-`read` object (or `null`) and `read_observation`. This does not enrich the mark
+`read` object (or `null`) and `read_observation`. Direct-name inspection without
+`--read-observation`, including Activity/Processes polling with `--after` or
+`--skip-processes`, does not invoke this reader or add either field. The
+reference route opts in automatically. This does not enrich the mark
 with the current reply or acknowledge anything. Check `read_observation.complete`
 and `freshness: "observed"`, then match both its `target` and the inspection's
 current name/run/conversation to the intended target. A portable reference may

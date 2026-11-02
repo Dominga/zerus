@@ -920,14 +920,16 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
         "inspect" => {
             let name = args
                 .first()
-                .ok_or("usage: hgs inspect <session> [--archive ID] [--after cursor] [--skip-processes]")?;
+                .ok_or("usage: hgs inspect <session> [--archive ID] [--after cursor] [--skip-processes] [--read-observation]")?;
             let mut after = 0;
             let mut archive_id = None;
             let mut agent_id = None;
             let mut include_processes = true;
+            let mut read_observation = false;
             let mut index = 1;
             while index < args.len() {
                 if args[index] == "--skip-processes" { include_processes = false; index += 1; continue; }
+                if args[index] == "--read-observation" { read_observation = true; index += 1; continue; }
                 let value = args.get(index + 1).ok_or("missing inspect option value")?;
                 match args[index].as_str() {
                     "--after" => {
@@ -949,7 +951,7 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
             } else {
                 journal::inspection(name, after, archive_id, include_processes)?
             };
-            if archive_id.is_none() && agent_id.is_none() {
+            if read_observation && archive_id.is_none() && agent_id.is_none() {
                 read_marks::observation::enrich(&mut output);
             }
             println!("{output}");

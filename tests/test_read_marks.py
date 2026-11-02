@@ -65,8 +65,9 @@ class ReadMarks(unittest.TestCase):
         uri = json.loads(uri_result.stdout)['uri']
         path = self.state / 'read-marks.json'
         original = path.read_bytes()
-        for target in (self.name, uri):
-            result = subprocess.run([str(HGS), 'inspect', target], env=self.env,
+        for target in ([self.name, '--read-observation'],
+                       [self.name, '--after', '0', '--skip-processes', '--read-observation'], [uri]):
+            result = subprocess.run([str(HGS), 'inspect', *target], env=self.env,
                                     text=True, capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
             row = json.loads(result.stdout)
@@ -84,7 +85,7 @@ class ReadMarks(unittest.TestCase):
     def test_inspection_distinguishes_absent_from_invalid_raw_mark_source(self):
         self.record_path.chmod(0o600)
         def inspect():
-            result = subprocess.run([str(HGS), 'inspect', self.name], env=self.env,
+            result = subprocess.run([str(HGS), 'inspect', self.name, '--read-observation'], env=self.env,
                                     text=True, capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
             return json.loads(result.stdout)
@@ -100,6 +101,30 @@ class ReadMarks(unittest.TestCase):
         self.assertFalse(row['read_observation']['complete'])
         self.assertEqual(row['read_observation']['freshness'], 'unknown')
         self.assertEqual(path.read_text(), '{broken source')
+
+    def test_activity_and_process_poll_shapes_never_include_read_observation(self):
+        self.record_path.chmod(0o600)
+        reply = self.reply(100.5)
+        self.mark(reply_id=reply)
+        path = self.state / 'read-marks.json'
+        marks = json.loads(path.read_text())
+        # A shared store sized like a real fleet must not enter a detail poll.
+        marks['sessions'].update({f'unrelated-{i}': {self.conversation_id: {
+            'conversation_id': self.conversation_id, 'reply_id': 'unrelated-reply',
+            'attention_signature': None, 'at': 1.0}} for i in range(20000)})
+        path.write_text(json.dumps(marks))
+        original = path.read_bytes()
+        for args in ([], ['--after', '0', '--skip-processes'],
+                     ['--after', '1', '--skip-processes'],
+                     ['--after', str(2**63 - 1)]):
+            with self.subTest(args=args):
+                result = subprocess.run([str(HGS), 'inspect', self.name, *args], env=self.env,
+                                        text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                row = json.loads(result.stdout)
+                self.assertNotIn('read', row)
+                self.assertNotIn('read_observation', row)
+        self.assertEqual(path.read_bytes(), original)
 
     def test_signature_ignores_status_updates_and_changes_for_a_new_request(self):
         self.waiting()

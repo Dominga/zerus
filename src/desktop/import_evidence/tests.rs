@@ -33,7 +33,7 @@ fn item(output: &mut Vec<u8>, header: Value, body: &[u8]) {
     output.extend(body);
     output.push(b'\n');
 }
-fn bundle(change: &str) -> Vec<u8> {
+pub(super) fn bundle(change: &str) -> Vec<u8> {
     let mut output = serde_json::to_vec(&start()).unwrap();
     output.push(b'\n');
     let snapshot: &[u8] = if change == "json" {

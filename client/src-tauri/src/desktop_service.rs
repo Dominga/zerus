@@ -409,16 +409,15 @@ impl Service {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone();
-            let result = match (relay, configuration, cancel) {
+            match (relay, configuration, cancel) {
                 (Some(relay), Some(configuration), Some(cancel)) => {
                     retained_import::before_grant(&self.shared, relay, configuration, cancel, true)
                         .await
                 }
-                _ => Err("retained_import_connection_unavailable"),
-            };
-            if let Err(code) = result {
-                self.shared.unavailable(code);
-                return self.shared.ownership.view();
+                _ => retained_import::record_error(
+                    &self.shared,
+                    "retained_import_connection_unavailable",
+                ),
             }
         }
         let view = self
@@ -434,7 +433,8 @@ impl Service {
             .publish_ownership(crate::desktop_ownership::Phase::Rearm)
             .await;
         if self.shared.ownership.granted() {
-            self.retry();
+            // Rearm already made its one explicit report attempt above.
+            self.retry_connection();
         }
         view
     }
@@ -455,6 +455,12 @@ impl Service {
             .clone()
     }
     pub fn retry(&self) {
+        if let Some(report) = &self.shared.retained_import {
+            report.request_retry();
+        }
+        self.retry_connection();
+    }
+    fn retry_connection(&self) {
         if self.shared.stopped.load(Ordering::Acquire) {
             return;
         }
@@ -734,6 +740,12 @@ impl Drop for Service {
 }
 
 impl Shared {
+    fn publish_retained_import(&self) {
+        let report = self.retained_import.as_ref().map(|report| report.status());
+        let mut snapshot = self.snapshot.lock().unwrap_or_else(PoisonError::into_inner);
+        snapshot.retained_source_import = report;
+        self.pump.service(snapshot.clone());
+    }
     fn observe_peer_choices(&self, state: &service::State, value: &Value) {
         // A runtime draining its sources is not a peer-membership removal.
         // The parser already checked configuration/epoch and the <=64 roster.
@@ -1179,7 +1191,10 @@ async fn connection(
     }
     *shared.relay.lock().unwrap_or_else(PoisonError::into_inner) = Some(relay.clone());
     let configuration = preflight(&shared, stop.clone()).await?;
-    let explicit = matches!(*control.borrow(), Control::Retry(n) if n > 0);
+    let explicit = shared
+        .retained_import
+        .as_ref()
+        .is_some_and(|report| report.take_retry());
     retained_import::before_grant(
         &shared,
         relay.clone(),
@@ -1187,7 +1202,7 @@ async fn connection(
         stop.clone(),
         explicit,
     )
-    .await?;
+    .await;
     if shared.ownership_supported.load(Ordering::Acquire) {
         shared
             .ownership

@@ -98,6 +98,7 @@ impl Record {
             | (Phase::Reserved, Phase::Reserved)
             | (Phase::Published, Phase::Published)
             | (Phase::Quarantined, Phase::Quarantined)
+            | (Phase::NotCommitted, Phase::Quarantined)
             | (Phase::NotCommitted, Phase::NotCommitted) => self.attempt == old.attempt,
             _ => false,
         }

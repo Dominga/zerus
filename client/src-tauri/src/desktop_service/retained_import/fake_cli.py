@@ -2,10 +2,11 @@
 """Private Staged-report fixture. No service, agent, source mutation or effects."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 
-root = Path(sys.argv[0]).resolve().parent
+root = Path(os.path.abspath(__file__)).parent
 args = sys.argv[1:]
 configuration = 'a' * 64
 if args == ['--help']:
@@ -13,6 +14,8 @@ if args == ['--help']:
 elif args == ['desktop', 'status', '--json']:
     print(json.dumps({'abi': 'desktop-v1', 'configuration': configuration}))
 elif args[:2] == ['desktop', 'import-status']:
+    if (root / 'mode').read_text() == 'lookup_error':
+        raise SystemExit(1)
     target = args[-1]
     path = root / 'committed.json'
     receipt = json.loads(path.read_text()) if path.exists() else None

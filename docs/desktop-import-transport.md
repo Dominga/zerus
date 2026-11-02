@@ -135,7 +135,9 @@ cross-target type checking.
 
 The live switch identity's service connection captures managed sources off the
 GUI thread after paired-CLI selection and configuration preflight, before the
-startup Grant. Explicit Resume uses the same ordering. This first report slice
+startup Grant. Explicit Resume uses the same ordering. The report is best-effort:
+busy, quarantined, unavailable and unconfirmed outcomes are recorded separately
+and never prevent Grant, watch, catalog or normal preference edits. This first report slice
 uses the existing Qt family decoders and the current local Settings bytes: 17
 Qt families on Linux (16 on macOS), plus three paired Next policy/recovery
 families, with at most 64 MiB, 1,024 snapshots and 1,024 pages. It is a private
@@ -145,7 +147,9 @@ The Unix source adapter retains the original private, single-link Qt file and
 Settings file identities and raw hashes. Mac defaults are exported read-only
 through the fixed owned helper and re-exported before the final record; an
 uncertain export never falls back to a plist. The local Settings writer pauses
-new mutations during its original capture. This is source-specific exclusion,
+new mutations during its original capture. The caller releases its capture after
+the attempt; original child/pipe clones still retain it until actual completion.
+This is source-specific exclusion,
 not proof that Qt or the whole desktop drained. Every helper, writer and pipe
 retains its original resources through actual completion. Shutdown reports
 unconfirmed work rather than declaring an outstanding resource group drained.
@@ -161,12 +165,21 @@ re-seeding changed Qt state. Unknown attempts perform only original-ID lookup.
 Only an exact known pre-reservation negative admits an explicit same-record
 retry (at most 16 attempts). Invalid, changed or unsupported sources are kept
 for review without a final manifest; no source is truncated, cleared or
-rewritten. Service status carries body-free `retained_source_import` progress.
+rewritten. Service status carries body-free `retained_source_import` progress,
+and the GUI shows deferred and review-needed reports independently of connection
+readiness. Normal preference edits remain available after completed failures;
+a later explicit known-negative retry must freshly capture the same source bytes.
 
 This report does not replace the existing frozen pending-read capture or its
 separate authenticated safe-passive page transfer. That transfer may wait for
 the connected service and need not complete before Grant. If a prior runtime
-holds the handoff lock, report publication stays blocked; the caller never
-silently revokes it or treats status as permission. Remaining interim operation,
+holds the handoff lock (including a rollback hold), report publication is durably
+deferred with `retained_import_handoff_busy` while the connection continues. It
+does not post through the in-process lock owner or retry automatically. A later
+explicit Retry may publish the same record only after an independently settled
+handoff/revoke has freed that lock and same-source checks pass. The caller never
+silently revokes a runtime or treats status as permission. Rearm makes at most
+one report attempt; its following reconnect is not another report retry.
+Remaining interim operation,
 draft/cache source adapters and actual migration/upgrade acceptance stay open
 under G3.

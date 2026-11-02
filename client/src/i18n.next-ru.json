@@ -592,5 +592,8 @@
   "winget: %1": "winget: %1",
   "worktree %1": "рабочее дерево %1",
   "~%1 GB estimated": "~%1 ГБ по оценке",
-  "✓ %1": "✓ %1"
+  "✓ %1": "✓ %1",
+  "Preparing the migration report. Your sessions remain available.": "Готовим отчёт о переносе. Сессии остаются доступны.",
+  "The migration report is deferred while background work is running.": "Отчёт о переносе отложен, пока выполняется фоновая работа.",
+  "The migration report needs review. Your sessions remain available.": "Отчёт о переносе требует проверки. Сессии остаются доступны."
 }

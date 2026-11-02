@@ -1,5 +1,6 @@
-//! One native Qt/Settings report before the first service Grant. Managed paths
-//! and original source handles come from setup, never a webview request.
+//! One best-effort native Qt/Settings report before the first service Grant.
+//! Its result never gates Grant or the read connection. Managed paths and
+//! original source handles come from setup, never a webview request.
 use super::*;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use zerus_client_core::{
@@ -74,6 +75,7 @@ struct State {
     running: bool,
     not_applicable: bool,
     code: &'static str,
+    retry_requested: bool,
 }
 pub(super) struct Report {
     inputs: Inputs,
@@ -100,6 +102,12 @@ impl Report {
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
+    pub fn request_retry(&self) {
+        self.state().retry_requested = true;
+    }
+    pub fn take_retry(&self) -> bool {
+        std::mem::take(&mut self.state().retry_requested)
+    }
     pub fn status(&self) -> Value {
         let state = self.state();
         json!({"scope":SCOPE,"running":state.running,"code":state.code,
@@ -124,6 +132,22 @@ impl Report {
         Ok(record)
     }
     fn run(
+        self: &Arc<Self>,
+        relay: Arc<zerus_client_core::desktop::relay::Connection>,
+        configuration: String,
+        stop: Arc<AtomicBool>,
+        explicit: bool,
+        work: Arc<dyn Send + Sync>,
+    ) -> Result<(), &'static str> {
+        let result = self.run_inner(relay, configuration, stop, explicit, work);
+        // Do not leave ordinary preferences frozen by a report outcome. Every
+        // original child/pipe still owns its own capture clone until it really
+        // finishes. The journal keeps the original identity and receipt; an
+        // explicit known-negative retry takes a fresh same-source capture.
+        self.state().captured = None;
+        result
+    }
+    fn run_inner(
         self: &Arc<Self>,
         relay: Arc<zerus_client_core::desktop::relay::Connection>,
         configuration: String,
@@ -251,6 +275,11 @@ impl Report {
             if record.qt_sha256 != captured.qt.snapshot().sha256
                 || record.settings_sha256 != captured.settings.sha256()
             {
+                self.save(&journal, |record| {
+                    record.phase = Phase::Quarantined;
+                    Ok(())
+                })
+                .map_err(|_| "retained_import_record_unavailable")?;
                 return Err("retained_import_source_changed");
             }
         } else {
@@ -365,6 +394,28 @@ pub(super) async fn before_grant(
     configuration: String,
     stop: Arc<AtomicBool>,
     explicit: bool,
+) {
+    let result = attempt(shared, relay, configuration, stop, explicit).await;
+    if let Err(code) = result {
+        record_error(shared, code);
+    } else {
+        shared.publish_retained_import();
+    }
+}
+
+pub(super) fn record_error(shared: &Shared, code: &'static str) {
+    if let Some(report) = &shared.retained_import {
+        report.state().code = code;
+    }
+    shared.publish_retained_import();
+}
+
+async fn attempt(
+    shared: &Arc<Shared>,
+    relay: Arc<zerus_client_core::desktop::relay::Connection>,
+    configuration: String,
+    stop: Arc<AtomicBool>,
+    explicit: bool,
 ) -> Result<(), &'static str> {
     let Some(report) = shared.retained_import.clone() else {
         return Ok(());
@@ -381,6 +432,7 @@ pub(super) async fn before_grant(
         state.running = true;
         state.code = "retained_import_running";
     }
+    shared.publish_retained_import();
     let worker = report.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         worker.run(relay, configuration, stop, explicit, Arc::new(charge))

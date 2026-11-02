@@ -83,6 +83,11 @@ if args == ['--help']:
         print('Desktop frontend request ABI: desktop-ui-request-v1')
     if config.get('ownership_abi', True):
         print('Desktop ownership ABI: ' + abi)
+    if config.get('retained_import_abi'):
+        print('Desktop import ABI: desktop-import-v1')
+elif config.get('retained_import_abi') and args[:2] in [
+        ['desktop', 'import-evidence'], ['desktop', 'import-status']]:
+    exec(compile((root / 'import-fixture.py').read_text(), 'import-fixture.py', 'exec'))
 elif args == ['desktop', 'ownership-status', '--json']:
     print(json.dumps(status()))
 elif args == ['desktop', 'frontend-request', '--json']:

@@ -379,5 +379,10 @@ pub fn status(location: &Location, id: &str) -> Result<Value> {
     )
 }
 
+#[cfg(all(test, target_os = "linux"))]
+pub(in crate::desktop) fn publish_fixture_for_test(location: &Location) -> Result<Value> {
+    publish(location, &mut &tests::bundle("")[..])
+}
+
 #[cfg(test)]
 mod tests;

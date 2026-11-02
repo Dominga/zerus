@@ -40,6 +40,8 @@ def main():
     private_display()
     x = c.CDLL("libX11.so.6")
     xt = c.CDLL("libXtst.so.6")
+    if not x.XInitThreads():
+        raise RuntimeError("private Xlib thread initialization failed")
     x.XOpenDisplay.argtypes = [c.c_char_p]
     x.XOpenDisplay.restype = c.c_void_p
     x.XFlush.argtypes = [c.c_void_p]

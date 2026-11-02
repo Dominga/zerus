@@ -131,13 +131,14 @@ fn only_original_live_mapping_reaches_the_authenticated_wait_and_never_replays()
     // Recheck withdrawal at handoff, not only at callback admission.
     router.offer(&f.store, &f.outbox, f.value.clone()).unwrap();
     ledger::withdraw(&mut f.store.db, &f.intent, 1).unwrap();
-    assert!(router
-        .closed_frontend(&f.store, &f.outbox, &desktop::Observation::Absent)
-        .unwrap()
-        .is_none());
+    let (_, withdrawn) = f.wait(&mut router);
+    router.waiting.as_mut().unwrap().until = Instant::now();
+    router.poll(&f.store, Some(&f.outbox), &mut seq);
+    let frame: Value = serde_json::from_slice(&withdrawn.take().unwrap()).unwrap();
+    assert!(frame["value"]["activation"].is_null());
 }
 #[test]
-fn unknown_frontend_never_launches_and_absence_spends_only_one_exact_target() {
+fn canonical_absence_without_an_ownership_grant_never_switches_mode_or_spends_the_click() {
     let f = Fixture::new();
     let mut router = f.router();
     router.offer(&f.store, &f.outbox, f.value.clone()).unwrap();
@@ -150,15 +151,28 @@ fn unknown_frontend_never_launches_and_absence_spends_only_one_exact_target() {
             .unwrap()
             .is_none());
     }
-    let launch = router
-        .closed_frontend(&f.store, &f.outbox, &desktop::Observation::Absent)
-        .unwrap()
-        .unwrap();
-    assert_eq!(launch.open().post_request_id, f.value.request_id);
-    assert!(router
-        .closed_frontend(&f.store, &f.outbox, &desktop::Observation::Absent)
-        .unwrap()
-        .is_none());
+    let original_id = router.pending[0].id.clone();
+    let original_until = router.pending[0].until;
+    for _ in 0..2 {
+        assert!(router
+            .closed_frontend(&f.store, &f.outbox, &desktop::Observation::Absent)
+            .is_err());
+        assert_eq!(router.pending.len(), 1);
+        assert_eq!(router.pending[0].id, original_id);
+        assert_eq!(router.pending[0].until, original_until);
+    }
+    // A legitimate service-mode frontend may still receive the original event
+    // through its authenticated wait; failure to launch was definitely unsent.
+    let (_, queue) = f.wait(&mut router);
+    let mut seq = 0;
+    router.poll(&f.store, Some(&f.outbox), &mut seq);
+    let frame: Value = serde_json::from_slice(&queue.take().unwrap()).unwrap();
+    assert_eq!(frame["value"]["activation"]["activation_id"], original_id);
+    assert_eq!(
+        frame["value"]["activation"]["post_request_id"],
+        f.value.request_id
+    );
+    assert!(router.pending.is_empty());
 }
 #[test]
 fn queue_wait_lifetime_stop_and_configuration_are_bounded() {

@@ -1679,6 +1679,7 @@
   "Portable Windows build %1. Download newer builds from the release page.": "Переносимая сборка для Windows %1. Новые сборки загружайте со страницы выпуска.",
   "Portable Windows build: there is no self-update, and nightly builds of the same version cannot be compared. The release page has the newest Windows zip.": "Переносимая сборка для Windows: самообновления нет, а ночные сборки одной версии нельзя сравнить. Новейший ZIP-архив для Windows есть на странице выпуска.",
   "Portable Windows build: there is no self-update, and no newer stable release is published.": "Переносимая сборка для Windows: самообновления нет, а более нового стабильного выпуска нет.",
+  "Preparing the migration report. Your sessions remain available.": "Готовим отчёт о переносе. Сессии остаются доступны.",
   "Preparing the session in the background": "Сессия готовится в фоне",
   "Preset colors": "Готовые цвета",
   "Press Go to open this path, or New folder to create it.": "Нажмите «Перейти», чтобы открыть этот путь, или «Новая папка», чтобы создать его.",
@@ -2446,6 +2447,8 @@
   "The login item is updated. Drafts are saved; agents keep running.": "Объект входа обновлён. Черновики сохранены; агенты продолжают работать.",
   "The login item was not changed.\n\n%1": "Объект входа не изменён.\n\n%1",
   "The machine appearance could not be saved. Try again.": "Не удалось сохранить внешний вид компьютера. Попробуйте ещё раз.",
+  "The migration report is deferred while background work is running.": "Отчёт о переносе отложен, пока выполняется фоновая работа.",
+  "The migration report needs review. Your sessions remain available.": "Отчёт о переносе требует проверки. Сессии остаются доступны.",
   "The native UI renderer stopped. Use Reload to reopen it.": "Собственный рендеринг пользовательского интерфейса остановлен. Используйте «Обновить», чтобы снова открыть его.",
   "The native UI returned an invalid connection address.": "Собственный пользовательский интерфейс вернул неверный адрес подключения.",
   "The native app accepted the recognized text. Queue status, when present, is shown alongside this recording. This does not confirm model delivery, reading or completion.": "Приложение агента приняло распознанный текст. Состояние очереди, если оно есть, показано рядом с этой записью. Это не подтверждает доставку до модели, прочтение или выполнение.",
@@ -2909,8 +2912,5 @@
   "↓  Jump to latest": "↓  Перейти к последней активности",
   "▸ Show report": "▸ Показать отчет",
   "▾ Hide report": "▾ Скрыть отчет",
-  "✓ %1": "✓ %1",
-  "Preparing the migration report. Your sessions remain available.": "Готовим отчёт о переносе. Сессии остаются доступны.",
-  "The migration report is deferred while background work is running.": "Отчёт о переносе отложен, пока выполняется фоновая работа.",
-  "The migration report needs review. Your sessions remain available.": "Отчёт о переносе требует проверки. Сессии остаются доступны."
+  "✓ %1": "✓ %1"
 }

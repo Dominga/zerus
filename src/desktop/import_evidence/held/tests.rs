@@ -84,6 +84,44 @@ fn owned_stage_is_revalidated_then_published_once_without_releasing_the_lock() {
 }
 
 #[test]
+fn server_claim_and_commit_work_with_the_original_cli_directory_handle_still_open() {
+    let f = Fixture::new();
+    let import = id();
+    let input = staged(&f.location, &import);
+    let expected = input.receipt();
+    // This is route()'s actual CLI handle, including FILE_SHARE_DELETE on
+    // Windows. finalize() also keeps its own original directory handle open
+    // across the production custody rename, before opening Replay's children.
+    let cli_pin = directory_handle(input.stage.path()).unwrap();
+    let (reference, original) = transfer(input);
+    let lock = f.location.handoff_lock().unwrap();
+    let result = finalize(
+        &f.location,
+        &reference,
+        &lock,
+        &AtomicBool::new(false),
+        |owned| {
+            assert!(!original.exists());
+            assert_eq!(key(&cli_pin).unwrap(), reference.directory);
+            assert_eq!(
+                key(&directory_handle(owned).unwrap()).unwrap(),
+                reference.directory
+            );
+            assert!(owned.join("record-v1.json").is_file());
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(result, expected);
+    assert_eq!(key(&cli_pin).unwrap(), reference.directory);
+    assert_eq!(
+        status(&f.location, &import).unwrap()["record_present"],
+        true
+    );
+    assert!(f.location.handoff_lock().is_err());
+}
+
+#[test]
 fn malformed_replaced_linked_and_over_limit_stages_never_reserve_a_uuid() {
     for change in [
         "directory",
@@ -223,8 +261,28 @@ fn replay_refuses_same_byte_file_replacement_directory_replacement_and_expired_w
             fs::rename(&leaf, f._temp.path().join("original-body")).unwrap();
             private_write(&leaf, &bytes).unwrap();
         } else {
-            fs::rename(&original, f._temp.path().join("original-directory")).unwrap();
-            directory(&original).unwrap();
+            let replaced = fs::rename(&original, f._temp.path().join("original-directory"));
+            #[cfg(windows)]
+            {
+                // Replay pins child directories as well as this root. Windows
+                // refuses replacing that tree while those handles are open;
+                // the OS refusal itself preserves the original input.
+                let error = replaced.expect_err("Windows must protect the pinned replay tree");
+                assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+                assert_eq!(
+                    key(&directory_handle(&original).unwrap()).unwrap(),
+                    reference.directory
+                );
+                let unchanged = stage(&f.location, &mut BufReader::new(replay)).unwrap();
+                assert_eq!(sha256(&unchanged.manifest), reference.record_sha256);
+                assert!(!f.location.root.join("imports").join(import).exists());
+                continue;
+            }
+            #[cfg(not(windows))]
+            {
+                replaced.unwrap();
+                directory(&original).unwrap();
+            }
         }
         assert!(
             stage(&f.location, &mut BufReader::new(replay)).is_err(),

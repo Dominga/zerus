@@ -33,7 +33,7 @@ upgrade route for live desktop checks. Do not install a test binary by hand.
 | [ ] Tray/lifecycle | Check panel icon, primary click, menu, background start and second-instance routing; closing windows keeps service duties, Quit flushes drafts and does not stop agents. | G4 `.66.6`, `.66.3.31` |
 | [ ] Terminal | Open an existing session and a folder terminal with spaces/non-ASCII paths; check exact argv, resize, paste and reattach after client exit. Never create a worktree by opening a dialog. | inventory “Terminal and process lifetime”; G7 `.66.2`, native terminal contracts |
 | [ ] Voice/video | Explicitly choose microphone/camera; record, preview, cancel and transcribe a short synthetic message. Hide/Escape stops capture, private draft survives exit, and an uncertain delivery is not resent. | G2 `.66.4.5`, inventory “Voice, video and speech providers” |
-| [ ] UI/durable parity | Exercise each inventory responsibility with its target owner: bounded Activity/archive/search/tasks pages, organization writes, creation/recovery, read marks and manual questions. Approval opt-in starts off; generic/agent callers cannot enable it. | G1–G4/G7; [#884](https://github.com/ufna/zerus/pull/884), `.66.3.32`, `.66.3.35`, `.66.3.38` |
+| [ ] UI/durable parity | Exercise each inventory responsibility with its target owner: bounded Activity/archive/search/tasks pages, organization writes, creation/recovery, read marks and manual questions. Use the [installed client cutover runbook](#installed-client-cutover-on-linux-and-macos) for service and intent cases. Approval opt-in starts off; generic/agent callers cannot enable it. | G1–G4/G7; [#884](https://github.com/ufna/zerus/pull/884), `.66.3.32`, `.66.3.35`, `.66.3.38` |
 | [ ] Qt rollback | Before removal, use the maintained previous-version rollback. Require settled desktop revoke/drain before Qt starts; missing/unknown revoke refuses. Verify the exact agents, drafts and original settings still exist; then return through the maintained Next route. | `.66.3.31`, `tray/update-installed.py`; desktop-u |
 
 Linux notification acceptance also requires the root service attachment
@@ -61,8 +61,237 @@ existing privacy identity, signature, installed path and one verified rollback c
 | [ ] Menu bar/lifecycle | Check icon/menu, reopen, Dock/menu-bar policy, second instance, Services/Hide/Show All and draft-safe Quit; agents and service remain independent. | G4 `.66.6`, `.66.3.31`, inventory native shell/menu rows |
 | [ ] Terminal | Open exact session/folder in the configured Terminal path, with quotes/spaces/non-ASCII; accept only the expected Apple Events consent. Check resize/paste and session survival after UI exit. | inventory Mac terminal rows; native terminal contracts |
 | [ ] Voice/video | Exercise real microphone/camera consent, short preview/transcription, cancel/hide and exit recovery. Check public privacy identity; never import an old device ID or replay uncertain delivery. | G2 `.66.4.5`, inventory media/privacy rows |
-| [ ] UI/durable parity | Apply the same complete inventory responsibility walk as Linux, including bounded details/tasks, archived reads, creation recovery and default-off approvals with authenticated frontend-only enablement. | G1–G4/G7, `.66.3.31/.32/.35/.38` |
+| [ ] UI/durable parity | Apply the same complete inventory responsibility walk as Linux, including bounded details/tasks, archived reads, creation recovery and default-off approvals with authenticated frontend-only enablement. Use the [installed client cutover runbook](#installed-client-cutover-on-linux-and-macos). | G1–G4/G7, `.66.3.31/.32/.35/.38` |
 | [ ] Qt rollback | Use the retained complete Qt copy and original maintained updater before deletion; desktop revoke must settle before Qt starts. Verify settings/drafts/agents, then switch back to Next without a second import. | `.66.3.31`, updater rollback and defaults-snapshot checks |
+
+## Installed client cutover on Linux and macOS
+
+**Preparation only; no installed case below has been executed or accepted.**
+Client procedure: `.66.3.31.1.1`, webkit-c; results and checkbox ledger: G6,
+migrate-u. Run Linux first, then macOS, after the coordinator selects the exact
+candidate and window. Use current integration, never the Qt-deletion draft.
+The installer/service primitives below were checked at `c319a25f` and remain
+unchanged at preparation baseline `1729e5c6`; recheck the selected candidate.
+
+### Admission and isolation
+
+Stop before execution until desktop-u supplies the reviewed, authenticated
+service-mode ownership grant/rearm (`.66.3.30.11.11`) and its actual background
+native-host/click/drain integration (`.66.3.30.11.12`), and the coordinator admits
+the owner window. At this baseline:
+
+- `background::Runtime` passes `None` to attention/activation polling and reports
+  attention `ready:false`, `code:discovery_only`. Component adapter tests do not
+  establish installed notification readiness.
+- A retained revoke or handoff marker blocks background restart; complete old
+  import evidence reports `delegation_required`. There is no public
+  `desktop activate`, `resume` or `handoff` command. Insert desktop-u's actual
+  reviewed grant/rearm UI/command sequence into the run record before proceeding,
+  including the supported private-service fault/passive/restore sequence used by
+  the cases. If that sequence is unavailable, stop here.
+  `desktop startup` is negative exclusion; `owner-status` reports no authority.
+  Neither manager restart nor deleting markers can supply the missing grant.
+
+G6 must select an existing private interactive login/profile with the original
+canonical install route, or reconcile the original canonical route explicitly.
+Do not create an account for this preparation. Same-UID config directories do
+not isolate Linux `hgs-tray.service`/`hgs-desktop.service`, Mac
+`com.hgdev.hgs-tray`/`com.hgdev.hgs-desktop`, or the canonical GUI socket. Do not
+start a second canonical switch under the owner's UID as private acceptance.
+A different development app ID, fake manager, altered unit label or source test
+is not installed canonical authority.
+
+Use the actual admitted graphical login's HOME, runtime, bus and temporary
+directory. File/profile overrides do not authenticate a frontend. On arch the
+coordinator brackets the run with START/END and load snapshots, holds
+`flock -w 1800 /tmp/zerus-arch-display.lock` for the display run, and stops if the
+screen locks or sleeps. Never replace the lock or invent display/bus values.
+Mac display access also requires the relayed owner window. Close every window
+opened by the run; never restart agents, tmux or a live DeepSeek host.
+
+### Maintained install and trusted GUI start
+
+Record exact GUI/CLI source, build/artifact identity, installed paths and prior
+manager definitions before changing anything. For a main Dev source build,
+`ZERUS_DEV_BUILD_NUMBER` must be that exact source's CI sequence. Preserve the
+maintained preview identity when using the preview route.
+
+| Platform | Maintained route in the admitted profile | Interpretation |
+|---|---|---|
+| Linux | Exact AUR/package route for the package row; source evaluation uses `bash ./install.sh`, then `HGS_LINUX_GUI=client bash ./tray/install.sh`. | The installer/updater owns replacement, drafts, rollback and service refresh. Root install can update connector/recovery/swarm/voice workers too; it is not a sandbox. |
+| macOS | Native checkout: `bash ./install.sh`, then `HGS_MAC_GUI=client bash ./tray/install.sh`; the existing remote route is `HGS_MAC_GUI=client ./mac-install.sh "$MAC_ALIAS"`. | The alias must select the admitted login. The SSH wrapper copies `tmux.conf` over `~/.config/tmux/tmux.conf` and runs `tmux source-file` to reload configuration; it does not restart tmux. Preserve the installed signed pair, existing signing identity and independent runner. |
+
+Let the Mac installer perform `prepare-local-macos.py`, `sign-local-macos.py`
+and `update-installed.py` in their maintained order. Register the **installed**
+bundled service `hgs`, not a build/staging copy. The independent ordinary runner
+may differ after signing; do not require its bytes to equal the bundled helper.
+Published bundle setup is explicitly `"$APP/Contents/Resources/bin/zerus-setup"`;
+cask installation alone is not setup, registration or readiness. Autostart is a
+separate opt-in.
+
+On both platforms, setting `HGS_INSTALL_PREFIX` makes the root installer stage
+the CLI there and skip worker/service refresh. The Linux tray uses it for file staging; the
+Mac tray ignores it. `DESTDIR` does not redirect these installers; it only
+suppresses the root Linux desktop refresh. `HGS_TRAY_RESTART=0` is
+not isolation: definitions can still be written and an absent GUI can start.
+None of these paths supplies positive registration or a running canonical UI.
+
+For the actual client cases, set exactly `ZERUS_CLIENT_DESKTOP_SERVICE=1` for a
+**new trusted GUI process** in the admitted profile. The flag is startup-only;
+a second start forwards to the existing process and cannot change its mode.
+Record the previous value or absence before setting it. These manager settings
+apply to every later unit/agent launched in that login until removed or restored,
+not just Zerus. With the original owned launcher present, after the old GUI's
+normal draft-safe Quit:
+
+```bash
+# Linux, only in the admitted private login with the maintained GUI unit:
+systemctl --user set-environment ZERUS_CLIENT_DESKTOP_SERVICE=1
+systemctl --user start hgs-tray.service
+
+# macOS, only in the admitted Aqua login with its maintained GUI LaunchAgent:
+launchctl setenv ZERUS_CLIENT_DESKTOP_SERVICE 1
+launchctl kickstart "gui/$(id -u)/com.hgdev.hgs-tray"
+```
+
+Do not force-restart a running GUI. If that original launcher is absent, G6 must
+select the maintained trusted desktop launch path and verify the flag reached
+the new process; do not fabricate a second definition. Launching from an
+agent-descended shell or clearing `HGS_SESSION`/`HGS_RUN_ID` does not establish
+consent or erase ancestry. Confirm the UI is actually in service mode before
+any positive effect case. These profile opt-ins do not change the product default.
+
+### Read-only source and manager preflight
+
+`SERVICE_HGS`, `RUNNER_HGS`, `GUI`, `APP`, `CFG` and `STATE` below are the exact
+absolute installed selections from that maintained route. On Linux the service
+CLI is the installed CLI; on Mac it is the signed bundled helper. The GUI,
+service definition and these probes must agree on configuration. Use the
+registration preview's actual `readiness.argv` and `readiness.environment`;
+preview itself is not registration or writer permission.
+
+```bash
+: "${SERVICE_HGS:?selected installed service CLI}" "${GUI:?selected installed GUI}"
+: "${CFG:?selected config}" "${STATE:?selected state}"
+"$GUI" --build-info
+"$SERVICE_HGS" --version
+
+desktop_cli() {
+  env HGS_CONFIG_DIR="$CFG" HGS_STATE_DIR="$STATE" "$SERVICE_HGS" desktop "$@"
+}
+desktop_cli registration --json
+desktop_cli status --json
+desktop_cli owner-status --json
+
+# Linux manager identity; run only the platform's applicable command:
+systemctl --user show hgs-desktop.service --property=LoadState,ActiveState,MainPID,FragmentPath,DropInPaths --no-pager
+# Mac Aqua manager identity:
+launchctl print "gui/$(id -u)/com.hgdev.hgs-desktop"
+```
+
+A new binary's `--build-info` alone does not identify an already-running GUI.
+Bind the actual new canonical PID/build/nonce to its original managed launch.
+A CLI version string alone is not source/artifact proof. Keep Mac GUI, bundled
+service helper and independent runner identities separate. Manager presence,
+`ipc_ready` and `writers_enabled` do not mean every background duty is ready;
+record lifecycle ABI/configuration/epoch/generation and each component's
+`ready`/`code` plus the durable approval opt-in independently. Disabled policy
+can be ready; degraded runtime can retain a true opt-in. No JSON readiness field
+grants authority.
+
+Use only the installed route's original helper when registration needs action:
+Linux helper `--check`, `install [--no-start]`, `session`, and existing-only
+`refresh` are in `scripts/install-linux-desktop-service.py` (`--hgs`, optional
+absolute `--config-dir`/`--state-dir`). Mac helper takes the installed bundled
+binary, `--runner-hgs`, `--check-only`; `--refresh-runner` preserves that backend
+during CLI-only updates. `--restart` is only for an actual owned backend change.
+Foreign/custom definitions refuse. No-start, headless/Aqua deferral, inactive
+refresh or Linux exit 3 (PendingRestart) is not readiness. Unix has no
+`desktop registration install/remove/status` command; those are Windows-only.
+Never hand-start a second `desktop serve` as a repair.
+
+### Client cases
+
+Use fresh synthetic targets in the admitted profile. Record original exact
+computer/session/run/conversation/reply/attention identities privately. Observe
+the actual UI and its existing native responses without adding another batch
+consumer or editing stores. Missing required observations leave a case BLOCKED
+or INCOMPLETE, not inferred from a fixture, local overlay or aggregate count.
+For host observation, use the selected host's read-only `hgs inspect "$TARGET_REFERENCE"`
+(or its verified configured-alias route), retaining only the matching raw read
+fields. A host without shared read state cannot satisfy the host-ACK case.
+
+| Case | Operator sequence | Required observation |
+|---|---|---|
+| New start and restart | Start the new trusted service-mode GUI through the maintained launcher. Open one synthetic session and a draft. Quit normally, prove its original UI/proxy exit, and reopen by the same trusted route. | One canonical GUI; matching new PID/build/source and service configuration; draft and exact session identities retained. Canonical responder remains, GUI writer Bootstrap/read/approval/notification/presence workers do not start. Closing the window/GUI leaves admitted service duties running; actual background readiness is required separately. |
+| Unavailable, Retry and no fallback | Through G6's admitted owned lifecycle route, make only the private service unavailable; open/refresh the client and selected view, then restore it through the reviewed route and press **Retry now**/the view's Retry. | Explicit unavailable/last-known state, null/incomplete counts preserved, no second service or GUI Fleet/read/approval writer. Healthy sources are not re-baselined by Retry; a halted source/view can recover. New epoch/configuration retires old observation bindings. |
+| Frozen read transfer and host observation | Before cutover, create a bounded set of genuine pending marks through the normal private-profile UI. Start service mode, observe capture/import and its normal Retry. Keep exact original targets fixed until host observation. | Complete validated source digest/row count, native `pending_read_import` progress, original page/mark IDs and durable new/superseded receipts. `complete:true`/queued means transfer only; `delivered:false` is not host ACK. Separately inspect the current owned host's exact target read-only: matching run/conversation and its raw `read.conversation_id`, `read.reply_id`/`read.attention_signature` must cover the captured parts. A changed/superseded target is not ACK of the old part. No GUI overlay or aggregate `pending:0` substitutes for this. Partial/unknown transfer retains frozen source and blocks fresh read delivery; no reseed or duplicate host dispatch. |
+| Authenticated enable and confirmation | Verify default OFF in the fresh profile. Turn ON only through Settings' existing confirmation; cancel once, then explicitly confirm with no unrelated/private questions eligible. Use one harmless synthetic one-time question to verify the intended flow and its journal, then turn OFF. | Cancel changes nothing. Confirm yields the native authenticated commit for the original logical UUID; ENABLE needs actual runtime/current writer readiness. Generic/agent toggle requests remain refused and do not change policy. No JSON role/confirmed flag, helper wrapper or direct audit Begin/Finish is an alternative. Journal paging/detail stays on the same configuration/epoch/journal/high-water. End with a confirmed durable OFF. |
+| OFF while degraded | With confirmed ON and no pending intent, use the admitted owned service lifecycle to reach IPC-connected, stored `automatic_approvals:true`, approvals `ready:false` (for example its documented passive state after restart). Do not revoke/reset policy to manufacture the case. Click OFF. | OFF is available without another confirmation and commits through the authenticated writable route despite degraded/absent workers. ON remains disabled until ready and still requires confirmation. If that state cannot be reached through the admitted source route, leave this case blocked. |
+| Uncertain result, lookup, no replay | During a controlled private service transition, submit one Approvals or Updates/Recovery configuration change through its existing UI and retain its original ID. Once the actual UI reports unconfirmed, use **Check result** while transport is unavailable, then after the service returns; check twice. For maintenance, retain the full update-and-recovery configuration; do not submit a second subsystem change while it is pending. | Unavailable lookup stays pending; the logical ID and operation do not change, and no new frontend mutation is sent. A durable receipt settles the original result. Only a later exact negative lookup after confirmed original child exit can settle not-applied; unverified exit remains pending. A fresh opposite intent is allowed only after settlement. If the transition produces only a definitive result/refusal, record that outcome and leave the unknown case incomplete; do not invent an unknown, replay, fake native authority or alter SQL/helper identity to obtain one. |
+| Revoke, rollback and return to Next | First settle dangerous opt-ins OFF. Use the exact revoke/lookup below, then the updater's retained Qt rollback. Return through the maintained Next install plus desktop-u's actual fresh handoff/rearm. | Settled original revoke/configuration/writer epoch and actual component/native-resource drain precede Qt writers. Agents, drafts and original settings survive. Return does not reseed imports or replay old intents. Missing rearm source or unknown drain stops the return segment; no row/marker deletion or bare background restart. |
+
+### Revoke and rollback commands
+
+Generate and retain one canonical `REVOKE_ID` in the private run record before
+submitting it. The lookup uses that same original ID; it does not repeat revoke.
+The GUI rollback path is its actual installed path, not a staged copy.
+
+```bash
+: "${REVOKE_ID:?saved original UUID}" "${INSTALLED_GUI:?actual installed GUI}"
+desktop_cli revoke --json --request-id "$REVOKE_ID" --reason rollback
+
+# Only if the first result was uncertain, read its original receipt:
+printf '{"op":"revoke_status","request_id":"%s"}\n' "$REVOKE_ID" |
+  env HGS_CONFIG_DIR="$CFG" HGS_STATE_DIR="$STATE" "$SERVICE_HGS" desktop request --json
+
+# Only after the matching settled result and actual owned drain:
+python3 tray/update-installed.py --rollback "$INSTALLED_GUI"
+```
+
+Require matching request/configuration and `accepted`, `durable`, `revoked`,
+`checkpointed`. The explicit `applicable:false`, `handoff:none`, `revoked:true`,
+`nothing_written` no-op is a separate no-work case; it does not prove that an
+active runtime drained. Unknown keeps Qt stopped. PID disappearance, a native
+Stop or `writers_enabled:false` alone is not original-resource drain. The
+updater's quit/draft/type-switch/rollback checks remain mandatory. Recheck the
+new candidate and actual fresh grant/rearm source before returning to Next.
+
+### Record and leave the profile
+
+Keep at most 64 KiB of redacted selected-field evidence per step and 1 MiB per
+platform record set; these are evidence caps, not protocol changes. Overflow or
+missing bytes/IDs is incomplete. Do not dump catalogs, SQL, marks files or
+message bodies. Retain private exact IDs while using stable placeholders in
+public results. Record:
+
+- Candidate/installed identity and original manager/PID bindings; configuration,
+  lifecycle epoch/generation, component readiness and durable opt-in separately.
+- Frozen-source completeness and immutable transfer receipts separately from
+  fresh host read observations; original mutation IDs and read-only lookups,
+  including primary/secondary errors and original child/EOF/wait evidence where
+  actually exposed. No missing field becomes a successful zero or empty list.
+- Settled revoke, actual resource drain, original session/draft continuity and
+  the admitted fresh rearm result. No source-only test counts as installed PASS.
+
+G6 records outcomes in its result ledger; leave every platform checkbox pending
+until that actual step passes and the coordinator accepts it. After the admitted
+shutdown/revoke/drain sequence, restore the prior private launch environment:
+
+- Linux: if previously absent, `systemctl --user unset-environment ZERUS_CLIENT_DESKTOP_SERVICE`;
+  if present, `systemctl --user set-environment "ZERUS_CLIENT_DESKTOP_SERVICE=$PREVIOUS_MODE"`
+  with its recorded previous value.
+- macOS: if previously absent, `launchctl unsetenv ZERUS_CLIENT_DESKTOP_SERVICE`;
+  if present, `launchctl setenv ZERUS_CLIENT_DESKTOP_SERVICE "$PREVIOUS_MODE"`
+  with its recorded previous value.
+
+These commands affect future launches, not the startup-cached mode of a running
+GUI. Do not launch a legacy writer while the service still owns its duties.
+Close opened windows and remove only owned test entries through their maintained
+teardown after confirmed exit/drain. If teardown is unavailable or uncertain,
+retain the private profile, registration and frozen source and report the
+blocker; never hand-delete units, markers, stores or a GUI copy. Do not stop
+agents or unrelated services.
 
 ## Windows — va-kids
 

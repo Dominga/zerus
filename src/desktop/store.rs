@@ -18,10 +18,6 @@ pub struct HandoffLock {
     root: PathBuf,
     configuration: String,
 }
-pub(super) enum HandoffAttempt {
-    Acquired(HandoffLock),
-    Contended(std::io::Error),
-}
 impl HandoffLock {
     pub fn verify(&self, location: &Location) -> Result<()> {
         ensure!(
@@ -97,23 +93,27 @@ impl Location {
     /// Passive inspection releases this immediately. Migrated writers will
     /// retain it for their full lifetime; the service process lock is separate.
     pub fn handoff_lock(&self) -> Result<HandoffLock> {
-        match self.try_handoff_lock()? {
-            HandoffAttempt::Acquired(lock) => Ok(lock),
-            HandoffAttempt::Contended(error) => Err(error).context("desktop handoff is busy"),
-        }
+        self.check_existing()?;
+        let file = private_file(&self.root.join(HANDOFF_LOCK), true)?;
+        fs2::FileExt::try_lock_exclusive(&file).context("desktop handoff is busy")?;
+        Ok(HandoffLock {
+            _lock: platform::FileLock::held(file),
+            root: self.root.clone(),
+            configuration: self.configuration.clone(),
+        })
     }
     /// Contention is recognized only at this exact OS try-lock call. Opening,
     /// path/privacy validation and every other failure remain ordinary errors.
-    pub(super) fn try_handoff_lock(&self) -> Result<HandoffAttempt> {
+    pub(super) fn try_handoff_lock(&self) -> Result<Option<HandoffLock>> {
         self.check_existing()?;
         let file = private_file(&self.root.join(HANDOFF_LOCK), true)?;
         if let Err(error) = fs2::FileExt::try_lock_exclusive(&file) {
             if platform::lock_contended(&error) {
-                return Ok(HandoffAttempt::Contended(error));
+                return Ok(None);
             }
             return Err(error).context("desktop handoff is unavailable");
         }
-        Ok(HandoffAttempt::Acquired(HandoffLock {
+        Ok(Some(HandoffLock {
             _lock: platform::FileLock::held(file),
             root: self.root.clone(),
             configuration: self.configuration.clone(),

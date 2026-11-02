@@ -78,8 +78,12 @@ never re-seed after rollback.
 
 G1 retains `desktop/owner.lock` for its process lifetime. G3 never takes it.
 `desktop/handoff.lock` is a separate OS-backed exclusive lock. G1's publication
-helper holds it briefly to commit immutable evidence and refuses/retries while
-an active writer holds it. G3 has no filesystem committer. G1 rereads
+helper holds it briefly to commit immutable evidence. If the active notification
+runtime holds it, G1's actor can lend its actual current Owner to one bounded
+Staged-only finalizer on the existing private IPC client thread. That whole
+Owner stays charged through filesystem work and original connection cleanup;
+revoke refuses new jobs and waits for admitted work. Other contention stays
+deferred, with only an exact known-negative explicit retry. G3 has no filesystem committer. G1 rereads
 the exact import UUID and digest under that lock, owns all marker transitions
 (`imported`, `quiesced`, `complete`, `revoked`), and retains the lock while any migrated
 writer runs. Commits use atomic replacement with durable file/directory flushes.

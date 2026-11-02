@@ -503,25 +503,77 @@ pub(crate) fn run_streamed(
     output_cap: usize,
     input: impl FnOnce(ChildStdin) -> bool + Send + 'static,
 ) -> Result<Exit, TooLarge> {
+    streamed(hgs, inv, parent_env, output_cap, None, None, input)
+}
+
+/// The same bounded streaming exchange, retaining the caller's original source
+/// guards through the child, writer and both actual pipe readers. A timeout or
+/// cancellation does not imply those resources finished. No group is stopped.
+pub(crate) fn run_streamed_retained(
+    hgs: &Path,
+    inv: &Invocation,
+    parent_env: &[(&str, &str)],
+    output_cap: usize,
+    cancel: &AtomicBool,
+    resources: Arc<dyn Send + Sync>,
+    input: impl FnOnce(ChildStdin) -> bool + Send + 'static,
+) -> Result<Exit, TooLarge> {
+    streamed(
+        hgs,
+        inv,
+        parent_env,
+        output_cap,
+        Some(cancel),
+        Some(resources),
+        input,
+    )
+}
+
+fn streamed(
+    hgs: &Path,
+    inv: &Invocation,
+    parent_env: &[(&str, &str)],
+    output_cap: usize,
+    cancel: Option<&AtomicBool>,
+    resources: Option<Arc<dyn Send + Sync>>,
+    input: impl FnOnce(ChildStdin) -> bool + Send + 'static,
+) -> Result<Exit, TooLarge> {
     assert!(
         inv.stdin.is_none(),
         "streamed input cannot have a second body"
     );
-    match run_inner(
+    if cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
+        return Ok(Exit::TimedOut);
+    }
+    let child_exited = resources.as_ref().map(|_| Arc::new(AtomicBool::new(false)));
+    let _child = resources.as_ref().map(|resources| ChildCharge {
+        resources: Some(resources.clone()),
+        exited: child_exited.as_ref().unwrap().clone(),
+    });
+    let result = run_inner(
         hgs,
         inv,
         parent_env,
         &[],
         output_cap,
-        None,
+        cancel,
         Pipes {
             input: Some(Box::new(input)),
+            require_complete: resources.is_some(),
+            readers: resources,
+            child_exited: child_exited.clone(),
             ..Pipes::default()
         },
-    ) {
+    );
+    if matches!(result, Ok(Exit::StartFailed(_))) {
+        if let Some(child_exited) = &child_exited {
+            child_exited.store(true, Ordering::Release);
+        }
+    }
+    match result {
         Ok(exit) => Ok(exit),
         Err(Stopped::TooLarge(error)) => Err(error),
-        Err(Stopped::Cancelled) => unreachable!("no cancellation flag"),
+        Err(Stopped::Cancelled) => Ok(Exit::TimedOut),
     }
 }
 
@@ -1023,6 +1075,58 @@ mod stream_tests {
         assert_eq!(exit, Exit::TimedOut);
         assert!(began.elapsed() < Duration::from_secs(3));
         assert!(completed.recv_timeout(Duration::from_secs(2)).unwrap());
+    }
+
+    #[test]
+    fn retained_streaming_keeps_the_original_guard_until_the_writer_really_ends() {
+        let resource = Arc::new(());
+        let weak = Arc::downgrade(&resource);
+        let (release, wait) = mpsc::channel();
+        let (done, completed) = mpsc::channel();
+        let exit = run_streamed_retained(
+            Path::new("python3"),
+            &python("pass", Duration::from_millis(250)),
+            &[],
+            1024,
+            &AtomicBool::new(false),
+            resource,
+            move |_original_pipe| {
+                let result = wait.recv_timeout(Duration::from_secs(5)).is_ok();
+                let _ = done.send(());
+                result
+            },
+        )
+        .unwrap();
+        assert!(!matches!(exit, Exit::Code { code: 0, .. }));
+        assert!(
+            weak.upgrade().is_some(),
+            "bounded return is not writer completion"
+        );
+        release.send(()).unwrap();
+        completed.recv_timeout(Duration::from_secs(2)).unwrap();
+        let until = Instant::now() + Duration::from_secs(2);
+        while weak.upgrade().is_some() && Instant::now() < until {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn cancelled_retained_streaming_admits_no_child_or_writer() {
+        let resource = Arc::new(());
+        let weak = Arc::downgrade(&resource);
+        let exit = run_streamed_retained(
+            Path::new("a-helper-that-must-not-start"),
+            &python("pass", Duration::from_secs(1)),
+            &[],
+            1024,
+            &AtomicBool::new(true),
+            resource,
+            |_| panic!("cancelled source started a writer"),
+        )
+        .unwrap();
+        assert_eq!(exit, Exit::TimedOut);
+        assert!(weak.upgrade().is_none());
     }
 }
 

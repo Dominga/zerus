@@ -38,7 +38,11 @@ impl Captured {
         let archived = matches!(self.action, Action::ForgetArchive { .. });
         bounded(&t.computer, 512, false)
             && bounded(&t.name, 512, true)
-            && bounded(&t.run_id, 128, true)
+            && bounded(
+                &t.run_id,
+                128,
+                !matches!(self.action, Action::TerminateShell { .. }),
+            )
             && bounded(&t.conversation_id, 256, false)
             && matches!(
                 self.state.as_str(),
@@ -48,6 +52,12 @@ impl Captured {
             && match &self.action {
                 Action::Archive | Action::Forget => self.state != "running",
                 Action::Terminate | Action::Kill => self.state == "running",
+                Action::TerminateShell { ref identity } => {
+                    self.state == "running"
+                        && t.run_id.is_empty()
+                        && t.conversation_id.is_empty()
+                        && identity.valid()
+                }
                 Action::ForgetBinding => !t.conversation_id.is_empty(),
                 Action::ClearContext { .. } => {
                     self.state == "running" && !t.conversation_id.is_empty()
@@ -79,6 +89,26 @@ impl Captured {
     /// This is fresh source equality only. The deadline, current native
     /// reservation and CLI's mutation-boundary identity checks still apply.
     pub fn matches(&self, value: &Value) -> bool {
+        if let Action::TerminateShell { identity } = &self.action {
+            return self.valid()
+                && value["name"].as_str() == Some(&self.target.name)
+                && value["tracked"] == false
+                && ["run_id", "conversation_id"].iter().all(|key| {
+                    value
+                        .get(key)
+                        .is_none_or(|v| v.is_null() || v.as_str() == Some(""))
+                })
+                && value
+                    .get("state")
+                    .is_none_or(|v| v.as_str() == Some("running"))
+                && value
+                    .get("runtime_state")
+                    .is_none_or(|v| v.as_str() == Some("live"))
+                && serde_json::from_value::<crate::untracked_shell::Identity>(
+                    value["untracked_terminal"].clone(),
+                )
+                .is_ok_and(|current| &current == identity);
+        }
         let text = |key: &str| value[key].as_str().unwrap_or("");
         // Native inspections report runtime_state, while catalog rows carry
         // state. A live Codex/Claude/Kimi inspection has no state field at all.
@@ -105,16 +135,21 @@ impl Captured {
     }
 
     pub fn checked_inspection(&self, exit: Exit) -> Result<(), String> {
+        let refusal = if matches!(self.action, Action::TerminateShell { .. }) {
+            crate::untracked_shell::UNVERIFIED
+        } else {
+            STATE_CHANGED
+        };
         let Exit::Code {
             code: 0, stdout, ..
         } = exit
         else {
-            return Err(STATE_CHANGED.into());
+            return Err(refusal.into());
         };
         if stdout.len() > METADATA_LIMIT
             || !serde_json::from_slice::<Value>(&stdout).is_ok_and(|v| self.matches(&v))
         {
-            return Err(STATE_CHANGED.into());
+            return Err(refusal.into());
         }
         Ok(())
     }
@@ -128,6 +163,9 @@ impl Captured {
         }
         if matches!(self.action, Action::ClearContext { .. }) {
             return actions::invocation(&self.target, &self.action, request_id);
+        }
+        if let Action::TerminateShell { identity } = &self.action {
+            return actions::shell_termination_invocation(&self.target, identity, request_id);
         }
         let (op, local, remote) = match self.action {
             Action::Archive => ("archive", 30, 45),
@@ -173,6 +211,16 @@ impl Captured {
         );
         match outcome {
             Outcome::Done { receipt, .. } => {
+                if let Action::TerminateShell { identity } = &self.action {
+                    if receipt["terminal_closed"] != true
+                        || serde_json::to_value(identity).ok().as_ref()
+                            != Some(&receipt["terminal_identity"])
+                    {
+                        return actions::failed(
+                            "Invalid acknowledgement. Check the session before retrying.",
+                        );
+                    }
+                }
                 if self
                     .archive_id()
                     .is_some_and(|id| receipt["archive_id"].as_str() != Some(id))

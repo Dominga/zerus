@@ -482,6 +482,7 @@ pub(crate) fn render(details: &PaneDetails, fields: &[PaneField]) -> String {
         .map(|field| match field {
             PaneField::SessionId => details.session_id.clone(),
             PaneField::SessionName => details.session_name.clone(),
+            PaneField::SocketPath | PaneField::SessionCreated | PaneField::SessionWindows | PaneField::WindowPanes => String::new(),
             PaneField::PaneId => details.pane.clone(),
             PaneField::ServerPid => details.server_pid.to_string(),
             PaneField::PanePid => details.pane_pid.to_string(),

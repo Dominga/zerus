@@ -1361,6 +1361,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         recovery::recovery_reload,
         speech_settings::open_speech_documentation,
         actions::run_action,
+        actions::untracked_shell_identity,
         action_delay::action_delay_begin,
         action_delay::action_delay_wait,
         action_delay::action_delay_cancel,

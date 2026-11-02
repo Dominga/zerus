@@ -365,8 +365,8 @@ class InstallerEnvironment(unittest.TestCase):
         isolated = {'HOME': 'C:/Example/private', 'USERPROFILE': 'C:/Example/private',
                     'APPDATA': 'C:/Example/private/roaming', 'LOCALAPPDATA': 'C:/Example/private/local',
                     'HGS_CONFIG_DIR': 'C:/Example/private/config', 'HGS_STATE_DIR': 'C:/Example/private/state'}
-        original = {'USERPROFILE': 'C:/Users/Example', 'APPDATA': 'C:/Users/Example/AppData/Roaming',
-                    'LOCALAPPDATA': 'C:/Users/Example/AppData/Local'}
+        original = {'USERPROFILE': 'C:/Users/example', 'APPDATA': 'C:/Users/example/AppData/Roaming',
+                    'LOCALAPPDATA': 'C:/Users/example/AppData/Local'}
         selected = installer_environment(isolated, original)
         self.assertEqual({key: selected[key] for key in original}, original)
         for key in ('HOME', 'HGS_CONFIG_DIR', 'HGS_STATE_DIR'):
@@ -387,7 +387,7 @@ class InstallerEnvironment(unittest.TestCase):
             (root / 'uninstall' / 'unins000.exe').write_bytes(b'synthetic uninstaller, never executed')
             case.logs = 0
             case.backend_tracking = False
-            case.installer_env = {'HOME': str(root), 'USERPROFILE': 'C:/Users/Example'}
+            case.installer_env = {'HOME': str(root), 'USERPROFILE': 'C:/Users/example'}
             case.env = {'USERPROFILE': str(root)}
             case.wait_for = Mock()
             with patch('test_windows_installer_survival.subprocess.run',

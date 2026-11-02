@@ -22,7 +22,13 @@ pub(crate) fn record(step: &'static str, code: &'static str) {
 
 fn write_record(path: &std::path::Path, step: &str, code: &str) -> std::io::Result<()> {
     use std::io::Write;
-    let body = serde_json::to_vec(&serde_json::json!({"version":1,"step":step,"code":code}))?;
+    let recorded_at_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(std::io::Error::other)?
+        .as_millis();
+    let body = serde_json::to_vec(&serde_json::json!({
+        "version":1,"step":step,"code":code,"recorded_at_unix_ms":recorded_at_unix_ms
+    }))?;
     if body.len() > 512 {
         return Err(std::io::Error::other("startup diagnostic exceeds limit"));
     }
@@ -94,8 +100,21 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "kept");
         let bytes = std::fs::read(&path).unwrap();
         assert!(bytes.len() <= 512);
+        let mut record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let timestamp = record
+            .as_object_mut()
+            .unwrap()
+            .remove("recorded_at_unix_ms")
+            .unwrap()
+            .as_u64()
+            .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        assert!(timestamp > 0 && u128::from(timestamp) <= now);
         assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            record,
             serde_json::json!({
                 "version":1,"step":"native_takeover.frontend_request","code":"frontend_process_image_unavailable"
             })

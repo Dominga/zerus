@@ -28,7 +28,7 @@ fn original(configuration: &str, epoch: &str) -> Verified {
 fn fixture() -> (tempfile::TempDir, Location, Store, String) {
     let temp = tempfile::tempdir().unwrap();
     let location = Location {
-        root: temp.path().join("state/desktop"),
+        root: temp.path().canonicalize().unwrap().join("state/desktop"),
         configuration: "a".repeat(64),
     };
     location.prepare().unwrap();

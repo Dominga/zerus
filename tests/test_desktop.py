@@ -139,19 +139,62 @@ finally:
         self.assertEqual(status['lifecycle']['mode'], 'background')
         self.stop(process)
 
-    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux native caller boundary')
+    @unittest.skipUnless(sys.platform.startswith('linux') or sys.platform == 'darwin', 'Unix native caller boundary')
     def test_mode_caller_requires_foreground_tty_or_the_actual_installed_frontend_and_refuses_agent_ancestry(self):
+        """Run in isolated CI/private runner, outside any native agent ancestry.
+
+        The positive TTY case deliberately refuses inside an agent tree even
+        when child markers are cleared; a private pty is not a bypass.
+        """
+        unsupported = None
+        if sys.platform == 'darwin':
+            from macos_ancestry import topology, unsupported_hosted_foreign
+            chain = topology()
+            print('MACOS_CALLER_TOPOLOGY ' + json.dumps(chain), file=sys.stderr, flush=True)
+            unsupported = unsupported_hosted_foreign(chain, os.geteuid(), os.environ)
         import shutil
         # This helper is a private fixture executable, not the owner's GUI.
         frontend = Path(self.env['HOME']) / '.local/bin/hgs-tray'
         frontend.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(sys.executable, frontend)
-        script = '''import os,sys,json,subprocess,fcntl,termios
+        # A native fixture avoids relocating the hosted Mac Python framework.
+        source = r"""#include <unistd.h>
+#include <sys/wait.h>
+#include <signal.h>
+#include <time.h>
+#include <stdio.h>
+int main(int argc, char **argv) {
+    if (argc != 2) return 90;
+    pid_t child = fork();
+    if (child < 0) return 91;
+    if (child == 0) {
+        execl(argv[1], argv[1], "desktop", "registration", "mode-check", "--json", (char *)0);
+        _exit(92);
+    }
+    int status;
+    time_t until = time(NULL) + 5;
+    while (time(NULL) < until) {
+        pid_t result = waitpid(child, &status, WNOHANG);
+        if (result == child) return WIFEXITED(status) ? WEXITSTATUS(status) : 93;
+        if (result < 0) return 94;
+        usleep(10000);
+    }
+    kill(child, SIGKILL); /* The original unreaped fixture child only. */
+    waitpid(child, &status, 0);
+    return 95;
+}
+"""
+        compiled = subprocess.run(['cc', '-x', 'c', '-', '-o', str(frontend)], input=source,
+                                  env=self.env, capture_output=True, text=True, timeout=20)
+        self.assertEqual(compiled.returncode, 0, compiled.stderr)
+        script = '''import os,sys,json,subprocess,fcntl,termios,signal
 tty=None
 try:
  if sys.argv[1]!='none':
   tty=os.open(sys.argv[1],os.O_RDWR)
   fcntl.ioctl(tty,termios.TIOCSCTTY,0)
+  old=signal.signal(signal.SIGTTOU,signal.SIG_IGN)
+  try: os.tcsetpgrp(tty,os.getpgrp())
+  finally: signal.signal(signal.SIGTTOU,old)
  env=dict(os.environ)
  if sys.argv[2]=='stripped':
   env.pop('HGS_SESSION',None);env.pop('HGS_RUN_ID',None)
@@ -161,7 +204,7 @@ try:
 finally:
  if tty is not None: os.close(tty)
 '''
-        def case(image, terminal=False, marker=False):
+        def case(image, terminal=False, marker=False, native=False):
             import pty
             env = dict(self.env)
             if marker:
@@ -170,30 +213,50 @@ finally:
             try:
                 if terminal:
                     master, slave = pty.openpty()
-                child = subprocess.run([str(image), '-c', script,
-                    os.ttyname(slave) if terminal else 'none', 'stripped', str(HGS)],
+                args = [str(image), str(HGS)] if native else [str(image), '-c', script,
+                    os.ttyname(slave) if terminal else 'none', 'stripped', str(HGS)]
+                child = subprocess.run(args,
                     env=env, start_new_session=True, stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=8, text=True)
+                if native:
+                    return dict(code=child.returncode, out=child.stdout, error=child.stderr)
                 self.assertEqual(child.returncode, 0, child.stderr)
                 return json.loads(child.stdout)
             finally:
                 if master is not None:
                     os.close(master); os.close(slave)
-        foreground = case(sys.executable, terminal=True)
-        self.assertEqual(foreground['code'], 0, foreground)
-        self.assertEqual(json.loads(foreground['out'])['source'], 'interactive_terminal')
-        gui = case(frontend)
-        self.assertEqual(gui['code'], 0, gui)
-        self.assertEqual(json.loads(gui['out'])['source'], 'installed_frontend')
+        # These refusals must run even on an unsupported hosted topology.
         headless = case(sys.executable)
         self.assertNotEqual(headless['code'], 0)
         agent = case(sys.executable, terminal=True, marker=True)
         self.assertNotEqual(agent['code'], 0)
         self.assertIn('agent-descended', agent['error'])
         named = frontend.with_name('claude')
-        shutil.copy2(sys.executable, named)
-        self.assertNotEqual(case(named, terminal=True)['code'], 0)
+        shutil.copy2(frontend, named)
+        named_agent = case(named, native=True)
+        self.assertNotEqual(named_agent['code'], 0)
+        self.assertIn('agent-descended', named_agent['error'])
+        # The checker itself cannot impersonate its own frontend ancestor.
+        native_frontend = frontend.read_bytes()
+        try:
+            shutil.copy2(HGS, frontend)
+            own = subprocess.run([str(frontend), 'desktop', 'registration', 'mode-check', '--json'],
+                                 env=self.env, start_new_session=True, stdin=subprocess.DEVNULL,
+                                 capture_output=True, text=True, timeout=5)
+            self.assertNotEqual(own.returncode, 0)
+        finally:
+            frontend.write_bytes(native_frontend)
         self.assertFalse(self.desktop.exists())
+        if unsupported is not None:
+            print('MACOS_CALLER_REFUSALS_COMPLETED', file=sys.stderr, flush=True)
+            self.skipTest('Hosted runner has unsupported foreign ancestor: ' + json.dumps(unsupported)
+                          + '; native macOS permission remains refused; refusal cases passed')
+        foreground = case(sys.executable, terminal=True)
+        self.assertEqual(foreground['code'], 0, foreground)
+        self.assertEqual(json.loads(foreground['out'])['source'], 'interactive_terminal')
+        gui = case(frontend, native=True)
+        self.assertEqual(gui['code'], 0, gui)
+        self.assertEqual(json.loads(gui['out'])['source'], 'installed_frontend')
 
     def test_approval_audit_is_selected_scoped_and_does_not_create_a_journal(self):
         self.serve()

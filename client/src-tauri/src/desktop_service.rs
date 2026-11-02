@@ -35,6 +35,7 @@ pub(crate) mod activation;
 #[derive(Default)]
 pub(crate) struct Observers {
     pub projections: Vec<Projection>,
+    pub notification_controls: Option<crate::desktop_notification_controls::Setup>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub activation: Option<activation::Sink>,
 }
@@ -45,6 +46,7 @@ mod catalog_relay;
 use catalog::catalog_loop;
 mod details;
 pub mod frontend;
+pub(crate) mod notification_controls;
 mod read_import;
 
 /// Registered at setup before start_source. Some contains a verified service
@@ -220,6 +222,8 @@ impl CatalogDelivery {
 }
 
 struct Shared {
+    notification_controls: Arc<crate::desktop_notification_controls::Controller>,
+    notification_supported: AtomicBool,
     ownership: Arc<crate::desktop_ownership::Controller>,
     ownership_supported: AtomicBool,
     hgs: PathBuf,
@@ -292,6 +296,7 @@ impl Service {
             responder,
             Observers {
                 projections,
+                notification_controls: None,
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 activation: None,
             },
@@ -312,6 +317,10 @@ impl Service {
             zerus_client_core::desktop::ownership::Mode::Service,
         );
         let shared = Arc::new(Shared {
+            notification_controls: crate::desktop_notification_controls::Controller::new(
+                observers.notification_controls,
+            ),
+            notification_supported: AtomicBool::new(false),
             ownership,
             ownership_supported: AtomicBool::new(false),
             hgs,
@@ -347,6 +356,12 @@ impl Service {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             activation: observers.activation,
         });
+        let weak = Arc::downgrade(&shared);
+        shared.notification_controls.hook(Arc::new(move || {
+            if let Some(shared) = weak.upgrade() {
+                shared.publish_notification_controls();
+            }
+        }));
         let (control, receiver) = watch::channel(Control::Retry(0));
         let (finished, join) = oneshot::channel();
         let service = Arc::new(Self {
@@ -379,7 +394,9 @@ impl Service {
                 None,
             )
             .await;
-        self.shared.publish_ownership();
+        self.shared
+            .publish_ownership(crate::desktop_ownership::Phase::Rearm)
+            .await;
         if self.shared.ownership.granted() {
             self.retry();
         }
@@ -387,7 +404,9 @@ impl Service {
     }
     pub(crate) async fn ownership_result(&self) -> crate::desktop_ownership::View {
         let view = self.shared.ownership.request(None, None, None).await;
-        self.shared.publish_ownership();
+        self.shared
+            .publish_ownership(crate::desktop_ownership::Phase::Result)
+            .await;
         view
     }
     /// Settings choices only: offline and generation-zero computers remain
@@ -575,8 +594,9 @@ impl Service {
         Ok(committed)
     }
     pub fn stop(&self) {
-        self.shared.ownership.stop();
         self.shared.stopped.store(true, Ordering::Release);
+        self.shared.notification_controls.close();
+        self.shared.ownership.stop();
         self.shared.audit_help.clear();
         if let Some(cancel) = self
             .shared
@@ -619,6 +639,7 @@ impl Service {
         }
         let closed = self.shared.rpc.close();
         let ownership_closed = self.shared.ownership.close();
+        let notification_closed = self.shared.notification_controls.close();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let activation_closed = self.shared.activation_rpc.close();
         let drained = tauri::async_runtime::spawn_blocking(move || {
@@ -626,6 +647,9 @@ impl Service {
             let drained =
                 closed.wait_until(until) == zerus_client_core::desktop::drain::Observation::Idle;
             let drained = (ownership_closed.wait_until(until)
+                == zerus_client_core::desktop::drain::Observation::Idle)
+                && drained;
+            let drained = (notification_closed.wait_until(until)
                 == zerus_client_core::desktop::drain::Observation::Idle)
                 && drained;
             #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -689,13 +713,33 @@ impl Shared {
             );
         }
     }
-    fn publish_ownership(&self) {
-        let view = serde_json::to_value(self.ownership.view()).ok();
+    async fn publish_ownership(&self, phase: crate::desktop_ownership::Phase) {
+        let owner = self.ownership.clone();
+        let view = tauri::async_runtime::spawn_blocking(move || owner.record_view(phase))
+            .await
+            .unwrap_or_else(|_| self.ownership.view());
+        let view = serde_json::to_value(view).ok();
         let mut current = self.snapshot.lock().unwrap_or_else(PoisonError::into_inner);
         current.notification_ownership = view;
         self.pump.service(current.clone());
     }
+    fn publish_notification_controls(&self) {
+        if self.stopped.load(Ordering::Acquire) {
+            return;
+        }
+        let value = self
+            .notification_controls
+            .view()
+            .and_then(|v| serde_json::to_value(v).ok());
+        let mut current = self.snapshot.lock().unwrap_or_else(PoisonError::into_inner);
+        current.notification_preferences = value;
+        self.pump.service(current.clone());
+    }
     fn publish(&self, mut snapshot: Snapshot) {
+        snapshot.notification_preferences = self
+            .notification_controls
+            .view()
+            .and_then(|v| serde_json::to_value(v).ok());
         snapshot.notification_ownership = serde_json::to_value(self.ownership.view()).ok();
         snapshot.pending_read_import = Some(
             self.read_import
@@ -940,6 +984,17 @@ async fn request(
 
 async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String, &'static str> {
     let help = command(shared, vec!["--help".into()], None, stop.clone()).await?;
+    shared.notification_supported.store(
+        std::str::from_utf8(&help).ok().is_some_and(|text| {
+            [
+                zerus_client_core::desktop::notification_control::HELP_MARKER,
+                zerus_client_core::desktop::ui_requests::HELP_MARKER,
+            ]
+            .iter()
+            .all(|marker| text.lines().any(|line| line.trim() == *marker))
+        }),
+        Ordering::Release,
+    );
     shared.ownership_supported.store(
         std::str::from_utf8(&help).ok().is_some_and(|text| {
             [
@@ -1001,6 +1056,7 @@ async fn run(shared: Arc<Shared>, mut control: watch::Receiver<Control>) {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(stop.clone());
         let result = connection(shared.clone(), &mut control, stop.clone()).await;
+        shared.notification_controls.disconnect();
         if !shared.stopped.load(Ordering::Acquire)
             && shared.ownership_supported.load(Ordering::Acquire)
         {
@@ -1008,6 +1064,9 @@ async fn run(shared: Arc<Shared>, mut control: watch::Receiver<Control>) {
             // remains available. Read its status; never auto-rearm at EOF.
             shared.ownership.request(None, None, None).await;
         }
+        shared
+            .publish_ownership(crate::desktop_ownership::Phase::ConnectionClosed)
+            .await;
         *shared.relay.lock().unwrap_or_else(PoisonError::into_inner) = None;
         stop.store(true, Ordering::Release);
         shared.audit_help.clear();
@@ -1054,6 +1113,9 @@ async fn connection(
     control: &mut watch::Receiver<Control>,
     stop: Arc<AtomicBool>,
 ) -> Result<(), &'static str> {
+    shared
+        .publish_ownership(crate::desktop_ownership::Phase::Connecting)
+        .await;
     let ordinary = shared.hgs.clone();
     let relay = Arc::new(
         tauri::async_runtime::spawn_blocking(move || {
@@ -1075,7 +1137,9 @@ async fn connection(
     } else {
         shared.ownership.unsupported();
     }
-    shared.publish_ownership();
+    shared
+        .publish_ownership(crate::desktop_ownership::Phase::StartupGrant)
+        .await;
     if shared.stopped.load(Ordering::Acquire) || stop.load(Ordering::Acquire) {
         return Err("stopped");
     }
@@ -1138,6 +1202,7 @@ async fn connection(
         })
     };
     let mut last_frame = tokio::time::Instant::now();
+    let mut notification_worker = None;
     let result = async {
         loop {
             tokio::select! {
@@ -1160,6 +1225,27 @@ async fn connection(
                         for projection in &shared.projections { projection(Some(&frame)); }
                         last_frame = tokio::time::Instant::now();
                         shared.publish(state.snapshot().clone());
+                        if frame["t"] == "hello" && notification_worker.is_none()
+                            && shared.notification_supported.load(Ordering::Acquire)
+                            && shared.notification_controls.enabled() {
+                            if let Some(epoch) = state.snapshot().epoch.clone() {
+                                let relay = shared.relay.lock().unwrap_or_else(PoisonError::into_inner).clone();
+                                if let Some(relay) = relay {
+                                    let owner = shared.notification_controls.clone();
+                                    let responder = shared.responder.clone();
+                                    let cancelled = stop.clone();
+                                    let supported = shared.notification_supported.load(Ordering::Acquire);
+                                    let scope = zerus_client_core::desktop::notification_control::Scope {
+                                        configuration: configuration.clone(), service_epoch: epoch,
+                                    };
+                                    notification_worker = Some(tauri::async_runtime::spawn(async move {
+                                        if let Some(session) = owner.connect(scope, relay, responder, cancelled, supported).await {
+                                            notification_controls::run(owner, session).await;
+                                        }
+                                    }));
+                                }
+                            }
+                        }
                         match update {
                             service::Update::Status => {
                                 shared.observe_peer_choices(&state, &frame["value"]);
@@ -1205,11 +1291,15 @@ async fn connection(
         }
     }.await;
     stop.store(true, Ordering::Release);
+    shared.notification_controls.disconnect();
     grant_cancel.notify_waiters();
     shared.changed.notify_one();
     shared.details_changed.notify_one();
     drop(stdin);
     let _ = grant_worker.await;
+    if let Some(worker) = notification_worker {
+        let _ = worker.await;
+    }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let _ = activation_worker.await;
     // Only this owned local proxy is stopped; the desktop service and native agents remain untouched.
@@ -1269,7 +1359,9 @@ async fn recover_grant(
                 Some(stop.clone()),
             )
             .await;
-        shared.publish_ownership();
+        shared
+            .publish_ownership(crate::desktop_ownership::Phase::RetryGrant)
+            .await;
         step = (step + 1).min(DELAYS.len() - 1);
     }
 }

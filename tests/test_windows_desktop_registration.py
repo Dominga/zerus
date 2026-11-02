@@ -20,87 +20,20 @@ if '--hgs' in sys.argv:
 
 @unittest.skipUnless(os.name == 'nt' and HGS is not None, 'explicit disposable Windows CLI required')
 class WindowsDesktopRegistration(unittest.TestCase):
-    def test_inherited_module_autoload_versus_explicit_minimal_environment(self):
-        # A controlled fresh-profile experiment, not a replay of a stuck PC
-        # operation. The only user module is this private synthetic probe.
-        root = Path(tempfile.mkdtemp(prefix='zerus-registration-environment-'))
-        source = Path(__file__).resolve().parents[1] / 'src/desktop/windows_registration.ps1'
-        program = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
-        system_modules = program.parent / 'Modules'
-        module = root / 'modules' / 'ZerusEnvironmentProbe'
-        module.mkdir(parents=True)
-        (module / 'ZerusEnvironmentProbe.psm1').write_text(
-            "function Invoke-ZerusEnvironmentProbe { return 'loaded' }\n", encoding='utf-8')
-        (module / 'ZerusEnvironmentProbe.psd1').write_text(
-            "@{RootModule='ZerusEnvironmentProbe.psm1';ModuleVersion='1.0.0';"
-            "FunctionsToExport=@('Invoke-ZerusEnvironmentProbe')}\n", encoding='utf-8')
-        safe = {'SystemRoot': os.environ['SystemRoot'], 'WINDIR': os.environ['SystemRoot'],
-                'COMSPEC': str(program.parents[2] / 'cmd.exe'), 'PATH': str(program.parents[2]),
-                'TEMP': str(root), 'TMP': str(root)}
-        escaped = str(source).replace("'", "''")
-        script = ("$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';"
-                  "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);"
-                  ". ([ScriptBlock]::Create([IO.File]::ReadAllText('" + escaped + "')));"
-                  "if($env:ZERUS_TEST_PARENT_PROFILE){$PSModuleAutoLoadingPreference='All'}"
-                  "else{Initialize-RegistrationEnvironment};"
-                  "try{$probe=Invoke-ZerusEnvironmentProbe}"
-                  "catch [System.Management.Automation.CommandNotFoundException]{$probe='refused'};"
-                  "[Console]::WriteLine((Get-RegistrationJson).Serialize([ordered]@{"
-                  "probe=$probe;autoload=[string]$PSModuleAutoLoadingPreference;"
-                  "module_path=$env:PSModulePath;parent_marker=$env:ZERUS_TEST_PARENT_PROFILE}))")
-        command = [str(program), '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
-                   base64.b64encode(script.encode('utf-16le')).decode('ascii')]
-        pending = False
-        results = {}
-        try:
-            for mode in ('inherited', 'minimal'):
-                env = dict(safe, PSModulePath=str(root / 'modules') if mode == 'inherited' else str(system_modules))
-                if mode == 'inherited':
-                    env['ZERUS_TEST_PARENT_PROFILE'] = 'controlled-parent'
-                with (root / (mode + '.out')).open('wb') as out, (root / (mode + '.err')).open('wb') as err:
-                    started = time.monotonic()
-                    process = subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL,
-                                               stdout=out, stderr=err, creationflags=subprocess.CREATE_NO_WINDOW)
-                    exited = False
-                    try:
-                        code = process.wait(timeout=15)
-                        exited = True
-                    except subprocess.TimeoutExpired:
-                        try:
-                            process.kill()
-                        except OSError:
-                            pass  # A failed request still requires the original physical wait.
-                        try:
-                            process.wait(timeout=2)
-                            exited = True
-                        except subprocess.TimeoutExpired:
-                            pending = True
-                        raise
-                    finally:
-                        pending = pending or not exited
-                    with (root / (mode + '.err')).open('rb') as error:
-                        self.assertEqual(code, 0, error.read(4096))
-                with (root / (mode + '.out')).open('rb') as captured:
-                    output = captured.read(65537)
-                self.assertLessEqual(len(output), 65536)
-                value = json.loads(output)
-                value['elapsed_ms'] = round((time.monotonic() - started) * 1000)
-                results[mode] = value
-                print('registration environment experiment:', mode, json.dumps(value), flush=True)
-            self.assertEqual(results['inherited']['probe'], 'loaded')
-            self.assertEqual(results['inherited']['autoload'], 'All')
-            self.assertEqual(results['inherited']['parent_marker'], 'controlled-parent')
-            self.assertIn(str(root / 'modules'), results['inherited']['module_path'])
-            self.assertEqual(results['minimal']['probe'], 'refused')
-            self.assertEqual(results['minimal']['autoload'], 'None')
-            self.assertIsNone(results['minimal']['parent_marker'])
-            self.assertEqual(results['minimal']['module_path'].casefold(), str(system_modules).casefold())
-        finally:
-            if pending:
-                print('Environment experiment termination pending; original PID/root retained:',
-                      process.pid, root, file=sys.stderr)
-            else:
-                shutil.rmtree(root)
+    def test_native_worker_refuses_bad_frames_without_loading_configuration(self):
+        with tempfile.TemporaryDirectory(prefix='zerus-registration-frame-') as directory:
+            root=Path(directory)
+            env={key: os.environ[key] for key in ('SystemRoot','WINDIR') if key in os.environ}
+            env.update(HGS_CONFIG_DIR=str(root/'unread-config'), HGS_STATE_DIR=str(root/'unread-state'))
+            for argument, body in [('0',b''),('65537',b''),('03',b'{} '),('3',b'{}'),('3',b'[1]'),('3',b'{x}')]:
+                with self.subTest(length=argument, body=body):
+                    result=subprocess.run([str(HGS),'__desktop-registration-native',argument],input=body,env=env,capture_output=True,timeout=20)
+                    self.assertEqual(result.returncode,1,result.stderr)
+                    reply=json.loads(result.stdout)
+                    self.assertEqual(reply['abi'],'desktop-native-registration-v1')
+                    self.assertIsInstance(reply['error'],str)
+                    self.assertNotIn('reply',reply)
+            self.assertEqual(list(root.iterdir()),[])
 
     def test_cold_notification_entry_refuses_without_loading_configuration(self):
         with tempfile.TemporaryDirectory(prefix='zerus-toast-cold-') as directory:
@@ -114,16 +47,8 @@ class WindowsDesktopRegistration(unittest.TestCase):
             self.assertEqual(list(root.iterdir()), [])
 
     def test_fixed_input_frame_finishes_while_the_writer_stays_open(self):
-        source = Path(__file__).resolve().parents[1] / 'src/desktop/windows_registration.ps1'
-        script = str(source).replace("'", "''")
-        body = json.dumps({'schema': 1, 'text': 'framed request'}).encode('utf-8')
-        script = ("$ProgressPreference='SilentlyContinue';. ([ScriptBlock]::Create([IO.File]::ReadAllText('" + script + "')))\n"
-                  "$s=[Console]::OpenStandardInput();"
-                  "try { $v=Read-RegistrationRequest $s " + str(len(body)) + ";"
-                  "[Console]::WriteLine((Get-RegistrationJson).Serialize($v)) } finally {$s.Dispose()}")
-        program = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
-        process = subprocess.Popen([str(program), '-NoLogo', '-NoProfile', '-NonInteractive',
-                                    '-EncodedCommand', base64.b64encode(script.encode('utf-16le')).decode('ascii')],
+        body = json.dumps({'schema': 1, 'operation': 'invalid'}).encode('utf-8')
+        process = subprocess.Popen([str(HGS), '__desktop-registration-native', str(len(body))],
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    creationflags=subprocess.CREATE_NO_WINDOW)
         try:
@@ -131,13 +56,14 @@ class WindowsDesktopRegistration(unittest.TestCase):
             process.stdin.flush()
             # Deliberately keep the ORIGINAL writer open, with no EOF. A timed
             # out reader fails this test; the 15s product limit is unchanged.
-            self.assertEqual(process.wait(timeout=15), 0)
+            self.assertEqual(process.wait(timeout=15), 1)
             self.assertFalse(process.stdin.closed)
             output = process.stdout.read(65537)
             error = process.stderr.read(65537)
             self.assertLessEqual(len(output), 65536)
             self.assertEqual(error, b'')
-            self.assertEqual(json.loads(output), json.loads(body))
+            self.assertEqual(json.loads(output)['abi'], 'desktop-native-registration-v1')
+            self.assertIn('error',json.loads(output))
         finally:
             process.stdin.close()
             if process.poll() is None:
@@ -164,6 +90,22 @@ class WindowsDesktopRegistration(unittest.TestCase):
                                     text=True, encoding='utf-8', timeout=75)
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             self.assertLessEqual(len(result.stdout.encode('utf-8')), 65536)
+            return json.loads(result.stdout)
+
+        def legacy(operation, plan):
+            # This frozen oracle is test-only: hgs never loads a script or
+            # interpreter. It proves upgrade compatibility in both directions.
+            source = Path(__file__).resolve().parents[1] / 'scripts/ci/fixtures/windows-desktop-registration-legacy.ps1'
+            body=json.dumps({'schema':1,'operation':operation,'plan':plan}).encode('utf-8')
+            escaped=str(source).replace("'","''")
+            script=(". ([ScriptBlock]::Create([IO.File]::ReadAllText('"+escaped+"')));"
+                    "Initialize-RegistrationEnvironment;Invoke-RegistrationMain "+str(len(body)))
+            command=[str(Path(os.environ['SystemRoot'])/'System32/WindowsPowerShell/v1.0/powershell.exe'),
+                     '-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',
+                     base64.b64encode(script.encode('utf-16le')).decode('ascii')]
+            result=subprocess.run(command,input=body,env=env,capture_output=True,timeout=20)
+            self.assertEqual(result.returncode,0,result.stderr+result.stdout)
+            self.assertLessEqual(len(result.stdout),65536)
             return json.loads(result.stdout)
 
         def digest(path):
@@ -193,6 +135,24 @@ class WindowsDesktopRegistration(unittest.TestCase):
             self.assertFalse(again['changed'])
             self.assertFalse(again['cli']['changed'])
             self.assertEqual(again['task_state'], 3)
+            selected_env = dict(env, HGS_EXECUTABLE=str(staged))
+            selected=subprocess.run([str(HGS),'desktop','registration','--json'],env=selected_env,
+                                    capture_output=True,timeout=20)
+            self.assertEqual(selected.returncode,0,selected.stderr)
+            plan=json.loads(selected.stdout)
+            self.assertEqual(plan['configuration'],first['configuration'])
+            # Native-created task must satisfy the previous helper's exact
+            # ownership/property checks. Legacy removal never Run/Stop/End.
+            self.assertTrue(legacy('status',plan)['registered'])
+            self.assertFalse(legacy('install',plan)['changed'])
+            self.assertFalse(legacy('remove',plan)['registered'])
+            # An existing pre-native task must remain an idempotent install
+            # and be removable by the new native reader without replacement.
+            self.assertTrue(legacy('install',plan)['registered'])
+            compatible=cli('desktop','registration','install','--json')
+            self.assertTrue(compatible['registered'])
+            self.assertFalse(compatible['changed'])
+            self.assertEqual(compatible['task_state'],3)
             removed = cli('desktop', 'registration', 'remove', '--json')
             self.assertTrue(removed['changed'])
             self.assertFalse(removed['registered'])

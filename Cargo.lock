@@ -3368,6 +3368,7 @@ dependencies = [
  "socket2",
  "time",
  "unicode-casefold",
+ "uuid",
  "windows-sys 0.61.2",
  "zerus-desktop-migration",
  "zerus-desktop-read-policy",

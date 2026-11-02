@@ -32,6 +32,8 @@ mod desk;
 ))]
 mod desktop_hello;
 #[cfg(feature = "live")]
+mod desktop_notification_controls;
+#[cfg(feature = "live")]
 mod desktop_ownership;
 #[cfg(feature = "live")]
 mod desktop_service;
@@ -532,6 +534,13 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
         })
         .on_window_event(|window, event| {
             #[cfg(feature = "live")]
+            if matches!(event,tauri::WindowEvent::Focused(_) | tauri::WindowEvent::Destroyed) {
+                use tauri::Manager;
+                if let Some(source)=window.try_state::<desktop_notification_controls::Source>() {
+                    desktop_notification_controls::observe_windows(window.app_handle(),&source);
+                }
+            }
+            #[cfg(feature = "live")]
             if window.label() == MAIN_WINDOW && matches!(event, tauri::WindowEvent::Destroyed) {
                 use tauri::Manager;
                 if let Some(delays) = window.try_state::<action_delay::Delays>() {
@@ -573,6 +582,18 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 std::fs::create_dir_all(&dir)?;
                 let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
                 app.manage(settings::open(app.handle(), &dir, replay));
+                if desktop_service::mode() {
+                    let source=desktop_notification_controls::Source::default();
+                    let handle=app.handle().clone();
+                    source.set_refresh(std::sync::Arc::new(move|source| {
+                        let app=handle.clone();
+                        let _=handle.run_on_main_thread(move||desktop_notification_controls::observe_windows(&app,&source));
+                    }));
+                    app.state::<commands::AppState>().register_notification_controls(desktop_notification_controls::Setup {
+                        source:source.clone(),settings:app.state::<settings::Store>().0.clone()
+                    });
+                    app.manage(source);
+                }
                 app.manage(speech_settings::SpeechPage::default());
                 app.manage(termination_cleanup::TerminationCleanup::default());
                 app.manage(worktree_cleanup::WorktreeCleanup::default());
@@ -1294,6 +1315,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         desktop_service::desktop_service_retry,
         desktop_service::desktop_service_ownership_rearm,
         desktop_service::desktop_service_ownership_result,
+        desktop_service::notification_controls::desktop_notification_preferences_set,
+        desktop_service::notification_controls::desktop_notification_preferences_check,
         desktop_service::desktop_service_read_marks,
         desktop_service::desktop_service_automatic_approvals,
         desktop_service::frontend::desktop_service_maintenance_configure,

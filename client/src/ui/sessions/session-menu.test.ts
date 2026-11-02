@@ -1,9 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.hoisted(() => {
   // store/ui.ts reads the page address and storage when it loads.
   const store = new Map<string, string>();
   vi.stubGlobal("location", { search: "", hash: "", href: "http://localhost/" });
+  vi.stubGlobal("navigator", { platform: "MacIntel" });
   vi.stubGlobal("localStorage", { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v); }, removeItem: (k: string) => { store.delete(k); } });
   // The list module registers Solid's delegated events when it loads; nothing renders here.
   // The composer it loads with Saved drafts listens for the page going.
@@ -34,23 +35,33 @@ vi.mock("../../bridge", () => ({
   localRetry: vi.fn(), localDelete: vi.fn(async () => {}), localInspect: vi.fn(async () => null),
   savedDrafts: vi.fn(), draftConflicts: vi.fn(), savedDraft: vi.fn(), draftRecover: vi.fn(), draftRestore: vi.fn(),
   composerClearControl: vi.fn(async () => null),
+  sessionFolderStatus: vi.fn(async () => ({ folder: false, shell: false, folder_hint: "Unavailable" })),
+  sessionFolderOpen: vi.fn(async () => ""),
   // Content search (store/contentSearch.ts) and the creation cards start with the list.
   inTauri: () => false,
   onCreations: vi.fn(async () => () => {}),
 }));
 
-import { sessionMenu } from "./SessionList";
+import { sessionContextMenu, sessionMenu } from "./SessionList";
 import { archivedSession } from "../../store/archive";
 import { applyBatch, toSession } from "../../store/catalog";
 import { composer } from "../../store/composer";
-import { composerClearControl } from "../../bridge";
-import { selectedKey, setSelectedKey, type MenuEntry } from "../../store/ui";
+import { composerClearControl, composerOpen, copyText, inspectSession, runAction, sessionFolderOpen, sessionFolderStatus, sessionReference } from "../../bridge";
+import { detailTab, menu, multi, peek, selectedKey, setDetailTab, setMenu, setMulti, setPeek, setSelectedKey, setStripMode, setSubagentOpen, subagentOpen, type MenuEntry } from "../../store/ui";
+import { clearMulti } from "./organize";
+import { setSetting } from "../../store/settings";
 import { emptyBatch, type ComposerView, type ViewRow } from "../../types";
 
 const labels = (entries: MenuEntry[]) => entries.map((e) => ("separator" in e ? "---" : "heading" in e ? `# ${e.heading}` : e.label));
 const archived = (agent: string): ViewRow => ({
   name: `${agent}/example/a1`, agent, state: "archived", status: "ended", archive_id: "10000000-0000-4000-8000-000000000001",
   archived_at: 100, run_id: "run-a1", conversation_id: "conv-a1", resumable: true,
+});
+
+afterEach(() => {
+  setMenu(undefined); clearMulti(); setSelectedKey(undefined); setSubagentOpen(undefined);
+  setPeek(false); setStripMode(false); setDetailTab("activity"); composer.apply(undefined);
+  vi.clearAllMocks();
 });
 
 describe("the session menu (Qt showSessionMenu 5266-5382)", () => {
@@ -109,5 +120,108 @@ describe("the session menu (Qt showSessionMenu 5266-5382)", () => {
     expect(entry()).toMatchObject({ disabled: true, hint: "Wait for the session update to finish." });
     composer.apply(undefined);
     setSelectedKey(undefined);
+  });
+});
+
+function contextRows() {
+  const row = (tag: string): ViewRow => ({ name: `codex/context/${tag}`, agent: "codex", state: "running", status: "ready", run_id: `context-${tag}`, conversation_id: `conversation-${tag}`, cwd: `/tmp/context-${tag}` });
+  const rows = ["open", "target", "other"].map((tag) => ({ computer: "", key: `run:context-${tag}`, row: row(tag) }));
+  applyBatch({ ...emptyBatch(), computers: [{ computer: "", status: "live", attempt: 0 }], upserts: rows });
+  return rows.map((r) => toSession(r.computer, r.key, r.row));
+}
+function contextEvent(overrides: Partial<MouseEvent> = {}): MouseEvent {
+  return { button: 2, ctrlKey: false, clientX: 20, clientY: 40, preventDefault: vi.fn(), stopPropagation: vi.fn(), ...overrides } as unknown as MouseEvent;
+}
+const menuItem = (label: string, items = menu()?.items ?? []) => {
+  const item = items.find((e) => "label" in e && e.label === label);
+  if (!item || !("label" in item)) throw Error(`Missing menu action: ${label}`);
+  return item;
+};
+
+describe("session context targeting", () => {
+  it.each([false, true])("opening and closing a context menu preserves the conversation, draft and selection (strip=%s)", async (strip) => {
+    const [open, target] = contextRows();
+    setStripMode(strip); setSelectedKey(open.key); setSubagentOpen("open-child");
+    setMulti(open.key, true); setPeek(true); setDetailTab("terminal");
+    composer.apply({ handle: 17, key: open.key, loaded: true, text_epoch: 1, text: "unsent draft", attachments: [], local: [] } as unknown as ComposerView);
+    const draft = composer.view();
+    sessionContextMenu(contextEvent(), target);
+    expect(menu()?.sessionKey).toBe(target.key);
+    expect(selectedKey()).toBe(open.key); expect(subagentOpen()).toBe("open-child");
+    expect(multi[open.key]).toBe(true); expect(multi[target.key]).not.toBe(true);
+    expect(peek()).toBe(true); expect(detailTab()).toBe("terminal");
+    expect(composer.view()).toBe(draft); expect(composerOpen).not.toHaveBeenCalled();
+    setMenu(undefined);
+    await Promise.resolve(); await Promise.resolve();
+    expect(menu()).toBeUndefined(); // Late capability reads cannot restore the highlight.
+    expect(selectedKey()).toBe(open.key); expect(composer.view()).toBe(draft);
+  });
+
+  it("keeps menu actions bound to the context session while another conversation stays open", async () => {
+    const [open, target] = contextRows(); setSelectedKey(open.key);
+    vi.mocked(sessionFolderStatus).mockResolvedValueOnce({ folder: true, shell: true, folder_hint: "" });
+    vi.mocked(runAction).mockResolvedValueOnce({ outcome: "done", receipt: null, cleanup: null });
+    vi.mocked(sessionReference).mockResolvedValueOnce("zerus://session?name=context-target");
+    sessionContextMenu(contextEvent(), target);
+    await vi.waitFor(() => expect(menuItem("Open folder").disabled).toBe(false));
+    const items = menu()!.items; setMenu(undefined); // MenuLayer closes before running an action.
+    menuItem("Copy session name", items).action?.();
+    expect(copyText).toHaveBeenCalledWith(target.name);
+    menuItem("Copy session reference", items).action?.();
+    const nativeTarget = { computer: target.computer, name: target.name, run_id: target.runId, conversation_id: target.conversationId };
+    expect(sessionReference).toHaveBeenCalledWith(nativeTarget, null);
+    menuItem("Open folder", items).action?.();
+    expect(sessionFolderOpen).toHaveBeenCalledWith({ target: nativeTarget, archive_id: null, agent_id: null, directory: target.cwdPath }, "folder");
+    menuItem("Pause session", items).action?.();
+    await vi.waitFor(() => expect(runAction).toHaveBeenCalledWith(nativeTarget, { kind: "pause" }));
+    expect(selectedKey()).toBe(open.key); expect(composerOpen).not.toHaveBeenCalled();
+  });
+
+  it("does not let an old folder result retarget a replacement or closed menu", async () => {
+    const [open, target, other] = contextRows(); setSelectedKey(open.key);
+    let finish!: (value: { folder: boolean; shell: boolean; folder_hint: string }) => void;
+    vi.mocked(sessionFolderStatus).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    sessionContextMenu(contextEvent(), target);
+    sessionContextMenu(contextEvent(), other);
+    finish({ folder: true, shell: true, folder_hint: "" });
+    await Promise.resolve(); await Promise.resolve();
+    expect(menu()?.sessionKey).toBe(other.key);
+    expect(menuItem("Open folder").disabled).toBe(true);
+    setMenu(undefined); await Promise.resolve();
+    expect(menu()).toBeUndefined(); expect(selectedKey()).toBe(open.key);
+  });
+
+  it("opens running commands for the context session instead of the current subagent", async () => {
+    const [open, target] = contextRows();
+    setSelectedKey(open.key); setSubagentOpen("open-child");
+    await setSetting("processes/enabled", true);
+    try {
+      sessionContextMenu(contextEvent(), { ...target, phase: "idle", activity: "idle", backgroundJobs: 1 });
+      const item = menuItem("Show running commands");
+      expect(item.disabled).toBe(false); expect(selectedKey()).toBe(open.key);
+      setMenu(undefined); item.action?.();
+      expect(selectedKey()).toBe(target.key); expect(subagentOpen()).toBeUndefined();
+      expect(detailTab()).toBe("processes");
+    } finally { await setSetting("processes/enabled", false); }
+  });
+
+  it("keeps macOS Control-click as additive selection without a context menu", () => {
+    const [open, target] = contextRows(); setSelectedKey(open.key);
+    const event = contextEvent({ button: 0, ctrlKey: true });
+    sessionContextMenu(event, target);
+    expect(event.stopPropagation).toHaveBeenCalled(); // Do not open the list background menu.
+    expect(menu()).toBeUndefined(); expect(selectedKey()).toBe(open.key);
+    expect(multi[open.key]).toBe(true); expect(multi[target.key]).toBe(true);
+    expect(sessionFolderStatus).not.toHaveBeenCalled(); expect(inspectSession).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("preserves the existing multi-selection menu (strip=%s)", (strip) => {
+    const [open, target] = contextRows(); setStripMode(strip); setSelectedKey(open.key);
+    setMulti(open.key, true); setMulti(target.key, true);
+    sessionContextMenu(contextEvent(), target);
+    expect(menu()?.items[0]).toEqual({ heading: "2 selected sessions" });
+    expect(menu()?.sessionKey).toBeUndefined();
+    expect(multi[open.key]).toBe(true); expect(multi[target.key]).toBe(true);
+    expect(selectedKey()).toBe(open.key); expect(sessionFolderStatus).not.toHaveBeenCalled();
   });
 });

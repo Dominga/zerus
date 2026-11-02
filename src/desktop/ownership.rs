@@ -154,6 +154,7 @@ pub(super) fn invalidate(db: &Connection) -> Result<()> {
             "UPDATE desktop_ownership_requests SET receipt=?2,final=1 WHERE request_id=?1",
             params![id, serde_json::to_string(&receipt)?],
         )?;
+        prune(db)?;
     }
     ensure!(
         revision < wire::MAX_REVISION,
@@ -197,7 +198,11 @@ fn save(tx: &Connection, receipt: &Receipt, origin: &Origin, final_result: bool)
         params![receipt.request_id,receipt.revision,receipt.fingerprint,origin,encoded,final_result])?;
     // Only settled receipts are evicted. Revision fencing means an evicted old
     // mutation cannot become a new grant; its missing lookup stays unknown.
-    tx.execute("DELETE FROM desktop_ownership_requests WHERE final=1 AND revision < COALESCE((SELECT revision FROM desktop_ownership_requests WHERE final=1 ORDER BY revision DESC LIMIT 1 OFFSET ?1),0)",[RECEIPTS-1])?;
+    prune(tx)?;
+    Ok(())
+}
+fn prune(db: &Connection) -> Result<()> {
+    db.execute("DELETE FROM desktop_ownership_requests WHERE final=1 AND revision < COALESCE((SELECT revision FROM desktop_ownership_requests WHERE final=1 ORDER BY revision DESC LIMIT 1 OFFSET ?1),0)",[RECEIPTS-1])?;
     Ok(())
 }
 fn refused(request: &Request, current: Status, code: &str) -> Result<Receipt> {
@@ -475,6 +480,7 @@ fn settle_locked(
         "UPDATE desktop_ownership_requests SET receipt=?2,final=1 WHERE request_id=?1 AND final=0",
         params![id, serde_json::to_string(&receipt)?],
     )?;
+    prune(&tx)?;
     tx.commit()?;
     Ok(())
 }

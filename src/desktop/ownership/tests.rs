@@ -322,6 +322,13 @@ fn settled_receipts_are_bounded_and_evicted_ids_cannot_regain_authority() {
     );
     assert_eq!(f.current().revision, revision);
     assert_eq!(f.count(), RECEIPTS);
+    let takeover = f.request(Action::NativeTakeover);
+    assert!(f.apply(takeover).native_ready());
+    assert_eq!(
+        f.count(),
+        RECEIPTS,
+        "settlement also applies the completed-receipt bound"
+    );
 }
 
 #[test]

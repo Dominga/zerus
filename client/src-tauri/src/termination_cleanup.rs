@@ -128,7 +128,12 @@ pub(crate) fn inspection(
     }
 }
 
-struct ReadGuard(Arc<Inner>, String);
+pub(crate) struct ReadGuard(Arc<Inner>, String);
+impl TerminationCleanup {
+    pub(crate) fn read_terminal_identity(&self) -> Result<ReadGuard, String> {
+        self.0.read()
+    }
+}
 impl Drop for ReadGuard {
     fn drop(&mut self) {
         lock(&self.0.model).reads.remove(&self.1);

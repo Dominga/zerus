@@ -458,7 +458,7 @@ impl Bus {
         mut mappings: Option<&mut Mappings>,
         endpoint: &Endpoint,
         deadline: Instant,
-    ) -> bool {
+    ) -> Exit {
         let mut good = was_good && self.matched == RULES.len();
         // Cancel only a read-only lookup. No native operation is replayed;
         // its pending reply still drains on the same original connection.
@@ -552,7 +552,7 @@ impl Bus {
             self.gate.removals_acked.store(true, Ordering::Release);
         }
         let connection = self.connection.clone();
-        good &= matches!(
+        let closed = matches!(
             self.drive(deadline, || false, connection.close()),
             Ok(Ok(()))
         );
@@ -568,8 +568,12 @@ impl Bus {
                 Poll::Pending
             }
         });
-        good &= self.drive(deadline, || false, finished).is_ok();
-        good && self.executor.is_empty() && !self.gate.refused()
+        let finished = self.drive(deadline, || false, finished).is_ok();
+        let drained = closed && finished && self.executor.is_empty();
+        Exit {
+            clean: good && drained && !self.gate.refused(),
+            drained,
+        }
     }
 }
 
@@ -589,6 +593,7 @@ pub(super) fn test_close_with_queued_callbacks(
     assert!(mappings.restore(vec![value]));
     emit();
     bus.close(true, Some(&mut mappings), &endpoint, Instant::now() + WAIT)
+        .clean
 }
 
 pub(super) fn run(
@@ -598,11 +603,16 @@ pub(super) fn run(
     controls: mpsc::Receiver<Control>,
     shared: Arc<Shared>,
     setup: Instant,
-) -> bool {
+) -> Exit {
     let cancelled = || shared.stop.load(Ordering::Acquire) || endpoint.stopping();
     let Ok(mut bus) = Bus::connect(address, setup, cancelled) else {
         shared.failed.store(true, Ordering::Release);
-        return false;
+        // No Bus/SDK executor was returned; the original setup future and its
+        // socket captures have been destroyed before this worker can join.
+        return Exit {
+            clean: false,
+            drained: true,
+        };
     };
     let mut good = bus.matches(true, setup, cancelled);
     let namespace = good
@@ -800,15 +810,15 @@ pub(super) fn run(
         good &= !bus.driver.broken && !bus.gate.refused();
     }
     shared.ready.store(false, Ordering::Release);
-    let clean = bus.close(
+    let exit = bus.close(
         good,
         Some(&mut mappings),
         &endpoint,
         shared.cleanup_deadline(),
     );
     drop(mappings);
-    shared.failed.store(!clean, Ordering::Release);
-    clean
+    shared.failed.store(!exit.clean, Ordering::Release);
+    exit
 }
 
 pub(super) fn reply_from(message: &zbus::Message, owner: &str) -> bool {

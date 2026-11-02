@@ -18,6 +18,8 @@ struct Request {
     expected_run_id: String,
     expected_conversation_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    terminal_identity: Option<zerus_client_core::untracked_shell::Identity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     archive_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     new_name: Option<String>,
@@ -171,7 +173,11 @@ fn validate(request: &Request, name: &str) -> Result<()> {
     }
     for (value, maximum, nonempty) in [
         (name, 512, true),
-        (request.expected_run_id.as_str(), 128, true),
+        (
+            request.expected_run_id.as_str(),
+            128,
+            request.action != "terminate_shell",
+        ),
         (request.expected_conversation_id.as_str(), 256, false),
     ] {
         if value.len() > maximum
@@ -180,6 +186,25 @@ fn validate(request: &Request, name: &str) -> Result<()> {
         {
             return Err("Invalid session identity".into());
         }
+    }
+    if request.action == "terminate_shell" {
+        if !request.expected_run_id.is_empty()
+            || !request.expected_conversation_id.is_empty()
+            || !request
+                .terminal_identity
+                .as_ref()
+                .is_some_and(|identity| identity.valid())
+            || request.archive_id.is_some()
+            || request.new_name.is_some()
+            || request.tag.is_some()
+            || request.message_id.is_some()
+        {
+            return Err(zerus_client_core::untracked_shell::UNVERIFIED.into());
+        }
+        return Ok(());
+    }
+    if request.terminal_identity.is_some() {
+        return Err("Unexpected terminal identity".into());
     }
     let archived = matches!(
         request.action.as_str(),
@@ -234,6 +259,16 @@ fn validate(request: &Request, name: &str) -> Result<()> {
 }
 
 fn perform(request: &Request, name: &str, scope: &Scope) -> Result<()> {
+    if request.action == "terminate_shell" {
+        return untracked_shell::terminate(
+            name,
+            request
+                .terminal_identity
+                .as_ref()
+                .ok_or(zerus_client_core::untracked_shell::UNVERIFIED)?,
+            scope,
+        );
+    }
     if opencode::exists(name) {
         scope.opencode_error();
         return opencode::session_action(name, &request.action, request.new_name.as_deref(), request.message_id.as_deref(), scope);
@@ -360,6 +395,10 @@ where
         }
     }
     if outcome.is_ok() {
+        if let Some(identity) = &request.terminal_identity {
+            answer["terminal_identity"] = json!(identity);
+            answer["terminal_closed"] = json!(true);
+        }
         if let Some(target) = scope.target.into_inner() {
             answer["result_target"] = target;
         }

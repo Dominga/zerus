@@ -102,6 +102,36 @@ abandoned undrained attachment keeps its original owner held rather than permit
 replacement. The returned activations still need the service-owned authenticated
 frontend handoff; this component adds no generic click request or UI launcher.
 
+Revoke, rollback, native takeover and runtime replacement first fence new posts
+and clicks, then finish restoration and the bounded retirement walk while the
+original host stays connected. A begun post keeps its original terminal receipt
+and copied resources; only a confirmed delivered mapping can produce its exact
+withdrawal. An unknown post or withdrawal is never replayed. The native stop is
+sent after this phase and the original operation resources settle, followed by
+the actual host join. Policy disable uses the same retirement walk and leaves
+the host connected and idle instead of stopping it.
+
+Shutdown retirement has one overall ten-second deadline from the first stop
+request. Repeated stop requests never extend it. A cleanup error or expiry stops
+discovery and sends native stop, exposing the failure rather than leaving a
+takeover waiting indefinitely. Unwithdrawn banners remain uncertain; neither a
+cleanup failure nor a timeout authorizes replay of a post or withdrawal. Original
+command/callback resources and the actual native worker still have to drain.
+
+On Linux a namespace fault remains visible even after the original socket and
+executor have actually closed and the same worker has joined. This is physical
+resource drain, not a clean callback fence. A failed teardown or a panicked
+worker supplies no such proof and still prevents settlement/replacement.
+
+The ledger remains revoked throughout cleanup. Its separate fresh withdrawal
+reservation validates the original delivered post's identity, token, native ID
+and receipt binding under the same writer/service incarnation. It cannot reserve
+a post or another device effect, retry a withdrawal, or adopt a stale writer.
+Only its private original reservation permits the native snapshot check after
+revocation; a read-only inspection cannot reconstruct that authority. Restoration
+can load these mappings for cleanup after revoke, while click checks still
+refuse them immediately.
+
 ## Authenticated activation handoff
 
 The native frontend consumer checks both `Desktop frontend request ABI:

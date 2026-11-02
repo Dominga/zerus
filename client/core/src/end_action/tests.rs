@@ -20,6 +20,85 @@ fn capture(action: Action) -> Captured {
         action,
     }
 }
+
+fn shell_identity() -> crate::untracked_shell::Identity {
+    serde_json::from_value(json!({"version":1,"socket":"/tmp/example-tmux.sock","socket_dev":"1","socket_ino":"9007199254740993",
+        "server_pid":100,"server_start":"server-birth","session_id":"$1","session_created":1700000000,
+        "pane_id":"%2","pane_pid":101,"pane_start":"pane-birth","shell":"bash"})).unwrap()
+}
+
+#[test]
+fn untracked_shell_requires_the_exact_confirmation_terminal_and_no_agent_binding() {
+    let identity = shell_identity();
+    let c = Captured {
+        target: Target {
+            computer: String::new(),
+            name: "example-shell".into(),
+            run_id: String::new(),
+            conversation_id: String::new(),
+        },
+        action: Action::TerminateShell {
+            identity: identity.clone(),
+        },
+        state: "running".into(),
+    };
+    let value = json!({"name":c.target.name,"tracked":false,"untracked_terminal":identity});
+    assert!(c.valid());
+    assert!(c.checked_inspection(exited(&value)).is_ok());
+    for field in [
+        "socket",
+        "socket_dev",
+        "socket_ino",
+        "server_start",
+        "session_id",
+        "pane_id",
+        "pane_start",
+        "shell",
+    ] {
+        let mut changed = value.clone();
+        changed["untracked_terminal"][field] = json!("changed");
+        assert!(!c.matches(&changed), "{field}");
+    }
+    for field in ["session_created", "server_pid", "pane_pid"] {
+        let mut changed = value.clone();
+        changed["untracked_terminal"][field] = json!(999);
+        assert!(!c.matches(&changed), "{field}");
+    }
+    for (key, changed) in [
+        ("tracked", json!(true)),
+        ("run_id", json!("agent-run")),
+        ("conversation_id", json!("agent-conversation")),
+        ("state", json!("stopped")),
+        ("run_id", json!(17)),
+    ] {
+        let mut v = value.clone();
+        v[key] = changed;
+        assert!(!c.matches(&v), "{key}");
+    }
+    let inv = c.invocation(REQUEST).unwrap();
+    assert_eq!(inv.args, ["session-action", "example-shell", "--json"]);
+    let body: Value = serde_json::from_slice(inv.stdin.as_ref().unwrap()).unwrap();
+    assert_eq!(body["action"], "terminate_shell");
+    assert_eq!(body["terminal_identity"], value["untracked_terminal"]);
+    let ack = json!({"request_id":REQUEST,"name":c.target.name,"run_id":"","conversation_id":"","status":"completed","terminal_closed":true,"terminal_identity":identity});
+    assert!(matches!(
+        c.completed(&inv, exited(&ack)),
+        Outcome::Done { cleanup: None, .. }
+    ));
+    let mut wrong = ack;
+    wrong["terminal_identity"]["pane_pid"] = json!(999);
+    assert!(matches!(
+        c.completed(&inv, exited(&wrong)),
+        Outcome::Failed { .. }
+    ));
+    let mut agent = c.clone();
+    agent.target.run_id = "agent-run".into();
+    assert!(!agent.valid());
+    let mut unsafe_kill = c;
+    unsafe_kill.action = Action::Kill;
+    assert!(!unsafe_kill.valid());
+    assert!(actions::invocation(&unsafe_kill.target, &Action::Kill, REQUEST).is_err());
+}
 fn record(c: &Captured) -> Value {
     json!({"name":c.target.name,"run_id":c.target.run_id,"conversation_id":c.target.conversation_id,"state":c.state,"archive_id":c.archive_id().unwrap_or("")})
 }

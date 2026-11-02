@@ -59,6 +59,9 @@ impl Runtime {
     pub fn handoff(&self) -> Option<Arc<HandoffLock>> {
         self.owner.as_ref().map(|o| o.handoff())
     }
+    pub fn writer_epoch(&self) -> Option<&str> {
+        self.grant.as_ref().map(ownership::Grant::writer_epoch)
+    }
     fn begin(&mut self, store: &mut Store) -> Result<()> {
         self.begin_with(store, preparation::Preparation::start)
     }

@@ -81,7 +81,7 @@ impl AppState {
         self.live.register_service_projection(observer)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn register_service_activation(
         &self,
         sink: crate::desktop_service::activation::Sink,
@@ -178,7 +178,7 @@ mod live {
         pub(super) desktop_responder: OnceLock<Arc<zerus_client_core::desktop::Responder>>,
         pub(super) pending_read_source: OnceLock<crate::actions::Actions>,
         service_projections: Mutex<Vec<crate::desktop_service::Projection>>,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         service_activation: OnceLock<crate::desktop_service::activation::Sink>,
         tasks_project: Mutex<Option<String>>,
         controls: zerus_client_core::desktop::drain::Gate,
@@ -198,7 +198,7 @@ mod live {
                 desktop_responder: OnceLock::new(),
                 pending_read_source: OnceLock::new(),
                 service_projections: Mutex::new(Vec::new()),
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
                 service_activation: OnceLock::new(),
                 tasks_project: Mutex::new(None),
                 controls: Gate::new(64).unwrap(),
@@ -209,7 +209,7 @@ mod live {
         }
     }
     impl Live {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         pub(super) fn register_service_activation(
             &self,
             sink: crate::desktop_service::activation::Sink,
@@ -418,7 +418,7 @@ mod live {
                             .lock()
                             .unwrap_or_else(PoisonError::into_inner)
                             .clone(),
-                        #[cfg(target_os = "linux")]
+                        #[cfg(any(target_os = "linux", target_os = "macos"))]
                         activation: self.service_activation.get().cloned(),
                     },
                 );

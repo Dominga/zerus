@@ -210,6 +210,17 @@ fn read(
     if !reply.matches(&id, configuration, epoch) {
         return Err(ReadError::Retryable);
     }
+    // Wayland activation tokens belong only to Linux. A Mac delivery comes
+    // from its native host and has no platform context; never interpret a
+    // foreign platform's presentation hint as a Mac click.
+    #[cfg(target_os = "macos")]
+    if reply
+        .activation
+        .as_ref()
+        .is_some_and(|open| open.platform_context.is_some())
+    {
+        return Err(ReadError::Retryable);
+    }
     Ok(reply.activation)
 }
 

@@ -84,11 +84,58 @@ blocked.
 
 Readiness must match the selected CLI's lifecycle ABI and configuration, with
 `lifecycle.ipc_ready=true` and the systemd main PID. This establishes IPC
-readiness only. The current registration still runs passive `desktop serve`;
-each background component reports its separate status and is not enabled by
-registration alone. Inspect `hgs desktop status --json` and
+readiness only. Fresh registration runs passive `desktop serve`; an explicit,
+reversible background selection is described below. Each background component
+reports its separate status. Inspect `hgs desktop status --json` and
 `journalctl --user -u hgs-desktop.service` when startup fails. No native agent,
 tmux server, recovery, voice or mobile service is stopped by this helper.
+
+### Select the desktop service mode
+
+Use Zerus Next's maintained service-mode startup and authenticated **Grant**
+against the passive service first. After a retained revoke, use its explicit
+**Rearm** instead; changing the unit never clears a revoke. The GUI and service
+must select the same configuration. The installer cannot grant ownership.
+
+From a foreground terminal **outside Zerus**, in the current graphical login:
+
+```sh
+# Source checkout; packaged installations ship the same helper in lib/zerus.
+python3 scripts/install-linux-desktop-service.py install --hgs "$(command -v hgs)" --mode background --json
+python3 scripts/install-linux-desktop-service.py status --hgs "$(command -v hgs)" --json
+```
+
+The helper requires the actual current native ownership grant and checks the
+original caller's process ancestry. Agent callers, including terminals launched
+inside Zerus that carry `HGS_SESSION`/`HGS_RUN_ID`, are refused. The other supported
+caller is the installed frontend's native Settings action. Missing or changed
+grant, custom units/drop-ins, incomplete graphical environment and unknown
+caller identity refuse without enabling background mode. No GUI is restarted.
+
+Selection changes only the owned `hgs-desktop.service`, adding `--background`
+and restarting that service through `systemctl --user`. `status` reports
+`selected_mode`, `running_mode`, `pending_restart` and any pending transition;
+`hgs desktop status --json` reports `lifecycle.mode` independently of component
+readiness. A selected background mode does not prove every worker is ready.
+Normal installer/session refreshes and CLI upgrades preserve the selected mode;
+omitting `--mode` never changes it. `--no-start` and headless staging cannot
+perform an explicit mode transition.
+
+To return to passive service registration:
+
+```sh
+python3 scripts/install-linux-desktop-service.py install --hgs "$(command -v hgs)" --mode passive --json
+```
+
+This first records one original rollback revoke UUID, then requires that exact
+durable, checkpointed revoke (including runtime/resource drain) before replacing
+the unit and restarting only the desktop service. A lost or unsettled result
+retains the original transition; inspect `status` and repeat **the same passive
+transition**, which retains its UUID. An unfinished rollback blocks background
+selection and ordinary refresh. Never remove its record, revoke or database to
+recover. Returning to background later requires a fresh authenticated frontend
+Rearm. Mac and Windows mode switching remain separate platform work; their
+registration defaults are unchanged.
 
 ## Qualify in a scratch prefix
 

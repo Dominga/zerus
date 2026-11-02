@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 UNIT = "hgs-desktop.service"
 ABI = "desktop-lifecycle-v1"
@@ -139,20 +140,24 @@ def destination_for(env):
     return root / "systemd/user" / UNIT
 
 
-def registration(hgs, env, run=command):
+def registration(hgs, env, run=command, mode="passive"):
     require("hgs desktop registration --json" in run([hgs, "--help"], env),
             "selected hgs does not support desktop registration; update the CLI first")
     try:
-        value = json.loads(run([hgs, "desktop", "registration", "--json"], env))
+        value = json.loads(run([hgs, "desktop", "registration", "--json"]
+                               + (["--background"] if mode == "background" else []), env))
         probe = value["readiness"]
         scope = probe["environment"]
         args = [hgs, "desktop", "serve", "--config-dir", scope["HGS_CONFIG_DIR"],
                 "--state-dir", scope["HGS_STATE_DIR"]]
+        if mode == "background":
+            args.append("--background")
         configuration = value["configuration"]
         require(value["schema"] == 1 and value["label"] == UNIT and len(configuration) == 64
                 and all(c in "0123456789abcdef" for c in configuration), "unsupported registration identity")
         require(value["argv"] == args and probe["argv"] == [hgs, "desktop", "status", "--json"],
                 "registration must preserve the selected local CLI and exact command")
+        require(value.get("mode", "passive") == mode, "registration mode does not match the selection")
         require(set(scope) == {"HGS_CONFIG_DIR", "HGS_STATE_DIR"}
                 and all(isinstance(p, str) and Path(p).is_absolute() and not any(ord(c) < 32 for c in p)
                         for p in scope.values()), "registration configuration paths are invalid")
@@ -207,17 +212,57 @@ def graphics(env):
 
 
 class Installer:
-    def __init__(self, hgs, env=None, run=command):
+    def __init__(self, hgs, env=None, run=command, mode=None):
         self.env = dict(os.environ if env is None else env)
         self.run = run
         self.hgs = os.path.abspath(hgs)
         require(os.access(self.hgs, os.X_OK), "selected hgs is not executable")
-        self.registration = registration(self.hgs, self.env, self.run)
+        require(mode in (None, "passive", "background"), "unsupported desktop service mode")
+        self.requested_mode = mode
+        old = read_file(destination_for(self.env).with_name(".hgs-desktop.zerus-registration.json"))
+        try:
+            selected = json.loads(old).get("mode", "passive") if old is not None else "passive"
+        except (TypeError, ValueError, AttributeError):
+            raise Refusal("invalid desktop registration record; kept") from None
+        require(selected in ("passive", "background"), "invalid selected mode; kept")
+        self.mode = mode or selected
+        self.registration = registration(self.hgs, self.env, self.run, self.mode)
         self.destination = Path(self.registration["destination"])
         self.record_path = self.destination.with_name(".hgs-desktop.zerus-registration.json")
         self.definition = self.registration["definition"].encode()
         self.configuration = self.registration["configuration"]
         self.binary = binary_digest(self.hgs)
+        self.last_status = None
+
+    def cli(self, *args, timeout=10):
+        probe = self.registration["readiness"]
+        value = json.loads(self.run([self.hgs, "desktop", *args],
+                                    dict(self.env, **probe["environment"]), timeout=timeout))
+        require(isinstance(value, dict), "invalid desktop command reply")
+        return value
+
+    def caller(self):
+        value = self.cli("registration", "mode-check", "--json")
+        require(value.get("schema") == 1 and value.get("configuration") == self.configuration
+                and value.get("admitted") is True
+                and value.get("source") in ("interactive_terminal", "installed_frontend"),
+                "mode changes require Settings or a terminal outside Zerus")
+
+    def grant(self):
+        value = self.cli("ownership-status", "--json")
+        def valid_uuid(text):
+            try:
+                return str(uuid.UUID(text)) == text
+            except (ValueError, TypeError, AttributeError):
+                return False
+        require(value.get("abi") == "desktop-ownership-v1"
+                and value.get("configuration") == self.configuration
+                and value.get("state") == "service" and value.get("identity_current") is True
+                and value.get("rearm_required") is False
+                and all(valid_uuid(value.get(key)) for key in ("journal", "request_id", "owner_epoch"))
+                and type(value.get("revision")) is int and 0 < value["revision"] < 2 ** 53,
+                "open Zerus Next in service mode and complete Grant/Rearm first; a retained revoke is never cleared by this installer")
+        return value
 
     def manager(self, *args):
         return self.run(["systemctl", "--user", *args], self.env)
@@ -247,6 +292,17 @@ class Installer:
                                 and all(c in "0123456789abcdef" for c in record[key])
                                 for key in ("binary_sha256", "definition_sha256")),
                         "invalid desktop registration record; kept")
+                require(record.get("mode", "passive") in ("passive", "background"),
+                        "invalid desktop registration mode; kept")
+                transition = record.get("transition")
+                if transition is not None:
+                    require(isinstance(transition, dict) and set(transition) == {"target", "request_id"}
+                            and transition["target"] == "passive"
+                            and str(uuid.UUID(transition["request_id"])) == transition["request_id"],
+                            "invalid pending mode transition; kept")
+                last = record.get("last_revoke_request_id")
+                require(last is None or str(uuid.UUID(last)) == last,
+                        "invalid original revoke identity; kept")
                 # A crash after replacing our unit but before saving its new
                 # digest can leave the old record. Recover only this selected
                 # CLI's exact emitted definition under an otherwise valid owned
@@ -254,7 +310,7 @@ class Installer:
                 require(raw is not None and (digest(raw) == record["definition_sha256"] or raw == self.definition),
                         "custom or missing desktop service definition kept")
                 return record
-            except (KeyError, TypeError, ValueError):
+            except (KeyError, TypeError, ValueError, AttributeError):
                 raise Refusal("invalid desktop registration record; kept") from None
         require(raw is None or raw == self.definition, "custom desktop service definition kept")
         return None
@@ -263,11 +319,13 @@ class Installer:
         probe = self.registration["readiness"]
         value = json.loads(self.run(probe["argv"], dict(self.env, **probe["environment"]), timeout=timeout))
         require(isinstance(value, dict), "invalid desktop readiness object")
+        self.last_status = value
         lifecycle = value.get("lifecycle", {})
         require(isinstance(lifecycle, dict) and lifecycle.get("abi") == ABI
                 and lifecycle.get("configuration") == self.configuration,
                 "desktop readiness ABI/configuration mismatch")
         require(type(lifecycle.get("ipc_ready")) is bool, "desktop readiness is not a boolean")
+        require(lifecycle.get("mode") in (None, "passive", "background"), "invalid running desktop mode")
         if lifecycle["ipc_ready"]:
             require(lifecycle.get("phase") == "serving"
                     and type(lifecycle.get("pid")) is int and lifecycle["pid"] > 0
@@ -280,7 +338,37 @@ class Installer:
     def save(self, record):
         write_file(self.record_path, (json.dumps(record, indent=2) + "\n").encode())
 
+    def status(self):
+        previous = self.ownership()
+        state = self.state()
+        lifecycle = self.probe() if state.get("ActiveState") == "active" else {}
+        if lifecycle:
+            require(str(lifecycle.get("pid")) == state.get("MainPID"), "desktop PID/readiness mismatch")
+        return {"schema": 1, "operation": "status", "configuration": self.configuration,
+                "label": UNIT, "registered": previous is not None,
+                "selected_mode": previous.get("mode", "passive") if previous else "passive",
+                "running_mode": lifecycle.get("mode"), "ipc_ready": lifecycle.get("ipc_ready", False),
+                "pending_restart": previous.get("pending_restart", False) if previous else False,
+                "last_revoke_request_id": previous.get("last_revoke_request_id") if previous else None,
+                "transition": previous.get("transition") if previous else None}
+
+    def rollback(self, previous):
+        # Persist before the first effect. An interrupted attempt can only use
+        # this SAME revoke ID; it cannot silently become a fresh permission.
+        transition = previous.get("transition")
+        if transition is None:
+            transition = {"target": "passive", "request_id": str(uuid.uuid4())}
+            previous = dict(previous, transition=transition)
+            self.save(previous)
+        value = self.cli("revoke", "--json", "--request-id", transition["request_id"], "--reason", "rollback")
+        require(value.get("request_id") == transition["request_id"]
+                and value.get("configuration") == self.configuration
+                and all(value.get(key) is True for key in ("accepted", "durable", "revoked", "checkpointed")),
+                "original rollback revoke has not settled; keep the same pending transition")
+        return transition
+
     def install(self, *, check=False, no_start=False, session=False, refresh=False):
+        require(self.requested_mode is None or not refresh, "refresh preserves mode; use install --mode for an explicit transition")
         previous = self.ownership()
         if refresh and previous is None:
             return "No managed desktop registration; CLI-only installation kept without a new service."
@@ -301,6 +389,20 @@ class Installer:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             previous = self.ownership()
             state = self.state()
+            require(self.requested_mode is not None or previous is None
+                    or previous.get("mode", "passive") == self.mode,
+                    "selected mode changed while waiting for registration; inspect status and retry")
+            explicit = self.requested_mode is not None and not check
+            transition = previous.get("transition") if previous else None
+            require(not transition or (explicit and self.mode == "passive"),
+                    "pending rollback: repeat the original --mode passive transition; do not rearm or change modes")
+            if explicit:
+                self.caller()
+                require(not no_start and not refresh and graphics(self.env) is not None,
+                        "explicit mode changes require the current graphical session and cannot use --no-start/refresh")
+                if self.mode == "background":
+                    require(previous is not None, "register the passive service and complete frontend Grant/Rearm first")
+                    self.grant()
             if refresh:
                 require(previous is not None, "managed registration disappeared; kept")
                 if (previous["binary_sha256"] == self.binary
@@ -314,16 +416,33 @@ class Installer:
                 current = self.probe()
                 require(current.get("ipc_ready") is True, "active desktop service is unavailable; kept for inspection")
                 require(str(current.get("pid")) == state.get("MainPID"), "desktop service PID/readiness mismatch; kept")
+            if explicit and self.mode == "passive" and previous is not None and (
+                    previous.get("mode", "passive") == "background" or transition
+                    or (active and current.get("mode") == "background")):
+                transition = self.rollback(previous)
             context = None if no_start or (refresh and not active) else graphics(self.env)
             changed = previous is None or previous.get("binary_sha256") != self.binary or previous.get("definition_sha256") != digest(self.definition)
             record = {"schema": 1, "configuration": self.configuration, "definition_sha256": digest(self.definition),
                       "binary_sha256": self.binary, "pending_restart": bool(active and (changed or previous.get("pending_restart", False))),
-                      "session": previous.get("session") if previous else None}
+                      "session": previous.get("session") if previous else None, "mode": self.mode}
+            if transition is not None:
+                record["transition"] = transition
+            last_revoke = transition["request_id"] if transition else (previous or {}).get("last_revoke_request_id")
+            if last_revoke:
+                record["last_revoke_request_id"] = last_revoke
             if session:
                 require(previous is not None, "register the desktop service before starting its session")
+            if explicit:
+                self.caller()
+                if self.mode == "background":
+                    self.grant()
             if read_file(self.destination) != self.definition:
                 write_file(self.destination, self.definition)
             self.save(record)
+            if explicit:
+                self.caller()
+                if self.mode == "background":
+                    self.grant()
             self.manager("daemon-reload")
             self.state()  # Refuse any newly loaded custom fragment or drop-in.
             if not refresh:
@@ -350,13 +469,21 @@ class Installer:
                 require(remaining > 0, "desktop IPC is not ready; inspect hgs-desktop.service")
                 lifecycle = self.probe(timeout=remaining)
                 if lifecycle["ipc_ready"]:
+                    if explicit:
+                        require(lifecycle.get("mode") == self.mode,
+                                "selected desktop mode is not running; keep pending_restart and inspect the service")
                     break
                 time.sleep(min(0.2, max(0, deadline - time.monotonic())))
             served = self.state()
             require(served.get("ActiveState") == "active" and served.get("MainPID") == str(lifecycle.get("pid")),
                     "readiness does not belong to the registered desktop service")
             require(binary_digest(self.hgs) == self.binary, "CLI changed during service activation; inspect before retrying")
+            if explicit and self.mode == "background":
+                self.grant()
+                require(self.last_status.get("background_start", {}).get("durably_blocked") is not True,
+                        "background handoff is blocked; complete authenticated Rearm, never clear the revoke")
             record.update(session=context, pending_restart=False)
+            record.pop("transition", None)
             self.save(record)
             return "Desktop service IPC ready. Background workers have their separate lifecycle status."
         finally:
@@ -365,13 +492,33 @@ class Installer:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("install", "session", "refresh"), nargs="?", default="install")
+    parser.add_argument("action", choices=("install", "session", "refresh", "status"), nargs="?", default="install")
     parser.add_argument("--hgs", default=shutil.which("hgs"))
     parser.add_argument("--config-dir")
     parser.add_argument("--state-dir")
     parser.add_argument("--check", action="store_true", help="validate ownership/registration without changing anything")
     parser.add_argument("--no-start", action="store_true", help="register for the next graphical login without starting/restarting")
+    parser.add_argument("--mode", choices=("passive", "background"), help="explicit owner selection; omitted preserves the registered mode")
+    parser.add_argument("--json", action="store_true", help="stable configuration-scoped receipt for the native Settings action")
     args = parser.parse_args()
+    instance = None
+    def failed(code, error):
+        if args.json:
+            record = None
+            if instance is not None:
+                try:
+                    raw = read_file(instance.record_path)
+                    record = json.loads(raw) if raw is not None else None
+                except (Refusal, OSError, ValueError):
+                    pass
+            print(json.dumps({"schema": 1, "operation": args.action, "ok": False,
+                              "code": code, "message": str(error),
+                              "configuration": instance.configuration if instance else None,
+                              "selected_mode": record.get("mode", "passive") if isinstance(record, dict) else None,
+                              "running_mode": None, "ipc_ready": None,
+                              "pending_restart": record.get("pending_restart") if isinstance(record, dict) else None,
+                              "last_revoke_request_id": record.get("last_revoke_request_id") if isinstance(record, dict) else None,
+                              "transition": record.get("transition") if isinstance(record, dict) else None}))
     try:
         require(sys.platform.startswith("linux") and os.geteuid() != 0, "run as the Linux desktop user, without sudo")
         require(args.hgs, "selected hgs not found; pass --hgs PATH")
@@ -380,19 +527,32 @@ def main():
             if value is not None:
                 require(Path(value).is_absolute(), "desktop configuration paths must be absolute")
                 env[name] = value
+        require(args.mode is None or args.action in ("install", "session"),
+                "only install/session can explicitly select a mode; status and refresh preserve it")
         # A deliberate CLI upgrade must not discover/adopt a service merely
         # because the new CLI can render one. No manager or CLI probe if absent.
         record = destination_for(env).with_name(".hgs-desktop.zerus-registration.json")
         if args.action == "refresh" and read_file(record) is None:
             print("No managed desktop registration; CLI-only installation kept without a new service.")
             return 0
-        print(Installer(args.hgs, env).install(check=args.check, no_start=args.no_start,
-                                             session=args.action == "session", refresh=args.action == "refresh"))
+        require(args.action != "status" or args.mode is None, "status cannot select a mode")
+        instance = Installer(args.hgs, env, mode=args.mode)
+        if args.action == "status":
+            print(json.dumps(instance.status()))
+        else:
+            result = instance.install(check=args.check, no_start=args.no_start,
+                                      session=args.action == "session", refresh=args.action == "refresh")
+            if args.json:
+                print(json.dumps(dict(instance.status(), operation=args.action, ok=True, message=result)))
+            else:
+                print(result)
         return 0
     except PendingRestart as error:
+        failed("restart_pending", error)
         print(f"Desktop service refresh pending: {error}", file=sys.stderr)
         return 3
     except (Refusal, OSError, ValueError, subprocess.SubprocessError) as error:
+        failed("registration_refused", error)
         print(f"Desktop service registration refused: {error}", file=sys.stderr)
         return 1
 

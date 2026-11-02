@@ -228,6 +228,40 @@ refresh or Linux exit 3 (PendingRestart) is not readiness. Unix has no
 `desktop registration install/remove/status` command; those are Windows-only.
 Never hand-start a second `desktop serve` as a repair.
 
+### Linux background registration opt-in
+
+The passive actor accepts the service-mode GUI's authenticated Grant/Rearm and
+journals it without starting background workers. Complete that handoff first;
+do not infer it from readiness. Then, from the owner's foreground terminal
+**outside Zerus** in the current graphical login, use the maintained helper:
+
+```bash
+: "${DESKTOP_HELPER:?installed lib/zerus/install-linux-desktop-service.py from this candidate}"
+python3 "$DESKTOP_HELPER" install --hgs "$SERVICE_HGS" \
+  --config-dir "$CFG" --state-dir "$STATE" --mode background --json
+python3 "$DESKTOP_HELPER" status --hgs "$SERVICE_HGS" \
+  --config-dir "$CFG" --state-dir "$STATE" --json
+desktop_cli status --json
+```
+
+Require the exact configuration and selected/running background mode separately
+from fleet/presence/read/notification readiness. Missing/stale native Grant or
+retained revoke refuses; perform authenticated frontend Rearm rather than
+clearing files or launching a second service. Agent ancestry and `HGS_SESSION`/
+`HGS_RUN_ID` refuse even if the environment is stripped in a child. The future
+native Settings control uses this same helper contract; an agent cannot perform
+the acceptance mode switch on the owner's behalf. Default install is passive;
+normal refreshes preserve selection. Mac/Windows switches need their own
+maintained platform route; the Linux command does not qualify them.
+
+For Linux passive rollback, use `install --mode passive --json` with the same
+selections **before** the GUI rollback. It durably retains one revoke UUID and
+requires the original checkpointed drain before changing/restarting only
+`hgs-desktop.service`. Record `last_revoke_request_id` on success. On uncertainty,
+`status.transition.request_id` is the original ID; inspect it and resume only
+that same passive transition. Do not substitute a new revoke UUID or return to
+background while it is pending. The helper never restarts the GUI or agents.
+
 ### Client cases
 
 Use fresh synthetic targets on the owner's main account. Record original exact
@@ -264,12 +298,16 @@ an unbounded full listing or the GUI's local overlay.
 
 ### Revoke and rollback commands
 
-Generate and retain one canonical `REVOKE_ID` in the private run record before
-submitting it. The lookup uses that same original ID; it does not repeat revoke.
+On Linux, use the maintained `--mode passive` command above and retain its
+original revoke ID. On macOS, generate and retain one canonical `REVOKE_ID` in
+the private run record before submitting it. The lookup uses that same original
+ID; it does not repeat revoke.
 The GUI rollback path is its actual installed path, not a staged copy.
 
 ```bash
-: "${REVOKE_ID:?saved original UUID}" "${INSTALLED_GUI:?actual installed GUI}"
+: "${INSTALLED_GUI:?actual installed GUI}"
+# macOS only, until its maintained mode-switch route is available:
+: "${REVOKE_ID:?saved original UUID}"
 desktop_cli revoke --json --request-id "$REVOKE_ID" --reason rollback
 
 # Only if the first result was uncertain, read its original receipt:

@@ -5,6 +5,7 @@
 #include <functional>
 #include "TeamModel.h"
 
+class QComboBox;
 class QLabel;
 class QPushButton;
 class QScrollArea;
@@ -23,9 +24,14 @@ class TeamConversation;
 // the designer's draft.
 class TeamDesignerPage : public QWidget {
 public:
+    struct Project {
+        QString id, name, folder, folderName;
+    };
     explicit TeamDesignerPage(TeamController *teams, QWidget *parent = nullptr);
     void setDark(bool dark);
-    // The folder and project the designer reads: the selected session's.
+    // Local project folders are available without a selected or running session.
+    void setProjects(const QList<Project> &projects, const QString &defaultProject = {});
+    // A selected session can also supply its folder and project directly.
     void setContext(const QString &folder, const QString &project);
     // The designer session of that project, if it runs; and its live state.
     std::function<QString()> designerSession;
@@ -62,6 +68,7 @@ private:
     // Decided proposals closed in the list; Apply still writes the kept ones.
     QSet<QString> m_closed;
     QLabel *m_title, *m_status, *m_reads, *m_proposes, *m_version;
+    QComboBox *m_projectChoice;
     QPushButton *m_open;
     // The designer's agent, model and effort before it starts.
     QString m_agent = QStringLiteral("claude"), m_model = QStringLiteral("opus"), m_effort = QStringLiteral("high");

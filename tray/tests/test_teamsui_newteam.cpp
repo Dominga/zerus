@@ -90,6 +90,7 @@ private slots:
     void designerSessionKeepsItsNameAndLeadsNoTeam();
     void designerRedoAsksOnlyARunningDesigner();
     void designerPageStartsOrOpensTheDesigner();
+    void designerStartsFromAProjectWithoutASession();
     void draftIsDecidedWithoutADesignerSession();
     void designerQuestionIsAnsweredInTheWindow();
 };
@@ -401,8 +402,12 @@ void TestTeamsUiNewteam::newTeamMaxMembersStepsUpAndDown()
     const QRect down = max->style()->subControlRect(QStyle::CC_SpinBox, &option, QStyle::SC_SpinBoxDown, max);
     auto *editor = max->findChild<QLineEdit *>();
     QVERIFY(editor && up.isValid() && down.isValid());
-    QVERIFY2(!up.intersects(editor->geometry()), qPrintable(QStringLiteral("up %1,%2 %3x%4 under the editor").arg(up.x()).arg(up.y()).arg(up.width()).arg(up.height())));
-    QVERIFY(!down.intersects(editor->geometry()));
+    // macOS' native stepper reports its rects over the editor's; its clicks
+    // below still step. Elsewhere an editor over a button eats its clicks.
+    if (max->style()->name().compare(QLatin1String("macos"), Qt::CaseInsensitive) != 0) {
+        QVERIFY2(!up.intersects(editor->geometry()), qPrintable(QStringLiteral("up %1,%2 %3x%4 under the editor").arg(up.x()).arg(up.y()).arg(up.width()).arg(up.height())));
+        QVERIFY(!down.intersects(editor->geometry()));
+    }
     QCOMPARE(max->style()->hitTestComplexControl(QStyle::CC_SpinBox, &option, up.center(), max), QStyle::SC_SpinBoxUp);
     QCOMPARE(max->style()->hitTestComplexControl(QStyle::CC_SpinBox, &option, down.center(), max), QStyle::SC_SpinBoxDown);
     QCOMPARE(max->value(), 6);
@@ -1174,6 +1179,36 @@ void TestTeamsUiNewteam::designerPageStartsOrOpensTheDesigner()
     WAIT_COMPARE(calls(script(), "catalog discard").size(), 1);
 }
 
+// A project is enough context: no current or previously opened session takes
+// part in choosing the folder or starting the designer's conversation.
+void TestTeamsUiNewteam::designerStartsFromAProjectWithoutASession()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamDesignerPage page(&controller);
+    QString startedIn, startedGoal;
+    QJsonObject launch;
+    page.startDesigner = [&](const QString &folder, const QString &goal, const QJsonObject &agent) {
+        startedIn = folder; startedGoal = goal; launch = agent;
+    };
+    page.setProjects({{"orbit", "Orbit platform", "/work/orbit", "Main"},
+                      {"orbit", "Orbit platform", "/work/orbit-docs", "Developer docs"},
+                      {"infra", "Infrastructure", "/work/infra", ""}}, "infra");
+    auto *projects = page.findChild<QComboBox *>("teamDesignerProject");
+    QVERIFY(projects && projects->isEnabled());
+    QCOMPARE(projects->currentText(), QStringLiteral("Infrastructure"));
+    projects->setCurrentIndex(2);
+    emit projects->activated(2);
+    QCOMPARE(projects->currentText(), QStringLiteral("Orbit platform — Developer docs"));
+    QVERIFY(page.findChild<QLabel *>("teamDesignerReads")->text().contains("orbit-docs"));
+    auto *input = page.findChild<QPlainTextEdit *>("teamConversationInput");
+    input->setPlainText("Clarify the documentation work and assemble a team.");
+    page.findChild<QPushButton *>("teamConversationSend")->click();
+    QCOMPARE(startedIn, QStringLiteral("/work/orbit-docs"));
+    QCOMPARE(startedGoal, QStringLiteral("Clarify the documentation work and assemble a team."));
+    QCOMPARE(launch["project"].toString(), QStringLiteral("Orbit platform"));
+}
+
 // U15: with no designer session the draft is still decided, from the
 // proposals list and from the catalog, and applied; a refused decision shows
 // its error next to the proposal in every view of the draft.
@@ -1279,9 +1314,10 @@ else:print('{}')
     TeamDesignerPage page(&controller);
     // Its own name each run: the card keeps answered drafts by session.
     const QString designer = "claude/checkout/team-designer-" + QUuid::createUuid().toString(QUuid::Id128).left(8);
-    bool waiting = true;
+    bool waiting = true; QString opened;
     page.designerSession = [&] { return designer; };
     page.designerLive = [&] { Teams::Live live; live.known = true; live.attention = waiting; return live; };
+    page.openTerminal = [&](const QString &host, const QString &name) { opened = host + '|' + name; };
     page.setContext("/work/checkout", "checkout");
     page.resize(1400, 860); page.show();
     auto *card = page.findChild<QuestionCard *>("teamConversationQuestion");
@@ -1301,6 +1337,9 @@ else:print('{}')
     lightPalette(); page.setDark(false);
     QTRY_VERIFY_WITH_TIMEOUT(!activity->renderPending(), 20000);
     lightShot(&page, "u16-designer-question-light"); darkPalette(); page.setDark(true);
+    auto *terminal = card->findChild<QPushButton *>("questionOpenTerminal");
+    QVERIFY(terminal && terminal->isEnabled()); terminal->click();
+    QCOMPARE(opened, QString('|' + designer));
     // Answered here: the native answer names the very question it answers.
     QAbstractButton *yes = nullptr;
     for (auto *option : card->findChildren<QAbstractButton *>("questionOption"))

@@ -31,6 +31,10 @@
 #include "AccountUsage.h"
 #include "AccountsPage.h"
 #include "NewSessionDialog.h"
+#include "PermissionCatalog.h"
+#include "PermissionCatalogDialog.h"
+#include <QJsonArray>
+#include <QMap>
 
 static int launchAccountRow(const QListWidget *list,const QString &id) {
     for(int row=0;row<list->count();++row)if(list->item(row)->data(Qt::UserRole).toString()==id)return row;
@@ -93,6 +97,12 @@ private slots:
     void loadingFinishesWithPartialOrUnavailableResults();
     void permissionsStayBoundToSelectedMachine();
     void permissionsStayBoundToSelectedMachine_data();
+    void permissionCatalogUsesDiscoveredChoices();
+    void permissionCatalogEditsMultipleControls();
+    void permissionCatalogUnknownKeysNeedRemoval();
+    void permissionCatalogFallbackPreservesSavedAuto();
+    void permissionCatalogWithdrawnValueNeedsCorrection();
+    void permissionCatalogDecodeEdgeCases();
     void permissionBadgesReflectInheritedAndMixedModes();
     void claudeSignInAndKeychainStatus_data();
     void claudeSignInAndKeychainStatus();
@@ -201,6 +211,38 @@ if args[0]=='account':
  if (root/'permission-modes').exists():
   for p in profiles:
    p['permission_mode']='provider';p['effective_permission_mode']='default' if host else 'bypass';p['permission_detail']='native setting'
+ if any((root/name).exists() for name in ('permission-catalog','permission-catalog-multi','permission-catalog-unavailable','permission-catalog-withdrawn','permission-catalog-unknown')):
+  def permission_catalog(p):
+   provider=p['provider']
+   if provider not in ('claude','codex','dsh'):return
+   if (root/'permission-catalog-unavailable').exists():
+    p['permission_mode']='auto' if provider=='claude' else 'provider'
+    p['permission_catalog']={'status':'unavailable','status_reason':'fixture discovery failed','source':'fixture','session_supported':True,'controls':[]}
+    return
+   if provider=='claude':
+    options=[{'value':'default_native','label':'Default native','description':'Claude fixture default'},
+             {'value':'plan_native','label':'Plan native','description':'Claude fixture plan'},
+             {'value':'accept_native','label':'Accept native'},
+             {'value':'bypass_native','label':'Bypass native'}]
+    selected='plan_native'
+   elif provider=='codex':
+    options=[{'value':'ask_native','label':'Ask native'},{'value':'never_native','label':'Never native','description':'Codex fixture never ask'}]
+    selected='ask_native'
+   else:
+    options=[{'value':'default_native','label':'Default native'},{'value':'bypass_native','label':'Bypass native'}]
+    selected='default_native'
+   controls=[{'id':'mode','label':'Mode','description':'Fixture mode control','kind':'select','scope':'launch','options':options}]
+   chosen={'mode':selected}
+   if (root/'permission-catalog-multi').exists():
+    controls.append({'id':'sandbox','label':'Sandbox','description':'Fixture sandbox control','kind':'select','scope':'launch',
+                     'options':[{'value':'workspace_native','label':'Workspace native'},{'value':'strict_native','label':'Strict native'}]})
+    chosen={'mode':'plan_native','sandbox':'strict_native'}
+   if (root/'permission-catalog-withdrawn').exists():chosen={'mode':'retired_native'}
+   if (root/'permission-catalog-unknown').exists():chosen={'mode':'plan_native','retired_key':'old'}
+   p['permission_catalog']={'status':'available','source':'fixture-'+provider,'version':'1','session_supported':True,'selected':chosen,'controls':controls}
+   p['permission_mode']='native:'+json.dumps(chosen,separators=(',',':'),sort_keys=True)
+   p['permission_current']={'source':'zerus','values':chosen,'detail':'fixture current'}
+  for p in profiles:permission_catalog(p)
  removed=[p for p in profiles if removed_file.exists() and p['id']==removed_file.read_text()]
  print(json.dumps({'host':host or 'arch','profiles':[p for p in profiles if p not in removed],'removed_profiles':removed,'revision':'rev1'}))
 elif args[0]=='dirs': print(json.dumps({'path':args[1] if len(args)>1 else '/tmp/sample','directories':[]}))
@@ -519,6 +561,195 @@ void TestAccountsPage::permissionsStayBoundToSelectedMachine()
     button->click();QTRY_VERIFY(QFile::exists(m_dir.filePath("permissions")));
     QFile file(m_dir.filePath("permissions"));QVERIFY(file.open(QIODevice::ReadOnly));const auto action=QJsonDocument::fromJson(file.readAll()).object();
     QCOMPARE(action["host"].toString(),QString("mac"));QCOMPARE(action["args"].toArray(),QJsonArray({"account","permissions","native-kimi","--mode","bypass","--revision","rev1"}));
+}
+
+void TestAccountsPage::permissionCatalogUsesDiscoveredChoices()
+{
+    QFile flag(m_dir.filePath("permission-catalog"));QVERIFY(flag.open(QIODevice::WriteOnly));flag.close();
+    AccountsPage page(FakeCli::program(m_script));page.setFleet(fleet());page.show();
+    QTRY_COMPARE(page.findChild<QListWidget *>("accountProfiles")->count(),8);
+    page.showAccount("mac","native-claude");
+    auto *state=page.findChild<QLabel *>("accountPermissionState");
+    QTRY_VERIFY2(state->text().contains("Plan native"),qPrintable(state->text()));
+    QVERIFY(state->text().contains("Permissions on mac:"));
+    auto *button=page.findChild<QPushButton *>("accountPermissions");QTRY_VERIFY(button->isEnabled());
+    QTimer poll;connect(&poll,&QTimer::timeout,&page,[&]{
+        auto *dialog=page.findChild<QDialog *>("accountPermissionsDialog");if(!dialog)return;poll.stop();
+        auto *mode=dialog->findChild<QComboBox *>("accountPermissionMode");QVERIFY(mode);
+        QCOMPARE(mode->currentData().toString(),QString("native:{\"mode\":\"plan_native\"}"));
+        QCOMPARE(mode->count(),6); // Default and Bypass stay; four discovered values.
+        QVERIFY(dialog->findChild<QLabel *>("permissionSourceNote")->text().contains("fixture-claude"));
+        const int accept=mode->findData("native:{\"mode\":\"accept_native\"}");QVERIFY(accept>=0);
+        mode->setCurrentIndex(accept);
+        auto *save=dialog->findChild<QPushButton *>("accountPermissionSave");QVERIFY(save&&save->isEnabled());save->click();
+    });
+    poll.start(10);button->click();
+    QTRY_VERIFY(QFile::exists(m_dir.filePath("permissions")));
+    QFile file(m_dir.filePath("permissions"));QVERIFY(file.open(QIODevice::ReadOnly));
+    const auto action=QJsonDocument::fromJson(file.readAll()).object();
+    QCOMPARE(action["host"].toString(),QString("mac"));
+    QCOMPARE(action["args"].toArray(),QJsonArray({"account","permissions","native-claude","--mode","native:{\"mode\":\"accept_native\"}","--revision","rev1"}));
+}
+
+void TestAccountsPage::permissionCatalogEditsMultipleControls()
+{
+    QFile flag(m_dir.filePath("permission-catalog-multi"));QVERIFY(flag.open(QIODevice::WriteOnly));flag.close();
+    AccountsPage page(FakeCli::program(m_script));page.setFleet(fleet());page.show();
+    QTRY_COMPARE(page.findChild<QListWidget *>("accountProfiles")->count(),8);
+    page.showAccount("mac","native-claude");
+    auto *state=page.findChild<QLabel *>("accountPermissionState");
+    QTRY_VERIFY2(state->text().contains("Plan native"),qPrintable(state->text()));
+    QVERIFY(state->text().contains("Strict native"));
+    auto *button=page.findChild<QPushButton *>("accountPermissions");QTRY_VERIFY(button->isEnabled());
+    QTimer poll;connect(&poll,&QTimer::timeout,&page,[&]{
+        auto *dialog=page.findChild<QDialog *>("accountPermissionsDialog");if(!dialog)return;poll.stop();
+        auto *mode=dialog->findChild<QComboBox *>("accountPermissionMode");QVERIFY(mode);
+        QCOMPARE(mode->count(),3); // Default, Bypass and the shared native editor.
+        const int index=mode->currentIndex();QVERIFY(mode->itemData(index,Qt::UserRole+3).toBool());
+        QVERIFY(mode->currentText().contains("Native permission settings"));
+        QTimer::singleShot(0,&page,[&]{
+            auto *editor=page.findChild<QDialog *>("nativePermissionEditor");QVERIFY(editor);
+            auto *sandbox=editor->findChild<QComboBox *>("nativePermission_sandbox");QVERIFY(sandbox);
+            sandbox->setCurrentIndex(sandbox->findData("workspace_native"));
+            auto *save=editor->findChild<QPushButton *>("nativePermissionSave");QVERIFY(save&&save->isEnabled());save->click();
+        });
+        mode->activated(index);
+        QVERIFY(mode->currentText().contains("Workspace native"));
+        auto *save=dialog->findChild<QPushButton *>("accountPermissionSave");QVERIFY(save&&save->isEnabled());save->click();
+    });
+    poll.start(10);button->click();
+    QTRY_VERIFY(QFile::exists(m_dir.filePath("permissions")));
+    QFile file(m_dir.filePath("permissions"));QVERIFY(file.open(QIODevice::ReadOnly));
+    const auto action=QJsonDocument::fromJson(file.readAll()).object();
+    QCOMPARE(action["args"].toArray(),QJsonArray({"account","permissions","native-claude","--mode","native:{\"mode\":\"plan_native\",\"sandbox\":\"workspace_native\"}","--revision","rev1"}));
+}
+
+void TestAccountsPage::permissionCatalogUnknownKeysNeedRemoval()
+{
+    QFile flag(m_dir.filePath("permission-catalog-unknown"));QVERIFY(flag.open(QIODevice::WriteOnly));flag.close();
+    AccountsPage page(FakeCli::program(m_script));page.setFleet(fleet());page.show();
+    QTRY_COMPARE(page.findChild<QListWidget *>("accountProfiles")->count(),8);
+    page.showAccount("mac","native-claude");
+    auto *state=page.findChild<QLabel *>("accountPermissionState");
+    QTRY_VERIFY2(state->text().contains("unavailable"),qPrintable(state->text()));
+    QVERIFY(state->text().contains("retired_key=old"));
+    auto *button=page.findChild<QPushButton *>("accountPermissions");QTRY_VERIFY(button->isEnabled());
+    QTimer poll;connect(&poll,&QTimer::timeout,&page,[&]{
+        auto *dialog=page.findChild<QDialog *>("accountPermissionsDialog");if(!dialog)return;poll.stop();
+        auto *mode=dialog->findChild<QComboBox *>("accountPermissionMode");QVERIFY(mode);
+        const int index=mode->currentIndex();QVERIFY(mode->itemData(index,Qt::UserRole+3).toBool());
+        auto *save=dialog->findChild<QPushButton *>("accountPermissionSave");QVERIFY(save&&!save->isEnabled());
+        QTimer::singleShot(0,&page,[&]{
+            auto *editor=page.findChild<QDialog *>("nativePermissionEditor");QVERIFY(editor);
+            auto *remove=editor->findChild<QPushButton *>("nativePermissionRemove_retired_key");QVERIFY(remove);
+            auto *editorSave=editor->findChild<QPushButton *>("nativePermissionSave");QVERIFY(editorSave&&!editorSave->isEnabled());
+            remove->click();QVERIFY(editorSave->isEnabled());editorSave->click();
+        });
+        mode->activated(index);
+        QVERIFY(save->isEnabled());save->click();
+    });
+    poll.start(10);button->click();
+    QTRY_VERIFY(QFile::exists(m_dir.filePath("permissions")));
+    QFile file(m_dir.filePath("permissions"));QVERIFY(file.open(QIODevice::ReadOnly));
+    const auto action=QJsonDocument::fromJson(file.readAll()).object();
+    QCOMPARE(action["args"].toArray(),QJsonArray({"account","permissions","native-claude","--mode","native:{\"mode\":\"plan_native\"}","--revision","rev1"}));
+}
+
+void TestAccountsPage::permissionCatalogFallbackPreservesSavedAuto()
+{
+    QFile flag(m_dir.filePath("permission-catalog-unavailable"));QVERIFY(flag.open(QIODevice::WriteOnly));flag.close();
+    AccountsPage page(FakeCli::program(m_script));page.setFleet(fleet());page.show();
+    QTRY_COMPARE(page.findChild<QListWidget *>("accountProfiles")->count(),8);
+    page.showAccount("mac","native-claude");
+    auto *state=page.findChild<QLabel *>("accountPermissionState");
+    QTRY_VERIFY2(state->text().contains("Auto"),qPrintable(state->text()));
+    auto *button=page.findChild<QPushButton *>("accountPermissions");QTRY_VERIFY(button->isEnabled());
+    QTimer poll;connect(&poll,&QTimer::timeout,&page,[&]{
+        auto *dialog=page.findChild<QDialog *>("accountPermissionsDialog");if(!dialog)return;poll.stop();
+        auto *mode=dialog->findChild<QComboBox *>("accountPermissionMode");QVERIFY(mode);
+        QCOMPARE(mode->count(),3); // Default, Bypass, and the preserved saved Auto.
+        QCOMPARE(mode->currentData().toString(),QString("auto"));
+        QCOMPARE(mode->currentText(),QString("Auto (saved, unavailable)"));
+        auto *save=dialog->findChild<QPushButton *>("accountPermissionSave");QVERIFY(save&&!save->isEnabled());
+        mode->setCurrentIndex(mode->findData("provider"));QVERIFY(save->isEnabled());save->click();
+    });
+    poll.start(10);button->click();
+    QTRY_VERIFY(QFile::exists(m_dir.filePath("permissions")));
+    QFile file(m_dir.filePath("permissions"));QVERIFY(file.open(QIODevice::ReadOnly));
+    const auto action=QJsonDocument::fromJson(file.readAll()).object();
+    QCOMPARE(action["args"].toArray(),QJsonArray({"account","permissions","native-claude","--mode","provider","--revision","rev1"}));
+}
+
+void TestAccountsPage::permissionCatalogWithdrawnValueNeedsCorrection()
+{
+    QFile flag(m_dir.filePath("permission-catalog-withdrawn"));QVERIFY(flag.open(QIODevice::WriteOnly));flag.close();
+    AccountsPage page(FakeCli::program(m_script));page.setFleet(fleet());page.show();
+    QTRY_COMPARE(page.findChild<QListWidget *>("accountProfiles")->count(),8);
+    page.showAccount("mac","native-claude");
+    auto *state=page.findChild<QLabel *>("accountPermissionState");
+    QTRY_VERIFY2(state->text().contains("unavailable"),qPrintable(state->text()));
+    auto *button=page.findChild<QPushButton *>("accountPermissions");QTRY_VERIFY(button->isEnabled());
+    QTimer poll;connect(&poll,&QTimer::timeout,&page,[&]{
+        auto *dialog=page.findChild<QDialog *>("accountPermissionsDialog");if(!dialog)return;poll.stop();
+        auto *mode=dialog->findChild<QComboBox *>("accountPermissionMode");QVERIFY(mode);
+        QCOMPARE(mode->currentData().toString(),QString("native:{\"mode\":\"retired_native\"}"));
+        auto *save=dialog->findChild<QPushButton *>("accountPermissionSave");QVERIFY(save&&!save->isEnabled());
+        mode->setCurrentIndex(mode->findData("native:{\"mode\":\"default_native\"}"));QVERIFY(save->isEnabled());save->click();
+    });
+    poll.start(10);button->click();
+    QTRY_VERIFY(QFile::exists(m_dir.filePath("permissions")));
+    QFile file(m_dir.filePath("permissions"));QVERIFY(file.open(QIODevice::ReadOnly));
+    const auto action=QJsonDocument::fromJson(file.readAll()).object();
+    QCOMPARE(action["args"].toArray(),QJsonArray({"account","permissions","native-claude","--mode","native:{\"mode\":\"default_native\"}","--revision","rev1"}));
+}
+
+void TestAccountsPage::permissionCatalogDecodeEdgeCases()
+{
+    const auto control=QJsonObject{{"id","mode"},{"label","Mode"},{"kind","select"},{"scope","launch"},
+        {"options",QJsonArray{QJsonObject{{"value","plan_native"},{"label","Plan native"}},
+                              QJsonObject{{"value","accept_native"},{"label","Accept native"}}}}};
+    const auto catalog=QJsonObject{{"status","available"},{"source","fixture"},{"session_supported",true},
+        {"controls",QJsonArray{control}}};
+    const auto single=PermissionCatalog::parse(QJsonObject{{"permission_mode","native:{\"mode\":\"plan_native\"}"},{"permission_catalog",catalog}});
+    QCOMPARE(single.selected.value("mode"),QString("plan_native"));QVERIFY(single.selectedValid);QVERIFY(single.available);
+    QCOMPARE(PermissionCatalog::summary(single),QString("Plan native"));
+    QMap<QString,QString> decoded;QVERIFY(PermissionCatalog::decodeNative("native:{\"mode\":\"plan_native\"}",&decoded));
+    QCOMPARE(decoded.value("mode"),QString("plan_native"));
+    const auto empty=PermissionCatalog::parse(QJsonObject{{"permission_mode","native:{}"},{"permission_catalog",catalog}});
+    QVERIFY(!empty.malformed);QVERIFY(empty.selected.isEmpty());
+    const auto multi=PermissionCatalog::parse(QJsonObject{{"permission_mode","native:{\"mode\":\"plan_native\",\"sandbox\":\"strict_native\"}"},
+        {"permission_catalog",QJsonObject{{"status","available"},{"session_supported",true},
+            {"controls",QJsonArray{control,QJsonObject{{"id","sandbox"},{"label","Sandbox"},{"kind","select"},{"scope","launch"},
+                {"options",QJsonArray{QJsonObject{{"value","strict_native"},{"label","Strict native"}}}}}}}}}});
+    QCOMPARE(multi.selected.size(),2);QVERIFY(multi.selectedValid);
+    QCOMPARE(PermissionCatalog::summary(multi),QString("Plan native · Strict native"));
+    const auto malformed=PermissionCatalog::parse(QJsonObject{{"permission_mode","native:{bad"}});
+    QVERIFY(malformed.malformed);QVERIFY(!malformed.selectedValid);
+    QVERIFY(PermissionCatalog::summary(malformed).contains("native:{bad"));
+    QVERIFY(PermissionCatalog::summary(malformed).contains("unavailable"));
+    const auto invalidKey=PermissionCatalog::parse(QJsonObject{{"permission_mode","native:{\"Mode\":\"plan_native\"}"}});
+    QVERIFY(invalidKey.malformed);QVERIFY(!invalidKey.selectedValid);
+    const auto oversized=PermissionCatalog::parse(QJsonObject{{"permission_mode",
+        "native:{\"mode\":\""+QString(1100,'x')+"\"}"}});
+    QVERIFY(oversized.malformed);QVERIFY(!oversized.selectedValid);
+    const auto codex=PermissionCatalog::parse(QJsonObject{{"provider","codex"},{"permission_mode","native:{\"approve_for_me\":\"on\",\"sandbox\":\"workspace-write\"}"},
+        {"permission_catalog",QJsonObject{{"status","available"},{"controls",QJsonArray{
+            QJsonObject{{"id","approval"},{"label","Approval policy"},{"options",QJsonArray{QJsonObject{{"value","on-request"},{"label","on-request"}}}}},
+            QJsonObject{{"id","sandbox"},{"label","Sandbox"},{"options",QJsonArray{QJsonObject{{"value","workspace-write"},{"label","workspace-write"}}}}},
+            QJsonObject{{"id","approve_for_me"},{"label","Approve for me"},{"conflicts_with",QJsonArray{"approval","sandbox"}},
+                {"options",QJsonArray{QJsonObject{{"value","on"},{"label","On"}}}}}
+        }}}}});
+    QVERIFY(!codex.selectedValid);
+    for(const auto &id:QStringList{"approval","sandbox"}){
+        const auto value=id=="approval"?QString("on-request"):QString("workspace-write");
+        QMap<QString,QString> selection{{"approve_for_me","on"},{id,value}};
+        PermissionCatalogDialog editor(codex,selection,"Fixture");
+        auto *save=editor.findChild<QPushButton *>("nativePermissionSave");QVERIFY(save&&!save->isEnabled());
+        QVERIFY(editor.findChild<QLabel *>("nativePermissionWarning")->text().contains("cannot be combined"));
+        auto *choice=editor.findChild<QComboBox *>("nativePermission_"+id);QVERIFY(choice);
+        choice->setCurrentIndex(0);QVERIFY(save->isEnabled());
+        QCOMPARE(editor.mode(),QString("native:{\"approve_for_me\":\"on\"}"));
+    }
 }
 
 void TestAccountsPage::renameAndDetailsStayBoundToSelectedProfile()

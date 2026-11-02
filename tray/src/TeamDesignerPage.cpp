@@ -3,12 +3,14 @@
 #include "TeamController.h"
 #include "TeamConversation.h"
 #include "TeamWidgets.h"
+#include <QComboBox>
 #include <QDir>
 #include <QHBoxLayout>
 #include <QJsonObject>
 #include <QMenu>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSignalBlocker>
 #include <QSplitter>
 #include <QTransform>
 #include <QVBoxLayout>
@@ -54,6 +56,20 @@ TeamDesignerPage::TeamDesignerPage(TeamController *teams, QWidget *parent) : QWi
     m_open->setToolTip(tr("Open in Activity")); m_open->setAccessibleName(tr("Open in Activity")); m_open->setCursor(Qt::PointingHandCursor);
     top->addWidget(m_open);
     hv->addLayout(top);
+    auto *projectRow = row(8);
+    auto *projectLabel = new QLabel(tr("Project")); projectLabel->setObjectName("teamDesignerProjectLabel");
+    m_projectChoice = new QComboBox; m_projectChoice->setObjectName("teamDesignerProject");
+    m_projectChoice->setAccessibleName(tr("Project for the Team designer"));
+    m_projectChoice->setMinimumContentsLength(18);
+    m_projectChoice->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    projectRow->addWidget(projectLabel); projectRow->addWidget(m_projectChoice, 1);
+    hv->addLayout(projectRow);
+    QObject::connect(m_projectChoice, &QComboBox::activated, this, [this](int index) {
+        if (index < 0) return;
+        m_project = m_projectChoice->itemData(index, Qt::UserRole + 2).toString();
+        m_folder = m_projectChoice->itemData(index, Qt::UserRole + 1).toString();
+        refresh();
+    });
     auto *chips = row(6);
     auto *reads = chip(QStringLiteral("folder"), "teamDesignerReads", &m_reads);
     auto *proposes = chip(QStringLiteral("shield"), "teamDesignerProposes", &m_proposes); m_proposes->setText(tr("Proposes only"));
@@ -92,8 +108,13 @@ TeamDesignerPage::TeamDesignerPage(TeamController *teams, QWidget *parent) : QWi
         if (!session.isEmpty() && openDesigner) openDesigner(session);
     };
     m_chat->startRequested = [this](const QString &text) {
+        if (m_folder.isEmpty()) {
+            startFailed(tr("Choose a project with a folder on this computer first."));
+            return;
+        }
         const QJsonObject launch{{"agent", m_agent}, {"model", m_agent == "dsh" ? QString() : m_model},
-                                 {"effort", m_agent == "dsh" || m_agent == "kimi" ? QString() : m_effort}};
+                                 {"effort", m_agent == "dsh" || m_agent == "kimi" ? QString() : m_effort},
+                                 {"project", m_project}};
         if (startDesigner) startDesigner(m_folder, text, launch);
     };
     cv->addWidget(m_chat, 1);
@@ -138,16 +159,60 @@ QWidget *TeamDesignerPage::intro()
     auto *title = new QLabel(tr("Design roles and teams with an agent")); title->setObjectName("teamDesignerEmptyTitle");
     title->setWordWrap(true); title->setAlignment(Qt::AlignHCenter);
     v->addWidget(title);
-    auto *text = new QLabel(tr("The designer reads the selected session’s folder and the team history, and proposes changes to roles, "
-                               "templates and routing. It never saves anything — you keep or reject each proposal and apply them."));
+    auto *text = new QLabel(tr("Choose a project and describe the work. The designer reads the project and the existing catalog, "
+                               "asks about your tasks, reuses suitable roles and teams, and proposes only what is missing. "
+                               "It never saves anything — you keep or reject each proposal and apply them."));
     text->setObjectName("teamDesignerEmptyText"); text->setWordWrap(true); text->setAlignment(Qt::AlignHCenter);
     v->addWidget(text);
     return w;
 }
 
+void TeamDesignerPage::setProjects(const QList<Project> &projects, const QString &defaultProject)
+{
+    const QSignalBlocker block(m_projectChoice);
+    m_projectChoice->clear();
+    m_projectChoice->addItem(projects.isEmpty() ? tr("No local project folders") : tr("Choose a project…"));
+    int current = -1, fallback = -1;
+    for (const auto &project : projects) {
+        if (project.folder.isEmpty()) continue;
+        QString title = project.name;
+        if (!project.folderName.isEmpty()) title += tr(" — %1").arg(project.folderName);
+        const int index = m_projectChoice->count();
+        m_projectChoice->addItem(title, project.id);
+        m_projectChoice->setItemData(index, project.folder, Qt::UserRole + 1);
+        m_projectChoice->setItemData(index, project.name, Qt::UserRole + 2);
+        m_projectChoice->setItemData(index, QDir::toNativeSeparators(project.folder), Qt::ToolTipRole);
+        if (project.id == defaultProject && fallback < 0) fallback = index;
+        if (project.folder == m_folder && (m_project.isEmpty() || project.id == m_project || project.name == m_project)) current = index;
+    }
+    if (current < 0) current = fallback >= 0 ? fallback : m_projectChoice->count() > 1 ? 1 : 0;
+    m_projectChoice->setCurrentIndex(current);
+    m_project = m_projectChoice->itemData(current, Qt::UserRole + 2).toString();
+    m_folder = m_projectChoice->itemData(current, Qt::UserRole + 1).toString();
+    refresh();
+}
+
 void TeamDesignerPage::setContext(const QString &folder, const QString &project)
 {
     m_folder = folder; m_project = project;
+    const QSignalBlocker block(m_projectChoice);
+    int index = -1;
+    for (int i = 1; i < m_projectChoice->count(); ++i) {
+        if (m_projectChoice->itemData(i, Qt::UserRole + 1).toString() == folder
+            && (project.isEmpty() || m_projectChoice->itemData(i).toString() == project
+                || m_projectChoice->itemData(i, Qt::UserRole + 2).toString() == project)) {
+            index = i;
+            break;
+        }
+    }
+    if (index < 0 && !folder.isEmpty()) {
+        index = m_projectChoice->count();
+        m_projectChoice->addItem(project.isEmpty() ? QDir::toNativeSeparators(folder) : project, project);
+        m_projectChoice->setItemData(index, folder, Qt::UserRole + 1);
+        m_projectChoice->setItemData(index, project, Qt::UserRole + 2);
+    }
+    m_projectChoice->setCurrentIndex(qMax(0, index));
+    if (index >= 0) m_project = m_projectChoice->itemData(index, Qt::UserRole + 2).toString();
     refresh();
 }
 
@@ -177,6 +242,12 @@ void TeamDesignerPage::setDark(bool dark)
         "QLabel#teamDesignerDraftText{color:%3;font-size:12px;}")
         .arg(c.border.name(), c.fg.name(), c.text2.name(), a(c.accent, .18), c.muted.name(), c.cardFill.name(), c.tile.name(),
              a(c.folder, .55), c.folder.name(), a(c.folder, .10)));
+    m_projectChoice->setStyleSheet(QStringLiteral(
+        "QComboBox#teamDesignerProject{background:%1;color:%2;border:1px solid %3;border-radius:7px;padding:5px 9px;}"
+        "QComboBox#teamDesignerProject:disabled{color:%4;}"
+        "QComboBox#teamDesignerProject::drop-down{border:none;width:22px;}"
+        "QComboBox#teamDesignerProject QAbstractItemView{background:%1;color:%2;selection-background-color:%5;}")
+        .arg(c.surface.name(), c.fg.name(), c.border.name(), c.muted.name(), c.tile.name()));
     findChild<QLabel *>("teamDesignerTile")->setPixmap(workspaceIcon("team", c.accent).pixmap(16, 16));
     findChild<QLabel *>("teamDesignerEmptyIcon")->setPixmap(workspaceIcon("team", c.accent).pixmap(36, 36));
     for (auto *glyph : findChildren<QLabel *>("designerChipIcon"))
@@ -208,11 +279,16 @@ void TeamDesignerPage::refresh()
     m_status->setText(status);
     m_status->setStyleSheet(QStringLiteral("color:%1;border:1px solid %2;border-radius:11px;padding:2px 12px;font-size:12px;")
                                 .arg(tone.name(), alpha(tone, .6).name(QColor::HexArgb)));
-    m_reads->setText(tr("Reads %1 (selected session)").arg(m_folder.isEmpty() ? tr("no folder") : QDir::toNativeSeparators(m_folder)));
+    m_reads->setText(tr("Reads %1 (project)").arg(m_folder.isEmpty() ? tr("no folder") : QDir::toNativeSeparators(m_folder)));
     m_reads->setToolTip(m_folder);
+    m_projectChoice->setEnabled(session.isEmpty() && m_projectChoice->count() > 1);
+    m_projectChoice->setToolTip(session.isEmpty() ? tr("Choose the project the designer reads")
+                                                  : tr("The running designer keeps its original project"));
     m_version->setText(catalog.builtin ? tr("Built-in catalog") : tr("Catalog v%1").arg(catalog.version));
     m_open->setVisible(!session.isEmpty());
     m_chat->setSession({}, session);
+    m_chat->setPlaceholder(session.isEmpty() ? m_folder.isEmpty() ? tr("Choose a project above…") : tr("Describe the project tasks…")
+                                             : tr("Ask for changes…"));
     m_editor->setDesignerWorking(live.working);
     updateModelButton();
     renderProposals();

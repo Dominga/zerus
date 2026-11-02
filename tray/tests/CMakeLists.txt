@@ -137,6 +137,10 @@ function(zerus_test_environment)
     get_property(tests DIRECTORY PROPERTY TESTS)
     foreach(test IN LISTS tests)
         set_property(TEST ${test} APPEND PROPERTY ENVIRONMENT_MODIFICATION "ZERUS_GUI_THREAD_CHECKS=set:fatal")
+        # Settings::set writes at once in every suite, so a test that reads
+        # QSettings right after never races the writer's thread. Windows'
+        # TestIsolation.cpp sets the same; test_settings turns it off itself.
+        set_property(TEST ${test} APPEND PROPERTY ENVIRONMENT_MODIFICATION "ZERUS_SETTINGS_SYNC=set:1")
     endforeach()
     if(NOT WIN32)
         return()

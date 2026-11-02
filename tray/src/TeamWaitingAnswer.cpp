@@ -319,6 +319,25 @@ void TeamWaitingAnswer::sendAddition()
     });
 }
 
+void TeamWaitingAnswer::declineAddition()
+{
+    if (busy() || m_reading || m_done || !m_teams) return;
+    m_notice.clear();
+    // A decline of an addition already gone (confirmed, replaced or expired)
+    // changes nothing and succeeds, so the item never stays stuck.
+    int phase = m_item.phase;
+    if (m_team) for (const auto &addition : m_team->additions) if (addition.id == additionId(m_item)) phase = addition.phase;
+    m_sending = true; render();
+    QPointer<TeamWaitingAnswer> guard(this);
+    m_teams->call(QStringLiteral("add-to-phase"), {{"team", m_item.team}, {"phase", phase}, {"confirm", additionId(m_item)}, {"decline", true}},
+        [guard](bool ok, const QJsonObject &, const QString &message) {
+            if (!guard) return;
+            guard->m_sending = false;
+            if (ok) guard->finish();
+            else { guard->m_notice = message; guard->render(); }
+        });
+}
+
 void TeamWaitingAnswer::sendAcceptance(bool accept)
 {
     if (busy() || m_reading || m_done) return;
@@ -485,7 +504,8 @@ void TeamWaitingAnswer::render()
         typed->setPlaceholderText(tr("Type add or %1 to confirm").arg(addition->phase));
         typed->setEnabled(!waiting);
         auto *cancel = button(tr("Cancel"), "teamWaitingAdditionCancel"); cancel->setProperty("ghost", true);
-        cancel->setToolTip(tr("Close it; nothing is sent and it keeps waiting until it expires"));
+        cancel->setToolTip(tr("Decline the addition: these tasks do not join and it leaves the list"));
+        cancel->setEnabled(!waiting);
         auto *add = button(tr("Add"), "teamWaitingAdditionAdd", true);
         const int phase = addition->phase;
         const auto fits = [phase](const QString &text) {
@@ -496,7 +516,7 @@ void TeamWaitingAnswer::render()
         QObject::connect(typed, &QLineEdit::textChanged, this, [this, add, fits](const QString &text) { m_typed = text; add->setEnabled(fits(text)); });
         QObject::connect(typed, &QLineEdit::returnPressed, this, [this, fits] { if (fits(m_typed)) sendAddition(); });
         QObject::connect(add, &QPushButton::clicked, this, [this] { sendAddition(); });
-        QObject::connect(cancel, &QPushButton::clicked, this, [this] { if (closed) closed(); });
+        QObject::connect(cancel, &QPushButton::clicked, this, [this] { declineAddition(); });
         answers->addWidget(typed, 1); answers->addWidget(cancel); answers->addWidget(add);
         v->addLayout(answers);
         m_layout->addWidget(box);

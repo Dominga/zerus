@@ -979,6 +979,22 @@ fn the_create_and_catalog_owner_paths_refuse_an_agent_session() {
     });
 }
 
+/// The owner, 2026-11-01: Create team on a computer that never had a team
+/// failed with "No teams yet" - the replay check read a store not made yet.
+#[test]
+fn the_first_team_on_a_computer_is_created_without_a_store() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        assert!(!crate::state::teams::store::path().exists());
+        set_test_caller_identities(Some((None, None, None)));
+        let input = json!({"request_id":"11111111-1111-4111-8111-111111111111","name":"First",
+            "folder":dir.path().join("project").display().to_string(),"lead":{"id":"lead","agent":"claude"},"by":"human"});
+        let created = run("create", &input, false).unwrap();
+        // A replay of the same request returns the same team.
+        assert_eq!(run("create", &input, false).unwrap()["team"], created["team"]);
+    });
+}
+
 /// #432 N8: a sub-team's create input cannot set an owner-only setting,
 /// through the command entry itself - the stored child keeps its defaults.
 #[test]

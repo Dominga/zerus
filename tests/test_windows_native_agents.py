@@ -995,11 +995,11 @@ class NativeWindowsClaude(NativeAgent, host.HostCase):
         self.deliver(name, MESSAGES[0])
         conversation = self.ready(name)["conversation_id"]
         self.second_account()
-        team = self.json("team", "create", input=json.dumps({
+        team = self.json("team", "create", "--json", input=json.dumps({
             "request_id": str(uuid.uuid4()), "name": "Swap", "by": "human",
             "lead": {"id": "lead", "role": "Lead", "agent": "claude",
                      "session": {"name": name, "host": ""}}}))
-        receipt = self.json("team", "swap-member", input=json.dumps({
+        receipt = self.json("team", "swap-member", "--json", input=json.dumps({
             "request_id": str(uuid.uuid4()), "team": team["team"], "by": "human",
             "from_account": "native-claude", "to_account": "second", "provider": "claude"}))
         self.assertEqual(receipt["status"], "swapped", receipt)
@@ -1009,7 +1009,7 @@ class NativeWindowsClaude(NativeAgent, host.HostCase):
         self.assertEqual((switched["name"], switched["conversation_id"], switched["account_id"]),
                          (name, conversation, "second"))
         # The roster reads the real account from the session.
-        status = self.json("team", "status", input=json.dumps({"team": team["team"], "by": "human"}))
+        status = self.json("team", "status", "--json", input=json.dumps({"team": team["team"], "by": "human"}))
         lead = next(member for member in status["members"] if member["id"] == "lead")
         self.assertEqual(lead["session_account"], "second", lead)
         # The moved lead still answers in that conversation.
@@ -1102,6 +1102,32 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
         config = (self.agent_home / "config.toml").read_text(encoding="utf-8")
         (folder / "config.toml").write_text(
             config.replace('env_key = "OPENAI_API_KEY"', 'env_key = "FIXTURE_API_KEY"'), encoding="utf-8")
+
+    def test_permission_combinations_match_the_native_argument_parser(self):
+        # Completion parses the real installed CLI arguments and exits without
+        # starting an agent, requesting a model or setting up a Windows sandbox.
+        cases = [
+            ({}, [], True),
+            ({"approve_for_me": "on"}, ["--approve-for-me"], True),
+            ({"approval": "on-request", "sandbox": "workspace-write"},
+             ["-a", "on-request", "-s", "workspace-write"], True),
+        ]
+        for key, flag, value in (("approval", "-a", "on-request"), ("approval", "-a", "never"),
+                                 ("sandbox", "-s", "workspace-write"), ("sandbox", "-s", "read-only")):
+            cases.append(({"approve_for_me": "on", key: value}, ["--approve-for-me", flag, value], False))
+        for selection, flags, valid in cases:
+            with self.subTest(selection=selection):
+                native = subprocess.run([str(self.BINARY), *flags, "completion", "bash"], env=self.env,
+                                        capture_output=True, encoding="utf-8", errors="replace", timeout=30,
+                                        creationflags=host.HIDDEN, stdin=subprocess.DEVNULL)
+                self.assertEqual(native.returncode, 0 if valid else 2, native.stderr)
+                mode = "native:" + json.dumps(selection, separators=(",", ":"))
+                planned = self.hgs("codex", str(self.project), "--dry-run", "-d", "--permissions", mode,
+                                   rc=0 if valid else 1)
+                if not valid:
+                    self.assertIn("cannot be combined", planned.stderr)
+                elif selection.get("approve_for_me"):
+                    self.assertIn("codex --approve-for-me", planned.stdout)
 
     def transcript_rows(self, conversation_id):
         # After a switch the conversation lives in the new account's store; the

@@ -274,6 +274,7 @@ QJsonObject ModelServerSettings::formServer(bool withControl) const
             if (const auto argv = ModelServers::argvFromText(edit->text()); !argv.isEmpty()) server.insert(QLatin1String(field), QJsonArray::fromStringList(argv));
     }
     if (const auto *stored = m_servers->server(m_was); stored && stored->upMinutes > 0) server.insert("up_minutes", stored->upMinutes);
+    if (const auto *stored = m_servers->server(m_was); stored && !stored->contexts.isEmpty()) server.insert("contexts", stored->contexts);
     if (!m_was.isEmpty()) server.insert("was", m_was);
     // The key only when you typed one or removed it; otherwise the stored one stays.
     if (m_keyChange == "remove") server.insert("key", QJsonValue::Null);

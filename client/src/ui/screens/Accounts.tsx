@@ -186,7 +186,7 @@ function Detail(props: { a: Account }) {
         <div class="acct-setting">
           <span title={m().permission_hint}>
             Permissions on {m().machine}: <b classList={{ danger: m().permission === "bypass" }}>{m().permission_label}</b>
-            <span class="dim acct-src">{m().permission === "bypass" ? "set in Zerus" : "from provider settings"}</span>
+            <span class="dim acct-src">{m().permission_source === "zerus" ? "set in Zerus" : "from provider settings"}</span>
           </span>
           <button class="btn small" disabled title={ACCOUNT_MANAGEMENT}>Change…</button>
         </div>

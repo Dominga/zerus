@@ -11,6 +11,8 @@
 #include "AccountUsageStore.h"
 #include "AccountCatalog.h"
 #include "AccountChoice.h"
+#include "PermissionCatalog.h"
+#include "PermissionCatalogDialog.h"
 #include "WorkspaceList.h"
 #include "MachinePlatform.h"
 #include "LocalLaunchWarning.h"
@@ -299,7 +301,7 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     m_effort->setToolTip(tr("Variants of the selected model. Default uses the model's own setting."));
     m_permissions=new QComboBox;m_permissions->setObjectName("launchPermissions");m_permissions->setAccessibleName(tr("Permissions"));
     m_permissionsLabel=plainLabel(tr("Permissions"));
-    m_permissions->addItem(tr("Account default"),QString());m_permissions->hide();m_permissionsLabel->hide();
+    m_permissions->addItem(tr("Use Zerus account settings"),QString());m_permissions->hide();m_permissionsLabel->hide();
     m_name=new QLineEdit(m_generatedBranch);m_name->setObjectName("launchName");
     m_nameError=plainLabel();m_nameError->setObjectName("launchNameError");m_nameError->hide();
     m_openTerminal=new QCheckBox(tr("Open terminal window"));m_openTerminal->setObjectName("launchOpenTerminal");
@@ -360,6 +362,12 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     });
     connect(m_folder,&QComboBox::activated,this,[this]{m_prefillRequest=0;updateForm();});
     connect(m_account,&QListWidget::currentItemChanged,this,[this]{m_preferredAgent=this->agent();m_preferredAccount=account();m_accountPreset=true;updateModels();updatePermissions();updateForm();});
+    connect(m_permissions,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this](int index){
+        if(!m_permissions->itemData(index,Qt::UserRole+2).toBool())m_permissionBeforeEditor=index;
+    });
+    connect(m_permissions,QOverload<int>::of(&QComboBox::activated),this,[this](int index){
+        if(m_permissions->itemData(index,Qt::UserRole+2).toBool())openPermissionEditor(index);
+    });
     connect(m_refreshAccounts,&QPushButton::clicked,this,[this]{
         // Refresh asks again for folders whose last answer was not a ready catalog.
         for(const auto &key:QStringList(m_folderOrder))
@@ -757,6 +765,15 @@ void NewSessionDialog::updateForm()
             if(combo->property("denseBad").toBool()!=bad){combo->setProperty("denseBad",bad);combo->style()->unpolish(combo);combo->style()->polish(combo);}
         m_folder->setPlaceholderText(tr("No folder on %1").arg(name));
     }
+    {
+        const int permissionIndex=m_permissions->currentIndex();
+        const bool unavailable=permissionIndex>=0&&m_permissions->itemData(permissionIndex,Qt::UserRole+3).toBool();
+        const bool unset=m_permissions->currentData().toString()==QStringLiteral("__editor__");
+        if(unavailable||unset){
+            m_start->setEnabled(false);
+            m_start->setToolTip(unavailable?tr("Choose an available permission mode."):tr("Choose this session's native permissions."));
+        }
+    }
     m_start->setText(m_creation?tr("Creating worktree…"):m_validation?tr("Checking folder…"):
         repository?(m_repository&&m_repository->busy()?(m_repository->cloning()?tr("Cloning…"):tr("Checking…")):
             (m_repository&&!m_repository->createdPath().isEmpty()?tr("Use checkout and start"):tr("Clone and start"))):tr("Start session"));
@@ -831,7 +848,7 @@ void NewSessionDialog::start()
             {"repository",m_repositorySource}};
         // WhiteWh fork: this session's permission mode and a local model
         // account's model (hgs --permissions, --local-model) travel in the plan.
-        if(const auto permissions=m_permissions->currentData().toString();!permissions.isEmpty())plan["permissions"]=permissions;
+        if(const auto permissions=m_permissions->currentData().toString();!permissions.isEmpty()&&permissions!=QStringLiteral("__editor__"))plan["permissions"]=permissions;
         if(const auto localModel=agent()=="opencode"?QString():denseLocalModel();!localModel.isEmpty())plan["local_model"]=localModel;
         if(!m_repositorySource&&plan["auto"].toBool())plan["destination"]=automaticWorktreePath();
         plan["group_name"]=m_project->currentText();
@@ -876,7 +893,18 @@ void NewSessionDialog::restoreCreationChoices(const QJsonObject &plan)
             {"effort_options",effort.isEmpty()?QJsonArray():QJsonArray{effort}},{"effort_labels",effort.isEmpty()?QJsonArray():QJsonArray{effort}}};
         m_chosenHost=host();m_chosenKey=modelKey();updateModels();
     }
-    if(const int index=m_permissions->findData(plan["permissions"].toString());index>=0)m_permissions->setCurrentIndex(index);
+    if(const auto restored=plan["permissions"].toString();!restored.isEmpty()&&restored!=QStringLiteral("__editor__")){
+        QMap<QString,QString> native;
+        if(PermissionCatalog::decodeNative(restored,&native)&&native.size()>1)m_permissionSelection=native;
+        int index=m_permissions->findData(restored);
+        if(index<0){
+            m_permissions->addItem(tr("%1 (unavailable)").arg(tr("Saved permission choice")),restored);
+            index=m_permissions->count()-1;
+            m_permissions->setItemData(index,true,Qt::UserRole+3);
+            m_permissions->setItemData(index,tr("This permission choice is no longer offered for this account."),Qt::ToolTipRole);
+        }
+        m_permissions->setCurrentIndex(index);
+    }
     if(const int index=m_localModel->findText(plan["local_model"].toString());!plan["local_model"].toString().isEmpty()&&index>=0)m_localModel->setCurrentIndex(index);
     updateForm();
 }
@@ -928,7 +956,8 @@ void NewSessionDialog::launch(const QString &target,const QString &addFolder)
     // A local model account takes this session's model (hgs --local-model).
     const auto model=agent()=="opencode"?m_model->currentData().toString():denseLocalModel();
     emit launchRequested(host(),agent(),target,m_name->text(),account(),m_project->currentData().toString(),m_openTerminal->isChecked()&&agent()!="dsh"&&agent()!="opencode",addFolder,
-        model,model.isEmpty()||agent()!="opencode"?QString():m_effort->currentData().toString(),m_permissions->currentData().toString());accept();
+        model,model.isEmpty()||agent()!="opencode"?QString():m_effort->currentData().toString(),
+        m_permissions->currentData().toString()==QStringLiteral("__editor__")?QString():m_permissions->currentData().toString());accept();
 }
 QString NewSessionDialog::agent() const
 {
@@ -1227,22 +1256,132 @@ void NewSessionDialog::createWorktree()
     m_autoPreferred=false;selectPath(dialog.createdPath());
 }
 
-// Only modes the selected computer's hgs lists for this account, and only for
-// agents whose launch takes them; older computers list none.
+// Native choices come from the selected computer's account row. A computer
+// without a catalog keeps the two base modes for agents it already launched
+// with permissions; a catalog's session_supported gates every other agent,
+// including DeepSeek once its per-launch contract is integrated.
 void NewSessionDialog::updatePermissions()
 {
-    const auto selected=m_permissions->currentData().toString();
     const auto profile=m_account->currentItem()?m_account->currentItem()->data(ProfileRole).toJsonObject():QJsonObject();
-    const auto modes=profile["permission_modes"].toArray();
-    const bool launchable=QStringList{"claude","codex","kimi"}.contains(agent());
+    const auto catalog=PermissionCatalog::parse(profile);
+    const auto context=host()+QChar(0x1f)+account()+QChar(0x1f)+agent();
+    const bool contextChanged=context!=m_permissionContext;
+    if(contextChanged){
+        m_permissionContext=context;m_permissionSelection.clear();m_permissionBeforeEditor=0;
+    }
+    const bool legacySupported=QStringList{"claude","codex","kimi"}.contains(agent());
+    const bool supported=m_account->currentItem()&&(catalog.present?catalog.sessionSupported:legacySupported);
+    const auto selected=contextChanged?QString():m_permissions->currentData().toString();
     const QSignalBlocker blocker(m_permissions);
-    m_permissions->clear();m_permissions->addItem(tr("Account default"),QString());
-    if(launchable&&modes.contains(QJsonValue("auto")))m_permissions->addItem(tr("Auto"),"auto");
-    if(launchable&&modes.contains(QJsonValue("bypass")))m_permissions->addItem(tr("Bypass permissions"),"bypass");
-    m_permissions->setCurrentIndex(qMax(0,m_permissions->findData(selected)));
-    const bool visible=m_permissions->count()>1;
+    m_permissions->clear();m_permissions->addItem(tr("Use Zerus account settings"),QString());
+    m_permissions->setItemData(0,tr("Use the permission selection saved for this account in Zerus. Current setting: %1.").arg(PermissionCatalog::summary(catalog)),Qt::ToolTipRole);
+    if(catalog.nativeSaved&&catalog.available&&!catalog.selectedValid){
+        m_permissions->setItemData(0,true,Qt::UserRole+3);
+        m_permissions->setItemData(0,PermissionCatalog::selectionProblem(catalog,catalog.selected),Qt::ToolTipRole);
+    }
+    if(supported){
+        for(const auto &choice:PermissionCatalog::sessionChoices(catalog,m_permissionSelection)){
+            m_permissions->addItem(choice.label,choice.value);
+            const int row=m_permissions->count()-1;
+            m_permissions->setItemData(row,choice.tooltip,Qt::ToolTipRole);
+            m_permissions->setItemData(row,choice.bypass,Qt::UserRole+1);
+            m_permissions->setItemData(row,choice.editor,Qt::UserRole+2);
+            m_permissions->setItemData(row,choice.unavailable,Qt::UserRole+3);
+        }
+    }
+    int index=selected.isEmpty()?0:m_permissions->findData(selected);
+    if(index<0&&!selected.isEmpty()){
+        // A choice this account no longer offers stays visible; Start refuses
+        // it rather than silently moving to a stronger or weaker mode.
+        m_permissions->addItem(tr("%1 (unavailable)").arg(selected==QStringLiteral("__editor__")?tr("Native permission settings"):tr("Saved permission choice")),selected);
+        index=m_permissions->count()-1;
+        m_permissions->setItemData(index,true,Qt::UserRole+3);
+        m_permissions->setItemData(index,tr("This permission choice is no longer offered for this account."),Qt::ToolTipRole);
+    }
+    m_permissions->setCurrentIndex(index<0?0:index);
+    const bool visible=supported;
     m_permissions->setVisible(visible);m_permissionsLabel->setVisible(visible);
-    m_permissions->setToolTip(tr("This session only. Account default keeps the account's permission mode."));
+    m_permissions->setToolTip(tr("This session only. Use Zerus account settings keeps the permission selection saved for the account in Zerus."));
+    updatePermissionMenu();
+}
+
+// The ··· menu and the classic combo share one selection model: a single
+// control lists its native values directly; several controls open the shared
+// native settings editor.
+void NewSessionDialog::updatePermissionMenu()
+{
+    if(!m_densePermissions)return;
+    m_densePermissions->clear();
+    for(int index=0;index<m_permissions->count();++index){
+        const bool editor=m_permissions->itemData(index,Qt::UserRole+2).toBool();
+        const bool unavailable=m_permissions->itemData(index,Qt::UserRole+3).toBool();
+        auto *action=m_densePermissions->addAction(m_permissions->itemText(index));
+        action->setCheckable(true);action->setChecked(index==m_permissions->currentIndex());
+        action->setEnabled(!unavailable);
+        action->setToolTip(m_permissions->itemData(index,Qt::ToolTipRole).toString());
+        if(editor)connect(action,&QAction::triggered,this,[this,index]{openPermissionEditor(index);});
+        else connect(action,&QAction::triggered,this,[this,index]{
+            if(m_permissions->itemData(index,Qt::UserRole+3).toBool())return;
+            m_permissions->setCurrentIndex(index);refreshDense();
+        });
+    }
+    m_densePermissions->menuAction()->setVisible(m_permissions->count()>1);
+    m_densePermissionsSeparator->setVisible(m_permissions->count()>1);
+}
+
+bool NewSessionDialog::openPermissionEditor(int index)
+{
+    if(m_permissionEditorOpen)return false;
+    const auto profile=m_account->currentItem()?m_account->currentItem()->data(ProfileRole).toJsonObject():QJsonObject();
+    const auto catalog=PermissionCatalog::parse(profile);
+    if(!catalog.available||catalog.controls.size()<2)return false;
+    if(index<0)index=m_permissions->currentIndex();
+    const bool editorItem=index>=0&&m_permissions->itemData(index,Qt::UserRole+2).toBool();
+    if(!editorItem&&m_permissions->currentData().toString()!=QStringLiteral("__editor__"))return false;
+    QMap<QString,QString> selection=m_permissionSelection;
+    if(selection.isEmpty()&&catalog.selectedValid)selection=catalog.selected;
+    m_permissionEditorOpen=true;
+    PermissionCatalogDialog dialog(catalog,selection,tr("This session on %1").arg(host().isEmpty()?m_fleet.local().host:host()),this);
+    const bool accepted=dialog.exec()==QDialog::Accepted;
+    m_permissionEditorOpen=false;
+    if(!accepted){
+        if(m_permissionBeforeEditor>=0&&m_permissionBeforeEditor<m_permissions->count()){
+            const QSignalBlocker blocker(m_permissions);m_permissions->setCurrentIndex(m_permissionBeforeEditor);
+        }
+        updateForm();return false;
+    }
+    m_permissionSelection=dialog.selection();
+    const auto mode=dialog.mode();
+    int editorIndex=-1;
+    for(int row=0;row<m_permissions->count();++row)if(m_permissions->itemData(row,Qt::UserRole+2).toBool()){editorIndex=row;break;}
+    if(m_permissionSelection.isEmpty()){
+        int providerIndex=m_permissions->findData(QStringLiteral("provider"));
+        if(providerIndex<0)providerIndex=0;
+        const QSignalBlocker blocker(m_permissions);m_permissions->setCurrentIndex(providerIndex);
+        if(editorIndex>=0){
+            m_permissions->setItemText(editorIndex,tr("Native permission settings…"));
+            m_permissions->setItemData(editorIndex,QStringLiteral("__editor__"),Qt::UserRole);
+            m_permissions->setItemData(editorIndex,false,Qt::UserRole+3);
+        }
+        m_permissionBeforeEditor=providerIndex;
+    }else if(editorIndex>=0){
+        const QSignalBlocker blocker(m_permissions);
+        m_permissions->setItemText(editorIndex,tr("Native permission settings… (%1)").arg(PermissionCatalog::summary(catalog,m_permissionSelection)));
+        m_permissions->setItemData(editorIndex,mode,Qt::UserRole);
+        m_permissions->setItemData(editorIndex,false,Qt::UserRole+3);
+        m_permissions->setCurrentIndex(editorIndex);
+        m_permissionBeforeEditor=editorIndex;
+    }else{
+        m_permissions->addItem(tr("Native permission settings… (%1)").arg(PermissionCatalog::summary(catalog,m_permissionSelection)),mode);
+        const int row=m_permissions->count()-1;
+        m_permissions->setItemData(row,true,Qt::UserRole+2);
+        m_permissions->setItemData(row,false,Qt::UserRole+3);
+        {const QSignalBlocker blocker(m_permissions);m_permissions->setCurrentIndex(row);}
+        m_permissionBeforeEditor=row;
+    }
+    updatePermissionMenu();updateForm();
+    if(m_denseRail)refreshDense();
+    return true;
 }
 
 // The short list is the account row's, or the folder's catalog once it is ready.
@@ -1864,12 +2003,7 @@ void NewSessionDialog::refreshDense()
     if(ollama&&!m_localModelsListed&&!m_localModelRequest)requestLocalModels();
     else if(ollama&&m_localModelsListed&&!m_localModelRequest&&m_localModel->count())refreshDenseModel();
     // Permission modes in the ··· menu.
-    m_densePermissions->clear();
-    for(int index=0;index<m_permissions->count();++index){
-        auto *mode=m_densePermissions->addAction(m_permissions->itemText(index));mode->setCheckable(true);mode->setChecked(index==m_permissions->currentIndex());
-        connect(mode,&QAction::triggered,this,[this,index]{m_permissions->setCurrentIndex(index);refreshDense();});
-    }
-    m_densePermissions->menuAction()->setVisible(m_permissions->count()>1);m_densePermissionsSeparator->setVisible(m_permissions->count()>1);
+    updatePermissionMenu();
     // Projects and computers carry their glyphs.
     for(int index=0;index<m_project->count();++index)if(m_project->itemIcon(index).isNull())m_project->setItemIcon(index,workspaceIcon("folder",t.folder));
     for(int index=0;index<m_machine->count();++index)if(m_machine->itemIcon(index).isNull())m_machine->setItemIcon(index,workspaceIcon("machines",t.muted));

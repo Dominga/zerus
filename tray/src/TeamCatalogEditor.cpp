@@ -605,7 +605,12 @@ TeamCatalogEditor::TeamCatalogEditor(TeamController *teams, QWidget *parent) : Q
         m_save->setEnabled(false); m_meta->setText(tr("Saving…"));
         QJsonObject input{{"catalog", m_catalog.json()}, {"version", m_catalog.version}};
         m_teams->call(QStringLiteral("catalog set"), input, [this](bool ok, const QJsonObject &result, const QString &error) {
-            if (!ok) { m_meta->setText(QStringLiteral("⚠ ") + error.toHtmlEscaped()); m_save->setEnabled(true); return; }
+            if (!ok) {
+                m_meta->setText(QStringLiteral("⚠ ") + error.toHtmlEscaped()); m_save->setEnabled(true);
+                // A newer version: read it, and the edits move onto it (rebase()).
+                if (error.contains(QLatin1String("catalog changed"))) m_teams->refreshCatalog();
+                return;
+            }
             m_dirty = false;
             m_applied = tr("Saved as v%1").arg(result.value("version").toInteger());
             updateHeader();
@@ -647,7 +652,7 @@ TeamCatalogEditor::TeamCatalogEditor(TeamController *teams, QWidget *parent) : Q
             changed(); rebuildLists(); rebuildEditor();
         });
     });
-    connect(m_teams, &TeamController::catalogChanged, this, [this] { if (!m_dirty) load(); else updateHeader(); });
+    connect(m_teams, &TeamController::catalogChanged, this, [this] { if (!m_dirty) load(); else rebase(); });
     setDark(true);
     if (m_teams->catalogReady()) load(); else m_teams->refreshCatalog();
 }
@@ -704,6 +709,7 @@ void TeamCatalogEditor::load()
     const auto &base = m_teams->catalog();
     m_catalog = base;
     m_catalog.proposals.clear();
+    m_loaded = m_catalog;
     m_dirty = false;
     m_readOnly = draftMode();
     if (m_readOnly) {
@@ -730,6 +736,57 @@ void TeamCatalogEditor::load()
             else if (p.kind == "planning_rules") m_catalog.planningRules = p.text;
         }
     }
+    rebuildLists(); rebuildEditor(); updateHeader();
+}
+
+namespace {
+// Three-way, by id: the items edited, added or removed in mine since loaded go
+// over now; the rest is now's.
+template <typename T>
+QList<T> rebased(const QList<T> &loaded, const QList<T> &mine, const QList<T> &now)
+{
+    const auto find = [](const QList<T> &items, const QString &id) -> qsizetype {
+        for (qsizetype i = 0; i < items.size(); ++i) if (items[i].id == id) return i;
+        return -1;
+    };
+    QList<T> out = now;
+    for (const auto &old : loaded) {
+        if (find(mine, old.id) >= 0) continue;
+        if (const auto at = find(out, old.id); at >= 0) out.removeAt(at);
+    }
+    for (const auto &item : mine) {
+        const auto old = find(loaded, item.id);
+        if (old >= 0 && loaded[old].json() == item.json()) continue;
+        if (const auto at = find(out, item.id); at >= 0) out[at] = item; else out.append(item);
+    }
+    return out;
+}
+
+QJsonArray rulesJson(const QList<Teams::Rule> &rules)
+{
+    QJsonArray out;
+    for (const auto &rule : rules) out.append(rule.json());
+    return out;
+}
+}
+
+void TeamCatalogEditor::rebase()
+{
+    const auto &base = m_teams->catalog();
+    if (base.version == m_loaded.version) { updateHeader(); return; }
+    Teams::Catalog next = base;
+    next.proposals.clear();
+    next.roles = rebased(m_loaded.roles, m_catalog.roles, base.roles);
+    next.templates = rebased(m_loaded.templates, m_catalog.templates, base.templates);
+    next.pipelines = rebased(m_loaded.pipelines, m_catalog.pipelines, base.pipelines);
+    if (rulesJson(m_catalog.routing) != rulesJson(m_loaded.routing)) next.routing = m_catalog.routing;
+    if (m_catalog.planningRules != m_loaded.planningRules) next.planningRules = m_catalog.planningRules;
+    m_loaded = base;
+    m_loaded.proposals.clear();
+    m_catalog = next;
+    // Edits the newer catalog already has leave nothing to save.
+    if (!unsavedChanges()) { load(); return; }
+    m_readOnly = false;
     rebuildLists(); rebuildEditor(); updateHeader();
 }
 

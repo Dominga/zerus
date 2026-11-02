@@ -1222,7 +1222,7 @@ impl Drop for Acl {
 /// A test folder whose DACL is only this user's Modify, as Authenticated Users
 /// Modify is inherited from the drive's root on a second drive.
 #[cfg(test)]
-fn set_modify_only(path: &Path) -> io::Result<()> {
+pub(crate) fn set_modify_only(path: &Path) -> io::Result<()> {
     let sid = process::current_user().ok_or_else(|| io::Error::other("this user's identity is unavailable"))?;
     let access = EXPLICIT_ACCESS_W {
         grfAccessPermissions: FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE,

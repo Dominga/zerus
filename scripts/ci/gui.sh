@@ -65,6 +65,8 @@ fi
 export QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software
 # JSON parsed on the GUI thread fails the suite (tray/src/JsonParse.h).
 export ZERUS_GUI_THREAD_CHECKS=fatal
+# Settings::set writes at once, so no suite races the settings writer (Settings.cpp).
+export ZERUS_SETTINGS_SYNC=1
 export QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu
 rm -rf artifacts/test-results/qt-functions
 mkdir -p artifacts/test-results/qt-functions

@@ -1,75 +1,119 @@
 //! Read-only account launch defaults. Per-project, managed policies and explicit
 //! session switches may still override these; never present them as live state.
 use super::*;
-use std::io::Read;
 
-fn text(path: &Path) -> Option<String> {
-    let mut value = String::new();
-    match fs::File::open(path) {
-        Ok(file) => { file.take(1024 * 1024 + 1).read_to_string(&mut value).ok()?; }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(String::new()),
-        Err(_) => return None,
-    }
-    (value.len() <= 1024 * 1024).then_some(value)
-}
-fn native(provider: &str, home: &Path, claude_native: &Path) -> Option<(&'static str, String)> {
-    match provider {
-        "claude" => {
-            let data = claude_settings::preview(claude_native, home).ok()?;
-            let mode = data["permissions"]["defaultMode"].as_str().unwrap_or("default");
-            Some((match mode { "bypassPermissions" => "bypass", "auto" => "auto", "plan" => "plan", "default" | "acceptEdits" | "dontAsk" => "default", _ => "unknown" }, mode.into()))
-        }
-        "codex" | "kimi" => {
-            let data = text(&home.join("config.toml"))?.parse::<toml_edit::DocumentMut>().ok()?;
-            if provider == "kimi" {
-                let mode = data.get("default_permission_mode").and_then(|v|v.as_str()).unwrap_or("manual");
-                return Some((match mode { "auto" | "yolo" => "bypass", "manual" => "default", _ => "unknown" }, mode.into()));
-            }
-            let profile = data.get("profile").and_then(|v|v.as_str());
-            let get = |key: &str| profile.and_then(|p|data.get("profiles")?.get(p)?.get(key)?.as_str())
-                .or_else(||data.get(key).and_then(|v|v.as_str()));
-            let approval = get("approval_policy").unwrap_or("on-request");
-            let sandbox = get("sandbox_mode").unwrap_or("read-only");
-            Some((if approval == "never" && sandbox == "danger-full-access" { "bypass" } else { "default" },
-                format!("Approvals: {approval}; sandbox: {sandbox}")))
-        }
-        _ => None,
-    }
-}
-pub(super) fn describe(config: &Config, row: &mut Value, mode: &str) {
+/// Fill the account row with the discovered catalog and the separate account
+/// launch projection. Discovery is cached per provider by the caller.
+pub(super) fn describe(
+    config: &Config,
+    row: &mut Value,
+    mode: &str,
+    catalogs: &mut permission_catalog::Cache,
+) {
+    let provider = string_field(row, "provider").to_owned();
+    let home = PathBuf::from(string_field(row, "home"));
+    let base = permission_catalog::catalog_for(config, &provider, &home, catalogs);
+    let (catalog, current) = permission_catalog::describe_account(
+        config,
+        &provider,
+        &home,
+        row["native"].as_bool().unwrap_or(false),
+        mode,
+        &base,
+    );
+    let effective = permission_catalog::effective_mode(
+        &provider,
+        current["source"].as_str().unwrap_or("provider"),
+        mode,
+        &current["values"],
+    );
+    let detail = current["detail"].clone();
+    row["permission_catalog"] = catalog;
+    row["permission_current"] = current;
     row["permission_mode"] = json!(mode);
-    let (effective, detail) = if let Some(set) = ["bypass", "auto"].into_iter().find(|set| *set == mode) {
-        (set, "Set in Zerus".into())
-    } else {
-        native(string_field(row,"provider"), Path::new(string_field(row,"home")),
-            &if row["native"].as_bool().unwrap_or(false) { PathBuf::from(string_field(row,"home")) } else { Path::new(&config.home).join(".claude") })
-            .unwrap_or(("unknown", "Provider settings could not be verified".into()))
-    };
     row["effective_permission_mode"] = json!(effective);
-    row["permission_detail"] = json!(detail);
+    row["permission_detail"] = detail;
 }
 fn string_field<'a>(v: &'a Value, key: &str) -> &'a str { v[key].as_str().unwrap_or("") }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn config(home: &Path) -> Config {
+        Config {
+            home: home.to_string_lossy().into_owned(),
+            dir: home.join("config"),
+            state: home.join("state"),
+            selves: vec![],
+            peers: vec![],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: BTreeMap::new(),
+            tab: false,
+            tab_colors: String::new(),
+        }
+    }
+
     #[test]
     fn reads_provider_defaults_without_exposing_or_changing_credentials() {
         let tmp = tempfile::tempdir().unwrap(); let home = tmp.path();
+        let config = config(home);
+        let mut cache = permission_catalog::Cache::default();
         let path = home.join("config.toml");
         fs::write(&path,"approval_policy = 'never'\nsandbox_mode = 'danger-full-access'\napi_key = 'secret'\n").unwrap();
-        assert_eq!(native("codex",home,home).unwrap().0,"bypass");
-        fs::write(&path,"approval_policy = 'never'\nsandbox_mode = 'danger-full-access'\nprofile = 'safe'\n[profiles.safe]\nsandbox_mode = 'workspace-write'\n").unwrap();
-        assert_eq!(native("codex",home,home).unwrap().0,"default");
-        for mode in ["manual", "yolo", "auto"] {
-            fs::write(&path,format!("default_permission_mode = '{mode}'")).unwrap();
-            assert_eq!(native("kimi",home,home).unwrap().0,if mode=="manual" {"default"} else {"bypass"});
-        }
-        fs::write(&path,"broken = [").unwrap(); assert!(native("codex",home,home).is_none());
-        let path = home.join("settings.json");
-        fs::write(&path,r#"{"permissions":{"defaultMode":"bypassPermissions"},"apiKey":"secret"}"#).unwrap();
-        assert_eq!(native("claude",home,home).unwrap(),("bypass","bypassPermissions".into()));
-        let bytes = fs::read(&path).unwrap();
-        assert!(native("dsh",home,home).is_none()); assert_eq!(fs::read(&path).unwrap(),bytes);
+        let mut row = json!({"id":"native-codex","provider":"codex","home":home});
+        describe(&config, &mut row, "provider", &mut cache);
+        assert_eq!(row["permission_current"]["values"]["approval"], "never");
+        assert_eq!(row["permission_current"]["values"]["sandbox"], "danger-full-access");
+        assert_eq!(row["effective_permission_mode"], "bypass");
+        assert!(!row.to_string().contains("secret"));
+
+        fs::write(&path,"permission_mode = 'yolo'\napi_key = 'secret'\n").unwrap();
+        let mut row = json!({"id":"native-kimi","provider":"kimi","home":home});
+        describe(&config, &mut row, "provider", &mut cache);
+        assert_eq!(row["permission_current"]["values"]["mode"], "yolo");
+        assert_eq!(row["effective_permission_mode"], "default");
+        assert!(!row.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn absent_native_defaults_are_not_guessed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = config(tmp.path());
+        let mut cache = permission_catalog::Cache::default();
+        let mut row = json!({"id":"native-codex","provider":"codex","home":tmp.path()});
+        describe(&config, &mut row, "provider", &mut cache);
+        assert!(row["permission_current"]["values"].as_object().unwrap().is_empty());
+        assert_eq!(row["effective_permission_mode"], "default");
+        assert!(row["permission_current"]["detail"].as_str().unwrap().contains("do not pin"));
+    }
+
+    #[test]
+    fn claude_native_setting_is_projected_without_collapsing_to_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = config(tmp.path());
+        let mut cache = permission_catalog::Cache::default();
+        fs::write(
+            tmp.path().join("settings.json"),
+            r#"{"permissions":{"defaultMode":"acceptEdits"},"apiKey":"secret"}"#,
+        )
+        .unwrap();
+        let mut row = json!({"id":"native-claude","provider":"claude","native":true,"home":tmp.path()});
+        describe(&config, &mut row, "provider", &mut cache);
+        assert_eq!(row["permission_current"]["values"]["mode"], "acceptEdits");
+        assert_eq!(row["permission_current"]["source"], "provider");
+        assert_eq!(row["effective_permission_mode"], "default");
+        assert!(!row.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn saved_native_selection_is_kept_when_options_are_unavailable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = config(tmp.path());
+        let mut cache = permission_catalog::Cache::default();
+        let mut row = json!({"id":"native-claude","provider":"claude","home":tmp.path()});
+        describe(&config, &mut row, "native:{\"mode\":\"acceptEdits\"}", &mut cache);
+        assert_eq!(row["permission_catalog"]["selected"]["mode"], "acceptEdits");
+        assert_eq!(row["permission_current"]["source"], "zerus");
     }
 }

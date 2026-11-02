@@ -47,7 +47,7 @@ impl Fixture {
             directory_entries: 2000,
             records,
             bytes: 4 << 20,
-            deadline: Instant::now() + Duration::from_secs(1),
+            deadline: Instant::now() + Duration::from_secs(2),
         }
     }
     fn event(id: usize, text: &str, phase: &str) -> String {

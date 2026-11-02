@@ -365,7 +365,7 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
         }
         m_operation = remove ? "remove" : "reset";
         // A removed machine leaves no kept overrides behind for a later one of its name.
-        if (remove) Settings::remove(otherTransportKey(target));
+        if (remove) SettingsJson::remove(otherTransportKey(target));
         m_request = m_client->requestMachines({m_operation, target, "--revision", revision}); updateControls();
     });
     connect(m_client, &HgsClient::machinesReady, this, [this](quint64 request, const QJsonObject &data) {
@@ -860,7 +860,7 @@ void MachinesPage::rememberOtherTransport() {
         other["wsl"] = QJsonObject{{"distribution", m_wslDistribution->text().trimmed()}, {"user", m_wslUser->text().trimmed()}, {"hgs_path", m_wslHgs->text()}};
     }
     // #694: a GUI-thread write never waits on the settings file's lock.
-    if (other.isEmpty()) Settings::remove(otherTransportKey(alias()));
+    if (other.isEmpty()) SettingsJson::remove(otherTransportKey(alias()));
     else SettingsJson::store(otherTransportKey(alias()), QJsonDocument(other));
 }
 void MachinesPage::save() {

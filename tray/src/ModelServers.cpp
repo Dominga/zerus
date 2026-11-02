@@ -20,6 +20,7 @@ QJsonObject Server::json() const
     QJsonObject out{{"name", name}, {"base_url", baseUrl}, {"kind", kind}};
     if (!ssh.isEmpty()) out.insert("ssh", ssh);
     if (upMinutes > 0) out.insert("up_minutes", upMinutes);
+    if (!contexts.isEmpty()) out.insert("contexts", contexts);
     const QList<std::pair<const char *, const QStringList *>> fields{{"status", &status}, {"up", &up}, {"down", &down}, {"logs", &logs}};
     for (const auto &[field, argv] : fields)
         if (!argv->isEmpty()) out.insert(QLatin1String(field), QJsonArray::fromStringList(*argv));
@@ -35,6 +36,7 @@ QList<Server> parseList(const QJsonObject &list)
         server.name = row.value("name").toString(); server.baseUrl = row.value("base_url").toString();
         server.kind = row.value("kind").toString(); server.ssh = row.value("ssh").toString();
         server.hasKey = row.value("key").toBool(); server.upMinutes = row.value("up_minutes").toInt();
+        server.contexts = row.value("contexts").toObject();
         const auto argv = row.value("argv").toObject();
         server.status = strings(argv.value("status")); server.up = strings(argv.value("up"));
         server.down = strings(argv.value("down")); server.logs = strings(argv.value("logs"));

@@ -228,6 +228,43 @@ fn claude_rule_indicator(line: &str) -> Option<String> {
     claude_effort_words(body.strip_suffix(" · /effort")?)
 }
 
+/// The owner, 2026-11-02: a Claude session behind a gateway (a model server,
+/// or an account whose settings set ANTHROPIC_BASE_URL, such as GB10) has no
+/// signed cloud catalog, so its model switch offered nothing. Its models are
+/// the gateway's list, read within 3 s and kept for a minute.
+fn gateway_catalog(record: &Value) -> Vec<ModelOption> {
+    static CACHE: OnceLock<Mutex<BTreeMap<String, (Instant, Vec<ModelOption>)>>> = OnceLock::new();
+    let Some(server) = gateway_server(record) else { return vec![] };
+    let key = super::model_servers::root(&server);
+    let cache = CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if let Some((at, models)) = cache.lock().ok().as_ref().and_then(|cache| cache.get(&key).cloned()) {
+        if at.elapsed() < Duration::from_secs(60) {
+            return models;
+        }
+    }
+    let Ok(config) = crate::config::Config::load() else { return vec![] };
+    let models: Vec<ModelOption> = super::model_servers::model_names(&config, &server, Duration::from_secs(3))
+        .into_iter()
+        .filter(|id| safe_model(id))
+        .take(64)
+        .map(|id| ModelOption { label: id.clone(), id, efforts: vec![], default_effort: String::new() })
+        .collect();
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(key, (Instant::now(), models.clone()));
+    }
+    models
+}
+
+/// The gateway a Claude session talks to: its model server, else the base URL
+/// and token its account's settings give Claude Code.
+fn gateway_server(record: &Value) -> Option<super::model_servers::Server> {
+    if let Some(name) = record["model_server"]["server"].as_str().filter(|name| !name.is_empty()) {
+        let config = crate::config::Config::load().ok()?;
+        return super::model_servers::load(&config).ok()?.into_iter().find(|server| server.name == name);
+    }
+    super::model_servers::account_gateway(&agent_home(record))
+}
+
 /// Claude Code caches its account's signed model catalog for the /model picker.
 /// The picker lists the "main" section; other models need --model at launch.
 fn claude_catalog(record: &Value) -> Vec<ModelOption> {
@@ -700,7 +737,8 @@ fn safe_model(value: &str) -> bool {
 
 fn catalog(record: &Value) -> Vec<ModelOption> {
     if string(record, "agent") == "claude" {
-        return claude_catalog(record);
+        let models = claude_catalog(record);
+        return if models.is_empty() { gateway_catalog(record) } else { models };
     }
     let mut result = Vec::new();
     if string(record, "agent") == "codex" {
@@ -1793,6 +1831,11 @@ fn claude_model(name: &str, request: &Request, model: &ModelOption) -> Result<()
             if !claude_row_is(&picker.row, &model.label) || !picker.session_only {
                 return Err("model picker selection changed; inspect Terminal".into());
             }
+            // A gateway's model (GB10) offers no effort in Zerus's catalog:
+            // Claude keeps whatever it shows for it.
+            if model.efforts.is_empty() {
+                return Ok(());
+            }
             let shown = picker.effort.ok_or("Claude's effort selection is not visible; enlarge Terminal")?;
             if shown == request.effort {
                 return Ok(());
@@ -1858,9 +1901,10 @@ fn claude_model(name: &str, request: &Request, model: &ModelOption) -> Result<()
                 // The receipt names effort only when the picker changed it; the
                 // indicator, when shown, must agree with the request.
                 let shown = claude_footer(&screen);
-                if (effort.is_empty() || effort == request.effort)
-                    && shown.as_deref().is_none_or(|shown| shown == request.effort)
-                    && input::checked_terminal(&record, true).is_ok()
+                let effort_agrees = model.efforts.is_empty()
+                    || ((effort.is_empty() || effort == request.effort)
+                        && shown.as_deref().is_none_or(|shown| shown == request.effort));
+                if effort_agrees && input::checked_terminal(&record, true).is_ok()
                 {
                     return Ok(());
                 }
@@ -2054,8 +2098,7 @@ fn apply_settings(
         // Its indicator shows effort only; history or a receipt names the model.
         let shown = claude_footer(&screen);
         if current.model == model.id
-            && (shown.as_deref() == Some(request.effort.as_str())
-                || (model.efforts.is_empty() && request.effort.is_empty()))
+            && (shown.as_deref() == Some(request.effort.as_str()) || model.efforts.is_empty())
         {
             Ok(())
         } else {
@@ -2934,6 +2977,39 @@ mod tests {
         ]},"state":{"thinking_by_model":[{"id":"claude-opus-5-5","thinking":{"type":"effort","effort":"high"}}]}}}).to_string()).unwrap();
         fs::write(dir.join("masked-ids.json"), "{}").unwrap();
         home
+    }
+
+    /// The owner, 2026-11-02: the GB10 account (ANTHROPIC_BASE_URL in its
+    /// settings) has no signed catalog; its switch lists the gateway's models.
+    #[test]
+    fn a_gateway_accounts_claude_catalog_is_the_gateways_model_list() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 4096];
+            let read = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+            let body = r#"{"data":[{"id":"qwen-coder"},{"id":"glm-flash"}]}"#;
+            write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
+            request
+        });
+        let home = tempfile::tempdir().unwrap();
+        fs::write(
+            home.path().join("settings.json"),
+            json!({"env":{"ANTHROPIC_BASE_URL":format!("http://127.0.0.1:{port}"),"ANTHROPIC_AUTH_TOKEN":"sk-gateway"}}).to_string(),
+        )
+        .unwrap();
+        let record = json!({"agent":"claude","agent_home":home.path()});
+        let models = catalog(&record);
+        let request = server.join().unwrap();
+        assert_eq!(models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["qwen-coder", "glm-flash"]);
+        assert!(request.starts_with("GET /v1/models"), "{request}");
+        assert!(request.contains("sk-gateway"), "the account's token reaches its gateway");
+        // An account without a gateway and without a catalog still has none.
+        let plain = tempfile::tempdir().unwrap();
+        assert!(catalog(&json!({"agent":"claude","agent_home":plain.path()})).is_empty());
     }
 
     #[test]

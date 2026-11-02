@@ -216,6 +216,34 @@ elif a[:2]==['account','ls']:
   if (root/'opencode-models').exists():profiles[-1].update(catalog())
  if (root/'permission-modes').exists():
   for profile in profiles:profile['permission_modes']={'claude':['provider','auto','bypass'],'codex':['provider','bypass'],'dsh':['provider','bypass']}.get(profile['provider'],[])
+ if any((root/name).exists() for name in ('permission-catalog','permission-catalog-multi','permission-catalog-unavailable','permission-catalog-dsh')):
+  def permission_catalog(profile):
+   provider=profile['provider']
+   if provider not in ('claude','codex','dsh'):return
+   if (root/'permission-catalog-unavailable').exists():
+    profile['permission_mode']='auto' if provider=='claude' else 'provider'
+    profile['permission_catalog']={'status':'unavailable','status_reason':'fixture discovery failed','source':'fixture','session_supported':True,'controls':[]}
+    return
+   if provider=='claude':
+    options=[{'value':'default_native','label':'Default native'},{'value':'plan_native','label':'Plan native'},{'value':'accept_native','label':'Accept native'},{'value':'bypass_native','label':'Bypass native'}]
+    selected='plan_native'
+   elif provider=='codex':
+    options=[{'value':'ask_native','label':'Ask native'},{'value':'never_native','label':'Never native'}]
+    selected='ask_native'
+   else:
+    options=[{'value':'default_native','label':'Default native'},{'value':'bypass_native','label':'Bypass native'}]
+    selected='default_native'
+   controls=[{'id':'mode','label':'Mode','description':'Fixture mode control','kind':'select','scope':'launch','options':options}]
+   chosen={'mode':selected}
+   if provider=='claude' and (root/'permission-catalog-multi').exists():
+    controls.append({'id':'sandbox','label':'Sandbox','description':'Fixture sandbox control','kind':'select','scope':'launch',
+                     'options':[{'value':'workspace_native','label':'Workspace native'},{'value':'strict_native','label':'Strict native'}]})
+    chosen={'mode':'plan_native','sandbox':'strict_native'}
+   supported=True if provider!='dsh' else (root/'permission-catalog-dsh').exists()
+   profile['permission_catalog']={'status':'available','source':'fixture-'+provider,'version':'1','session_supported':supported,'selected':chosen,'controls':controls}
+   profile['permission_mode']='native:'+json.dumps(chosen,separators=(',',':'),sort_keys=True)
+   profile['permission_current']={'source':'zerus','values':chosen,'detail':'fixture current'}
+  for profile in profiles:permission_catalog(profile)
  if (root/'empty-catalog').exists():profiles=[]
  for profile in profiles:
   if not (root/'uncached').exists():profile['account_status']=status(profile['id'],profile['provider'])
@@ -867,26 +895,98 @@ elif a and a[0]=='worktrees':
         again.activateWindow();QVERIFY(QTest::qWaitForWindowActive(&again));QSignalSpy closed(&again,&QDialog::rejected);
         QTest::keyClick(&again,Qt::Key_Escape);QTRY_COMPARE(closed.size(),1);QVERIFY(!again.isVisible());
     }
-    void permissionsOfferOnlyTheComputersListedModes() {
+    void permissionsFallBackToDefaultAndBypass() {
         classicView();
-        {   // An older computer lists no modes: only the account default exists.
+        {   // An older computer accepts only an explicit bypass per launch; the
+            // provider default is the account default. Auto is never resurrected.
             NewSessionDialog dialog(program(),fleet(),{},"claude");dialog.selectPath("/workspace/example",false);dialog.show();
             QTRY_VERIFY(row(dialog,"claude")>=0);choices(dialog)->setCurrentRow(row(dialog,"claude"));
-            QVERIFY(!dialog.findChild<QComboBox *>("launchPermissions")->isVisible());
+            auto *mode=dialog.findChild<QComboBox *>("launchPermissions");
+            QTRY_VERIFY(mode->isVisible());QCOMPARE(mode->count(),2);
+            QCOMPARE(mode->itemData(1).toString(),QString("bypass"));
+            QCOMPARE(mode->findData("provider"),-1);QCOMPARE(mode->findData("auto"),-1);
+            choices(dialog)->setCurrentRow(row(dialog,"work"));QCOMPARE(mode->count(),2);QCOMPARE(mode->findData("auto"),-1);
+            choices(dialog)->setCurrentRow(row(dialog,"native-dsh"));QVERIFY(!mode->isVisible());
+            choices(dialog)->setCurrentRow(row(dialog,"claude"));mode->setCurrentIndex(mode->findData("bypass"));
+            auto *start=dialog.findChild<QPushButton *>("primary");QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);
+            QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launched.size(),1);
+            QCOMPARE(launched[0][1].toString(),QString("claude"));QCOMPARE(launched[0][10].toString(),QString("bypass"));
         }
+        // A legacy permission_modes list does not resurrect hardcoded Auto.
         flag("permission-modes");
         NewSessionDialog dialog(program(),fleet(),{},"claude");dialog.selectPath("/workspace/example",false);dialog.show();
         QTRY_VERIFY(row(dialog,"claude")>=0);choices(dialog)->setCurrentRow(row(dialog,"claude"));
         auto *mode=dialog.findChild<QComboBox *>("launchPermissions");
-        QTRY_VERIFY(mode->isVisible());QCOMPARE(mode->count(),3);QCOMPARE(mode->itemData(1).toString(),QString("auto"));
-        // Codex has no Auto mode; DeepSeek takes its mode only from the account.
-        choices(dialog)->setCurrentRow(row(dialog,"work"));QCOMPARE(mode->count(),2);QCOMPARE(mode->findData("auto"),-1);
-        choices(dialog)->setCurrentRow(row(dialog,"native-dsh"));QVERIFY(!mode->isVisible());
-        choices(dialog)->setCurrentRow(row(dialog,"claude"));mode->setCurrentIndex(mode->findData("auto"));
+        QTRY_VERIFY(mode->isVisible());QCOMPARE(mode->count(),2);QCOMPARE(mode->findData("auto"),-1);
+        flag("permission-modes",false);
+    }
+    void nativePermissionsFollowTheSelectedComputerAndAccount() {
+        classicView();
+        flag("permission-catalog");
+        NewSessionDialog dialog(program(),fleet(),{},"claude");dialog.selectPath("/workspace/example",false);dialog.show();
+        QTRY_VERIFY(row(dialog,"claude")>=0);choices(dialog)->setCurrentRow(row(dialog,"claude"));
+        auto *mode=dialog.findChild<QComboBox *>("launchPermissions");
+        QTRY_VERIFY(mode->isVisible());QCOMPARE(mode->count(),7); // Default, Bypass and four discovered values.
+        QCOMPARE(mode->itemData(1).toString(),QString("provider"));
+        const auto accept=QString("native:{\"mode\":\"accept_native\"}");
+        QVERIFY(mode->findData(accept)>=0);QCOMPARE(mode->currentData().toString(),QString());
+        mode->setCurrentIndex(mode->findData(accept));
+        // Another account (same computer) resets the session override.
+        choices(dialog)->setCurrentRow(row(dialog,"work"));
+        QTRY_COMPARE(mode->count(),5);QCOMPARE(mode->currentData().toString(),QString());
+        QCOMPARE(mode->findData(accept),-1);
+        choices(dialog)->setCurrentRow(row(dialog,"claude"));
+        QTRY_COMPARE(mode->count(),7);QCOMPARE(mode->currentData().toString(),QString());
+        // Another computer resets it too, even for the same account id.
+        mode->setCurrentIndex(mode->findData(accept));
+        auto *machine=dialog.findChild<QComboBox *>("launchComputer");
+        machine->setCurrentIndex(machine->findData("mac"));
+        QTRY_VERIFY(row(dialog,"claude")>=0);choices(dialog)->setCurrentRow(row(dialog,"claude"));
+        QTRY_COMPARE(mode->currentData().toString(),QString());
+        // A native value reaches launch as one opaque selector.
+        mode->setCurrentIndex(mode->findData(accept));
+        dialog.selectPath("/workspace/example",false);
         auto *start=dialog.findChild<QPushButton *>("primary");QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);
         QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launched.size(),1);
-        QCOMPARE(launched[0][1].toString(),QString("claude"));QCOMPARE(launched[0][10].toString(),QString("auto"));
-        flag("permission-modes",false);
+        QCOMPARE(launched[0][1].toString(),QString("claude"));QCOMPARE(launched[0][10].toString(),accept);
+        flag("permission-catalog",false);
+    }
+    void nativePermissionsCombineControlsForTheSession() {
+        classicView();
+        flag("permission-catalog-multi");
+        NewSessionDialog dialog(program(),fleet(),{},"claude");dialog.selectPath("/workspace/example",false);dialog.show();
+        QTRY_VERIFY(row(dialog,"claude")>=0);choices(dialog)->setCurrentRow(row(dialog,"claude"));
+        auto *mode=dialog.findChild<QComboBox *>("launchPermissions");
+        QTRY_VERIFY(mode->isVisible());QCOMPARE(mode->count(),4); // Account default, Default, Bypass, native editor.
+        const int editor=mode->count()-1;QVERIFY(mode->itemData(editor,Qt::UserRole+2).toBool());
+        QTimer::singleShot(0,&dialog,[&]{
+            auto *settings=dialog.findChild<QDialog *>("nativePermissionEditor");QVERIFY(settings);
+            auto *sandbox=settings->findChild<QComboBox *>("nativePermission_sandbox");QVERIFY(sandbox);
+            sandbox->setCurrentIndex(sandbox->findData("workspace_native"));
+            auto *save=settings->findChild<QPushButton *>("nativePermissionSave");QVERIFY(save&&save->isEnabled());save->click();
+        });
+        mode->activated(editor);
+        const auto combined=QString("native:{\"mode\":\"plan_native\",\"sandbox\":\"workspace_native\"}");
+        QCOMPARE(mode->currentData().toString(),combined);
+        auto *start=dialog.findChild<QPushButton *>("primary");QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);
+        QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launched.size(),1);
+        QCOMPARE(launched[0][10].toString(),combined);
+        flag("permission-catalog-multi",false);
+    }
+    void dshPermissionsGateOnSessionSupported() {
+        classicView();
+        flag("permission-catalog");
+        NewSessionDialog hidden(program(),fleet(),{},"dsh");hidden.selectPath("/workspace/example",false);hidden.show();
+        QTRY_VERIFY(row(hidden,"native-dsh")>=0);choices(hidden)->setCurrentRow(row(hidden,"native-dsh"));
+        QVERIFY(!hidden.findChild<QComboBox *>("launchPermissions")->isVisible());
+        flag("permission-catalog",false);
+        flag("permission-catalog-dsh");
+        NewSessionDialog shown(program(),fleet(),{},"dsh");shown.selectPath("/workspace/example",false);shown.show();
+        QTRY_VERIFY(row(shown,"native-dsh")>=0);choices(shown)->setCurrentRow(row(shown,"native-dsh"));
+        auto *mode=shown.findChild<QComboBox *>("launchPermissions");
+        QTRY_VERIFY(mode->isVisible());QCOMPARE(mode->count(),5); // Default, Bypass and DeepSeek's two discovered values.
+        QVERIFY(mode->findData("native:{\"mode\":\"bypass_native\"}")>=0);
+        flag("permission-catalog-dsh",false);
     }
     void untouchedInboxUsesNativeFolderInferenceAndExplicitInboxWins() {
         for(int explicitChoice=0;explicitChoice<3;++explicitChoice){

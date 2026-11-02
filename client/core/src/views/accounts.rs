@@ -155,10 +155,14 @@ pub struct Profile {
     /// The status line under the machine tags.
     pub detail: String,
     pub signed_in: bool,
-    /// `bypass`, `auto`, `plan`, `default` or `unknown`.
+    /// The stored override (`provider`, `bypass`, legacy `auto` or `native:...`).
     pub permission: String,
     pub permission_label: String,
     pub permission_hint: String,
+    /// `provider` or `zerus`; never a live-session claim.
+    pub permission_source: String,
+    pub permission_catalog: Value,
+    pub permission_current: Value,
     pub model_supported: bool,
     pub model_text: String,
     pub usage: Usage,
@@ -424,36 +428,93 @@ fn member(
     (state, detail, signed_in)
 }
 
-/// permissionMode (AccountsPage.cpp:72-74).
+/// The stored override string. `provider` means inherit the native setting.
 fn permission_mode(raw: &Value) -> String {
-    if text(raw, "permission_mode") == "bypass" {
-        return "bypass".into();
-    }
-    Some(text(raw, "effective_permission_mode"))
-        .filter(|mode| !mode.is_empty())
-        .unwrap_or_else(|| "unknown".into())
-}
-
-/// permissionLabel (AccountsPage.cpp:75-78).
-pub fn permission_label(mode: &str) -> &'static str {
-    match mode {
-        "bypass" => "Bypass",
-        "auto" => "Auto",
-        "plan" => "Plan",
-        "mixed" => "Varies",
-        _ => "Default",
+    let stored = text(raw, "permission_mode");
+    if stored.is_empty() {
+        "provider".into()
+    } else {
+        stored
     }
 }
 
-/// permissionHint (AccountsPage.cpp:89-92).
+fn catalog_option_label(catalog: &Value, control: &str, value: &str) -> Option<String> {
+    catalog["controls"]
+        .as_array()?
+        .iter()
+        .find(|item| item["id"].as_str() == Some(control))?
+        .get("options")?
+        .as_array()?
+        .iter()
+        .find(|item| item["value"].as_str() == Some(value))?
+        .get("label")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn native_label(raw: &Value) -> Option<String> {
+    let catalog = raw.get("permission_catalog")?;
+    let values = raw.get("permission_current")?.get("values")?.as_object()?;
+    let mut labels = Vec::new();
+    for (control, value) in values {
+        let value = value.as_str()?;
+        labels.push(
+            catalog_option_label(catalog, control, value)
+                .unwrap_or_else(|| value.to_owned()),
+        );
+    }
+    (!labels.is_empty()).then(|| labels.join(", "))
+}
+
+fn legacy_label(raw: &Value) -> String {
+    match text(raw, "effective_permission_mode").as_str() {
+        "auto" => "Auto".into(),
+        "plan" => "Plan".into(),
+        "bypass" => "Bypass".into(),
+        _ => "Default".into(),
+    }
+}
+
+/// The native label where discovery supplied one; never collapse an unknown
+/// value into "Default". Older peers without the new projection keep their
+/// effective label.
+fn permission_label(raw: &Value) -> String {
+    match permission_mode(raw).as_str() {
+        "bypass" => "Bypass".into(),
+        "auto" => "Auto".into(),
+        "provider" => native_label(raw).unwrap_or_else(|| legacy_label(raw)),
+        mode if mode.starts_with("native:") => native_label(raw).unwrap_or_else(|| "Custom".into()),
+        _ => legacy_label(raw),
+    }
+}
+
+fn permission_source(raw: &Value) -> String {
+    raw.get("permission_current")
+        .and_then(|current| current["source"].as_str())
+        .filter(|source| !source.is_empty())
+        .unwrap_or_else(|| match permission_mode(raw).as_str() {
+            "provider" => "provider",
+            _ => "zerus",
+        })
+        .to_owned()
+}
+
+/// permissionHint (AccountsPage.cpp:89-92), with the native current value kept.
 fn permission_hint(raw: &Value) -> String {
-    let source = if text(raw, "permission_mode") == "bypass" {
+    let source = if permission_source(raw) == "zerus" {
         "Set in Zerus"
     } else {
         "From provider settings"
     };
-    let detail = Some(text(raw, "permission_detail"))
+    let detail = raw
+        .get("permission_current")
+        .and_then(|current| current["detail"].as_str())
         .filter(|detail| !detail.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            let detail = text(raw, "permission_detail");
+            (!detail.is_empty()).then_some(detail)
+        })
         .unwrap_or_else(|| "Provider defaults have not been verified.".into());
     format!("{source}\n{detail}\nApplies to new and resumed sessions; a running session may use a different mode.")
 }
@@ -589,8 +650,11 @@ fn profile(entry: &FleetEntry, raw: &Value, state: &AccountsState) -> Profile {
         state: member_state,
         detail,
         signed_in,
-        permission_label: permission_label(&permission).into(),
+        permission_label: permission_label(raw),
         permission_hint: permission_hint(raw),
+        permission_source: permission_source(raw),
+        permission_catalog: raw.get("permission_catalog").cloned().unwrap_or(Value::Null),
+        permission_current: raw.get("permission_current").cloned().unwrap_or(Value::Null),
         permission,
         model_supported: flag(raw, "model_defaults_supported"),
         model_text: model_text(raw),
@@ -739,14 +803,14 @@ fn better(usage: &Usage, previous: &Usage) -> bool {
 
 /// accountPermission (AccountsPage.cpp:80-88).
 fn account_permission(members: &[Profile]) -> String {
-    let mut mode = String::new();
+    let mut label = String::new();
     for member in members {
-        if !mode.is_empty() && mode != member.permission {
-            return "mixed".into();
+        if !label.is_empty() && label != member.permission_label {
+            return "Varies".into();
         }
-        mode = member.permission.clone();
+        label = member.permission_label.clone();
     }
-    mode
+    if label.is_empty() { "Default".into() } else { label }
 }
 
 /// The identity block (AccountsPage.cpp:625-636).
@@ -838,7 +902,7 @@ pub fn group(profiles: &[Profile]) -> Vec<Account> {
         if !named(&group.label) && !group.usage.identity.email.is_empty() {
             group.label = group.usage.identity.email.clone();
         }
-        group.permission = permission_label(&account_permission(&group.members)).into();
+        group.permission = account_permission(&group.members);
         (group.identity_lines, group.identity_note) = identity_lines(&group.label, &group.usage);
     }
     groups
@@ -878,7 +942,7 @@ pub fn refresh_groups(groups: &[Account], profiles: &[Profile]) -> Vec<Account> 
             provider: old.provider.clone(),
             installed: members.iter().any(|m| m.installed),
             machines,
-            permission: permission_label(&account_permission(&members)).into(),
+            permission: account_permission(&members),
             usage,
             identity_lines,
             identity_note,
@@ -1294,6 +1358,34 @@ mod tests {
         );
         assert_eq!(member(&view, "kimi-studio").state, Ready);
         assert_eq!(member(&view, "native-codex").permission_label, "Bypass");
+        // Native current values use the discovered labels; an unknown raw value
+        // is shown as itself, never collapsed to "Default".
+        let native = json!({
+            "permission_mode": "provider",
+            "permission_catalog": {"controls": [{"id": "mode", "options": [
+                {"value": "yolo", "label": "Ask When Needed"},
+                {"value": "acceptEdits", "label": "acceptEdits"}
+            ]}]},
+            "permission_current": {"source": "provider", "values": {"mode": "yolo"}}
+        });
+        assert_eq!(permission_label(&native), "Ask When Needed");
+        assert_eq!(permission_source(&native), "provider");
+        let unknown = json!({
+            "permission_mode": "provider",
+            "permission_catalog": {"controls": []},
+            "permission_current": {"source": "provider", "values": {"mode": "future-mode"}}
+        });
+        assert_eq!(permission_label(&unknown), "future-mode");
+        assert_ne!(permission_label(&unknown), "Default");
+        let chosen = json!({
+            "permission_mode": "native:{\"mode\":\"acceptEdits\"}",
+            "permission_catalog": {"controls": [{"id": "mode", "options": [
+                {"value": "acceptEdits", "label": "acceptEdits"}
+            ]}]},
+            "permission_current": {"source": "zerus", "values": {"mode": "acceptEdits"}}
+        });
+        assert_eq!(permission_label(&chosen), "acceptEdits");
+        assert_eq!(permission_source(&chosen), "zerus");
         assert_eq!(
             member(&view, "claude-work").model_text,
             "New sessions: opus (high)"

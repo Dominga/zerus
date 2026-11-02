@@ -2012,8 +2012,15 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             }
             m_creationFixAccess->setText(tr("Folder rights fixed"));
             showNotice(tr("Folder rights fixed; starting the session again."),false);
+            // The sandbox check refuses before hgs writes or starts anything
+            // (dsh.rs, ensure_sandbox_folder), so this "unknown" launch started
+            // nothing: it ends as refused and starts again, under a new launch id.
+            const auto op=m_creations->operation(id);
+            if(op["state"]=="unknown"&&op["failed_stage"]=="launching"&&!sandboxFolderOf(op["error"].toString()).isEmpty())
+                m_creations->ended(id,op["launch_id"].toString(),op["error"].toString());
             if(SessionCreationController::canResume(m_creations->operation(id)))m_creations->resume(id);else m_creations->check(id);
         });
+        ChildProcess::inheritStdioOnly(*process);
         process->start(m_client.executable(),{QStringLiteral("sandbox-folder"),QStringLiteral("grant"),folder,QStringLiteral("--json")});
     });
     connect(m_creationCheck,&QPushButton::clicked,this,[this]{m_creations->check(m_selectedCreation);emit refreshRequested();});
@@ -7784,11 +7791,22 @@ void SessionsWindow::showTeamDesigner()
         m_teamDesignerPage->editor()->projectRules=[this]{return teamProjectRules();};
         m_teamDesignerPageIndex=m_pages->addWidget(m_teamDesignerPage);
     }
-    // The designer follows the project of the session selected when the mode opens.
-    if(const auto *entry=selected();entry&&entry->host.isEmpty()){
-        m_teamDesignerFolder=entry->session.cwd;m_teamDesignerProject=entry->session.name.section('/',1,1);
+    QList<TeamDesignerPage::Project> projects;
+    for(const auto &group:m_organization.groups()){
+        if(group.id=="ungrouped")continue;
+        for(const auto &folder:group.folders)if(folder.machine==m_fleet.local().host)
+            projects.append({group.id,group.name,folder.path,folder.name});
     }
-    m_teamDesignerPage->setContext(m_teamDesignerFolder,m_teamDesignerProject);
+    m_teamDesignerPage->setProjects(projects,m_organization.defaultProject());
+    // A selected session supplies its project, but no session is required. A
+    // running designer keeps the project named in its original brief.
+    const auto *entry=selected();
+    if(entry&&entry->host.isEmpty()&&(teamDesignerSession().isEmpty()||m_teamDesignerFolder.isEmpty())){
+        m_teamDesignerFolder=entry->session.cwd;
+        m_teamDesignerProject=m_organization.groupFor(entry->host+'\n'+entry->session.name);
+        if(m_teamDesignerProject.isEmpty())m_teamDesignerProject=entry->session.name.section('/',1,1);
+    }
+    if(!m_teamDesignerFolder.isEmpty())m_teamDesignerPage->setContext(m_teamDesignerFolder,m_teamDesignerProject);
     m_pages->setCurrentWidget(m_teamDesignerPage);
     m_teamDesignerPage->refresh();
 }
@@ -7856,6 +7874,7 @@ void SessionsWindow::openWaitingItem(const QString &team,const QString &kind,int
 void SessionsWindow::startTeamDesigner(const QString &folder,const QString &goal,const QJsonObject &agent)
 {
     if(!m_teams)return;
+    m_teamDesignerFolder=folder;m_teamDesignerProject=agent.value("project").toString();
     showNotice(tr("Starting the Team designer…"));
     QJsonObject input=agent;input.insert("folder",QDir::toNativeSeparators(folder));input.insert("goal",goal);
     m_teams->call(QStringLiteral("catalog designer"),input,

@@ -7566,5 +7566,5 @@ mod dispatcher_drafts;
 mod dispatcher_stall;
 
 #[cfg(test)]
-#[path = "tests/dispatcher_tests.rs"]
+#[path = "tests/dispatcher_areas.rs"]
 mod tests;

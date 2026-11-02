@@ -401,7 +401,8 @@ elif args == ['desktop', 'frontend-request', '--json']:
             run=target['run'], conversation=target['conversation'])).encode()).rstrip(b'=').decode()
         activation = {'activation_id': '11111111-1111-4111-8111-111111111111',
                       'post_request_id': '22222222-2222-4222-8222-222222222222', 'target': target,
-                      'token': token, 'platform_context': {'platform': 'wayland', 'activation_token': 'ephemeral-fixture'}}
+                      'token': token, 'platform_context': config.get('activation_platform_context',
+                          None if sys.platform == 'darwin' else {'platform': 'wayland', 'activation_token': 'ephemeral-fixture'})}
         answer = {'abi': 'desktop-activation-v1', 'request_id': request['request_id'],
                   'configuration': 'a' * 64, 'service_epoch': epoch,
                   'activation': None if config.get('activation_idle_first') and n == 1 else activation}

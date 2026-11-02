@@ -333,9 +333,10 @@ fn the_actual_version_suffix_alone_defines_the_gui_dev_number() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod native {
     use super::*;
+    #[cfg(target_os = "linux")]
     use crate::desktop_service::tests::Fixture;
     use std::{
         io::{Read, Write},
@@ -395,6 +396,7 @@ pub(crate) mod native {
             self.thread.take().unwrap().join().unwrap();
         }
     }
+    #[cfg(target_os = "linux")]
     async fn eventually(label: &str, check: impl Fn() -> bool) {
         let until = tokio::time::Instant::now() + Duration::from_secs(10);
         while !check() {
@@ -421,6 +423,7 @@ pub(crate) mod native {
         responder.configure_once(configuration);
         responder
     }
+    #[cfg(target_os = "linux")]
     #[test]
     fn degraded_root_status_still_uses_the_original_child_disable_route() {
         let _process = crate::PROCESS_TREE.read().unwrap();
@@ -482,6 +485,7 @@ pub(crate) mod native {
     // Exercise the production startup producer through its original child and
     // native cache registration. The private fake service supplies receipts;
     // the service/ledger tests separately verify their real SQL commits.
+    #[cfg(target_os = "linux")]
     async fn native_startup_import(lost_replies: bool, superseded: bool) {
         let fixture = Fixture::new(
             json!({"ready":false,"frontend_uncertain":lost_replies,"pending_reads_superseded":superseded}),
@@ -590,6 +594,7 @@ pub(crate) mod native {
         );
         service.join().await.unwrap();
     }
+    #[cfg(target_os = "linux")]
     #[test]
     fn original_child_registration_receipts_and_unknown_delivery_use_only_the_dedicated_route() {
         const CHILD: &str = "ZERUS_FRONTEND_SENDER_FIXTURE";

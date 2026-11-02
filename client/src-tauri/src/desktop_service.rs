@@ -29,13 +29,13 @@ const SOURCES: usize = 64;
 const KEY_BYTES: usize = 32 << 20;
 const CATALOG_KEYS: usize = 1_000_000;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod activation;
 
 #[derive(Default)]
 pub(crate) struct Observers {
     pub projections: Vec<Projection>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub activation: Option<activation::Sink>,
 }
 
@@ -236,13 +236,13 @@ struct Shared {
     changed: Notify,
     rpc: Gate,
     // Long activation reads never consume fleet/details admission capacity.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     activation_rpc: Gate,
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
     activation_retry: Mutex<Option<Duration>>,
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
     activation_backoffs: std::sync::atomic::AtomicUsize,
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
     activation_permanent: AtomicBool,
     allowed: bool,
     stopped: AtomicBool,
@@ -255,7 +255,7 @@ struct Shared {
     frontend: frontend::Frontend,
     read_import: Mutex<read_import::State>,
     projections: Vec<Projection>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     activation: Option<activation::Sink>,
 }
 
@@ -292,7 +292,7 @@ impl Service {
             responder,
             Observers {
                 projections,
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
                 activation: None,
             },
         )
@@ -323,13 +323,13 @@ impl Service {
             dirty: Mutex::new(Dirty::default()),
             changed: Notify::new(),
             rpc: Gate::new(4).unwrap(),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             activation_rpc: Gate::new(1).unwrap(),
-            #[cfg(all(test, target_os = "linux"))]
+            #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
             activation_retry: Mutex::new(None),
-            #[cfg(all(test, target_os = "linux"))]
+            #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
             activation_backoffs: std::sync::atomic::AtomicUsize::new(0),
-            #[cfg(all(test, target_os = "linux"))]
+            #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
             activation_permanent: AtomicBool::new(false),
             allowed,
             stopped: AtomicBool::new(false),
@@ -344,7 +344,7 @@ impl Service {
             frontend: frontend::Frontend::default(),
             read_import: Mutex::new(read_import::State::default()),
             projections: observers.projections,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             activation: observers.activation,
         });
         let (control, receiver) = watch::channel(Control::Retry(0));
@@ -593,7 +593,7 @@ impl Service {
             .unwrap_or_else(PoisonError::into_inner)
             .take();
         self.shared.rpc.close();
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.shared.activation_rpc.close();
         let _ = self.control.send(Control::Stop);
     }
@@ -619,7 +619,7 @@ impl Service {
         }
         let closed = self.shared.rpc.close();
         let ownership_closed = self.shared.ownership.close();
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let activation_closed = self.shared.activation_rpc.close();
         let drained = tauri::async_runtime::spawn_blocking(move || {
             let until = std::time::Instant::now() + RPC_WAIT;
@@ -628,7 +628,7 @@ impl Service {
             let drained = (ownership_closed.wait_until(until)
                 == zerus_client_core::desktop::drain::Observation::Idle)
                 && drained;
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             let drained = (activation_closed.wait_until(until)
                 == zerus_client_core::desktop::drain::Observation::Idle)
                 && drained;
@@ -1117,7 +1117,7 @@ async fn connection(
     let detail_stop = stop.clone();
     let mut detail_worker =
         tauri::async_runtime::spawn(async move { details::run(detail_shared, detail_stop).await });
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let activation_worker = {
         let (state, cancelled, configuration) =
             (shared.clone(), stop.clone(), configuration.clone());
@@ -1210,7 +1210,7 @@ async fn connection(
     shared.details_changed.notify_one();
     drop(stdin);
     let _ = grant_worker.await;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let _ = activation_worker.await;
     // Only this owned local proxy is stopped; the desktop service and native agents remain untouched.
     if child.kill().await.is_err() && child.wait().await.is_err() {

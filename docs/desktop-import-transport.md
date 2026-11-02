@@ -106,14 +106,18 @@ counts. Compare all identities before accepting the result. Reports contain no
 snapshot bodies or source paths. Errors are nonzero and redacted.
 
 There is one closed negative response: after all input and the final manifest
-have been validated, contention from the actual `try_lock_exclusive` call,
-without an admitted current service owner,
-may
+have been validated, contention from the actual `try_lock_exclusive` call
+without an admitted current service owner may
 return exit zero with `published:false`, `code:"handoff_busy"`,
 `this_attempt_not_committed:true`, and the exact ABI, configuration, import UUID
 and `import_record:{version:1,sha256}`. This invocation has not attempted the
-UUID directory reservation. Path, open, privacy, identity and permission errors
-are not this response. Any failure after reservation remains unknown.
+UUID directory reservation. The owner-assisted path also returns this exact
+attempt-only negative for a busy finalizer, full/closed actor queue, loan timeout,
+failed owner query, stop or failed pre-claim filesystem check. The boundary is
+before entering the custody rename syscall. Once that syscall is entered, any
+rename/validation/commit/reply uncertainty remains unknown, including an error
+before UUID reservation. Invalid/mismatched request framing is refused. Ordinary
+local lock open/path/privacy errors do not become a typed OS-contention result.
 
 Accept that negative only after the original child exits successfully and its
 input writer and both output pipes finish completely, and only against the
@@ -188,8 +192,30 @@ runtime owner and separate one-slot finalizer admission remain charged through
 filesystem work and original stream cleanup. Revoke closes new admissions and
 waits for this same resource; disconnect does not remove its input or release
 its charge early. Lost replies and all post-reservation uncertainty remain
-original-ID lookup only. Unknown or malformed stages are retained, never
-automatically replayed or repaired.
+original-ID lookup only. Temporary-copy cleanup cannot change the certainty of
+a complete exact reply; a cleanup refusal keeps the copy for review instead.
+
+Native staging has private adjacent ownership and empty OS-lease sidecars; they
+are outside the fixed three-entry input directory and never enter an immutable
+import manifest. They bind configuration, import UUID, random native nonce,
+directory and lease-file identities and creation time. The creator retains its
+lease through the original request; a claimed container has its own worker
+lease. These local cleanup records grant no effect/writer authority.
+
+Before immutable commit, a best-effort sweep under the actual handoff lock
+considers at most 256 directory entries and retires at most two verified stages or orphan sidecar sets
+older than 24 hours. A pass admits another candidate only within 100 ms; each
+candidate has finite file/metadata limits (1,024 snapshots, 1,024 pages, one
+record, 64 MiB aggregate). No body scan or actor-thread I/O is added. The sweep
+requires every retained creator/job lease to be free, private no-follow single-link files,
+exact native ownership/directory/file identities and a closed data inventory.
+An existing native claimed-container record still binds its exact input after
+the creator's sidecars are gone; an unmarked standalone legacy stage does not.
+Live, fresh, replaced, oversized, malformed and unverified legacy stages stay.
+Published UUID directories and original source stores are never sweep targets.
+Cleanup ends at any uncertain check and never authorizes publication replay or
+settles an unknown original import. Unknown outcomes remain original-ID lookup
+only even after a stale generated copy is removed.
 
 This report does not replace the existing frozen pending-read capture or its
 separate authenticated safe-passive page transfer. That transfer may wait for

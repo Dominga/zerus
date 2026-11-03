@@ -222,6 +222,11 @@ impl Runtime {
             .to_owned();
         let run = Arc::new(
             move |inv: &Invocation, cap, cancel: &AtomicBool, lease: Arc<Lease>| {
+                if crate::self_exec::ensure().is_err() {
+                    return Exit::Abnormal {
+                        stderr: String::new(),
+                    };
+                }
                 zerus_client_core::run::run_accounted(
                     &hgs,
                     inv,

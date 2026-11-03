@@ -146,6 +146,7 @@ pub(super) fn control(action: &str, args: &[String]) -> Result<Value> {
 
 #[cfg(not(unix))]
 pub(super) fn create(args: &[String]) -> Result<Value> {
+    crate::self_exec::ensure().map_err(|e| e.to_string())?;
     create_direct(args)
 }
 

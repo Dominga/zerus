@@ -897,7 +897,7 @@ fn transport(
     use std::process::Stdio;
     let mut command;
     if host.is_empty() || host == "@local" || config.is_self(host) {
-        command = Command::new(env::current_exe()?);
+        command = Command::new(crate::self_exec::current()?);
         command.args(args);
     } else {
         if !config.peers.iter().any(|s| s == host) {

@@ -17,6 +17,7 @@ mod phones;
 mod platform;
 mod presence;
 mod screen;
+mod self_exec;
 mod session_reference;
 mod speech;
 mod state;

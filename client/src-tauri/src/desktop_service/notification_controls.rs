@@ -646,6 +646,9 @@ async fn due_focus(
         return None;
     }
     if focus.state == FocusState::Foreground {
+        if owner.has_work(session) {
+            return None;
+        }
         let refresh = owner.setup.as_ref()?.source.refresh();
         let observed = if let Some(refresh) = refresh {
             let wait = refresh.wait();
@@ -656,7 +659,7 @@ async fn due_focus(
                     _ = owner.changed.notified() => (),
                     _ = tokio::time::sleep(Duration::from_millis(250)) => (),
                 }
-                if !owner.current(session) {
+                if !owner.current(session) || owner.has_work(session) {
                     return None;
                 }
                 // Native loss invalidates Foreground immediately, even while

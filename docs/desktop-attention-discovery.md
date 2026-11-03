@@ -246,6 +246,20 @@ The Linux helper keeps its original `Child`, waits through wrapper exec, and
 uses `observe_original_child` / `revalidate_child` against the retained image and
 birth identity. `revalidate_for_launch` also binds the opaque Launch to the same
 service configuration. A cached exited child or another process is never adopted.
+
+On Windows, the selected GUI and running CLI each use the final path read from
+their held file handle. Both normalized ancestor chains stay pinned through
+startup, including when their installation directories differ. The GUI's `--hgs`
+argument uses that verified CLI path. A suspended child's reported image is
+opened and compared with the pinned file's full `FileIdInfo` volume/file ID
+before resume; pathname casing and hard-link spellings do not establish identity.
+Rejected helper or GUI starts request termination and wait at most five seconds
+on the original process handle. An unconfirmed exit retains that child, its
+selection pins, launch admission and preparation owner on the original worker.
+`closed_frontend.cleanup_unknown` exposes the bounded diagnostic, and service
+drain cannot detach this rejected-start cleanup as a live GUI observer. Physical
+exit clears the unknown state and releases custody; it never replays the click.
+
 This is image custody, not a navigation capability or launch permit: the helper
 still requires the selected frontend's actual target-argument ABI, and only the
 service-owned `Launch` supplies an exact target. No installed program is queried

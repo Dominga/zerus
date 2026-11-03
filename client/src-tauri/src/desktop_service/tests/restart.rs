@@ -204,3 +204,147 @@ fn real_service_restart_retains_catalog_and_recovers_without_retry() {
         mark("client-finished");
     });
 }
+
+#[test]
+#[ignore = "run client/scripts/test-service-reconnect.py --scenario resume with private binaries"]
+fn real_service_resume_delta_keeps_the_native_replaced_reason() {
+    // zerus-uutz: the real journal's revision for the native resume frame
+    // reaches the view successor first, with the stopped run `replaced`.
+    real_service_replacement(vec![
+        ("run:run-1".to_owned(), None),
+        ("run:run-2".to_owned(), None),
+        ("run:run-1".to_owned(), Some(Some("replaced".to_owned()))),
+    ]);
+}
+
+#[test]
+#[ignore = "run client/scripts/test-service-reconnect.py --scenario paged-fresh with private binaries"]
+fn real_service_paged_start_fresh_keeps_the_journaled_replaced_reason() {
+    // zerus-ic13: the removal and its new-conversation successor arrive as
+    // separate native frames; only the journaled native reason says so.
+    real_service_replacement(vec![
+        ("run:run-1".to_owned(), None),
+        ("run:run-1".to_owned(), Some(Some("replaced".to_owned()))),
+        ("run:run-2".to_owned(), None),
+    ]);
+}
+
+/// The view's changes for the peer while the harness replaces `run:run-1`
+/// by `run:run-2` of the same session name.
+fn real_service_replacement(expected: Vec<(String, Option<Option<String>>)>) {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    let root =
+        PathBuf::from(std::env::var_os("ZERUS_TEST_SERVICE_RESTART").expect("private harness"));
+    let mark = |name: &str| fs::write(root.join(name), []).unwrap();
+    tauri::async_runtime::block_on(async {
+        let pump = crate::pump::Pump::default();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let observe = seen.clone();
+        pump.tap(Box::new(move |change| match change {
+            Change::Upsert { computer, key, .. } if computer.0 == "peer" => {
+                observe.lock().unwrap().push((key.clone(), None))
+            }
+            Change::Remove {
+                computer,
+                key,
+                reason,
+            } if computer.0 == "peer" => observe
+                .lock()
+                .unwrap()
+                .push((key.clone(), Some(reason.clone()))),
+            _ => {}
+        }));
+        let (sink, rx) = std::sync::mpsc::sync_channel(256);
+        let drain = pump.drain_service(rx, |_| {});
+        let service = Service::start(
+            root.join("relay"),
+            pump.clone(),
+            sink,
+            true,
+            drain,
+            None,
+            vec![],
+        );
+        eventually("private service connected", || service.snapshot().connected).await;
+        mark("client-connected");
+        eventually("stopped run baseline", || {
+            pump.row("peer", "run:run-1").is_some() && pump.online("peer")
+        })
+        .await;
+        mark("baseline-ready");
+        eventually("new run replaces the stopped run", || {
+            pump.row("peer", "run:run-2").is_some() && pump.row("peer", "run:run-1").is_none()
+        })
+        .await;
+        service.join().await.unwrap();
+        assert_eq!(*seen.lock().unwrap(), expected);
+        mark("client-finished");
+    });
+}
+
+#[test]
+#[ignore = "run client/scripts/test-service-reconnect.py --scenario resync with private binaries"]
+fn real_service_native_resync_keeps_a_live_computer_live() {
+    // zerus-bkbb: an overflow resync rebuilds an online source's view. A Live
+    // computer never shows Probing or Reconnecting for it: every row of that
+    // computer would repaint as offline and back (the list-wide blink).
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    let root =
+        PathBuf::from(std::env::var_os("ZERUS_TEST_SERVICE_RESTART").expect("private harness"));
+    let mark = |name: &str| fs::write(root.join(name), []).unwrap();
+    tauri::async_runtime::block_on(async {
+        let pump = crate::pump::Pump::default();
+        let statuses = Arc::new(Mutex::new(Vec::new()));
+        let observe = statuses.clone();
+        pump.tap(Box::new(move |change| {
+            if let Change::Computer { computer, status } = change {
+                if computer.0 == "peer" {
+                    observe.lock().unwrap().push(*status);
+                }
+            }
+        }));
+        let (sink, rx) = std::sync::mpsc::sync_channel(256);
+        let drain = pump.drain_service(rx, |_| {});
+        let service = Service::start(
+            root.join("relay"),
+            pump.clone(),
+            sink,
+            true,
+            drain,
+            None,
+            vec![],
+        );
+        eventually("private service connected", || service.snapshot().connected).await;
+        mark("client-connected");
+        eventually("live baseline", || {
+            pump.live("peer")
+                && (1..=3).all(|n| pump.row("peer", &format!("run:run-{n}")).is_some())
+        })
+        .await;
+        statuses.lock().unwrap().clear();
+        mark("baseline-ready");
+        // Walk the staging view: its hints arrive with the gap and first page.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(pump.live("peer"), "{:?}", statuses.lock().unwrap());
+        mark("staging-walked");
+        eventually("the completed snapshot's membership", || {
+            pump.row("peer", "run:run-4").is_some()
+                && pump.row("peer", "run:run-2").is_none()
+                && pump.row("peer", "run:run-1").is_some()
+        })
+        .await;
+        service.join().await.unwrap();
+        let statuses = statuses.lock().unwrap().clone();
+        assert!(
+            !statuses.is_empty(),
+            "the resync published no catalog status"
+        );
+        assert!(
+            statuses
+                .iter()
+                .all(|status| *status == ComputerStatus::Live),
+            "{statuses:?}"
+        );
+        mark("client-finished");
+    });
+}

@@ -476,8 +476,15 @@ fn creation_sdk_keeps_original_shared_charge_until_reply_completion_after_close(
     tauri::async_runtime::block_on(async {
         let f = Fixture::new("success");
         let (service, _cache) = f.service();
-        eventually("Qt report connected before held creation SDK", || {
-            service.snapshot().connected && f.attempts() == 1
+        let report = service.shared.retained_import.as_ref().unwrap().clone();
+        // The fake CLI logs its publication before it reads the mode. Hold only
+        // after the Qt report has finished, or that report would be held instead.
+        eventually("Qt report published before held creation SDK", || {
+            let qt = report.status();
+            service.snapshot().connected
+                && qt["complete"] == true
+                && qt["running"] == false
+                && f.attempts() == 1
         })
         .await;
         f.mode("hold");
@@ -487,7 +494,10 @@ fn creation_sdk_keeps_original_shared_charge_until_reply_completion_after_close(
             || f.root.join("holding").exists(),
         )
         .await;
-        let report = service.shared.retained_import.as_ref().unwrap().clone();
+        assert_eq!(
+            fs::read_to_string(f.root.join("holding")).unwrap(),
+            report.inputs.creations.status().capture_id.unwrap()
+        );
         let closed = report.close();
         assert_eq!(report.work.snapshot().unwrap().admitted, 1);
         assert!(closed.iter().any(|c| c.wait_until(Instant::now())

@@ -53,7 +53,8 @@ mod instance;
 #[cfg(windows)]
 #[path = "instance_windows.rs"]
 mod instance;
-mod lifecycle;
+#[doc(hidden)]
+pub mod lifecycle;
 #[cfg(feature = "live")]
 mod login_item;
 #[cfg(target_os = "macos")]
@@ -124,7 +125,10 @@ mod watchdog;
 #[cfg(feature = "live")]
 mod window_geometry;
 #[cfg(feature = "live")]
-mod window_layer;
+#[doc(hidden)]
+pub mod window_layer;
+#[doc(hidden)]
+pub mod window_theme;
 mod window_visibility;
 #[cfg(any(windows, test))]
 mod windows_shell;
@@ -498,6 +502,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
         )
         .manage(commands::AppState::default())
         .manage(window_visibility::Visibility::default())
+        .manage(window_theme::Theme::default())
         .manage(lifecycle::Lifecycle { menu_bar })
         .manage(exit_flush::ExitFlush::default());
     #[cfg(target_os = "macos")]
@@ -1361,6 +1366,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::build_info,
         commands::voice_support,
         renderer::renderer_frame,
+        window_theme::window_theme,
         content_search::content_search,
         content_search::cancel_content_search,
         native_ui::runtime::native_ui_open,
@@ -1690,6 +1696,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::build_info,
         commands::voice_support,
         renderer::renderer_frame,
+        window_theme::window_theme,
         clipboard::copy_text,
         clipboard::copy_verbatim,
         desk_take_pending,
@@ -1736,6 +1743,7 @@ pub(crate) fn main_window(app: &AppHandle) -> Option<WebviewWindow> {
 /// macOS before the webview is built, Linux through its public settings API.
 pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     use tauri::Manager;
+    let generation = window_theme::register(app);
     // ZERUS_CLIENT_QUERY opens a given state (`select=<session name>`) for
     // headless screenshots and scripted measurements, as the mockup's URL
     // parameters do; ZERUS_CLIENT_PERF=auto adds `perf=auto`.
@@ -1759,8 +1767,15 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
         .title("Zerus Next")
         .visible(false)
+        .initialization_script(format!(
+            "Object.defineProperty(window, '__ZERUS_WINDOW_THEME__', {{value: {}}});",
+            serde_json::to_string(&generation).expect("window generation")
+        ))
         .inner_size(1440.0, 900.0)
         .min_inner_size(900.0, 560.0);
+    // Hidden until CSS supplies the exact native backgrounds. The initial
+    // fallback remains unseen even when the saved theme is light.
+    builder = builder.background_color(tauri::window::Color(22, 27, 33, 255));
     // Page rendering at the display rate, not near 60 fps: the preference is set
     // on the configuration before the webview exists (toggling a live page is
     // unreliable). The measurement's control run keeps WebKit's default.

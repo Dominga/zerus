@@ -129,6 +129,9 @@ pub fn show_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     {
         return Ok(window);
     }
+    if !crate::window_theme::can_show(&window) {
+        return Ok(window);
+    }
     if window.is_minimized()? {
         window.unminimize()?;
     }
@@ -155,6 +158,7 @@ pub fn request_main(app: &AppHandle) -> Result<(), String> {
 }
 
 pub fn hide_main(app: &AppHandle) {
+    crate::window_theme::hidden(app);
     #[cfg(feature = "live")]
     crate::window_layer::hidden(app);
     if let Some(window) = crate::main_window(app) {

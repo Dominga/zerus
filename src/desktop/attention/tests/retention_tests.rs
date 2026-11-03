@@ -478,7 +478,7 @@ fn schema_twenty_migration_preserves_prior_effects_and_rolls_back_partial_ddl() 
             .db
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        SCHEMA
+        crate::desktop::store::SCHEMA
     );
     assert_eq!(
         reopened

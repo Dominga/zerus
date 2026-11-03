@@ -174,10 +174,11 @@ def frame(seq, kind, body):
     print(json.dumps({'abi': 'desktop-v1', 'epoch': epoch, 'seq': seq, 't': kind, 'value': body}), flush=True)
 
 
-def hint(seq, revision, selected=projection, computer=''):
+def hint(seq, revision, selected=projection, computer='', staging=False, online=True):
+    settled = online and not staging
     frame(seq, 'catalog_changed', {'computer': computer, 'incarnation': 2 if computer else 1, 'generation': 1,
-          'projection': selected, 'revision': revision, 'online': True, 'last_known': False,
-          'complete': True, 'reset_required': False, 'changes_abi': abi, 'attention_counts': status()['attention_counts']})
+          'projection': selected, 'revision': revision, 'online': online, 'last_known': not settled,
+          'complete': settled, 'reset_required': not settled, 'changes_abi': abi, 'attention_counts': status()['attention_counts']})
     if config.get('replace_projection') and selected == 'b' * 32 and (config.get('projection_publication_gate') or os.environ.get('ZERUS_TEST_SERVICE_PROJECTION_PUBLICATION_GATE') == '1'):
         # Hold this exact publication boundary until the next page selects state.
         wait(root / 'replacement-page-selected')
@@ -185,6 +186,11 @@ def hint(seq, revision, selected=projection, computer=''):
 
 def row(key):
     return {'key': key, 'row': {'name': 'codex/example/' + key, 'agent': 'codex', 'state': 'running', 'status': 'ready'}}
+
+
+def resumed(key, run, state, conversation='conversation'):
+    return {'key': key, 'row': {'name': 'codex/example/review', 'agent': 'codex', 'state': state, 'status': 'ready',
+                                'run_id': run, 'conversation_id': conversation}}
 
 
 def change(key, revision, remove=False):
@@ -311,9 +317,30 @@ def desktop_request():
                         next_cursor=str(uuid.UUID(int=number + 100)) if offset + 128 < count else None)
         if config.get('replace_projection') and number == 2 and (config.get('projection_publication_gate') or os.environ.get('ZERUS_TEST_SERVICE_PROJECTION_PUBLICATION_GATE') == '1'):
             (root / 'replacement-page-selected').touch()
+        if config.get('offline_hint') and (root / 'release-offline').exists():
+            # The source went offline: only its retained rows, last known.
+            page.update(online=False, last_known=True, complete=False, start_revision=None)
+            (root / 'offline-page').touch()
+        if config.get('online_resync') and (root / 'resynced').exists():
+            page.update(projection='b' * 32, items=[row('replacement')])
+        elif config.get('online_resync') and number > 1:
+            # The source restages a snapshot while online: until it completes,
+            # the real service serves the retained view as last known.
+            page.update(start_revision='1', revision='1', last_known=True, complete=False)
+            (root / 'staging-page').touch()
+        if config.get('resume_delta'):
+            page.update(items=[resumed('run:0-old', 'old', 'paused'), row('run:9-ended')])
+        if config.get('paged_fresh'):
+            page.update(items=[resumed('run:0-old', 'old', 'paused')])
         print(json.dumps(page))
     elif op == 'catalog_changes':
         number = counter('delta-number')
+        if config.get('online_resync') and value['projection'] == projection and value['since_revision'] == '1':
+            # The real service refuses changes until a staged snapshot completes.
+            (root / 'changes-while-staging').touch()
+            print(json.dumps({'request_id': request_id, 'accepted': False, 'durable': False,
+                              'code': 'catalog_changes_reset', 'reset_required': True}))
+            return
         page = dict(common, projection=value['projection'], since_revision=value['since_revision'],
                     through_revision=value['since_revision'], revision=value['since_revision'], items=[])
         if config.get('peer_failure'):
@@ -361,11 +388,34 @@ def desktop_request():
                 wait(root / 'release-old-page')
         elif config.get('replace_projection') == 'exhausted' and number == 2:
             page.update(through_revision='1', revision='1')
+        if (config.get('online_resync') or config.get('offline_hint')) and number == 1:
+            (root / 'initial-complete').touch()
         if config.get('large'):
             if number == 1:
                 (root / 'initial-complete').touch()
             else:
                 page.update(through_revision='3', revision='3', items=[change('row-0', '1'), change('row-1', '2', True), change('new', '3')])
+        if config.get('resume_delta'):
+            # One native frame: the resumed run replaces its stopped run and an
+            # unrelated session ends. Its revision spans two change pages, and
+            # the replaced key sorts before its successor.
+            if number == 1:
+                (root / 'initial-complete').touch()
+            elif number == 2:
+                page.update(through_revision='1', revision='1', next_cursor=cursor, items=[change('run:0-old', '1', True)])
+            elif number == 3:
+                successor = dict(change('run:1-new', '1'), row=resumed('run:1-new', 'new', 'running')['row'])
+                page.update(through_revision='1', revision='1', items=[successor, change('run:9-ended', '1', True)])
+        if config.get('paged_fresh'):
+            # A Start fresh whose native delta paged its removal (with the
+            # journaled native reason) and its new-conversation successor
+            # into separate frames, hence separate revisions.
+            if number == 1:
+                (root / 'initial-complete').touch()
+            elif number == 2:
+                successor = dict(change('run:1-new', '2'), row=resumed('run:1-new', 'new', 'running', 'fresh')['row'])
+                page.update(through_revision='2', revision='2',
+                            items=[dict(change('run:0-old', '1', True), reason='replaced'), successor])
         print(json.dumps(page))
     elif op == 'read_intent':
         path = root / 'read-seen'
@@ -612,6 +662,24 @@ elif args == ['desktop', 'watch', '--json']:
     if config.get('large'):
         wait(root / 'initial-complete')
         hint(1, '3')
+    if config.get('offline_hint'):
+        wait(root / 'initial-complete')
+        wait(root / 'release-offline')
+        hint(1, '0', online=False)
+    if config.get('online_resync'):
+        wait(root / 'initial-complete')
+        wait(root / 'release-staging')
+        hint(1, '1', staging=True)
+        wait(root / 'staging-page')
+        wait(root / 'release-resync')
+        (root / 'resynced').touch()
+        hint(2, '0', 'b' * 32)
+    if config.get('resume_delta'):
+        wait(root / 'initial-complete')
+        hint(1, '1')
+    if config.get('paged_fresh'):
+        wait(root / 'initial-complete')
+        hint(1, '2')
     if config.get('peer_failure'):
         wait(root / 'peer-hints')
         hint(1, '1')

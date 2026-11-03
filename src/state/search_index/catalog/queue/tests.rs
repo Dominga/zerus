@@ -386,10 +386,43 @@ fn grown_binding_beyond_the_publication_budget_does_not_fence_later_hits() {
     discover(&store, &state);
     let consumed = store.consume(&state, &Budget::interactive(), &AtomicBool::new(false));
     eprintln!(
-        "interactive consume ok={} pending={:?}",
+        "interactive consume ok={} progress={} pending={:?}",
         consumed.is_ok(),
+        consumed
+            .as_ref()
+            .map_or(String::new(), |p| serde_json::to_string(p).unwrap()),
         totals(&store)
     );
+    consumed.unwrap();
+    // That pass has a 250 ms wall-clock deadline. Ingesting the later session
+    // takes about 14 journaled index commits, so slow durable writes (Windows
+    // under a full suite) can stop it mid-source with valid pending work.
+    // Resume the fixture with bounded passes, as consume_until does, until the
+    // later healthy session is fully indexed; the grown binding stays pending.
+    let other = state.join(format!("{:x}.json", Sha256::digest(b"codex/example/other")));
+    let other_done = |store: &Store| -> bool {
+        store
+            .index
+            .connection()
+            .query_row(
+                "SELECT done FROM catalog_queue WHERE path=?",
+                [other.to_str().unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    let mut passes = 0;
+    while !other_done(&store) {
+        assert!(
+            passes < 32,
+            "the later session was not indexed within 32 bounded passes"
+        );
+        store
+            .consume(&state, &budget(128), &AtomicBool::new(false))
+            .unwrap();
+        passes += 1;
+    }
+    eprintln!("resumed passes={passes} pending={:?}", totals(&store));
     let mut cursor: Option<String> = None;
     let mut stalled = 0;
     let mut returned = 0;

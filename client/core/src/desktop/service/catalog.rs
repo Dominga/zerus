@@ -123,6 +123,10 @@ pub struct ChangeItem {
     pub revision: Revision,
     pub key: String,
     pub row: Option<Value>,
+    /// A removal's native reason, from services that journal it; older
+    /// services omit it. Only removals use it, as `Change::Remove` reads it.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 pub struct ChangePage {

@@ -255,6 +255,9 @@ impl Worker {
             if shared.lock().unwrap().epoch != epoch {
                 return;
             }
+            if !crate::window_theme::can_show(&window) {
+                return;
+            }
             let _ = window.unminimize();
             let _ = window.show();
             let _ = window.set_focus();

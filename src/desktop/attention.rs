@@ -27,6 +27,8 @@ pub(super) fn migrate_retention(tx: &rusqlite::Transaction<'_>) -> Result<()> {
 }
 #[cfg(test)]
 pub(super) fn remove_retention_fixture(db: &rusqlite::Connection) {
+    // Rewind the later schema-21 leaf too, never leaving it labelled older.
+    super::catalog_read::remove_reason_fixture(db);
     db.execute_batch(
         "DROP TRIGGER desktop_attention_edge_remove;
         DROP INDEX desktop_attention_compact;

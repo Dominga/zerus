@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Report hosted Ubuntu disk use; cleanup remains limited to Quick and relay."""
+"""Report hosted Ubuntu disk use and reclaim only fixed unused toolchains."""
 
 import argparse
 import json
@@ -9,7 +9,7 @@ import shutil
 import subprocess
 
 
-# Neither job uses Android, .NET, Haskell or CodeQL. Never prune Docker here:
+# These jobs do not use Android, .NET, Haskell or CodeQL. Never prune Docker here:
 # the relay's PostgreSQL service is already running when checkout starts.
 UNUSED_TOOLS = (
     "/usr/local/lib/android",
@@ -19,7 +19,8 @@ UNUSED_TOOLS = (
 )
 RELAY_TARGETS = ("target", "services/mobile/relay/target", "services/mobile/crypto/target")
 REPORT_JOBS = ("quick", "relay", "client-native-linux")
-CLEANUP_JOBS = ("quick", "relay")
+CLEANUP_JOBS = ("quick", "relay", "client-native-linux")
+NATIVE_MIN_FREE_BYTES = 24 * 1024**3
 
 
 def hosted_workspace():
@@ -64,10 +65,28 @@ def report(workspace, phase):
 
 def prepare(workspace):
     if os.environ.get("GITHUB_JOB") not in CLEANUP_JOBS:
-        raise ValueError("only Quick and relay may reclaim unused tools")
+        raise ValueError("unexpected hosted job for unused-tool cleanup")
     report(workspace, "before-unused-tools")
     subprocess.run(["sudo", "rm", "-rf", "--one-file-system", "--", *UNUSED_TOOLS], check=True)
     report(workspace, "after-unused-tools")
+    if os.environ.get("GITHUB_JOB") == "client-native-linux":
+        # Measure again after cleanup and diagnostics, before dependencies or
+        # compilation. A healthy run (41624988657) used 17.7 GiB from checkout
+        # to the end of its checks; the core test links alone took 8.7 GiB.
+        # Reserve the rest for parallel link temporaries and growth, without
+        # changing build/test coverage. Fail clearly instead of in the linker.
+        actual = shutil.disk_usage(workspace).free
+        admitted = actual >= NATIVE_MIN_FREE_BYTES
+        print(json.dumps({"phase": "native-space-admission", "required_free_bytes": NATIVE_MIN_FREE_BYTES,
+                          "actual_free_bytes": actual, "admitted": admitted}), flush=True)
+        if not admitted:
+            message = (
+                f"native Linux disk admission failed: required_free_bytes={NATIVE_MIN_FREE_BYTES} "
+                f"({NATIVE_MIN_FREE_BYTES / 1024**3:.1f} GiB), actual_free_bytes={actual} "
+                f"({actual / 1024**3:.1f} GiB) after unused-tool cleanup; refusing dependencies and compilation"
+            )
+            print(f"::error title=Native Linux disk admission::{message}", flush=True)
+            raise SystemExit(message)
 
 
 def relay_before_image(workspace):

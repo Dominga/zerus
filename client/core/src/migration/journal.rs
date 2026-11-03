@@ -169,26 +169,32 @@ impl Journal {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::*;
     use std::{
         fs,
+        sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
 
     struct Scratch(PathBuf);
     impl Scratch {
         fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
             let root = std::env::temp_dir().join(format!(
-                "zerus-import-journal-{}-{}",
+                "zerus-import-journal-{}-{}-{}",
                 std::process::id(),
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
-                    .as_nanos()
+                    .as_nanos(),
+                NEXT.fetch_add(1, Ordering::Relaxed),
             ));
+            #[cfg(unix)]
             fs::create_dir(&root).unwrap();
+            #[cfg(windows)]
+            drop(crate::fsx::windows::Parents::open(&root, true).unwrap());
             Self(root.canonicalize().unwrap())
         }
         fn journal(&self) -> Journal {

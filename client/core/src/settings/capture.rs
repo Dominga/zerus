@@ -1,21 +1,26 @@
 //! Native, temporary capture of this original Settings writer only. Local
 //! preferences remain client-owned; this is not whole-G3 drain or permission.
 use super::Settings;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use super::{Contents, MAX_STORE};
 use super::{QtSnapshot, QtStore};
 use crate::migration::{SourceError, SourceResult};
+#[cfg(unix)]
+use std::io::{Read, Seek};
 use std::sync::atomic::AtomicBool;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::sync::atomic::Ordering;
-use std::{fs::File, path::PathBuf, sync::Arc, time::Instant};
+#[cfg(windows)]
+use std::sync::Mutex;
+#[cfg(any(unix, windows))]
+use std::time::Duration;
 #[cfg(unix)]
-use std::{
-    io::{Read, Seek},
-    time::Duration,
-};
+use std::{fs::File, path::PathBuf};
+use std::{sync::Arc, time::Instant};
 #[cfg(unix)]
-use zerus_desktop_migration::{canonical, sha256};
+use zerus_desktop_migration::canonical;
+#[cfg(any(unix, windows))]
+use zerus_desktop_migration::sha256;
 
 struct Lease(Settings);
 impl Drop for Lease {
@@ -28,11 +33,14 @@ impl Drop for Lease {
 
 /// Original Qt file identity or the original managed defaults domain. This is
 /// a read-only current-source capture, never a claim that Qt's writer drained.
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg_attr(not(any(unix, windows)), allow(dead_code))]
 pub struct CapturedQt {
     snapshot: QtSnapshot,
     store: QtStore,
+    #[cfg(unix)]
     original: Option<(File, PathBuf)>,
+    #[cfg(windows)]
+    original: Mutex<crate::fsx::windows::qt::Source>,
 }
 impl QtStore {
     pub fn capture_for_migration(
@@ -40,7 +48,40 @@ impl QtStore {
         resources: Arc<dyn Send + Sync>,
         cancel: &AtomicBool,
     ) -> SourceResult<Option<CapturedQt>> {
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let _ = resources;
+            if cancel.load(Ordering::Acquire) || !matches!(self, QtStore::Ini(_)) {
+                return Err(SourceError::UnsupportedSource);
+            }
+            let Some(mut original) = crate::fsx::windows::qt::capture_with_deadline(
+                self.path(),
+                super::MAX_QT_STORE as usize,
+                Instant::now() + Duration::from_secs(30),
+            )
+            .map_err(|_| SourceError::SourceUnreadable)?
+            else {
+                return Ok(None);
+            };
+            let bytes = original
+                .unchanged_bytes(self.path(), super::MAX_QT_STORE as usize)
+                .map_err(|_| SourceError::SourceChanged)?;
+            if cancel.load(Ordering::Acquire) {
+                return Err(SourceError::SourceUnreadable);
+            }
+            let snapshot = QtSnapshot {
+                values: super::qt::read_ini(&bytes),
+                source: "qt-ini",
+                sha256: sha256(&bytes),
+                modified_at: original.modified_at.and_then(super::seconds),
+            };
+            Ok(Some(CapturedQt {
+                snapshot,
+                store: self.clone(),
+                original: Mutex::new(original),
+            }))
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (resources, cancel);
             Err(SourceError::UnsupportedSource)
@@ -99,7 +140,25 @@ impl CapturedQt {
         resources: Arc<dyn Send + Sync>,
         cancel: &AtomicBool,
     ) -> SourceResult<String> {
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let _ = resources;
+            if cancel.load(Ordering::Acquire) {
+                return Err(SourceError::SourceUnreadable);
+            }
+            let mut original = self
+                .original
+                .try_lock()
+                .map_err(|_| SourceError::SourceUnreadable)?;
+            let bytes = original
+                .unchanged_bytes(self.store.path(), super::MAX_QT_STORE as usize)
+                .map_err(|_| SourceError::SourceChanged)?;
+            if sha256(&bytes) != self.snapshot.sha256 || cancel.load(Ordering::Acquire) {
+                return Err(SourceError::SourceChanged);
+            }
+            Ok(self.snapshot.sha256.clone())
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (resources, cancel);
             Err(SourceError::UnsupportedSource)
@@ -143,10 +202,14 @@ impl CapturedQt {
 
 /// No public constructor or serializable guard. Keep the original capture in
 /// the selected publisher's resource group until its child and pipes finish.
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg_attr(not(any(unix, windows)), allow(dead_code))]
 pub struct CapturedSettings {
+    #[cfg(unix)]
     original: File,
+    #[cfg(unix)]
     canonical: PathBuf,
+    #[cfg(windows)]
+    original: Mutex<crate::fsx::windows::Opened>,
     bytes: Vec<u8>,
     hash: String,
     lease: Arc<Lease>,
@@ -156,14 +219,12 @@ impl Settings {
     /// then exclude new mutations while retaining exact private source bytes.
     /// This operation never rewrites, normalizes or creates the source file.
     pub fn capture_for_migration(&self, deadline: Instant) -> SourceResult<CapturedSettings> {
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = deadline;
-            // Do not substitute a shareable Windows File::open for the original
-            // exclusive parent/leaf/ACL reader; its generic adapter is separate.
             Err(SourceError::UnsupportedSource)
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             loop {
                 if Instant::now() >= deadline {
@@ -187,40 +248,70 @@ impl Settings {
                     }
                 };
                 if let Some(lease) = lease {
-                    let canonical =
-                        canonical(&self.shared.path).map_err(|_| SourceError::SourceUnreadable)?;
-                    let mut disk =
-                        crate::fsx::checkpoint::current(&self.shared.path, MAX_STORE as usize)
-                            .map_err(|_| SourceError::SourceUnreadable)?
-                            .ok_or(SourceError::SourceUnreadable)?;
-                    disk.file
-                        .rewind()
-                        .map_err(|_| SourceError::SourceUnreadable)?;
-                    let mut bytes = Vec::with_capacity(disk.bytes);
-                    (&mut disk.file)
-                        .take(MAX_STORE + 1)
-                        .read_to_end(&mut bytes)
-                        .map_err(|_| SourceError::SourceUnreadable)?;
-                    if bytes.len() != disk.bytes || sha256(&bytes) != disk.hash {
-                        return Err(SourceError::SourceChanged);
+                    #[cfg(windows)]
+                    {
+                        let mut original = crate::fsx::windows::capture_with_deadline(
+                            &self.shared.path,
+                            MAX_STORE as usize,
+                            deadline,
+                        )
+                        .map_err(|_| SourceError::SourceUnreadable)?
+                        .ok_or(SourceError::SourceUnreadable)?;
+                        let bytes = original
+                            .unchanged_bytes(&self.shared.path, MAX_STORE as usize)
+                            .map_err(|_| SourceError::SourceChanged)?;
+                        let parsed =
+                            Contents::parse(&bytes).ok_or(SourceError::UnsupportedSource)?;
+                        if parsed != self.shared.lock().contents {
+                            return Err(SourceError::SourceChanged);
+                        }
+                        let capture = CapturedSettings {
+                            hash: sha256(&bytes),
+                            bytes,
+                            original: Mutex::new(original),
+                            lease,
+                        };
+                        capture.recheck(deadline)?;
+                        return Ok(capture);
                     }
-                    let parsed = Contents::parse(&bytes).ok_or(SourceError::UnsupportedSource)?;
-                    let same = {
-                        let state = self.shared.lock();
-                        parsed == state.contents
-                    };
-                    if !same {
-                        return Err(SourceError::SourceChanged);
+                    #[cfg(unix)]
+                    {
+                        let canonical = canonical(&self.shared.path)
+                            .map_err(|_| SourceError::SourceUnreadable)?;
+                        let mut disk =
+                            crate::fsx::checkpoint::current(&self.shared.path, MAX_STORE as usize)
+                                .map_err(|_| SourceError::SourceUnreadable)?
+                                .ok_or(SourceError::SourceUnreadable)?;
+                        disk.file
+                            .rewind()
+                            .map_err(|_| SourceError::SourceUnreadable)?;
+                        let mut bytes = Vec::with_capacity(disk.bytes);
+                        (&mut disk.file)
+                            .take(MAX_STORE + 1)
+                            .read_to_end(&mut bytes)
+                            .map_err(|_| SourceError::SourceUnreadable)?;
+                        if bytes.len() != disk.bytes || sha256(&bytes) != disk.hash {
+                            return Err(SourceError::SourceChanged);
+                        }
+                        let parsed =
+                            Contents::parse(&bytes).ok_or(SourceError::UnsupportedSource)?;
+                        let same = {
+                            let state = self.shared.lock();
+                            parsed == state.contents
+                        };
+                        if !same {
+                            return Err(SourceError::SourceChanged);
+                        }
+                        let capture = CapturedSettings {
+                            original: disk.file,
+                            canonical,
+                            bytes,
+                            hash: disk.hash,
+                            lease,
+                        };
+                        capture.recheck(deadline)?;
+                        return Ok(capture);
                     }
-                    let capture = CapturedSettings {
-                        original: disk.file,
-                        canonical,
-                        bytes,
-                        hash: disk.hash,
-                        lease,
-                    };
-                    capture.recheck(deadline)?;
-                    return Ok(capture);
                 }
                 std::thread::sleep(
                     deadline
@@ -409,7 +500,24 @@ impl CapturedSettings {
     /// Uses the same managed path and writer; no replacement path or new
     /// capture can be adopted to turn a changed source into success.
     pub fn recheck(&self, deadline: Instant) -> SourceResult<String> {
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            if Instant::now() >= deadline {
+                return Err(SourceError::SourceUnreadable);
+            }
+            let mut original = self
+                .original
+                .try_lock()
+                .map_err(|_| SourceError::SourceUnreadable)?;
+            let bytes = original
+                .unchanged_bytes(&self.lease.0.shared.path, MAX_STORE as usize)
+                .map_err(|_| SourceError::SourceChanged)?;
+            if bytes != self.bytes || Instant::now() >= deadline {
+                return Err(SourceError::SourceChanged);
+            }
+            Ok(self.hash.clone())
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = deadline;
             Err(SourceError::UnsupportedSource)
@@ -446,3 +554,6 @@ impl CapturedSettings {
         }
     }
 }
+
+#[cfg(all(test, windows))]
+mod windows_tests;

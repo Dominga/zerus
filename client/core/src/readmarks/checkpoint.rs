@@ -24,7 +24,7 @@ pub struct Checkpoint {
     // The Windows source remains exclusively owned through native capture and
     // original helper/pipe lifetimes. These handles are never serialized.
     #[cfg(windows)]
-    original: std::sync::Mutex<windows::Opened>,
+    original: std::sync::Mutex<crate::fsx::windows::Opened>,
 }
 // Comparing checkpoint data never authenticates an owner or substitutes handles.
 impl PartialEq for Checkpoint {

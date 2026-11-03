@@ -184,6 +184,25 @@ finally:
             self.assertEqual(db.execute('SELECT rows,bytes,active FROM desktop_creation_clone_budget').fetchone(), (0, 0, 0))
         self.assertEqual(status['operation_queue']['kinds']['creation_clone']['undrained'], 0)
 
+    def test_creation_worktree_is_closed_and_not_yet_advertised(self):
+        self.serve()
+        status = self.cli('desktop', 'status', '--json')
+        scope = dict(configuration=status['configuration'], service_epoch=status['epoch'])
+        creation, request = str(uuid.uuid4()), str(uuid.uuid4())
+        original = dict(id=creation, creation_schema=1, created=1, revision=4, cmd='codex', tag='example',
+                        host='', state='worktree', auto=True, parent='/srv', target='/srv/repo',
+                        branch='zerus-example', destination='/srv/repo-zerus-example',
+                        worktree_common='/srv/repo/.git', worktree_id=request, worktree_receipts=True,
+                        expected_machine='22222222-2222-4222-8222-222222222222')
+        intent = dict(scope=scope, creation_id=creation, worktree_request_id=request, revision=4,
+                      original=json.dumps(original, separators=(',', ':')))
+        refused = self.cli('desktop', 'request', '--json', data=dict(op='creation_worktree', intent=intent))
+        self.assertFalse(refused['accepted'])
+        self.assertEqual(refused['code'], 'frontend_authentication_required')
+        help_text = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True).stdout
+        self.assertIn('Desktop creation clone ABI: desktop-creation-clone-v1', help_text)
+        self.assertNotIn('desktop-creation-worktree', help_text)
+
     @unittest.skipUnless(sys.platform.startswith('linux') or sys.platform == 'darwin', 'Unix registration mode')
     def test_registration_variant_is_read_only_and_service_reports_its_requested_mode(self):
         passive = self.cli('desktop', 'registration', '--json')

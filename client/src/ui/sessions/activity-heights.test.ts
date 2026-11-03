@@ -73,19 +73,21 @@ it("keeps estimates only for loaded rows across transcript updates (the cache bo
 it("returns the scroll overscan to eight once widths stop changing", () => {
   vi.useFakeTimers();
   try {
+    // The contract is 250 ms, not whatever the constant holds (#1176 review).
+    expect(ACTIVITY_RESIZE_SETTLE_MS).toBe(250);
     let resizing = false, settled = 0;
     const widths = createActivityResize((value) => { resizing = value; }, () => { settled++; });
     expect(activityOverscan(resizing)).toBe(ACTIVITY_OVERSCAN);
     widths.resized();
     expect(activityOverscan(resizing)).toBe(ACTIVITY_RESIZE_OVERSCAN);
-    vi.advanceTimersByTime(ACTIVITY_RESIZE_SETTLE_MS - 1);
+    vi.advanceTimersByTime(249);
     widths.resized(); // another width change restarts the wait
-    vi.advanceTimersByTime(ACTIVITY_RESIZE_SETTLE_MS - 1);
+    vi.advanceTimersByTime(249);
     expect([activityOverscan(resizing), settled]).toEqual([ACTIVITY_RESIZE_OVERSCAN, 0]);
     vi.advanceTimersByTime(1);
     expect([activityOverscan(resizing), settled]).toEqual([8, 1]);
     // Disposal cancels a pending return without settling.
-    widths.resized(); widths.dispose(); vi.advanceTimersByTime(ACTIVITY_RESIZE_SETTLE_MS);
+    widths.resized(); widths.dispose(); vi.advanceTimersByTime(250);
     expect([resizing, settled]).toEqual([true, 1]);
   } finally { vi.useRealTimers(); }
 });

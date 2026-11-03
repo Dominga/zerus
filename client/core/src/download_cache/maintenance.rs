@@ -278,9 +278,8 @@ impl Prepared {
             {
                 continue;
             }
-            states[i] = State::Unknown; // an OS error is never no-effect proof
-            if fs::remove_file(self.ledger.root.join(&candidate.name)).is_ok() {
-                states[i] = State::Removed;
+            states[i] = unlink_outcome(fs::remove_file(self.ledger.root.join(&candidate.name)));
+            if states[i] == State::Removed {
                 self.usage.bytes = self.usage.bytes.saturating_sub(candidate.bytes);
                 self.usage.files = self.usage.files.saturating_sub(1);
             }
@@ -336,6 +335,27 @@ impl Prepared {
         #[cfg(unix)]
         self.directory.sync_all().map_err(|_| REFUSED)?;
         Ok(())
+    }
+}
+
+fn unlink_outcome(result: io::Result<()>) -> State {
+    match result {
+        Ok(()) => State::Removed,
+        Err(error) => {
+            // A viewer may deny delete sharing. This exact Windows refusal
+            // precedes deletion; it is not a lost destructive result. Do not
+            // generalize to ErrorKind, access denied, missing files or other
+            // errors, which retain the original conservative Unknown outcome.
+            // https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-deletefile
+            #[cfg(windows)]
+            if error.raw_os_error()
+                == Some(windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION as i32)
+            {
+                return State::Kept;
+            }
+            let _ = error;
+            State::Unknown
+        }
     }
 }
 

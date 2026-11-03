@@ -241,6 +241,10 @@ mod tests {
         assert!(path.is_dir());
         fs::remove_dir(&path).unwrap();
         fs::remove_dir(path.parent().unwrap()).unwrap();
+        reserve(&Location {
+            root: path.parent().unwrap().into(),
+            configuration: "fixture".into(),
+        });
         record(&args, STARTUP_REFUSED, "must not recreate startup state");
         assert!(!path.parent().unwrap().exists());
     }
@@ -250,6 +254,10 @@ mod tests {
         let original = root.path().join("other");
         fs::write(&original, "keep original").unwrap();
         fs::hard_link(&original, &path).unwrap();
+        reserve(&Location {
+            root: path.parent().unwrap().into(),
+            configuration: "fixture".into(),
+        });
         record(&args, STARTUP_REFUSED, "do not follow or replace an alias");
         assert_eq!(fs::read_to_string(&path).unwrap(), "keep original");
         assert_eq!(fs::read_to_string(&original).unwrap(), "keep original");
@@ -261,6 +269,10 @@ mod tests {
         let target = root.path().join("other");
         fs::write(&target, "keep target").unwrap();
         std::os::unix::fs::symlink(&target, &path).unwrap();
+        reserve(&Location {
+            root: path.parent().unwrap().into(),
+            configuration: "fixture".into(),
+        });
         record(&args, STARTUP_REFUSED, "do not follow a link");
         assert!(path.is_symlink());
         assert_eq!(fs::read_to_string(&target).unwrap(), "keep target");

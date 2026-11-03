@@ -453,6 +453,11 @@ impl Model {
                 "Folder kept",
                 "Zerus no longer tracks this folder. Its files and the branch stay.".to_owned(),
             ),
+            // Another action may have resolved it; the files are not known to stay.
+            leftover::Settled::Resolved => (
+                "Record already gone",
+                "Zerus no longer tracks this folder. Review again to see what remains.".to_owned(),
+            ),
             leftover::Settled::Refused { detail } => ("Nothing changed", detail.clone()),
             leftover::Settled::Unknown { detail } => (
                 "Result unknown",

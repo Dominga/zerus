@@ -1244,7 +1244,10 @@ pub fn perf_away(
         _ => window.unminimize(),
     };
     crate::window_visibility::sync_webview(&window);
-    if let Err(error) = back.and_then(|()| window.set_focus()) {
+    // Perf-only: refused above outside a measurement run (clippy.toml).
+    #[allow(clippy::disallowed_methods)]
+    let back = back.and_then(|()| window.set_focus());
+    if let Err(error) = back {
         eprintln!("zerus-client perf: could not bring the window back: {error}");
     }
     Ok(serde_json::json!({ "how": how, "minimized": minimized, "sample": sample }))

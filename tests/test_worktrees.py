@@ -522,6 +522,93 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         again=self.keep(tree,left['fingerprint']);self.assertNotEqual(again.returncode,0);self.assertIn('No partial-removal record',again.stderr)
         absent=json.loads(again.stdout);self.assertEqual((absent['status'],absent['operation']),('kept','worktree_leftover_keep'))
         self.assertIn('No partial-removal record',absent['detail'])
+    def test_keep_folder_reports_a_failure_after_forgetting_started_as_unconfirmed(self):
+        import sqlite3
+        tree,_,_=self.partial('forget-fails');left=self.leftover(tree)
+        database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3'
+        # Reads still work; only forgetting the record fails, after every check passed.
+        with contextlib.closing(sqlite3.connect(database)) as db,db:
+            db.execute("CREATE TRIGGER synthetic_forget_failure BEFORE DELETE ON removals BEGIN SELECT RAISE(ABORT,'synthetic forget failure'); END")
+        result=self.keep(tree,left['fingerprint']);self.assertNotEqual(result.returncode,0)
+        outcome=json.loads(result.stdout)
+        self.assertEqual((outcome['operation'],outcome['status'],outcome['request_id']),('worktree_leftover_keep','unconfirmed','test-keep'))
+        self.assertIn('synthetic forget failure',outcome['detail'])
+        self.assertEqual(self.records(),[(str(tree.resolve()),'partial')])
+        self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
+    def test_an_unreadable_record_store_is_never_taken_as_no_record(self):
+        if os.geteuid()==0:self.skipTest('root ignores directory permissions')
+        tree,_,_=self.partial('unreadable-store');left=self.leftover(tree)
+        store=self.root/'state'/'worktree-maintenance';store.chmod(0o000)
+        try:
+            kept=self.keep(tree,left['fingerprint']);data=self.review()
+            catalog=self.catalog()
+        finally:
+            store.chmod(0o700)
+        self.assertNotEqual(kept.returncode,0);outcome=json.loads(kept.stdout)
+        self.assertEqual(outcome['status'],'kept')
+        self.assertNotIn('No partial-removal record',outcome['detail']);self.assertIn('Permission denied',outcome['detail'])
+        self.assertEqual(data['leftovers'],[]);self.assertIn('Permission denied',data['leftovers_unavailable'])
+        self.assertNotIn('leftovers',catalog)
+        self.assertEqual(self.records(),[(str(tree.resolve()),'partial')])
+    def hold_repository_lock(self):
+        import fcntl,hashlib
+        common=str((self.repo/'.git').resolve())
+        path=self.root/'state'/'worktree-cache'/('repo-'+hashlib.sha256(common.encode()).hexdigest()+'.lock')
+        self.assertTrue(path.parent.is_dir())
+        handle=os.fdopen(os.open(path,os.O_RDWR|os.O_CREAT,0o600),'r+');fcntl.flock(handle,fcntl.LOCK_EX)
+        return handle
+    # Mutation D: a record whose worktree Git still lists is resolved only while
+    # no other worktree operation holds the repository lock.
+    def test_a_registered_record_is_forgotten_only_under_the_repository_lock(self):
+        import sqlite3
+        self.partial('lock-witness');live=self.linked('locked-live')
+        database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3';common=str((self.repo/'.git').resolve())
+        with contextlib.closing(sqlite3.connect(database)) as db,db:
+            db.execute("INSERT INTO removals VALUES (?,?,?,?,?,?,?,?,?)",(str(live.resolve()),common,'feature/locked-live','0'*40,'f'*64,'',1.0,'pending',''))
+        held=self.hold_repository_lock()
+        try:
+            data=self.review()
+            self.assertIsNone(self.leftover(live,data))
+            self.assertIn((str(live.resolve()),'pending'),self.records())
+        finally:
+            held.close()
+        self.review();self.assertNotIn(str(live.resolve()),[path for path,_ in self.records()])
+    # Mutation E: keep-folder waits for the repository lock and then refuses.
+    def test_keep_folder_never_runs_while_another_worktree_operation_holds_the_lock(self):
+        tree,_,_=self.partial('lock-keep');left=self.leftover(tree)
+        held=self.hold_repository_lock()
+        try:
+            result=self.keep(tree,left['fingerprint'])
+        finally:
+            held.close()
+        self.assertNotEqual(result.returncode,0);self.assertIn('Another worktree operation is running',result.stderr)
+        self.assertEqual(json.loads(result.stdout)['status'],'kept')
+        self.assertEqual(self.records(),[(str(tree.resolve()),'partial')])
+        kept=self.keep(tree,left['fingerprint']);self.assertEqual(kept.returncode,0,kept.stderr);self.assertEqual(self.records(),[])
+    # Mutation I: a dangling link at the leftover path is something there, not
+    # a vanished folder; only a missing name resolves the record.
+    def test_a_dangling_link_at_a_leftover_path_is_not_taken_as_gone(self):
+        import sqlite3
+        self.partial('link-witness');database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3'
+        link=self.root/'dangling-leftover';os.symlink(self.root/'nowhere',link);missing=self.root/'missing-leftover'
+        with contextlib.closing(sqlite3.connect(database)) as db,db:
+            db.executemany("INSERT INTO removals VALUES (?,?,?,?,?,?,?,?,?)",[(str(p),str(self.root/'gone-repository/.git'),'b','0'*40,'f'*64,'',1.0,'partial','') for p in (link,missing)])
+        listed=subprocess.run([str(HGS),'worktrees','leftovers','--json'],env=self.env,text=True,capture_output=True,timeout=60)
+        self.assertEqual(listed.returncode,0,listed.stderr)
+        paths=[path for path,_ in self.records()]
+        self.assertIn(str(link),paths);self.assertNotIn(str(missing),paths)
+        self.assertIn(str(link),[row['path'] for row in json.loads(listed.stdout)['leftovers']])
+    # zerus-ty94 #2: a targeted review reports that worktree's own leftover
+    # and nothing about any other record.
+    def test_a_targeted_review_reports_only_its_own_leftover(self):
+        tree,_,_=self.partial('targeted');other,_,_=self.partial('untargeted')
+        data=self.review(worktree=tree)
+        self.assertEqual(data['worktrees'],[])
+        self.assertEqual([row['path'] for row in data['leftovers']],[str(tree.resolve())])
+        self.assertEqual(data['leftovers'][0]['verdict'],'partially_removed');self.assertFalse(data['leftovers_partial'])
+        live=self.linked('still-live');data=self.review(worktree=live)
+        self.assertEqual([row['path'] for row in data['worktrees']],[str(live.resolve())]);self.assertEqual(data['leftovers'],[])
+        self.assertEqual(len(self.records()),2)
     def test_an_interrupted_removal_stays_pending_for_review(self):
         self.fake("if any(sys.argv[i:i+2]==['worktree','remove'] for i in range(len(sys.argv)-1)):\n import signal,subprocess\n subprocess.run(["+repr(GIT)+",*sys.argv[1:]])\n os.kill(os.getppid(),signal.SIGKILL);sys.exit(1)\nelse: os.execv("+repr(GIT)+",["+repr(GIT)+",*sys.argv[1:]])\n")
         tree,row,result=self.partial('interrupted')

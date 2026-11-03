@@ -316,19 +316,16 @@ mod tests {
         ] {
             assert!(!adapter.contains(forbidden), "{forbidden}");
         }
-        for (source, file) in [
-            (include_str!("window_layer.rs"), "window_layer.rs"),
-            (include_str!("lifecycle.rs"), "lifecycle.rs"),
+        // Tauri's window focus is a disallowed method: Windows all-target
+        // Clippy fails on any call Windows can reach, however it is written
+        // (through a macro too); the Unix calls and the perf-only hooks allow
+        // it inside their gates.
+        let config = include_str!("../clippy.toml");
+        for path in [
+            "\"tauri::WebviewWindow::set_focus\"",
+            "\"tauri::Window::set_focus\"",
         ] {
-            for (at, _) in source.match_indices(".set_focus()") {
-                let before = &source[..at];
-                let gate = before.rfind("#[cfg(").map(|i| &before[i..]);
-                assert!(
-                    gate.is_some_and(|gate| gate.starts_with("#[cfg(not(windows))]")
-                        || gate.starts_with("#[cfg(target_os = \"macos\")]")),
-                    "{file}: set_focus reachable on Windows"
-                );
-            }
+            assert!(config.contains(path), "{path}");
         }
     }
     #[test]

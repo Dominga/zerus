@@ -1107,7 +1107,10 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 // An unattended measurement needs frames: keep its window in front
                 // and focused for the run, which ends by exiting the app.
                 if std::env::var("ZERUS_CLIENT_PERF").is_ok_and(|mode| mode == "auto") {
-                    if let Err(error) = window.set_always_on_top(true).and_then(|()| window.set_focus()) {
+                    // Perf-only, inside this gate: never the presentation path (clippy.toml).
+                    #[allow(clippy::disallowed_methods)]
+                    let front = window.set_always_on_top(true).and_then(|()| window.set_focus());
+                    if let Err(error) = front {
                         eprintln!("zerus-client perf: could not bring the window to the front: {error}");
                     }
                 }

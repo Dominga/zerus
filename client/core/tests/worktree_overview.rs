@@ -357,7 +357,7 @@ fn a_leftover_outcome_is_recorded_once_until_a_fresh_review() {
     assert!(!model.settle(&id, Settled::Deleted));
     assert_eq!(model.row(&id).unwrap().state, "Result unknown");
     // The fresh review's row replaces it and may be acted on again.
-    assert!(model.put(left));
+    assert!(model.put(left.clone()));
     assert!(model
         .row(&id)
         .unwrap()
@@ -368,4 +368,10 @@ fn a_leftover_outcome_is_recorded_once_until_a_fresh_review() {
         .is_none());
     assert!(model.settle(&id, Settled::Forgotten));
     assert_eq!(model.row(&id).unwrap().state, "Folder kept");
+    // A record another action already resolved never claims the files stayed.
+    assert!(model.put(left));
+    assert!(model.settle(&id, Settled::Resolved));
+    let shown = model.row(&id).unwrap();
+    assert_eq!(shown.state, "Record already gone");
+    assert!(!shown.remains.contains("stay"));
 }

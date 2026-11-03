@@ -234,6 +234,8 @@ class Forks(Base):
         self.assertEqual(page['head']['total_incoming'],1)
         self.assertEqual([e['incoming_seq'] for e in page['events'] if e['detail']=='source reply'],[None])
         self.assertEqual(page['history_epoch'],before['history_epoch'])
+        # A new fork's first read is no backfill (#1248 N3).
+        self.assertNotIn('canonical_order_reset',before['source_status'])
         # The source's own history is unchanged and inherits nothing.
         self.assertEqual(talk(history(source)),[('source request',None),('source reply',None),('source after the fork',None)])
         # A copy of the source history in the fork's own transcript (dated
@@ -252,17 +254,54 @@ class Forks(Base):
         self.send_event(source,'Stop',last_assistant_message='source later reply')
         late=self.fork(source,'phone-late')
         path=self.root/'state'/(hashlib.sha256(late.encode()).hexdigest()+'.json')
-        record=json.loads(path.read_text());kept={k:record.pop(k) for k in ('fork_lineage','fork_source_name')}
+        record=json.loads(path.read_text());kept={k:record.pop(k) for k in ('fork_lineage','fork_source_name','fork_parent_id')}
         path.write_text(json.dumps(record))
         self.send_event(late,'UserPromptSubmit',prompt='late request')
+        # Indexed as an older CLI did, with a provider copy of the source history.
+        late_transcript=Path(self.binding(late)['transcript'])
+        with late_transcript.open('a') as out:
+            out.write(json.dumps({"type":"assistant","uuid":"late-copy","timestamp":"2001-01-01T00:00:00Z",
+                "sessionId":self.binding(late)['conversation_id'],
+                "message":{"role":"assistant","content":[{"type":"text","text":"late copied line"}]}})+"\n")
         first=history(late)
-        self.assertEqual(talk(first),[('late request',None)])
+        self.assertEqual(talk(first),[('late copied line',None),('late request',None)])
         record=json.loads(path.read_text());record.update(kept);path.write_text(json.dumps(record))
         second=history(late)
         self.assertEqual(talk(second),[('source request',source),('source reply',source),('source after the fork',source),
                                        ('source later reply',source),('late request',None)])
         self.assertNotEqual(second['history_epoch'],first['history_epoch'])
         self.assertEqual(second['source_status']['canonical_order_reset'],'inherited_backfill')
+        # A long source loads over several bounded calls, reported as indexing.
+        import sqlite3
+        big=self.start('claude','phone-big')
+        self.send_event(big,'UserPromptSubmit',prompt='big request')
+        self.send_event(big,'Stop',last_assistant_message='big reply')
+        record=self.binding(big)
+        with sqlite3.connect(self.root/'state'/'events.sqlite3') as db:
+            db.executemany("INSERT INTO events(name,conversation,payload) VALUES(?,?,?)",
+                [(record.get('journal_name') or big,record['conversation_id'],
+                  json.dumps({"type":"Stop","agent_id":"","at":time.time()-5,"detail":f"bulk {i}"})) for i in range(2500)])
+        time.sleep(1.1)
+        branch=self.fork(big,'phone-big-branch')
+        self.send_event(branch,'UserPromptSubmit',prompt='branch request')
+        branch_record=self.binding(branch)
+        once=subprocess.run([str(test_pause.HGS),'history',branch,'--json'],env=self.env,capture_output=True,text=True,timeout=20,
+            input=json.dumps(dict(request_id=str(uuid.uuid4()),expected_run_id=branch_record['run_id'],
+                                  expected_conversation_id=branch_record['conversation_id'],limit=100)))
+        once=json.loads(once.stdout)
+        self.assertEqual((once['head']['complete'],once['indexing'],once['source_status']['inherited']),(False,True,'indexing'))
+        done=history(branch)
+        self.assertEqual(done['source_status']['inherited'],'complete')
+        # Rows sort by time: the bulk rows were dated before the source's own exchange.
+        self.assertEqual(talk(done)[-3:],[('big request',big),('big reply',big),('branch request',None)])
+        self.assertIn(('bulk 2499',big),talk(done))
+        self.assertEqual(done['head']['total_incoming'],0)
+        # A fork recorded before its lineage finds its source once and saves it (#1248 N7).
+        path=self.root/'state'/(hashlib.sha256(fork.encode()).hexdigest()+'.json')
+        record=json.loads(path.read_text());record.pop('fork_lineage');path.write_text(json.dumps(record))
+        history(fork)
+        [[saved_source,saved_conversation,_]]=self.binding(fork)['fork_lineage']
+        self.assertEqual((saved_source,saved_conversation),(source,self.binding(source)['conversation_id']))
 
     def test_provider_returning_source_id_is_not_confirmed_as_a_fork(self):
         source=self.start('claude');(self.root/'broken-fork').touch()

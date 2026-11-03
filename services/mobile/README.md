@@ -661,14 +661,18 @@ point, sorted before the fork's own rows, as additive rows of type `Inherited`
 with `inherited_type` (the original row type) and `inherited_from` (the source's
 journal name). They are read-only and never incoming: they never move
 `incoming_seq`, `head` or read marks. An app that does not know the type drops
-the row as it drops any unknown type, so older apps show exactly what they showed
-before. Indexing adds at most 1,000 inherited rows per source and call. A fork
-whose index already existed gets one epoch reset (`canonical_order_reset:
-inherited_backfill`), so an app reads the older rows again; apps reset their read
-position on an epoch change, so such a fork's own replies may show unread once.
-The fork's own transcript rows dated before it was created (a provider's copy of
-the source history) are not shown twice. Child views and DeepSeek or OpenCode
-forks, whose native history already includes the copy, inherit nothing.
+the row as it drops any unknown type, so it never counts a source reply as
+unread. Such an older app shows only the fork's own rows: for a provider that
+copies the source history into the fork's transcript, that copy is no longer
+shown either, and a fork without rows of its own reads as empty until the app is
+updated, so the app rendering ships in the same Dev build. Each call adds at most
+1,000 inherited rows across the whole lineage and reports `indexing` until they
+are complete. A fork whose index already existed gets one epoch reset
+(`canonical_order_reset: inherited_backfill`) that also drops its own provider
+rows dated before its creation, so an app reads the older rows again; apps reset
+their read position on an epoch change, so such a fork's own replies may show
+unread once. Child views and DeepSeek or OpenCode forks, whose native history
+already includes the copy, inherit nothing.
 
 The native derived SQLite index contains public projections only, uses private
 files, and bounds each call to two MiB of provider input plus bounded journal,

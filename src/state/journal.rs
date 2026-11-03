@@ -694,7 +694,7 @@ fn derived_lineage(db: &Connection, record: &Value) -> Option<Vec<Value>> {
 /// Saves a derived lineage into the fork's own record. The journal search
 /// runs without the state lock (`inspect` has released it by then); only
 /// [`store_lineage`] takes it, briefly.
-fn save_derived_lineage(db: &Connection, record: &mut Value) {
+pub(super) fn save_derived_lineage(db: &Connection, record: &mut Value) {
     let Some(lineage) = derived_lineage(db, record) else {
         return;
     };

@@ -448,6 +448,24 @@ fn unix_only(command: &str, unix: bool) -> Result<()> {
 /// has no tmux C-v binding, which pulls a peer's image through `hgs paste` and
 /// `hgs clip`, no `hgs notify`, and its dry runs print the session host's
 /// requests, so its text tells of none of them and does not name tmux.
+/// What this computer's `hgs --help` prints. The creation worktree executor
+/// binds Git to a `/proc/self/fd` link, so only Linux advertises its ABI.
+fn help_text() -> Cow<'static, str> {
+    advertised(usage_text(cfg!(unix)), cfg!(target_os = "linux"))
+}
+fn advertised(usage: Cow<'static, str>, linux: bool) -> Cow<'static, str> {
+    if linux {
+        return usage;
+    }
+    let marker = zerus_client_core::desktop::creation_worktree::HELP_MARKER;
+    usage
+        .lines()
+        .filter(|line| line.trim() != marker)
+        .map(|line| format!("{line}\n"))
+        .collect::<String>()
+        .into()
+}
+
 fn usage_text(tmux: bool) -> Cow<'static, str> {
     if tmux {
         return USAGE.into();
@@ -577,7 +595,7 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
         }
     }
     let Some(command) = args.get(index) else {
-        eprint!("{}", usage_text(cfg!(unix)));
+        eprint!("{}", help_text());
         return Ok(1);
     };
     let args = &args[index + 1..];
@@ -596,7 +614,7 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
             if !target.is_empty() && !config.is_self(&target) {
                 return remote(&config, &target, "--help", args, dry);
             }
-            print!("{}", usage_text(cfg!(unix)));
+            print!("{}", help_text());
             println!("Encrypted workspace ABI: guarded-local-v1");
             println!("Desktop creation ABI: guarded-create-v1");
             println!("Account transfer ABI: revision-copy-v1");
@@ -2701,6 +2719,27 @@ mod tests {
                     "Ctrl+V in a session attached from a peer pulls the image from that box's clipboard.\n",
                     ""
                 )
+        );
+    }
+
+    #[test]
+    fn only_linux_advertises_the_creation_worktree_executor() {
+        let marker = zerus_client_core::desktop::creation_worktree::HELP_MARKER;
+        let clone = zerus_client_core::desktop::creation_clone::HELP_MARKER;
+        assert_eq!(advertised(usage_text(true), true), USAGE);
+        let mac = advertised(usage_text(true), false);
+        assert!(!mac.lines().any(|line| line.trim() == marker));
+        assert!(mac.lines().any(|line| line.trim() == clone), "clone stays POSIX");
+        assert_eq!(
+            mac,
+            USAGE.replace(
+                "       Desktop creation worktree ABI: desktop-creation-worktree-v1\n",
+                ""
+            )
+        );
+        assert_eq!(
+            help_text().lines().any(|line| line.trim() == marker),
+            cfg!(target_os = "linux")
         );
     }
 

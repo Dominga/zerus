@@ -1,6 +1,6 @@
 # Service-owned creation worktree
 
-The second creation effect owned by the desktop actor is the local POSIX
+The second creation effect owned by the desktop actor is the local Linux
 worktree checkout that the native creation reducer requests after its catalog
 step. It follows the [creation clone](desktop-creation-clone.md) leaf. Its own
 kind, binding, ledger and result stay separate from clone and from task-start
@@ -11,10 +11,12 @@ reconciliation. G1 agreed this per-kind split on 2026-11-03.
 The closed `CreationWorktree` frontend request and its wire types live in
 `client/core/src/desktop/creation_worktree.rs`. As for clone, native Service
 mode and the exact configuration authenticate it. Generic `into_request`
-refuses it, and it has its own ordering lane. On Linux and macOS the service
-advertises `Desktop creation worktree ABI: desktop-creation-worktree-v1`, and
-the admitted desktop actor executes it. Windows answers
-`creation_worktree_unsupported` and advertises nothing. The client keeps its
+refuses it, and it has its own ordering lane. On Linux the service advertises
+`Desktop creation worktree ABI: desktop-creation-worktree-v1`, and the
+admitted desktop actor executes it. The owned checkout binds Git to the pinned
+common directory through `/proc/self/fd`, which macOS lacks, so macOS and
+Windows answer `creation_worktree_unsupported` before admission and advertise
+nothing. The client keeps its
 existing direct `worktrees create --receipt` path until a separate
 default-off service path lands.
 

@@ -216,7 +216,11 @@ finally:
         status = self.cli('desktop', 'status', '--json')
         self.assertEqual(status['operation_queue']['kinds']['creation_worktree']['undrained'], 0)
         help_text = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True).stdout
-        self.assertIn('Desktop creation worktree ABI: desktop-creation-worktree-v1', help_text)
+        # Only Linux binds the owned checkout's Git to a descriptor link.
+        if sys.platform.startswith('linux'):
+            self.assertIn('Desktop creation worktree ABI: desktop-creation-worktree-v1', help_text)
+        else:
+            self.assertNotIn('desktop-creation-worktree', help_text)
 
     @unittest.skipUnless(sys.platform.startswith('linux') or sys.platform == 'darwin', 'Unix registration mode')
     def test_registration_variant_is_read_only_and_service_reports_its_requested_mode(self):

@@ -23,12 +23,17 @@ fn refused() -> io::Error {
 }
 #[cfg(unix)]
 fn stamp(file: &File) -> io::Result<Stamp> {
+    stamp_with_access(file, false)
+}
+#[cfg(unix)]
+fn stamp_with_access(file: &File, legacy_cache: bool) -> io::Result<Stamp> {
     use std::os::unix::fs::MetadataExt;
     let m = file.metadata()?;
+    let forbidden = if legacy_cache { 0o022 } else { 0o077 };
     if !m.is_file()
         || m.uid() != unsafe { libc::geteuid() }
         || m.nlink() != 1
-        || m.mode() & 0o077 != 0
+        || m.mode() & forbidden != 0
     {
         return Err(refused());
     }
@@ -182,19 +187,25 @@ fn parent(path: &Path) -> io::Result<Parents> {
     Parents::open(path.parent().ok_or_else(refused)?, false)
 }
 pub(crate) fn read(path: &Path, limit: usize) -> io::Result<Option<(Vec<u8>, Stamp)>> {
-    read_with(path, limit, false, true)
+    read_with(path, limit, false, true, false)
 }
 pub(crate) fn durable(path: &Path, limit: usize) -> io::Result<Option<(Vec<u8>, Stamp)>> {
-    read_with(path, limit, true, true)
+    read_with(path, limit, true, true, false)
 }
 pub(crate) fn read_source(path: &Path, limit: usize) -> io::Result<Option<(Vec<u8>, Stamp)>> {
-    read_with(path, limit, false, false)
+    read_with(path, limit, false, false, false)
+}
+/// ONLY the legacy worktree-snapshots read accepts owned 0644. Archives,
+/// checkpoints and every other Next source retain their private leaf policy.
+pub(crate) fn read_legacy_cache(path: &Path, limit: usize) -> io::Result<Option<(Vec<u8>, Stamp)>> {
+    read_with(path, limit, false, false, true)
 }
 fn read_with(
     path: &Path,
     limit: usize,
     sync: bool,
     private: bool,
+    legacy_cache: bool,
 ) -> io::Result<Option<(Vec<u8>, Stamp)>> {
     let parents = Parents::open_with(path.parent().ok_or_else(refused)?, false, private)?;
     if std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && m.len() > limit as u64) {
@@ -214,7 +225,18 @@ fn read_with(
     #[cfg(windows)]
     let file = &mut opened.file;
     #[cfg(unix)]
-    let opened = super::checkpoint::current(path, limit)?;
+    let opened = if legacy_cache {
+        super::checkpoint::read_only_source(path, limit)?
+    } else {
+        super::checkpoint::current(path, limit)?
+    };
+    #[cfg(unix)]
+    let read_stamp = |file: &File| stamp_with_access(file, legacy_cache);
+    #[cfg(not(unix))]
+    let read_stamp = |file: &File| {
+        let _ = legacy_cache;
+        stamp(file)
+    };
     #[cfg(unix)]
     let Some(mut opened) = opened
     else {
@@ -224,7 +246,7 @@ fn read_with(
     let file = &mut opened.file;
     #[cfg(not(any(unix, windows)))]
     let file = &mut File::open(path)?;
-    let before = stamp(file)?;
+    let before = read_stamp(file)?;
     if before.size > limit as u64 {
         return Err(refused());
     }
@@ -233,7 +255,7 @@ fn read_with(
     (&mut *file)
         .take(limit as u64 + 1)
         .read_to_end(&mut bytes)?;
-    if bytes.len() > limit || bytes.len() as u64 != before.size || stamp(file)? != before {
+    if bytes.len() > limit || bytes.len() as u64 != before.size || read_stamp(file)? != before {
         return Err(refused());
     }
     #[cfg(unix)]

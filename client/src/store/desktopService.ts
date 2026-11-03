@@ -51,6 +51,7 @@ export function retainedSourceNotice(state: DesktopService | undefined): string 
   const captureNotice = creationCaptureNotice(report);
   if (captureNotice) return captureNotice;
   if (drafts?.paused) return tr("Importing drafts from Qt is paused because the earlier drafts could not be recorded. New drafts are saved.");
+  if (report?.worktree_cache_capture?.paused) return tr("Saving folder catalogs is paused while their original cache is preserved. Fresh folder queries and session creation remain available.");
   const local = report?.local_reads_report;
   if (local?.required && !local.complete) {
     if (local.running) return tr("Preparing the historical local read-mark report. Your sessions remain available.");
@@ -73,7 +74,7 @@ export function retainedSourceNotice(state: DesktopService | undefined): string 
 const DRAFTS_RECORDED = ["draft_capture_waiting", "draft_capture_captured", "draft_capture_not_applicable"];
 
 export interface MigrationReportDetail { reason: string; next: string; code: string; phase: string | null }
-export type MigrationReportDetails = Partial<Record<"settings" | "creations" | "capture" | "localReads" | "localReadsReport" | "drafts", MigrationReportDetail>>;
+export type MigrationReportDetails = Partial<Record<"settings" | "creations" | "capture" | "localReads" | "localReadsReport" | "drafts" | "worktreeCache", MigrationReportDetail>>;
 
 /** Independent native report reasons. Reviewing never retries or publishes. */
 export function retainedSourceDetails(state: DesktopService | undefined): MigrationReportDetails | undefined {
@@ -86,6 +87,13 @@ export function retainedSourceDetails(state: DesktopService | undefined): Migrat
       ? tr("The local read-mark writer did not start. Restart Zerus to retry; the original file is unchanged.")
       : tr("Check access to the local read-mark file and its private archive. Keep unsupported or changed originals for review; retry does not replace a saved original."),
     code: report.local_read_capture.code, phase: null,
+  };
+  if (report.worktree_cache_capture?.paused) details.worktreeCache = {
+    reason: tr("Saving folder catalogs is paused while their original cache is preserved. Fresh folder queries and session creation remain available."),
+    next: report.worktree_cache_capture.code === "worktree_cache_source_owner_unavailable"
+      ? tr("The folder-cache worker could not run. Restart Zerus to retry; the original cache is unchanged.")
+      : tr("Check access to the folder cache and its private archive, then retry. Keep unsupported or changed originals for review; Retry never replaces a saved original."),
+    code: report.worktree_cache_capture.code, phase: null,
   };
   const local = report.local_reads_report;
   if (local?.required) {

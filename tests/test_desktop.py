@@ -1202,7 +1202,7 @@ finally:
         process, before = self.serve()
         self.stop(process)
         database = self.desktop / 'state.sqlite3'
-        previous = SCHEMA - 1
+        previous = 17  # Historical predecessor of the original cache-18 leaf.
         with closing(sqlite3.connect(database)) as db, db:
             self.remove_cache_schema(db)
             db.execute(f'PRAGMA user_version={previous}')
@@ -1224,6 +1224,29 @@ finally:
         with closing(sqlite3.connect(database)) as db:
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_cache_operations').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_cache_unknown').fetchone()[0], 0)
+
+    def test_cache_effect_migration_is_atomic_and_keeps_existing_cache_tables(self):
+        process, before = self.serve()
+        self.stop(process)
+        database = self.desktop / 'state.sqlite3'
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute('DROP TRIGGER desktop_cache_effect_monotone')
+            db.execute('DROP TRIGGER desktop_cache_kept_original')
+            db.execute('ALTER TABLE desktop_cache_operations DROP COLUMN effect_started')
+            db.execute('ALTER TABLE desktop_cache_operations DROP COLUMN kept_receipt')
+            db.execute('PRAGMA user_version=18')
+            db.execute('CREATE TRIGGER desktop_cache_effect_monotone BEFORE UPDATE ON desktop_cache_operations BEGIN SELECT 1; END')
+        self.failed_serve()
+        with closing(sqlite3.connect(database)) as db, db:
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 18)
+            self.assertEqual(db.execute("SELECT count(*) FROM pragma_table_info('desktop_cache_operations') WHERE name IN('effect_started','kept_receipt')").fetchone()[0], 0)
+            db.execute('DROP TRIGGER desktop_cache_effect_monotone')
+        process, status = self.serve()
+        self.assertEqual(status['schema'], SCHEMA)
+        self.assertEqual(status['configuration'], before['configuration'])
+        self.assertFalse(status['writers_enabled'])
+        self.assertFalse(status['automatic_approvals'])
+        self.assertEqual(status['operation_queue']['undrained'], 0)
 
     def test_schema_five_metadata_is_charged_once_and_preserved(self):
         process, _ = self.serve()

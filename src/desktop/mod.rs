@@ -3,6 +3,7 @@ mod approval_audit;
 #[allow(dead_code)] // Discovery is bound to the original notification factory at cutover.
 mod attention;
 mod background;
+mod cache_effects;
 mod cache_maintenance;
 mod catalog_read;
 mod catalog_relay;

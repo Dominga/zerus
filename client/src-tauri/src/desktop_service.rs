@@ -946,6 +946,10 @@ impl Drop for Service {
 /// keep running. Elsewhere (the view drain thread, a blocking-pool thread, a
 /// current-thread runtime, where `block_in_place` would panic) it waits as
 /// before. Callers hold no other std lock: nested acquisitions take `lock()`.
+/// Not for tasks inside a Tokio LocalSet: a LocalSet on the multi-thread
+/// runtime still reports MultiThread, cannot be detected here, and makes a
+/// contended `block_in_place` panic (zerus-uq02). The app runs no LocalSet;
+/// `no_production_code_runs_a_local_set` keeps it that way.
 fn admission<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
     match lock.try_lock() {
         Ok(guard) => return guard,

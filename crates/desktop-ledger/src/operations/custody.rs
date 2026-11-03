@@ -80,9 +80,22 @@ pub fn migrate(tx: &Transaction<'_>) -> Result<()> {
 /// custody binding commit together, before any helper is spawned. A coalesced
 /// ticket is status-only; a file prepared for a different ticket is never used.
 pub fn reserve(db: &mut Connection, request: &Reserve, prepared: &Prepared) -> Result<Reservation> {
-    prepared.validate()?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let result = reserve_in(&tx, request)?;
+    let result = reserve_in(&tx, request, prepared)?;
+    tx.commit()?;
+    Ok(result)
+}
+
+/// Pair reservation and original custody in the actor's already-held IMMEDIATE
+/// transaction, after its current native checks. No commit or execution permit
+/// is supplied here. Any error requires rollback of the whole transaction.
+pub fn reserve_in(
+    tx: &Transaction<'_>,
+    request: &Reserve,
+    prepared: &Prepared,
+) -> Result<Reservation> {
+    prepared.validate()?;
+    let result = super::reserve_in(tx, request)?;
     if result.fresh {
         ensure!(
             result.attempt.ticket == prepared.ticket,
@@ -101,11 +114,10 @@ pub fn reserve(db: &mut Connection, request: &Reserve, prepared: &Prepared) -> R
             params![prepared.ticket.attempt_id,hash(prepared.ticket.encoded()?.as_bytes()),json(prepared,8192)?])?;
     } else if result.attempt.ticket == prepared.ticket {
         ensure!(
-            record(&tx, &prepared.ticket)?.is_some_and(|r| r.prepared == *prepared),
+            record(tx, &prepared.ticket)?.is_some_and(|r| r.prepared == *prepared),
             "custody reservation changed"
         );
     }
-    tx.commit()?;
     Ok(result)
 }
 

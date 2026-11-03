@@ -49,6 +49,13 @@ limit still applies; this is not a hard WAL-size or physical-disk qualification.
 `admit(Admission)` freezes one original and returns its Admitted identity.
 An exact duplicate returns the original metadata; changing an admission UUID's
 identity, bodies, Binding or provenance refuses. It grants no execution.
+`admit_in`, `reserve_in` and `custody::reserve_in` use the actor's already-held
+IMMEDIATE transaction. The actor acquires the writer lock, rechecks its original
+opaque native proof and current lease, and only then calls these APIs. They do
+not commit, create a runtime permit or establish physical resource drain. The
+caller must roll back the entire transaction on error, including a later guard
+refusal; original reservation and custody become durable only on its commit.
+The existing connection-based calls delegate to these same transaction bodies.
 `load(operation_id)` returns one bounded private Frozen original for policy
 revalidation. Neither Admission nor Frozen implements Debug or Serialize.
 

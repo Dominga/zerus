@@ -86,6 +86,84 @@ fn submitted() -> Outcome {
 fn proof() -> VerifiedDrain {
     VerifiedDrain::from_owned_resources(true, true, true, true).unwrap()
 }
+
+#[test]
+fn actor_transaction_owns_admission_and_reservation_commit_or_rollback() {
+    for commit in [false, true] {
+        let mut db = db();
+        let f = fixture();
+        let binding: Binding = serde_json::from_value(f["binding"].clone()).unwrap();
+        let admission = Admission {
+            admission_id: ADMISSION,
+            binding: &binding,
+            raw_record: f["raw_record"].as_str().unwrap().as_bytes(),
+            retained_input: f["retained_input"].as_str().unwrap().as_bytes(),
+            provenance: &Value::Null,
+            writer_epoch: WRITER,
+            service_epoch: SERVICE,
+        };
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let original = admit_in(&tx, &admission).unwrap();
+        let request = request(&original, 0);
+        let reserved = reserve_in(&tx, &request).unwrap();
+        assert!(reserved.fresh);
+        assert_eq!(admit_in(&tx, &admission).unwrap(), original);
+        let duplicate = reserve_in(&tx, &request).unwrap();
+        assert!(!duplicate.fresh);
+        assert_eq!(duplicate.attempt, reserved.attempt);
+        assert_eq!(totals(&tx).unwrap().unsettled, 1);
+        assert_eq!(totals(&tx).unwrap().undrained, 1);
+        if commit {
+            tx.commit().unwrap();
+            let frozen = load(&db, &original.operation_id).unwrap();
+            assert_eq!(frozen.raw_record, admission.raw_record);
+            assert_eq!(frozen.retained_input, admission.retained_input);
+            assert!(!reserve(&mut db, &request).unwrap().fresh);
+        } else {
+            // A later native-guard refusal must discard the entire actor turn.
+            tx.rollback().unwrap();
+            assert!(load(&db, &original.operation_id).is_err());
+            assert_eq!(totals(&db).unwrap().unsettled, 0);
+            assert_eq!(totals(&db).unwrap().undrained, 0);
+        }
+    }
+}
+
+#[test]
+fn transaction_scoped_calls_keep_the_sql_revocation_fence() {
+    let mut db = db();
+    let f = fixture();
+    let binding: Binding = serde_json::from_value(f["binding"].clone()).unwrap();
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    crate::revoke(&tx, "fixture").unwrap();
+    assert!(admit_in(
+        &tx,
+        &Admission {
+            admission_id: ADMISSION,
+            binding: &binding,
+            raw_record: f["raw_record"].as_str().unwrap().as_bytes(),
+            retained_input: f["retained_input"].as_str().unwrap().as_bytes(),
+            provenance: &Value::Null,
+            writer_epoch: WRITER,
+            service_epoch: SERVICE,
+        }
+    )
+    .is_err());
+    tx.rollback().unwrap();
+    let original = put(&mut db, 0);
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    crate::revoke(&tx, "fixture").unwrap();
+    assert!(reserve_in(&tx, &request(&original, 0)).is_err());
+    assert_eq!(totals(&tx).unwrap().undrained, 0);
+    tx.rollback().unwrap();
+}
+
 #[test]
 fn shared_utf8_vector_preserves_each_distinct_digest_and_exact_body() {
     let mut db = db();

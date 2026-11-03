@@ -44,6 +44,45 @@ fn setup() -> (Connection, Reserve, store::Prepared) {
 }
 
 #[test]
+fn actor_transaction_commits_or_discards_reservation_and_custody_together() {
+    for commit in [false, true] {
+        let (mut db, request, prepared) = setup();
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let reserved = store::reserve_in(&tx, &request, &prepared).unwrap();
+        assert!(reserved.fresh);
+        assert_eq!(
+            store::record(&tx, &reserved.attempt.ticket)
+                .unwrap()
+                .unwrap()
+                .prepared,
+            prepared
+        );
+        assert!(!store::reserve_in(&tx, &request, &prepared).unwrap().fresh);
+        if commit {
+            tx.commit().unwrap();
+            assert!(!store::reserve(&mut db, &request, &prepared).unwrap().fresh);
+            assert_eq!(totals(&db).unwrap().undrained, 1);
+        } else {
+            tx.rollback().unwrap();
+            assert!(store::pending(&db).unwrap().is_none());
+            assert_eq!(totals(&db).unwrap().undrained, 0);
+        }
+    }
+    let (mut db, request, prepared) = setup();
+    db.execute_batch("CREATE TRIGGER refuse_custody BEFORE INSERT ON desktop_operation_custody BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    assert!(store::reserve_in(&tx, &request, &prepared).is_err());
+    // The actor propagates the error and rolls back, including the reservation.
+    tx.rollback().unwrap();
+    assert!(store::pending(&db).unwrap().is_none());
+    assert_eq!(totals(&db).unwrap().undrained, 0);
+}
+
+#[test]
 fn reservation_and_prepared_custody_are_atomic_and_replay_is_status_only() {
     let (mut db, request, prepared) = setup();
     db.execute_batch("CREATE TRIGGER refuse_custody BEFORE INSERT ON desktop_operation_custody BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();

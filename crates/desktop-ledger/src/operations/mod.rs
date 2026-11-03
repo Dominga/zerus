@@ -367,6 +367,16 @@ const ATTEMPT: &str = "seq,ticket,state,outcome_json,drained";
 /// Requires already verified explicit G2 Original and current actor guard.
 /// Exact duplicates coalesce without changing bodies or providing execution.
 pub fn admit(db: &mut Connection, request: &Admission<'_>) -> Result<Admitted> {
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let original = admit_in(&tx, request)?;
+    tx.commit()?;
+    Ok(original)
+}
+
+/// Freeze within the actor's original IMMEDIATE transaction, after its native
+/// proof/current guard has been rechecked under the writer lock. This neither
+/// supplies that proof nor commits; any error requires caller rollback.
+pub fn admit_in(tx: &Transaction<'_>, request: &Admission<'_>) -> Result<Admitted> {
     uuid(request.admission_id)?;
     let operation_id = request.binding.validate()?;
     ensure!(
@@ -387,7 +397,6 @@ pub fn admit(db: &mut Connection, request: &Admission<'_>) -> Result<Admitted> {
     let binding_sha256 = hash(binding.as_bytes());
     let key = &request.binding.key;
     let executor = &request.binding.executor;
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let prior_id: Option<String> = tx
         .query_row(
             "SELECT operation_id FROM desktop_operations WHERE admission_id=?1",
@@ -403,7 +412,7 @@ pub fn admit(db: &mut Connection, request: &Admission<'_>) -> Result<Admitted> {
         ensure!(old.operation_id==operation_id && old.admission_id==request.admission_id && old_binding==binding && old_provenance==provenance,"operation admission identity changed");
         return Ok(old);
     }
-    allowed(&tx, request.writer_epoch, request.service_epoch)?;
+    allowed(tx, request.writer_epoch, request.service_epoch)?;
     let unsettled: i64 = tx.query_row(
         "SELECT unsettled FROM desktop_operation_totals WHERE id=1",
         [],
@@ -412,7 +421,6 @@ pub fn admit(db: &mut Connection, request: &Admission<'_>) -> Result<Admitted> {
     ensure!(unsettled < UNSETTLED, "operation admission capacity");
     tx.execute("INSERT INTO desktop_operations(operation_id,admission_id,kind,schema,configuration,project,task,original_request_id,key_json,binding_json,binding_sha256,raw_record,retained_input,source_record_sha256,ui_snapshot_sha256,task_start_reconcile_input_v1_sha256,plan_sha256,consent_sha256,executor_machine,executor_session_id,executor_run_id,executor_conversation_id,provenance_json,policy_state,revision) VALUES(?1,?2,'task_start_reconcile',1,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?14,?15,?16,?17,?18,?19,?20,'ready',1)",
       params![operation_id,request.admission_id,key.configuration,key.project,key.task,key.request_id,json(key,4096)?,binding,binding_sha256,request.raw_record,request.retained_input,request.binding.source_record_sha256,request.binding.ui_snapshot_sha256,request.binding.task_start_reconcile_input_v1_sha256,consent_sha256(request.retained_input),executor.machine,executor.session_id,executor.run_id,executor.conversation_id,provenance])?;
-    tx.commit()?;
     Ok(Admitted {
         operation_id,
         admission_id: request.admission_id.into(),
@@ -431,7 +439,9 @@ pub fn reserve(db: &mut Connection, request: &Reserve) -> Result<Reservation> {
     Ok(result)
 }
 
-fn reserve_in(tx: &Transaction<'_>, request: &Reserve) -> Result<Reservation> {
+/// Reserve inside the actor's original IMMEDIATE transaction after its current
+/// native checks. Does not commit or grant execution; roll back on any error.
+pub fn reserve_in(tx: &Transaction<'_>, request: &Reserve) -> Result<Reservation> {
     digest(&request.operation_id)?;
     uuid(&request.attempt_id)?;
     uuid(&request.lease)?;

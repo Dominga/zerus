@@ -81,6 +81,23 @@ pub struct Original {
     stamp: Option<Stamp>,
 }
 
+impl Seed {
+    /// The seed's own invariants: version 1, this boundary, a canonical
+    /// capture ID and a directory object digest.
+    fn valid(&self) -> bool {
+        self.version == 1
+            && self.boundary == BOUNDARY
+            && zerus_desktop_migration::canonical_uuid(&self.capture_id)
+            && digest(&self.directory)
+    }
+
+    /// A valid seed of this very folder object: the folder hash only
+    /// locates the slot.
+    fn binds(&self, object: &str, birth: Option<&str>) -> bool {
+        self.valid() && self.directory == object && self.birth.as_deref() == birth
+    }
+}
+
 impl Original {
     /// The receipt's own invariants against its slot's seed: the version,
     /// format and boundary, the seed's identity and directory object, and a
@@ -193,6 +210,73 @@ fn slot(canonical: &Path, object: &str, birth: Option<&str>) -> PathBuf {
         .join(hex(&Sha256::digest(key.as_bytes())))
 }
 
+/// Where a folder is for the private slot, mirroring the gates of
+/// `fsx::preload::Parents` on Windows: a local fixed or removable drive, a
+/// verified location the slot never uses (a network share, or a network,
+/// optical or RAM drive), or a location that could not be classified.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Place {
+    Local,
+    /// Verified not capturable: the change proceeds, recording nothing, and
+    /// the folder is never reported captured.
+    Unsupported,
+    /// Not classified: the change is refused like any capture failure.
+    Unknown,
+}
+
+/// The kind of volume a path starts with.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Volume {
+    /// A drive letter, plain or verbatim.
+    Drive,
+    /// A UNC share, plain or verbatim.
+    Share,
+    /// Any other prefix, such as a device namespace.
+    Other,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+/// Pure classification: `drive` is a drive root's `GetDriveTypeW` result.
+pub(crate) fn classify(volume: Volume, drive: Option<u32>) -> Place {
+    match (volume, drive) {
+        // DRIVE_REMOVABLE, DRIVE_FIXED: the private slot's own gate.
+        (Volume::Drive, Some(2 | 3)) => Place::Local,
+        // DRIVE_REMOTE, DRIVE_CDROM, DRIVE_RAMDISK: verified elsewhere.
+        (Volume::Drive, Some(4..=6)) | (Volume::Share, _) => Place::Unsupported,
+        // DRIVE_UNKNOWN, DRIVE_NO_ROOT_DIR, no answer, other prefixes.
+        _ => Place::Unknown,
+    }
+}
+
+#[cfg(windows)]
+fn place(canonical: &Path) -> Place {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::{Component, Prefix};
+    let Some(Component::Prefix(prefix)) = canonical.components().next() else {
+        return Place::Unknown;
+    };
+    match prefix.kind() {
+        Prefix::Disk(_) | Prefix::VerbatimDisk(_) => {
+            let root: PathBuf = canonical.components().take(2).collect();
+            let wide: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
+            // SAFETY: a NUL-terminated wide path for the duration of the call.
+            let kind =
+                unsafe { windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(wide.as_ptr()) };
+            classify(Volume::Drive, Some(kind))
+        }
+        Prefix::UNC(..) | Prefix::VerbatimUNC(..) => classify(Volume::Share, None),
+        _ => classify(Volume::Other, None),
+    }
+}
+
+/// Other platforms have no such gate: every folder is local to the slot.
+#[cfg(not(windows))]
+fn place(_: &Path) -> Place {
+    Place::Local
+}
+
 /// The original index as one writer's locked load saw it, held in memory:
 /// the load writes nothing (a service preparation stays read-only). The
 /// first effect under the same lock commits it ([`Pending::commit`]).
@@ -202,6 +286,8 @@ pub(crate) struct Pending {
     birth: Option<String>,
     index: Option<Vec<u8>>,
     identity: Option<String>,
+    /// A verified location the slot never uses: nothing is recorded.
+    unsupported: bool,
     committed: bool,
     refused: bool,
 }
@@ -214,6 +300,9 @@ impl Pending {
     pub(crate) fn commit(&mut self) -> Result<(), String> {
         if self.refused {
             return Err(NOT_RECORDED.into());
+        }
+        if self.unsupported {
+            return Ok(());
         }
         if !self.committed {
             if self.record().is_err() {
@@ -235,10 +324,14 @@ impl Pending {
         let slot = slot(&canonical, &object, birth.as_deref());
         let _parents = disk::Parents::open(&slots, true)?;
         if !slot.exists() {
-            let count = fs::read_dir(&slots)?
-                .take(MAX_SLOTS + 1)
-                .filter(|entry| entry.as_ref().is_ok_and(|e| e.path().is_dir()))
-                .count();
+            // Every raw entry counts, whatever it is, and an unreadable one
+            // refuses: a bounded listing that may be incomplete never admits
+            // another slot.
+            let mut count = 0;
+            for entry in fs::read_dir(&slots)?.take(MAX_SLOTS) {
+                entry?;
+                count += 1;
+            }
             if count >= MAX_SLOTS {
                 return Err(refused());
             }
@@ -260,13 +353,7 @@ impl Pending {
                 seed
             }
         };
-        if seed.version != 1
-            || seed.boundary != BOUNDARY
-            || !zerus_desktop_migration::canonical_uuid(&seed.capture_id)
-            || !digest(&seed.directory)
-            || seed.directory != object
-            || seed.birth != birth
-        {
+        if !seed.binds(&object, birth.as_deref()) {
             return Err(refused());
         }
         if let Some(receipt) = read_json::<Original>(&slot.join("receipt.json"))? {
@@ -332,7 +419,33 @@ thread_local! {
 /// The locked load's phase, read-only: the folder and the index exactly as
 /// the ledger loaded it (`None`: no index, verified under the lock).
 pub(crate) fn prepare(root: &Path, index: Option<&[u8]>) -> Result<Pending, String> {
-    let (canonical, object, birth) = folder(root).map_err(|_| NOT_RECORDED.to_owned())?;
+    let canonical = fs::canonicalize(root).map_err(|_| NOT_RECORDED.to_owned())?;
+    prepare_at(&canonical, index, place(&canonical))
+}
+
+/// [`prepare`] for a folder already classified.
+pub(crate) fn prepare_at(
+    canonical: &Path,
+    index: Option<&[u8]>,
+    place: Place,
+) -> Result<Pending, String> {
+    match place {
+        Place::Local => {}
+        Place::Unknown => return Err(NOT_RECORDED.into()),
+        Place::Unsupported => {
+            return Ok(Pending {
+                root: canonical.into(),
+                object: String::new(),
+                birth: None,
+                index: None,
+                identity: None,
+                unsupported: true,
+                committed: false,
+                refused: false,
+            })
+        }
+    }
+    let (canonical, object, birth) = folder(canonical).map_err(|_| NOT_RECORDED.to_owned())?;
     if index.is_some_and(|index| index.len() > ORIGINAL) {
         return Err(NOT_RECORDED.into());
     }
@@ -348,6 +461,7 @@ pub(crate) fn prepare(root: &Path, index: Option<&[u8]>) -> Result<Pending, Stri
         birth,
         index: index.map(<[u8]>::to_vec),
         identity,
+        unsupported: false,
         committed: false,
         refused: false,
     })
@@ -366,19 +480,29 @@ pub enum Evidence {
     /// No receipt for this folder object: Next has not changed it.
     None,
     Captured(Box<Original>),
+    /// A verified location the private slot never uses: not capturable.
+    Unsupported,
     Unreadable,
 }
 
 /// What the folder at `root` holds for its current directory object.
 pub fn evidence(root: &Path) -> Evidence {
-    let Ok((canonical, object, birth)) = folder(root) else {
+    let Ok(canonical) = fs::canonicalize(root) else {
+        return Evidence::Unreadable;
+    };
+    match place(&canonical) {
+        Place::Local => {}
+        Place::Unsupported => return Evidence::Unsupported,
+        Place::Unknown => return Evidence::Unreadable,
+    }
+    let Ok((canonical, object, birth)) = folder(&canonical) else {
         return Evidence::Unreadable;
     };
     let slot = slot(&canonical, &object, birth.as_deref());
     if !slot.exists() {
         return Evidence::None;
     }
-    match Snapshot::open(&slot) {
+    match Snapshot::open(&slot, &object, birth.as_deref()) {
         Ok(snapshot) => Evidence::Captured(Box::new(snapshot.receipt)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Evidence::None,
         Err(_) => Evidence::Unreadable,
@@ -386,9 +510,15 @@ pub fn evidence(root: &Path) -> Evidence {
 }
 
 impl Snapshot {
-    pub fn open(slot: &Path) -> io::Result<Self> {
+    /// The slot's receipt and original, for the folder object `directory`
+    /// born at `birth`: a valid seed of that very folder, never only a slot
+    /// found under its hash.
+    pub fn open(slot: &Path, directory: &str, birth: Option<&str>) -> io::Result<Self> {
         let seed: Seed =
             read_json(&slot.join("identity.json"))?.ok_or(io::ErrorKind::InvalidData)?;
+        if !seed.binds(directory, birth) {
+            return Err(refused());
+        }
         let receipt: Original =
             read_json(&slot.join("receipt.json"))?.ok_or(io::ErrorKind::NotFound)?;
         if !receipt.valid(&seed) {

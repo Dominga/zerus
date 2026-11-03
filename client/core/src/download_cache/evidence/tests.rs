@@ -38,9 +38,9 @@ impl Folder {
         }
     }
     fn original(&self) -> Option<Vec<u8>> {
-        let slots: Vec<_> = fs::read_dir(self.0.join(DIR)).unwrap().collect();
-        assert_eq!(slots.len(), 1);
-        Snapshot::open(&slots[0].as_ref().unwrap().path())
+        let (canonical, object, birth) = folder(&self.0).unwrap();
+        let slot = slot(&canonical, &object, birth.as_deref());
+        Snapshot::open(&slot, &object, birth.as_deref())
             .unwrap()
             .index
     }
@@ -356,4 +356,141 @@ fn a_receipt_whose_original_is_missing_or_resized_refuses_changes() {
             Some(NOT_RECORDED)
         );
     }
+}
+
+fn private_dir(path: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut fs::DirBuilder::new(), 0o700)
+        .create(path)
+        .unwrap();
+    #[cfg(not(unix))]
+    fs::create_dir(path).unwrap();
+}
+
+/// review-n P2 on #1237: the folder hash only locates a slot. A slot moved
+/// under another folder's key is never that folder's evidence.
+#[test]
+fn a_slot_moved_under_another_folders_key_is_never_reported_captured() {
+    let a = Folder::new();
+    a.plain("a.txt", b"a", 90_000);
+    assert_eq!(ON.trim(&a.0, 0, NOW).error, None);
+    let (ca, oa, ba) = folder(&a.0).unwrap();
+    let from = slot(&ca, &oa, ba.as_deref());
+    let b = Folder::new();
+    b.plain("b.txt", b"b", 90_000);
+    let (cb, ob, bb) = folder(&b.0).unwrap();
+    let to = slot(&cb, &ob, bb.as_deref());
+    // Moved whole, so original.bin keeps its object and stamp.
+    private_dir(&b.0.join(DIR));
+    fs::rename(&from, &to).unwrap();
+    assert_eq!(evidence(&b.0), Evidence::Unreadable);
+    assert_eq!(evidence(&a.0), Evidence::None, "A's slot is gone");
+    let before = b.index();
+    assert_eq!(ON.trim(&b.0, 0, NOW).error.as_deref(), Some(NOT_RECORDED));
+    assert_eq!(b.index(), before);
+}
+
+#[test]
+fn seeds_of_another_version_boundary_or_id_are_never_reported_captured() {
+    let corruptions: [fn(&mut Value, &mut Value); 3] = [
+        |seed, _| seed["version"] = json!(2),
+        |seed, _| seed["boundary"] = json!("other-boundary"),
+        |seed, receipt| {
+            seed["capture_id"] = json!("not-a-uuid");
+            receipt["capture_id"] = json!("not-a-uuid");
+        },
+    ];
+    for corrupt in corruptions {
+        let folder = Folder::new();
+        folder.plain("a.txt", b"a", 90_000);
+        assert_eq!(ON.trim(&folder.0, 0, NOW).error, None);
+        let (canonical, object, birth) = super::folder(&folder.0).unwrap();
+        let slot = slot(&canonical, &object, birth.as_deref());
+        let read = |name: &str| -> Value {
+            serde_json::from_slice(&fs::read(slot.join(name)).unwrap()).unwrap()
+        };
+        let (mut seed, mut receipt) = (read("identity.json"), read("receipt.json"));
+        corrupt(&mut seed, &mut receipt);
+        fs::write(
+            slot.join("identity.json"),
+            serde_json::to_vec(&seed).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            slot.join("receipt.json"),
+            serde_json::to_vec(&receipt).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(evidence(&folder.0), Evidence::Unreadable, "{seed}");
+        assert_eq!(
+            ON.trim(&folder.0, 0, NOW).error.as_deref(),
+            Some(NOT_RECORDED)
+        );
+    }
+}
+
+/// review-n P2 on #1237: raw entries of any kind count toward the slot cap,
+/// so unrelated files can never hide existing slots.
+#[test]
+fn raw_entries_never_hide_the_slot_cap() {
+    let folder = Folder::new();
+    folder.plain("a.txt", b"a", 90_000);
+    private_dir(&folder.0.join(DIR));
+    for n in 0..MAX_SLOTS {
+        private_dir(&folder.0.join(DIR).join(format!("{n:064x}")));
+    }
+    for n in 0..64 {
+        fs::write(folder.0.join(DIR).join(format!("junk-{n}")), b"").unwrap();
+    }
+    assert_eq!(
+        ON.trim(&folder.0, 0, NOW).error.as_deref(),
+        Some(NOT_RECORDED)
+    );
+    let dirs = fs::read_dir(folder.0.join(DIR))
+        .unwrap()
+        .filter(|e| e.as_ref().unwrap().path().is_dir())
+        .count();
+    assert_eq!(dirs, MAX_SLOTS, "no 17th slot");
+    // Below the cap a new slot is admitted.
+    let other = Folder::new();
+    other.plain("a.txt", b"a", 90_000);
+    private_dir(&other.0.join(DIR));
+    for n in 0..MAX_SLOTS - 1 {
+        private_dir(&other.0.join(DIR).join(format!("{n:064x}")));
+    }
+    assert_eq!(ON.trim(&other.0, 0, NOW).error, None);
+}
+
+/// The Windows gate classification, as portable controls.
+#[test]
+fn only_verified_unsupported_locations_are_not_capturable() {
+    assert_eq!(classify(Volume::Drive, Some(2)), Place::Local);
+    assert_eq!(classify(Volume::Drive, Some(3)), Place::Local);
+    for remote in [4, 5, 6] {
+        assert_eq!(classify(Volume::Drive, Some(remote)), Place::Unsupported);
+    }
+    assert_eq!(classify(Volume::Share, None), Place::Unsupported);
+    for unknown in [Some(0), Some(1), Some(7), None] {
+        assert_eq!(classify(Volume::Drive, unknown), Place::Unknown);
+    }
+    assert_eq!(classify(Volume::Other, None), Place::Unknown);
+}
+
+#[test]
+fn an_unsupported_location_records_nothing_and_an_unknown_one_refuses() {
+    let folder = Folder::new();
+    folder.plain("a.txt", b"a", 90_000);
+    let index = folder.index();
+    let mut pending = prepare_at(&folder.0, Some(&index), Place::Unsupported).unwrap();
+    assert_eq!(pending.commit(), Ok(()));
+    assert!(
+        !folder.0.join(DIR).exists(),
+        "never captured, nothing written"
+    );
+    assert_eq!(
+        prepare_at(&folder.0, Some(&index), Place::Unknown)
+            .err()
+            .as_deref(),
+        Some(NOT_RECORDED)
+    );
 }

@@ -637,7 +637,8 @@ mod tests {
         {
             let link = base.join("link");
             std::os::unix::fs::symlink(base.join("nowhere"), &link).unwrap();
-            assert!(!vanished(&text(&link), Some("")));
+            // The plain missing check: a link that follows nowhere is still there.
+            assert!(!vanished(&text(&link), None));
         }
         fs::remove_dir(&folder).unwrap();
         // A record from an older CLI keeps the plain missing check; one whose
@@ -647,11 +648,9 @@ mod tests {
         assert!(!vanished(&text(&folder), Some("linux:1:00000000000000ff")));
         let Some(here) = volume(&base) else {
             // Every macOS filesystem has an identity: the log must prove it ran.
-            assert!(
-                !cfg!(target_os = "macos"),
-                "no macOS volume identity for {}",
-                base.display()
-            );
+            if cfg!(target_os = "macos") {
+                panic!("no macOS volume identity for {}", base.display());
+            }
             eprintln!("skipped: no volume identity here (Windows, or a zero Linux fsid)");
             return;
         };

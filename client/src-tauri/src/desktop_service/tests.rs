@@ -1049,6 +1049,108 @@ fn a_journaled_native_reason_keeps_a_paged_start_fresh_replaced() {
     });
 }
 #[test]
+fn an_online_resnapshot_keeps_a_live_computer_live_and_asks_no_refused_changes() {
+    // zerus-bkbb: an online source restaging its snapshot (a native overflow
+    // resync) is no connection change. Probing or Reconnecting here repaints
+    // every row of the computer as offline and back: the list-wide blink.
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({"online_resync":true}));
+        let pump = crate::pump::Pump::default();
+        let statuses = Arc::new(Mutex::new(Vec::new()));
+        let observe = statuses.clone();
+        pump.tap(Box::new(move |change| {
+            if let Change::Computer { computer, status } = change {
+                if computer.is_local() {
+                    observe.lock().unwrap().push(*status);
+                }
+            }
+        }));
+        let (service, pump) = fixture.start_with_pump(true, pump, None);
+        eventually("initial live baseline", || {
+            pump.live("") && pump.row("", "row").is_some()
+        })
+        .await;
+        statuses.lock().unwrap().clear();
+        fs::write(fixture.0.join("release-staging"), []).unwrap();
+        eventually("staging view walked", || {
+            fixture.0.join("staging-page").exists()
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(pump.live(""), "{:?}", statuses.lock().unwrap());
+        assert!(
+            pump.row("", "row").is_some(),
+            "staging keeps last-known rows"
+        );
+        fs::write(fixture.0.join("release-resync"), []).unwrap();
+        eventually("completed snapshot's membership", || {
+            pump.row("", "replacement").is_some() && pump.row("", "row").is_none()
+        })
+        .await;
+        service.join().await.unwrap();
+        let statuses = statuses.lock().unwrap().clone();
+        assert!(!statuses.is_empty(), "no walk finished");
+        assert!(
+            statuses
+                .iter()
+                .all(|status| *status == ComputerStatus::Live),
+            "{statuses:?}"
+        );
+        assert!(
+            !fixture.0.join("changes-while-staging").exists(),
+            "a staging view has no change range to ask for"
+        );
+    });
+}
+#[test]
+fn a_live_computer_whose_source_goes_offline_still_probes_then_reconnects() {
+    // zerus-bkbb: only a source that stays online keeps a Live computer Live
+    // through its re-baseline. An offline hint is a real connection change.
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({"offline_hint":true}));
+        let pump = crate::pump::Pump::default();
+        let statuses = Arc::new(Mutex::new(Vec::new()));
+        let observe = statuses.clone();
+        pump.tap(Box::new(move |change| {
+            if let Change::Computer { computer, status } = change {
+                if computer.is_local() {
+                    observe.lock().unwrap().push(*status);
+                }
+            }
+        }));
+        let (service, pump) = fixture.start_with_pump(true, pump, None);
+        eventually("initial live baseline", || {
+            pump.live("") && pump.row("", "row").is_some()
+        })
+        .await;
+        statuses.lock().unwrap().clear();
+        fs::write(fixture.0.join("release-offline"), []).unwrap();
+        // The hint's Probing and the walk's first Reconnecting race; the
+        // walk's Finish follows its page RPC and settles the status.
+        eventually("offline baseline finished", || {
+            fixture.0.join("offline-page").exists()
+                && statuses.lock().unwrap().last()
+                    == Some(&ComputerStatus::Reconnecting { attempt: 0 })
+        })
+        .await;
+        service.join().await.unwrap();
+        let statuses = statuses.lock().unwrap().clone();
+        let probing = statuses.iter().position(|s| *s == ComputerStatus::Probing);
+        assert!(
+            probing.is_some_and(|i| i + 1 < statuses.len()),
+            "{statuses:?}"
+        );
+        assert!(!statuses.contains(&ComputerStatus::Live), "{statuses:?}");
+        assert!(!pump.online(""));
+        assert!(
+            pump.row("", "row").is_some(),
+            "offline keeps last-known rows"
+        );
+    });
+}
+#[test]
 fn stuck_view_callback_cannot_hold_the_quit_completion_past_its_deadline() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {

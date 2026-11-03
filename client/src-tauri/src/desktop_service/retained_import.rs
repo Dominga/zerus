@@ -2,6 +2,7 @@
 //! Its result never gates Grant or the read connection. Managed paths and
 //! original source handles come from setup, never a webview request.
 use super::*;
+pub(super) mod creations;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use zerus_client_core::{
     migration::{
@@ -82,6 +83,7 @@ struct State {
 pub(super) struct Report {
     inputs: Inputs,
     state: Mutex<State>,
+    creations: Mutex<creations::CreationState>,
     capture: Gate,
     work: Gate,
 }
@@ -90,6 +92,7 @@ impl Report {
         Arc::new(Self {
             inputs,
             state: Mutex::new(State::default()),
+            creations: Mutex::new(creations::CreationState::default()),
             capture: Gate::new(1).unwrap(),
             work: Gate::new(1).unwrap(),
         })
@@ -108,6 +111,7 @@ impl Report {
         self.inputs.creations.hook(notify);
     }
     pub fn request_retry(&self) {
+        self.retry_creations();
         self.inputs.creations.request_retry();
         self.state().retry_requested = true;
     }
@@ -116,7 +120,7 @@ impl Report {
     }
     pub fn status(&self) -> Value {
         let state = self.state();
-        json!({"creations_capture":self.inputs.creations.status(),"scope":SCOPE,"running":state.running,"code":state.code,
+        json!({"creations_report":self.creation_status(),"creations_capture":self.inputs.creations.status(),"scope":SCOPE,"running":state.running,"code":state.code,
             "required":!state.not_applicable,
             "complete":state.stored.as_ref().is_some_and(|s| s.record.phase == Phase::Published),
             "import_id":state.stored.as_ref().map(|s|&s.record.import_id),
@@ -401,7 +405,15 @@ pub(super) async fn before_grant(
     stop: Arc<AtomicBool>,
     explicit: bool,
 ) {
-    let result = attempt(shared, relay, configuration, stop, explicit).await;
+    let result = attempt(
+        shared,
+        relay.clone(),
+        configuration.clone(),
+        stop.clone(),
+        explicit,
+    )
+    .await;
+    creations::arm(shared, relay, configuration, stop, explicit);
     if let Err(code) = result {
         record_error(shared, code);
     } else {

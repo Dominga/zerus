@@ -64,7 +64,10 @@ fn same_generation_readiness_preserves_pending_metadata_and_bounds_retries() {
 }
 #[test]
 fn source_identity_reads_precede_potentially_slow_detail_follows() {
-    let mut hub = Hub { lease: Some(lease()), ..Hub::default() };
+    let mut hub = Hub {
+        lease: Some(lease()),
+        ..Hub::default()
+    };
     hub.follow("", spec(0)).unwrap();
     hub.source("", 1).unwrap();
     assert!(matches!(hub.next(), Some((_, Work::Source { part, .. })) if part == "hello"));
@@ -227,7 +230,10 @@ fn pushed_hello_resumes_only_the_current_generations_halted_catalog() {
     tauri::async_runtime::block_on(async {
         let fixture = Fixture::new(json!({}));
         let (service, _) = fixture.start(false);
-        crate::desktop_service::tests::eventually("replay transport refused", || service.snapshot().code == "replay_transport_unavailable").await;
+        crate::desktop_service::tests::eventually("replay transport refused", || {
+            service.snapshot().code == "replay_transport_unavailable"
+        })
+        .await;
         let selected = lease();
         {
             let mut hub = service.shared.details.lock().unwrap();
@@ -236,10 +242,22 @@ fn pushed_hello_resumes_only_the_current_generations_halted_catalog() {
         }
         {
             let mut dirty = service.shared.dirty.lock().unwrap();
-            dirty.sources.insert(String::new(), SourceVersion { generation: 2, ..SourceVersion::default() });
+            dirty.sources.insert(
+                String::new(),
+                SourceVersion {
+                    generation: 2,
+                    ..SourceVersion::default()
+                },
+            );
             dirty.halted.insert(String::new());
         }
-        let hello: Value = serde_json::from_str(include_str!("../../../../core/tests/fixtures/basic.ndjson").lines().next().unwrap()).unwrap();
+        let hello: Value = serde_json::from_str(
+            include_str!("../../../../core/tests/fixtures/basic.ndjson")
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         for generation in [1, 2] {
             frame(&service.shared, &json!({"t":"source","epoch":selected.epoch,
@@ -248,7 +266,12 @@ fn pushed_hello_resumes_only_the_current_generations_halted_catalog() {
             assert_eq!(dirty.halted.contains(""), generation == 1);
             assert_eq!(dirty.pending.contains(""), generation == 2);
         }
-        assert!(service.shared.details.lock().unwrap().local_identity_ready(2));
+        assert!(service
+            .shared
+            .details
+            .lock()
+            .unwrap()
+            .local_identity_ready(2));
         service.join().await.unwrap();
     });
 }

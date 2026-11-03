@@ -1,5 +1,11 @@
 use super::*;
-use std::cell::Cell;
+use std::{
+    cell::Cell,
+    sync::Arc,
+    thread,
+    time::{Duration, Instant},
+};
+use zerus_desktop_ledger::operations::cache as cache_ledger;
 
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[test]
@@ -53,6 +59,264 @@ fn reconnect_keeps_ownership_epoch_but_new_image_and_explicit_rearm_rotate_it() 
     let request = f.request(Action::Rearm);
     assert!(f.apply(request).service_granted());
     assert_ne!(f.current().owner_epoch.unwrap(), updated);
+}
+
+// Use the actual cache worker, frozen files, owner lock and indexed operation
+// ledger. No synthetic undrained counter stands in for retained resources.
+struct RetainedCache {
+    runtime: super::super::cache_maintenance::Runtime,
+    preparation: String,
+    operation: String,
+    file: PathBuf,
+}
+impl RetainedCache {
+    fn new(f: &mut Fixture) -> Self {
+        use super::super::ui_authority::Validated;
+        use zerus_client_core::download_cache;
+        let root = f.base.join("cache");
+        let part = download_cache::reserve(&root).unwrap();
+        std::fs::write(part.path(), b"original cached content").unwrap();
+        download_cache::complete(
+            part,
+            "report.txt",
+            None,
+            chrono::Utc::now().timestamp_millis() - 120_000,
+        )
+        .unwrap();
+        let owner = Arc::new(f.location.lock().unwrap());
+        let mut runtime =
+            super::super::cache_maintenance::Runtime::new(&f.location, &f.epoch, owner);
+        let preparation = uuid::Uuid::new_v4().to_string();
+        let operation = uuid::Uuid::new_v4().to_string();
+        let value = serde_json::json!({"op":"cache_maintenance","request_id":preparation,
+            "command":{"phase":"prepare","operation_id":operation,
+            "configuration":f.location.configuration,"root":root,"limit":1,"revision":0,
+            "timing":"immediate","policy_change":true}});
+        let result = runtime.frontend_request(&mut f.store, Validated::fixture(&value));
+        assert_eq!(result["phase"], "preparing", "{result}");
+        let mut retained = Self {
+            runtime,
+            preparation,
+            operation,
+            file: root.join("report.txt"),
+        };
+        let until = Instant::now() + Duration::from_secs(5);
+        while retained.row(f).phase != cache_ledger::Phase::Prepared {
+            retained.runtime.poll(&mut f.store);
+            assert!(Instant::now() < until, "cache did not prepare");
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(f.store.operation_undrained().unwrap(), 1);
+        assert!(!retained.runtime.drained());
+        assert!(f.location.lock().is_err());
+        retained
+    }
+    fn row(&self, f: &Fixture) -> cache_ledger::Record {
+        cache_ledger::load(&f.store.db, &self.preparation)
+            .unwrap()
+            .unwrap()
+    }
+    fn execute(&mut self, f: &mut Fixture) {
+        let value = serde_json::json!({"op":"cache_maintenance","request_id":self.operation,
+            "command":{"phase":"execute","configuration":f.location.configuration,
+            "preparation_id":self.preparation,"binding_sha256":self.row(f).binding_sha256}});
+        let result = self.runtime.frontend_request(
+            &mut f.store,
+            super::super::ui_authority::Validated::fixture(&value),
+        );
+        assert_eq!(result["phase"], "reserved", "{result}");
+        self.drain(f);
+        let row = self.row(f);
+        assert_eq!(row.phase, cache_ledger::Phase::Settled);
+        assert!(!row.undrained);
+        assert_eq!(
+            row.receipt.unwrap().files,
+            [cache_ledger::FileState::Removed]
+        );
+        assert!(!self.file.exists());
+    }
+    fn drain(&mut self, f: &mut Fixture) {
+        let until = Instant::now() + Duration::from_secs(5);
+        while !self.runtime.drained() {
+            self.runtime.poll(&mut f.store);
+            assert!(Instant::now() < until, "cache did not physically join");
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(f.store.operation_undrained().unwrap(), 0);
+    }
+}
+
+#[test]
+fn same_origin_refresh_preserves_original_operation_custody_and_execution() {
+    let mut f = Fixture::new();
+    let first_request = f.request(Action::Grant);
+    let first = f.apply(first_request.clone());
+    let grant = grant(&f.store, &f.location.configuration).unwrap().unwrap();
+    let mut cache = RetainedCache::new(&mut f);
+    let handoff = f.location.handoff_lock().unwrap();
+    // Model the already admitted writer under the original serve/handoff
+    // exclusions. A refresh must preserve this exact writer, not reauthorize it.
+    zerus_desktop_ledger::authorize(
+        &mut f.store.db,
+        first.current.owner_epoch.as_ref().unwrap(),
+        &f.epoch,
+    )
+    .unwrap();
+    let original = cache.row(&f);
+    let writer = f.writer();
+    let request = f.request(Action::Grant);
+    let checked = Cell::new(false);
+    let receipt = apply_guarded(
+        &f.location,
+        &mut f.store,
+        &f.epoch,
+        (request.clone(), f.origin.clone()),
+        Some(&handoff),
+        |_| panic!("refresh must not drain the original runtime"),
+        || {
+            checked.set(true);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert!(
+        checked.get(),
+        "refresh still needs the final original native proof"
+    );
+    assert!(receipt.matches(&request, &f.location.configuration));
+    assert!(receipt.service_granted());
+    assert_eq!(receipt.revision, first.revision + 1);
+    assert_eq!(receipt.current.owner_epoch, first.current.owner_epoch);
+    assert_eq!(f.count(), 2);
+    assert!(grant.current(&f.store).unwrap());
+    assert_eq!(f.writer(), writer, "refresh must not renew a writer");
+    let retained = cache.row(&f);
+    assert_eq!(retained.original, original.original);
+    assert_eq!(retained.binding_sha256, original.binding_sha256);
+    assert_eq!(retained.phase, original.phase);
+    assert!(retained.undrained);
+    assert!(!cache.runtime.drained());
+    assert!(cache.file.is_file());
+    assert!(f.location.lock().is_err());
+    let old = super::original(&f.store.db, first_request.id())
+        .unwrap()
+        .unwrap()
+        .0;
+    let historical = current_receipt(&f.store.db, old).unwrap();
+    assert!(matches!(historical.outcome, Outcome::Granted { .. }));
+    assert!(!historical.service_granted());
+    assert_eq!(historical.current, receipt.current);
+    // Only the original frozen operation executes, with its original lease,
+    // service/writer epochs and binding. Reconnect creates no replacement.
+    cache.execute(&mut f);
+    assert_eq!(cache.row(&f).original, original.original);
+    assert!(grant.current(&f.store).unwrap());
+    drop(cache);
+    assert!(f.location.lock().is_ok());
+}
+
+#[test]
+fn new_owner_and_rearm_still_refuse_until_original_resources_physically_join() {
+    for action in [Action::Grant, Action::Rearm] {
+        let mut f = Fixture::new();
+        let request = f.request(Action::Grant);
+        f.apply(request);
+        let before = f.current();
+        let grant = grant(&f.store, &f.location.configuration).unwrap().unwrap();
+        let mut cache = RetainedCache::new(&mut f);
+        let original = cache.row(&f);
+        let origin = if action == Action::Grant {
+            let image = f.base.join("replacement-hgs-tray");
+            std::fs::write(&image, b"another frontend").unwrap();
+            Origin::capture(&image, f.origin.build.clone()).unwrap()
+        } else {
+            f.origin.clone()
+        };
+        let request = f.request(action);
+        let drained = Cell::new(false);
+        let receipt = apply(
+            &f.location,
+            &mut f.store,
+            &f.epoch,
+            request,
+            origin.clone(),
+            None,
+            |store| {
+                drained.set(true);
+                cache.runtime.request_stop(store)?;
+                // Stopping is not a physical join or durable ledger drain.
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(drained.get());
+        assert!(
+            matches!(receipt.outcome, Outcome::Refused { ref code } if code == "ownership_resources_pending")
+        );
+        assert_eq!(f.current(), before);
+        assert_eq!(f.count(), 1);
+        assert!(grant.current(&f.store).unwrap());
+        assert_eq!(cache.row(&f).original, original.original);
+        assert!(cache.row(&f).undrained);
+        assert_eq!(f.store.operation_undrained().unwrap(), 1);
+        assert!(f.location.lock().is_err());
+        cache.drain(&mut f);
+        assert!(
+            cache.file.is_file(),
+            "refused replacement cannot execute the old operation"
+        );
+        assert!(grant.current(&f.store).unwrap());
+        let request = f.request(action);
+        let receipt = apply(
+            &f.location,
+            &mut f.store,
+            &f.epoch,
+            request,
+            origin,
+            None,
+            |_| {
+                assert!(cache.runtime.drained());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(receipt.service_granted());
+        assert_ne!(receipt.current.owner_epoch, before.owner_epoch);
+        assert!(!grant.current(&f.store).unwrap());
+        assert_eq!(f.count(), 2);
+        assert_eq!(cache.row(&f).original, original.original);
+    }
+}
+
+#[test]
+fn refresh_with_retained_operation_still_rolls_back_on_failed_final_native_proof() {
+    let mut f = Fixture::new();
+    let request = f.request(Action::Grant);
+    f.apply(request);
+    let before = f.current();
+    let mut cache = RetainedCache::new(&mut f);
+    let original = cache.row(&f);
+    let request = f.request(Action::Grant);
+    let checked = Cell::new(false);
+    let result = apply_guarded(
+        &f.location,
+        &mut f.store,
+        &f.epoch,
+        (request, f.origin.clone()),
+        None,
+        |_| panic!("refresh must not drain the original runtime"),
+        || {
+            checked.set(true);
+            anyhow::bail!("original native proof expired")
+        },
+    );
+    assert!(checked.get());
+    assert!(result.is_err());
+    assert_eq!(f.current(), before);
+    assert_eq!(f.count(), 1);
+    assert_eq!(cache.row(&f).original, original.original);
+    assert!(cache.row(&f).undrained);
+    cache.execute(&mut f);
 }
 
 #[cfg(unix)]
@@ -159,6 +423,16 @@ impl Fixture {
             .query_row("SELECT count(*) FROM desktop_ownership_requests", [], |r| {
                 r.get(0)
             })
+            .unwrap()
+    }
+    fn writer(&self) -> (Option<String>, String, bool, String) {
+        self.store
+            .db
+            .query_row(
+                "SELECT epoch,service_epoch,revoked,reason FROM desktop_writer WHERE id=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
             .unwrap()
     }
     fn query(&self, original: &Request) -> Query {

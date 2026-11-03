@@ -1,8 +1,8 @@
 use super::*;
 use std::{fs, path::Path, time::Instant};
 
-mod silent_watch;
 mod restart;
+mod silent_watch;
 
 pub(super) struct Fixture(pub(super) PathBuf, pub(super) Arc<AtomicBool>);
 
@@ -1093,11 +1093,20 @@ fn pending_local_identity_does_not_hold_catalog_rpc_or_delay_peer_rows() {
     tauri::async_runtime::block_on(async {
         let fixture = Fixture::new(json!({"details":true,"source_held":true,"project_peer":true}));
         let (service, pump) = fixture.start(true);
-        eventually("peer catalog is independent of local identity", || pump.row("studio", "row").is_some()).await;
+        eventually("peer catalog is independent of local identity", || {
+            pump.row("studio", "row").is_some()
+        })
+        .await;
         assert!(pump.row("", "row").is_none());
-        assert!(!fixture.calls().iter().any(|call| call["value"]["op"] == "catalog_page" && call["value"]["computer"] == ""));
+        assert!(!fixture
+            .calls()
+            .iter()
+            .any(|call| call["value"]["op"] == "catalog_page" && call["value"]["computer"] == ""));
         fs::write(fixture.0.join("source-identity-ready"), []).unwrap();
-        eventually("late local identity wakes its catalog", || pump.row("", "row").is_some()).await;
+        eventually("late local identity wakes its catalog", || {
+            pump.row("", "row").is_some()
+        })
+        .await;
         assert_eq!(pump.row("", "row").unwrap().machine, "untrusted-caption");
         service.join().await.unwrap();
     });
@@ -1108,10 +1117,19 @@ fn transient_source_metadata_failures_recover_local_catalog_without_refresh() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         for failure in ["transport", "refused", "native", "offline", "null"] {
-            let fixture = Fixture::new(json!({"details":true,"source_warming":true,"source_failure":failure}));
+            let fixture = Fixture::new(
+                json!({"details":true,"source_warming":true,"source_failure":failure}),
+            );
             let (service, pump) = fixture.start(true);
-            eventually("local metadata recovers without Refresh", || pump.row("", "row").is_some()).await;
-            assert_eq!(pump.row("", "row").unwrap().machine, "untrusted-caption", "{failure}");
+            eventually("local metadata recovers without Refresh", || {
+                pump.row("", "row").is_some()
+            })
+            .await;
+            assert_eq!(
+                pump.row("", "row").unwrap().machine,
+                "untrusted-caption",
+                "{failure}"
+            );
             assert!(fixture.calls().iter().filter(|c| c["value"]["op"] == "detail_source" && c["value"]["part"] == "hello").count() >= 2, "{failure}");
             service.join().await.unwrap();
         }
@@ -1131,16 +1149,48 @@ fn service_catalog_rows_use_native_host_and_peer_alias_for_project_membership() 
         let grouped = pump.clone();
         let (sink, rx) = std::sync::mpsc::sync_channel(256);
         let drain = pump.drain_service(rx, move |change| {
-            if let Change::Organization { update: zerus_client_core::OrganizationUpdate::State { value, membership, .. }, .. } = change {
-                grouped.present(&value["organization"], membership.clone(), 1, zerus_client_core::swarm::grouping::SyncView::default());
+            if let Change::Organization {
+                update:
+                    zerus_client_core::OrganizationUpdate::State {
+                        value, membership, ..
+                    },
+                ..
+            } = change
+            {
+                grouped.present(
+                    &value["organization"],
+                    membership.clone(),
+                    1,
+                    zerus_client_core::swarm::grouping::SyncView::default(),
+                );
             }
         });
-        let service = Service::start(fixture.0.join("hgs"), pump.clone(), sink, true, drain, None, vec![]);
-        service.follow_detail("", detail_spec("organization", None)).unwrap();
+        let service = Service::start(
+            fixture.0.join("hgs"),
+            pump.clone(),
+            sink,
+            true,
+            drain,
+            None,
+            vec![],
+        );
+        service
+            .follow_detail("", detail_spec("organization", None))
+            .unwrap();
         eventually("local and peer rows reach their projects", || {
-            pump.members_of("alpha").iter().map(|(member, _)| member.as_str()).collect::<Vec<_>>() == vec!["untrusted-caption\ncodex/example/row"]
-                && pump.members_of("beta").iter().map(|(member, _)| member.as_str()).collect::<Vec<_>>() == vec!["studio\ncodex/example/row"]
-        }).await;
+            pump.members_of("alpha")
+                .iter()
+                .map(|(member, _)| member.as_str())
+                .collect::<Vec<_>>()
+                == vec!["untrusted-caption\ncodex/example/row"]
+                && pump
+                    .members_of("beta")
+                    .iter()
+                    .map(|(member, _)| member.as_str())
+                    .collect::<Vec<_>>()
+                    == vec!["studio\ncodex/example/row"]
+        })
+        .await;
         assert_eq!(pump.row("", "row").unwrap().machine, "untrusted-caption");
         assert_eq!(pump.row("studio", "row").unwrap().machine, "studio");
         assert_ne!(pump.row("", "row").unwrap().machine, "metadata-caption");

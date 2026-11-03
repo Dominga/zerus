@@ -1,9 +1,11 @@
-import { Show, createMemo } from "solid-js";
+import { Show, createMemo, createSignal } from "solid-js";
 import { desktopService, pendingReadNotice, retainedSourceNotice, retryDesktopService, ownershipActions, ownershipNotice } from "../../store/desktopService";
 import { toast } from "../../store/ui";
 import { tr } from "../../i18n";
+import { MigrationReportDialog } from "./MigrationReportDialog";
 
 export function DesktopServiceStatus(props: { counts?: boolean }) {
+  const [reviewOrigin, setReviewOrigin] = createSignal<HTMLElement>();
   const notice = createMemo(() => {
     const state = desktopService.state();
     if (!state?.connected) return state?.reconnecting
@@ -19,7 +21,10 @@ export function DesktopServiceStatus(props: { counts?: boolean }) {
     <div class="desktop-service-status" role="status">
       <Show when={notice()} fallback={<span>{tr("Background service connected")}</span>}>{(text) => <span>{text()}</span>}</Show>
       <Show when={pendingReadNotice(desktopService.state())}>{(text) => <span>{text()}</span>}</Show>
-      <Show when={retainedSourceNotice(desktopService.state())}>{(text) => <span>{text()}</span>}</Show>
+      <Show when={retainedSourceNotice(desktopService.state())}>{(text) => <>
+        <span>{text()}</span>
+        <button type="button" class="btn small ghost" aria-label={tr("Review migration report")} onClick={(event) => setReviewOrigin(event.currentTarget)}>{tr("Review")}</button>
+      </>}</Show>
       <button type="button" class="btn small ghost" onClick={() => void retryDesktopService().catch(error => toast(tr("Background service"), String(error), "error", true))}>{tr("Retry now")}</button>
       <Show when={ownershipNotice(desktopService.state()?.notification_ownership)}>{(text) => <span>{text()}</span>}</Show>
       <Show when={desktopService.state()?.notification_ownership?.pending} fallback={
@@ -38,5 +43,6 @@ export function DesktopServiceStatus(props: { counts?: boolean }) {
         <Show when={!counts()?.complete}><span>{tr("Incomplete")}</span></Show>
       </Show>
     </div>
+    <Show when={reviewOrigin()}>{(origin) => <MigrationReportDialog origin={origin()} close={() => setReviewOrigin(undefined)} />}</Show>
   </Show>;
 }

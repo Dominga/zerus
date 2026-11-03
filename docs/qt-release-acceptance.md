@@ -145,6 +145,46 @@ contents or an additional acceptance result:
 | `native-restored-takeover-receipt.json` | `4f558744a11d0731cda4907b74a47c002b202292b49d3e2168dd534b6d497c0c` |
 | `native-restore-continuity-summary.json` | `c351b54aad72fdcc547c6cddf858f6354bd0ff3ed7610fc79c9a3f596b533151` |
 
+### Recorded Arch reconnect/grouping retry — 2026-11-03
+
+This separate retry belongs to `zerus-5wmh.66.8.3` and product task
+`T-i0p1w7`. Physical checks used the exact installed source
+`5c11005546fc8bd0c6a2224acb81eacb5a21e0d9`, including
+[#1124](https://github.com/ufna/zerus/pull/1124) and
+[#1128](https://github.com/ufna/zerus/pull/1128). **The reconnect and project
+presentation retry passed; broader G6 remains open and all platform checkboxes
+are unchanged.**
+The preceding `5e4427f6` failures and its pending historical observation are
+unchanged; the results below apply to this new installed source only.
+
+| Subcheck | Result | Actual evidence and limit |
+|---|---|---|
+| Installed identity and controlled GUI start | PASS, source-install scope | Selected CLI/GUI hashes matched installed provenance for `5c110055`, with clean source identity. The coordinator paused the rollout watcher; the original display lock was held. Owner-confirmed normal Quit ended the prior GUI with exit 0. The prior ABSENT startup flag was saved, only the service-mode flag was set to `1`, and one maintained service-mode GUI was started with its original process birth and unit invocation pinned. |
+| Ownership after owner Resume | PASS, scoped Grant/current identity | After one owner Resume, the fresh lookup of `ARCH_G6_RETRY_GRANT_ID` found an accepted, durable `grant` result at revision 56. Its lookup retained `definitive:false`; the accompanying current snapshot independently showed Service revision 56, current identity and `rearm_required:false`. This Grant request is not relabeled as a Rearm request. |
+| Maintained background switch and automatic reconnect | PASS, owner-confirmed retry | The owner's foreground Konsole call to the maintained helper succeeded for the same configuration: selected/running background mode, IPC ready, no pending transition/restart. After the service restart, the same original GUI automatically reconnected without Retry. The owner confirmed all 47 sessions and their projects in place. This qualifies the observed restart path for `zerus-yqie` and grouping path for `zerus-gpz3`, not every recovery case. |
+| Background runtime and native frontend | PASS, readiness scope | Final status at service generation 66 and new service epoch `ARCH_G6_RETRY_SERVICE_EPOCH` showed writers enabled, local and Mac Fleet sources live, presence writer active, reads ready, automatic approvals OFF/disabled, and the Linux attention host ready with its attachment restored and outbox pending zero. The same original GUI's frontend observation remained `live_next` with its unchanged `ARCH_G6_RETRY_FRONTEND_INSTANCE`; the observer's `authority:false` did not grant mutation permission. This is readiness evidence, not notification or exact-target read-delivery acceptance. |
+| Initial passive view and migration warning | OBSERVED / WARNING, G3 remains open | Before a live baseline, the fresh passive GUI initially showed a zero/skeleton view; this did not establish deletion. The retained migration-review notice associated with the Qt 0644 source remained visible. [#1133](https://github.com/ufna/zerus/pull/1133) was not installed in the attested `5c110055` run. The independent report warning does not overturn the later owner-confirmed project placement. |
+| Duplicate new-session placeholder | SEPARATE BUG: `zerus-zckh` | A duplicate placeholder for a newly created session was reported separately to menu-c. Root did not create or exercise a new session to test it; this ledger does not qualify its fix. |
+| End state requested by owner | PASS, background intentionally retained | The owner requested staying in background mode. The manager flag therefore deliberately remains `1`, changed from its prior ABSENT state; the registered service remains background. The maintained updater through the existing GUI unit preserves that startup mode and service selection. No passive or Native restoration was performed in this successful retry. The window END was reported and the original display lock released normally; documentation follow-up does not hold rollout or the watcher. |
+| Remaining native/platform acceptance | INCOMPLETE | No deliberate Post/click, approval ENABLE, synthetic read mark or raw host ACK was submitted. Qt type rollback/removal and package qualification were not performed. Full G3, delivery/click, terminal, voice/video, destructive-review and broader G6 cases remain open. |
+
+Selected records are retained privately under `.ci-build/g6-arch-5c110055/`.
+Stable role labels above replace private request UUIDs, service epochs and
+process identities; no private project/session names or contents are published.
+The installed image SHA-256 values were:
+
+- CLI: `16227b68f443b23677ec9580e192c22d3036825f4795dd1eacddc2290b68d1a1`.
+- GUI: `ddc8305714ffc78abbb6f8ba2d90f33a8aadbfa3dd535b0983baca1bdbf96f34`.
+
+These SHA-256 values identify the exact retained evidence bytes:
+
+| Private evidence filename | SHA-256 |
+|---|---|
+| `step5-verification-summary.json` | `f7356171d048182b00b0f76b99df4c2795e583f980974d16d35eb739d616df91` |
+| `preflight-images.json` | `0b0ee2de6af18a8ca10431a54f62072d690ba53e8e047e14d0b0b5cc801d5b43` |
+| `status-final-background.json` | `01675ec8c0887c5ede212134dca01db126316d23b51b61b34f132ee69298cd69` |
+| `grant-after-resume-result.json` | `d29d6b74f1b20b224d5e530ae22eebf80ce86e767b60a36cec4a3f385be1bb3f` |
+
 ### Remaining G3 source work at this run
 
 The whole `.66.5` migration is still incomplete. The preference/organization and
@@ -189,7 +229,8 @@ Grant, watch/catalog, ownership Resume and the separate G2 actor stay available.
 Do not clear the slot to manufacture a successful report.
 
 On Unix the capture resolves the managed data folder once and pins that canonical
-object; symlinks through home, `$XDG_DATA_HOME` and `.local/share` are supported.
+object for capture and the original legacy journal load/writes; symlinks through
+home, `$XDG_DATA_HOME` and `.local/share` are supported.
 The existing data folder must be owned by the user; a group-writable mode such as
 0775 is preserved. The archive slot must remain user-owned and private (0700),
 and source/archive leaves remain private, owned, single-link and no-follow. A
@@ -200,14 +241,34 @@ asks to check the managed data folder's availability and ownership.
 on Unix) and review retained partial files before Retry. No permission
 or source repair happens automatically.
 
+These are endpoint identity rechecks, not an exclusive namespace hold. Deliberate
+same-user rename-and-back between checks is outside this protection. Other users
+in a shared writable data-directory group can rename the archive slot away, just
+as they can the live journal; private leaves and rechecks do not make 0775 a
+hostile-writer exclusion guarantee. Missing/replaced data remains unavailable and
+never grants current coverage or effect authority.
+
 After capture, normal live journal writes may resume. The archive is explicitly
 historical pre-load data: a later source recheck validates the retained private
 snapshot's native identity and raw hash, not today's mutable journal. It is not
 Drained, current-source completeness, worker ownership or execution consent.
 This exception does not relax the Qt/Settings source leases. The separate
-creations-group configuration binding and Staged publication caller remain
-follow-up work; capture alone does not complete G3 or any installed acceptance
-row.
+creation report binds this exact capture ID once to the paired canonical service
+configuration. It publishes the unchanged creation source and
+an explicit historical provenance source through the existing Staged publisher;
+its own `creations-retained-import-v1.json` retains the configuration, snapshot
+reference, attempt and expected receipt. It never uses the Qt/Settings journal's
+hash fields. Attempts/unknown results keep their original ID and are lookup-only.
+A complete exact negative permits explicit Retry of the same record after fresh
+snapshot validation. A confirmed local callback failure before the final record
+write has its own durable `before_record` state: no final record was sent, so
+explicit Retry may prepare that same identity again without inventing a receipt.
+Missing, partial or lost child output never establishes this state. The native
+metadata lock is explicitly unlocked before close, so a forked child's inherited
+descriptor cannot prolong it. Retained SDK/helper/pipe resources
+keep the shared report admission charged until actual completion. Publication
+runs off the UI/legacy worker and never gates Grant, watch/catalog or Resume.
+Capture/report success alone does not complete G3 or installed acceptance.
 
 ## macOS
 

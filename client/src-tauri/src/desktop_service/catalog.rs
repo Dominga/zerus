@@ -55,11 +55,23 @@ pub(super) async fn catalog_loop(
                 .clone()
                 .ok_or("service_unavailable")?;
             if shared.park_until_source_identity(&computer, &source) {
-                shared.dirty.lock().unwrap_or_else(PoisonError::into_inner).running = None;
-                row(&shared, &computer, &source, &epoch, &stop, Change::Computer {
-                    computer: ComputerId::from(computer.as_str()),
-                    status: ComputerStatus::Reconnecting { attempt: 0 },
-                }).await?;
+                shared
+                    .dirty
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .running = None;
+                row(
+                    &shared,
+                    &computer,
+                    &source,
+                    &epoch,
+                    &stop,
+                    Change::Computer {
+                        computer: ComputerId::from(computer.as_str()),
+                        status: ComputerStatus::Reconnecting { attempt: 0 },
+                    },
+                )
+                .await?;
                 continue;
             }
             let result = walk(
@@ -157,7 +169,13 @@ impl Shared {
     /// Park only this local baseline; hold neither a relay nor an RPC slot.
     /// Hello application takes the same hub/dirty lock order and wakes it.
     fn park_until_source_identity(&self, computer: &str, source: &SourceVersion) -> bool {
-        if !computer.is_empty() || !self.snapshot.lock().unwrap_or_else(PoisonError::into_inner).details_available {
+        if !computer.is_empty()
+            || !self
+                .snapshot
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .details_available
+        {
             return false;
         }
         let hub = self.details.lock().unwrap_or_else(PoisonError::into_inner);
@@ -165,7 +183,11 @@ impl Shared {
             return false;
         }
         let mut dirty = self.dirty.lock().unwrap_or_else(PoisonError::into_inner);
-        if dirty.sources.get(computer).is_some_and(|current| current.serial == source.serial) {
+        if dirty
+            .sources
+            .get(computer)
+            .is_some_and(|current| current.serial == source.serial)
+        {
             dirty.pending.remove(computer);
             dirty.halted.insert(computer.into());
         }
@@ -173,8 +195,12 @@ impl Shared {
     }
     pub(super) fn catalog_identity_ready(&self, computer: &str, generation: u64) {
         let mut dirty = self.dirty.lock().unwrap_or_else(PoisonError::into_inner);
-        if dirty.sources.get(computer).is_some_and(|source| source.generation == generation)
-            && !dirty.progress.contains_key(computer) {
+        if dirty
+            .sources
+            .get(computer)
+            .is_some_and(|source| source.generation == generation)
+            && !dirty.progress.contains_key(computer)
+        {
             dirty.halted.remove(computer);
             dirty.pending.insert(computer.into());
             self.changed.notify_one();
@@ -282,8 +308,16 @@ async fn row(
     .await
 }
 
-fn project(shared: &Shared, computer: &str, source: &SourceVersion, value: &Value) -> zerus_client_core::ViewRow {
-    shared.details.lock().unwrap_or_else(PoisonError::into_inner)
+fn project(
+    shared: &Shared,
+    computer: &str,
+    source: &SourceVersion,
+    value: &Value,
+) -> zerus_client_core::ViewRow {
+    shared
+        .details
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
         .project_row(&ComputerId::from(computer), source.generation, value)
 }
 

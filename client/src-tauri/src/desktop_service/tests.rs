@@ -2,6 +2,7 @@ use super::*;
 use std::{fs, path::Path, time::Instant};
 
 mod notification_receipts;
+mod quit_deadline;
 mod restart;
 mod silent_watch;
 
@@ -688,16 +689,16 @@ fn exit_waits_for_the_owned_proxy_and_blocked_view_callback_before_finishing() {
         eventually("view callback entered", || observed.try_recv().is_ok()).await;
         let finished = Arc::new(AtomicBool::new(false));
         let ended = finished.clone();
-        let exiting = tauri::async_runtime::spawn(crate::exit_flush::finish_service_exit(
-            service,
-            move || ended.store(true, Ordering::Release),
-        ));
+        crate::exit_flush::finish_service_exit(service, move || {
+            ended.store(true, Ordering::Release)
+        });
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert!(!finished.load(Ordering::Acquire));
-        assert!(!exiting.inner().is_finished());
         drop(release);
-        exiting.await.unwrap();
-        assert!(finished.load(Ordering::Acquire));
+        eventually("exit after the released view", || {
+            finished.load(Ordering::Acquire)
+        })
+        .await;
     });
 }
 
@@ -1190,15 +1191,17 @@ fn stuck_view_callback_cannot_hold_the_quit_completion_past_its_deadline() {
             .unwrap();
         drop(view_input);
         eventually("blocked callback", || observed.try_recv().is_ok()).await;
-        let finished = AtomicBool::new(false);
+        let (finished, done) = std::sync::mpsc::channel();
         let started = Instant::now();
         crate::exit_flush::finish_service_exit_with_deadline(
             service.clone(),
-            || finished.store(true, Ordering::Release),
+            move || {
+                let _ = finished.send(());
+            },
             Duration::from_millis(40),
-        )
-        .await;
-        assert!(finished.load(Ordering::Acquire));
+        );
+        done.recv_timeout(Duration::from_secs(1))
+            .expect("quit completion at its deadline");
         assert!(started.elapsed() < Duration::from_secs(1));
         std::thread::sleep(injected_delay("ZERUS_TEST_SERVICE_RELEASE_DELAY_MS"));
         drop(release);

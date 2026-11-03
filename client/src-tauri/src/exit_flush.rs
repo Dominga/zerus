@@ -208,32 +208,68 @@ fn finish_exit(app: AppHandle, code: i32) {
     {
         // The draft handshake has ended. Join this GUI's owned proxy and view
         // drain off the event loop before requesting the final native exit.
-        tauri::async_runtime::spawn(finish_service_exit(service, move || app.exit(code)));
+        finish_service_exit(service, move || app.exit(code));
         return;
     }
     app.exit(code);
 }
 
 #[cfg(feature = "live")]
-pub(crate) async fn finish_service_exit(
+pub(crate) fn finish_service_exit(
     service: Arc<crate::desktop_service::Service>,
-    finish: impl FnOnce(),
+    finish: impl FnOnce() + Send + 'static,
 ) {
-    finish_service_exit_with_deadline(service, finish, std::time::Duration::from_secs(5)).await;
+    finish_service_exit_with_deadline(service, finish, Duration::from_secs(5));
 }
 
+/// Joins the service on the runtime and runs `finish` exactly once: when the
+/// join ends or at `wait`, whichever comes first. The deadline is its own
+/// thread: a view callback stalled inside catalog admission holds the snapshot
+/// lock, so async readers of that lock can occupy every runtime worker and no
+/// runtime timer fires until the callback returns (zerus-5wmh.66.3.31.11).
 #[cfg(feature = "live")]
-pub(crate) async fn finish_service_exit_with_deadline(
+pub(crate) fn finish_service_exit_with_deadline(
     service: Arc<crate::desktop_service::Service>,
-    finish: impl FnOnce(),
-    wait: std::time::Duration,
+    finish: impl FnOnce() + Send + 'static,
+    wait: Duration,
 ) {
-    match tokio::time::timeout(wait, service.join()).await {
-        Ok(Ok(())) => (),
-        Ok(Err(error)) => eprintln!("zerus-client: service shutdown: {error}"),
-        Err(_) => eprintln!("zerus-client: service shutdown exceeded the quit deadline"),
+    fn take<F>(finish: &Mutex<Option<F>>) -> Option<F> {
+        finish.lock().unwrap_or_else(PoisonError::into_inner).take()
     }
-    finish();
+    let finish = Arc::new(Mutex::new(Some(finish)));
+    // The join task drops `joined` when it ends, which wakes the deadline early.
+    let (joined, ended) = std::sync::mpsc::channel::<()>();
+    let expire = finish.clone();
+    let deadline = std::thread::Builder::new()
+        .name("zerus-quit-deadline".into())
+        .spawn(move || {
+            if ended.recv_timeout(wait) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+                if let Some(finish) = take(&expire) {
+                    eprintln!("zerus-client: service shutdown exceeded the quit deadline");
+                    finish();
+                }
+            }
+        });
+    // Without that thread, keep the runtime deadline rather than none at all.
+    let fallback = deadline
+        .inspect_err(|error| eprintln!("zerus-client: quit deadline thread: {error}"))
+        .is_err()
+        .then_some(wait);
+    tauri::async_runtime::spawn(async move {
+        let result = match fallback {
+            Some(wait) => tokio::time::timeout(wait, service.join()).await,
+            None => Ok(service.join().await),
+        };
+        drop(joined);
+        if let Some(finish) = take(&finish) {
+            match result {
+                Ok(Ok(())) => (),
+                Ok(Err(error)) => eprintln!("zerus-client: service shutdown: {error}"),
+                Err(_) => eprintln!("zerus-client: service shutdown exceeded the quit deadline"),
+            }
+            finish();
+        }
+    });
 }
 
 #[tauri::command]

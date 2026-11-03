@@ -23,7 +23,7 @@ impl Folder {
             .is_none());
     }
     fn prepare(&self, limit: u64) -> Prepared {
-        Prepared::open(&self.0, limit, NOW, &AtomicBool::new(false)).unwrap()
+        Prepared::open(&self.0, limit, NOW, &AtomicBool::new(false), false).unwrap()
     }
     fn index(&self) -> Value {
         serde_json::from_slice(&fs::read(self.0.join(INDEX)).unwrap()).unwrap()
@@ -305,7 +305,7 @@ fn a_future_or_oversized_index_is_never_rewritten() {
     ] {
         let folder = Folder::new();
         fs::write(folder.0.join(INDEX), &bytes).unwrap();
-        assert!(Prepared::open(&folder.0, 1, NOW, &AtomicBool::new(false)).is_err());
+        assert!(Prepared::open(&folder.0, 1, NOW, &AtomicBool::new(false), false).is_err());
         assert_eq!(fs::read(folder.0.join(INDEX)).unwrap(), bytes);
     }
 }

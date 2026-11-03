@@ -1,6 +1,6 @@
 //! Original Next bytes captured by their sole native owner BEFORE first
 //! service-mode load/normalization. Each source has a separate fixed historical
-//! boundary and private slot. Neither is a live checkpoint or effect authority;
+//! boundary and private slot. These are not live checkpoints or effect authority;
 //! Qt/Settings keep their existing current-source leases.
 use super::{sources, SourceError, SourceResult, SourceStream};
 use crate::fsx::preload::{self as disk, Stamp};
@@ -18,20 +18,23 @@ const RAW: usize = crate::creation::JOURNAL_LIMIT;
 const BOUNDARY: &str = "next-creations-before-first-load-v1";
 
 pub mod local_reads;
+pub mod worktree_cache;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Creations,
     LocalReads,
+    WorktreeCache,
 }
 impl Kind {
     fn boundary(self) -> &'static str {
         match self {
             Self::Creations => BOUNDARY,
             Self::LocalReads => "next-local-read-marks-before-first-load-v1",
+            Self::WorktreeCache => "next-worktree-cache-before-first-load-v1",
         }
     }
     fn from_boundary(boundary: &str) -> Option<Self> {
-        [Self::Creations, Self::LocalReads]
+        [Self::Creations, Self::LocalReads, Self::WorktreeCache]
             .into_iter()
             .find(|kind| kind.boundary() == boundary)
     }
@@ -39,24 +42,33 @@ impl Kind {
         match self {
             Self::Creations => "creation-preload-v1",
             Self::LocalReads => "local-read-preload-v1",
+            Self::WorktreeCache => "worktree-cache-preload-v1",
         }
     }
     fn leaf(self) -> &'static str {
         match self {
             Self::Creations => "creations.json",
             Self::LocalReads => "attention-marks.json",
+            Self::WorktreeCache => "worktree-snapshots.json",
         }
     }
     fn limit(self) -> usize {
         match self {
             Self::Creations => RAW,
-            Self::LocalReads => 16 << 20,
+            Self::LocalReads | Self::WorktreeCache => 16 << 20,
         }
     }
     fn source(self, bytes: &[u8]) -> SourceResult<SourceStream> {
         match self {
             Self::Creations => sources::creations(sources::Origin::Next, bytes),
             Self::LocalReads => sources::next_local_read_marks(bytes),
+            Self::WorktreeCache => sources::next_worktree_snapshots(bytes),
+        }
+    }
+    fn read_source(self, path: &Path) -> std::io::Result<Option<(Vec<u8>, Stamp)>> {
+        match self {
+            Self::WorktreeCache => disk::read_legacy_cache(path, self.limit()),
+            _ => disk::read_source(path, self.limit()),
         }
     }
     fn code(self, index: usize) -> &'static str {
@@ -86,7 +98,21 @@ impl Kind {
             "local_read_source_writer_unavailable",
             "local_read_source_owner_unavailable",
         ];
+        const CACHE: [&str; 11] = [
+            "worktree_cache_source_waiting",
+            "worktree_cache_source_not_applicable",
+            "worktree_cache_source_captured",
+            "worktree_cache_source_changed",
+            "worktree_cache_source_too_large",
+            "worktree_cache_source_unsupported",
+            "worktree_cache_source_data_directory",
+            "worktree_cache_source_private_slot",
+            "worktree_cache_source_unavailable",
+            "worktree_cache_source_writer_unavailable",
+            "worktree_cache_source_owner_unavailable",
+        ];
         match self {
+            Self::WorktreeCache => CACHE[index],
             Self::Creations => CREATION[index],
             Self::LocalReads => READS[index],
         }
@@ -180,6 +206,10 @@ impl Capture {
     /// Only native service-mode setup selects this fixed managed family.
     pub fn local_reads(data: PathBuf) -> Arc<Self> {
         Self::for_kind(data, Kind::LocalReads)
+    }
+    /// Only the native NewSession owner selects this fixed legacy cache source.
+    pub fn worktree_cache(data: PathBuf) -> Arc<Self> {
+        Self::for_kind(data, Kind::WorktreeCache)
     }
     fn for_kind(data: PathBuf, kind: Kind) -> Arc<Self> {
         Arc::new(Self {
@@ -285,8 +315,9 @@ impl Capture {
     pub fn retry_pending(&self) -> bool {
         self.retry.load(Ordering::Acquire)
     }
-    /// Called only on the ORIGINAL queue worker, before any legacy mutation.
-    /// I/O is finite (8 MiB raw, fixed metadata leaves, no listing or helper).
+    /// Called only on the ORIGINAL native source owner, before legacy mutation.
+    /// I/O is finite (source-specific 8/16 MiB raw cap and fixed metadata leaves;
+    /// no directory listing or helper).
     pub fn prepare(&self) -> SourceResult<Prepared> {
         let _operation = self
             .preparing
@@ -371,7 +402,7 @@ impl Capture {
         let plan_path = root.join("source.json");
         let previous = read_json::<Plan>(&plan_path)?.map(|(p, _)| p);
         let source_path = data.join(self.kind.leaf());
-        let source = disk::read_source(&source_path, self.kind.limit()).map_err(unreadable)?;
+        let source = self.kind.read_source(&source_path).map_err(unreadable)?;
         let (bytes, stamp) = match source {
             Some((b, s)) => (b, Some(s)),
             None => (Vec::new(), None),
@@ -408,7 +439,7 @@ impl Capture {
         };
         // Reopen the source before releasing its original worker fence. This
         // verifies the source object/stamp/hash, not a normalized projection.
-        let check = disk::read_source(&source_path, self.kind.limit()).map_err(unreadable)?;
+        let check = self.kind.read_source(&source_path).map_err(unreadable)?;
         if check.as_ref().map(|(_, s)| s) != plan.source.as_ref()
             || check
                 .as_ref()
@@ -605,12 +636,14 @@ impl Snapshot {
                 family: match self.kind {
                     Kind::Creations => "next-creations-preload-provenance",
                     Kind::LocalReads => "next-local-read-marks-preload-provenance",
+                    Kind::WorktreeCache => "next-worktree-cache-preload-provenance",
                 }
                 .into(),
                 schema: 1,
                 format: match self.kind {
                     Kind::Creations => "creation-preload-provenance-v1",
                     Kind::LocalReads => "local-read-preload-provenance-v1",
+                    Kind::WorktreeCache => "worktree-cache-preload-provenance-v1",
                 }
                 .into(),
                 sha256: hash,

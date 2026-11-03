@@ -36,6 +36,9 @@ impl Fixture {
         let report = Report::new(Inputs {
             creations: zerus_client_core::migration::preload::Capture::new(root.clone()),
             local_reads: zerus_client_core::migration::preload::Capture::local_reads(root.clone()),
+            worktree_cache: zerus_client_core::migration::preload::Capture::worktree_cache(
+                root.clone(),
+            ),
             // Synthetic roots only: never this computer's Qt or dev stores.
             drafts: Arc::new(zerus_client_core::migration::draft_preload::Capture::new(
                 root.clone(),

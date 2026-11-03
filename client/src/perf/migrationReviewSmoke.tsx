@@ -46,6 +46,12 @@ async function run() {
   desktopService.apply({ ...state, retained_source_import: { ...report, creations_report: { ...report, code: "creations_import_original_result_unconfirmed", phase: "unknown" } } });
   await settle();
   check(dialog?.textContent?.includes("retained_import_qt_unavailable") && dialog?.textContent?.includes("creations_import_original_result_unconfirmed"), "one report masked the other report's reason");
+  desktopService.apply({ ...state, retained_source_import: { ...report, creations_report: { ...report, code: "creations_import_before_record", phase: "before_record" } } });
+  await settle();
+  check(dialog?.textContent?.includes("not sent because local preparation failed") && dialog?.textContent?.includes("retained_import_qt_unavailable"), "before_record lost its definitely-unsent reason or masked the Qt reason");
+  desktopService.apply({ ...state, retained_source_import: { ...report, creations_report: { ...report, code: "creations_import_before_record", phase: "unknown" } } });
+  await settle();
+  check(!dialog?.textContent?.includes("not sent because local preparation failed") && dialog?.textContent?.includes("checks the original report"), "a stale preparation code relabeled unknown publication");
   dialog?.dispatchEvent(new Event("cancel", { cancelable: true })); await settle(); await settle();
   check(!root.querySelector("dialog") && document.activeElement === review, "Escape/cancel did not close and restore focus");
   check(calls === 0 && desktopService.ready("fleet"), "Review or dismissal changed native state");

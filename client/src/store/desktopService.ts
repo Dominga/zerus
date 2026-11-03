@@ -85,12 +85,15 @@ export function retainedSourceDetails(state: DesktopService | undefined): Migrat
     details.settings = { reason, next, code, phase: report.phase };
   const creations = report.creations_report;
   if (creations?.required) {
-    if (["creations_import_original_result_unconfirmed", "creations_import_result_unavailable"].includes(creations.code)) {
+    if (creations.phase === "unknown" || ["creations_import_original_result_unconfirmed", "creations_import_result_unavailable"].includes(creations.code)) {
       reason = tr("The original migration report result is unconfirmed.");
       next = tr("Retry checks the original report result. It does not publish another copy of an unconfirmed report.");
     } else if (creations.running) {
       reason = tr("Preparing the saved creation report. Your sessions remain available.");
       next = tr("Your sessions remain available while the report is prepared.");
+    } else if (creations.phase === "before_record" && creations.code === "creations_import_before_record") {
+      reason = tr("The saved creation report was not sent because local preparation failed.");
+      next = tr("Check access to the original journal and the Zerus data folder, then use Retry. The original report identity is preserved.");
     } else if (creations.complete) {
       reason = tr("The migration report has been saved for review.");
       next = tr("A saved report is historical evidence; it does not grant background access.");

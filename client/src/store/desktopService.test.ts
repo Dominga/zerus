@@ -37,6 +37,22 @@ describe("desktop service presentation", () => {
     expect(creationOnly.settings).toBeUndefined();
     expect(creationOnly.creations?.code).toBe("creations_import_original_result_unconfirmed");
   });
+  it("separates definitely-unsent creation preparation from unknown publication", () => {
+    const settings = { required: true, complete: false, running: false, code: "retained_import_qt_unavailable", phase: null };
+    const creation = { ...settings, code: "creations_import_before_record", phase: "before_record" };
+    const view = (phase: string) => serviceView({ retained_source_import: { ...settings, creations_report: { ...creation, phase } } });
+    const unsent = retainedSourceDetails(view("before_record"))!;
+    expect(unsent.settings?.code).toBe("retained_import_qt_unavailable");
+    expect(unsent.creations?.reason).toContain("not sent because local preparation failed");
+    expect(unsent.creations?.next).toContain("then use Retry");
+    expect(unsent.creations?.phase).toBe("before_record");
+    expect(retainedSourceNotice(view("before_record"))).toContain("deferred");
+    // A code alone cannot turn an unknown publication into a safe resend.
+    const unknown = retainedSourceDetails(view("unknown"))!.creations!;
+    expect(unknown.reason).toContain("unconfirmed");
+    expect(unknown.next).toContain("checks the original report");
+    expect(unknown.reason).not.toContain("not sent");
+  });
   it("shows deferred or unconfirmed migration without changing connected readiness", () => {
     const report = { required: true, complete: false, running: false, code: "retained_import_handoff_busy", phase: "not_committed" };
     const service = createDesktopService();

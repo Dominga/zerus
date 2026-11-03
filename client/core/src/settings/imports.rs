@@ -18,7 +18,12 @@ const FAMILIES: &[&str] = &[
     "window-geometry",
     "session-splitter",
     "project-folder-splitter",
+    "inspector-panel",
 ];
+
+/// Qt's inspector tabs in their QTabWidget order (SessionsWindow.cpp:1375-1439),
+/// which Next's side panel keeps.
+const INSPECTOR_TABS: [&str; 4] = ["plan", "details", "worktrees", "tasks"];
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -261,6 +266,10 @@ fn matches(family: &str, key: &str) -> bool {
         "window-geometry" => key == "sessions/geometry",
         "session-splitter" => key == "workspace/splitter",
         "project-folder-splitter" => key == "workspace/projectFolderSplit",
+        "inspector-panel" => matches!(
+            key,
+            "workspace/inspectorVisible" | "workspace/inspectorWidth" | "workspace/inspectorTab"
+        ),
         _ => false,
     }
 }
@@ -269,6 +278,7 @@ fn target(key: &str) -> &str {
     match key {
         "sessions/geometry" => super::geometry::KEY,
         "workspace/splitter" => "workspace/sessionsWidth",
+        "workspace/inspectorVisible" => "workspace/inspectorOpen",
         _ => key,
     }
 }
@@ -289,6 +299,26 @@ fn converted(key: &str, value: &QtValue) -> Result<Value, &'static str> {
             super::find(target(key)).unwrap().kind,
             Some(&json!(size)),
         ));
+    }
+    // The side panel: shown or hidden, its width, and its tab by Qt's index,
+    // which Qt bounds to the tabs it has (SessionsWindow.cpp:1495-1500).
+    if key == "workspace/inspectorVisible" {
+        return super::checked_qt_flag(value)
+            .map(Value::Bool)
+            .ok_or("invalid preference flag");
+    }
+    if key == "workspace/inspectorWidth" {
+        let kind = super::find(key).ok_or("invalid preference identity")?.kind;
+        return match value.to_long() {
+            (_, true) => Ok(super::from_qt(kind, value)),
+            _ => Err("invalid inspector width"),
+        };
+    }
+    if key == "workspace/inspectorTab" {
+        return match value.to_long() {
+            (index, true) => Ok(json!(INSPECTOR_TABS[index.clamp(0, 3) as usize])),
+            _ => Err("invalid inspector tab"),
+        };
     }
     let kind = super::find(key).ok_or("invalid preference identity")?.kind;
     if key.starts_with("machines/colors/") {

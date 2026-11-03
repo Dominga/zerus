@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createDesktopService, createServiceApprovalIntent, pendingReadNotice, retainedSourceNotice, ownershipNotice, createOwnershipActions } from "./desktopService";
+import { createDesktopService, createServiceApprovalIntent, pendingReadNotice, retainedSourceNotice, retainedSourceDetails, ownershipNotice, createOwnershipActions } from "./desktopService";
 import { createApprovalOptIn } from "../ui/screens/settings/approval-opt-in";
 import { emptyBatch, isEmptyBatch, type DesktopService, type NotificationOwnership } from "../types";
 import { normalize } from "../bridge";
@@ -9,6 +9,34 @@ export const serviceView = (patch: Partial<DesktopService> = {}): DesktopService
   automatic_approvals: null, details_available: false, code: "background_unready", ...patch,
 });
 describe("desktop service presentation", () => {
+  it("reviews the actual migration reason and gives a read-only next step", () => {
+    const report = { required: true, complete: false, running: false, code: "retained_import_qt_unavailable", phase: null };
+    const state = serviceView({ retained_source_import: report, background: { fleet: { ready: true, code: "ready" } } });
+    const before = structuredClone(state);
+    const details = retainedSourceDetails(state)!.settings!;
+    expect(details.reason).toContain("Qt settings file");
+    expect(details.next).toContain("other users cannot write");
+    expect(details.code).toBe(report.code);
+    expect(details.phase).toBeNull();
+    expect(state).toEqual(before);
+    expect(retainedSourceDetails(undefined)).toBeUndefined();
+    for (const code of ["retained_import_result_unavailable", "retained_import_original_result_unconfirmed"]) {
+      const unknown = retainedSourceDetails(serviceView({ retained_source_import: { ...report, code, phase: "unknown" } }))!.settings!;
+      expect(unknown.reason).toContain("unconfirmed");
+      expect(unknown.next).toContain("checks the original report");
+      expect(unknown.code).toBe(code);
+    }
+    const both = retainedSourceDetails(serviceView({ retained_source_import: { ...report, creations_capture: { code: "creation_source_private_slot", paused: true, capture_id: null }, creations_report: { ...report, code: "creations_import_original_result_unconfirmed", phase: "unknown" } } }))!;
+    const creation = both.capture!;
+    expect(creation.reason).toContain("0700");
+    expect(creation.code).toBe("creation_source_private_slot");
+    expect(both.settings?.code).toBe("retained_import_qt_unavailable");
+    expect(both.creations?.code).toBe("creations_import_original_result_unconfirmed");
+    expect(both.creations?.next).toContain("checks the original report");
+    const creationOnly = retainedSourceDetails(serviceView({ retained_source_import: { ...report, required: false, code: "retained_import_staged", creations_report: { ...report, code: "creations_import_original_result_unconfirmed", phase: "unknown" } } }))!;
+    expect(creationOnly.settings).toBeUndefined();
+    expect(creationOnly.creations?.code).toBe("creations_import_original_result_unconfirmed");
+  });
   it("shows deferred or unconfirmed migration without changing connected readiness", () => {
     const report = { required: true, complete: false, running: false, code: "retained_import_handoff_busy", phase: "not_committed" };
     const service = createDesktopService();

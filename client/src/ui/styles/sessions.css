@@ -85,11 +85,6 @@
   .scard.compact[data-emphasis]::before { top: 4px; bottom: 4px; }
   /* While a card and its compact row morph into each other the card clips its lines. */
   .scard.morph { overflow: hidden; }
-  /* The compact-row morph's ease-out (cubic-bezier(.33, 1, .68, 1)) completes
-     its 220 ms glide at 22% of a 1 s timeline and holds the final transform, so
-     the transition never ends by itself: removing .morphing at 260 ms ends it
-     from the main thread with the final style (zerus-bkbb). */
-  .sp-scroll.morphing .vrow { transition: transform 1000ms linear(0, 0.1436 1.1%, 0.2721 2.2%, 0.3866 3.3%, 0.488 4.4%, 0.5773 5.5%, 0.6555 6.6%, 0.7232 7.7%, 0.7814 8.8%, 0.8308 9.9%, 0.8722 11%, 0.9062 12.1%, 0.9337 13.2%, 0.9552 14.3%, 0.9716 15.4%, 0.9834 16.5%, 0.9914 17.6%, 0.9963 18.7%, 0.9989 19.8%, 0.9999 20.9%, 1 22%, 1 100%); }
   .scard[data-emphasis="attention"], .scard[data-emphasis="unread"] { --edge: var(--z-list-edge-attention); }
   .scard[data-emphasis="error"] { --edge: var(--z-list-edge-error); }
   .scard[data-emphasis="draft"] { --edge: var(--z-list-edge-draft); }

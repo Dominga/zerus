@@ -83,27 +83,42 @@ const openMenu = (e: MouseEvent, items: MenuEntry[], sessionKey?: string) => {
 // Card <-> compact row. The swap is instant in Qt; here it morphs in 220 ms so
 // the title never jumps: the card's height eases to the new size, the title and
 // badges glide from their old place (FLIP, transform only), the detail lines
-// fade, and the rows below slide with the same timing.
-// No morph animation ends by itself (zerus-bkbb): an accelerated animation that
-// finishes on its own hands its layer back to the last committed (pre-morph)
-// transform until the next commit, and vblank-paced 144 Hz WebKitGTK showed
-// that frame: the row and every row below at their expanded places. Each one
-// holds its final value; endMorph cancels them together on the main thread, in
-// one commit with the final style. The rows' CSS glide holds the same way
-// (sessions.css: .sp-scroll.morphing .vrow).
+// fade, and the rows below slide with the same timing (FLIP on the independent
+// translate property, so the virtualizer's own transform stays free).
+// No morph animation finishes by itself (zerus-bkbb). An accelerated animation
+// that leaves its active phase, even one filling forwards, hands its layer back
+// to the last committed (pre-morph) transform until the next main-thread
+// commit, and vblank-paced 144 Hz WebKitGTK presented that frame: the row and
+// every row below at their expanded places. Each animation runs its motion and
+// then holds the end value while still active; endMorph cancels them all on the
+// main thread, in one commit with the final style. Offset keyframes with a
+// cubic-bezier easing keep to the Safari 16 / macOS 14.0 WKWebView floor (CSS
+// linear() needs Safari 17.2).
 const MORPH = { duration: 220, easing: "cubic-bezier(.33, 1, .68, 1)" } as const;
-const HELD = { ...MORPH, fill: "forwards" } as const;
+/** How long every morph animation stays active: well past endMorph. */
+const HOLD = 1000;
 const FLIP = [".sc-title", ".sbadge", ".agent-badge", ".sc-mute"];
 const DETAIL_LINES = ".sc-l2, .sc-l3, .sc-foot";
-const [morphing, setMorphing] = createSignal(false);
 let morphTimer: number | undefined;
 let held: Animation[] = [];
+/** The rows' glides, retargeted (not stacked) when another morph starts. */
+let glides: Animation[] = [];
+/** Faded copies of a collapsing card's detail lines, removed by endMorph. */
+let fading: HTMLElement[] = [];
+
+/** `from` until `start` ms, eased to `to` over `span` ms, then `to` while active. */
+function hold(el: Element, from: Keyframe, to: Keyframe, start = 0, span: number = MORPH.duration, easing: string = MORPH.easing): Animation {
+  const head: Keyframe[] = start > 0 ? [{ ...from, offset: 0 }, { ...from, offset: start / HOLD, easing }] : [{ ...from, offset: 0, easing }];
+  return el.animate([...head, { ...to, offset: (start + span) / HOLD }, { ...to, offset: 1 }], { duration: HOLD, fill: "both" });
+}
 
 function endMorph() {
-  for (const a of held) a.cancel();
+  for (const a of [...held, ...glides]) a.cancel();
+  for (const g of fading) g.remove();
   held = [];
+  glides = [];
+  fading = [];
   for (const card of document.querySelectorAll(".sp-scroll .scard.morph")) card.classList.remove("morph");
-  setMorphing(false);
 }
 
 function setRowCompact(key: string, compact: boolean) {
@@ -114,29 +129,38 @@ function setRowCompact(key: string, compact: boolean) {
   const before = FLIP.map((sel) => row.querySelector(sel)?.getBoundingClientRect());
   const from = card.getBoundingClientRect().height;
   const ghosts = compact ? [...card.querySelectorAll<HTMLElement>(DETAIL_LINES)].map((n) => n.cloneNode(true) as HTMLElement) : [];
+  // Where every row is seen now, an earlier glide included; then that glide
+  // gives way so the new one starts from the same place.
+  const seen = new Map([...document.querySelectorAll<HTMLElement>(".sp-scroll .vrow")].map((el) => [el, el.getBoundingClientRect().top]));
+  for (const a of glides) a.cancel();
+  glides = [];
   clearTimeout(morphTimer);
-  setMorphing(true);
-  setCompactRows(key, compact); // Solid updates the row synchronously.
+  setCompactRows(key, compact); // Solid updates the rows synchronously.
+  for (const [el, top] of seen) {
+    const dy = top - el.getBoundingClientRect().top;
+    if (el.isConnected && Math.abs(dy) > 0.5) glides.push(hold(el, { translate: `0 ${dy}px` }, { translate: "0 0" }));
+  }
   const next = row.querySelector<HTMLElement>(".scard");
   if (next) {
     const to = next.getBoundingClientRect().height;
     next.classList.add("morph");
-    held.push(next.animate([{ height: `${from}px` }, { height: `${to}px` }], HELD));
+    held.push(hold(next, { height: `${from}px` }, { height: `${to}px` }));
     FLIP.forEach((sel, i) => {
       const el = row.querySelector<HTMLElement>(sel), a = before[i];
       if (!el || !a) return;
       const b = el.getBoundingClientRect();
-      if (a.left !== b.left || a.top !== b.top) held.push(el.animate([{ transform: `translate(${a.left - b.left}px, ${a.top - b.top}px)` }, { transform: "none" }], HELD));
+      if (a.left !== b.left || a.top !== b.top) held.push(hold(el, { transform: `translate(${a.left - b.left}px, ${a.top - b.top}px)` }, { transform: "none" }));
     });
     if (compact) {
       for (const g of ghosts) {
         g.setAttribute("aria-hidden", "true");
         g.style.pointerEvents = "none";
         next.append(g);
-        g.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 120, easing: "ease-out", fill: "forwards" }).finished.catch(() => {}).finally(() => g.remove());
+        held.push(hold(g, { opacity: 1 }, { opacity: 0 }, 0, 120, "ease-out"));
+        fading.push(g);
       }
     } else {
-      next.querySelectorAll<HTMLElement>(DETAIL_LINES).forEach((n) => held.push(n.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, delay: 60, easing: "ease-out", fill: "both" })));
+      next.querySelectorAll<HTMLElement>(DETAIL_LINES).forEach((n) => held.push(hold(n, { opacity: 0 }, { opacity: 1 }, 60, 160, "ease-out")));
     }
   }
   morphTimer = window.setTimeout(endMorph, MORPH.duration + 40);
@@ -619,7 +643,7 @@ export function SessionList() {
         <Show when={stateFilter() === "archived"}><ArchiveBar contentSearch={!!search().trim()} /></Show>
         <Show when={search().trim()} fallback={<>
           <Show when={catalog.order.length > 0 || creationCount() > 0 || stateFilter() === "archived"} fallback={<ListPlaceholder />}>
-            <div class="sp-scroll" classList={{ morphing: morphing(), organizing: !!dragItem() }} ref={list.ref} tabindex="0" onKeyDown={onKey} role="tree"
+            <div class="sp-scroll" classList={{ organizing: !!dragItem() }} ref={list.ref} tabindex="0" onKeyDown={onKey} role="tree"
               onDragOver={(e) => organizeOver(e, list)} onDrop={(e) => organizeDrop(e)} onDragLeave={(e) => { if (!(e.currentTarget as Element).contains(e.relatedTarget as Node)) setDrop(undefined); }}
               aria-label={tr("Agent sessions; Ctrl-click to select several; drag to organize, left/right to collapse or expand a group")}>
               <Show when={list.rows().length} fallback={<NoMatches />}>

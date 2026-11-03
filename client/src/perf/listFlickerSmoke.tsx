@@ -56,7 +56,8 @@ function snapshot() {
     const badge = el.querySelector(".sbadge");
     const style = getComputedStyle(el);
     out.set(key, { node: el, top: el.getBoundingClientRect().top,
-      look: `${badge?.className ?? ""}|${badge?.textContent ?? ""}|${style.opacity}|${el.querySelector(".card,.rowhit")?.className ?? ""}` });
+      // The Working clock ticks every second; only its caption is the row's look.
+      look: `${badge?.className ?? ""}|${(badge?.textContent ?? "").replace(/\s*\([^)]*\)$/, "")}|${style.opacity}|${el.querySelector(".card,.rowhit")?.className ?? ""}` });
   }
   return out;
 }

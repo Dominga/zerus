@@ -68,9 +68,11 @@ async function collapse(name: string, sameRow: boolean, morphs: number[]) {
   };
   requestAnimationFrame(busy);
   let last = layout(), lowest = last, shrinking = false, taller = 0, frames = 0, running = true;
+  const start = last.next, nexts = new Set<number>();
   const sample = () => {
     const now = layout();
     frames++;
+    nexts.add(Math.round(now.next));
     if (now.height < last.height - 0.5) shrinking = true;
     if (shrinking && (now.height > lowest.height + 0.5 || now.next > lowest.next + 0.5)) taller++;
     lowest = { height: Math.min(lowest.height, now.height), next: Math.min(lowest.next, now.next) };
@@ -85,8 +87,11 @@ async function collapse(name: string, sameRow: boolean, morphs: number[]) {
   running = false;
   await frame();
   const compact = !!vrow().querySelector(".scard.compact");
-  cases.push({ name, frames, taller, compact, height: Math.round(last.height), next: Math.round(last.next) });
+  // The rows below glide: several laid-out places between start and end.
+  const glided = [...nexts].filter((y) => y < Math.round(start) - 1 && y > Math.round(last.next) + 1).length;
+  cases.push({ name, frames, taller, glided, compact, height: Math.round(last.height), next: Math.round(last.next) });
   if (!compact) failures.push(`${name}: the row did not collapse`);
+  if (glided < 3) failures.push(`${name}: the rows below snapped (${glided} intermediate places)`);
   if (taller) failures.push(`${name}: ${taller} laid-out frames were taller after the collapse began`);
   toggle(); // Expand again (also a morph) before the next case.
   await sleep(1000);

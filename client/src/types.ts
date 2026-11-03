@@ -298,6 +298,9 @@ export interface ActivityEvent {
   voice?: Record<string, unknown>;
   /** Codex's question replies of a user event, parsed in Rust (R7's annotate_replies). */
   question_replies?: Reply[];
+  /** A fork's row from the session it began from (that session's journal name):
+   * read-only history before the fork (zerus-b4qk). */
+  inherited_from?: string;
   [field: string]: unknown;
 }
 

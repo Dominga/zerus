@@ -1965,6 +1965,19 @@ the fork right after its original and opens it, once its inspection names the
 source conversation as its parent, even before a Codex fork has a conversation ID
 of its own. With an hgs that predates the parent field it waits for that ID.
 
+A fork's Activity first shows the history it began from, read-only: each source
+session's rows up to the moment of the fork, under an "Inherited from" label
+naming that session, then a "Forked here" marker and the fork's own activity.
+A fork records its sources when it starts (up to four forks back, so a fork of a
+fork shows both); a fork made before this records nothing, so its first
+inspection finds its source's rows up to its creation time and before its own
+first row, and saves that. Each Activity page reads at most one page from each
+of these ranges, however long a source is. Inherited rows are muted and never act as the
+fork's own: they open no attachments, and search finds them only in their source.
+A provider that copies the history into the fork's own transcript adds nothing
+twice, because the fork's messages dated before its creation are not shown. The
+source session is never changed. Rows the journal no longer keeps are not shown.
+
 Codex may defer `SessionStart` until the fork's first message. Activity enables
 Send once Zerus verifies that the supervised process owns an independent child
 history linked to the source conversation and its native composer is ready.
@@ -2599,7 +2612,10 @@ interruption or failure keeps it. A folder that Git no longer tracks but that
 still exists then appears in the repository review (and in a review targeted at
 that worktree, such as the cleanup after Terminate) as a **leftover**
 (`worktree-leftovers-v1`), with a fresh bounded listing of the remaining files,
-the retained branch and current processes or sessions. The cleanup after
+the retained branch and current processes or sessions. Size, manifest and deletion
+blockers share one no-follow walk, bounded by two seconds and 200,000 entries,
+including queued children. Unreadable or protected subtrees and exhausted bounds
+leave `size_complete` false and refuse deletion. The cleanup after
 Terminate keeps such a folder with "Git no longer tracks this folder, but files
 remain" instead of an unverified-folder error. A targeted review matches the
 worktree's whole path, as given or resolved through links, never a prefix. The
@@ -2619,7 +2635,10 @@ explicit confirmation and the fingerprint of the fresh review the owner saw. It
 checks everything again under the repository and session locks and refuses
 saved or running sessions, other running programs, nested Git repositories,
 special files, folders on another filesystem or owned by another user, and an
-incomplete listing. The narrow manual exception for programs whose folders
+incomplete listing. A failed saved-session inventory (including an unreadable or
+malformed binding) is an explicit blocker, never evidence that no session uses
+the folder. The process-only manual exception cannot override it.
+The narrow manual exception for programs whose folders
 cannot be read works as it does for worktree removal: it is bound to the exact
 leftover path and its fresh-review fingerprint and expires after five minutes,
 the known-use, session, ownership and file protections still apply, and
@@ -2632,7 +2651,21 @@ changes. A filesystem whose mount cannot be identified is refused. The reviewed
 folder itself is part of the confirmed fingerprint (device, inode and mount): it
 is reopened through its parent without following links (folders above it need
 only search permission: Linux opens them as paths and macOS for search), and
-completion is confirmed through that parent. Only after those checks does deletion grant the
+completion is confirmed through that parent. The reviewed root stays open and
+its name is checked against that inode again immediately before final removal.
+This rejects an observable replacement and prevents reuse of its inode number.
+The check and removal are separate: neither [Linux `unlinkat`](https://man7.org/linux/man-pages/man2/unlink.2.html)
+nor [macOS `unlinkat`](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/vfs/vfs_syscalls.c)
+provides an expected-inode argument or directory removal through the open root
+itself. An empty directory swapped into the name between the check and removal
+can still be removed. No userspace traversal enters that replacement. On Linux,
+directory removal refuses a nonempty replacement. On macOS, [XNU may clean up AppleDouble entries and retry directory removal](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/vfs/vfs_syscalls.c#L10670)
+after `ENOTEMPTY`: its cleanup
+can unlink ordinary files whose names start with `._`, such as `._payload`.
+A late macOS replacement therefore has no empty-only guarantee; its unreviewed
+`._*` files may be removed by the kernel. Renaming the path into quarantine
+would instead move an unreviewed folder and cannot guarantee race-free
+restoration, so it does not supply the missing inode-bound primitive. Only after those checks does deletion grant the
 owner write access to their own folders inside the reviewed tree, which is what
 blocked Git; it never touches the branch. If it
 stops partway, the record stays with the reason and the deletion is never

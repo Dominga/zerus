@@ -12,6 +12,8 @@ vi.hoisted(() => {
   vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }));
 });
 vi.mock("../../bridge", () => ({
+  // The session entry points also initialize the bounded creation-card store.
+  onCreations: vi.fn(async () => () => {}), creationsView: vi.fn(async () => []),
   inTauri: () => false,
   // The native workspace store, loaded by the session entry points.
   nativeUiOpen: vi.fn(), nativeUiRetire: vi.fn(async () => {}), nativeUiVisible: vi.fn(async () => {}),

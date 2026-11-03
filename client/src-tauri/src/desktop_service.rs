@@ -375,6 +375,14 @@ impl Service {
                 shared.publish_notification_controls();
             }
         }));
+        if let Some(report) = &shared.retained_import {
+            let weak = Arc::downgrade(&shared);
+            report.hook_creations(Arc::new(move || {
+                if let Some(shared) = weak.upgrade() {
+                    shared.publish_retained_import();
+                }
+            }));
+        }
         let (control, receiver) = watch::channel(Control::Retry(0));
         let (finished, join) = oneshot::channel();
         let service = Arc::new(Self {

@@ -25,6 +25,10 @@ export function pendingReadNotice(state: DesktopService | undefined): string {
 
 export function retainedSourceNotice(state: DesktopService | undefined): string {
   const report = state?.retained_source_import;
+  if (report?.creations_capture?.paused && report.creations_capture.code === "creation_source_private_slot") return tr("Session creation is paused. Check that the journal archive folder is available and private (0700 on Unix), then retry.");
+  if (report?.creations_capture?.paused && report.creations_capture.code === "creation_source_data_directory") return tr("Session creation is paused. Check that the desktop data folder is available and owned by your user, then retry.");
+  if (report?.creations_capture?.paused && report.creations_capture.code === "creation_source_unavailable") return tr("Session creation is paused. Check journal and archive access, ownership and private file permissions (0600 on Unix); review retained partial files before retrying.");
+  if (report?.creations_capture?.paused) return tr("Session creation is paused while its original journal is preserved. Review migration status or retry.");
   if (!report?.required || !report.code || report.code === "retained_import_staged") return "";
   if (report.running) return tr("Preparing the migration report. Your sessions remain available.");
   if (report.code === "retained_import_handoff_busy") return tr("The migration report is deferred while background work is running.");

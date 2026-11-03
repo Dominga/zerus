@@ -2,6 +2,7 @@
 //! attention marks ([`crate::marks`]), the organization's pending edits
 //! ([`crate::swarm::draft`]) and the files the app saves for its owner.
 pub(crate) mod checkpoint;
+pub(crate) mod preload;
 #[cfg(windows)]
 pub(crate) mod windows;
 

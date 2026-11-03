@@ -1,6 +1,6 @@
 # Service-owned creation worktree
 
-The second creation effect owned by the desktop actor is the local POSIX
+The second creation effect owned by the desktop actor is the local Linux
 worktree checkout that the native creation reducer requests after its catalog
 step. It follows the [creation clone](desktop-creation-clone.md) leaf. Its own
 kind, binding, ledger and result stay separate from clone and from task-start
@@ -8,16 +8,46 @@ reconciliation. G1 agreed this per-kind split on 2026-11-03.
 
 ## Current state
 
-The closed `CreationWorktree` frontend request and its wire types exist in
-`client/core/src/desktop/creation_worktree.rs`. Native Service mode and the
-exact configuration authenticate the request, as they do for clone. Generic
-`into_request` refuses it, and it has its own ordering lane. **No service
-executes it yet.** The service answers an authenticated request with
-`creation_worktree_unsupported` and does not advertise
-`Desktop creation worktree ABI: desktop-creation-worktree-v1`. The client keeps
-its existing direct `worktrees create --receipt` path. The actor, its ledger and
-the client service path are separate follow-up changes. The service path stays
-default-off (desktop-service mode only) until acceptance.
+The closed `CreationWorktree` frontend request and its wire types live in
+`client/core/src/desktop/creation_worktree.rs`. As for clone, native Service
+mode and the exact configuration authenticate it. Generic `into_request`
+refuses it, and it has its own ordering lane. On Linux the service advertises
+`Desktop creation worktree ABI: desktop-creation-worktree-v1`, and the
+admitted desktop actor executes it. The owned checkout binds Git to the pinned
+common directory through `/proc/self/fd`, which macOS lacks, so macOS and
+Windows answer `creation_worktree_unsupported` before admission and advertise
+nothing. The client keeps its
+existing direct `worktrees create --receipt` path until a separate
+default-off service path lands.
+
+## Actor
+
+The actor (`src/desktop/creation_worktree`) mirrors the clone leaf. It shares
+clone's machine-source and lease guard; its consent, ledger, ticket and result
+are worktree-specific.
+
+- **Admission.** The opaque native permit is rechecked after `BEGIN
+  IMMEDIATE`, together with the current writer epoch, the local native machine
+  source, the original service owner and the handoff exclusion. Admission then
+  durably retains the immutable source, the fixed plan and the consent binding.
+  The one live consent value exists only in the running actor. A restarted or
+  imported original becomes Unknown and is never executed.
+- **Custody and steps.** One worker commits the original inherited-lock
+  custody with its exact ticket before any effect. It then runs the owned
+  effect, `worktree_requests::create_owned`. Each step needs a fresh actor
+  transaction with the same lease, consent, ticket and next step: Reserve,
+  Destination, Checkout, Verify, Track, Own.
+- **Settlement.** The result settles only after a read-only worker observes
+  the original custody lock released. A lost result is read from the original
+  CLI receipt and is never re-run.
+- **Storage.** The ledger has its own tables, `desktop_creation_worktrees`
+  and `desktop_creation_worktree_budget`, added at Store schema 23 by merge
+  order. The bounds are the same as clone's: 4096 IDs, 16 MiB, 32 unsettled
+  charges and one effect worker.
+- **Accounting.** Its undrained charges join `operation_undrained` and the
+  takeover, revoke, startup, recovery and status accounting.
+- **Lookup.** `creation_worktree_result` is the bounded read-only
+  original-result lookup.
 
 ## Exact input
 
@@ -124,6 +154,17 @@ drain, and only for a `created` or `failed` receipt whose request ID and
 request fingerprint match the plan. A created receipt then passes the same
 `worktrees::created` check as the direct path, and its path must equal the
 destination. Queued, running and Unknown never mean success or failure.
+
+A result carries a bounded projection of that receipt (`project`): only the
+fields the reducer checks (request ID, fingerprint, status, path, common
+directory, branch, `effects_started`, `detail` and `resource_error`), with each
+free text bounded to 2 KiB of encoded JSON. The full receipt, including its
+ownership record, stays in the CLI receipt store. Admission (`Intent::verify`)
+refuses, before anything starts, a plan whose projection with its own paths and
+the longest texts would exceed the 16 KiB result bound. If an original still
+cannot be represented, its result is Unknown with
+`worktree_result_unrepresentable`. Storing a result therefore never fails on
+size, and a physically released charge always drains.
 
 `Query` and `Lookup` form a bounded read-only original-result lookup bound to
 the fresh configuration and service epoch. A missing or Unknown result never

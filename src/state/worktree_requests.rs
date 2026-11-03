@@ -92,6 +92,14 @@ fn read(id: &str) -> Result<Option<Value>> {
     Ok(Some(value))
 }
 
+/// The original receipt for the worktree actor's read-only recovery. A
+/// missing or unreadable receipt never authorizes another request.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn original_receipt(id: &str) -> Result<Option<Value>> {
+    token(&["--request-id".into(), id.into()])?;
+    read(id)
+}
+
 fn lock(id: &str, create: bool) -> Result<File> {
     let mut options = OpenOptions::new();
     options

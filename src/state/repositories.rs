@@ -52,6 +52,15 @@ thread_local! {
     pub(in crate::state) static OWNED_GIT_DIRECT: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
 }
+/// Test-only: `run` with this thread's owned Git commands run directly, for
+/// actor tests of the real owned executor inside a private probe.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn with_direct_owned_git<T>(run: impl FnOnce() -> T) -> T {
+    OWNED_GIT_DIRECT.with(|direct| direct.set(true));
+    let result = run();
+    OWNED_GIT_DIRECT.with(|direct| direct.set(false));
+    result
+}
 /// Git's own `GIT_DIR` and `GIT_COMMON_DIR` for one owned command, as
 /// descriptors its process holds (`/proc/self/fd/N`), never as pathnames.
 #[derive(Clone, Copy, Default)]

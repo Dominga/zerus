@@ -97,6 +97,12 @@ mod launch_observation;
 pub(crate) use launch_observation::observe as observe_launch;
 mod worktrees;
 mod worktree_requests;
+// The creation worktree actor's only entry into the owned effect.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use {
+    worktree_requests::{create_owned as create_worktree_owned, original_receipt as worktree_request_receipt},
+    worktrees::{Control as WorktreeControl, Step as WorktreeStep},
+};
 mod worktree_cleanup;
 mod worktree_caches;
 mod worktree_inspection;

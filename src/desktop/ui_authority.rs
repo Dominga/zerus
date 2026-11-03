@@ -302,6 +302,18 @@ impl Validated {
         };
         Ok(*intent)
     }
+    /// Only the worktree actor calls this after BEGIN IMMEDIATE. Cached native
+    /// Service mode was bound to this exact original request during admission.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn creation_worktree(
+        self,
+    ) -> Result<zerus_client_core::desktop::creation_worktree::Intent> {
+        self.check()?;
+        let Request::CreationWorktree { intent } = self.0 else {
+            anyhow::bail!("not a creation worktree");
+        };
+        Ok(*intent)
+    }
     /// Only the per-kind actor may consume this after BEGIN IMMEDIATE, then
     /// recheck its actual current source/lease and freeze the original bytes.
     #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]

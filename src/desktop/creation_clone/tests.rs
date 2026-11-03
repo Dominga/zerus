@@ -82,7 +82,7 @@ fn exact_previous_store_upgrade_adds_only_the_independent_clone_leaf() {
                 |r| r.get(0)
             )
             .unwrap(),
-        before + 2 + 4 + 2 // creation17, cache18 and independent attention20 tables.
+        before + 2 + 4 + 2 + 2 // creation17, cache18, attention20 and worktree22 tables.
     );
     assert_eq!(
         store

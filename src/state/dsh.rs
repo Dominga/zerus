@@ -862,8 +862,9 @@ pub(super) fn fork(
     {
         return Err("source session changed; refresh before forking".into());
     }
+    // An archived session's name is free for a new one, as for other agents.
     let mut occupied: std::collections::BTreeSet<String> = binding_records().iter()
-        .chain(records()?.iter()).chain(archive::records()?.iter())
+        .chain(records()?.iter())
         .map(|record| string(record, "name").to_owned()).collect();
     occupied.insert(name.to_owned());
     let target = fork::choose_name(name, tag, &occupied)?;

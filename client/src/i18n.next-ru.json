@@ -521,6 +521,7 @@
   "Terminate cancelled: the session changed.": "Завершение отменено: сессия изменилась.",
   "Terminating %1 sessions": "Завершение сессий: %1",
   "Terminating session": "Завершение сессии",
+  "That name is in use. The fork will be named %1.": "Это имя уже используется. Новая сессия будет называться %1.",
   "The Qt settings file could not be read safely.": "Не удалось безопасно прочитать файл настроек Qt.",
   "The agent ID is on the clipboard": "ID агента скопирован в буфер обмена",
   "The approval journal changed. Refresh to read it again.": "Журнал разрешений изменился. Обновите, чтобы прочитать его заново.",

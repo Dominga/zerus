@@ -899,9 +899,11 @@ class NativeHarness(unittest.TestCase):
         self.cli('send', fork, self.payload(fork, text='FORK_ONLY_MARKER', attachments=[]))
         self.wait(lambda: any(e['type'] == 'AgentMessage' and 'FORK_ONLY_MARKER' in e['detail'] for e in self.cli('inspect', fork)['events']))
         self.assertFalse(any('FORK_ONLY_MARKER' in e['detail'] for e in self.cli('inspect', source)['events']))
+        # zerus-ucck: a name in use is not a refusal; the fork gets the first free suffix.
         duplicate = self.hgs('fork', source['name'], '-n', tag, '-d')
-        self.assertNotEqual(duplicate.returncode, 0)
-        self.assertIn('already uses this name', duplicate.stderr)
+        self.assertEqual(duplicate.returncode, 0, duplicate.stderr)
+        self.wait(lambda: (name + '-2') in self.bindings())
+        self.assertNotEqual(self.bindings()[name + '-2']['conversation_id'], fork['conversation_id'])
         # The scoped mobile action reports the exact new identity it created.
         request = {'request_id': str(uuid.uuid4()), 'action': 'fork', 'expected_run_id': source['run_id'],
                    'expected_conversation_id': source['conversation_id'], 'tag': tag + '-scoped'}

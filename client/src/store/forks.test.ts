@@ -1,16 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import { createRoot, createSignal } from "solid-js";
 import { createForks } from "./forks";
-import { detailsFromInspection, snapshotOf } from "../ui/sessions/actions-ui";
-import { forkAvailable, forkProblem, forkTag } from "../ui/sessions/fork-ui";
+import { detailsFromInspection, snapshotOf, type ActionRow } from "../ui/sessions/actions-ui";
+import { forkAvailable, forkProblem, forkTag, freeForkTag } from "../ui/sessions/fork-ui";
 import type { Session } from "../ui/sessions/types";
-import type { Outcome } from "../types";
+import type { Details, Outcome } from "../types";
 const row = (fields: Partial<Session> = {}) => ({ key: "studio\nrun:r", name: "codex/example/review", computer: "studio", machine: "Studio", state: "running", runId: "r", conversationId: "c", created: 1, ...fields } as Session);
 const details = () => detailsFromInspection({ run_id: "r", conversation_id: "c", fork_supported: true, fork_reason: "Ready" })!;
 const done = { outcome: "done", receipt: null, cleanup: null } as Outcome;
+const ticks = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
 function setup() {
   const source = row(), [rows, setRows] = createSignal([source]), [online, setOnline] = createSignal(true), [busy, setBusy] = createSignal(false);
-  const inspect = vi.fn(async () => details()), perform = vi.fn(async (): Promise<Outcome> => done), warning = vi.fn(async (): Promise<string | null> => null);
+  const inspect = vi.fn(async (_row: ActionRow): Promise<Details> => details()), perform = vi.fn(async (): Promise<Outcome> => done), warning = vi.fn(async (): Promise<string | null> => null);
   const place = vi.fn(), select = vi.fn(), notify = vi.fn(), confirm = vi.fn(async () => true), dispatched = vi.fn();
   const deps = { rows, current: (key: string) => rows().find((r) => r.key === key), online, busy, inspect, perform, warning,
     groupOf: () => "project", defaultGroup: () => "default", hasGroup: () => true, next: () => undefined, place, select, notify };
@@ -30,9 +31,15 @@ describe("Fork session", () => {
   it("suggests the first unused tag on this host and validates the complete name", () => {
     const s = row(), rows = [s, row({ key: "a", name: "codex/example/review-fork" }), row({ key: "b", name: "codex/example/review-fork-2" }), row({ computer: "other", name: "codex/example/review-fork-3" })];
     expect(forkTag(s, rows)).toBe("review-fork-3");
-    expect(forkProblem(s, "review-fork", rows)).toBe("This session name is already in use.");
-    expect(forkProblem(s, "bad/name", rows)).toBeTruthy();
-    expect(forkProblem(s, "new fork", rows)).toBeUndefined();
+    // zerus-ucck: a name in use is not a problem; the fork gets the first free suffix.
+    expect(forkProblem(s, "review-fork")).toBeUndefined();
+    expect(freeForkTag(s, "review-fork", rows)).toBe("review-fork-3");
+    expect(forkProblem(s, "bad/name")).toBeTruthy();
+    expect(forkProblem(s, "new fork")).toBeUndefined();
+    // An archived session never holds a name.
+    const archived = [s, row({ key: "old", name: "codex/example/review-fork", state: "archived", archiveId: "a1" })];
+    expect(forkTag(s, archived)).toBe("review-fork");
+    expect(freeForkTag(s, "review-fork", archived)).toBe("review-fork");
   });
   it("submits once with the pinned source, then places and opens only the new conversation", async () => {
     await createRoot(async (dispose) => {
@@ -44,14 +51,32 @@ describe("Fork session", () => {
       t.setRows([t.source, row({ key: "new", name: "codex/example/review-fork", runId: "new", conversationId: "c" })]);
       await Promise.resolve(); expect(t.select).not.toHaveBeenCalled();
       const fork = row({ key: "new", name: "codex/example/review-fork", runId: "new", conversationId: "new-conversation" });
-      t.setRows([t.source, fork]); await Promise.resolve();
+      t.setRows([t.source, fork]); await ticks();
       expect(t.place).toHaveBeenCalledExactlyOnceWith(fork, "project", undefined);
       expect(t.select).toHaveBeenCalledExactlyOnceWith(fork);
       expect(t.forks.busy()).toBe(false);
       dispose();
     });
   });
-  it.each(["run", "conversation", "offline", "busy", "collision", "closed"])("refuses %s changes while its inspection is pending", async (change) => {
+  it("sends the free name for a taken one and finds a suffix hgs chose meanwhile", async () => {
+    await createRoot(async (dispose) => {
+      const t = setup(), taken = row({ key: "taken", name: "codex/example/review-fork", runId: "t", conversationId: "t" });
+      t.setRows([t.source, taken]);
+      await t.submit("review-fork");
+      expect(t.perform).toHaveBeenCalledExactlyOnceWith(expect.anything(), { kind: "fork", tag: "review-fork-2", archive_id: null });
+      // Another session took -2 meanwhile, so hgs suffixed the sent name (-2-2):
+      // the fork is still found, and the session that took the name is not adopted.
+      const raced = row({ key: "raced", name: "codex/example/review-fork-2", runId: "x", conversationId: "x" });
+      const fork = row({ key: "new", name: "codex/example/review-fork-2-2", runId: "new", conversationId: "new-conversation" });
+      t.inspect.mockImplementation(async (r) => ({ ...details(), fork_parent_id: r.name === fork.name ? "c" : "unrelated" }));
+      t.setRows([t.source, taken, raced, fork]); await ticks();
+      expect(t.select).toHaveBeenCalledExactlyOnceWith(fork);
+      expect(t.place).toHaveBeenCalledExactlyOnceWith(fork, "project", undefined);
+      expect(t.forks.busy()).toBe(false);
+      dispose();
+    });
+  });
+  it.each(["run", "conversation", "offline", "busy", "closed"])("refuses %s changes while its inspection is pending", async (change) => {
     await createRoot(async (dispose) => {
       const t = setup(); let resolve!: (d: ReturnType<typeof details>) => void;
       t.inspect.mockReturnValue(new Promise((done) => { resolve = done; }));
@@ -60,10 +85,20 @@ describe("Fork session", () => {
       if (change === "conversation") t.setRows([row({ conversationId: "other" })]);
       if (change === "offline") t.setOnline(false);
       if (change === "busy") t.setBusy(true);
-      if (change === "collision") t.setRows([t.source, row({ key: "other", name: "codex/example/review-fork" })]);
       if (change === "closed") t.controller.abort();
       resolve(details()); await first;
       expect(t.inspect).toHaveBeenCalledTimes(1); expect(t.perform).not.toHaveBeenCalled();
+      dispose();
+    });
+  });
+  it("a name taken while its inspection is pending forks under the next free name", async () => {
+    await createRoot(async (dispose) => {
+      const t = setup(); let resolve!: (d: Details) => void;
+      t.inspect.mockReturnValue(new Promise((done) => { resolve = done; }));
+      const first = t.submit();
+      t.setRows([t.source, row({ key: "other", name: "codex/example/review-fork" })]);
+      resolve(details()); await first;
+      expect(t.perform).toHaveBeenCalledExactlyOnceWith(expect.anything(), { kind: "fork", tag: "review-fork-2", archive_id: null });
       dispose();
     });
   });
@@ -95,7 +130,7 @@ describe("Fork session", () => {
       const forks = createForks({ ...t.deps, next: () => neighbor, hasGroup: () => kept });
       await forks.submit(snapshotOf(t.source), details(), "review-fork", t.controller.signal, t.confirm, t.dispatched);
       const fork = row({ key: "new", name: "codex/example/review-fork", runId: "new", conversationId: "new" });
-      t.setRows([t.source, neighbor, fork]); await Promise.resolve();
+      t.setRows([t.source, neighbor, fork]); await ticks();
       expect(t.place).toHaveBeenCalledExactlyOnceWith(fork, kept ? "project" : "default", kept ? neighbor : undefined); dispose();
     });
   });

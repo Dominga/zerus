@@ -1936,7 +1936,12 @@ tracking evidence without changing reply/read identities or restarting agents.
 next to the original session in its group. Files remain shared. The CLI is
 `hgs [@host] fork SESSION [-n NAME] [-d] [--archive ID]`; support depends on the agent.
 DeepSeek uses the native fork of a supported resident host
-([DeepSeek](#deepseek)).
+([DeepSeek](#deepseek)). A session name is a label: an archived session never
+blocks a new session or a fork from its name. Without `-n` the fork is named
+`TAG-fork`; a name a live or saved session already uses gets the first free `-2`,
+`-3`… instead of failing, with or without `-n`. The fork dialog shows the name the
+fork will get, and the new session is recognized by its fork parent, never by a
+name another session took meanwhile.
 
 Codex may defer `SessionStart` until the fork's first message. Activity enables
 Send once Zerus verifies that the supervised process owns an independent child

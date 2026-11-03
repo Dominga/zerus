@@ -4954,6 +4954,17 @@ summaries are re-read when their journal rows or catalog row change, at most
 every 500 ms, and otherwise every 2 s while the agent is busy and every 15 s
 while it is idle; DeepSeek and OpenCode every 2 s.
 
+The stream also checks every 5 s whether an update put another file at the path
+of the `hgs` it runs. That file must differ in device, inode, modification time
+or size, and be a regular executable file. A missing path, or a file not yet
+executable, does not count. When the next check finds the same file, the stream
+sends a fatal `error` with code `hgs_replaced` and exits 0. Without this check,
+a stream left running after a CLI-only update, or after a peer's update, would
+keep sending the old code's summaries (such as Clear's reason) while new
+commands run the new code. A client starts the new stream at once and keeps its
+rows. Only one such restart a minute skips the delay; another within that minute
+waits like any failure.
+
 A frame is at most 1 MiB including its newline. An event too large for a frame
 is cut with `"truncated": true`, and an oversized summary loses the oldest items
 of its largest lists, named in `stream_truncated`; `inspect` returns them whole.

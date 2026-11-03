@@ -28,6 +28,8 @@ struct Shared {
     space: Condvar,
     capacity: usize,
     stopped: AtomicBool,
+    /// A frame taken from the queue is still being written.
+    writing: AtomicBool,
 }
 
 impl Shared {
@@ -55,6 +57,7 @@ impl Writer {
             space: Condvar::new(),
             capacity,
             stopped: AtomicBool::new(false),
+            writing: AtomicBool::new(false),
         });
         let thread = Arc::clone(&shared);
         std::thread::Builder::new()
@@ -136,13 +139,16 @@ impl Writer {
         self.shared.stopped.load(Ordering::SeqCst)
     }
 
-    /// Waits up to `limit` for the queue to empty; for tests and orderly ends.
-    #[cfg(test)]
+    /// Waits up to `limit` until every queued frame is written; for tests
+    /// and orderly ends.
     pub(super) fn drain(&self, limit: Duration) -> bool {
         let deadline = Instant::now() + limit;
+        // The queue is read first: a frame taken from it is marked as being
+        // written before the queue's lock is released.
+        let written = || self.backlog() == 0 && !self.shared.writing.load(Ordering::SeqCst);
         loop {
-            if self.backlog() == 0 || self.stopped() {
-                return self.backlog() == 0;
+            if written() || self.stopped() {
+                return written();
             }
             if Instant::now() >= deadline {
                 return false;
@@ -168,6 +174,7 @@ fn write_frames<W: Write>(shared: &Shared, mut out: W, heartbeat: Duration) {
             loop {
                 if let Some(item) = queue.items.pop_front() {
                     queue.bytes -= item.body.len();
+                    shared.writing.store(true, Ordering::SeqCst);
                     shared.space.notify_all();
                     break item.body;
                 }
@@ -185,10 +192,13 @@ fn write_frames<W: Write>(shared: &Shared, mut out: W, heartbeat: Duration) {
         };
         seq += 1;
         let Ok(mut line) = protocol::envelope(seq, &body) else {
+            shared.writing.store(false, Ordering::SeqCst);
             continue;
         };
         line.push('\n');
-        if out.write_all(line.as_bytes()).and_then(|()| out.flush()).is_err() {
+        let written = out.write_all(line.as_bytes()).and_then(|()| out.flush());
+        shared.writing.store(false, Ordering::SeqCst);
+        if written.is_err() {
             return;
         }
         last = Instant::now();

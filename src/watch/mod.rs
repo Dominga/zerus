@@ -44,6 +44,11 @@ const LISTING_GAP: Duration = Duration::from_millis(500);
 /// background work, a session that has not reported a hook event yet
 /// (startup choosers) and DeepSeek and OpenCode hosts.
 const PROBE: Duration = Duration::from_secs(5);
+/// How often the stream looks for a replaced executable; a replacement must
+/// read the same twice in a row, so the stream ends 5 to 10 s after it.
+const REPLACEMENT_CHECK: Duration = PROBE;
+/// How long an ending stream waits for its last frames to be written.
+const END_DRAIN: Duration = Duration::from_secs(2);
 /// The whole listing runs at least this often, for what neither a file nor
 /// the probe shows: terminal choosers and status lines of sessions that have
 /// reported hooks, and native transcripts between hook events. 15 s would
@@ -119,7 +124,10 @@ pub(crate) fn run(config: &Config, args: &[String], dry: bool) -> Result<i32> {
     let mut next_pulse = Instant::now() + PULSE;
     loop {
         let now = Instant::now();
-        let deadline = [watch.listing_due, watch.refresh_due].into_iter().flatten().fold(next_pulse, Instant::min);
+        let deadline = [watch.listing_due, watch.refresh_due, Some(watch.replacement_due)]
+            .into_iter()
+            .flatten()
+            .fold(next_pulse, Instant::min);
         let input = received.recv_timeout(deadline.saturating_duration_since(now));
         if matches!(input, Ok(Input::Line(_) | Input::TooLong)) {
             pending.fetch_sub(1, Ordering::SeqCst);
@@ -161,6 +169,10 @@ pub(crate) fn run(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         }
         if watch.refresh_due.is_some_and(|due| now >= due) {
             watch.refresh_rows(now);
+        }
+        if now >= watch.replacement_due && watch.replaced(now) {
+            watch.end_replaced();
+            return Ok(0);
         }
         watch.emit_catalog();
         watch.resync_activity();
@@ -347,6 +359,11 @@ struct Watch<'a> {
     organization: organization::Organization,
     organization_pool: Option<organization::Pool>,
     writers: Writers,
+    /// The file this stream started from (zerus-5wmh.66.2.46), the last
+    /// replacement seen at its path, and when to look again.
+    executable: Option<crate::swarm::Executable>,
+    replacement: Option<crate::swarm::Replacement>,
+    replacement_due: Instant,
 }
 
 impl<'a> Watch<'a> {
@@ -395,7 +412,35 @@ impl<'a> Watch<'a> {
             organization: organization::Organization::new(),
             organization_pool: None,
             writers: Writers::None,
+            executable: crate::swarm::Executable::current(),
+            replacement: None,
+            replacement_due: Instant::now() + REPLACEMENT_CHECK,
         }
+    }
+
+    /// An update put another ready executable at this stream's path, and
+    /// the next look found the same file: a file still being written, a
+    /// missing path or one not yet executable never ends the stream.
+    fn replaced(&mut self, now: Instant) -> bool {
+        self.replacement_due = now + REPLACEMENT_CHECK;
+        let seen = self.executable.as_ref().and_then(crate::swarm::Executable::replacement);
+        let settled = seen.is_some() && seen == self.replacement;
+        self.replacement = seen;
+        settled
+    }
+
+    /// Ends the stream so that its client starts the new executable: a
+    /// stream left running would keep the old code's summaries beside the
+    /// new CLI's commands. Clients keep their rows across the restart.
+    fn end_replaced(&mut self) {
+        self.out.put(&Body::Error(protocol::ErrorFrame {
+            code: protocol::code::HGS_REPLACED.into(),
+            message: "the hgs executable was replaced; start the stream again to run the new version".into(),
+            topic: None,
+            key: None,
+            fatal: true,
+        }));
+        self.out.writer.drain(END_DRAIN);
     }
 
     fn hello(&mut self) {

@@ -199,6 +199,70 @@ fn a_fatal_error_ends_the_stream_and_the_next_one_goes_live() {
     handle.stop();
 }
 
+/// zerus-5wmh.66.2.46: a server whose executable was replaced ends with a
+/// fatal `hgs_replaced` error. The new executable starts at once, without a
+/// failure and with the rows kept; a repeat within a minute (a broken install)
+/// waits like a failure, so a replaced stream never restarts in a tight loop.
+#[test]
+fn a_replaced_executable_restarts_at_once_and_only_once_a_minute() {
+    let replaced = json!({"t": "error", "code": "hgs_replaced", "fatal": true,
+        "message": "the hgs executable was replaced; start the stream again to run the new version"});
+    let row = [("r1", "claude/sample-project/review")];
+    let fake = FakeHgs::new(
+        "stream_replaced",
+        json!({"": {"runs": [
+            [{"lines": [hello("workstation"), catalog(&row), replaced.clone()]}, {"serve": true}],
+            [{"lines": [hello("workstation"), catalog(&row), replaced]}, {"serve": true}],
+            [{"lines": [hello("workstation"), catalog(&row)]}, {"serve": true}]
+        ]}}),
+    );
+    let (tx, rx) = channel();
+    let mut seen = Seen::new(rx);
+    let timing = Timing {
+        // A restart after a failure waits a visible 2 s; the first replaced
+        // stream's restart must not.
+        restart: [2, 2, 2, 2].map(Duration::from_secs),
+        stop_grace: common::WAIT + Duration::from_secs(1),
+        ..quick()
+    };
+    let handle = stream::spawn(&fake.path(), &ComputerId::local(), timing, tx);
+    let first = seen.until("live", live);
+    let second = seen.until_from(first + 1, "live after the replacement", live);
+    let between = &seen.all[first..second];
+    assert!(
+        !between.iter().any(|event| reconnecting(event, 1)),
+        "the first replacement is no failure"
+    );
+    assert!(between.iter().any(|event| {
+        change_of(event).and_then(|change| status_of(change, &ComputerId::local()))
+            == Some(ComputerStatus::Probing)
+    }));
+    // The repeat within the minute counts as a failure and waits its delay.
+    let failed = seen.until_from(second, "the repeat reconnects", |event| {
+        reconnecting(event, 1)
+    });
+    seen.until_from(failed, "live after the delay", live);
+    handle.stop();
+    let starts = fake.runs("", &["watch", "--json"]);
+    assert_eq!(starts.len(), 3, "{starts:?}");
+    assert!(
+        starts[1] - starts[0] < 1.5,
+        "the replaced stream restarted at once: {starts:?}"
+    );
+    assert!(
+        starts[2] - starts[1] >= 2.0,
+        "the repeat waited the delay: {starts:?}"
+    );
+    // Rows stay as last known throughout.
+    for event in &seen.all {
+        match change_of(event) {
+            Some(Change::Replace { rows, .. }) if !rows.is_empty() => assert_eq!(rows.len(), 1),
+            Some(Change::Remove { .. }) => panic!("a removal across the restart"),
+            _ => {}
+        }
+    }
+}
+
 #[test]
 fn a_silent_stream_restarts() {
     let fake = FakeHgs::new(

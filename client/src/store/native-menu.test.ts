@@ -9,7 +9,7 @@ vi.hoisted(() => {
   vi.stubGlobal("window", { document, addEventListener: () => {}, removeEventListener: () => {} });
 });
 
-import { bindMenuBarrier, menu, setMenu, visibleMenu } from "./ui";
+import { bindMenuBarrier, menu, setMenu, visibleMenu, MENU_PREPARATION_MS } from "./ui";
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 function barrier() {
@@ -18,9 +18,50 @@ function barrier() {
   bindMenuBarrier(() => promise);
   return resolve;
 }
-afterEach(() => { bindMenuBarrier(undefined); setMenu(undefined); });
+afterEach(() => { bindMenuBarrier(undefined); setMenu(undefined); vi.useRealTimers(); });
 
 describe("native child menu admission", () => {
+  it("paints at the preparation bound and accepts guarded in-place updates", async () => {
+    vi.useFakeTimers();
+    let prepared!: (items: { label: string }[]) => void;
+    const ready = new Promise<{ label: string }[]>((resolve) => { prepared = resolve; });
+    const initial = { x: 20, y: 40, items: [{ label: "Checking" }] };
+    const update = setMenu(initial, ready)!;
+    await vi.advanceTimersByTimeAsync(MENU_PREPARATION_MS - 1);
+    expect(visibleMenu()).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(visibleMenu()).toBe(initial);
+    const partial = [{ label: "Folder ready" }];
+    update(partial); expect(visibleMenu()?.items).toBe(partial);
+    const final = [{ label: "Inspection ready" }];
+    prepared(final); await vi.advanceTimersByTimeAsync(0);
+    expect(visibleMenu()?.items).toBe(final);
+    setMenu(undefined); update(partial);
+    expect(menu()).toBeUndefined(); expect(visibleMenu()).toBeUndefined();
+  });
+
+  it("never uses the preparation deadline to bypass native hiding", async () => {
+    vi.useFakeTimers();
+    const hidden = barrier();
+    const initial = { x: 20, y: 40, items: [{ label: "Checking" }] };
+    setMenu(initial, new Promise(() => {}));
+    await vi.advanceTimersByTimeAsync(MENU_PREPARATION_MS + 1000);
+    expect(visibleMenu()).toBeUndefined();
+    hidden(); await vi.advanceTimersByTimeAsync(0);
+    expect(visibleMenu()).toBe(initial);
+  });
+
+  it.each([false, true])("cancels the deadline and late updater after dismissal/replacement (replace=%s)", async (replace) => {
+    vi.useFakeTimers();
+    const update = setMenu({ x: 20, y: 40, items: [] }, new Promise(() => {}))!;
+    const replacement = replace ? { x: 40, y: 60, items: [{ label: "New target" }] } : undefined;
+    setMenu(replacement);
+    await vi.advanceTimersByTimeAsync(MENU_PREPARATION_MS + 1000);
+    update([{ label: "Old target" }]);
+    expect(menu()).toBe(replacement); expect(visibleMenu()).toBe(replacement);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it.each([false, true])("waits for both final items and native hiding (items first=%s)", async (itemsFirst) => {
     const hidden = barrier();
     let prepared!: (items: { label: string; disabled: boolean }[]) => void;

@@ -139,7 +139,32 @@ const menuItem = (label: string, items = menu()?.items ?? []) => {
 };
 
 describe("session context targeting", () => {
-  it.each([false, true])("publishes one final snapshot after folder, inspection and Clear settle (failure=%s)", async (failure) => {
+  it("opens within the bound and adopts independent replies while inspection is stalled", async () => {
+    vi.useFakeTimers();
+    try {
+      const row: ViewRow = { name: "codex/context/slow", agent: "codex", state: "running", status: "ready", run_id: "slow-context", conversation_id: "slow-conversation", cwd: "/example/menu" };
+      applyBatch({ ...emptyBatch(), computers: [{ computer: "", status: "live", attempt: 0 }], upserts: [{ computer: "", key: "run:slow-context", row }] });
+      const target = toSession("", "run:slow-context", row);
+      let folder!: (value: Awaited<ReturnType<typeof sessionFolderStatus>>) => void;
+      let cleared!: (value: Awaited<ReturnType<typeof composerClearControl>>) => void;
+      vi.mocked(sessionFolderStatus).mockImplementationOnce(() => new Promise((resolve) => { folder = resolve; }));
+      vi.mocked(inspectSession).mockImplementationOnce(() => new Promise(() => {}));
+      vi.mocked(composerClearControl).mockImplementationOnce(() => new Promise((resolve) => { cleared = resolve; }));
+      sessionContextMenu(contextEvent(), target);
+      await vi.advanceTimersByTimeAsync(179); expect(visibleMenu()).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1); expect(visibleMenu()?.sessionKey).toBe(target.key);
+      expect(menuItem("Open folder").disabled).toBe(true);
+      folder({ folder: true, shell: true, folder_hint: "" });
+      cleared({ enabled: true, dismiss: false, title: "Clear session?", text: "", confirm: "Clear session", run: row.run_id!, conversation: row.conversation_id!, cache_enabled: true, running: false, reason: "", cache_reason: "" });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(visibleMenu()).toBe(menu());
+      expect(menuItem("Open folder").disabled).toBe(false);
+      expect(menuItem("Clear session…").disabled).toBe(false);
+      expect(menuItem("Fork session…").disabled).toBe(true);
+    } finally { setMenu(undefined); vi.useRealTimers(); }
+  });
+
+  it.each([false, true])("publishes the prepared snapshot when reads settle before the bound (failure=%s)", async (failure) => {
     const tag = failure ? "final-failed" : "final-ready";
     const row: ViewRow = { name: `codex/context/${tag}`, agent: "codex", state: "running", status: "ready", run_id: tag, conversation_id: `conversation-${tag}`, cwd: "/example/menu" };
     applyBatch({ ...emptyBatch(), computers: [{ computer: "", status: "live", attempt: 0 }], upserts: [{ computer: "", key: `run:${tag}`, row }] });
@@ -155,10 +180,10 @@ describe("session context targeting", () => {
     expect(initial?.sessionKey).toBe(target.key); expect(visibleMenu()).toBeUndefined();
     folder({ folder: !failure, shell: !failure, folder_hint: "" });
     await Promise.resolve(); await Promise.resolve();
-    expect(menu()).toBe(initial); expect(visibleMenu()).toBeUndefined();
+    expect(menu()?.sessionKey).toBe(initial?.sessionKey); expect(visibleMenu()).toBeUndefined();
     inspected(null);
     await Promise.resolve(); await Promise.resolve();
-    expect(menu()).toBe(initial); expect(visibleMenu()).toBeUndefined();
+    expect(menu()?.sessionKey).toBe(initial?.sessionKey); expect(visibleMenu()).toBeUndefined();
     cleared(failure ? null : { enabled: true, dismiss: false, title: "Clear session?", text: "", confirm: "Clear session", run: tag, conversation: row.conversation_id!, cache_enabled: true, running: false, reason: "", cache_reason: "" });
     await vi.waitFor(() => expect(visibleMenu()?.sessionKey).toBe(target.key));
     const final = visibleMenu();

@@ -229,16 +229,23 @@ function openSessionMenu(e: MouseEvent, s: Session) {
   const details = s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined;
   const request = folderRequest(s, details);
   const items = sessionMenu(s), read = clearRead?.id === clearReadIdentity(s) ? clearRead : undefined;
-  // Prepare once: replacing the whole For list on each reply used to remove
-  // every button, refocus the first one and remeasure the entrance animation.
-  const folders = sessionFolderStatus(request.target.computer, request.directory).catch(() => undefined);
+  let folderStatus: { request: ReturnType<typeof folderRequest>; status: FolderStatus } | undefined, forkDetails = details;
+  let update: ReturnType<typeof setMenu>;
+  const snapshot = () => sessionMenu(s, folderStatus, forkDetails, read);
+  const refresh = () => update?.(snapshot());
+  // Local reads can finish before the bounded opening; slower replies update
+  // the same slots through this opening's revision guard, without refocusing.
+  const folders = sessionFolderStatus(request.target.computer, request.directory).catch(() => undefined).then((status) => {
+    folderStatus = status ? { request, status } : undefined; refresh();
+  });
   const fork = !details && !computerOffline(s.computer)
     ? inspectSession({ computer: s.computer, name: s.name, run_id: s.runId ?? "", conversation_id: s.conversationId ?? "" }, s.archiveId ?? null).catch(() => undefined)
     : Promise.resolve(details);
+  const inspected = fork.then((value) => { forkDetails = value ?? undefined; refresh(); });
+  const cleared = read?.pending?.then(refresh);
   e.preventDefault();
   e.stopPropagation();
-  setMenu({ x: e.clientX, y: e.clientY, items, sessionKey: s.key }, Promise.all([folders, fork, read?.pending]).then(([status, inspected]) =>
-    sessionMenu(s, status ? { request, status } : undefined, inspected ?? undefined, read)));
+  update = setMenu({ x: e.clientX, y: e.clientY, items, sessionKey: s.key }, Promise.all([folders, inspected, cleared]).then(snapshot));
 }
 
 /** A context target is independent of the open conversation and selection. */

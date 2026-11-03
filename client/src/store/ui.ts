@@ -65,23 +65,48 @@ export const [menu, rememberMenu] = createSignal<Menu | undefined>();
 export const [visibleMenu, publishMenu] = createSignal<Menu | undefined>();
 let menuBarrier: ((scope: string, opening: boolean) => Promise<void> | undefined) | undefined;
 let menuRevision = 0;
+let menuPreparationTimer: ReturnType<typeof setTimeout> | undefined;
+export const MENU_PREPARATION_MS = 180;
 /** A native child must acknowledge hiding before an app menu can cover it. */
 export function bindMenuBarrier(barrier: typeof menuBarrier) { menuBarrier = barrier; }
 export const nativeOverlayBarrier = (scope: string, opening: boolean) => menuBarrier?.(scope, opening);
+/** Open after preparation or its budget, retaining the native hide barrier.
+ * The returned updater accepts partial replies only for this exact opening. */
 export function setMenu(value: Menu | undefined, ready?: Promise<MenuEntry[]>) {
+  clearTimeout(menuPreparationTimer);
+  menuPreparationTimer = undefined;
   const revision = ++menuRevision;
   rememberMenu(value);
   const wait = nativeOverlayBarrier("menu", !!value);
-  if (!value || (!wait && !ready)) { publishMenu(value); return; }
-  // Keep the context target available for dismissal/highlighting, but paint
-  // only the final item snapshot after both preparation and native hiding.
-  if (ready) publishMenu(undefined);
-  void Promise.all([wait, ready]).then(([, items]) => {
+  if (!value) { publishMenu(undefined); return; }
+  let current = value, shown = false;
+  // Late reads belong to this opening, even after the preparation budget.
+  const update = (items: MenuEntry[]) => {
     if (revision !== menuRevision) return;
-    const prepared = items ? { ...value, items } : value;
-    rememberMenu(prepared);
-    publishMenu(prepared);
-  }).catch(() => {});
+    current = { ...current, items };
+    rememberMenu(current);
+    if (shown) publishMenu(current);
+  };
+  const show = () => {
+    if (revision !== menuRevision) return;
+    shown = true;
+    publishMenu(current);
+  };
+  if (!wait && !ready) { show(); return update; }
+  // Bound only data preparation. Native-child hiding still requires its
+  // actual acknowledgement before any menu can be painted over the child.
+  if (ready) publishMenu(undefined);
+  const preparation = ready && new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, MENU_PREPARATION_MS);
+    menuPreparationTimer = timer;
+    void ready.then(update).catch(() => {}).finally(() => {
+      clearTimeout(timer);
+      if (menuPreparationTimer === timer) menuPreparationTimer = undefined;
+      resolve();
+    });
+  });
+  void Promise.all([wait, preparation]).then(show).catch(() => {});
+  return update;
 }
 export const [contentScale, setContentScale] = createSignal(1);
 /** A row the session list scrolls to once it lists it (Qt's `revealRow`); a new selection drops it. */

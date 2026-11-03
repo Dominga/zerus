@@ -1,4 +1,4 @@
-import { For, Index, Match, Show, Switch, createEffect, onCleanup, onMount } from "solid-js";
+import { For, Index, Match, Show, Switch, createEffect, createMemo, onCleanup, onMount } from "solid-js";
 import { Icon } from "../lib/icons";
 import { ProviderGlyph } from "../sessions/SessionCard";
 import { agentKind } from "../../store/catalog";
@@ -48,10 +48,12 @@ export function MenuLayer() {
 /** Measure the final layout while hidden; never measure an animated transform. */
 function MenuPopup(props: { menu: () => NonNullable<ReturnType<typeof visibleMenu>>; reference: (el: HTMLDivElement) => void; onKey: (e: KeyboardEvent) => void }) {
   let el!: HTMLDivElement;
+  // Item replies update the existing slots without measuring or moving the
+  // open menu. Only a new anchor changes its placement.
+  const x = createMemo(() => props.menu().x), y = createMemo(() => props.menu().y);
   createEffect(() => {
-    const m = props.menu();
-    el.style.left = `${Math.max(8, Math.min(m.x, innerWidth - el.offsetWidth - 8))}px`;
-    el.style.top = `${Math.max(8, Math.min(m.y, innerHeight - el.offsetHeight - 8))}px`;
+    el.style.left = `${Math.max(8, Math.min(x(), innerWidth - el.offsetWidth - 8))}px`;
+    el.style.top = `${Math.max(8, Math.min(y(), innerHeight - el.offsetHeight - 8))}px`;
     el.style.visibility = "visible";
   });
   onMount(() => el.querySelector<HTMLElement>(".menu-item:not([aria-disabled=true])")?.focus({ preventScroll: true }));

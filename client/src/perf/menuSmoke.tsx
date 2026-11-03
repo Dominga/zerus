@@ -22,11 +22,18 @@ const painted = () => { const el = popup(); return el && getComputedStyle(el).vi
 const buttons = () => [...root.querySelectorAll<HTMLButtonElement>(".menu-item")];
 const deferred = <T,>() => { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { promise, resolve }; };
 
-async function sample(name: string, open: () => void, replies?: () => Promise<void>) {
+async function sample(name: string, open: () => void, replies?: () => Promise<void>, maxPaintMs?: number) {
   setMenu(undefined);
   await frame();
   let first: HTMLElement | undefined, initial: Element[] = [], moves = 0, replacements = 0, mounts = 0, removals = 0, samples = 0;
-  let box: DOMRect | undefined;
+  let box: DOMRect | undefined, firstPaintMs: number | undefined, firstMeasurements = 0, measurements = 0;
+  // Count application layout reads separately from the frame sampler's rects.
+  const dimensions = ["offsetWidth", "offsetHeight"].map((name) => ({ name, descriptor: Object.getOwnPropertyDescriptor(HTMLElement.prototype, name)! }));
+  for (const { name, descriptor } of dimensions) Object.defineProperty(HTMLElement.prototype, name, { ...descriptor, get() {
+    if (this.classList.contains("menu")) measurements++;
+    return descriptor.get!.call(this);
+  } });
+  const started = performance.now();
   const observer = new MutationObserver((records) => {
     for (const record of records) {
       for (const n of record.addedNodes) if (n instanceof Element) { if (n.matches(".menu")) mounts++; }
@@ -41,7 +48,7 @@ async function sample(name: string, open: () => void, replies?: () => Promise<vo
     const el = painted();
     if (el) {
       const r = el.getBoundingClientRect(), current = buttons();
-      if (!first) { first = el; initial = current; box = r; }
+      if (!first) { first = el; initial = current; box = r; firstPaintMs = performance.now() - started; firstMeasurements = measurements; }
       else {
         if (el !== first || current.some((button, i) => button !== initial[i]) || current.length !== initial.length) replacements++;
         if (Math.abs(r.left - box!.left) > .1 || Math.abs(r.top - box!.top) > .1 || Math.abs(r.width - box!.width) > .1 || Math.abs(r.height - box!.height) > .1) moves++;
@@ -55,12 +62,15 @@ async function sample(name: string, open: () => void, replies?: () => Promise<vo
   await replies?.();
   await sleep(400);
   running = false; observer.disconnect();
+  for (const { name, descriptor } of dimensions) Object.defineProperty(HTMLElement.prototype, name, descriptor);
   check(samples >= 3, `${name}: no painted frames`);
   check(mounts === 1 && removals === 0 && replacements === 0, `${name}: mounts=${mounts}, removals=${removals}, replacements=${replacements}`);
   check(moves === 0, `${name}: ${moves} frames changed position or size after first paint`);
+  check(measurements === firstMeasurements, `${name}: ${measurements - firstMeasurements} layout reads after first paint`);
+  if (maxPaintMs !== undefined) check(firstPaintMs !== undefined && firstPaintMs <= maxPaintMs, `${name}: first paint ${firstPaintMs ?? "missing"} ms exceeds ${maxPaintMs} ms`);
   if (box) check(box.left >= 7.9 && box.top >= 7.9 && box.right <= innerWidth - 7.9 && box.bottom <= innerHeight - 7.9, `${name}: outside viewport`);
   check(!popup()?.getAnimations().length, `${name}: entrance animation changes painted geometry`);
-  cases.push({ name, samples, mounts, removals, replacements, moves, box: box && { x: box.x, y: box.y, width: box.width, height: box.height } });
+  cases.push({ name, samples, mounts, removals, replacements, moves, firstPaintMs, lateMeasurements: measurements - firstMeasurements, box: box && { x: box.x, y: box.y, width: box.width, height: box.height } });
 }
 
 async function run() {
@@ -80,10 +90,10 @@ async function run() {
   } };
   applySkin(skins[0]);
   await sample("session async reads", () => sessionContextMenu(new MouseEvent("contextmenu", { clientX: innerWidth - 12, clientY: innerHeight - 12, button: 2 }), session), async () => {
-    await sleep(80);
+    await sleep(40);
     check(!!menu() && !painted(), "session async reads: painted before final capabilities");
     folder.resolve({ folder: true, shell: true, folder_hint: "" });
-    await sleep(80);
+    await sleep(40);
     check(!painted(), "session async reads: painted before inspection and Clear finished");
     inspect.resolve({ run_id: row.run_id, conversation_id: row.conversation_id, fork_supported: true });
     clear.resolve({ enabled: true, reason: "", run: row.run_id, conversation: row.conversation_id });
@@ -92,6 +102,36 @@ async function run() {
     const button = buttons().find((b) => b.textContent?.trim() === label);
     check(button && button.getAttribute("aria-disabled") !== "true", `${label}: final state missing`);
   }
+  const slowRow = { ...row, name: "codex/example/slow-menu", run_id: "slow-menu-run", conversation_id: "slow-menu-conversation" };
+  applyBatch({ ...emptyBatch(), upserts: [{ computer: "", key: "run:slow-menu-run", row: slowRow }] });
+  const slowSession = toSession("", "run:slow-menu-run", slowRow);
+  const slowFolder = deferred<unknown>(), slowInspect = deferred<unknown>(), slowClear = deferred<unknown>();
+  native.__TAURI_INTERNALS__ = { invoke: (command) => {
+    if (command === "session_folder_status") return slowFolder.promise;
+    if (command === "inspect_session") return slowInspect.promise;
+    if (command === "composer_clear_control") return slowClear.promise;
+    return Promise.reject(new Error(`Unexpected native command: ${command}`));
+  } };
+  await sample("stalled inspection opens within bound", () => sessionContextMenu(new MouseEvent("contextmenu", { clientX: innerWidth - 12, clientY: innerHeight - 12, button: 2 }), slowSession), async () => {
+    // All reads are still unresolved when the preparation budget expires.
+    await sleep(230);
+    check(!!painted(), "stalled inspection: no menu after the preparation bound");
+    buttons()[1]?.focus(); const focused = document.activeElement;
+    slowFolder.resolve({ folder: true, shell: true, folder_hint: "" });
+    slowClear.resolve({ enabled: true, reason: "", run: slowRow.run_id, conversation: slowRow.conversation_id });
+    await frame(); await frame();
+    for (const label of ["Open folder", "Clear session…"]) {
+      const button = buttons().find((b) => b.textContent?.trim() === label);
+      check(button && button.getAttribute("aria-disabled") !== "true", `${label}: blocked behind stalled inspection`);
+    }
+    check(document.activeElement === focused, "partial replies stole keyboard focus");
+    const fork = buttons().find((b) => b.textContent?.trim() === "Fork session…"), checking = fork?.title;
+    await sleep(80);
+    slowInspect.resolve({ run_id: slowRow.run_id, conversation_id: slowRow.conversation_id, fork_supported: true });
+    await frame(); await frame();
+    check(fork?.title !== checking, "late inspection did not update its existing button");
+    check(document.activeElement === focused, "late inspection stole keyboard focus");
+  }, 260); // 180 ms budget plus frame/timer scheduling allowance.
   delete native.__TAURI_INTERNALS__;
   // Every other context/dropdown caller shares this exact layer and CSS.
   for (const skin of skins.slice(0, 2)) {

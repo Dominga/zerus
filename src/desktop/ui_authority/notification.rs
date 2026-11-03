@@ -130,6 +130,7 @@ impl Validated {
                         focus,
                     },
                 ),
+                application: String::new(),
             },
         )
     }

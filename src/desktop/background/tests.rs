@@ -71,6 +71,8 @@ impl Fixture {
             activations: activation::Router::new(&location.configuration, &epoch),
             drained: false,
             stopping: false,
+            #[cfg(windows)]
+            swarm: crate::desktop::swarm_windows::Runtime::new(&config, owner.clone()),
             notifications: notification_service::Runtime::new(
                 &config,
                 &location,
@@ -80,6 +82,13 @@ impl Fixture {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             creation: crate::desktop::creation_clone::Runtime::new(&config, &epoch, owner.clone())
                 .unwrap(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            task_start: crate::desktop::task_start_reconcile::Runtime::new(
+                &config,
+                &epoch,
+                owner.clone(),
+            )
+            .unwrap(),
         };
         Self {
             _temp: temp,

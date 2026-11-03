@@ -507,6 +507,11 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
     def test_keep_folder_forgets_only_the_record_after_a_fresh_bound_review(self):
         tree,row,_=self.partial('kept');left=self.leftover(tree)
         stale=self.keep(tree,'0'*64);self.assertNotEqual(stale.returncode,0);self.assertIn('changed since the review',stale.stderr)
+        # A refusal before the record is touched is a request-bound outcome.
+        refused=json.loads(stale.stdout)
+        self.assertEqual((refused['operation'],refused['outcome_version'],refused['status'],refused['request_id'],refused['path']),
+            ('worktree_leftover_keep',1,'kept','test-keep',str(tree)))
+        self.assertIn('changed since the review',refused['detail']);self.assertEqual(len(self.records()),1)
         (tree/'later.txt').write_text('new local file')
         changed=self.keep(tree,left['fingerprint']);self.assertNotEqual(changed.returncode,0);self.assertIn('changed since the review',changed.stderr)
         left=self.leftover(tree);kept=self.keep(tree,left['fingerprint']);self.assertEqual(kept.returncode,0,kept.stderr)
@@ -515,6 +520,137 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         self.assertIsNone(self.leftover(tree));self.assertEqual(self.records(),[])
         self.assertIn(row['branch'],self.git('-C',str(self.repo),'branch','--list',row['branch']))
         again=self.keep(tree,left['fingerprint']);self.assertNotEqual(again.returncode,0);self.assertIn('No partial-removal record',again.stderr)
+        absent=json.loads(again.stdout);self.assertEqual((absent['status'],absent['operation']),('kept','worktree_leftover_keep'))
+        self.assertIn('No partial-removal record',absent['detail'])
+    def test_keep_folder_reports_a_failure_after_forgetting_started_as_unconfirmed(self):
+        import sqlite3
+        tree,_,_=self.partial('forget-fails');left=self.leftover(tree)
+        database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3'
+        # Reads still work; only forgetting the record fails, after every check passed.
+        with contextlib.closing(sqlite3.connect(database)) as db,db:
+            db.execute("CREATE TRIGGER synthetic_forget_failure BEFORE DELETE ON removals BEGIN SELECT RAISE(ABORT,'synthetic forget failure'); END")
+        result=self.keep(tree,left['fingerprint']);self.assertNotEqual(result.returncode,0)
+        outcome=json.loads(result.stdout)
+        self.assertEqual((outcome['operation'],outcome['status'],outcome['request_id']),('worktree_leftover_keep','unconfirmed','test-keep'))
+        self.assertIn('synthetic forget failure',outcome['detail'])
+        self.assertEqual(self.records(),[(str(tree.resolve()),'partial')])
+        self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
+    def test_an_unreadable_record_store_is_never_taken_as_no_record(self):
+        if os.geteuid()==0:self.skipTest('root ignores directory permissions')
+        tree,_,_=self.partial('unreadable-store');left=self.leftover(tree)
+        store=self.root/'state'/'worktree-maintenance';store.chmod(0o000)
+        try:
+            kept=self.keep(tree,left['fingerprint']);data=self.review()
+            catalog=self.catalog()
+        finally:
+            store.chmod(0o700)
+        self.assertNotEqual(kept.returncode,0);outcome=json.loads(kept.stdout)
+        self.assertEqual(outcome['status'],'kept')
+        self.assertNotIn('No partial-removal record',outcome['detail']);self.assertIn('Permission denied',outcome['detail'])
+        self.assertEqual(data['leftovers'],[]);self.assertIn('Permission denied',data['leftovers_unavailable'])
+        self.assertNotIn('leftovers',catalog)
+        self.assertEqual(self.records(),[(str(tree.resolve()),'partial')])
+    def hold_repository_lock(self):
+        import fcntl,hashlib
+        common=str((self.repo/'.git').resolve())
+        path=self.root/'state'/'worktree-cache'/('repo-'+hashlib.sha256(common.encode()).hexdigest()+'.lock')
+        self.assertTrue(path.parent.is_dir())
+        handle=os.fdopen(os.open(path,os.O_RDWR|os.O_CREAT,0o600),'r+');fcntl.flock(handle,fcntl.LOCK_EX)
+        return handle
+    # Mutation D: a record whose worktree Git still lists is resolved only while
+    # no other worktree operation holds the repository lock.
+    def test_a_registered_record_is_forgotten_only_under_the_repository_lock(self):
+        import sqlite3
+        self.partial('lock-witness');live=self.linked('locked-live')
+        database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3';common=str((self.repo/'.git').resolve())
+        with contextlib.closing(sqlite3.connect(database)) as db,db:
+            db.execute("INSERT INTO removals VALUES (?,?,?,?,?,?,?,?,?)",(str(live.resolve()),common,'feature/locked-live','0'*40,'f'*64,'',1.0,'pending',''))
+        held=self.hold_repository_lock()
+        try:
+            data=self.review()
+            self.assertIsNone(self.leftover(live,data))
+            self.assertIn((str(live.resolve()),'pending'),self.records())
+        finally:
+            held.close()
+        self.review();self.assertNotIn(str(live.resolve()),[path for path,_ in self.records()])
+    # Mutation E: keep-folder waits for the repository lock and then refuses.
+    def test_keep_folder_never_runs_while_another_worktree_operation_holds_the_lock(self):
+        tree,_,_=self.partial('lock-keep');left=self.leftover(tree)
+        held=self.hold_repository_lock()
+        try:
+            result=self.keep(tree,left['fingerprint'])
+        finally:
+            held.close()
+        self.assertNotEqual(result.returncode,0);self.assertIn('Another worktree operation is running',result.stderr)
+        self.assertEqual(json.loads(result.stdout)['status'],'kept')
+        self.assertEqual(self.records(),[(str(tree.resolve()),'partial')])
+        kept=self.keep(tree,left['fingerprint']);self.assertEqual(kept.returncode,0,kept.stderr);self.assertEqual(self.records(),[])
+    # Mutation I: a dangling link at the leftover path is something there, not
+    # a vanished folder; only a missing name resolves the record.
+    def test_a_dangling_link_at_a_leftover_path_is_not_taken_as_gone(self):
+        import sqlite3
+        self.partial('link-witness');database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3'
+        link=self.root/'dangling-leftover';os.symlink(self.root/'nowhere',link);missing=self.root/'missing-leftover'
+        with contextlib.closing(sqlite3.connect(database)) as db,db:
+            db.executemany("INSERT INTO removals VALUES (?,?,?,?,?,?,?,?,?)",[(str(p),str(self.root/'gone-repository/.git'),'b','0'*40,'f'*64,'',1.0,'partial','') for p in (link,missing)])
+        listed=subprocess.run([str(HGS),'worktrees','leftovers','--json'],env=self.env,text=True,capture_output=True,timeout=60)
+        self.assertEqual(listed.returncode,0,listed.stderr)
+        paths=[path for path,_ in self.records()]
+        self.assertIn(str(link),paths);self.assertNotIn(str(missing),paths)
+        self.assertIn(str(link),[row['path'] for row in json.loads(listed.stdout)['leftovers']])
+    # zerus-ty94 #2: a targeted review reports that worktree's own leftover
+    # and nothing about any other record.
+    def test_a_targeted_review_reports_only_its_own_leftover(self):
+        tree,_,_=self.partial('targeted');other,_,_=self.partial('untargeted')
+        data=self.review(worktree=tree)
+        self.assertEqual(data['worktrees'],[])
+        self.assertEqual([row['path'] for row in data['leftovers']],[str(tree.resolve())])
+        self.assertEqual(data['leftovers'][0]['verdict'],'partially_removed');self.assertFalse(data['leftovers_partial'])
+        live=self.linked('still-live');data=self.review(worktree=live)
+        self.assertEqual([row['path'] for row in data['worktrees']],[str(live.resolve())]);self.assertEqual(data['leftovers'],[])
+        self.assertEqual(len(self.records()),2)
+    def volumes(self):
+        import sqlite3
+        database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3'
+        with contextlib.closing(sqlite3.connect(database)) as db:return db.execute('SELECT path,folder,repository FROM removal_volumes ORDER BY path').fetchall()
+    # zerus-ty94 #5: a reservation records which filesystem held the folder
+    # and the repository; a missing path counts as gone only there.
+    @unittest.skipUnless(sys.platform in ('linux','darwin'),'volume identities exist on Linux and macOS')
+    def test_a_vanished_record_resolves_only_on_its_recorded_filesystem(self):
+        import sqlite3
+        tree,_,_=self.partial('volume-witness')
+        [(path,folder,repository)]=self.volumes()
+        self.assertEqual(path,str(tree.resolve()))
+        if not folder:self.skipTest('this filesystem has no identity (zero fsid)')
+        self.assertTrue(folder.startswith(('linux:','macos:')));self.assertEqual(folder,repository)
+        database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3';gone_repository=str(self.root/'gone-repository/.git')
+        cases={'older-cli':None,'unrecorded':('',''),'same':(folder,folder),'foreign':('linux:1:00000000000000ff','linux:1:00000000000000ff')}
+        with contextlib.closing(sqlite3.connect(database)) as db,db:
+            for name,volume in cases.items():
+                db.execute("INSERT INTO removals VALUES (?,?,?,?,?,?,?,?,?)",(str(self.root/name),gone_repository,'b','0'*40,'f'*64,'',1.0,'partial',''))
+                if volume:db.execute("INSERT INTO removal_volumes VALUES (?,?,?)",(str(self.root/name),*volume))
+        listed=subprocess.run([str(HGS),'worktrees','leftovers','--json'],env=self.env,text=True,capture_output=True,timeout=60)
+        self.assertEqual(listed.returncode,0,listed.stderr)
+        paths=[path for path,_ in self.records()]
+        # Gone for good: today's check for an older CLI's record, and a missing
+        # folder and repository whose filesystem is still there.
+        self.assertNotIn(str(self.root/'older-cli'),paths);self.assertNotIn(str(self.root/'same'),paths)
+        # Uncertain, never gone: an unrecorded or another filesystem.
+        self.assertIn(str(self.root/'unrecorded'),paths);self.assertIn(str(self.root/'foreign'),paths)
+        self.assertEqual(sorted(p for p,_,_ in self.volumes()),sorted([str(tree.resolve()),str(self.root/'unrecorded'),str(self.root/'foreign')]))
+        # The record a live removal settled keeps its volume row with it.
+        shutil.rmtree(tree,ignore_errors=True)
+        if tree.exists():(tree/'target'/'readonly').chmod(0o755);shutil.rmtree(tree)
+        self.assertIsNone(self.leftover(tree));self.assertNotIn(str(tree.resolve()),[p for p,_,_ in self.volumes()])
+    # #1206 review: the targeted filter matches whole paths, never a prefix,
+    # and resolves a linked target to its record.
+    def test_a_targeted_review_matches_whole_paths_and_resolved_links(self):
+        pre,_,_=self.partial('pre');self.partial('pre-x')
+        data=self.review(worktree=pre)
+        self.assertEqual([row['path'] for row in data['leftovers']],[str(pre.resolve())])
+        link=self.root/'link-to-pre';os.symlink(pre,link)
+        data=self.review(worktree=link)
+        self.assertEqual([row['path'] for row in data['leftovers']],[str(pre.resolve())])
     def test_an_interrupted_removal_stays_pending_for_review(self):
         self.fake("if any(sys.argv[i:i+2]==['worktree','remove'] for i in range(len(sys.argv)-1)):\n import signal,subprocess\n subprocess.run(["+repr(GIT)+",*sys.argv[1:]])\n os.kill(os.getppid(),signal.SIGKILL);sys.exit(1)\nelse: os.execv("+repr(GIT)+",["+repr(GIT)+",*sys.argv[1:]])\n")
         tree,row,result=self.partial('interrupted')
@@ -523,6 +659,82 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         left=self.leftover(tree);self.assertIsNotNone(left)
         self.assertEqual(left['removal']['status'],'pending');self.assertEqual(left['verdict'],'partially_removed')
         self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
+    # zerus-ty94 #6: hgs is killed before Git starts removing. The Git it
+    # started inherited the repository lock, so the lock stays taken while that
+    # orphan runs: a review must keep the pending record however old it looks,
+    # and the folder Git leaves behind is still a reviewable leftover.
+    def test_a_review_never_resolves_a_removal_an_orphaned_git_is_still_running(self):
+        go=self.root/'orphan-go';done=self.root/'orphan-done'
+        self.fake("args=sys.argv[1:]\n"
+                  "if any(args[i:i+2]==['worktree','remove'] for i in range(len(args)-1)):\n"
+                  " import signal,subprocess\n os.kill(os.getppid(),signal.SIGKILL)\n end=time.time()+30\n"
+                  " while not os.path.exists("+repr(str(go))+") and time.time()<end: time.sleep(0.05)\n"
+                  " r=subprocess.run(["+repr(GIT)+",*args],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode\n"
+                  " open("+repr(str(done))+",'w').close();sys.exit(r)\n"
+                  "os.execv("+repr(GIT)+",["+repr(GIT)+",*args])\n")
+        tree,row,result=self.partial('orphaned-git')
+        self.assertEqual(result.returncode,-9,result.stderr)
+        self.assertEqual(self.records(),[(str(tree.resolve()),'pending')])
+        # Git has not deregistered the worktree yet. A clock step or a long
+        # Git run ages the record (review-w's probe): it must still stay.
+        import sqlite3
+        database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3'
+        with contextlib.closing(sqlite3.connect(database)) as db,db:db.execute("UPDATE removals SET reserved_at=reserved_at-100000")
+        data=self.review();self.assertIn(str(tree.resolve()),[r['path'] for r in data['worktrees']])
+        self.assertEqual(self.records(),[(str(tree.resolve()),'pending')])
+        go.touch();end=time.time()+30
+        while not done.exists() and time.time()<end:time.sleep(0.05)
+        self.assertTrue(done.exists());(self.home/'.local/bin/git').unlink()
+        left=self.leftover(tree);self.assertIsNotNone(left)
+        self.assertEqual(left['removal']['status'],'pending')
+        self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
+    # Only the removal's Git inherits the repository lock; every other Git
+    # hgs runs, before and after, never holds it, and it is free afterwards.
+    @unittest.skipUnless(sys.platform=='linux','reads /proc/self/fd')
+    def test_only_the_removal_git_inherits_the_repository_lock(self):
+        log=self.root/'git-fds.log'
+        self.fake("args=sys.argv[1:]\n"
+                  "held=False\n"
+                  "for name in os.listdir('/proc/self/fd'):\n"
+                  " try:target=os.readlink('/proc/self/fd/'+name)\n"
+                  " except OSError:continue\n"
+                  " held=held or ('worktree-cache' in target and target.endswith('.lock'))\n"
+                  "open("+repr(str(log))+",'a').write(repr((held,args))+'\\n')\n"
+                  "os.execv("+repr(GIT)+",["+repr(GIT)+",*args])\n")
+        clean=self.linked('inherits');self.age(clean);row=self.row(clean)
+        result=self.remove(clean,row['fingerprint']);self.assertEqual(result.returncode,0,result.stderr)
+        calls=[eval(line) for line in log.read_text().splitlines()]
+        removal=[held for held,args in calls if any(args[i:i+2]==['worktree','remove'] for i in range(len(args)-1))]
+        self.assertEqual(removal,[True])
+        self.assertGreater(len(calls),len(removal));self.assertFalse(any(held for held,args in calls if 'remove' not in args))
+        import fcntl,hashlib
+        common=str((self.repo/'.git').resolve())
+        path=self.root/'state'/'worktree-cache'/('repo-'+hashlib.sha256(common.encode()).hexdigest()+'.lock')
+        with open(path,'r+') as handle:fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    # The removal releases its lock by closing it, never by an explicit
+    # unlock: a helper the removal's Git started keeps it taken until it exits.
+    @unittest.skipUnless(sys.platform in ('linux','darwin'),'flock inheritance')
+    def test_the_repository_lock_lasts_while_anything_the_removal_git_started_runs(self):
+        import fcntl,hashlib
+        go=self.root/'helper-go'
+        self.fake("args=sys.argv[1:]\n"
+                  "if any(args[i:i+2]==['worktree','remove'] for i in range(len(args)-1)) and os.fork()==0:\n"
+                  " [os.close(fd) for fd in (0,1,2)]\n end=time.time()+30\n"
+                  " while not os.path.exists("+repr(str(go))+") and time.time()<end: time.sleep(0.05)\n"
+                  " os._exit(0)\n"
+                  "os.execv("+repr(GIT)+",["+repr(GIT)+",*args])\n")
+        clean=self.linked('helper');self.age(clean);row=self.row(clean)
+        result=self.remove(clean,row['fingerprint']);self.assertEqual(result.returncode,0,result.stderr)
+        common=str((self.repo/'.git').resolve())
+        path=self.root/'state'/'worktree-cache'/('repo-'+hashlib.sha256(common.encode()).hexdigest()+'.lock')
+        def free():
+            with open(path,'r+') as handle:
+                try:fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB);return True
+                except BlockingIOError:return False
+        self.assertFalse(free(),'the lock was released while a helper of the removal Git ran')
+        go.touch();end=time.time()+10
+        while not free() and time.time()<end:time.sleep(0.05)
+        self.assertTrue(free())
     def test_resolved_and_stale_records_drop_and_the_bound_fails_closed(self):
         import sqlite3
         tree,_,_=self.partial('resolved');self.assertEqual(len(self.records()),1)
@@ -546,6 +758,29 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         shutil.rmtree(orphans)
         result=self.remove(live,self.row(live)['fingerprint']);self.assertEqual(result.returncode,0,result.stderr)
         self.assertFalse(live.exists());self.assertEqual(self.records(),[])
+    def test_capacity_refusal_commits_resolved_vanished_records(self):
+        import sqlite3
+        tree,_,_=self.partial('capacity-witness')
+        live=self.linked('capacity-live');self.age(live);row=self.row(live)
+        database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3'
+        # A late partial outcome can leave a historical store above the bound.
+        # The first page contains a definitely vanished record, followed by
+        # enough still-existing folders that the new removal must still refuse.
+        vanished=self.root/'000-vanished';orphans=self.root/'capacity-orphans';orphans.mkdir()
+        for n in range(512):(orphans/str(n)).mkdir()
+        with contextlib.closing(sqlite3.connect(database)) as db,db:
+            db.executemany("INSERT INTO removals VALUES (?,?,?,?,?,?,?,?,?)",
+                [(str(vanished),str(self.root/'gone-repository/.git'),'b','0'*40,'f'*64,'',1.0,'partial','')]
+                +[(str(orphans/str(n)),str(self.root/'gone-repository/.git'),'b','0'*40,'f'*64,'',1.0,'partial','') for n in range(512)])
+        refused=self.remove(live,row['fingerprint'])
+        self.assertNotEqual(refused.returncode,0);self.assertIn('512 earlier removals still need review',refused.stderr)
+        self.assertEqual(json.loads(refused.stdout)['status'],'kept')
+        remaining=dict(self.records())
+        self.assertFalse(str(vanished) in remaining,'a refused reservation must not resurrect a verified resolution')
+        self.assertEqual(len(remaining),513);self.assertIn(str(tree.resolve()),remaining)
+        self.assertTrue(live.exists());self.assertEqual(len(list(orphans.iterdir())),512)
+        self.assertIn('feature/capacity-live',self.git('-C',str(self.repo),'branch','--list','feature/capacity-live'))
+
     def test_a_stale_listing_never_forgets_a_partial_record(self):
         if os.geteuid()==0:self.skipTest('root ignores directory permissions')
         tree=self.linked('race');readonly=tree/'target'/'readonly';readonly.mkdir(parents=True);(readonly/'out').write_text('build')
@@ -609,6 +844,46 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         self.assertIn('changed since the review',keep('0'*64).stderr)
         kept=keep(orphan['fingerprint']);self.assertEqual(kept.returncode,0,kept.stderr);self.assertEqual(json.loads(kept.stdout)['status'],'kept')
         self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build');self.assertEqual(self.records(),[])
+    def test_many_leftovers_stay_bounded_and_the_catalog_counts_them(self):
+        import sqlite3
+        tree,_,_=self.partial('counted')
+        self.assertEqual(self.catalog()['leftovers'],1)
+        data=self.review();self.assertEqual(len(data['leftovers']),1);self.assertFalse(data['leftovers_partial'])
+        database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3';common=str((self.repo/'.git').resolve())
+        extra=self.root/'extra';gone=self.root/'gone'
+        for n in range(40):(extra/str(n)).mkdir(parents=True);(gone/str(n)).mkdir(parents=True)
+        with contextlib.closing(sqlite3.connect(database)) as db,db:
+            db.executemany("INSERT INTO removals VALUES (?,?,?,?,?,?,?,?,?)",
+                [(str(extra/str(n)),common,'b','0'*40,'f'*64,'',1.0,'partial','') for n in range(40)]
+                +[(str(gone/str(n)),str(self.root/'gone-repository/.git'),'b','0'*40,'f'*64,'',1.0,'partial','') for n in range(40)])
+        self.assertEqual(self.catalog()['leftovers'],41)
+        data=self.review();self.assertEqual(len(data['leftovers']),32);self.assertTrue(data['leftovers_partial'])
+        listed=subprocess.run([str(HGS),'worktrees','leftovers','--json'],env=self.env,text=True,capture_output=True,timeout=60)
+        self.assertEqual(listed.returncode,0,listed.stderr);value=json.loads(listed.stdout)
+        self.assertEqual(len(value['leftovers']),32);self.assertTrue(value['partial'])
+        # Nothing beyond the bound is forgotten; vanished folders still resolve.
+        self.assertEqual(len(self.records()),81)
+        shutil.rmtree(extra)
+        data=self.review();self.assertEqual([r['path'] for r in data['leftovers']],[str(tree.resolve())])
+        self.assertFalse(data['leftovers_partial']);self.assertEqual(self.catalog()['leftovers'],1)
+    def test_leftover_rows_stay_within_their_byte_bound(self):
+        import sqlite3
+        tree,_,_=self.partial('large');database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3'
+        common=str((self.repo/'.git').resolve());extra=self.root/'large-details';gone=self.root/'large-gone'
+        for n in range(20):(extra/str(n)).mkdir(parents=True);(gone/str(n)).mkdir(parents=True)
+        # Twenty rows of about 100 KB each: the 32-row bound alone admits all of them.
+        with contextlib.closing(sqlite3.connect(database)) as db,db:
+            db.executemany("INSERT INTO removals VALUES (?,?,?,?,?,?,?,?,?)",
+                [(str(extra/str(n)),common,'b','0'*40,'f'*64,'',1.0,'partial','x'*100_000) for n in range(20)]
+                +[(str(gone/str(n)),str(self.root/'gone-repository/.git'),'b','0'*40,'f'*64,'',1.0,'partial','x'*100_000) for n in range(20)])
+        data=self.review();rows=data['leftovers']
+        self.assertTrue(data['leftovers_partial']);self.assertLess(len(rows),21);self.assertGreater(len(rows),1)
+        self.assertLessEqual(len(json.dumps(rows,separators=(',',':')).encode()),1024*1024)
+        listed=subprocess.run([str(HGS),'worktrees','leftovers','--json'],env=self.env,text=True,capture_output=True,timeout=60)
+        self.assertEqual(listed.returncode,0,listed.stderr);value=json.loads(listed.stdout)
+        self.assertTrue(value['partial']);self.assertLess(len(value['leftovers']),20)
+        self.assertLessEqual(len(json.dumps(value['leftovers'],separators=(',',':')).encode()),1024*1024)
+        self.assertEqual(len(self.records()),41)
     def delete(self,path,fingerprint,confirm=True,extra=()):
         return subprocess.run([str(HGS),'worktrees','delete-leftover','--path',str(path),'--common-dir',str(self.repo/'.git'),'--fingerprint',fingerprint,
             *(['--confirm-delete'] if confirm else []),'--request-id','test-delete','--json',*extra],env=self.env,text=True,capture_output=True,timeout=60)
@@ -658,6 +933,67 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         left=self.leftover(tree);self.assertIn('nested_repository',codes(left['reasons']));self.assertFalse(left['deletable'])
         self.assertNotEqual(self.delete(tree,left['fingerprint']).returncode,0)
         self.assertTrue((nested/'.git').is_dir());self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
+    def test_leftover_deletion_refuses_an_incomplete_saved_binding_inventory(self):
+        for failure in ('unreadable-file','malformed-record','unreadable-directory'):
+            with self.subTest(failure=failure):
+                tree,row,_=self.partial('binding-'+failure)
+                name='codex/protected-'+failure;self.binding(name,tree)
+                known=self.root/'state'/(hashlib.sha256(name.encode()).hexdigest()+'.json')
+                self.assertIn('sessions',codes(self.leftover(tree)['reasons']))
+                unrelated='codex/unrelated-'+failure;self.binding(unrelated,self.root)
+                bad=self.root/'state'/(hashlib.sha256(unrelated.encode()).hexdigest()+'.json')
+                original=bad.read_text()
+                directory=self.root/'state'/'bindings';directory.mkdir(exist_ok=True)
+                if failure=='unreadable-file':bad.chmod(0)
+                elif failure=='malformed-record':bad.write_text('{invalid')
+                else:directory.chmod(0)
+                try:
+                    current=self.leftover(tree)
+                    # Use the fresh proof: refusal cannot rely on an old one
+                    # becoming stale, nor on the known record being unreadable.
+                    result=self.delete(tree,current['fingerprint'])
+                    self.assertNotEqual(result.returncode,0,result.stdout)
+                    self.assertIn('Saved sessions could not be checked',result.stderr)
+                    self.assertEqual(tuple(json.loads(result.stdout)[key] for key in ('operation','outcome_version','status')),('worktree_leftover_delete',1,'kept'))
+                    self.assertFalse(current['deletable'])
+                    self.assertIn('sessions_unavailable',codes(current['reasons']))
+                    self.assertFalse(current.get('process_fingerprint'))
+                    self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
+                    self.assertIn(row['branch'],self.git('-C',str(self.repo),'branch','--list',row['branch']))
+                finally:
+                    bad.chmod(0o600);bad.write_text(original);directory.chmod(0o700)
+                # A repaired inventory still protects the real saved reference.
+                repaired=self.leftover(tree)
+                self.assertIn('sessions',codes(repaired['reasons']));self.assertFalse(repaired['deletable'])
+                known.unlink();bad.unlink()
+                ready=self.leftover(tree);self.assertTrue(ready['deletable'])
+                allowed=self.delete(tree,ready['fingerprint']);self.assertEqual(allowed.returncode,0,allowed.stderr)
+                self.assertFalse(tree.exists())
+
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux protected-process review')
+    def test_process_only_consent_never_overrides_an_unreadable_binding_inventory(self):
+        tree,_,_=self.partial('binding-consent')
+        child=subprocess.Popen([sys.executable,'-I','-c',
+            'import ctypes,time; assert ctypes.CDLL(None).prctl(4,0,0,0,0)==0; print("ready",flush=True); time.sleep(90)'],
+            cwd=self.root,stdout=subprocess.PIPE,text=True)
+        self.addCleanup(child.stdout.close);self.addCleanup(child.wait);self.addCleanup(lambda:child.poll() is None and child.kill())
+        self.assertEqual(child.stdout.readline().strip(),'ready')
+        before=self.leftover(tree)
+        self.assertEqual(codes(before['reasons']),['processes_unavailable'])
+        self.assertTrue(before['process_fingerprint'])
+        name='codex/unreadable-consent';self.binding(name,self.root)
+        bad=self.root/'state'/(hashlib.sha256(name.encode()).hexdigest()+'.json');bad.chmod(0)
+        try:
+            current=self.leftover(tree)
+            result=self.delete(tree,current['fingerprint'],extra=('--process-fingerprint',before['process_fingerprint']))
+            self.assertNotEqual(result.returncode,0,result.stdout)
+            self.assertEqual(tuple(json.loads(result.stdout)[key] for key in ('operation','outcome_version','status')),('worktree_leftover_delete',1,'kept'))
+            self.assertIn('sessions_unavailable',codes(current['reasons']))
+            self.assertIn('processes_unavailable',codes(current['reasons']))
+            self.assertFalse(current.get('process_fingerprint'))
+            self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
+        finally:bad.chmod(0o600)
+
     def test_a_stopped_deletion_keeps_its_record_and_is_never_retried(self):
         tree,_,_=self.partial('stopped');left=self.leftover(tree)
         parent=tree.parent;mode=parent.stat().st_mode;parent.chmod(0o555);self.addCleanup(lambda:parent.chmod(mode))
@@ -670,6 +1006,50 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         self.assertNotEqual(self.delete(tree,left['fingerprint']).returncode,0);self.assertTrue(tree.exists())
         finished=self.delete(tree,later['fingerprint']);self.assertEqual(finished.returncode,0,finished.stderr)
         self.assertFalse(tree.exists());self.assertEqual(self.records(),[])
+    def test_delete_confirmation_is_spent_even_when_no_file_changed_and_settlement_fails(self):
+        import sqlite3
+        tree,row,_=self.partial('single-use')
+        retained=self.root/'retained-ignored-payload';tree.rename(retained);tree.mkdir()
+        left=self.leftover(tree);identity=(tree.stat().st_ino,tree.stat().st_mtime_ns)
+        database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3'
+        with contextlib.closing(sqlite3.connect(database)) as db,db:
+            db.execute("CREATE TRIGGER synthetic_settle_failure BEFORE INSERT ON removals WHEN NEW.detail LIKE 'Deleting the leftover stopped:%' BEGIN SELECT RAISE(ABORT,'synthetic settlement failure'); END")
+        mode=self.root.stat().st_mode
+        def stopped(proof):
+            self.root.chmod(0o555)
+            try:result=self.delete(tree,proof)
+            finally:self.root.chmod(mode)
+            self.assertNotEqual(result.returncode,0);self.assertIn('Deleting the leftover stopped',result.stderr)
+            value=json.loads(result.stdout)
+            self.assertEqual((value['operation'],value['outcome_version'],value['status']),('worktree_leftover_delete',1,'unconfirmed'))
+            self.assertEqual((tree.stat().st_ino,tree.stat().st_mtime_ns),identity)
+            self.assertEqual(list(tree.iterdir()),[])
+        stopped(left['fingerprint'])
+        later=self.leftover(tree)
+        self.assertNotEqual(later['fingerprint'],left['fingerprint'],'the pre-walk record must consume the confirmation even when settlement fails')
+        stale=self.delete(tree,left['fingerprint']);self.assertNotEqual(stale.returncode,0)
+        self.assertEqual(json.loads(stale.stdout)['status'],'kept');self.assertTrue(tree.exists())
+        with contextlib.closing(sqlite3.connect(database)) as db,db:db.execute('DROP TRIGGER synthetic_settle_failure')
+        # Repeating the same refusal must consume a different confirmation too.
+        for _ in range(2):
+            before=self.leftover(tree);stopped(before['fingerprint'])
+            self.assertNotEqual(self.leftover(tree)['fingerprint'],before['fingerprint'],'a repeated refusal must not restore its spent confirmation')
+        self.assertEqual((retained/'target'/'readonly'/'out').read_text(),'build')
+        self.assertIn(row['branch'],self.git('-C',str(self.repo),'branch','--list',row['branch']))
+    def test_unwritable_attempt_record_refuses_before_deleting_any_files(self):
+        import sqlite3
+        tree,_,_=self.partial('intent-refused');left=self.leftover(tree)
+        database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3'
+        with contextlib.closing(sqlite3.connect(database)) as db,db:
+            for operation in ('INSERT','UPDATE'):
+                db.execute(f"CREATE TRIGGER synthetic_intent_{operation.lower()} BEFORE {operation} ON removals BEGIN SELECT RAISE(ABORT,'synthetic intent failure'); END")
+        result=self.delete(tree,left['fingerprint']);self.assertNotEqual(result.returncode,0)
+        value=json.loads(result.stdout)
+        self.assertEqual((value['operation'],value['outcome_version'],value['status']),('worktree_leftover_delete',1,'kept'))
+        self.assertIn('synthetic intent failure',value['detail'])
+        self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
+        self.assertEqual(self.leftover(tree)['fingerprint'],left['fingerprint'])
+
     def inspect(self,path,file=None,common=None):
         return subprocess.run([str(HGS),'worktrees','inspect','--path',str(path),'--common-dir',str(common or self.repo/'.git'),*(['--file',file] if file else []),'--json'],env=self.env,text=True,capture_output=True,timeout=30)
     def test_ignored_notes_are_not_candidates_and_require_exact_consent(self):

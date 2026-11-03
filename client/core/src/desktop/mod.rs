@@ -16,6 +16,7 @@ pub mod activation;
 pub mod approval_audit;
 pub mod cache_maintenance;
 pub mod creation_clone;
+pub mod creation_launch;
 pub mod creation_worktree;
 pub mod drain;
 pub mod notification_control;
@@ -25,8 +26,10 @@ pub mod pending_reads;
 pub mod producer;
 pub mod profile;
 pub mod relay;
+pub mod server_trust;
 pub mod service;
 pub mod startup;
+pub mod task_start_reconcile;
 pub mod ui_requests;
 
 #[cfg(unix)]

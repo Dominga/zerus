@@ -11,8 +11,12 @@ deferred until the owner reschedules it.** Windows remains on va-kids using the
 owner's main account; the inventory's unreachable-PC note is historical.
 **Full platform acceptance remains pending.** Recorded subchecks do not establish
 platform acceptance; a merged PR or a private fixture pass does not check a box.
-Qt deletion stays a draft until the coordinator accepts the
-results for all three platforms; do not deploy the deletion branch for these tests.
+Owner removal decision (2026-11-03): **#906a retires Linux/macOS Qt builds and
+CI only after both macOS and Linux acceptance records are complete.** It is a
+ready review PR, not permission to merge or deploy. **#906b remains draft until
+Windows PC (va-kids) acceptance** and then removes the retained `tray/` tree and
+Windows Qt pieces. Windows PC testing does not gate #906a. Use the existing
+candidate installation, never either deletion branch, for acceptance.
 
 For each platform, record the exact Next and last-Qt release/source, installed
 `--build-info`, package/artifact identity and installer route in the acceptance
@@ -21,9 +25,31 @@ steps/results. Keep logs bounded and redact account/message/device data. Preserv
 Qt settings, drafts, outboxes and connector journals; never restart agents, tmux
 or a live DeepSeek host, and do not touch unrelated services. Close every window
 opened by a run and avoid notification spam. Explicit confirmations remain
-required for destructive UI. A clean-install or default-OFF subcase needs genuinely
-clean/default state: never clear or reseed the owner's existing state to manufacture
-it, and leave the subcase pending if it cannot be observed on the main account.
+required for destructive UI. **Clean-install exception, owner decision 2026-11-03:** use the exact candidate's
+CI install/package checks plus the upgrade path on the owner's main accounts.
+Do not reset an account, create a test account or require initially empty
+accounts/projects. Record both evidence sets; the exception is not a native
+clean-account PASS. Default-OFF subcases still need genuine default state: never
+clear or reseed the owner's existing state to manufacture it; leave them pending
+if they cannot be observed on the main account.
+
+### Owner participation and the clean-install exception
+
+The 2026-11-03 exception replaces all three clean-account subcases with exact
+candidate CI install/package checks **and** the owner-account upgrade. Keep links
+and results for both halves beside each platform row. It does not waive upgrade,
+one-time import, service readiness, notifications, rollback or genuine default-OFF
+checks. Staging prefixes and fake service managers remain component evidence.
+
+macOS automation may run without a separate owner window under the existing
+rules. Ask the owner to perform any new microphone/camera, Apple Events, screen
+lock/unlock or authentication consent; never approve privacy prompts for them.
+Voice/video quality and any sensory result not observable in the retained
+record require their observation. The Arch display checks wait for the owner's
+rescheduled window; nondisplay source/package evidence can be prepared meanwhile.
+Windows PC execution waits for its separate acceptance. Neither this scheduling
+nor the exception permits clearing state, creating a replacement account or
+restarting agents, tmux or a live DeepSeek host.
 
 ## Linux — arch
 
@@ -34,7 +60,7 @@ file checks only, not installed acceptance. Do not install a test binary by hand
 
 | Pending check | How to verify | Coverage / owner |
 |---|---|---|
-| [ ] Clean install | Check a genuinely clean canonical install of the exact Next package on the owner's main account; open About and compare GUI/CLI identities. Inspect package contents/dependencies for Qt/KF6/WebEngine absence; confirm accounts/projects are initially empty. | G5 `.66.7.1`, [#867](https://github.com/ufna/zerus/pull/867); linux-shell-u |
+| EXCEPTION — owner accepted 2026-11-03 | Combine the exact candidate's CI install/package checks (including Qt/KF6/WebEngine absence and GUI/CLI identity) with the maintained upgrade on the owner's main account. Link both results; do not clear state or claim an empty-account install. | G5 `.66.7.1`, [#867](https://github.com/ufna/zerus/pull/867); linux-shell-u |
 | [ ] Upgrade with agents running | From the last Qt release, keep a known terminal/native session and an unsent draft open; record exact session/run/conversation identities. Upgrade through the maintained installer/updater, reopen that same session and verify identity, jobs, terminal and draft survived without a restart. | [#886](https://github.com/ufna/zerus/pull/886), G2 `.66.4`, G6 `.66.8` |
 | [ ] One-time import | Compare selected Qt settings, collapsed rows, folder split, cleanup choices, window geometry, drafts and read marks. Change a Next preference, restart twice and roll back/forward: no reseed, source writes or replay. Malformed/partial families remain recoverable. | G3 `.66.5.2.1`, `.66.5.3`, [#870](https://github.com/ufna/zerus/pull/870) |
 | [ ] Service registration/readiness | Inspect the generated user unit and `hgs desktop status --json`: one owned service, independent background readiness, graphical-session environment imported. Close Next; catalog/details, presence and durable read delivery continue. Custom units refuse overwrite. | `.66.3.27`, [#886](https://github.com/ufna/zerus/pull/886), [#898](https://github.com/ufna/zerus/pull/898), `.66.3.31` |
@@ -282,7 +308,74 @@ keep the shared report admission charged until actual completion. Publication
 runs off the UI/legacy worker and never gates Grant, watch/catalog or Resume.
 Capture/report success alone does not complete G3 or installed acceptance.
 
+The service-mode, non-replay native local-mark writer also preserves the exact
+`attention-marks.json` bytes before its first load/normalization in a separate
+`local-read-preload-v1` slot. This historical boundary is specific to local
+presentation marks, not the shared host-read queue or `attention-observed.json`.
+The original pair order, duplicates and unknown fields remain in the private
+snapshot. The existing decoder still refuses more than 20,000 entries in either
+map; a larger captured original is retained, never exported after capping it.
+Capture failure pauses local-mark mutations and all file writes, including
+flush/drop and thread-spawn fallback, while presentation reads still answer.
+Review shows `local_read_capture` independently; Retry wakes the same writer.
+A loaded model retains editable unsaved changes after a failed file write;
+Retry checks the same live file object before saving them.
+Later writes check the canonical managed directory and the same live leaf
+identity/hash; a changed leaf is never adopted. Every current file is classified
+without normalization before a restarted model is installed, even when an older
+historical receipt exists.
+
+The separate `local_reads_report` publishes that original snapshot and its
+historical provenance through the existing Staged publisher after paired
+canonical configuration is known. Its fixed scope and private journal are
+separate from the Qt/Settings and creations reports. Review keeps capture and
+publication reasons separate. Later local writes do not change the original;
+publication rechecks the retained snapshot's private identity and raw hash.
+A lost or uncertain result only looks up the original import UUID. Explicit
+Retry can repeat only a verified not-committed attempt or a durably proven
+failure before the final record, with the same snapshot/configuration/receipt
+and a compare-and-swap fence against a late original callback. All groups share
+the existing single report admission and original helper/pipe resource charges;
+report failure never gates Grant, watch/catalog or Resume.
+
+These are source/component controls. A Staged receipt is historical evidence,
+not shared-read delivery or acknowledgement, notification suppression,
+current-source completeness, ownership or permission to act. Installed import
+and upgrade acceptance remain pending.
+
+The native NewSession owner also preserves `worktree-snapshots.json` in a fixed
+`worktree-cache-preload-v1` slot before its first service-mode load or file write.
+The exact historical original and capture ID remain unchanged after later cache
+writes. Both the original and today's restarted file pass the existing strict
+64-record/8 MiB cache decoder before the pruning model runs (raw reads stay
+bounded to 16 MiB). Opaque cache hashes never prove current checkout ownership.
+Only this legacy cache's read accepts an owned, single-link 0644 Unix source;
+group/other writes, links and changed canonical identities refuse capture.
+The source is never chmodded. Archive/metadata and replacement cache files stay
+private (0600); Windows native ACL/reparse checks are unchanged. The existing
+local-disk and ancestor-list requirements still apply; a redirected UNC source
+remains unavailable.
+
+A failure pauses only cache file persistence. Fresh folder queries and separately
+authorized session creation remain available; dirty in-memory cache data stays
+bounded and unsaved until an explicit same-owner Retry passes its original
+source checks. Quit refuses late model installation and new cache writes.
+Review shows `worktree_cache_capture` separately from drafts, local read marks
+and published reports. This is component/source coverage: config-bound Staged
+publication is a later slice, and no installed acceptance row is promoted.
+
 ## macOS
+
+For a coordinator-approved private click fixture, opt in to actual GUI selection
+readback with `ZERUS_CLIENT_ACCEPTANCE_SELECTION=1` and a canonical, owned 0700
+`XDG_STATE_HOME`. The main webview records its current page, detail tab and selected
+computer/name/run/conversation in `hgs/client-selection-diagnostic.json` below that
+private state directory (atomic 0600, at most 2 KiB, timestamp and source commit).
+Only one write and the latest pending observation are retained. Match this actual
+selection against the original Delivered mapping after the owner's click; a native
+intended target or a visible project alone does not prove the selected Activity.
+The opt-in is off by default and accepts no navigation, permission or service
+command. Readback is observation only and never supplies authority.
 
 Use the signed/notarized Next bundle/cask and the maintained local installer for
 the owner's main-account evaluation. **Run Mac first after the source admission
@@ -295,7 +388,7 @@ existing privacy identity, signature, installed path and one verified rollback c
 
 | Pending check | How to verify | Coverage / owner |
 |---|---|---|
-| [ ] Clean install | Check a genuinely clean canonical install of the exact signed/notarized `Zerus.app` on the owner's main account. Check bundle/CLI identity, signature/notary and package checks; no Qt frameworks/plugins. Cask install itself must not quit apps or start services. | G5 `.66.7.2`, [#871](https://github.com/ufna/zerus/pull/871); macbundle-u |
+| EXCEPTION — owner accepted 2026-11-03 | Combine the exact candidate's CI install/package checks (bundle/CLI identity, signature/notary and no Qt frameworks/plugins) with the maintained owner-account upgrade. Cask installation must not quit apps or start services. Link both results; do not clear state or claim an empty-account install. | G5 `.66.7.2`, [#871](https://github.com/ufna/zerus/pull/871); macbundle-u |
 | [ ] Upgrade with agents running | Upgrade last Qt via the maintained updater; verify exact running session/run/conversation, terminal/jobs and flushed drafts survive. Keep `com.hgdev.hgs-tray` and `~/Applications/hgs-tray.app`; no native-agent/tmux restart. | `.12.6`, [#871](https://github.com/ufna/zerus/pull/871), `tray/update-installed.py` |
 | [ ] One-time import | Check exported Qt defaults, layout/window bounds, drafts and read/attention marks; Next values win. Restart and rollback/forward without reseeding handled families; preserve original plist/export/store bytes. | G3 `.66.5.2.1`, `.66.5.3`, [#870](https://github.com/ufna/zerus/pull/870) |
 | [ ] Service registration/readiness | Through explicit `zerus-setup`, inspect the Aqua `com.hgdev.hgs-desktop` LaunchAgent and actual `desktop status`; close Next and verify background duties continue. Foreign/custom definitions are refused. | `.66.3.27.2`, [#882](https://github.com/ufna/zerus/pull/882); macbundle-u/desktop-u |
@@ -305,6 +398,40 @@ existing privacy identity, signature, installed path and one verified rollback c
 | [ ] Voice/video | Exercise real microphone/camera consent, short preview/transcription, cancel/hide and exit recovery. Check public privacy identity; never import an old device ID or replay uncertain delivery. | G2 `.66.4.5`, inventory media/privacy rows |
 | [ ] UI/durable parity | Apply the same complete inventory responsibility walk as Linux, including bounded details/tasks, archived reads, creation recovery and default-off approvals with authenticated frontend-only enablement. Use the [installed client cutover runbook](#installed-client-cutover-on-linux-and-macos). | G1–G4/G7, `.66.3.31/.32/.35/.38` |
 | [ ] Qt rollback | Use the retained complete Qt copy and original maintained updater before deletion; desktop revoke must settle before Qt starts. Verify settings/drafts/agents, then switch back to Next without a second import. | `.66.3.31`, updater rollback and defaults-snapshot checks |
+
+### Recorded Mac native-host subchecks — source `f1833dec`
+
+macbundle-u reported the maintained main-account installation
+`f1833decd99e503b4ee48314df298894006c8062`. migrate-u checked the three bounded
+summary/receipt/status files below against their supplied hashes. Owner sensory
+observations and the private fixture-to-target comparison remain attributed to
+macbundle-u; this was not an independent rerun. **Mac acceptance remains open
+(`.66.3.30.2.4`); no platform checkbox or #906a merge gate is satisfied here.**
+
+| Subcheck | Result | Actual evidence and limit |
+|---|---|---|
+| One service-host Post | PASS, one synthetic target | One controlled synthetic reply produced one Delivered Post. The retained receipt/native-token hash matched the producer's reserved private run/conversation fixture. The original callback was host/default, one callback with zero GUI callbacks. This does not establish delivery for other targets or a second attempt. |
+| Owner banner and click | PASS, owner-reported scope | The owner reported one new banner and one click into the fixture project. **Actual selected Activity remains UNQUALIFIED:** the run exported no exact selected-session readback. Project visibility alone is not exact-target selection proof. |
+| Normal revoke/drain | FAILED | The retained status has one pending native Post hold, `notification_cleanup_deadline`, `notification_host_unresponsive`, `drained:false`, `operation_drained:false` and no observed host exit. `background_drained:true` does not establish the missing physical drain. The original revoke remains unsettled. |
+| Original withdrawal | UNKNOWN, no replay | The asynchronous Withdraw receipt is `unknown` / `native_error`; it is not a completed withdrawal or a retry grant. Keep its original identity and uncertainty. |
+| Exceptional physical cleanup and owner restore | Separate recovery, not normal-drain PASS | The coordinator separately authorized one TERM to the test host and one to the private service, with zero KILLs. The test GUI/host/service were absent afterward; owner LaunchAgent, native agents and rollout agent were untouched. The owner reopened the ordinary installed GUI, Native ownership revision 15, and the watcher resumed. The supervisor, fixture/data and checkout were deliberately retained. Cleanup does not settle the original revoke or unknown Withdraw. |
+
+P0 `.66.3.30.2.8` / [#1210](https://github.com/ufna/zerus/pull/1210) addresses
+the native host lifetime and provides an opt-in bounded exact-selection readback.
+Its source/component tests are not the required rerun. A reviewed installed
+candidate must establish normal drain and actual selected Activity under the
+coordinator's next admitted route. Do not replay the original unknown operations.
+Import/upgrade, tray, terminal, voice/video and the rest of G6 remain unqualified.
+
+The selected evidence is retained privately by macbundle-u under
+`.ci-build/mac-native-acceptance/installed-4u7n-bounded-summary/`. These hashes
+identify the checked summary bytes, not public SDK metadata or owner content:
+
+| Evidence file | Bytes | SHA-256 |
+|---|---|---|
+| `summary.json` | 833 | `d5f29374b8de0a3a894150ba3fabc7366f0839264dec8f08b9508a1c40d2ffed` |
+| `selected-receipts.json` | 664 | `95ad49391c527b69082ffea7f7f51868e4acdde8b77a87612f53985a9e97f3ca` |
+| `selected-cleanup-status.json` | 406 | `73bcf6e34d938b088268497978f57855e3150d8198502e1edce53aa88581d308` |
 
 ## Installed client cutover on Linux and macOS
 
@@ -646,7 +773,7 @@ Do not touch unrelated desktop/apps/settings.
 
 | Pending check | How to verify | Coverage / owner |
 |---|---|---|
-| [ ] Clean install | Test portable ZIP and per-user installer. Verify `zerus-windows-x86_64/hgs-tray.exe`, adjacent `hgs.exe`, connector/ConPTY and actual WebView2 readiness; no Qt DLLs/plugins. | G5 `.66.7.3/.4`, [#875](https://github.com/ufna/zerus/pull/875); fleet-c |
+| EXCEPTION — owner accepted 2026-11-03 | Combine CI portable-ZIP/per-user-installer install/package checks with the owner-account upgrade. Verify `zerus-windows-x86_64/hgs-tray.exe`, adjacent `hgs.exe`, connector/ConPTY, WebView2 readiness and no Qt DLLs/plugins. Native Windows PC acceptance remains deferred. | G5 `.66.7.3/.4`, [#875](https://github.com/ufna/zerus/pull/875); fleet-c |
 | [ ] Upgrade with agents running | Upgrade the last Qt install in its owned folder; verify exact native session/run/conversation and ConPTY jobs, saved drafts and accounts survive. Stale Qt payload cleanup must stay inside that installer-owned folder. | `.66.7.3`, `.66.6.15`; fleet-c/fixes-u |
 | [ ] One-time import | Check actual legacy registry/INI preferences, folder mapping, geometry, drafts and attention seed. Restart and rollback/forward: no source writes, reimport or automatic policy inheritance. | G3 `.66.5.2.1`, `.66.5.3/.10`, [#870](https://github.com/ufna/zerus/pull/870) |
 | [ ] Service registration/readiness | Check opt-in registration in the interactive user session, never LocalSystem/Session 0; verify named-pipe identity and independent background readiness with UI closed. Remove temporary logon entries. | `.66.3.27.3`, `.66.3.31`, [#912](https://github.com/ufna/zerus/pull/912); fixes-u/desktop-u |
@@ -730,13 +857,27 @@ still need their own platform checks above.
 ## Deletion PR merge gate
 
 The coordinator records per-platform acceptance and any exceptions against the
-inventory; unmet G1–G5/G7 responsibilities remain blockers. The draft deletion PR
-must be rebased on the final installer/consumer/notification/packaging PRs and pass
+inventory; unmet G1–G5/G7 responsibilities remain blockers. The owner approved
+this split on **2026-11-03**:
+
+- **#906a (Linux/macOS):** ready for source review once final, based on current
+  integration; merge only when **both macOS and Linux acceptance records are
+  complete**, including the clean-install exception's CI/package and owner-upgrade
+  evidence. Remove the `arch` and `mac-desktop` Qt jobs, their runner/sampler,
+  Linux/macOS Qt build/start/rollback selections and macOS Qt assembly/install
+  inputs. This also retires the tests tracked by `.66.21` and `.66.24`.
+- **#906b (Windows/tree):** retain as a draft until **va-kids acceptance**. Remove
+  the remaining `tray/` C++/CMake/tests, Windows Qt installer/pin/notices, shared
+  Qt archive installer, comparison programs and obsolete documentation. Audit
+  non-CI rollback/build dependencies before deleting the tree. Historical immutable
+  Qt ZIP validation and old-client update compatibility remain supported.
+
+Windows PC testing is deferred and is not a merge gate for #906a. The ready state
+of #906a is not an acceptance result or a merge authorization. Each part must be rebased on the final installer/consumer/notification/packaging PRs and pass
 source/privacy, workflow/security, package and retained migration/updater tests.
 Audit final artifacts for Qt/KF6/WebEngine requirements and dangling source paths.
 Keep `hgs`, `HGS_*`, service/app IDs, installed paths, user data, migration readers,
 CLI/connector/ConPTY and immutable published assets unchanged. Keep legacy update
 feed fields and sealed-candidate retry templates while old clients require them.
-Only then remove Qt build code, jobs, dependencies and the obsolete fallback
-offer; the coordinator owns merge and rollout. This document authorizes no install,
+Remove each part only at its gate above; the coordinator owns merge and rollout. This document authorizes no install,
 service cutover, credential operation or deletion of user data.

@@ -23,6 +23,7 @@ use sha2::{Digest, Sha256};
 
 use crate::qt_lock;
 
+pub mod evidence;
 pub mod maintenance;
 
 /// A copy saved or opened within this long is never removed by a trim.
@@ -613,6 +614,9 @@ struct Ledger {
     root: PathBuf,
     entries: Vec<Map<String, Value>>,
     original_sha256: Option<String>,
+    /// A writer's load: the original index recorded under this lock, whose
+    /// receipt [`Ledger::before_change`] commits before the first effect.
+    evidence: Option<evidence::Pending>,
     _lock: qt_lock::QtLock,
 }
 
@@ -621,7 +625,26 @@ impl Ledger {
         Self::open_bounded(root, MAX_INDEX_BYTES)
     }
 
+    /// A load that may change the folder. With `evidence`, it keeps the
+    /// original index for [`Ledger::before_change`] (G3), or refuses here.
+    fn open_for_change(root: &Path, evidence: bool) -> Result<Ledger, String> {
+        Self::load(root, MAX_INDEX_BYTES, evidence)
+    }
+
     fn open_bounded(root: &Path, maximum: u64) -> Result<Ledger, String> {
+        Self::load(root, maximum, false)
+    }
+
+    /// Before this load's first effect (a rename, an attribution change, an
+    /// unlink or an index write): commits the recorded original. A refusal
+    /// leaves the folder as it was.
+    fn before_change(&mut self) -> Result<(), String> {
+        self.evidence
+            .as_mut()
+            .map_or(Ok(()), evidence::Pending::commit)
+    }
+
+    fn load(root: &Path, maximum: u64, change: bool) -> Result<Ledger, String> {
         let root = absolute(root);
         prepare_folder(&root, false)?;
         let busy = || "The downloaded files cache is busy.".to_owned();
@@ -638,9 +661,13 @@ impl Ledger {
             root,
             entries: Vec::new(),
             original_sha256: None,
+            evidence: None,
             _lock: lock,
         };
         if !occupied(&index) {
+            if change {
+                ledger.evidence = Some(evidence::prepare(&ledger.root, None)?);
+            }
             return Ok(ledger);
         }
         let unreadable = || "Cannot read the downloaded files index.".to_owned();
@@ -658,6 +685,9 @@ impl Ledger {
             return Err(unreadable());
         }
         let mut document = decode_index(&bytes)?;
+        if change {
+            ledger.evidence = Some(evidence::prepare(&ledger.root, Some(&bytes))?);
+        }
         // The service's stricter bounded reader needs an exact frozen index.
         // Ordinary interactive cache reads retain their existing cost.
         if maximum < MAX_INDEX_BYTES {
@@ -769,6 +799,53 @@ pub fn complete(
     source: Option<&Source>,
     now_ms: i64,
 ) -> Result<Completed, String> {
+    Writer::default().complete(part, name, source, now_ms)
+}
+
+/// The cache's changes made by a maintained Next build: each records the
+/// folder's original index before its first change ([`evidence`], G3), or
+/// refuses that change before any effect. Development and replay builds use
+/// the plain functions, which never write evidence.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Writer {
+    pub evidence: bool,
+}
+
+impl Writer {
+    /// [`complete`], recording the original index first with `evidence`.
+    pub fn complete(
+        self,
+        part: InProgress,
+        name: &str,
+        source: Option<&Source>,
+        now_ms: i64,
+    ) -> Result<Completed, String> {
+        complete_in(part, name, source, now_ms, self.evidence)
+    }
+
+    /// [`lookup`], recording the original index first with `evidence`.
+    pub fn lookup(
+        self,
+        root: &Path,
+        source: &Source,
+        now_ms: i64,
+    ) -> Result<Option<PathBuf>, String> {
+        lookup_in(root, source, now_ms, self.evidence)
+    }
+
+    /// [`trim`], recording the original index first with `evidence`.
+    pub fn trim(self, root: &Path, limit: u64, now_ms: i64) -> Usage {
+        trim_in(root, limit, now_ms, self.evidence)
+    }
+}
+
+fn complete_in(
+    part: InProgress,
+    name: &str,
+    source: Option<&Source>,
+    now_ms: i64,
+    evidence: bool,
+) -> Result<Completed, String> {
     let source = source.filter(|source| !source.host.is_empty() || !source.path.is_empty());
     if source.is_some_and(|source| !valid_source(source)) {
         return Err("The downloaded file source is invalid.".into());
@@ -778,7 +855,8 @@ pub fn complete(
     }
     let data = snapshot(&part.path, true)
         .ok_or_else(|| "The downloaded copy could not be verified.".to_owned())?;
-    let mut ledger = Ledger::open(&part.root)?;
+    let mut ledger = Ledger::open_for_change(&part.root, evidence)?;
+    ledger.before_change()?;
     let name = filename(name);
     let dot = name.rfind('.').filter(|dot| *dot > 0);
     let (stem, extension) = match dot {
@@ -846,13 +924,22 @@ pub fn complete(
 /// attribution; no file is removed. A hit is a local snapshot, not proof the
 /// remote file is current.
 pub fn lookup(root: &Path, source: &Source, now_ms: i64) -> Result<Option<PathBuf>, String> {
+    lookup_in(root, source, now_ms, false)
+}
+
+fn lookup_in(
+    root: &Path,
+    source: &Source,
+    now_ms: i64,
+    evidence: bool,
+) -> Result<Option<PathBuf>, String> {
     if !valid_source(source) {
         return Err("The downloaded file source is invalid.".into());
     }
     if !occupied(root) {
         return Ok(None);
     }
-    let mut ledger = Ledger::open(root)?;
+    let mut ledger = Ledger::open_for_change(root, evidence)?;
     let digest = source_digest(source);
     let Some(selected) = ledger
         .entries
@@ -878,6 +965,7 @@ pub fn lookup(root: &Path, source: &Source, now_ms: i64) -> Result<Option<PathBu
             prior.remove("source_sha256");
         }
     }
+    ledger.before_change()?;
     ledger.save()?;
     Ok(valid.then_some(path))
 }
@@ -885,10 +973,17 @@ pub fn lookup(root: &Path, source: &Source, now_ms: i64) -> Result<Option<PathBu
 /// DownloadCache::trim: the oldest copies removed while over `limit` bytes
 /// (0: never), sparing those saved or opened within [`OPENING_GRACE_MS`].
 pub fn trim(root: &Path, limit: u64, now_ms: i64) -> Usage {
+    trim_in(root, limit, now_ms, false)
+}
+
+fn trim_in(root: &Path, limit: u64, now_ms: i64, evidence: bool) -> Usage {
     if !root.exists() {
         return Usage::default();
     }
-    let mut ledger = match Ledger::open(root) {
+    let mut ledger = match Ledger::open_for_change(root, evidence).and_then(|mut ledger| {
+        ledger.before_change()?;
+        Ok(ledger)
+    }) {
         Ok(ledger) => ledger,
         Err(error) => {
             return Usage {

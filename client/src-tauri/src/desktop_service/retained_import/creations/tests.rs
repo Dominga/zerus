@@ -1,7 +1,7 @@
 use super::super::tests::Fixture;
 use super::*;
 use std::fs;
-fn source(f: &Fixture) {
+pub(super) fn source(f: &Fixture) {
     zerus_client_core::fsx::write_private_durable(
         &f.root.join("creations.json"),
         br#"{"schema":1,"operations":{},"opaque":"before-load"}"#,
@@ -9,7 +9,7 @@ fn source(f: &Fixture) {
     .unwrap();
     assert!(f.report.inputs.creations.prepare().is_ok());
 }
-fn run(f: &Fixture, explicit: bool) -> Result<(), &'static str> {
+pub(super) fn run(f: &Fixture, explicit: bool) -> Result<(), &'static str> {
     let charge = f.report.work.admit(Role::Operations).unwrap();
     f.report.run_creation(
         f.relay.clone(),
@@ -71,7 +71,7 @@ fn advance(
     change(&mut record);
     journal(f).save(record, Some(&stored.sha256)).unwrap()
 }
-fn receipt_for(record: &CreationRecord) -> migration::transport::StagedReceipt {
+pub(super) fn receipt_for(record: &CreationRecord) -> migration::transport::StagedReceipt {
     serde_json::from_value(
         json!({"abi":"desktop-import-v1","published":true,"evidence":"staged",
         "configuration":record.configuration,"import_id":record.import_id,
@@ -538,6 +538,8 @@ fn a_paused_original_callback_cannot_record_after_a_recovery_fence() {
 
 // Control (c): the original gate lands after the recovery's lookup but before
 // its fence. The fence compare-and-swap refuses; the original publishes alone.
+// Its final write may overlap the recovery's journal lock, as it did on macOS:
+// holding that lock for a moment must delay the original, never fail it.
 #[test]
 fn a_gate_recorded_before_the_fence_makes_recovery_refuse() {
     let _process = crate::PROCESS_TREE.read().unwrap();
@@ -561,6 +563,12 @@ fn a_gate_recorded_before_the_fence_makes_recovery_refuse() {
                 .flatten()
                 .is_some_and(|s| s.record.recorded_attempt == Some(1))
         });
+        #[cfg(unix)]
+        {
+            let held = fs::File::open(root.join("creations-retained-import-v1.lock")).unwrap();
+            held.lock().unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
     }));
     assert_eq!(
         rerun(&f, &restarted, true),

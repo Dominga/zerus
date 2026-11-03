@@ -188,14 +188,26 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             "transcript": null, "startup_kind":startup_kind,"launch_id":nonempty_env("HGS_LAUNCH_ID"), "account_id": nonempty_env("HGS_ACCOUNT_ID"), "agent_home": nonempty_env(home_var(&agent)?), "pid": std::process::id(),
             "process_start": process_start(std::process::id()),
             "supervisor": {"pid": std::process::id(), "start": process_start(std::process::id())}});
+        // A fork starts in its source session's project (zerus-zjsj).
+        let mut fork_source = None;
         if let Some(parent) = nonempty_env("HGS_FORK_PARENT_ID") {
             record["fork_parent_id"] = json!(parent);
             record.as_object_mut().unwrap().remove("launch_id");
-            record["fork_source_name"] =
-                json!(nonempty_env("HGS_FORK_SOURCE_NAME").unwrap_or_default());
+            let source = nonempty_env("HGS_FORK_SOURCE_NAME").unwrap_or_default();
+            record["fork_source_name"] = json!(source);
+            fork_source = Some((source, nonempty_env("HGS_FORK_SOURCE_ARCHIVE")));
+            // The source rows its Activity shows, up to where the fork began.
+            if let Some(lineage) = nonempty_env("HGS_FORK_LINEAGE")
+                .and_then(|lineage| serde_json::from_str::<Value>(&lineage).ok())
+                .filter(Value::is_array)
+            {
+                record["fork_lineage"] = lineage;
+            }
         }
         std::env::remove_var("HGS_FORK_PARENT_ID");
         std::env::remove_var("HGS_FORK_SOURCE_NAME");
+        std::env::remove_var("HGS_FORK_SOURCE_ARCHIVE");
+        std::env::remove_var("HGS_FORK_LINEAGE");
         agent_hint::inherit_fork(&mut record, fork_hint_revision.as_deref());
         if let Some(expected) = expected {
             let previous = read(&name)?;
@@ -236,6 +248,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
                 "pending_settings",
                 "fork_parent_id",
                 "fork_source_name",
+                "fork_lineage",
                 "cleared_conversations",
             ] {
                 if let Some(value) = previous.get(key) {
@@ -265,10 +278,16 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         write(&mut record)?;
         // Keep this exact newly-created binding pinned during optional initial
         // placement. A removal/replacement must not inherit the old folder's
-        // inference. The swarm lock is nonblocking and Git shares one 3s cap.
+        // inference. The swarm lock is nonblocking and Git shares one 3s cap;
+        // a fork's inherited project retries the lock within its own 3s cap.
         if infer_project {
             if let Ok(config) = crate::config::Config::load() {
                 crate::swarm::infer_new_session(&config, &name, &cwd);
+            }
+        }
+        if let Some((source, archive)) = fork_source.filter(|(source, _)| !source.is_empty()) {
+            if let Ok(config) = crate::config::Config::load() {
+                crate::swarm::inherit_fork_project(&config, &name, &source, archive.as_deref());
             }
         }
     }

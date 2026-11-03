@@ -37,7 +37,7 @@ pub(in crate::desktop) struct Runtime {
     preferences: zerus_client_core::desktop::notification_control::Preferences,
     #[cfg(all(test, target_os = "linux"))]
     test_bus: Option<String>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     closed: super::closed::Runtime,
 }
 impl Runtime {
@@ -81,7 +81,7 @@ impl Runtime {
             preferences: Default::default(),
             #[cfg(all(test, target_os = "linux"))]
             test_bus: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", windows))]
             closed: super::closed::Runtime::new(config, location),
         }
     }
@@ -251,7 +251,7 @@ impl Runtime {
                 (!self.recovering && native.fault().is_none()).then_some(native.outbox()),
                 seq,
             );
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", windows))]
             if !self.stopping && !self.recovering && native.ready() {
                 if let (Some(grant), Some(owner)) = (&self.grant, &self.owner) {
                     self.closed
@@ -287,9 +287,9 @@ impl Runtime {
                 .native
                 .as_ref()
                 .is_none_or(attachment::Runtime::drained);
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", windows))]
             let closed_done = self.closed.drained();
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", windows)))]
             let closed_done = true;
             if selected_done && native_done && closed_done {
                 self.native = None;
@@ -311,7 +311,7 @@ impl Runtime {
         self.error = Some(bounded(error));
         self.recovering = true;
         self.retry_at = None;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         self.closed.stop();
         if let Some(preparing) = &self.preparing {
             preparing.stop();
@@ -329,9 +329,9 @@ impl Runtime {
                 .native
                 .as_ref()
                 .is_none_or(attachment::Runtime::drained);
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", windows))]
             let closed_done = self.closed.drained();
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", windows)))]
             let closed_done = true;
             if !selected_done || !native_done || !closed_done {
                 return;
@@ -356,7 +356,7 @@ impl Runtime {
             self.retry_at = None;
             self.recovering = false;
             self.attempted = false;
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", windows))]
             {
                 self.closed = super::closed::Runtime::new(&self.config, &self.location);
             }
@@ -370,7 +370,7 @@ impl Runtime {
         self.recovering = false;
         self.error = None;
         self.retry_at = None;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         self.closed.stop();
         if let Some(preparing) = &self.preparing {
             preparing.stop();
@@ -393,7 +393,7 @@ impl Runtime {
         "recovering":self.recovering,"retry_in_ms":self.retry_at.map(|at| at.saturating_duration_since(Instant::now()).as_millis() as u64),
         "failed_attempts":self.failures,
         "selection":self.preparing.as_ref().map(preparation::Preparation::status),"attachment":self.native.as_ref().map(attachment::Runtime::status)});
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         let value = {
             let mut value = value;
             value["closed_frontend"] = self.closed.status();

@@ -171,8 +171,9 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] worktrees keep-folder --path FOLDER --common-dir DIR --fingerprint HASH [--request-id ID] [--json]   forget a partial-removal record; the folder stays
        hgs [@host] worktrees delete-leftover --path FOLDER --common-dir DIR --fingerprint HASH --confirm-delete [--process-fingerprint HASH] [--request-id ID] [--json]   delete a reviewed leftover's files; the branch stays
        hgs [@host] worktrees leftovers [--json]   partial-removal leftovers whose repository is gone
-       Worktree leftover ABI: worktree-leftovers-v1 (review "leftovers" after a partial removal)
+       Worktree leftover ABI: worktree-leftovers-v1 (review "leftovers" after a partial removal, catalog "leftovers" count)
        Worktree leftover deletion ABI: worktree-leftover-delete-v1
+       Worktree leftover keep ABI: worktree-leftover-keep-v1 (request-bound keep-folder outcome)
        Mobile worktree ABI: worktrees-v1 (catalog/create/verified project placement)
        hgs [@host] repository check|clone --url URL --parent PATH --name NAME --json
        hgs [@host] repository status --request-id UUID --json
@@ -454,7 +455,24 @@ fn usage_text(tmux: bool) -> Cow<'static, str> {
         .into()
 }
 
-pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
+#[cfg(any(windows, test))]
+mod swarm_restart;
+
+pub fn dispatch(args: Vec<String>) -> Result<i32> {
+    dispatch_at(args, Instant::now())
+}
+
+pub(crate) fn dispatch_at(args: Vec<String>, entered: Instant) -> Result<i32> {
+    #[cfg(any(windows, test))]
+    if let Some(request) = swarm_restart::select(&args) {
+        return swarm_restart::dispatch(request, entered);
+    }
+    #[cfg(not(any(windows, test)))]
+    let _ = entered;
+    dispatch_normal(args)
+}
+
+fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
     if crate::desktop::launchd_command(&args) {
         args.pop();
         return dispatch(args).map_err(|mut error| {

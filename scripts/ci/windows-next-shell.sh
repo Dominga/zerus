@@ -23,10 +23,14 @@ cargo test --locked host::token::private_creation || native_status=1
 cargo test --locked desktop::transport || native_status=1
 cargo test --locked desktop::background::tests || native_status=1
 cargo test --locked desktop::revoke || native_status=1
+# Original native impostor -> Unknown -> no notification launch capability.
+bash scripts/ci/windows-frontend-adversary.sh actor || native_status=1
 cargo test --locked desktop::windows_registration_policy::hold || native_status=1
-for selected in actions::read_barrier:: desktop_service::cache::tests desktop_service::frontend::tests::cache_ windows_shell::tests instance::tests platform::windows::startup::tests platform::windows::drawing::tests cli::tests lifecycle::tests window_layer::tests; do
+for selected in actions::local_read_capture:: actions::read_barrier:: desktop_service::cache::tests desktop_service::frontend::tests::cache_ windows_shell::tests instance::tests platform::windows::startup::tests platform::windows::drawing::tests cli::tests lifecycle::tests window_layer::tests; do
     cargo test --locked --manifest-path client/src-tauri/Cargo.toml --lib "$selected" || native_status=1
 done
+bash scripts/ci/windows-frontend-adversary.sh frontend || native_status=1
+bash scripts/ci/windows-frontend-adversary.sh frontend-replay || native_status=1
 cargo test --locked --manifest-path client/src-tauri/Cargo.toml --lib --no-run --message-format=json > "$CARGO_TARGET_DIR/windows-native-tests.jsonl"
 export HGS_TEST_BIN
 HGS_TEST_BIN=$(cygpath -w "$CARGO_TARGET_DIR/debug/hgs.exe")

@@ -285,6 +285,85 @@ fn large_shell_job_bindings_stay_searchable_and_are_reverified() {
 }
 
 #[test]
+fn large_public_snapshots_do_not_hide_transcripts_in_ingestion_sweep_or_publication() {
+    for archive in [false, true] {
+        for (prompt, reply) in [
+            (RECORD_BYTES + 1, 0),
+            (0, RECORD_BYTES + 1),
+            (600 << 10, 600 << 10),
+        ] {
+            let mut fixture = Fixture::new();
+            if archive {
+                fixture.identity.archive_id = uuid::Uuid::new_v4().to_string();
+                fixture.record["archive_id"] = json!(fixture.identity.archive_id);
+                fixture.record["archived_at"] = json!(42);
+                fs::create_dir(fixture.state.join("archives")).unwrap();
+                fixture.binding = fixture
+                    .state
+                    .join("archives")
+                    .join(format!("{}.json", fixture.identity.archive_id));
+            }
+            fixture.record["prompt"] = json!("x".repeat(prompt));
+            fixture.record["last_message"] = json!("y".repeat(reply));
+            fs::write(&fixture.binding, fixture.record.to_string()).unwrap();
+            assert!(fs::metadata(&fixture.binding).unwrap().len() > RECORD_BYTES as u64);
+            fixture.append(&Fixture::event(1, "public transcript needle", "final"));
+            let mut store = fixture.store();
+            // Bound the first slice to the transcript record. Public snapshots
+            // remain pending; accepting the binding must not retire this hit.
+            fixture.consume_records(&mut store, 1, 1);
+            store
+                .index
+                .connection()
+                .execute("DELETE FROM meta WHERE key='source_sweep'", [])
+                .unwrap();
+            let budget = fixture.budget(128);
+            let mut progress = Progress::default();
+            store
+                .sweep(
+                    &fixture.state,
+                    &budget,
+                    &mut progress,
+                    &AtomicBool::new(false),
+                    &mut metadata::Reader::default(),
+                )
+                .unwrap();
+            assert!(progress.bytes > RECORD_BYTES && progress.bytes <= budget.bytes);
+            let page = store
+                .publish(
+                    &fixture.state,
+                    "needle",
+                    50,
+                    None,
+                    &fixture.budget(128),
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            assert_eq!(page["results"].as_array().unwrap().len(), 1, "{page}");
+            assert_eq!(page["results"][0]["content"], "public transcript needle");
+            assert_eq!(page["unavailable_sessions"], 0);
+            assert_ne!(page["index_coverage"]["state"], "ready");
+            assert_eq!(page["truncated"], true);
+            // Same path and payload size, but a different source identity:
+            // neither the large-text exception nor a prior proof may adopt it.
+            fixture.record["conversation_id"] = json!(uuid::Uuid::new_v4().to_string());
+            fs::write(&fixture.binding, fixture.record.to_string()).unwrap();
+            let replaced = store
+                .publish(
+                    &fixture.state,
+                    "needle",
+                    50,
+                    None,
+                    &fixture.budget(128),
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            assert!(replaced["results"].as_array().unwrap().is_empty());
+        }
+    }
+}
+
+#[test]
 fn sweep_keeps_a_source_active_when_only_the_remaining_slice_is_too_small() {
     let mut fixture = Fixture::new();
     fixture.record["shell_jobs"] = json!({"command":"private-shell-command ".repeat(70_000)});
@@ -704,3 +783,5 @@ fn copied_loose_modes_links_and_other_configuration_are_refused() {
     fs::copy(&db, other_dir.join("index.sqlite3")).unwrap();
     assert!(Store::open(&other_dir).is_err());
 }
+
+mod chunks;

@@ -6,10 +6,22 @@ import { tr } from "../i18n";
 /** Presence of this projection is the startup mode. It never grants writer authority. */
 export function createDesktopService() {
   const [state, setState] = createSignal<DesktopService>();
+  let localReadReady: (() => void) | undefined, announced: string | undefined;
+  const notifyLocalReadReady = (next: DesktopService | undefined) => {
+    const capture = next?.retained_source_import?.local_read_capture;
+    if (capture?.paused || capture?.view_ready !== true) { announced = undefined; return; }
+    const view = `${capture.capture_id}/${capture.view_revision ?? "0"}`;
+    if (capture.capture_id && view !== announced && localReadReady) {
+      announced = view;
+      localReadReady();
+    }
+  };
   return {
-    state, apply: (next: DesktopService) => setState(next),
+    state, apply: (next: DesktopService) => { setState(next); notifyLocalReadReady(next); },
     enabled: () => state() !== undefined,
     ready: (component: string) => !!state()?.connected && state()?.background[component]?.ready === true,
+    /** One bounded presentation reload after the actual native model is ready. */
+    onLocalReadReady: (listener: () => void) => { localReadReady = listener; notifyLocalReadReady(state()); },
   };
 }
 export const desktopService = createDesktopService();
@@ -23,12 +35,29 @@ export function pendingReadNotice(state: DesktopService | undefined): string {
     : tr("Saved read marks could not be transferred. Marking sessions as read is paused. Retry to continue.");
 }
 
-export function retainedSourceNotice(state: DesktopService | undefined): string {
-  const report = state?.retained_source_import;
+function creationCaptureNotice(report: DesktopService["retained_source_import"]): string {
   if (report?.creations_capture?.paused && report.creations_capture.code === "creation_source_private_slot") return tr("Session creation is paused. Check that the journal archive folder is available and private (0700 on Unix), then retry.");
   if (report?.creations_capture?.paused && report.creations_capture.code === "creation_source_data_directory") return tr("Session creation is paused. Check that the desktop data folder is available and owned by your user, then retry.");
   if (report?.creations_capture?.paused && report.creations_capture.code === "creation_source_unavailable") return tr("Session creation is paused. Check journal and archive access, ownership and private file permissions (0600 on Unix); review retained partial files before retrying.");
   if (report?.creations_capture?.paused) return tr("Session creation is paused while its original journal is preserved. Review migration status or retry.");
+  return "";
+}
+
+export function retainedSourceNotice(state: DesktopService | undefined): string {
+  const report = state?.retained_source_import;
+  const drafts = report?.drafts_capture;
+  if (drafts && !drafts.writes) return tr("Drafts are not being saved because their earlier versions could not be recorded. Check the Zerus data folder, then retry.");
+  if (report?.local_read_capture?.paused) return tr("Local read marks are paused while their original file is preserved. Review the migration report and retry.");
+  const captureNotice = creationCaptureNotice(report);
+  if (captureNotice) return captureNotice;
+  if (drafts?.paused) return tr("Importing drafts from Qt is paused because the earlier drafts could not be recorded. New drafts are saved.");
+  if (report?.worktree_cache_capture?.paused) return tr("Saving folder catalogs is paused while their original cache is preserved. Fresh folder queries and session creation remain available.");
+  const local = report?.local_reads_report;
+  if (local?.required && !local.complete) {
+    if (local.running) return tr("Preparing the historical local read-mark report. Your sessions remain available.");
+    if (local.phase !== "unknown" && ["local_reads_import_waiting", "local_reads_import_source_resources_pending", "local_reads_import_handoff_busy", "local_reads_import_before_record"].includes(local.code)) return tr("The historical local read-mark report is deferred. Retry keeps the original report identity.");
+    return tr("The historical local read-mark report needs review. An unconfirmed publication will only be looked up, never resent.");
+  }
   const creations = report?.creations_report;
   if (creations?.required && !creations.complete) {
     if (creations.running) return tr("Preparing the saved creation report. Your sessions remain available.");
@@ -41,18 +70,77 @@ export function retainedSourceNotice(state: DesktopService | undefined): string 
   return tr("The migration report needs review. Your sessions remain available.");
 }
 
+/** Draft capture outcomes that recorded the earlier drafts (or found none). */
+const DRAFTS_RECORDED = ["draft_capture_waiting", "draft_capture_captured", "draft_capture_not_applicable"];
+
 export interface MigrationReportDetail { reason: string; next: string; code: string; phase: string | null }
-export type MigrationReportDetails = Partial<Record<"settings" | "creations" | "capture", MigrationReportDetail>>;
+export type MigrationReportDetails = Partial<Record<"settings" | "creations" | "capture" | "localReads" | "localReadsReport" | "drafts" | "worktreeCache", MigrationReportDetail>>;
 
 /** Independent native report reasons. Reviewing never retries or publishes. */
 export function retainedSourceDetails(state: DesktopService | undefined): MigrationReportDetails | undefined {
   const report = state?.retained_source_import;
   if (!report) return;
   const details: MigrationReportDetails = {};
+  if (report.local_read_capture?.paused) details.localReads = {
+    reason: tr("Local read marks are paused while their original file is preserved. Review the migration report and retry."),
+    next: report.local_read_capture.code === "local_read_source_owner_unavailable"
+      ? tr("The local read-mark writer did not start. Restart Zerus to retry; the original file is unchanged.")
+      : tr("Check access to the local read-mark file and its private archive. Keep unsupported or changed originals for review; retry does not replace a saved original."),
+    code: report.local_read_capture.code, phase: null,
+  };
+  if (report.worktree_cache_capture?.paused) details.worktreeCache = {
+    reason: tr("Saving folder catalogs is paused while their original cache is preserved. Fresh folder queries and session creation remain available."),
+    next: report.worktree_cache_capture.code === "worktree_cache_source_owner_unavailable"
+      ? tr("The folder-cache worker could not run. Restart Zerus to retry; the original cache is unchanged.")
+      : tr("Check access to the folder cache and its private archive, then retry. Keep unsupported or changed originals for review; Retry never replaces a saved original."),
+    code: report.worktree_cache_capture.code, phase: null,
+  };
+  const local = report.local_reads_report;
+  if (local?.required) {
+    let reason: string, next: string;
+    if (local.phase === "unknown" || ["local_reads_import_original_result_unconfirmed", "local_reads_import_result_unavailable"].includes(local.code)) {
+      reason = tr("The original migration report result is unconfirmed.");
+      next = tr("Retry checks the original report result. It does not publish another copy of an unconfirmed report.");
+    } else if (local.running) {
+      reason = tr("Preparing the historical local read-mark report. Your sessions remain available.");
+      next = tr("Your sessions remain available while the report is prepared.");
+    } else if (local.phase === "before_record" && local.code === "local_reads_import_before_record") {
+      reason = tr("The historical local read-mark report was not sent because local preparation failed.");
+      next = tr("Check access to the original journal and the Zerus data folder, then use Retry. The original report identity is preserved.");
+    } else if (local.complete) {
+      reason = tr("The migration report has been saved for review.");
+      next = tr("This historical local read-mark report does not confirm delivery to a host or grant background access.");
+    } else if (["local_reads_import_waiting", "local_reads_import_source_resources_pending", "local_reads_import_handoff_busy"].includes(local.code)) {
+      reason = tr("The historical local read-mark report is deferred. Retry keeps the original report identity.");
+      next = tr("Wait for background work to finish, then retry.");
+    } else {
+      reason = tr("The historical local read-mark report needs review. An unconfirmed publication will only be looked up, never resent.");
+      next = tr("Keep the original settings and report for review before attempting another migration.");
+    }
+    details.localReadsReport = { reason, next, code: local.code, phase: local.phase };
+  }
   const capture = report.creations_capture;
   if (capture?.paused) details.capture = {
-    reason: retainedSourceNotice(state), next: tr("Check the original journal and archive access before retrying."),
+    reason: creationCaptureNotice(report), next: tr("Check the original journal and archive access before retrying."),
     code: capture.code, phase: null,
+  };
+  // A not-captured drafts outcome stays visibly incomplete after Retry
+  // resumes the import; any code not known to be recorded counts as one.
+  const drafts = report.drafts_capture;
+  if (drafts && (!drafts.writes || drafts.paused || !DRAFTS_RECORDED.includes(drafts.code))) details.drafts = {
+    reason: !drafts.writes
+      ? tr("Drafts are not being saved because their earlier versions could not be recorded. Check the Zerus data folder, then retry.")
+      : drafts.paused
+        ? tr("Importing drafts from Qt is paused because the earlier drafts could not be recorded. New drafts are saved.")
+        : drafts.code === "draft_capture_next_earlier_run"
+          ? tr("Your Qt drafts were recorded. Drafts already in Zerus could not be recorded, because an earlier run changed them first.")
+          : tr("The earlier drafts could not be recorded for the migration report. Drafts are saved and imported normally."),
+    next: !drafts.writes
+      ? tr("Check that the Zerus data folder is available and owned by your user. Retry records the earlier drafts before any draft is saved.")
+      : drafts.paused
+        ? tr("Retry imports the drafts from Qt. The earlier drafts stay unrecorded; Retry never records them later.")
+        : tr("This part of the migration report stays incomplete. Retry never records the earlier drafts later."),
+    code: drafts.code, phase: null,
   };
   const code = report.code;
   let reason: string, next: string;

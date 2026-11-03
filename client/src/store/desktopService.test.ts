@@ -9,6 +9,82 @@ export const serviceView = (patch: Partial<DesktopService> = {}): DesktopService
   automatic_approvals: null, details_available: false, code: "background_unready", ...patch,
 });
 describe("desktop service presentation", () => {
+  it("reloads local presentation only after the native owner is ready, once per ready boundary", () => {
+    const service = createDesktopService(), reload = vi.fn(); service.onLocalReadReady(reload);
+    const view = (code: string, paused = false) => serviceView({ retained_source_import: { required: false, complete: true, running: false, code: "retained_import_staged", phase: null,
+      local_read_capture: { code: code === "local_read_source_ready" ? "local_read_source_captured" : code, paused, capture_id: "original", view_ready: code === "local_read_source_ready" } } });
+    service.apply(view("local_read_source_captured")); expect(reload).not.toHaveBeenCalled();
+    service.apply(view("local_read_source_ready")); service.apply(view("local_read_source_ready")); expect(reload).toHaveBeenCalledTimes(1);
+    service.apply(view("local_read_source_writer_unavailable", true)); expect(reload).toHaveBeenCalledTimes(1);
+    service.apply(view("local_read_source_ready")); expect(reload).toHaveBeenCalledTimes(2);
+    const next = view("local_read_source_ready");
+    next.retained_source_import!.local_read_capture!.view_revision = "2";
+    service.apply(next); expect(reload).toHaveBeenCalledTimes(3); // intermediate reset may have been coalesced
+    service.apply(next); expect(reload).toHaveBeenCalledTimes(3);
+  });
+
+  it("shows local read capture failure independently without granting transfer or masking creation capture", () => {
+    const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: null,
+      local_read_capture: { code: "local_read_source_unsupported", paused: true, capture_id: "original" },
+      creations_capture: { code: "creation_source_private_slot", paused: true, capture_id: null } };
+    const state = serviceView({ retained_source_import: report });
+    const before = structuredClone(state);
+    const detail = retainedSourceDetails(state)!;
+    expect(retainedSourceNotice(state)).toContain("Local read marks are paused");
+    expect(detail.localReads!.code).toBe("local_read_source_unsupported");
+    expect(detail.localReads!.next).toContain("does not replace");
+    expect(detail.capture!.reason).toContain("Session creation is paused");
+    expect(state).toEqual(before);
+  });
+
+  it("reviews local capture and historical publication independently, without host ACK or hidden retries", () => {
+    const report = { required: true, complete: false, running: false, code: "retained_import_qt_unavailable", phase: null,
+      local_read_capture: { code: "local_read_source_unsupported", paused: true, capture_id: "original" },
+      local_reads_report: { required: true, complete: false, running: false, code: "local_reads_import_before_record", phase: "before_record" },
+      creations_report: { required: true, complete: false, running: false, code: "creations_import_original_result_unconfirmed", phase: "unknown" } };
+    const state = serviceView({ retained_source_import: report });
+    const before = structuredClone(state);
+    const details = retainedSourceDetails(state)!;
+    expect(details.settings?.code).toBe("retained_import_qt_unavailable");
+    expect(details.localReads?.code).toBe("local_read_source_unsupported");
+    expect(details.localReadsReport?.reason).toContain("not sent because local preparation failed");
+    expect(details.creations?.next).toContain("checks the original report");
+    const unknown = serviceView({ retained_source_import: { ...report, local_reads_report: { ...report.local_reads_report, phase: "unknown" } } });
+    expect(retainedSourceDetails(unknown)!.localReadsReport?.next).toContain("checks the original report");
+    expect(state).toEqual(before);
+    const settled = serviceView({ retained_source_import: { ...report, local_reads_report: { ...report.local_reads_report, complete: true, code: "local_reads_import_staged", phase: "published" } } });
+    expect(retainedSourceDetails(settled)!.localReadsReport?.next).toContain("does not confirm delivery to a host");
+    expect(settled.pending_read_import).toBeUndefined();
+  });
+  it("keeps the local historical report visible independently of Qt, creation and read-transfer readiness", () => {
+    const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
+    const local = { required: true, complete: false, running: false, code: "local_reads_import_handoff_busy", phase: "not_committed" };
+    const view = (patch = {}) => serviceView({ retained_source_import: { ...report, local_reads_report: { ...local, ...patch } } });
+    expect(retainedSourceNotice(view())).toContain("keeps the original report identity");
+    expect(retainedSourceNotice(view({ running: true }))).toContain("Preparing the historical local read-mark report");
+    expect(retainedSourceNotice(view({ phase: "unknown", code: "local_reads_import_before_record" }))).toContain("never resent");
+    expect(retainedSourceNotice(view({ complete: true }))).toBe("");
+    expect(view().connected).toBe(true);
+  });
+
+  it("keeps a paused folder-cache write separate from draft/read capture, publication and service readiness", () => {
+    const base = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
+    const state = serviceView({ retained_source_import: { ...base,
+      worktree_cache_capture: { code: "worktree_cache_source_unsupported", paused: true, capture_id: "original" },
+      local_reads_report: { required: true, complete: false, running: false, code: "local_reads_import_original_result_unconfirmed", phase: "unknown" },
+      drafts_capture: { code: "draft_capture_next_earlier_run", writes: true, paused: false, capture_id: "draft", manifests: 1 } } });
+    const before = structuredClone(state);
+    expect(retainedSourceNotice(state)).toContain("Fresh folder queries and session creation remain available");
+    const detail = retainedSourceDetails(state)!;
+    expect(detail.worktreeCache?.code).toBe("worktree_cache_source_unsupported");
+    expect(detail.worktreeCache?.next).toContain("never replaces a saved original");
+    expect(detail.drafts?.reason).toContain("earlier run");
+    expect(detail.localReadsReport?.next).toContain("checks the original report");
+    expect(state).toEqual(before); expect(state.connected).toBe(true);
+    const unavailable = serviceView({ retained_source_import: { ...base, worktree_cache_capture: { code: "worktree_cache_source_owner_unavailable", paused: true, capture_id: null } } });
+    expect(retainedSourceDetails(unavailable)!.worktreeCache?.next).toContain("Restart Zerus");
+  });
+
   it("reviews the actual migration reason and gives a read-only next step", () => {
     const report = { required: true, complete: false, running: false, code: "retained_import_qt_unavailable", phase: null };
     const state = serviceView({ retained_source_import: report, background: { fleet: { ready: true, code: "ready" } } });
@@ -64,6 +140,34 @@ describe("desktop service presentation", () => {
     expect(retainedSourceNotice(serviceView({ retained_source_import: { ...report, complete: true, code: "retained_import_staged", phase: "published" } }))).toBe("");
     expect(retainedSourceNotice(serviceView({ retained_source_import: { ...report, required: false } }))).toBe("");
     expect(retainedSourceNotice(serviceView({ retained_source_import: { ...report, required: false, complete: true, code: "retained_import_staged", creations_capture: { code: "creation_source_unavailable", paused: true, capture_id: null } } }))).toContain("Session creation is paused");
+  });
+  it("shows refused draft saves first and a paused draft import until Retry", () => {
+    const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
+    const drafts = { code: "draft_capture_private_slot", writes: false, paused: true, capture_id: null, manifests: 0 };
+    const view = (patch = {}) => serviceView({ retained_source_import: { ...report, drafts_capture: { ...drafts, ...patch } } });
+    expect(retainedSourceNotice(view())).toContain("Drafts are not being saved");
+    const refused = retainedSourceDetails(view())!.drafts!;
+    expect(refused.code).toBe("draft_capture_private_slot");
+    expect(refused.next).toContain("records the earlier drafts before any draft is saved");
+    const paused = view({ code: "draft_capture_too_large", writes: true });
+    expect(retainedSourceNotice(paused)).toContain("Importing drafts from Qt is paused");
+    expect(retainedSourceDetails(paused)!.drafts!.next).toContain("never records them later");
+    // After Retry resumed the import, the banner goes, but the report keeps
+    // the not-captured outcome visibly incomplete; an unknown code too.
+    const resumed = view({ code: "draft_capture_too_large", writes: true, paused: false });
+    expect(retainedSourceNotice(resumed)).toBe("");
+    expect(retainedSourceDetails(resumed)!.drafts!.next).toContain("stays incomplete");
+    expect(retainedSourceDetails(view({ code: "draft_capture_future", writes: true, paused: false }))!.drafts!.code).toBe("draft_capture_future");
+    // Qt's originals recorded, Next's own after an earlier run: incomplete.
+    const earlier = retainedSourceDetails(view({ code: "draft_capture_next_earlier_run", writes: true, paused: false }))!.drafts!;
+    expect(earlier.reason).toContain("Your Qt drafts were recorded");
+    expect(earlier.next).toContain("stays incomplete");
+    // A captured store, or one with no drafts, shows nothing.
+    for (const code of ["draft_capture_captured", "draft_capture_not_applicable"]) {
+      expect(retainedSourceNotice(view({ code, writes: true, paused: false }))).toBe("");
+      expect(retainedSourceDetails(view({ code, writes: true, paused: false }))).toBeUndefined();
+    }
+    expect(paused.connected).toBe(true);
   });
   it("explains the archive and data-directory refusals without changing readiness", () => {
     const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };

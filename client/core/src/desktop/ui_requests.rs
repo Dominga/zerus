@@ -28,6 +28,12 @@ pub enum Request {
     CreationWorktree {
         intent: Box<super::creation_worktree::Intent>,
     },
+    CreationLaunch {
+        intent: Box<super::creation_launch::Intent>,
+    },
+    TaskStartReconcile {
+        intent: Box<super::task_start_reconcile::Intent>,
+    },
     NotificationControl {
         scope: super::notification_control::Scope,
         control: super::notification_control::Command,
@@ -81,6 +87,8 @@ impl Request {
         match self {
             Self::CreationClone { intent } => &intent.clone_request_id,
             Self::CreationWorktree { intent } => &intent.worktree_request_id,
+            Self::CreationLaunch { intent } => &intent.launch_id,
+            Self::TaskStartReconcile { intent } => &intent.reconcile_id,
             Self::NotificationControl { control, .. } => control.request_id(),
             Self::ActivationWait { request_id }
             | Self::DesktopOwnership { request_id, .. }
@@ -94,6 +102,8 @@ impl Request {
         match self {
             Self::CreationClone { .. } => "creation_clone",
             Self::CreationWorktree { .. } => "creation_worktree",
+            Self::CreationLaunch { .. } => "creation_launch",
+            Self::TaskStartReconcile { .. } => "task_start_reconcile",
             Self::NotificationControl { control, .. } => control.operation(),
             Self::DesktopOwnership { .. } => "desktop_ownership",
             Self::ImportPendingReads { .. } => "import_pending_reads",
@@ -107,6 +117,8 @@ impl Request {
         match self {
             Self::CreationClone { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::CreationWorktree { intent } => intent.as_ref().clone().verify().is_ok(),
+            Self::CreationLaunch { intent } => intent.as_ref().clone().verify().is_ok(),
+            Self::TaskStartReconcile { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::NotificationControl { scope, control } => scope.valid() && control.valid(),
             Self::DesktopOwnership {
                 journal, revision, ..
@@ -236,6 +248,8 @@ impl Cache {
             Request::CacheMaintenance { .. }
                 | Request::CreationClone { .. }
                 | Request::CreationWorktree { .. }
+                | Request::CreationLaunch { .. }
+                | Request::TaskStartReconcile { .. }
         ) {
             if ownership_mode != Some(super::ownership::Mode::Service) {
                 return Err(io::ErrorKind::PermissionDenied.into());
@@ -371,6 +385,22 @@ impl Responder {
                 Some(super::ownership::Mode::Service)
             }
             Request::CreationWorktree { intent } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
+                    || self.configuration.get() != Some(&intent.scope.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
+            }
+            Request::CreationLaunch { intent } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
+                    || self.configuration.get() != Some(&intent.scope.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
+            }
+            Request::TaskStartReconcile { intent } => {
                 if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
                     || self.configuration.get() != Some(&intent.scope.configuration)
                 {
@@ -727,6 +757,138 @@ mod tests {
             let mut request = serde_json::to_value(&value.request).unwrap();
             request[field] = true.into();
             assert!(serde_json::from_value::<Request>(request).is_err());
+        }
+    }
+
+    #[test]
+    fn launch_evidence_requires_cached_service_mode_and_the_same_configuration() {
+        use crate::desktop::ownership::Mode;
+        let intent = crate::desktop::creation_launch::test_intent();
+        let cache = Cache::default();
+        let mut value = envelope(1);
+        value.request = Request::CreationLaunch {
+            intent: Box::new(intent.clone()),
+        };
+        assert_eq!(value.request.operation(), "creation_launch");
+        assert_eq!(value.request.id(), intent.launch_id);
+        assert!(cache.prepare(value.clone()).is_err());
+        assert!(cache
+            .prepare_with_mode(value.clone(), Some(Mode::Native))
+            .is_err());
+        let slot = cache
+            .prepare_with_mode(value.clone(), Some(Mode::Service))
+            .unwrap();
+        *slot.0.child.lock().unwrap() = Some((25, "synthetic-birth".into()));
+        let evidence = cache.evidence(&id(1)).unwrap();
+        assert_eq!(evidence.ownership_mode, Some(Mode::Service));
+        assert_eq!(evidence.request_id, intent.launch_id);
+        // A clone-shaped body never deserializes as this kind, and no
+        // authority claim can ride along.
+        let mut request = serde_json::to_value(&value.request).unwrap();
+        request["op"] = "creation_worktree".into();
+        assert!(serde_json::from_value::<Request>(request).is_err());
+        for field in ["mode", "confirmed", "role", "execution_consent"] {
+            let mut request = serde_json::to_value(&value.request).unwrap();
+            request[field] = true.into();
+            assert!(serde_json::from_value::<Request>(request).is_err());
+        }
+    }
+
+    #[test]
+    fn task_start_reconcile_keeps_its_original_body_and_cached_service_mode() {
+        use crate::desktop::ownership::Mode;
+        let intent = crate::desktop::task_start_reconcile::test_intent();
+        let value = Envelope {
+            abi: ABI.into(),
+            attempt: id(1),
+            request: Request::TaskStartReconcile {
+                intent: Box::new(intent.clone()),
+            },
+        };
+        assert!(value.valid());
+        assert_eq!(value.request.operation(), "task_start_reconcile");
+        assert_eq!(value.request.id(), intent.reconcile_id);
+        assert_ne!(value.request.id(), intent.binding.key.request_id);
+        let cache = Cache::default();
+        assert!(cache.prepare(value.clone()).is_err());
+        assert!(cache
+            .prepare_with_mode(value.clone(), Some(Mode::Native))
+            .is_err());
+        let slot = cache
+            .prepare_with_mode(value.clone(), Some(Mode::Service))
+            .unwrap();
+        *slot.0.child.lock().unwrap() = Some((26, "synthetic-birth".into()));
+        let evidence = cache.evidence(&id(1)).unwrap();
+        assert_eq!(evidence.ownership_mode, Some(Mode::Service));
+        assert_eq!(evidence.fingerprint, value.request.fingerprint());
+        assert!(slot.envelope().request == value.request);
+        for field in ["role", "confirmed", "execution_consent", "path"] {
+            let mut request = serde_json::to_value(&value.request).unwrap();
+            request[field] = true.into();
+            assert!(serde_json::from_value::<Request>(request).is_err());
+        }
+        let mut request = serde_json::to_value(value.request).unwrap();
+        request["op"] = "creation_worktree".into();
+        assert!(serde_json::from_value::<Request>(request).is_err());
+    }
+
+    #[test]
+    fn task_start_native_responder_uses_its_cached_configuration_and_mode() {
+        const CASE: &str = "desktop::ui_requests::tests::task_start_native_responder_uses_its_cached_configuration_and_mode";
+        if std::env::var_os("ZERUS_TASK_START_RESPONDER_TEST_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", CASE, "--test-threads=1", "--nocapture"])
+                .env_remove("HGS_SESSION")
+                .env_remove("HGS_RUN_ID")
+                .env("ZERUS_TASK_START_RESPONDER_TEST_CHILD", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+            return;
+        }
+        use crate::desktop::{ownership::Mode, Build};
+        let intent = crate::desktop::task_start_reconcile::test_intent();
+        for (configuration, mode, accepted) in [
+            (intent.scope.configuration.clone(), None, false),
+            (
+                intent.scope.configuration.clone(),
+                Some(Mode::Native),
+                false,
+            ),
+            ("f".repeat(64), Some(Mode::Service), false),
+            (
+                intent.scope.configuration.clone(),
+                Some(Mode::Service),
+                true,
+            ),
+        ] {
+            let responder = Responder::new(
+                "com.hgdev.hgs-tray".into(),
+                Build {
+                    version: "1.2.3".into(),
+                    source_commit: "a".repeat(40),
+                    source_dirty: Some(false),
+                },
+                id(80),
+                true,
+                false,
+            );
+            assert!(responder.configure_once(configuration));
+            if let Some(mode) = mode {
+                assert!(responder.configure_ownership_mode_once(mode));
+            }
+            let prepared = responder.prepare_ui_request(
+                id(1),
+                Request::TaskStartReconcile {
+                    intent: Box::new(intent.clone()),
+                },
+            );
+            assert_eq!(prepared.is_ok(), accepted);
         }
     }
 

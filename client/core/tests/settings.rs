@@ -1262,3 +1262,223 @@ fn malformed_splitter_is_unhandled_and_retry_is_family_atomic() {
     assert_eq!(settings.number("workspace/projectFolderSplit"), 320.0);
     assert!(settings.flush_within(FLUSH));
 }
+
+/// zerus-5wmh.66.5.3: Qt's side panel (shown, width, tab) imports once into
+/// Next's inspector keys; Next's own choices win and Qt is never written.
+#[test]
+fn inspector_panel_family_imports_once_and_next_choices_win() {
+    let scratch = Scratch::new("inspector-panel");
+    let qt = scratch.0.join("qt.ini");
+    let original =
+        b"[workspace]\ninspectorVisible=true\ninspectorWidth=600\ninspectorTab=2\n".to_vec();
+    fs::write(&qt, &original).unwrap();
+    let path = scratch.0.join("settings.json");
+    legacy_switch(&path, json!({}));
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert_eq!(settings.get("workspace/inspectorOpen"), json!(true));
+    assert_eq!(settings.number("workspace/inspectorWidth"), 600.0);
+    assert_eq!(settings.text("workspace/inspectorTab"), "worktrees");
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let family = &saved["g3"]["families"]["inspector-panel"];
+    assert_eq!(
+        family["keys"],
+        json!([
+            "workspace/inspectorTab",
+            "workspace/inspectorVisible",
+            "workspace/inspectorWidth"
+        ])
+    );
+    assert_eq!(family["sha256"], zerus_desktop_migration::sha256(&original));
+    assert_eq!(fs::read(&qt).unwrap(), original);
+    // Handled once: a later Qt change is never imported again.
+    fs::write(
+        &qt,
+        b"[workspace]\ninspectorVisible=false\ninspectorTab=0\n",
+    )
+    .unwrap();
+    let restarted = Settings::open(path, Some(QtStore::Ini(qt.clone())));
+    assert_eq!(restarted.get("workspace/inspectorOpen"), json!(true));
+    assert_eq!(restarted.text("workspace/inspectorTab"), "worktrees");
+    assert!(restarted.flush_within(FLUSH));
+    drop(restarted);
+    // Next's own choices win, a hidden panel included; Qt bounds its tab
+    // index and Next its width.
+    fs::write(
+        &qt,
+        b"[workspace]\ninspectorVisible=true\ninspectorWidth=5000\ninspectorTab=9\n",
+    )
+    .unwrap();
+    let own = scratch.0.join("own.json");
+    legacy_switch(&own, json!({"workspace/inspectorOpen": false}));
+    let kept = Settings::open(own, Some(QtStore::Ini(qt.clone())));
+    assert_eq!(kept.get("workspace/inspectorOpen"), json!(false));
+    assert_eq!(kept.number("workspace/inspectorWidth"), 900.0);
+    assert_eq!(kept.text("workspace/inspectorTab"), "tasks");
+    assert!(kept.flush_within(FLUSH));
+}
+
+/// #1239 review: Qt reads the tab with a 32-bit toInt(); a value outside it
+/// waits (the whole family) instead of importing a tab Qt never showed.
+#[test]
+fn an_inspector_tab_outside_qts_32_bit_domain_waits() {
+    let scratch = Scratch::new("inspector-tab-domain");
+    let qt = scratch.0.join("qt.ini");
+    let path = scratch.0.join("settings.json");
+    fs::write(
+        &qt,
+        b"[workspace]\ninspectorVisible=true\ninspectorTab=2147483648\n",
+    )
+    .unwrap();
+    legacy_switch(&path, json!({}));
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert!(!settings.contains("workspace/inspectorTab"));
+    assert!(!settings.contains("workspace/inspectorOpen"));
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        saved["g3"]["quarantine"]["inspector-panel"]["reason"],
+        "invalid inspector tab"
+    );
+    // The largest 32-bit index is one Qt bounds to its last tab.
+    fs::write(&qt, b"[workspace]\ninspectorTab=2147483647\n").unwrap();
+    let settings = Settings::open(path, Some(QtStore::Ini(qt)));
+    assert_eq!(settings.text("workspace/inspectorTab"), "tasks");
+    assert!(settings.flush_within(FLUSH));
+}
+
+#[test]
+fn a_malformed_inspector_value_leaves_the_whole_family_for_a_retry() {
+    let scratch = Scratch::new("inspector-retry");
+    let qt = scratch.0.join("qt.ini");
+    let path = scratch.0.join("settings.json");
+    fs::write(
+        &qt,
+        b"[workspace]\ninspectorVisible=true\ninspectorWidth=wide\n",
+    )
+    .unwrap();
+    legacy_switch(&path, json!({}));
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert!(!settings.contains("workspace/inspectorOpen"));
+    assert!(!settings.contains("workspace/inspectorWidth"));
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(saved["g3"]["families"].get("inspector-panel").is_none());
+    assert_eq!(
+        saved["g3"]["quarantine"]["inspector-panel"]["reason"],
+        "invalid inspector width"
+    );
+    fs::write(
+        &qt,
+        b"[workspace]\ninspectorVisible=true\ninspectorWidth=520\n",
+    )
+    .unwrap();
+    let settings = Settings::open(path, Some(QtStore::Ini(qt)));
+    assert_eq!(settings.get("workspace/inspectorOpen"), json!(true));
+    assert_eq!(settings.number("workspace/inspectorWidth"), 520.0);
+    assert!(settings.flush_within(FLUSH));
+}
+
+/// zerus-5wmh.66.5.3: the Migration report's Qt preferences section lists
+/// key names only: what imported, what kept a Next value, what waits to
+/// retry and why, and the Qt keys Next has no use for. Never a value.
+#[test]
+fn the_preference_report_names_keys_and_never_values() {
+    let scratch = Scratch::new("preference-report");
+    let qt = scratch.0.join("qt.ini");
+    fs::write(
+        &qt,
+        b"[workspace]\ninspectorVisible=true\ninspectorWidth=613\ninspectorTab=2\nsplitter=@ByteArray(bad)\n\
+          expandedSessions=secret-row\nworktreeCleanupDeleteBranches=true\n",
+    )
+    .unwrap();
+    let path = scratch.0.join("settings.json");
+    legacy_switch(&path, json!({"workspace/inspectorOpen": false}));
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert!(settings.flush_within(FLUSH));
+    let report = settings.preference_report();
+    let family = |name: &str| {
+        report["families"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["family"] == name)
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    let inspector = family("inspector-panel");
+    assert_eq!(inspector["state"], "imported");
+    assert_eq!(
+        inspector["imported"],
+        json!(["workspace/inspectorTab", "workspace/inspectorWidth"])
+    );
+    assert_eq!(inspector["kept"], json!(["workspace/inspectorVisible"]));
+    let splitter = family("session-splitter");
+    assert_eq!(splitter["state"], "waiting");
+    assert_eq!(splitter["reason"], "invalid Qt splitter");
+    assert_eq!(splitter["keys"], json!(["workspace/splitter"]));
+    assert_eq!(
+        report["unused"],
+        json!([
+            "workspace/expandedSessions",
+            "workspace/worktreeCleanupDeleteBranches"
+        ])
+    );
+    let text = report.to_string();
+    for value in ["613", "secret-row", "bad"] {
+        assert!(!text.contains(value), "{value} in {text}");
+    }
+    drop(settings);
+    // The report-only family is never a family row (no "no-consumer" label).
+    assert!(report["families"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|f| f["family"] != "no-consumer"));
+    // A family that waits records no outcome; it is reported from its quarantine.
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(saved["g3_outcome"].get("session-splitter").is_none());
+    assert!(saved["g3_outcome"].get("no-consumer").is_none());
+    // The same after a restart, from the saved journal.
+    let restarted = Settings::open(path, Some(QtStore::Ini(qt)));
+    assert_eq!(
+        restarted.preference_report()["families"],
+        report["families"]
+    );
+    assert!(restarted.flush_within(FLUSH));
+}
+
+/// #1243 review Q4: an install whose earlier families were all handled
+/// before the report existed still gains the "Not imported" keys, once,
+/// through the report-only no-consumer family.
+#[test]
+fn unused_qt_keys_are_reported_after_every_other_family_was_handled() {
+    let scratch = Scratch::new("preference-report-upgrade");
+    let qt = scratch.0.join("qt.ini");
+    fs::write(
+        &qt,
+        b"[workspace]\nexpandedSessions=row\nsessionsCollapsed=true\n",
+    )
+    .unwrap();
+    let path = scratch.0.join("settings.json");
+    legacy_switch(&path, json!({}));
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    // As saved by a build without the report: every other family handled.
+    let mut saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    saved["g3"]["families"]
+        .as_object_mut()
+        .unwrap()
+        .remove("no-consumer");
+    fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let upgraded = Settings::open(path, Some(QtStore::Ini(qt)));
+    assert!(upgraded.flush_within(FLUSH));
+    assert_eq!(
+        upgraded.preference_report()["unused"],
+        json!(["workspace/expandedSessions", "workspace/sessionsCollapsed"])
+    );
+}

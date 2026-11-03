@@ -1,6 +1,7 @@
 //! A prepared Start uses the existing private outbox under a separate scope.
-//! The complete original plan is checkpointed before the only fresh delivery;
-//! recovery and review always use its exact identity with --recover-only.
+//! The complete original plan is checkpointed before the only fresh delivery.
+//! Eligible records also retain its exact input for service reconciliation;
+//! larger native Starts keep their existing limits without reconstructed input.
 use crate::{
     creation::canonical_uuid,
     task_details,
@@ -141,6 +142,42 @@ fn call(action: &str, project: &str, task: &str, input: &Value, recover: bool) -
         input: input.to_string(),
     }
 }
+
+// Keep the complete encoded checkpoint inside G1's original-record bound.
+// Missing input stays unavailable to that actor; never truncate it or reduce
+// the existing 31 MiB native plan / 32 MiB outbox limits to make it fit.
+const ERROR_CHARS: usize = 2048;
+fn retain_delivery_input(record: &mut Value, input: &str) {
+    const LIMIT: usize = crate::operation_recovery::task_start::PRIVATE_BYTES;
+    // Settlement changes only phase and error. Every resulting phase is
+    // shorter than "delivering"; a control character needs at most six JSON
+    // bytes. Retention must fit the record that recovery actually reads.
+    const CHECKPOINT_LIMIT: usize = LIMIT - 6 * ERROR_CHARS;
+    if input.len() > LIMIT {
+        return;
+    }
+    struct Size(usize);
+    impl std::io::Write for Size {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > CHECKPOINT_LIMIT - self.0 {
+                return Err(std::io::Error::other("task Start recovery size limit"));
+            }
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    record["intent"]["retained_input"] = Value::String(input.to_owned());
+    if serde_json::to_writer(&mut Size(0), record).is_err() {
+        record["intent"]
+            .as_object_mut()
+            .expect("fresh task Start intent")
+            .remove("retained_input");
+    }
+}
+
 fn outcome(
     reply: &Map<String, Value>,
     project: &str,
@@ -247,6 +284,7 @@ pub fn start(
         return open(store, project, task, None);
     }
     let plan = prepare(project, task, stage_at, assignment, selection, id, &mut run)?;
+    let delivery = call("start-deliver", project, task, &plan, false);
     let mut record = previous.clone().unwrap_or_else(|| json!({}));
     record["schema"] = json!(1);
     record["id"] = json!(id);
@@ -262,6 +300,7 @@ pub fn start(
             format!(" @{}", selection.host)
         }
     ));
+    retain_delivery_input(&mut record, &delivery.input);
     if let Some(previous) = &previous {
         checkpoint(store, project, task, previous, &record)?;
     } else {
@@ -273,9 +312,10 @@ pub fn start(
         }
         checkpoint(store, project, task, &reservation.record, &record)?;
     }
-    // The original plan and its exact marker are now durable. Every subsequent
-    // operation on this record is read-only recovery or an explicit release.
-    let result = run(&call("start-deliver", project, task, &plan, false));
+    // The original plan, marker and any eligible retained input are durable.
+    // Use that SAME call, never reserialize the plan after its checkpoint.
+    let result = run(&delivery);
+    drop(delivery);
     let (state, error) = match result {
         Ok(reply) => match outcome(&reply, project, task, id) {
             Ok(state) => (
@@ -296,7 +336,7 @@ pub fn start(
         "refused" => "released",
         _ => "review",
     });
-    settled["error"] = json!(error.chars().take(2048).collect::<String>());
+    settled["error"] = json!(error.chars().take(ERROR_CHARS).collect::<String>());
     checkpoint(store, project, task, &record, &settled)?;
     let mut view = open(store, project, task, None)?;
     view.outcome = Some(state);
@@ -416,6 +456,9 @@ mod tests {
                         .unwrap();
                     assert_eq!(record["phase"], "delivering");
                     assert_eq!(record["id"], id);
+                    assert!(
+                        record["intent"]["retained_input"].as_str() == Some(call.input.as_str())
+                    );
                     assert_eq!(
                         serde_json::from_str::<Value>(&call.input).unwrap(),
                         record["intent"]["plan"]
@@ -432,6 +475,248 @@ mod tests {
         )
         .unwrap()
     }
+
+    fn start_with_text(
+        store: &Path,
+        text: &str,
+        mut deliver: impl FnMut(&TaskCall) -> Result<Map<String, Value>, String>,
+    ) -> Result<View, String> {
+        start(
+            store,
+            "example",
+            TASK,
+            123,
+            &assignment(),
+            &selection(),
+            SECOND,
+            |call| match call.args[0].as_str() {
+                "get" => Ok(document()),
+                "start-plan" => {
+                    let mut reply = plan(call);
+                    reply.get_mut("plan").unwrap()["request"]["text"] = json!(text);
+                    Ok(reply)
+                }
+                "start-deliver" => deliver(call),
+                _ => panic!("unexpected fixture call"),
+            },
+        )
+    }
+
+    #[test]
+    fn retained_input_survives_lost_reply_and_explicit_native_release() {
+        let s = Scratch::new();
+        let unknown = attempt(&s.0, FIRST, "lost");
+        let before = outbox::pending(&root(&s.0), "example", TASK)
+            .unwrap()
+            .unwrap();
+        let input = before["intent"]["retained_input"].as_str().unwrap();
+        let source = crate::migration::sources::task_start_delivery(
+            "example",
+            TASK,
+            FIRST,
+            &serde_json::to_vec(&before).unwrap(),
+        )
+        .unwrap();
+        let mut snapshots = 0;
+        for item in crate::migration::Bundle::new(
+            zerus_desktop_migration::SOURCE,
+            false,
+            "a".repeat(64),
+            SECOND.into(),
+            1,
+            vec![source],
+            1 << 20,
+        )
+        .unwrap()
+        {
+            if let crate::migration::BundleItem::Snapshot { reader, .. } = item.unwrap() {
+                let body: Value = serde_json::from_slice(reader.get_ref()).unwrap();
+                assert!(body["record"] == before);
+                assert!(body["record"]["intent"]["retained_input"].as_str() == Some(input));
+                snapshots += 1;
+            }
+        }
+        assert_eq!(snapshots, 1);
+        release(&s.0, "example", TASK, FIRST, &unknown.snapshot, |call| {
+            assert!(call.args.iter().any(|s| s == "--recover-only"));
+            assert!(call.input == input);
+            Ok(delivered(FIRST, "submitted"))
+        })
+        .unwrap();
+        let after = outbox::pending(&root(&s.0), "example", TASK)
+            .unwrap()
+            .unwrap();
+        assert!(after["intent"]["retained_input"] == before["intent"]["retained_input"]);
+    }
+
+    #[test]
+    fn legacy_pending_input_is_never_backfilled_by_start_or_native_release() {
+        let s = Scratch::new();
+        attempt(&s.0, FIRST, "lost");
+        let current = outbox::pending(&root(&s.0), "example", TASK)
+            .unwrap()
+            .unwrap();
+        let mut legacy = current.clone();
+        legacy["intent"]
+            .as_object_mut()
+            .unwrap()
+            .remove("retained_input");
+        assert!(
+            outbox::replace_if_unchanged(&root(&s.0), "example", TASK, &current, &legacy).unwrap()
+        );
+        let path = outbox::path(&root(&s.0), "example", TASK);
+        let original = std::fs::read(&path).unwrap();
+        let again = start_with_text(&s.0, "another task", |_| {
+            panic!("pending legacy Start must not call hgs")
+        })
+        .unwrap();
+        assert_eq!(again.id, FIRST);
+        assert!(std::fs::read(&path).unwrap() == original);
+        release(&s.0, "example", TASK, FIRST, &again.snapshot, |call| {
+            assert!(call.args.iter().any(|s| s == "--recover-only"));
+            Ok(delivered(FIRST, "uncertain"))
+        })
+        .unwrap();
+        let after = outbox::pending(&root(&s.0), "example", TASK)
+            .unwrap()
+            .unwrap();
+        assert!(after["intent"].get("retained_input").is_none());
+    }
+
+    #[test]
+    fn near_limit_native_starts_remain_readable_without_previous_input_adoption() {
+        for previous in [false, true] {
+            let s = Scratch::new();
+            if previous {
+                attempt(&s.0, FIRST, "submitted");
+            }
+            let mut calls = 0;
+            let text = "x".repeat(31 * 1024 * 1024 - 4096);
+            let view = start_with_text(&s.0, &text, |call| {
+                calls += 1;
+                let record = outbox::pending(&root(&s.0), "example", TASK)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(record["phase"], "delivering");
+                assert_eq!(record["id"], SECOND);
+                assert!(record["intent"].get("retained_input").is_none());
+                assert!(call.input.len() > 30 * 1024 * 1024);
+                assert!(call.input.contains(SECOND) && !call.input.contains(FIRST));
+                Ok(delivered(SECOND, "uncertain"))
+            })
+            .unwrap();
+            assert_eq!(calls, 1);
+            assert!(view.pending);
+            let path = outbox::path(&root(&s.0), "example", TASK);
+            assert!(std::fs::metadata(path).unwrap().len() <= 32 * 1024 * 1024);
+        }
+    }
+
+    #[test]
+    fn encoded_escape_overhead_can_decline_retention_without_reducing_native_support() {
+        let s = Scratch::new();
+        let mut calls = 0;
+        let text = "\\\"\n".repeat(80_000);
+        start_with_text(&s.0, &text, |call| {
+            calls += 1;
+            assert!(call.input.len() < crate::operation_recovery::task_start::PRIVATE_BYTES);
+            let record = outbox::pending(&root(&s.0), "example", TASK)
+                .unwrap()
+                .unwrap();
+            assert!(record["intent"].get("retained_input").is_none());
+            assert!(record["intent"]["plan"]["request"]["text"].as_str() == Some(text.as_str()));
+            Ok(delivered(SECOND, "uncertain"))
+        })
+        .unwrap();
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn near_limit_uncertain_settlement_keeps_every_retained_record_inside_the_bound() {
+        const LIMIT: usize = crate::operation_recovery::task_start::PRIVATE_BYTES;
+        let s = Scratch::new();
+        let mut baseline = 0;
+        start_with_text(&s.0, "x", |_| {
+            let record = outbox::pending(&root(&s.0), "example", TASK)
+                .unwrap()
+                .unwrap();
+            assert!(record["intent"]["retained_input"].is_string());
+            baseline = serde_json::to_vec(&record).unwrap().len();
+            Ok(delivered(SECOND, "submitted"))
+        })
+        .unwrap();
+        // Each additional ASCII text byte occurs in plan and retained_input.
+        // Probe just inside the settlement-safe threshold and at the old
+        // delivering-only threshold; neither count relies on fixture captions.
+        let error = "\u{1}".repeat(ERROR_CHARS);
+        let encoded_error = serde_json::to_vec(&error).unwrap().len() - 2;
+        let safe_text = 1 + (LIMIT - encoded_error - baseline) / 2;
+        // Between a five-byte reserve and the actual encoded error size: a
+        // too-small reserve must retain this input and then exceed the bound.
+        let between_text = 1 + (LIMIT - (encoded_error - ERROR_CHARS / 2) - baseline) / 2;
+        let old_text = 1 + (LIMIT - baseline) / 2;
+        for (bytes, retained) in [(safe_text, true), (between_text, false), (old_text, false)] {
+            let s = Scratch::new();
+            let text = "x".repeat(bytes);
+            let view = start_with_text(&s.0, &text, |call| {
+                let record = outbox::pending(&root(&s.0), "example", TASK)
+                    .unwrap()
+                    .unwrap();
+                if record["intent"]["retained_input"].is_string() {
+                    assert!(
+                        record["intent"]["retained_input"].as_str() == Some(call.input.as_str())
+                    );
+                }
+                Err(error.clone())
+            })
+            .unwrap();
+            assert!(view.pending);
+            let record = outbox::pending(&root(&s.0), "example", TASK)
+                .unwrap()
+                .unwrap();
+            assert_eq!(record["phase"], "review");
+            assert!(record["error"].as_str() == Some(error.as_str()));
+            let bytes = std::fs::read(outbox::path(&root(&s.0), "example", TASK)).unwrap();
+            assert!(bytes.len() <= LIMIT);
+            assert_eq!(record["intent"]["retained_input"].is_string(), retained);
+            if retained {
+                assert!(
+                    bytes.len() >= LIMIT - 8,
+                    "exercise the actual size boundary"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn failed_reservation_and_oversized_checkpoint_never_offer_delivery() {
+        let s = Scratch::new();
+        std::fs::write(root(&s.0), b"fixture prevents reservation").unwrap();
+        assert!(start_with_text(&s.0, "new task", |_| panic!(
+            "failed reservation must not offer input"
+        ))
+        .is_err());
+
+        let s = Scratch::new();
+        attempt(&s.0, FIRST, "submitted");
+        let current = outbox::pending(&root(&s.0), "example", TASK)
+            .unwrap()
+            .unwrap();
+        let mut large = current.clone();
+        large["private_unknown"] = Value::String("x".repeat(31 * 1024 * 1024 + 512 * 1024));
+        assert!(
+            outbox::replace_if_unchanged(&root(&s.0), "example", TASK, &current, &large).unwrap()
+        );
+        assert!(start_with_text(&s.0, &"y".repeat(1024 * 1024), |_| panic!(
+            "failed checkpoint must not offer input"
+        ))
+        .is_err());
+        let after = outbox::pending(&root(&s.0), "example", TASK)
+            .unwrap()
+            .unwrap();
+        assert!(after == large);
+    }
+
     #[test]
     fn reserve_before_delivery_and_never_repeat_unknown_original() {
         let s = Scratch::new();

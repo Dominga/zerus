@@ -5,6 +5,7 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 /// One small private record, replaced atomically. No child text, environment,
 /// request/configuration identity or user content enters this file or stderr.
 pub(crate) fn record(step: &'static str, code: &'static str) {
+    crate::startup_log::record("failed", code, Some(step));
     eprintln!(
         "zerus-client: desktop startup refused; step={step} code={code}; writers remain stopped"
     );
@@ -74,6 +75,7 @@ pub(crate) fn show(context: tauri::Context<tauri::Wry>) {
         })
         .run(context);
     if let Err(error) = result {
+        crate::startup_log::record("failed", "startup_dialog_failed", Some(&error.to_string()));
         eprintln!("zerus-client: could not show startup error: {error}");
     }
 }

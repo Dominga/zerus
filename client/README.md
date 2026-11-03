@@ -37,6 +37,17 @@ starts a GUI and receives the same exclusion. The fixed authenticated Mac
 creates no window or menu-bar item. Private canonical copies retain the published
 bundle ID and participate in this guard.
 
+During the two-second handoff wait, startup retries kernel acquisition so a
+finishing owner does not discard a relaunch. A successful activation write and
+an unresponsive duplicate are distinct outcomes. Every guard decision appends
+one line of at most 512 bytes to the GUI log: `~/Library/Logs/hgs-tray.log` on
+macOS, `$XDG_STATE_HOME/hgs/hgs-tray.log` (default `~/.local/state`) on Linux,
+and `%LOCALAPPDATA%/hgdev/hgs-tray/hgs-tray.log` on Windows. Entry, final teardown,
+startup refusals and Rust panics also leave bounded records; panic payloads are
+omitted. If the file is unwritable, macOS records a fixed reason in the unified
+log. The fallback never writes to inherited stderr, so a full pipe or a failed
+stderr write cannot block or panic during startup or teardown.
+
 The installed Linux and Windows switch uses the same identifier,
 `com.hgdev.hgs-tray`, and the `hgs-tray` executable/instance name. Settings seed
 once from Qt's `~/.config/hgdev/hgs-tray.conf` on Linux (an absolute

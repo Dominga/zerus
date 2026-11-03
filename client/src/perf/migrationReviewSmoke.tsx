@@ -17,10 +17,14 @@ const state: DesktopService = { connected: true, epoch: "fixture", generation: 1
   attention_counts: null, automatic_approvals: false, details_available: true, code: "", retained_source_import: report };
 desktopService.apply(state);
 const root = document.getElementById("root")!;
-const dispose = render(() => <DesktopServiceStatus />, root);
+const dispose = render(() => <div class="app"><nav class="rail" /><main class="page">Synthetic page</main>
+  <footer class="statusbar"><span>1 of 1 machines connected</span><DesktopServiceStatus /></footer></div>, root);
 const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 30));
 async function run() {
   await settle();
+  const page = root.querySelector("main")!, footer = root.querySelector("footer")!;
+  const geometry = () => [page.getBoundingClientRect().y, page.getBoundingClientRect().height, footer.getBoundingClientRect().height];
+  const initial = geometry();
   const review = root.querySelector<HTMLButtonElement>('button[aria-label="Review migration report"]');
   check(review, "banner has no Review action");
   review!.focus(); review!.click(); await settle();
@@ -55,8 +59,24 @@ async function run() {
   dialog?.dispatchEvent(new Event("cancel", { cancelable: true })); await settle(); await settle();
   check(!root.querySelector("dialog") && document.activeElement === review, "Escape/cancel did not close and restore focus");
   check(calls === 0 && desktopService.ready("fleet"), "Review or dismissal changed native state");
+  const ownership = { pending: false, running: false, code: "", request_id: null,
+    status: { abi: "fixture", configuration: "fixture", journal: null, revision: 1, state: "revoked" as const, rearm_required: true, request_id: null, owner_epoch: null, identity_current: true } };
+  for (const [patch, expected] of [
+    [{}, []],
+    [{ code: "background_unready" }, ["Retry now"]],
+    [{ notification_ownership: ownership }, ["Resume background work"]],
+    [{ notification_ownership: { ...ownership, pending: true } }, ["Check result"]],
+  ] as const) {
+    desktopService.apply({ ...state, retained_source_import: undefined, ...patch }); await settle();
+    const actions = [...footer.querySelectorAll("button")].map((b) => b.textContent);
+    check(JSON.stringify(actions) === JSON.stringify(expected), `wrong footer actions: ${JSON.stringify(actions)}`);
+    check(!page.querySelector(".desktop-service-status") && footer.querySelector('[role="status"]'), "service status escaped the footer");
+    check(JSON.stringify(geometry()) === JSON.stringify(initial) && initial[2] === 28, "service status changed the page or footer geometry");
+    check(footer.querySelector(".service-summary")?.getAttribute("title"), "full service explanation is unavailable");
+  }
+  check(calls === 0, "status presentation attempted native IPC");
   dispose();
-  const result = { failures, calls, cases: ["Qt refusal detail", "read-only review", "unknown no-replay guidance", "close/cancel focus"] };
+  const result = { failures, calls, cases: ["Qt refusal detail", "read-only review", "unknown no-replay guidance", "close/cancel focus", "healthy/no retry", "not-ready/retry", "rearm/resume", "pending/check", "fixed page/footer geometry"] };
   (window as unknown as { webkit: { messageHandlers: { result: { postMessage(text: string): void } } } }).webkit.messageHandlers.result.postMessage(JSON.stringify(result));
 }
 void run().catch((error) => {

@@ -734,6 +734,8 @@ jobs:
           persist-credentials: false
       - name: Disk usage after native checkout
         run: python3 scripts/ci/ubuntu-disk.py report after-native-checkout
+      - name: Prepare native disk headroom
+        run: python3 scripts/ci/ubuntu-disk.py prepare
       - name: Linux media, video and Tauri build dependencies
         run: >-
           sudo apt-get update && sudo apt-get install --no-install-recommends -y
@@ -760,8 +762,7 @@ jobs:
       - name: Disk usage after native cache restore
         run: python3 scripts/ci/ubuntu-disk.py report after-native-cache-restore
       - name: Media and video tests and Tauri media clippy
-        # This job observes disk use without reclaiming tools or build outputs.
-        # The script also reports between its existing Linux build phases.
+        # The script reports between its existing Linux build phases.
         run: bash scripts/ci/client-native.sh linux
       - name: Disk usage after native checks
         if: ${{ !cancelled() }}

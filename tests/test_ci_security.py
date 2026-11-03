@@ -1049,9 +1049,9 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertLess(retired, relay.index('docker build --tag zerus-relay-contract'))
         self.assertIn('name: Enforce the 256 MiB runtime envelope', relay)
 
-    def test_native_linux_disk_checkpoints_only_observe_existing_checks(self):
+    def test_native_linux_disk_preparation_precedes_dependencies_and_preserves_checks(self):
         native = job((ROOT / ".github/workflows/checks.yml").read_text(), "client-native-linux")
-        self.assertNotIn("ubuntu-disk.py prepare", native)
+        self.assertEqual(native.count("ubuntu-disk.py prepare"), 1)
         self.assertNotIn("ubuntu-disk.py relay-before-image", native)
         self.assertNotIn("CARGO_PROFILE_DEV_DEBUG", native)
         self.assertNotIn("CARGO_PROFILE_TEST_DEBUG", native)
@@ -1060,6 +1060,8 @@ class WorkflowSecurityTests(unittest.TestCase):
         indices = [native.index(f"ubuntu-disk.py report {phase}") for phase in phases]
         self.assertEqual(indices, sorted(indices))
         self.assertLess(indices[0], native.index("sudo apt-get update"))
+        self.assertLess(indices[0], native.index("ubuntu-disk.py prepare"))
+        self.assertLess(native.index("ubuntu-disk.py prepare"), native.index("sudo apt-get update"))
         self.assertLess(native.index("rustup toolchain install"), indices[1])
         self.assertLess(native.index("actions/cache/restore@"), indices[2])
         self.assertLess(indices[2], native.index("bash scripts/ci/client-native.sh linux"))

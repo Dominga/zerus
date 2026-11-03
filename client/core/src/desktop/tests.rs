@@ -245,7 +245,9 @@ mod sockets {
         let elapsed = start.elapsed();
         completed
             .recv_timeout(FIXTURE_WAIT)
-            .unwrap_or_else(|error| panic!("{case}: socket fixture did not finish: {error}"));
+            .unwrap_or_else(|error| {
+                panic!("{case}: socket fixture did not finish: {error}; probe={result:?}, elapsed={elapsed:?}")
+            });
         task.join().unwrap();
         (result, elapsed)
     }

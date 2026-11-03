@@ -209,7 +209,7 @@ impl CatalogDelivery {
                 if let (Some(keys), Some(_)) = (keys, through) {
                     pump.service_catalog_finish(&computer, &keys);
                 }
-                pump.push(Change::Computer {
+                let change = Change::Computer {
                     computer,
                     // A contiguous delta range remains live even when a newer
                     // head needs another catch-up. Pending display changes do
@@ -219,7 +219,9 @@ impl CatalogDelivery {
                     } else {
                         ComputerStatus::Reconnecting { attempt: 0 }
                     },
-                });
+                };
+                observe(&change);
+                pump.push(change);
                 let _ = done.send(());
             }
         }

@@ -345,6 +345,23 @@ class Repositories(unittest.TestCase):
         self.assertIn('Git resolves to the running hgs image', json.loads(result.stdout)['Err'])
 
     @unittest.skipIf(os.name == "nt", "Unix worker context guard")
+    @unittest.skipUnless(shutil.which('cc'), 'native argv[0] shim fixture requires cc')
+    def test_git_symlink_keeps_its_dispatch_name(self):
+        manager = self.root / 'tool-manager'
+        source = ('#include <stdio.h>\n#include <string.h>\n'
+                  'int main(int argc, char **argv) { (void)argc; '
+                  'const char *name = strrchr(argv[0], \'/\'); '
+                  'if (strcmp(name ? name + 1 : argv[0], "git")) return 64; '
+                  'puts("git shim"); return 0; }\n')
+        subprocess.run(['cc', '-x', 'c', '-o', str(manager), '-'], input=source,
+                       capture_output=True, text=True, check=True, timeout=10)
+        git = self.root / '.local/bin/git'
+        git.parent.mkdir(parents=True, exist_ok=True)
+        git.symlink_to(manager)
+        result = self.worker_with_lifeline()
+        self.assertEqual(json.loads(result)['Ok'], list(b'git shim\n'))
+
+    @unittest.skipIf(os.name == "nt", "Unix worker context guard")
     def test_git_descendant_cannot_reenter_the_repository_worker(self):
         self.synthetic_git("(root / 'git-called').touch()\n")
         self.env['HGS_REPOSITORY_GIT_WORKER'] = '1'
@@ -371,6 +388,13 @@ class Repositories(unittest.TestCase):
             "(root / 'nested-result').write_text(json.dumps([nested.returncode,nested.stderr]))\n"
             "sys.exit(1)\n"
         )
+        self.worker_with_lifeline()
+        code, error = json.loads((self.root / 'nested-result').read_text())
+        self.assertEqual(code, 1, error)
+        self.assertIn('Nested repository Git workers are refused', error)
+        self.assertEqual((self.root / 'worker-visits').read_text(), '1')
+
+    def worker_with_lifeline(self):
         command = [str(HGS), '__state', 'repository-git-worker', '5', image_proof(HGS), '--version']
         if sys.platform.startswith('linux'):
             command = [sys.executable, str(Path(__file__).with_name('bounded_process.py')),
@@ -382,14 +406,11 @@ class Repositories(unittest.TestCase):
             process.wait(timeout=11)
             output, error = process.stdout.read(), process.stderr.read()
             self.assertEqual(process.returncode, 0, output + error)
+            return output
         finally:
             if process.poll() is None:
                 process.kill()
             process.communicate(timeout=3)
-        code, error = json.loads((self.root / 'nested-result').read_text())
-        self.assertEqual(code, 1, error)
-        self.assertIn('Nested repository Git workers are refused', error)
-        self.assertEqual((self.root / 'worker-visits').read_text(), '1')
 
     @unittest.skipIf(os.name == "nt", "Unix worker's independent deadline")
     def test_worker_deadline_stops_git_without_wrapper_cancellation(self):

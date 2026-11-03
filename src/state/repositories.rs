@@ -197,14 +197,14 @@ fn run_git(
     #[cfg(unix)]
     let program = {
         let found = crate::platform::which("git").ok_or("Cannot find Git")?;
-        let path = crate::platform::canonical(found).map_err(|e| e.to_string())?;
+        let path = crate::platform::canonical(&found).map_err(|e| e.to_string())?;
         if crate::platform::file_identity(&path)
             .zip(crate::platform::image_identity())
             .is_some_and(|(git, running)| git == running)
         {
             return Err("Git resolves to the running hgs image".into());
         }
-        path
+        found
     };
     #[cfg(windows)]
     let program = "git";

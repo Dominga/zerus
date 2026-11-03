@@ -135,7 +135,7 @@ def supervise(command, seconds, limit):
     child = None
     def interrupted(signum, _frame):
         raise SystemExit(128 + signum)
-    previous = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGTERM, signal.SIGINT)}
+    previous = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
     try:
         child = subprocess.Popen(command, start_new_session=True)
         deadline = time.monotonic() + seconds

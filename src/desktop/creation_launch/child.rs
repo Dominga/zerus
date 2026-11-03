@@ -107,6 +107,8 @@ pub(super) fn run(
     ];
     let mut stderr = Vec::new();
     let mut status = None;
+    // A pipe that cannot be read is never taken as its end.
+    let mut unreadable = false;
     loop {
         for (index, slot) in pipes.iter_mut().enumerate() {
             let Some(pipe) = slot else { continue };
@@ -127,6 +129,7 @@ pub(super) fn run(
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(_) => {
                         *slot = None;
+                        unreadable = true;
                         break;
                     }
                 }
@@ -144,6 +147,9 @@ pub(super) fn run(
         }
         if let Some(status) = status {
             if pipes.iter().all(Option::is_none) {
+                if unreadable {
+                    return Ended::Unknown("creation_launch_output_unreadable");
+                }
                 return match status.code() {
                     Some(code) => Ended::Exited {
                         code,

@@ -123,7 +123,8 @@ fn observe(launch: &str) -> zerus_client_core::desktop::creation_launch::Observa
     if let Some(reader) = outstanding.take() {
         let _ = reader.join();
     }
-    let deadline = Instant::now() + Duration::from_secs(2);
+    // Local metadata reads take milliseconds; the serve path never waits long.
+    let deadline = Instant::now() + Duration::from_millis(250);
     let (send, receive) = mpsc::sync_channel(1);
     let launch = launch.to_owned();
     let Ok(reader) = std::thread::Builder::new()

@@ -272,6 +272,52 @@ finally:
         else:
             self.assertNotIn('desktop-creation-launch', help_text)
 
+    @unittest.skipUnless(sys.platform.startswith('linux') or sys.platform == 'darwin', 'POSIX launch custody')
+    def test_a_launch_child_holds_custody_but_no_program_it_starts_inherits_it(self):
+        # The real binary's main() marks the inherited custody descriptor
+        # close-on-exec before anything else: the Git (or tmux) it starts, and
+        # their own children, never hold the creation's custody lock.
+        import fcntl
+        fake = self.root / 'custody-bin'
+        fake.mkdir(mode=0o700)
+        record = self.root / 'custody-record'
+        git = fake / 'git'
+        git.write_text('#!/bin/sh\n'
+                       'python3 -c "import os,sys\ntry:\n os.fstat(int(sys.argv[1]))\n print(\'open\')\n'
+                       'except OSError:\n print(\'closed\')" "$CUSTODY_PROBE_FD" >> "$CUSTODY_RECORD"\n'
+                       # A child that outlives the command, as a tmux server would.
+                       'sleep 3 </dev/null >/dev/null 2>&1 &\n'
+                       'exit 128\n')
+        git.chmod(0o700)
+        lock_path = self.root / 'custody.lock'
+        held = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        os.set_inheritable(held, True)
+        repo = self.root / 'not-a-repository'
+        repo.mkdir()
+        env = dict(self.env, PATH=f"{fake}{os.pathsep}{self.env.get('PATH', '')}",
+                   HGS_CREATION_LAUNCH_CUSTODY_FD=str(held), CUSTODY_PROBE_FD=str(held),
+                   CUSTODY_RECORD=str(record))
+        try:
+            result = subprocess.run([str(HGS), 'worktrees', '--path', str(repo), '--json'], env=env,
+                                    pass_fds=(held,), capture_output=True, text=True, timeout=20)
+        finally:
+            os.close(held)
+        self.assertIn('closed', record.read_text().split(), result.stderr)
+        self.assertNotIn('open', record.read_text().split())
+        # The command and its programs have exited: nothing holds the lock,
+        # although the program's own child is still running.
+        probe = os.open(lock_path, os.O_RDWR)
+        try:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(probe)
+        # A malformed descriptor refuses before anything starts.
+        bad = dict(self.env, HGS_CREATION_LAUNCH_CUSTODY_FD='not-a-descriptor')
+        refused = subprocess.run([str(HGS), '--help'], env=bad, capture_output=True, text=True, timeout=10)
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn('Invalid creation launch custody', refused.stderr)
+
     @unittest.skipUnless(sys.platform.startswith('linux') or sys.platform == 'darwin', 'Unix registration mode')
     def test_registration_variant_is_read_only_and_service_reports_its_requested_mode(self):
         passive = self.cli('desktop', 'registration', '--json')

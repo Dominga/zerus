@@ -391,6 +391,27 @@ mod launch_child {
     }
 
     #[test]
+    fn the_launch_child_leads_its_own_process_group() {
+        let (_temp, _location, _record, held) = lock();
+        let mut args = vec!["python3".to_string()];
+        args.extend(python(
+            "import os,sys\nsys.stderr.write('own' if os.getpgid(0)==os.getpid() else 'shared')",
+        ));
+        assert_eq!(
+            child::run(
+                std::path::Path::new("/usr/bin/env"),
+                &args,
+                &held,
+                Instant::now() + Duration::from_secs(20)
+            ),
+            Ended::Exited {
+                code: 0,
+                stderr: "own".into()
+            }
+        );
+    }
+
+    #[test]
     fn the_deadline_kills_only_the_original_child_never_its_group() {
         let (_temp, _location, _record, held) = lock();
         let dir = tempfile::tempdir().unwrap();

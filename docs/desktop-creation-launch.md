@@ -102,6 +102,6 @@ launch. An end record is nonexclusive (`binding_unresolved` stays true), and a
 binding still waits for a fresh exact session listing.
 
 The service's `creation_launch_result` lookup reads that evidence with the
-bounded in-process reader (`src/state/launch_observation.rs`), within two
-seconds, on a separate thread. At most one read is outstanding; while it is,
-the evidence is Unknown and no further reader starts.
+bounded in-process reader (`src/state/launch_observation.rs`), within a
+quarter of a second, on a separate thread. At most one read is outstanding;
+while it is, the evidence is Unknown and no further reader starts.

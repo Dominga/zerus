@@ -107,7 +107,11 @@ HGS_LINUX_GUI=client HGS_LINUX_WEBKIT_PREFIX=/absolute/private/prefix ./tray/ins
 ```
 
 The prefix must contain `lib/libwebkit2gtk-4.1.so.0`, its JavaScriptCore library,
-GTK3 under `gtk/lib`, and the WebKit processes under `libexec/webkit2gtk-4.1`.
+and the WebKit processes under `libexec/webkit2gtk-4.1`. It uses system GTK3
+unless the prefix also contains a `gtk/` override. That override must contain
+both GTK3 and GDK3 libraries under `gtk/lib`; a partial override is rejected.
+To retain a private WebKit build with system GTK, select a separate prefix
+containing only its `lib/` and `libexec/` directories (symlinks are supported).
 The installer saves the selection in `~/.local/share/hgs/local-webkit.json`
 (`$HGS_INSTALL_PREFIX/share/hgs/local-webkit.json` for an isolated install).
 Later preview installs retain it without the variable. The local service and

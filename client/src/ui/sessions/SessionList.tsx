@@ -84,11 +84,27 @@ const openMenu = (e: MouseEvent, items: MenuEntry[], sessionKey?: string) => {
 // the title never jumps: the card's height eases to the new size, the title and
 // badges glide from their old place (FLIP, transform only), the detail lines
 // fade, and the rows below slide with the same timing.
+// No morph animation ends by itself (zerus-bkbb): an accelerated animation that
+// finishes on its own hands its layer back to the last committed (pre-morph)
+// transform until the next commit, and vblank-paced 144 Hz WebKitGTK showed
+// that frame: the row and every row below at their expanded places. Each one
+// holds its final value; endMorph cancels them together on the main thread, in
+// one commit with the final style. The rows' CSS glide holds the same way
+// (sessions.css: .sp-scroll.morphing .vrow).
 const MORPH = { duration: 220, easing: "cubic-bezier(.33, 1, .68, 1)" } as const;
+const HELD = { ...MORPH, fill: "forwards" } as const;
 const FLIP = [".sc-title", ".sbadge", ".agent-badge", ".sc-mute"];
 const DETAIL_LINES = ".sc-l2, .sc-l3, .sc-foot";
 const [morphing, setMorphing] = createSignal(false);
 let morphTimer: number | undefined;
+let held: Animation[] = [];
+
+function endMorph() {
+  for (const a of held) a.cancel();
+  held = [];
+  for (const card of document.querySelectorAll(".sp-scroll .scard.morph")) card.classList.remove("morph");
+  setMorphing(false);
+}
 
 function setRowCompact(key: string, compact: boolean) {
   if (!!compactRows[key] === compact) return;
@@ -105,12 +121,12 @@ function setRowCompact(key: string, compact: boolean) {
   if (next) {
     const to = next.getBoundingClientRect().height;
     next.classList.add("morph");
-    next.animate([{ height: `${from}px` }, { height: `${to}px` }], MORPH).finished.catch(() => {}).finally(() => next.classList.remove("morph"));
+    held.push(next.animate([{ height: `${from}px` }, { height: `${to}px` }], HELD));
     FLIP.forEach((sel, i) => {
       const el = row.querySelector<HTMLElement>(sel), a = before[i];
       if (!el || !a) return;
       const b = el.getBoundingClientRect();
-      if (a.left !== b.left || a.top !== b.top) el.animate([{ transform: `translate(${a.left - b.left}px, ${a.top - b.top}px)` }, { transform: "none" }], MORPH);
+      if (a.left !== b.left || a.top !== b.top) held.push(el.animate([{ transform: `translate(${a.left - b.left}px, ${a.top - b.top}px)` }, { transform: "none" }], HELD));
     });
     if (compact) {
       for (const g of ghosts) {
@@ -120,10 +136,10 @@ function setRowCompact(key: string, compact: boolean) {
         g.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 120, easing: "ease-out", fill: "forwards" }).finished.catch(() => {}).finally(() => g.remove());
       }
     } else {
-      next.querySelectorAll<HTMLElement>(DETAIL_LINES).forEach((n) => n.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, delay: 60, easing: "ease-out", fill: "backwards" }));
+      next.querySelectorAll<HTMLElement>(DETAIL_LINES).forEach((n) => held.push(n.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, delay: 60, easing: "ease-out", fill: "both" })));
     }
   }
-  morphTimer = window.setTimeout(() => setMorphing(false), MORPH.duration + 40);
+  morphTimer = window.setTimeout(endMorph, MORPH.duration + 40);
 }
 
 type ClearRead = { id: string; checking: boolean; control?: ClearControl; pending?: Promise<void> };

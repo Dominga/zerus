@@ -21,6 +21,22 @@ stops or replaces the installed Zerus GUI, CLI, agents or services.
 On the Mac the client also builds as Zerus itself, the switch bundle that takes
 over `com.hgdev.hgs-tray`; see `docs/macos-distribution.md#tauri-client-switch`.
 
+The canonical `com.hgdev.hgs-tray` GUI has one owner per login user on macOS,
+Linux and Windows, independent of temporary directories, HOME/profile overrides
+and hgs configuration. Unix retains a kernel lock in a private UID directory
+under the OS `/tmp`; Windows retains a global kernel object keyed by the token
+SID. A duplicate forwards public navigation to the canonical endpoint and exits
+before GUI or desktop ownership setup. If that endpoint is not ready, it exits
+cleanly after a bounded wait. Unsafe or unavailable exclusion fails closed.
+Exclusion lasts through final GUI teardown until actual process exit. Crashes
+release it in the kernel; only its next owner replaces a stale Unix
+socket. The existing Qt activation endpoints remain available for updaters and
+configuration-bound desktop requests. `ZERUS_CLIENT_DESKTOP_SERVICE=1` still
+starts a GUI and receives the same exclusion. The fixed authenticated Mac
+`--desktop-notification-host` entry runs separately before GUI admission and
+creates no window or menu-bar item. Private canonical copies retain the published
+bundle ID and participate in this guard.
+
 The installed Linux and Windows switch uses the same identifier,
 `com.hgdev.hgs-tray`, and the `hgs-tray` executable/instance name. Settings seed
 once from Qt's `~/.config/hgdev/hgs-tray.conf` on Linux (an absolute

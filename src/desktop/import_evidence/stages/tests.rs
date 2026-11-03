@@ -270,3 +270,47 @@ fn a_parent_replaced_after_planning_is_refused_before_any_file_is_removed() {
         .join(format!("{}.json", sha256(b"{}")))
         .is_file());
 }
+
+#[test]
+fn a_claim_plan_refuses_a_still_present_source_stage_without_deleting_either() {
+    let f = Fixture::new();
+    let (original, mut source) = f.input(NOW - AGE - 1);
+    source.retain();
+    let container = tempfile::Builder::new()
+        .prefix(".held-import-")
+        .tempdir_in(f.location.root.join("imports"))
+        .unwrap();
+    platform::restrict_dir(container.path()).unwrap();
+    let mut claim = Lease::new(
+        &f.location,
+        container.path(),
+        &source.record.import_id,
+        Kind::Claim {
+            source: source.record.stage.clone(),
+            directory: source.record.directory,
+        },
+        NOW - AGE - 1,
+    )
+    .unwrap();
+    claim.retain();
+    fs::rename(&original, container.path().join("input")).unwrap();
+    let container = container.keep();
+    // An unrelated private replacement at the original source name must block
+    // claim cleanup even when all original sidecars and claimed bytes match.
+    directory(&original).unwrap();
+    private_write(&original.join("keep.json"), b"do not delete").unwrap();
+    drop(source);
+    drop(claim);
+    let root = f.location.root.join("imports");
+    let name = container.file_name().unwrap().to_str().unwrap();
+    let owned = proof(&f.location, &root, name, NOW).unwrap();
+    assert!(plan(&root, &owned, &f.location, NOW).is_err());
+    drop(owned);
+    let lock = f.location.handoff_lock().unwrap();
+    assert_eq!(sweep_at(&f.location, &lock, NOW).unwrap().removed, 0);
+    assert_eq!(
+        fs::read(original.join("keep.json")).unwrap(),
+        b"do not delete"
+    );
+    assert!(container.join("input/record-v1.json").is_file());
+}

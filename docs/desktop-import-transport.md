@@ -172,7 +172,10 @@ sharing without delete sharing. Directory data access is needed for the
 [Windows sharing check](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fsa/8c0e3f4f-0729-49f4-a14d-7f7add593819);
 attributes-only handles do not prevent renames. No directory enumeration occurs.
 An ancestor that does not permit this read access refuses capture; permissions
-are never repaired. Native tests rename only their owned scratch/outer/hgdev
+are never repaired. This also changes the read-marks checkpoint on hardened
+profiles: list permission is required at every ancestor, including the drive
+root. Retained parent pins on a removable source drive can prevent safe eject
+until the original capture/checkpoint is released. Native tests rename only their owned scratch/outer/hgdev
 folders, not the system/profile/temp ancestors outside those fixtures.
 
 The foreign Qt INI is read-only

@@ -217,7 +217,7 @@ fn closed_raw_requests_and_foreign_configuration_never_prepare_or_execute() {
 
 #[test]
 fn schema_upgrades_exactly_from_real_creation_seventeen_without_a_placeholder() {
-    let f = Fixture::new();
+    let mut f = Fixture::new();
     // Reconstruct the exact prior version by removing only this leaf's DDL;
     // the real creation17 and notification-controls16 tables remain unchanged.
     f.store.db.execute_batch("DROP TRIGGER desktop_cache_unknown_preserve; DROP TRIGGER desktop_cache_unknown_immutable;
@@ -235,6 +235,18 @@ fn schema_upgrades_exactly_from_real_creation_seventeen_without_a_placeholder() 
         .collect::<rusqlite::Result<_>>()
         .unwrap();
     assert!(!creation_before.is_empty());
+    let tx = f.store.db.transaction().unwrap();
+    super::migrate(&tx).unwrap();
+    tx.pragma_update(None, "user_version", SCHEMA).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(
+        f.store
+            .db
+            .query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap(),
+        18
+    );
+    assert_eq!(f.store.db.query_row::<i64,_,_>("SELECT count(*) FROM pragma_table_info('desktop_cache_operations') WHERE name='effect_started'",[],|r|r.get(0)).unwrap(),0);
     drop(f.store);
     let epoch = id();
     let store = Store::open(&f.location, &epoch).unwrap();
@@ -243,7 +255,7 @@ fn schema_upgrades_exactly_from_real_creation_seventeen_without_a_placeholder() 
             .db
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        SCHEMA
+        super::super::store::SCHEMA
     );
     assert_eq!(SCHEMA, 18);
     assert_eq!(super::super::creation_clone::SCHEMA, 17);
@@ -262,6 +274,39 @@ fn schema_upgrades_exactly_from_real_creation_seventeen_without_a_placeholder() 
 }
 
 #[test]
+fn effect_schema_upgrades_exactly_from_eighteen_and_rolls_back_partial_ddl() {
+    let f = Fixture::new();
+    assert_eq!(super::super::cache_effects::SCHEMA, 19);
+    f.store.db.execute_batch("DROP TRIGGER desktop_cache_effect_monotone; DROP TRIGGER desktop_cache_kept_original;
+        ALTER TABLE desktop_cache_operations DROP COLUMN effect_started;
+        ALTER TABLE desktop_cache_operations DROP COLUMN kept_receipt; PRAGMA user_version=18;
+        CREATE TRIGGER desktop_cache_effect_monotone BEFORE UPDATE ON desktop_cache_operations BEGIN SELECT 1; END;").unwrap();
+    assert!(Store::open(&f.location, &id()).is_err());
+    assert_eq!(
+        f.store
+            .db
+            .query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap(),
+        18
+    );
+    assert_eq!(f.store.db.query_row::<i64,_,_>("SELECT count(*) FROM pragma_table_info('desktop_cache_operations') WHERE name IN('effect_started','kept_receipt')",[],|r|r.get(0)).unwrap(),0);
+    f.store
+        .db
+        .execute_batch("DROP TRIGGER desktop_cache_effect_monotone;")
+        .unwrap();
+    drop(f.store);
+    let store = Store::open(&f.location, &id()).unwrap();
+    assert_eq!(
+        store
+            .db
+            .query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap(),
+        19
+    );
+    assert_eq!(store.operation_undrained().unwrap(), 0);
+}
+
+#[test]
 fn deadline_keeps_the_actual_worker_owned_and_late_completion_cannot_erase_unknown() {
     let mut f = Fixture::new();
     let root = f.save();
@@ -270,10 +315,16 @@ fn deadline_keeps_the_actual_worker_owned_and_late_completion_cannot_erase_unkno
     f.runtime.hold = Some(Arc::new(TestHold {
         entered,
         release: std::sync::Mutex::new(receive),
+        after_started: true,
     }));
     let (prepare, operation) = f.prepare(&root, 0);
     assert_eq!(f.execute(&prepare, &operation)["accepted"], true);
-    wait.recv_timeout(Duration::from_secs(3)).unwrap();
+    let until = Instant::now() + Duration::from_secs(3);
+    while wait.try_recv().is_err() {
+        f.runtime.poll(&mut f.store);
+        assert!(Instant::now() < until, "original hold did not become ready");
+        thread::sleep(Duration::from_millis(1));
+    }
     f.runtime.job.as_mut().unwrap().until = Instant::now() - Duration::from_millis(1);
     f.runtime.poll(&mut f.store);
     let row = ledger::load(&f.store.db, &operation).unwrap().unwrap();
@@ -326,13 +377,50 @@ fn owned_cache_crash_fixture() {
     let root = f.save();
     let (entered, wait) = mpsc::sync_channel(1);
     let (release, receive) = mpsc::sync_channel(1);
-    f.runtime.hold = Some(Arc::new(TestHold {
-        entered,
-        release: std::sync::Mutex::new(receive),
-    }));
-    let (prepare, operation) = f.prepare(&root, 0);
+    let after_started = std::env::var("ZERUS_CACHE_CRASH_AFTER_START").as_deref() == Ok("1");
+    f.runtime.hold = after_started.then(|| {
+        Arc::new(TestHold {
+            entered,
+            release: std::sync::Mutex::new(receive),
+            after_started: true,
+        })
+    });
+    let (prepare, operation) = f.prepare_timing(
+        &root,
+        0,
+        if after_started {
+            "immediate"
+        } else {
+            "after_opening_grace"
+        },
+    );
     assert_eq!(f.execute(&prepare, &operation)["accepted"], true);
-    wait.recv_timeout(Duration::from_secs(3)).unwrap();
+    let until = Instant::now() + Duration::from_secs(3);
+    loop {
+        f.runtime.poll(&mut f.store);
+        let ready = if after_started {
+            wait.try_recv().is_ok()
+        } else {
+            zerus_client_core::qt_lock::lock(&root.join(".zerus-files.lock"), Duration::ZERO)
+                .unwrap()
+                .is_some()
+        };
+        if ready {
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "original crash stage did not become ready"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        ledger::load(&f.store.db, &operation)
+            .unwrap()
+            .unwrap()
+            .effect_started,
+        after_started
+    );
     let marker = json!({"root":f.root,"state":f.location.root,"configuration":f.location.configuration,"operation_id":operation});
     // Only the parent's unpredictable private marker folder is used. Its
     // original child identity, not the marker, authorizes parent termination.
@@ -346,12 +434,19 @@ fn owned_cache_crash_fixture() {
     // Controller failure has a bounded child safety path; never execute the
     // paused unlink after its original controller has disappeared.
     f.runtime.request_stop(&mut f.store).unwrap();
-    release.send(()).unwrap();
+    let _ = release.send(());
     f.drain();
 }
 
 #[test]
-fn killing_the_original_service_process_recovers_only_unknown_and_never_replays() {
+fn killing_during_the_real_grace_recovers_original_kept_without_an_unknown_fence() {
+    kill_original_and_recover(false);
+}
+#[test]
+fn killing_after_committed_effect_start_recovers_unknown_and_never_replays() {
+    kill_original_and_recover(true);
+}
+fn kill_original_and_recover(after_started: bool) {
     use std::io::Read;
     use std::process::{Command, Stdio};
     let base = tempfile::tempdir().unwrap().keep();
@@ -362,6 +457,10 @@ fn killing_the_original_service_process_recovers_only_unknown_and_never_replays(
             "--nocapture",
         ])
         .env("ZERUS_CACHE_CRASH_FIXTURE", &base)
+        .env(
+            "ZERUS_CACHE_CRASH_AFTER_START",
+            if after_started { "1" } else { "0" },
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -412,17 +511,35 @@ fn killing_the_original_service_process_recovers_only_unknown_and_never_replays(
     let original = ledger::load(&store.db, marker["operation_id"].as_str().unwrap())
         .unwrap()
         .unwrap();
-    assert_eq!(original.phase, ledger::Phase::Unknown);
+    assert_eq!(original.effect_started, after_started);
+    assert_eq!(
+        original.phase,
+        if after_started {
+            ledger::Phase::Unknown
+        } else {
+            ledger::Phase::Settled
+        }
+    );
     assert!(!original.undrained);
+    if !after_started {
+        assert_eq!(
+            original.receipt.as_ref().unwrap().files,
+            [ledger::FileState::Kept]
+        );
+        assert_eq!(original.receipt, original.kept_receipt);
+    }
     let content = &original.binding.unwrap().candidates[0].content_id;
-    assert!(store
-        .db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM desktop_cache_unknown WHERE content_id=?1)",
-            [content],
-            |r| r.get::<_, bool>(0)
-        )
-        .unwrap());
+    assert_eq!(
+        store
+            .db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM desktop_cache_unknown WHERE content_id=?1)",
+                [content],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap(),
+        after_started
+    );
     assert!(root.join("cache/report.txt").is_file());
     drop(store);
     drop(owner);
@@ -513,4 +630,132 @@ fn admitted_delayed_original_completes_after_the_full_real_opening_grace() {
     assert_eq!(row.phase, ledger::Phase::Settled);
     assert_eq!(row.receipt.unwrap().files, [ledger::FileState::Removed]);
     assert!(!root.join("report.txt").exists());
+}
+
+#[test]
+fn a_missing_original_start_ack_never_unlinks_or_invents_an_unknown_fence() {
+    let mut f = Fixture::new();
+    let root = f.save();
+    let (prepare, operation) = f.prepare(&root, 0);
+    f.execute(&prepare, &operation);
+    let event = f
+        .runtime
+        .job
+        .as_ref()
+        .unwrap()
+        .events
+        .recv_timeout(Duration::from_secs(3))
+        .unwrap();
+    let Event::StartEffects { reply, .. } = event else {
+        panic!("original worker did not ask for start")
+    };
+    assert!(
+        !ledger::load(&f.store.db, &operation)
+            .unwrap()
+            .unwrap()
+            .effect_started
+    );
+    assert_eq!(f.store.operation_undrained().unwrap(), 1);
+    assert!(root.join("report.txt").is_file());
+    drop(reply); // Only the original private reply; no actor commit or permit.
+    f.drain();
+    let row = ledger::load(&f.store.db, &operation).unwrap().unwrap();
+    assert!(!row.effect_started);
+    assert_eq!(row.phase, ledger::Phase::Settled);
+    assert_eq!(
+        row.receipt.as_ref().unwrap().files,
+        [ledger::FileState::Kept]
+    );
+    assert_eq!(row.receipt, row.kept_receipt);
+    assert!(root.join("report.txt").is_file());
+    assert_eq!(
+        f.store
+            .db
+            .query_row::<i64, _, _>("SELECT count(*) FROM desktop_cache_unknown", [], |r| r
+                .get(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn a_start_commit_write_failure_does_not_release_a_permit_or_unlink() {
+    let mut f = Fixture::new();
+    let root = f.save();
+    let (prepare, operation) = f.prepare(&root, 0);
+    f.execute(&prepare, &operation);
+    f.store.db.execute_batch("PRAGMA query_only=ON;").unwrap();
+    let until = Instant::now() + Duration::from_secs(3);
+    while f
+        .runtime
+        .job
+        .as_ref()
+        .is_some_and(|j| !j.cancel.load(Ordering::Acquire))
+        && !f.runtime.error
+    {
+        f.runtime.poll(&mut f.store);
+        assert!(Instant::now() < until, "start failure was not observed");
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        !ledger::load(&f.store.db, &operation)
+            .unwrap()
+            .unwrap()
+            .effect_started
+    );
+    assert!(root.join("report.txt").is_file());
+    f.store.db.execute_batch("PRAGMA query_only=OFF;").unwrap();
+    f.drain();
+    let row = ledger::load(&f.store.db, &operation).unwrap().unwrap();
+    assert_eq!(row.phase, ledger::Phase::Settled);
+    assert!(!row.effect_started);
+    assert_eq!(
+        row.receipt.as_ref().unwrap().files,
+        [ledger::FileState::Kept]
+    );
+    assert!(root.join("report.txt").is_file());
+}
+
+#[test]
+fn a_lost_reply_after_the_start_commit_still_does_not_authorize_unlink() {
+    let mut f = Fixture::new();
+    let root = f.save();
+    let (prepare, operation) = f.prepare(&root, 0);
+    f.execute(&prepare, &operation);
+    let job = f.runtime.job.as_ref().unwrap();
+    let event = job.events.recv_timeout(Duration::from_secs(3)).unwrap();
+    let Event::StartEffects {
+        binding_sha256,
+        reply,
+    } = event
+    else {
+        panic!("original worker did not ask for start")
+    };
+    assert_eq!(job.binding_sha256.as_ref(), Some(&binding_sha256));
+    let original = job.original.clone();
+    // Transport-loss control: the original storage transition commits, but no
+    // EffectPermit is delivered. This is not a native authentication proof.
+    let tx = f
+        .store
+        .db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    ledger::start_effects(&tx, &original, &binding_sha256).unwrap();
+    tx.commit().unwrap();
+    assert!(
+        ledger::load(&f.store.db, &operation)
+            .unwrap()
+            .unwrap()
+            .effect_started
+    );
+    drop(reply);
+    f.drain();
+    let row = ledger::load(&f.store.db, &operation).unwrap().unwrap();
+    assert_eq!(row.phase, ledger::Phase::Settled);
+    assert!(row.effect_started);
+    assert_eq!(
+        row.receipt.as_ref().unwrap().files,
+        [ledger::FileState::Kept]
+    );
+    assert!(root.join("report.txt").is_file());
 }

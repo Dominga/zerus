@@ -4549,9 +4549,15 @@ unindexed files remain intact. Download completion admits fixed work with a
 65-second opening grace; the folder lock is released while waiting, and any
 change to its frozen index or files keeps the original copies. The admitted
 pass can finish after the UI closes. Revoke stops new effects and remains
-unsettled until the original worker physically joins. A lost removal result is
-terminal unknown for that original file/content identity, including after a
-rename or an unrelated index edit. Another request ID cannot clear that fence.
+unsettled until the original worker physically joins. After the grace and exact
+reopen, the actor durably marks effect start before releasing the original
+worker into execution. A missing start reply cannot authorize unlink. An admitted
+reservation without a committed start mark can settle as Kept from its retained
+original receipt only after physical join or exclusive-owner restart; cache
+totals are never reconstructed. Older reservations without this evidence remain
+conservative. A lost result after the start mark is terminal unknown for that
+original file/content identity, including after a rename or an unrelated index
+edit. Another request ID cannot clear that fence.
 The read-only `cache_maintenance_result` request accepts the original request ID
 and returns its bounded receipt; it cannot prepare, retry or authorize work.
 

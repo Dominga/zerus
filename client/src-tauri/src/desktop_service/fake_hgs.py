@@ -23,8 +23,6 @@ abi = 'desktop-catalog-changes-v1'
 args = sys.argv[1:]
 watch_seq, watch_status = 0, None
 value = json.loads(sys.stdin.readline()) if args[:2] in [['desktop', 'request'], ['desktop', 'frontend-request']] else {}
-with (root / 'calls').open('a') as log:
-    log.write(json.dumps({'args': args, 'value': value, 'pid': os.getpid()}) + '\n')
 
 
 def wait(path):
@@ -33,6 +31,18 @@ def wait(path):
         if time.monotonic() > until:
             raise SystemExit('fixture deadline')
         time.sleep(.005)
+
+
+# Delay only this fixture's first watch before it records startup. This models
+# a process that has spawned but has not been scheduled through its greeting.
+if args == ['desktop', 'watch', '--json'] and config.get('audit_first_watch_hold'):
+    held = root / 'audit-first-watch-held'
+    if not held.exists():
+        held.touch()
+        wait(root / 'audit-first-watch-release')
+
+with (root / 'calls').open('a') as log:
+    log.write(json.dumps({'args': args, 'value': value, 'pid': os.getpid()}) + '\n')
 
 
 def counter(name):

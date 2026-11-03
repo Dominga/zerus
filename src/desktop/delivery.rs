@@ -27,6 +27,18 @@ use zerus_client_core::{
 };
 use zerus_desktop_ledger::reads;
 
+/// Root schema leaf: catalog rows carry the approval-phase flag that the
+/// automatic-approval scan visits first (zerus-5wmh.66.3.33).
+pub(super) const SCHEMA: i64 = 22;
+#[cfg(test)]
+pub(super) fn remove_approval_fixture(db: &Connection) {
+    db.execute_batch(
+        "DROP INDEX desktop_catalog_approval; DROP INDEX desktop_catalog_approval_pending;
+        ALTER TABLE desktop_catalog_rows DROP COLUMN approval;",
+    )
+    .unwrap();
+}
+
 pub(super) fn migrate(db: &Connection) -> Result<()> {
     state::migrate(db)?;
     db.execute_batch(
@@ -40,6 +52,10 @@ const APPROVALS: usize = 2;
 const SLOTS: usize = READS + APPROVALS;
 const RECENT: usize = 4096;
 const SCAN: Duration = Duration::from_secs(1);
+/// Approval-phase rows read per scan, before the one-page catalog walk.
+const INDEXED: usize = 16;
+/// Rows stored before schema 22 whose flag one scan derives.
+const BACKFILL: usize = 1024;
 const COOLDOWN: Duration = Duration::from_secs(5);
 const UNKNOWN: &str = "Answer delivery could not be confirmed. Check Activity or Terminal.";
 
@@ -202,6 +218,8 @@ pub(super) struct Runtime {
     writer_token: Option<String>,
     stopping: bool,
     scan_at: Instant,
+    /// No row stored before schema 22 is left without its approval flag.
+    backfilled: bool,
 }
 impl Runtime {
     /// No child, registration, service activation or journal constructor here.
@@ -260,6 +278,7 @@ impl Runtime {
             writer_token: None,
             stopping: false,
             scan_at: Instant::now(),
+            backfilled: false,
         }
     }
 
@@ -601,6 +620,26 @@ impl Runtime {
             self.scan_at = Instant::now() + SCAN;
             if self.sources.observe_reads(store).is_err() {
                 self.read_error = Some("read_observation_unavailable");
+            }
+            // Bounded, resumable: each scan derives one batch of old rows.
+            if !self.backfilled {
+                match zerus_desktop_catalog::approvals::backfill(&mut store.db, BACKFILL) {
+                    Ok(0) => self.backfilled = true,
+                    Ok(_) => (),
+                    Err(_) => self.read_error = Some("delivery_catalog_unavailable"),
+                }
+            }
+            // Sessions in an approval phase first, whatever the catalog size;
+            // the walk below stays the backstop. Eligibility is unchanged.
+            if self.policy.is_some_and(|p| p.enabled) && self.approval_error.is_none() {
+                match self.sources.approvals(store, INDEXED) {
+                    Ok(candidates) => {
+                        for candidate in candidates {
+                            self.inspect(store, candidate);
+                        }
+                    }
+                    Err(_) => self.read_error = Some("delivery_catalog_unavailable"),
+                }
             }
             match self.sources.page(store) {
                 Ok(candidates) => {

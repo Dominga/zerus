@@ -131,6 +131,36 @@ impl Fixture {
             self.runtime.sources.native_fixture(&self.store, "");
         }
     }
+    /// A native source of many rows, in legacy pages of the largest size.
+    fn source_rows(&mut self, rows: Vec<CatalogItem>) {
+        self.generation += 1;
+        let pages: Vec<Vec<CatalogItem>> = rows.chunks(128).map(<[_]>::to_vec).collect();
+        let mut packets = vec![feed::Packet::LegacyBegin {
+            computer: String::new(),
+            generation: self.generation,
+            metadata: json!({"machine_id":"fixture"}),
+            rows: rows.len(),
+            pages: pages.len(),
+        }];
+        for (index, items) in pages.into_iter().enumerate() {
+            packets.push(feed::Packet::LegacyPage {
+                computer: String::new(),
+                generation: self.generation,
+                index,
+                items,
+            });
+        }
+        packets.push(feed::Packet::LegacyComplete {
+            computer: String::new(),
+            generation: self.generation,
+        });
+        for packet in packets {
+            self.feed
+                .apply(&mut self.store, &self.producer, &packet)
+                .unwrap();
+        }
+        self.runtime.sources.native_fixture(&self.store, "");
+    }
     fn tick_until(&mut self, predicate: impl Fn(&Runtime) -> bool) {
         let end = Instant::now() + Duration::from_secs(5);
         loop {
@@ -902,4 +932,132 @@ fn persistence_retry_does_not_upgrade_an_original_incomplete_read_receipt() {
         serde_json::from_str::<reads::Outcome>(&result).unwrap(),
         reads::Outcome::Failed
     );
+}
+
+/// Idle sessions, then the fixture's approval row last (`claude/example/a`).
+fn idle_then_approval(idle: usize) -> Vec<CatalogItem> {
+    let mut rows: Vec<CatalogItem> = (0..idle)
+        .map(|n| {
+            let mut row = row();
+            row["name"] = json!(format!("claude/example/idle-{n}"));
+            row["phase"] = json!("working");
+            row["run_id"] = json!(format!("run-{n}"));
+            row["conversation_id"] = json!(format!("conversation-{n}"));
+            CatalogItem {
+                key: format!("run:run-{n}"),
+                row,
+            }
+        })
+        .collect();
+    rows.push(CatalogItem {
+        key: "run:run".into(),
+        row: row(),
+    });
+    rows
+}
+
+/// The sessions whose native inspection the runner was asked for.
+fn inspections() -> (Runner, Arc<Mutex<Vec<String>>>) {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = seen.clone();
+    let run: Runner = Arc::new(move |inv, _, _, _| {
+        assert!(inv.args.iter().any(|a| a == "inspect"));
+        record.lock().unwrap().extend(inv.args.iter().cloned());
+        Exit::TimedOut
+    });
+    (run, seen)
+}
+
+#[test]
+fn every_row_the_policy_accepts_is_in_the_approval_index() {
+    // zerus-5wmh.66.3.33: the index may hold more rows than the policy
+    // accepts, never fewer, so indexing changes no eligibility.
+    let (mut accepted, mut only_indexed) = (0, 0);
+    for provider in ["claude", "opencode", "dsh", "codex", ""] {
+        for phase in [
+            json!("approval"),
+            json!("input"),
+            json!("question"),
+            json!("working"),
+            Value::Null,
+        ] {
+            for child in [
+                None,
+                Some(json!({"phase":"approval"})),
+                Some(json!({"state":"approval"})),
+                Some(json!({"display_state":"approval"})),
+                Some(json!({"status":"Needs approval"})),
+                Some(json!({"phase":"working","status":"Running"})),
+            ] {
+                for (tracked, state) in [(true, "running"), (false, "running"), (true, "stopped")] {
+                    let mut row = row();
+                    row["cmd"] = json!(provider);
+                    row["phase"] = phase.clone();
+                    row["tracked"] = json!(tracked);
+                    row["state"] = json!(state);
+                    if let Some(child) = &child {
+                        row["subagents"] = json!({"agent-1": child});
+                    }
+                    let candidate =
+                        policy::candidate("", &zerus_client_core::view::row(&row)).is_some();
+                    let indexed = zerus_desktop_catalog::approvals::approval_phase(&row);
+                    assert!(!candidate || indexed, "{row}");
+                    accepted += usize::from(candidate);
+                    only_indexed += usize::from(indexed && !candidate);
+                }
+            }
+        }
+    }
+    assert!(
+        accepted > 0 && only_indexed > 0,
+        "{accepted} {only_indexed}"
+    );
+}
+
+#[test]
+fn an_approval_at_the_end_of_a_large_catalog_is_found_on_the_first_scan() {
+    // The one-page walk would reach the last of 20,001 rows after 157 scans.
+    let (run, seen) = inspections();
+    let mut f = Fixture::new(run);
+    f.active();
+    f.enabled(true);
+    f.source_rows(idle_then_approval(20_000));
+    f.scan();
+    f.tick_until(|r| r.jobs.is_empty());
+    let seen = seen.lock().unwrap();
+    assert!(seen.iter().any(|a| a == "claude/example/a"), "{seen:?}");
+    assert!(!seen.iter().any(|a| a.starts_with("claude/example/idle-")));
+}
+
+#[test]
+fn rows_stored_before_the_index_are_found_once_the_scan_backfills_them() {
+    let (run, seen) = inspections();
+    let mut f = Fixture::new(run.clone());
+    f.active();
+    f.enabled(true);
+    f.source_rows(idle_then_approval(300));
+    // An upgraded store: every row predates schema 22, then a restart.
+    f.store
+        .db
+        .execute_batch("UPDATE desktop_catalog_rows SET approval=NULL;")
+        .unwrap();
+    let mut restarted = Runtime::new(&f.runtime.epoch, f.runtime.approval_root.clone(), run);
+    restarted.sources.native_fixture(&f.store, "");
+    f.runtime = restarted;
+    f.scan();
+    f.tick_until(|r| r.jobs.is_empty());
+    assert!(seen.lock().unwrap().iter().any(|a| a == "claude/example/a"));
+    let pending: i64 = f
+        .store
+        .db
+        .query_row(
+            "SELECT count(*) FROM desktop_catalog_rows WHERE approval IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending, 0);
+    // The next scan finds nothing left and stops backfilling.
+    f.scan();
+    assert!(f.runtime.backfilled);
 }

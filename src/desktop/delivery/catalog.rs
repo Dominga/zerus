@@ -43,6 +43,10 @@ pub(super) struct Sources {
     computer: usize,
     read_after: i64,
     read_through: i64,
+    /// Per native source: the generation and last row id the approval-phase
+    /// walk reached. At most one entry per native source.
+    approval_after: BTreeMap<String, (i64, i64)>,
+    approval_next: usize,
 }
 impl Sources {
     pub fn new(epoch: &str) -> Self {
@@ -53,6 +57,8 @@ impl Sources {
             computer: 0,
             read_after: 0,
             read_through: 0,
+            approval_after: BTreeMap::new(),
+            approval_next: 0,
         }
     }
 
@@ -193,6 +199,67 @@ impl Sources {
             .last()
             .map_or(self.read_through, |intent| intent.seq);
         Ok(())
+    }
+
+    /// The approval-phase index (zerus-5wmh.66.3.33): at most `limit` flagged
+    /// rows per scan over the current native sources, starting with a
+    /// different source each scan, each walked from the last row id it reached
+    /// (ids only grow, so arriving rows cannot shift the walk), wrapping at the
+    /// end. Candidates go through the same policy, `same()`, native inspection
+    /// and durable reservation as the catalog walk's.
+    pub fn approvals(&mut self, store: &Store, limit: usize) -> Result<Vec<Candidate>> {
+        self.approval_after
+            .retain(|computer, _| self.native.contains_key(computer));
+        let sources: Vec<Stamp> = self
+            .native
+            .values()
+            .map(|(stamp, _)| stamp.clone())
+            .collect();
+        if sources.is_empty() {
+            return Ok(Vec::new());
+        }
+        let first = self.approval_next % sources.len();
+        self.approval_next = first + 1;
+        let mut candidates = Vec::new();
+        let mut budget = limit;
+        for offset in 0..sources.len() {
+            if budget == 0 {
+                break;
+            }
+            let stamp = &sources[(first + offset) % sources.len()];
+            let Some(visible) = stamp.visible else {
+                continue;
+            };
+            if !self.current(&store.db, stamp)? {
+                continue;
+            }
+            let cursor = self
+                .approval_after
+                .entry(stamp.computer.clone())
+                .or_insert((visible, 0));
+            if cursor.0 != visible {
+                *cursor = (visible, 0);
+            }
+            let rows = catalog::approvals::page(&store.db, visible, cursor.1, budget)?;
+            // A short page reached the end: the next scan starts again.
+            cursor.1 = if rows.len() < budget {
+                0
+            } else {
+                rows.last().map_or(0, |row| row.id)
+            };
+            budget -= rows.len();
+            for row in rows {
+                let view = view::row(&serde_json::from_str(&row.json)?);
+                if let Some(target) = policy::candidate(&stamp.computer, &view) {
+                    candidates.push(Candidate {
+                        target,
+                        source: stamp.clone(),
+                        key: row.key,
+                    });
+                }
+            }
+        }
+        Ok(candidates)
     }
 
     /// One bounded discovery page, never an all-session map. Every candidate

@@ -217,6 +217,20 @@ inspections and answers; cancellation after a possible send remains unknown.
 Read receipt retries remain distinct from this no-replay approval rule. Neither
 status nor a command receipt establishes worker drain, currentness or release.
 
+Schema 22 adds an approval-phase index so that an eligible approval is found
+on the first scan, however large the catalog. Each stored catalog row carries
+an `approval` flag, written in the transaction that stores that row version:
+the row's phase is `approval` or `input`, or a subagent waits for approval.
+The flag is a superset of every row the policy can accept and decides nothing
+by itself. While the policy is enabled, each scan first reads at most 16
+flagged rows of the current generation, rotating across native sources and
+keyset-paging by row id, which stays stable while rows arrive because an
+update keeps its id. Each such row then takes the same candidate, inspection,
+current-source and reservation path as before, and the one-page catalog walk
+continues as a backstop. Rows stored before schema 22 read NULL; the scan
+derives them in batches of at most 1024 rows, one short transaction each,
+resuming where it stopped, including after a restart.
+
 
 ## Read-only approval audit
 

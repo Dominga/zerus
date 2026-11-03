@@ -1261,6 +1261,10 @@ finally:
 
     @staticmethod
     def remove_catalog_reason_schema(db):
+        # Rewind the later schema-22 leaf too, never leaving it labelled older.
+        db.execute('DROP INDEX desktop_catalog_approval')
+        db.execute('DROP INDEX desktop_catalog_approval_pending')
+        db.execute('ALTER TABLE desktop_catalog_rows DROP COLUMN approval')
         db.execute('ALTER TABLE desktop_catalog_changes DROP COLUMN reason')
 
     @classmethod

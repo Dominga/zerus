@@ -254,121 +254,127 @@ fn mutations(running: &Running) -> Vec<String> {
         })
         .collect()
 }
-#[tokio::test]
-async fn actual_startup_then_automatic_reconnect_never_repeats_grant_or_helper_activation() {
+#[test]
+fn actual_startup_then_automatic_reconnect_never_repeats_grant_or_helper_activation() {
     let _process = crate::PROCESS_TREE.read().unwrap();
-    let helpers = Fixture::new();
-    let running = start_native(&helpers, json!({"ready":true,"restart_watch":true}));
-    crate::desktop_service::tests::eventually("startup Grant then original activation", || {
-        running.service.snapshot().connected
-            && helpers.effects() == 1
-            && running.service.shared.ownership.granted()
-    })
-    .await;
-    assert_eq!(mutations(&running), vec!["grant"]);
-    // Force a newly observed default-passive status during reconnect. Even
-    // that positive policy observation must not make reconnect activate.
-    helpers.config("default", "passive", false);
-    fs::write(running.source.0.join("restart-watch"), []).unwrap();
-    crate::desktop_service::tests::eventually("a new automatic read stream", || {
-        running
-            .source
-            .calls()
-            .iter()
-            .filter(|c| c["args"] == json!(["desktop", "watch", "--json"]))
-            .count()
-            >= 2
-    })
-    .await;
-    running.service.join().await.unwrap();
-    assert_eq!(mutations(&running), vec!["grant"]);
-    assert_eq!(helpers.effects(), 1);
-}
-#[tokio::test]
-async fn actual_explicit_resume_rearms_only_when_revoked_and_then_activates_once() {
-    let _process = crate::PROCESS_TREE.read().unwrap();
-    for revoked in [false, true] {
+    tauri::async_runtime::block_on(async {
         let helpers = Fixture::new();
-        helpers.config("explicit", "passive", false);
-        let running = start_native(
-            &helpers,
-            json!({"ready":true,"state":if revoked {"revoked"} else {"passive"},"rearm_required":revoked}),
-        );
-        crate::desktop_service::tests::eventually("limited consumer is available", || {
-            // Connected is the preflight projection. The original watch is
-            // spawned only after ownership and orchestration have settled.
+        let running = start_native(&helpers, json!({"ready":true,"restart_watch":true}));
+        crate::desktop_service::tests::eventually("startup Grant then original activation", || {
             running.service.snapshot().connected
-                && running
-                    .source
-                    .calls()
-                    .iter()
-                    .any(|call| call["args"] == json!(["desktop", "watch", "--json"]))
+                && helpers.effects() == 1
+                && running.service.shared.ownership.granted()
         })
         .await;
-        assert_eq!(
-            helpers.effects(),
-            0,
-            "explicit passive never resumes on mount"
-        );
-        if revoked {
-            assert!(mutations(&running).is_empty());
-        } else {
-            assert_eq!(mutations(&running), vec!["grant"]);
+        assert_eq!(mutations(&running), vec!["grant"]);
+        // Force a newly observed default-passive status during reconnect. Even
+        // that positive policy observation must not make reconnect activate.
+        helpers.config("default", "passive", false);
+        fs::write(running.source.0.join("restart-watch"), []).unwrap();
+        crate::desktop_service::tests::eventually("a new automatic read stream", || {
+            running
+                .source
+                .calls()
+                .iter()
+                .filter(|c| c["args"] == json!(["desktop", "watch", "--json"]))
+                .count()
+                >= 2
+        })
+        .await;
+        running.service.join().await.unwrap();
+        assert_eq!(mutations(&running), vec!["grant"]);
+        assert_eq!(helpers.effects(), 1);
+    });
+}
+#[test]
+fn actual_explicit_resume_rearms_only_when_revoked_and_then_activates_once() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        for revoked in [false, true] {
+            let helpers = Fixture::new();
+            helpers.config("explicit", "passive", false);
+            let running = start_native(
+                &helpers,
+                json!({"ready":true,"state":if revoked {"revoked"} else {"passive"},"rearm_required":revoked}),
+            );
+            crate::desktop_service::tests::eventually("limited consumer is available", || {
+                // Connected is the preflight projection. The original watch is
+                // spawned only after ownership and orchestration have settled.
+                running.service.snapshot().connected
+                    && running
+                        .source
+                        .calls()
+                        .iter()
+                        .any(|call| call["args"] == json!(["desktop", "watch", "--json"]))
+            })
+            .await;
+            assert_eq!(
+                helpers.effects(),
+                0,
+                "explicit passive never resumes on mount"
+            );
+            if revoked {
+                assert!(mutations(&running).is_empty());
+            } else {
+                assert_eq!(mutations(&running), vec!["grant"]);
+            }
+            running.service.ownership_rearm().await;
+            crate::desktop_service::tests::eventually(
+                "Resume reconnects read-only after its one mutation",
+                || {
+                    running
+                        .source
+                        .calls()
+                        .iter()
+                        .filter(|call| call["args"] == json!(["desktop", "watch", "--json"]))
+                        .count()
+                        >= 2
+                },
+            )
+            .await;
+            running.service.join().await.unwrap();
+            assert_eq!(
+                mutations(&running),
+                if revoked {
+                    vec!["rearm"]
+                } else {
+                    vec!["grant"]
+                }
+            );
+            assert_eq!(helpers.effects(), 1);
         }
-        running.service.ownership_rearm().await;
+    });
+}
+
+#[test]
+fn actual_unconfirmed_grant_offers_only_original_lookup_and_never_activates() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let helpers = Fixture::new();
+        let running = start_native(&helpers, json!({"ready":true,"pending":true}));
         crate::desktop_service::tests::eventually(
-            "Resume reconnects read-only after its one mutation",
+            "original pending Grant settled to the read stream",
             || {
-                running
-                    .source
-                    .calls()
-                    .iter()
-                    .filter(|call| call["args"] == json!(["desktop", "watch", "--json"]))
-                    .count()
-                    >= 2
+                running.service.snapshot().connected
+                    && running
+                        .source
+                        .calls()
+                        .iter()
+                        .any(|call| call["args"] == json!(["desktop", "watch", "--json"]))
             },
         )
         .await;
+        assert!(running.service.shared.ownership.view().pending);
+        assert_eq!(mutations(&running), vec!["grant"]);
+        assert_eq!(helpers.effects(), 0);
+        let original = fs::read(running.source.0.join("original.json")).unwrap();
+        running.service.ownership_rearm().await;
         running.service.join().await.unwrap();
+        assert_eq!(mutations(&running), vec!["grant"]);
+        assert_eq!(helpers.effects(), 0);
         assert_eq!(
-            mutations(&running),
-            if revoked {
-                vec!["rearm"]
-            } else {
-                vec!["grant"]
-            }
+            fs::read(running.source.0.join("original.json")).unwrap(),
+            original
         );
-        assert_eq!(helpers.effects(), 1);
-    }
-}
-
-#[tokio::test]
-async fn actual_unconfirmed_grant_offers_only_original_lookup_and_never_activates() {
-    let _process = crate::PROCESS_TREE.read().unwrap();
-    let helpers = Fixture::new();
-    let running = start_native(&helpers, json!({"ready":true,"pending":true}));
-    crate::desktop_service::tests::eventually(
-        "original pending Grant settled to the read stream",
-        || {
-            running.service.snapshot().connected
-                && running
-                    .source
-                    .calls()
-                    .iter()
-                    .any(|call| call["args"] == json!(["desktop", "watch", "--json"]))
-        },
-    )
-    .await;
-    assert!(running.service.shared.ownership.view().pending);
-    assert_eq!(mutations(&running), vec!["grant"]);
-    assert_eq!(helpers.effects(), 0);
-    let original = fs::read(running.source.0.join("original.json")).unwrap();
-    running.service.ownership_rearm().await;
-    running.service.join().await.unwrap();
-    assert_eq!(mutations(&running), vec!["grant"]);
-    assert_eq!(helpers.effects(), 0);
-    assert_eq!(
-        fs::read(running.source.0.join("original.json")).unwrap(),
-        original
-    );
+    });
 }

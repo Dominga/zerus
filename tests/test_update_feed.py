@@ -82,6 +82,73 @@ class FakeGitHub:
         return digest
 
 
+class SharedUpdateFeedContractTest(unittest.TestCase):
+    """The production builder and Next parse the same inert catalog values.
+
+    Payloads are tiny synthetic bytes, not distributable archives or signing
+    evidence. Trusted-origin URLs are data only; no client or fetch is created.
+    """
+
+    @staticmethod
+    def build_catalog(case, root):
+        producer = case['producer']
+        info = producer['info']
+        payloads = {name: text.encode('utf-8')
+                    for name, text in producer['payloads'].items()}
+        payloads['release-info.json'] = (
+            json.dumps(info, sort_keys=True, separators=(',', ':')) + '\n'
+        ).encode('utf-8')
+        files = {}
+        sums = {}
+        for name, raw in payloads.items():
+            path = root / name
+            path.write_bytes(raw)
+            files[name] = path
+            sums[name] = hashlib.sha256(raw).hexdigest()
+        checksums = ''.join(f'{digest}  {name}\n'
+                            for name, digest in sorted(sums.items())).encode('ascii')
+        release = copy.deepcopy(producer['release'])
+        release['assets'] = [
+            {'id': index, 'name': name, 'size': len(raw), 'state': 'uploaded',
+             'digest': 'sha256:' + hashlib.sha256(raw).hexdigest(),
+             'browser_download_url': (
+                 f'https://github.com/{feed.REPOSITORY}/releases/download/'
+                 f'{release["tag_name"]}/{name}')}
+            for index, (name, raw) in enumerate(
+                sorted({**payloads, 'SHA256SUMS': checksums}.items()), 1)
+        ]
+        return feed.build_feed(release, info, files, sums,
+                               producer['package_versions'], producer['commit'])
+
+    def test_production_builder_matches_shared_next_catalogs(self):
+        path = (SCRIPTS.parent / 'client/core/tests/fixtures/'
+                'update-feed-contract.json')
+        contract = json.loads(path.read_text())
+        self.assertEqual(contract['schema'], 1)
+        self.assertEqual({case['name'] for case in contract['cases']},
+                         {'stable-v1', 'stable-v1-additive-macos-windows'})
+        with tempfile.TemporaryDirectory() as temporary:
+            for case in contract['cases']:
+                with self.subTest(case=case['name']):
+                    root = Path(temporary) / case['name']
+                    root.mkdir()
+                    catalog = self.build_catalog(case, root)
+                    self.assertEqual(catalog, case['catalog'])
+                    self.assertEqual(catalog['schemaVersion'], 1)
+                    self.assertEqual({item['kind'] for item in catalog['artifacts']},
+                                     {'source', 'linux-archive', 'arch-package'})
+                    self.assertTrue(all(item['name'] not in {
+                        case['producer']['info'].get('windows_portable'),
+                        case['producer']['info'].get('windows_installer', {}).get('asset'),
+                    } for item in catalog['artifacts']))
+                    if 'macos' in catalog:
+                        self.assertEqual(catalog['macos']['qt_version'],
+                                         case['producer']['info']['macos']['qt_version'])
+                        self.assertEqual(len(catalog['macos']['downloads']), 2)
+                        self.assertTrue(all(item['os'] != 'macos'
+                                            for item in catalog['artifacts']))
+
+
 class MirrorTest(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)/'content';self.client=FakeGitHub()

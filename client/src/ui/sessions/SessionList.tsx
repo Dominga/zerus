@@ -13,6 +13,7 @@ import {
 } from "./SessionCard";
 import { agentKind, catalog, computerFresh, computerOffline } from "../../store/catalog";
 import { visibleUnreadReply } from "../../store/attention";
+import { optionalQuestionCount } from "./optional-questions";
 import { runningCommandsEntry } from "../../store/processes";
 import { flag } from "../../store/settings";
 import { archiveCount, archiveTip } from "../../store/archive";
@@ -846,9 +847,10 @@ function StripBand(props: { row: Extract<Row, { type: "header" }> }) {
 /** A square tile: status and provider marks, name on up to two lines, state; the frame carries the state colour. */
 function StripTile(props: { row: Extract<Row, { type: "card" }> }) {
   const s = () => props.row.session;
+  const optionalCount = () => optionalQuestionCount(s(), computerFresh(s().computer));
   const kind = () => badgeKind(s());
   const frame = () => (emphasis(s()) === "draft" ? "draft" : kind() === "muted-attention" || kind() === "muted-unread" ? "muted" : kind() === "unread" ? "attention" : kind());
-  const tip = () => [`${s().name}: ${statusCaption(s())}`, s().summary, `${folderOf(s())}${s().branch ? ` / ${s().branch}` : ""} on ${s().machine}`, s().git ? gitTooltip(s()) : "", s().optionalQuestions ? `${s().optionalQuestions} optional question(s) waiting` : ""].filter(Boolean).join("\n");
+  const tip = () => [`${s().name}: ${statusCaption(s())}`, s().summary, `${folderOf(s())}${s().branch ? ` / ${s().branch}` : ""} on ${s().machine}`, s().git ? gitTooltip(s()) : "", optionalCount() ? `${optionalCount()} optional question(s) waiting` : ""].filter(Boolean).join("\n");
   return (
     <button class="strip-tile" classList={{ selected: selectedKey() === s().key, "context-target": visibleMenu()?.sessionKey === s().key }} data-frame={frame()} title={tip()} onClick={() => selectSession(s().key)}
       onContextMenu={(e) => sessionContextMenu(e, s())}>
@@ -861,7 +863,7 @@ function StripTile(props: { row: Extract<Row, { type: "card" }> }) {
           <Show when={s().muted}><Icon name="mute" size={14} class="st-mute" /></Show>
           <span class="st-provider">
             <AgentBadge agent={s().agent} narrow />
-            <Show when={s().optionalQuestions}><i class="st-question" classList={{ muted: !!s().muted }}>?</i></Show>
+            <Show when={optionalCount()}><i class="st-question" classList={{ muted: !!s().muted }}>?</i></Show>
           </span>
         </span>
         <span class="st-name">{s().title}</span>

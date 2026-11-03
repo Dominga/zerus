@@ -1018,6 +1018,37 @@ fn detail_spec(topic: &str, after: Option<i64>) -> zerus_watch_protocol::Subscri
 }
 
 #[test]
+fn pending_local_identity_does_not_hold_catalog_rpc_or_delay_peer_rows() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({"details":true,"source_held":true,"project_peer":true}));
+        let (service, pump) = fixture.start(true);
+        eventually("peer catalog is independent of local identity", || pump.row("studio", "row").is_some()).await;
+        assert!(pump.row("", "row").is_none());
+        assert!(!fixture.calls().iter().any(|call| call["value"]["op"] == "catalog_page" && call["value"]["computer"] == ""));
+        fs::write(fixture.0.join("source-identity-ready"), []).unwrap();
+        eventually("late local identity wakes its catalog", || pump.row("", "row").is_some()).await;
+        assert_eq!(pump.row("", "row").unwrap().machine, "untrusted-caption");
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn transient_source_metadata_failures_recover_local_catalog_without_refresh() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        for failure in ["transport", "refused", "native", "offline", "null"] {
+            let fixture = Fixture::new(json!({"details":true,"source_warming":true,"source_failure":failure}));
+            let (service, pump) = fixture.start(true);
+            eventually("local metadata recovers without Refresh", || pump.row("", "row").is_some()).await;
+            assert_eq!(pump.row("", "row").unwrap().machine, "untrusted-caption", "{failure}");
+            assert!(fixture.calls().iter().filter(|c| c["value"]["op"] == "detail_source" && c["value"]["part"] == "hello").count() >= 2, "{failure}");
+            service.join().await.unwrap();
+        }
+    });
+}
+
+#[test]
 fn service_catalog_rows_use_native_host_and_peer_alias_for_project_membership() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {

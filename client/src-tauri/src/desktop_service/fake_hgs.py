@@ -263,6 +263,18 @@ def desktop_request():
         print(json.dumps({'request_id': request_id, 'accepted': True, 'durable': False,
                           'lease': value['lease'], 'id': value['id'], 'state': 'unfollowed'}))
     elif op == 'detail_source':
+        if config.get('source_held') and not (root / 'source-identity-ready').exists():
+            print(json.dumps({'request_id': request_id, 'accepted': False, 'code': 'source_pending'}))
+            return
+        if config.get('source_warming') and counter('source-' + epoch + '-' + value['part']) == 1:
+            failure = config.get('source_failure', 'offline')
+            if failure == 'transport':
+                raise SystemExit('private metadata read interrupted')
+            print(json.dumps({'request_id': request_id, 'accepted': failure != 'refused', 'durable': False,
+                'lease': value['lease'], 'computer': value['computer'], 'generation': value['generation'],
+                'part': value['part'], 'native': failure != 'native', 'online': failure != 'offline',
+                'complete': False, 'value': None if failure == 'null' else native_hello()}))
+            return
         metadata = native_hello() if value['part'] == 'hello' else {'host': 'metadata-caption', 'ok': True,
                     'machine_id': '00000000-0000-4000-8000-000000000099', 'peers': [],
                     'metrics': {'platform': 'linux'}}

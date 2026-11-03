@@ -20,6 +20,58 @@ fn spec(n: usize) -> Subscription {
         ..Default::default()
     }
 }
+
+#[test]
+fn same_generation_readiness_preserves_pending_metadata_and_bounds_retries() {
+    let mut hub = Hub {
+        lease: Some(lease()),
+        ..Hub::default()
+    };
+    hub.source_state("", 1, false).unwrap();
+    assert!(
+        hub.next().is_none(),
+        "offline sources must not poll metadata"
+    );
+    hub.source_state("", 1, true).unwrap();
+    let (
+        _,
+        Work::Source {
+            computer,
+            generation,
+            serial,
+            part,
+        },
+    ) = hub.next().unwrap()
+    else {
+        panic!("source read");
+    };
+    assert_eq!(part, "hello");
+    hub.retry_source(&computer, generation, serial, &part);
+    assert!(hub.next().is_none());
+    assert!(hub
+        .retry_at()
+        .is_some_and(|at| at > tokio::time::Instant::now()));
+    hub.source_state("", 1, false).unwrap();
+    assert!(
+        hub.retry_at().is_none(),
+        "offline retry timers must not spin"
+    );
+    hub.source_state("", 2, true).unwrap();
+    let (_, Work::Source { generation, .. }) = hub.next().unwrap() else {
+        panic!("fresh source read");
+    };
+    assert_eq!(generation, 2, "new source discards the old retry delay");
+}
+#[test]
+fn source_identity_reads_precede_potentially_slow_detail_follows() {
+    let mut hub = Hub { lease: Some(lease()), ..Hub::default() };
+    hub.follow("", spec(0)).unwrap();
+    hub.source("", 1).unwrap();
+    assert!(matches!(hub.next(), Some((_, Work::Source { part, .. })) if part == "hello"));
+    assert!(matches!(hub.next(), Some((_, Work::Source { part, .. })) if part == "meta"));
+    assert!(matches!(hub.next(), Some((_, Work::Follow { .. }))));
+}
+
 #[test]
 fn desired_and_retiring_routes_share_a_fixed_bound_and_eof_retires_every_old_id() {
     let mut hub = Hub {
@@ -167,4 +219,36 @@ fn recovery_at_capacity_retires_before_rearming_and_has_a_finite_budget() {
     assert!(!hub.routes[&key].halted && hub.routes[&key].pending);
     assert_eq!(hub.routes[&key].recoveries, 0);
     assert_ne!(hub.routes[&key].route.id, old_id);
+}
+
+#[test]
+fn pushed_hello_resumes_only_the_current_generations_halted_catalog() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({}));
+        let (service, _) = fixture.start(false);
+        crate::desktop_service::tests::eventually("replay transport refused", || service.snapshot().code == "replay_transport_unavailable").await;
+        let selected = lease();
+        {
+            let mut hub = service.shared.details.lock().unwrap();
+            hub.lease = Some(selected.clone());
+            hub.source("", 2).unwrap();
+        }
+        {
+            let mut dirty = service.shared.dirty.lock().unwrap();
+            dirty.sources.insert(String::new(), SourceVersion { generation: 2, ..SourceVersion::default() });
+            dirty.halted.insert(String::new());
+        }
+        let hello: Value = serde_json::from_str(include_str!("../../../../core/tests/fixtures/basic.ndjson").lines().next().unwrap()).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        for generation in [1, 2] {
+            frame(&service.shared, &json!({"t":"source","epoch":selected.epoch,
+                "value":{"lease":selected.lease,"computer":"","generation":generation,"frame":hello}}), &stop).await.unwrap();
+            let dirty = service.shared.dirty.lock().unwrap();
+            assert_eq!(dirty.halted.contains(""), generation == 1);
+            assert_eq!(dirty.pending.contains(""), generation == 2);
+        }
+        assert!(service.shared.details.lock().unwrap().local_identity_ready(2));
+        service.join().await.unwrap();
+    });
 }

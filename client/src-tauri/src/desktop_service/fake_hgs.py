@@ -531,6 +531,10 @@ elif args == ['desktop', 'frontend-request', '--json']:
 elif args == ['desktop', 'status', '--json']:
     print(json.dumps(status()))
 elif args == ['desktop', 'watch', '--json']:
+    cycle = counter('watch-cycle') if config.get('restart_watch') else 0
+    if cycle > 1:
+        (root / 'second-watch-held').touch()
+        wait(root / 'release-second-watch')
     initial = status()
     if config.get('details'):
         initial['details'] = {'abi': 'desktop-details-v1', 'epoch': epoch,
@@ -623,6 +627,8 @@ elif args == ['desktop', 'watch', '--json']:
     seq, seen = max(100, watch_seq), set()
     heartbeat = time.monotonic() + 1
     while not select.select([sys.stdin], [], [], .005 if config.get('details') else .1)[0]:
+        if cycle == 1 and (root / 'restart-watch').exists():
+            raise SystemExit(0)
         if config.get('details'):
             for path in sorted(root.glob('pending-*')):
                 if path.suffix == '.tmp' or path.name in seen:

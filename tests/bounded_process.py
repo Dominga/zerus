@@ -119,9 +119,9 @@ class Tree:
                     if not pid:
                         break
                 except ChildProcessError:
-                    break
-            if not children(os.getpid()):
-                return True
+                    # Only the kernel's no-children result proves cleanup.
+                    # /proc discovery can be empty because access was denied.
+                    return True
             time.sleep(.005)
         return False
 

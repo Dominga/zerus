@@ -425,7 +425,7 @@ wire_api="responses"
             time.sleep(.2)
         return value
 
-    def resumed(self):
+    def resumed(self, hook=None):
         """Relaunch the saved conversation as `hgs resume` leaves it: Codex defers
         SessionStart to the next turn, so the binding still expects the saved
         conversation. A localhost provider answers that turn and the native hooks
@@ -441,7 +441,7 @@ wire_api="responses"
         env = dict(HGS_SESSION=self.name, HGS_RUN_ID=self.run_id, HGS_STATE_DIR=str(self.state),
                    HGS_CONFIG_DIR=str(self.root / 'config'), PATH=self.env['PATH'])
         command = ('env ' + ' '.join(shlex.quote(k + '=' + v) for k, v in env.items()) + ' '
-                   + shlex.quote(str(test_input.HGS)) + ' __state hook')
+                   + (hook or shlex.quote(str(test_input.HGS)) + ' __state hook'))
         (self.native_home / 'hooks.json').write_text(json.dumps(dict(hooks={kind: [dict(hooks=[
             dict(type='command', command=command)])] for kind in ('SessionStart', 'SessionEnd', 'UserPromptSubmit', 'Stop')})))
         previous = self.record['pid']
@@ -524,6 +524,53 @@ wire_api="responses"
         self.wait_for(lambda: message in self.tmux('capture-pane', '-p', '-t', self.pane))
         self.tmux('send-keys', '-t', self.pane, 'Enter')
         self.assert_new_conversation(None)
+
+    def test_already_rejected_resumed_clear_recovers_from_a_real_hook_after_the_lost_start(self):
+        import sys
+        hook = self.root / 'skip-rejected-start.py'
+        rejected = self.root / 'rejected-start.json'
+        hook.write_text('''import json,pathlib,subprocess,sys
+data=sys.stdin.buffer.read(1024*1024+1)
+if len(data)>1024*1024:raise SystemExit(2)
+event=json.loads(data)
+if event.get('hook_event_name')=='SessionStart' and event.get('session_id')!=OLD:
+ pathlib.Path(REJECTED).write_text(json.dumps({'session_id':event['session_id']}))
+else:
+ result=subprocess.run([HGS,'__state','hook'],input=data,timeout=10)
+ raise SystemExit(result.returncode)
+'''.replace('OLD', repr(self.conversation_id)).replace('REJECTED', repr(str(rejected)))
+            .replace('HGS', repr(str(test_input.HGS))))
+        self.resumed(shlex.quote(sys.executable) + ' ' + shlex.quote(str(hook)))
+        import test_clear_context
+        self.record['clear_context_request'] = dict(request_id=str(uuid.uuid4()),
+                                                  conversation_id=self.conversation_id, at=time.time())
+        self.write_record()
+        self.tmux('send-keys', '-t', self.pane, '-l', '/clear')
+        self.wait_for(lambda: '/clear' in self.tmux('capture-pane', '-p', '-t', self.pane))
+        self.tmux('send-keys', '-t', self.pane, 'Enter')
+        self.settle(lambda: 'Previous fixture answer' not in self.tmux('capture-pane', '-p', '-t', self.pane),
+                    'The original fixture clear did not finish')
+        # Recreate the precise older binding after its rejected start. The
+        # native successor's real SessionStart is deliberately discarded, not
+        # replayed. A later real hook must prove and publish the current ID.
+        self.record = json.loads(self.record_path.read_text())
+        self.assertNotIn('session_clear', self.record)
+        self.record.update(error='agent resumed a different conversation', activity='unknown', phase='unknown',
+                           conversation_state='ended', last_event_at=time.time(),
+                           session_end=dict(run_id=self.run_id, conversation_id=self.conversation_id, at=time.time()))
+        self.write_record()
+        message = 'First fixture message after the rejected start'
+        self.tmux('send-keys', '-t', self.pane, '-l', message)
+        self.wait_for(lambda: message in self.tmux('capture-pane', '-p', '-t', self.pane))
+        self.tmux('send-keys', '-t', self.pane, 'Enter')
+        self.assert_new_conversation(None)
+        current = json.loads(self.record_path.read_text())
+        self.assertEqual(current['conversation_id'], json.loads(rejected.read_text())['session_id'])
+        self.assertEqual(current['pid'], self.record['pid'])
+        events = test_clear_context.ClearContext.inspect(self)['events']
+        self.assertEqual(sum(event['type'] == 'SessionCleared' for event in events), 1)
+        self.assertFalse(any(event['type'] == 'SessionStart' and event['conversation_id'] == current['conversation_id']
+                             for event in events))
 
     def assert_new_conversation(self, cleared_at):
         import test_clear_context

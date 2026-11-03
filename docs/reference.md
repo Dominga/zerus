@@ -3839,19 +3839,21 @@ No reverse connection is created by default. Explicit peer setup uses
 | `--open-mode MODE` | Linux auto/tab/window/clipboard; macOS terminal/clipboard; Windows auto/tab/window/console/clipboard |
 | `--selftest` | Headless hgs connectivity check |
 | `--sessions` | Open the workspace; on Windows also the default |
-| `--desktop-target JSON` | Zerus Next on Linux: open the exact `computer`, `run` and `conversation`; implies `--sessions`. Navigation data only, with no notification or writer authority |
+| `--desktop-target JSON` | Zerus Next on Linux and Windows: open the exact `computer`, `run` and `conversation`; implies `--sessions`. Navigation data only, with no notification or writer authority |
 | `--background` | Start in the tray only; the default on Linux and macOS. Not together with `--sessions` |
 
 A single-instance socket forwards repeated launches to the running GUI: one that
 would open the workspace opens it there.
-The Linux target value is bounded to 8192 bytes and accepts only those three
+The target value is bounded to 8192 bytes and accepts only those three
 fields. It follows the exact run and conversation through a session rename and
 refuses an archived or replaced session. The service's selected-child launcher
 requires the separate environment-input capability and passes the same target
 as `ZERUS_CLIENT_DESKTOP_TARGET` in that child only, keeping the identifiers out
-of its command line. An ephemeral Wayland activation token also travels only in
-that child's environment. The new GUI consumes both values before starting its
+of its command line. On Linux, an ephemeral Wayland activation token also travels
+only in that child's environment. The new GUI consumes both values before starting its
 workers; forwarding navigation to an already running GUI carries no token.
+On Windows the per-user activation pipe forwards the target as a `target` line
+and the forwarding start exits successfully.
 Conflicting argument/environment targets and target/background starts refuse.
 On Linux and macOS, concurrent launches take turns on it, and a launch such as
 `hgs-tray --sessions` leaves it to the `hgs-tray` systemd or launchd service

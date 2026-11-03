@@ -27,25 +27,63 @@ use windows_sys::Win32::{
     UI::WindowsAndMessaging::AllowSetForegroundWindow,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Activation {
     Show,
     Sessions,
+    /// Public UI navigation only; never carries a callback token or permission.
+    #[cfg(feature = "live")]
+    Navigation(zerus_client_core::desktop::activation::Target),
 }
 pub type Reply = Arc<dyn Fn(&OwnedHandle, &[u8]) -> Option<Vec<u8>> + Send + Sync>;
+/// Qt's commands and the delegation hello stay within one short line.
+const LINE: usize = 64;
+const TARGET_PREFIX: &[u8] = b"target ";
+/// A navigation line: the prefix, the bounded encoded target and LF.
+#[cfg(feature = "live")]
+const TARGET_LINE: usize =
+    TARGET_PREFIX.len() + zerus_client_core::desktop::activation::NAVIGATION_BYTES + 1;
+#[cfg(not(feature = "live"))]
+const TARGET_LINE: usize = LINE;
+/// Only a line that already announced a target may grow past [`LINE`].
+fn line_limit(bytes: &[u8]) -> usize {
+    if bytes.starts_with(TARGET_PREFIX) {
+        TARGET_LINE
+    } else {
+        LINE
+    }
+}
 impl Activation {
-    fn line(self) -> &'static [u8] {
+    fn line(&self) -> Vec<u8> {
         match self {
-            Self::Show => b"show\n",
-            Self::Sessions => b"sessions\n",
+            Self::Show => b"show\n".to_vec(),
+            Self::Sessions => b"sessions\n".to_vec(),
+            #[cfg(feature = "live")]
+            Self::Navigation(target) => {
+                match zerus_client_core::desktop::activation::encode_navigation(target) {
+                    Some(encoded) => format!("target {encoded}\n").into_bytes(),
+                    None => Vec::new(),
+                }
+            }
         }
     }
     fn parse(bytes: &[u8]) -> Option<Self> {
         match bytes.trim_ascii() {
             b"show" => Some(Self::Show),
             b"sessions" => Some(Self::Sessions),
+            #[cfg(feature = "live")]
+            line => std::str::from_utf8(line)
+                .ok()
+                .and_then(|line| line.strip_prefix("target "))
+                .and_then(zerus_client_core::desktop::activation::decode_navigation)
+                .map(Self::Navigation),
+            #[cfg(not(feature = "live"))]
             _ => None,
         }
+    }
+    /// A start that opens the window lets the owner take the foreground.
+    fn opens_window(&self) -> bool {
+        !matches!(self, Self::Show)
     }
 }
 
@@ -182,7 +220,11 @@ fn same_user_server(pipe: &OwnedHandle, sid: &str) -> io::Result<u32> {
     Ok(pid)
 }
 
-fn forward(name: &str, activation: Activation) -> bool {
+fn forward(name: &str, activation: &Activation) -> bool {
+    let bytes = activation.line();
+    if bytes.is_empty() {
+        return false;
+    }
     let Ok(sid) = own_sid() else { return false };
     let pipe = wide(&format!(r"\\.\pipe\{name}"));
     let end = Instant::now() + Duration::from_millis(200);
@@ -202,7 +244,7 @@ fn forward(name: &str, activation: Activation) -> bool {
             let Ok(pid) = same_user_server(&handle, &sid) else {
                 return false;
             };
-            if activation == Activation::Sessions {
+            if activation.opens_window() {
                 unsafe {
                     AllowSetForegroundWindow(pid);
                 }
@@ -219,18 +261,32 @@ fn forward(name: &str, activation: Activation) -> bool {
             {
                 return false;
             }
-            let bytes = activation.line();
-            let mut written = 0;
-            return unsafe {
-                WriteFile(
-                    handle.as_raw_handle(),
-                    bytes.as_ptr(),
-                    bytes.len() as u32,
-                    &mut written,
-                    std::ptr::null_mut(),
-                )
-            } != 0
-                && written == bytes.len() as u32;
+            // A nonblocking write may accept part of a long target line.
+            let end = Instant::now() + Duration::from_millis(200);
+            let mut sent = 0;
+            while sent < bytes.len() {
+                let mut written = 0;
+                if unsafe {
+                    WriteFile(
+                        handle.as_raw_handle(),
+                        bytes[sent..].as_ptr(),
+                        (bytes.len() - sent) as u32,
+                        &mut written,
+                        std::ptr::null_mut(),
+                    )
+                } == 0
+                {
+                    return false;
+                }
+                sent += written as usize;
+                if sent < bytes.len() {
+                    if Instant::now() >= end {
+                        return false;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            return true;
         }
         if Instant::now() >= end {
             return false;
@@ -272,15 +328,19 @@ fn listen(
             }
         }
         let end = Instant::now() + Duration::from_millis(200);
-        let mut bytes = Vec::with_capacity(64);
-        while Instant::now() < end && !stop.load(Ordering::Acquire) && bytes.len() < 64 {
-            let mut buffer = [0u8; 64];
+        let mut bytes = Vec::with_capacity(LINE);
+        while Instant::now() < end
+            && !stop.load(Ordering::Acquire)
+            && bytes.len() < line_limit(&bytes)
+        {
+            let mut buffer = [0u8; 4096];
+            let wanted = (line_limit(&bytes) - bytes.len()).min(buffer.len());
             let mut read = 0;
             let ok = unsafe {
                 ReadFile(
                     pipe.as_raw_handle(),
                     buffer.as_mut_ptr(),
-                    (64 - bytes.len()) as u32,
+                    wanted as u32,
                     &mut read,
                     std::ptr::null_mut(),
                 )
@@ -290,6 +350,8 @@ fn listen(
                 if let Some(lf) = bytes.iter().position(|b| *b == b'\n') {
                     if let Some(activation) = Activation::parse(&bytes[..=lf]) {
                         let _ = sender.try_send(activation);
+                    } else if bytes.starts_with(TARGET_PREFIX) {
+                        // A malformed target is neither navigation nor a hello.
                     } else if lf + 1 == bytes.len() && same_user(&pipe) {
                         if let Some(answer) =
                             reply.as_ref().and_then(|reply| reply(&pipe, &bytes[..lf]))
@@ -357,7 +419,7 @@ fn create_pipe(name: &str, security: &Security) -> io::Result<OwnedHandle> {
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT | PIPE_REJECT_REMOTE_CLIENTS,
             1,
             4096,
-            64,
+            TARGET_LINE as u32,
             200,
             &attrs,
         )
@@ -406,7 +468,7 @@ fn claim_inner(
     admitted: impl FnOnce(),
 ) -> Claim {
     let canonical = if let Some(pipe) = canonical {
-        match canonical_claim_observed(pipe, activation, || {}) {
+        match canonical_claim_observed(pipe, &activation, || {}) {
             Ok(CanonicalClaim::Owner(guard)) => Some(guard),
             Ok(CanonicalClaim::Forwarded) => return Claim::Forwarded,
             Ok(CanonicalClaim::Busy) => return Claim::Duplicate("canonical_owner_unresponsive"),
@@ -434,7 +496,7 @@ enum CanonicalClaim {
 }
 fn canonical_claim_observed(
     pipe: String,
-    activation: Activation,
+    activation: &Activation,
     mut busy: impl FnMut(),
 ) -> io::Result<CanonicalClaim> {
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -474,7 +536,7 @@ fn claim_guarded(
     admitted: impl FnOnce(),
 ) -> Claim {
     // Also recognizes an already-running Qt GUI using this activation protocol.
-    if forward(name, activation) {
+    if forward(name, &activation) {
         return Claim::Forwarded;
     }
     if let Err(e) = std::fs::create_dir_all(directory) {
@@ -490,7 +552,7 @@ fn claim_guarded(
     {
         Ok(lock) => lock,
         Err(e) if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) => {
-            return if forward(name, activation) {
+            return if forward(name, &activation) {
                 Claim::Forwarded
             } else {
                 Claim::Duplicate("profile_owner_unresponsive")
@@ -900,7 +962,7 @@ mod tests {
                 Instant::now() + Duration::from_secs(2)
             )
             .is_none());
-            assert!(forward(&name, Activation::Sessions));
+            assert!(forward(&name, &Activation::Sessions));
             assert_eq!(
                 claimed
                     .activations
@@ -1022,13 +1084,13 @@ mod tests {
         let pipe = create_pipe(&name, &Security::user_only().unwrap()).unwrap();
         // No listener exists yet: forward must have written AND closed its
         // handle before the first ConnectNamedPipe call can possibly happen.
-        assert!(forward(&name, Activation::Show));
+        assert!(forward(&name, &Activation::Show));
         let (sender, receiver) = mpsc::sync_channel(32);
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
         let thread = std::thread::spawn(move || listen(pipe, stopped, sender, None));
         let first = receiver.recv_timeout(Duration::from_secs(2));
-        let forwarded = forward(&name, Activation::Sessions);
+        let forwarded = forward(&name, &Activation::Sessions);
         let second = receiver.recv_timeout(Duration::from_secs(2));
         stop.store(true, Ordering::Release);
         thread.join().unwrap();
@@ -1051,6 +1113,115 @@ mod tests {
         );
         assert_eq!(Activation::parse(b"show\n"), Some(Activation::Show));
         assert_eq!(Activation::parse(b"quit\n"), None);
+        assert!(!Activation::Show.opens_window());
+        assert!(Activation::Sessions.opens_window());
+        assert_eq!(line_limit(b"sessions"), LINE);
+        assert_eq!(line_limit(b"target {"), TARGET_LINE);
+    }
+    #[cfg(feature = "live")]
+    #[test]
+    fn a_bounded_target_line_navigates_and_malformed_or_oversize_lines_do_not() {
+        use zerus_client_core::desktop::activation::Target;
+        // A nonblocking writer that never waits for the listener to read.
+        fn raw(name: &str, bytes: &[u8]) {
+            let pipe = wide(&format!(r"\\.\pipe\{name}"));
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let handle = loop {
+                let handle = unsafe {
+                    CreateFileW(
+                        pipe.as_ptr(),
+                        FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES | FILE_READ_ATTRIBUTES,
+                        0,
+                        std::ptr::null(),
+                        OPEN_EXISTING,
+                        SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if let Ok(handle) = owned(handle) {
+                    break handle;
+                }
+                assert!(Instant::now() < deadline, "pipe connect deadline");
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            let mode = PIPE_NOWAIT;
+            assert_ne!(
+                unsafe {
+                    SetNamedPipeHandleState(
+                        handle.as_raw_handle(),
+                        &mode,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                    )
+                },
+                0
+            );
+            let mut written = 0;
+            unsafe {
+                WriteFile(
+                    handle.as_raw_handle(),
+                    bytes.as_ptr(),
+                    bytes.len() as u32,
+                    &mut written,
+                    std::ptr::null_mut(),
+                );
+            }
+        }
+        let root = std::env::temp_dir().join(format!("zerus-target-test-{}", uuid::Uuid::new_v4()));
+        let name = format!("zerus-target-{}", uuid::Uuid::new_v4());
+        let Claim::Claimed(owner) = claim_at(&name, &root, Activation::Show) else {
+            panic!("first claim")
+        };
+        // The largest valid target is far longer than Qt's 64-byte commands.
+        let target = Target {
+            computer: "c".repeat(255),
+            run: "r".repeat(1024),
+            conversation: "v".repeat(1024),
+        };
+        let navigation = Activation::Navigation(target);
+        assert!(navigation.line().len() > LINE);
+        assert!(navigation.opens_window());
+        assert_eq!(
+            Activation::parse(&navigation.line()),
+            Some(navigation.clone())
+        );
+        assert!(matches!(
+            claim_at(&name, &root, navigation.clone()),
+            Claim::Forwarded
+        ));
+        assert_eq!(
+            owner
+                .activations
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap(),
+            navigation
+        );
+        raw(&name, b"target {}\n");
+        raw(
+            &name,
+            br#"target {"computer":"c","run":"r","conversation":"v","token":"t"}
+"#,
+        );
+        raw(
+            &name,
+            format!("target {}\n", "x".repeat(TARGET_LINE)).as_bytes(),
+        );
+        raw(&name, format!("{}\n", "x".repeat(LINE)).as_bytes());
+        // None of those activated, and the listener still serves the next start.
+        assert!(matches!(
+            claim_at(&name, &root, Activation::Sessions),
+            Claim::Forwarded
+        ));
+        assert_eq!(
+            owner
+                .activations
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap(),
+            Activation::Sessions
+        );
+        assert!(owner.activations.try_recv().is_err());
+        drop(owner);
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn login_shortcut_plus_run_registration_never_opens_a_background_window() {

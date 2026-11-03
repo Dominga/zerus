@@ -4,6 +4,7 @@ use std::{fs, path::Path, time::Instant};
 mod notification_receipts;
 mod restart;
 mod silent_watch;
+mod source_meta;
 
 pub(super) struct Fixture(pub(super) PathBuf, pub(super) Arc<AtomicBool>);
 

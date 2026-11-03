@@ -402,6 +402,8 @@ fn search(directory: &Path, mut bindings: Vec<Value>, query: &str, limit: usize)
 
 /// Reuse the legacy excerpt and archive navigation shape for typed index data.
 pub(super) fn indexed_hit(pattern: Regex, hit: zerus_content_search::Hit, record: &Value) -> Option<Value> {
+    let partial = hit.part.as_ref().is_some_and(|part|
+        part.offset > 0 || hit.message.text.len() < part.total);
     let message = hit.message;
     let role = match message.role {
         zerus_content_search::Role::User => "user",
@@ -419,7 +421,9 @@ pub(super) fn indexed_hit(pattern: Regex, hit: zerus_content_search::Hit, record
             "seq":message.seq,"at":message.at,"detail":message.text}),
         role,
     );
-    formatter.results.pop()
+    let mut result = formatter.results.pop()?;
+    if partial { result["content_truncated"] = json!(true); }
+    Some(result)
 }
 
 /// Same folder scopes as archive pages, with no writes or catalog enumeration.

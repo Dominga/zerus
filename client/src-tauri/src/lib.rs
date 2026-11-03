@@ -1490,6 +1490,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         settings::skins::user_skin_import,
         settings::skins::user_skins_open,
         settings::settings_get,
+        settings::settings_qt_preferences,
         settings::settings_set,
         desk::desk_take_pending,
         window_layer::window_layer_state,

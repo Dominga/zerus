@@ -127,6 +127,13 @@ pub async fn settings_get(store: State<'_, Store>) -> Result<Value, String> {
     Ok(json!({ "values": values, "revision": revision }))
 }
 
+/// What the one-time Qt preference import did, by key name only, for the
+/// Migration report. Read-only and local: nothing is published.
+#[tauri::command]
+pub async fn settings_qt_preferences(store: State<'_, Store>) -> Result<Value, String> {
+    Ok(store.0.preference_report())
+}
+
 /// Stores one setting and answers with the value now in effect (clamped as
 /// Qt clamps it; `null` for a removed override) and the store's revision after
 /// the change.

@@ -23,6 +23,10 @@ cargo test --locked host::token::private_creation || native_status=1
 cargo test --locked desktop::transport || native_status=1
 cargo test --locked desktop::background::tests || native_status=1
 cargo test --locked desktop::revoke || native_status=1
+# Original native impostor -> Unknown -> no notification launch capability.
+cargo test --locked --bin hgs \
+    desktop::notifications::activation::tests::native_refused_frontend_keeps_the_original_launch_unspent -- \
+    --ignored --exact --nocapture --test-threads=1 || native_status=1
 cargo test --locked desktop::windows_registration_policy::hold || native_status=1
 for selected in actions::read_barrier:: desktop_service::cache::tests desktop_service::frontend::tests::cache_ windows_shell::tests instance::tests platform::windows::startup::tests platform::windows::drawing::tests cli::tests lifecycle::tests window_layer::tests; do
     cargo test --locked --manifest-path client/src-tauri/Cargo.toml --lib "$selected" || native_status=1

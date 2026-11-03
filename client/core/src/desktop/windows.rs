@@ -329,7 +329,14 @@ fn acquire_until(
         .name("frontend-verification".into())
         .spawn(move || {
             let _admission = admission;
-            let _ = sender.send(verify(&pipe));
+            // Move captures into locals AFTER the admission. On unwind these
+            // drain first; the closure environment otherwise drops only after
+            // local guards, which could re-open admission with handles alive.
+            let retained_pipe = pipe;
+            let verifier = verify;
+            let result = verifier(&retained_pipe);
+            drop(retained_pipe);
+            let _ = sender.send(result);
         })
         .is_err()
     {

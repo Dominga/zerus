@@ -2,7 +2,7 @@ import { Show, Suspense, createSignal, lazy, onCleanup, onMount } from "solid-js
 import { invoke } from "@tauri-apps/api/core";
 import { listRows } from "./sessions/model";
 import { applyBatch, orderedRows } from "../store/catalog";
-import { multi, peek, selectedKey, setDetailTab, setMulti, setPeek, setSearch, setSelectedKey, setStateFilter, setStripMode, stateFilter, stripMode } from "../store/ui";
+import { multi, peek, selected, selectedKey, detailTab, page, setDetailTab, setMulti, setPeek, setSearch, setSelectedKey, setStateFilter, setStripMode, stateFilter, stripMode } from "../store/ui";
 import { handlerFor, route, sequenceState } from "../store/shortcuts";
 import { clearMulti } from "./sessions/organize";
 import { archive, archiveRows } from "../store/archive";
@@ -28,6 +28,7 @@ import { machinesPage } from "../store/machines";
 import { projectsPage } from "../store/projects";
 import { createProject, defaultProject, deleteProject, grouping, moveProject, moveToProject, renameProject, sortProject } from "../store/organization";
 import { activityCandidates, activitySource, type ScenarioResult } from "../perf/scenarios";
+import { observeSelection } from "../perf/selectionReadback";
 
 // The measurement panel (src/perf), loaded on demand: `?perf=1` in the window
 // URL (ZERUS_CLIENT_QUERY=perf=1) or Ctrl+Shift+D. It drives the live session
@@ -47,6 +48,7 @@ import { activityCandidates, activitySource, type ScenarioResult } from "../perf
 const Diagnostics = lazy(() => import("../perf/Diagnostics"));
 
 interface PerfConfig {
+  acceptance_selection?: boolean;
   mode?: string | null;
   out?: string | null;
   label?: string | null;
@@ -958,6 +960,13 @@ const onScenarioEnd = (id: string, index: number, total: number, ms: number, res
 export function PerfHost() {
   const urlMode = new URLSearchParams(location.search).get("perf");
   const [config, setConfig] = createSignal<PerfConfig>({ mode: urlMode });
+  observeSelection(() => config().acceptance_selection === true, () => {
+    const row = selected();
+    return {
+      page: page(), detail_tab: detailTab(),
+      session: row ? { computer: row.computer, name: row.name, run_id: row.runId ?? null, conversation_id: row.conversationId ?? null } : null,
+    };
+  }, (observation) => invoke("acceptance_selection", { observation }));
   const [open, setOpen] = createSignal(urlMode === "1" || urlMode === "auto");
   const keys = (e: KeyboardEvent) => {
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "d") {

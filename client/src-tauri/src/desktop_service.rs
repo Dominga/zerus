@@ -1760,8 +1760,8 @@ pub(crate) mod recovery_pause {
     type Hook = (PathBuf, mpsc::Sender<()>, oneshot::Receiver<()>);
     // One hook per service executable, so concurrent tests never clobber.
     static HOOKS: Mutex<Vec<Hook>> = Mutex::new(Vec::new());
-    // Armed only by the Unix ownership tests.
-    #[cfg_attr(not(unix), allow(dead_code))]
+    // Armed only by the Linux ownership tests.
+    #[cfg(target_os = "linux")]
     pub(crate) fn arm(hgs: PathBuf, entered: mpsc::Sender<()>, resume: oneshot::Receiver<()>) {
         HOOKS.lock().unwrap().push((hgs, entered, resume));
     }

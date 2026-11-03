@@ -141,6 +141,24 @@ pub enum Data {
     Detail(details::Delivery),
 }
 
+/// Display provenance for a per-session receipt, never writer authority.
+/// Cache projection/cursor retirement does not change the original source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NotificationScope {
+    computer: String,
+    configuration: String,
+    epoch: String,
+    incarnation: u64,
+    generation: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct NotificationReceipt {
+    pub(crate) scope: NotificationScope,
+    pub(crate) key: String,
+    pub(crate) provider: String,
+}
+
 /// Recheck identity at the view drain, not just when an RPC finishes. Frames
 /// already queued before a removal, reconnect or new generation cannot reappear.
 pub struct CatalogDelivery {
@@ -184,6 +202,23 @@ impl CatalogDelivery {
             || dirty.sources.get(&self.computer) != Some(&self.source)
         {
             return;
+        }
+        if let Some(configuration) = shared
+            .configuration
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+        {
+            pump.notification_scope(
+                &self.computer,
+                NotificationScope {
+                    computer: self.computer.clone(),
+                    configuration,
+                    epoch: self.epoch.clone(),
+                    incarnation: self.source.incarnation,
+                    generation: self.source.generation,
+                },
+            );
         }
         match self.value {
             CatalogValue::Row(change) => {
@@ -313,6 +348,89 @@ pub struct Service {
 }
 
 impl Service {
+    pub(crate) fn notification_receipt(
+        &self,
+        target: &zerus_client_core::actions::Target,
+    ) -> Option<NotificationReceipt> {
+        let scope = self.notification_scope(&target.computer)?;
+        self.shared.pump.notification_receipt(scope, target)
+    }
+
+    pub(crate) fn notification_scope(&self, computer: &str) -> Option<NotificationScope> {
+        if self.shared.stopped.load(Ordering::Acquire) {
+            return None;
+        }
+        let snapshot = self
+            .shared
+            .snapshot
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !snapshot.connected {
+            return None;
+        }
+        let dirty = self
+            .shared
+            .dirty
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let source = dirty.sources.get(computer).filter(|source| source.online)?;
+        Some(NotificationScope {
+            computer: computer.into(),
+            configuration: self
+                .shared
+                .configuration
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()?,
+            epoch: snapshot.epoch.clone()?,
+            incarnation: source.incarnation,
+            generation: source.generation,
+        })
+    }
+
+    pub(crate) fn apply_notification_preferences(
+        &self,
+        expected: &NotificationReceipt,
+        target: &zerus_client_core::actions::Target,
+        preferences: &Value,
+    ) {
+        let scope = &expected.scope;
+        if self.shared.stopped.load(Ordering::Acquire) || scope.computer != target.computer {
+            return;
+        }
+        // Hold the same scope admission as catalog delivery through Pump publish.
+        let snapshot = self
+            .shared
+            .snapshot
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let dirty = self
+            .shared
+            .dirty
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !snapshot.connected
+            || snapshot.epoch.as_ref() != Some(&scope.epoch)
+            || self
+                .shared
+                .configuration
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+                != Some(&scope.configuration)
+            || !dirty.sources.get(&target.computer).is_some_and(|source| {
+                source.online
+                    && source.incarnation == scope.incarnation
+                    && source.generation == scope.generation
+            })
+        {
+            return;
+        }
+        self.shared
+            .pump
+            .apply_notification_preferences(expected, target, preferences);
+    }
+
     #[cfg(all(test, unix))]
     pub fn start(
         hgs: PathBuf,

@@ -14,6 +14,9 @@ use std::sync::Arc;
 use serde_json::Value;
 use tauri::State;
 
+#[cfg(feature = "live")]
+pub(crate) type NotificationProjection = Box<dyn FnOnce(&Value) + Send>;
+
 #[derive(Default)]
 pub struct AppState {
     #[cfg(feature = "live")]
@@ -129,15 +132,13 @@ impl AppState {
         let _ = self.live.creations.set(host);
     }
 
-    /// Applies the preferences the host confirmed for a Mute or Unmute to the
-    /// session's row at once, for the window and the menu bar alike
-    /// (`FleetState::applyNotificationPreferences`). A replay has no hosts.
-    pub fn apply_notifications(
+    /// Captures the selected source before Mute/Unmute I/O. Only its checked
+    /// receipt can update the window and menu bar (`FleetState::applyNotificationPreferences`).
+    pub(crate) fn notification_projection(
         &self,
-        target: &zerus_client_core::actions::Target,
-        preferences: &Value,
-    ) {
-        self.live.apply_notifications(target, preferences);
+        target: zerus_client_core::actions::Target,
+    ) -> NotificationProjection {
+        self.live.notification_projection(target)
     }
 
     /// Applies the resumed run to the replay after the fake accepted Resume.
@@ -239,6 +240,38 @@ mod live {
         }
     }
     impl Live {
+        #[cfg(all(test, unix))]
+        pub(crate) fn test_service(
+            service: Arc<crate::desktop_service::Service>,
+            pump: Pump,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                pump,
+                source: Mutex::new(Some(Source::Service(service))),
+                ..Self::default()
+            })
+        }
+
+        pub(crate) fn notification_projection(
+            self: &Arc<Self>,
+            target: zerus_client_core::actions::Target,
+        ) -> super::NotificationProjection {
+            let (native, scope) = match self
+                .source
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+            {
+                Some(Source::Fleet(_)) => (true, None),
+                Some(Source::Service(service)) => (false, service.notification_receipt(&target)),
+                _ => (false, None),
+            };
+            let live = self.clone();
+            Box::new(move |preferences| {
+                live.apply_notifications(&target, preferences, native, scope.as_ref())
+            })
+        }
+
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         pub(super) fn register_service_activation(
             &self,
@@ -654,15 +687,25 @@ mod live {
             &self,
             target: &zerus_client_core::actions::Target,
             preferences: &serde_json::Value,
+            native: bool,
+            scope: Option<&crate::desktop_service::NotificationReceipt>,
         ) {
             let Ok(_admission) = self.admit() else { return };
-            if let Some(Source::Fleet(fleet)) = self
+            match self
                 .source
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .as_ref()
             {
-                fleet.apply_notifications(target, preferences.clone());
+                Some(Source::Fleet(fleet)) if native => {
+                    fleet.apply_notifications(target, preferences.clone());
+                }
+                Some(Source::Service(service)) => {
+                    if let Some(scope) = scope {
+                        service.apply_notification_preferences(scope, target, preferences);
+                    }
+                }
+                _ => {}
             }
         }
 

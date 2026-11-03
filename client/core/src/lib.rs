@@ -44,6 +44,7 @@ pub mod menubar;
 pub mod migration;
 pub mod mobile;
 pub mod native_notice;
+pub mod notification_preferences;
 pub mod operation_recovery;
 pub mod organization;
 pub mod paths;

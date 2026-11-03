@@ -1,6 +1,7 @@
 use super::*;
 use std::{fs, path::Path, time::Instant};
 
+mod notification_receipts;
 mod restart;
 mod silent_watch;
 

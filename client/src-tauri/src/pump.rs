@@ -6,7 +6,8 @@
 //! row's project and the headers (zerus-5wmh.31). A [`Tap`] sees every change
 //! as it arrives (the menu bar's desk).
 
-use std::collections::{BTreeMap, HashMap};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
@@ -180,13 +181,99 @@ impl Pump {
     /// Queues one change and wakes a parked `take`.
     pub fn push(&self, change: Change) {
         let mut inner = self.lock();
-        if let Some(tap) = &inner.tap {
-            tap(&change);
-        }
-        inner.mirror.observe(&change);
-        inner.grouping.observe(&change);
-        inner.coalescer.push(change);
+        inner.publish(change);
         self.wake(inner);
+    }
+
+    pub(crate) fn notification_scope(
+        &self,
+        computer: &str,
+        scope: crate::desktop_service::NotificationScope,
+    ) {
+        let mut inner = self.lock();
+        let rows = inner.mirror.computers.entry(computer.into()).or_default();
+        if rows.notification_scope.as_ref() != Some(&scope) {
+            rows.notification_rows.clear();
+            rows.notification_scope = Some(scope);
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn notification_index_len(&self, computer: &str) -> usize {
+        self.lock()
+            .mirror
+            .computers
+            .get(computer)
+            .map_or(0, |rows| {
+                rows.notification_rows
+                    .values()
+                    .flat_map(|conversations| conversations.values())
+                    .map(BTreeSet::len)
+                    .sum()
+            })
+    }
+
+    pub(crate) fn apply_notification_preferences(
+        &self,
+        receipt: &crate::desktop_service::NotificationReceipt,
+        target: &zerus_client_core::actions::Target,
+        preferences: &Value,
+    ) {
+        let mut inner = self.lock();
+        let Some(rows) = inner.mirror.computers.get_mut(&target.computer) else {
+            return;
+        };
+        if rows.status != Some(ComputerStatus::Live)
+            || rows.notification_scope.as_ref() != Some(&receipt.scope)
+        {
+            return;
+        }
+        let Some(row) = rows
+            .rows
+            .get(&receipt.key)
+            .filter(|row| row.notify.cmd == receipt.provider)
+        else {
+            return;
+        };
+        let mut row = row.clone();
+        if !zerus_client_core::notification_preferences::apply(&mut row, target, preferences) {
+            return;
+        }
+        let key = receipt.key.clone();
+        let change = Change::Upsert {
+            computer: ComputerId::from(target.computer.as_str()),
+            key,
+            row,
+        };
+        inner.publish(change);
+        self.wake(inner);
+    }
+
+    pub(crate) fn notification_receipt(
+        &self,
+        scope: crate::desktop_service::NotificationScope,
+        target: &zerus_client_core::actions::Target,
+    ) -> Option<crate::desktop_service::NotificationReceipt> {
+        let inner = self.lock();
+        let rows = inner.mirror.computers.get(&target.computer)?;
+        if rows.status != Some(ComputerStatus::Live)
+            || rows.notification_scope.as_ref() != Some(&scope)
+        {
+            return None;
+        }
+        let (key, row) = rows.rows.iter().find(|(_, row)| {
+            row.shared_notifications
+                && !row.notify.cmd.is_empty()
+                && row.state != "archived"
+                && row.name == target.name
+                && row.run_id.as_deref() == Some(&target.run_id)
+                && row.conversation_id.as_deref() == Some(&target.conversation_id)
+        })?;
+        Some(crate::desktop_service::NotificationReceipt {
+            scope,
+            key: key.clone(),
+            provider: row.notify.cmd.clone(),
+        })
     }
 
     /// Marks the pump dirty and wakes a parked `take`.
@@ -195,7 +282,40 @@ impl Pump {
         drop(inner);
         self.0 .1.notify_all();
     }
+}
 
+impl Inner {
+    /// Apply receipt retention before either the tray tap or the webview sees
+    /// an incoming row. The index names only current-scope preference rows in this mirror.
+    fn publish(&mut self, mut change: Change) {
+        match &mut change {
+            Change::Upsert { computer, row, .. } => {
+                if let Some(rows) = self.mirror.computers.get_mut(&computer.0) {
+                    rows.keep_notifications(row);
+                }
+            }
+            Change::Replace {
+                computer,
+                rows: incoming,
+            } => {
+                if let Some(rows) = self.mirror.computers.get_mut(&computer.0) {
+                    for (_, row) in incoming {
+                        rows.keep_notifications(row);
+                    }
+                }
+            }
+            _ => {}
+        }
+        if let Some(tap) = &self.tap {
+            tap(&change);
+        }
+        self.mirror.observe(&change);
+        self.grouping.observe(&change);
+        self.coalescer.push(change);
+    }
+}
+
+impl Pump {
     /// Wakes a parked `take` without a change: a hub's view changed.
     pub fn poke(&self) {
         self.lock().dirty = true;
@@ -833,6 +953,8 @@ struct Mirror {
     computers: BTreeMap<String, Rows>,
 }
 
+type NotificationRows = HashMap<String, HashMap<String, BTreeSet<(Reverse<i64>, String)>>>;
+
 #[derive(Default)]
 struct Rows {
     archive_generation: u64,
@@ -842,9 +964,49 @@ struct Rows {
     order: Vec<String>,
     rows: HashMap<String, ViewRow>,
     launches: HashMap<String, String>,
+    notification_scope: Option<crate::desktop_service::NotificationScope>,
+    /// Provider/conversation -> highest revision, then native key order.
+    /// At most one key per current mirror row; no row or payload copies.
+    notification_rows: NotificationRows,
 }
 
 impl Rows {
+    fn keep_notifications(&self, row: &mut ViewRow) {
+        let Some((_, key)) = self
+            .notification_rows
+            .get(&row.notify.cmd)
+            .and_then(|conversations| {
+                conversations.get(row.conversation_id.as_deref().unwrap_or(""))
+            })
+            .and_then(|keys| keys.first())
+        else {
+            return;
+        };
+        if let Some(previous) = self.rows.get(key) {
+            zerus_client_core::notification_preferences::keep(previous, row);
+        }
+    }
+
+    fn forget_notifications(&mut self, key: &str, row: &ViewRow) {
+        let Some(conversation) = row.conversation_id.as_deref() else {
+            return;
+        };
+        if let Some(conversations) = self.notification_rows.get_mut(&row.notify.cmd) {
+            if let Some(keys) = conversations.get_mut(conversation) {
+                keys.remove(&(
+                    Reverse(row.notification_revision.unwrap_or(-1)),
+                    key.to_owned(),
+                ));
+                if keys.is_empty() {
+                    conversations.remove(conversation);
+                }
+            }
+            if conversations.is_empty() {
+                self.notification_rows.remove(&row.notify.cmd);
+            }
+        }
+    }
+
     fn forget_launch(&mut self, key: &str, row: &ViewRow) {
         if let Some(launch) = &row.launch_id {
             if self
@@ -860,8 +1022,19 @@ impl Rows {
     fn upsert(&mut self, key: &str, row: &ViewRow) {
         if let Some(previous) = self.rows.insert(key.to_owned(), row.clone()) {
             self.forget_launch(key, &previous);
+            self.forget_notifications(key, &previous);
         } else {
             self.order.push(key.to_owned());
+        }
+        if self.notification_scope.is_some() && row.notify.preferences.is_some() {
+            if let Some(conversation) = row.conversation_id.as_deref().filter(|c| !c.is_empty()) {
+                self.notification_rows
+                    .entry(row.notify.cmd.clone())
+                    .or_default()
+                    .entry(conversation.into())
+                    .or_default()
+                    .insert((Reverse(row.notification_revision.unwrap_or(-1)), key.into()));
+            }
         }
         if row.state != "archived" {
             if let Some(launch) = row.launch_id.as_ref().filter(|launch| !launch.is_empty()) {
@@ -873,6 +1046,7 @@ impl Rows {
     fn remove(&mut self, key: &str) {
         if let Some(row) = self.rows.remove(key) {
             self.forget_launch(key, &row);
+            self.forget_notifications(key, &row);
             self.order.retain(|known| known != key);
         }
     }
@@ -896,6 +1070,7 @@ impl Mirror {
                 entry.order.clear();
                 entry.rows.clear();
                 entry.launches.clear();
+                entry.notification_rows.clear();
                 for (key, row) in rows {
                     entry.upsert(key, row);
                 }
@@ -904,6 +1079,8 @@ impl Mirror {
                 let entry = self.computers.entry(computer.0.clone()).or_default();
                 entry.status = Some(*status);
                 if *status == ComputerStatus::Ended {
+                    entry.notification_scope = None;
+                    entry.notification_rows.clear();
                     entry.archive_generation = entry.archive_generation.saturating_add(1);
                     entry.machine = None;
                 }

@@ -22,7 +22,7 @@ projection = 'a' * 32
 abi = 'desktop-catalog-changes-v1'
 args = sys.argv[1:]
 watch_seq, watch_status = 0, None
-value = json.loads(sys.stdin.readline()) if args[:2] in [['desktop', 'request'], ['desktop', 'frontend-request']] else {}
+value = json.loads(sys.stdin.readline()) if args[:2] in [['desktop', 'request'], ['desktop', 'frontend-request']] or args[:1] == ['notifications'] else {}
 
 
 def wait(path):
@@ -185,6 +185,9 @@ def hint(seq, revision, selected=projection, computer='', staging=False, online=
 
 
 def row(key):
+    if config.get('notification_fixture'):
+        key = (root / 'notification-key').read_text() if (root / 'notification-key').exists() else key
+        return {'key': key, 'row': json.loads((root / 'notification-row').read_text())}
     return {'key': key, 'row': {'name': 'codex/example/' + key, 'agent': 'codex', 'state': 'running', 'status': 'ready'}}
 
 
@@ -343,6 +346,15 @@ def desktop_request():
             return
         page = dict(common, projection=value['projection'], since_revision=value['since_revision'],
                     through_revision=value['since_revision'], revision=value['since_revision'], items=[])
+        if config.get('notification_fixture'):
+            revision = (root / 'notification-version').read_text() if (root / 'notification-version').exists() else '0'
+            page.update(through_revision=revision, revision=revision)
+            if int(revision) > int(value['since_revision']):
+                item = row('row')
+                page['items'] = [dict(op='upsert', key=item['key'], revision=revision, row=item['row'])]
+                if (root / 'notification-removed').exists():
+                    page['items'].append(dict(op='remove', key=(root / 'notification-removed').read_text(), revision=revision, row=None))
+                page['items'].sort(key=lambda item: item['key'])
         if config.get('peer_failure'):
             if value['computer'] == 'broken':
                 if not any((root / path).exists() for path in ['peer-recovered', 'peer-scope-recovered']):
@@ -444,6 +456,8 @@ def desktop_request():
 
 
 if args == ['--help']:
+    if config.get('notification_fixture'):
+        print('session-notifications-v1')
     print('Desktop cache maintenance ABI: desktop-cache-maintenance-v1')
     if config.get('audit_help_hold') and counter('audit-help-number') > 1:
         (root / 'audit-help-held').touch()
@@ -461,6 +475,18 @@ if args == ['--help']:
         print('Desktop maintenance ABI: desktop-maintenance-v1')
     if config.get('audit_abi', True):
         print('Desktop approval audit ABI: desktop-approval-audit-v1')
+elif args[:1] == ['notifications'] and config.get('notification_fixture'):
+    if config.get('notification_hold'):
+        (root / 'notification-held').touch()
+        wait(root / 'notification-release')
+    assert set(value) == {'run_id', 'conversation_id', 'muted', 'expected_revision'}
+    preferences = dict(conversation_id=value['conversation_id'], muted=value['muted'],
+                       revision=value['expected_revision'] + 1, suppressed=config['notification_suppressed'])
+    answer = dict(ok=True, applied=True, run_id=value['run_id'],
+                  conversation_id=value['conversation_id'], preferences=preferences)
+    if config.get('notification_bad_receipt'):
+        answer['run_id'] = 'another-run'
+    print(json.dumps(answer))
 elif args == ['desktop', 'frontend-request', '--json']:
     request = value['request']
     assert value['abi'] == 'desktop-ui-request-v1'

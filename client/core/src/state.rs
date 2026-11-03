@@ -422,9 +422,6 @@ impl CatalogState {
         target: &crate::actions::Target,
         preferences: &Value,
     ) -> Vec<Change> {
-        let Some(confirmed) = preferences.as_object() else {
-            return Vec::new();
-        };
         // Qt's matchingSession (`FleetState.cpp:187-195`) also compares the
         // archive and `created`; the action's target carries neither. A live
         // row has no archive, and one run ID names one run, which has one
@@ -437,32 +434,9 @@ impl CatalogState {
         let Some((key, row)) = found else {
             return Vec::new();
         };
-        let run = row.run_id.as_deref().unwrap_or("");
-        if !row.shared_notifications
-            || run.is_empty()
-            || run != target.run_id
-            || !view::preferences_valid(confirmed, &target.conversation_id)
-        {
+        if !crate::notification_preferences::apply(row, target, preferences) {
             return Vec::new();
         }
-        let incoming = view::preferences_revision(confirmed.get("revision")).unwrap_or(-1);
-        let current = row.notification_revision.unwrap_or(-1);
-        let applied = view::Preferences {
-            muted: confirmed.get("muted") == Some(&Value::Bool(true)),
-            suppressed: confirmed.get("suppressed").cloned().unwrap_or(Value::Null),
-        };
-        let same = row
-            .notify
-            .preferences
-            .as_ref()
-            .is_some_and(|kept| kept.same(&applied));
-        if incoming < current || (incoming == current && !same) {
-            return Vec::new();
-        }
-        row.muted = applied.muted;
-        row.notification_revision = Some(incoming);
-        row.notify.preferences = Some(applied);
-        row.notification_error = None;
         vec![Change::Upsert {
             computer: computer.clone(),
             key: key.clone(),
@@ -1022,23 +996,7 @@ impl<'a> Before<'a> {
         let Some(old) = found(&self.preferences, &row.notify.cmd, conversation(row)) else {
             return;
         };
-        if row.shared_notifications {
-            let previous = old.notification_revision.unwrap_or(-1);
-            let incoming = row.notification_revision.unwrap_or(-1);
-            let same = match (&row.notify.preferences, &old.notify.preferences) {
-                (Some(new), Some(old)) => new.same(old),
-                (new, old) => new == old,
-            };
-            if incoming > previous || (incoming == previous && same) {
-                return;
-            }
-            if incoming == previous {
-                row.notification_error = Some(NOTIFICATION_CONFLICT.to_owned());
-            }
-        }
-        row.notify.preferences.clone_from(&old.notify.preferences);
-        row.muted = old.muted;
-        row.notification_revision = old.notification_revision;
+        crate::notification_preferences::keep(old, row);
     }
 }
 

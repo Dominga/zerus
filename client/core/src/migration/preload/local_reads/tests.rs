@@ -192,3 +192,21 @@ fn snapshot_replacement_refuses_fresh_reporter_reads() {
     crate::fsx::write_private_durable(&path, &raw()).unwrap();
     assert!(matches!(original.bytes(), Err(SourceError::SourceChanged)));
 }
+
+#[test]
+fn view_ready_revision_keeps_the_original_capture_and_source_classification() {
+    let s = Scratch::new();
+    let capture = s.capture();
+    let id = match capture.prepare().unwrap() {
+        Prepared::Missing { capture_id } => capture_id,
+        _ => panic!("missing"),
+    };
+    capture.local_read_ready();
+    assert_eq!(capture.status().code, "local_read_source_not_applicable");
+    assert_eq!(capture.status().view_revision.as_deref(), Some("1"));
+    capture.prepare().unwrap();
+    capture.local_read_ready();
+    assert_eq!(capture.status().capture_id.as_deref(), Some(id.as_str()));
+    assert_eq!(capture.status().view_revision.as_deref(), Some("2"));
+    assert_eq!(capture.status().code, "local_read_source_not_applicable");
+}

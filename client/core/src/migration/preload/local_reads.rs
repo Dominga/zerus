@@ -70,6 +70,19 @@ impl Capture {
         if state.paused {
             return;
         }
+        let next = state
+            .view_revision
+            .as_ref()
+            .and_then(|n| n.parse::<u64>().ok())
+            .and_then(|n| n.checked_add(1));
+        let Some(next) = next else {
+            state.paused = true;
+            state.view_ready = Some(false);
+            state.code = self.kind.code(9);
+            return;
+        };
+        // This local view counter never changes the durable capture/import ID.
+        state.view_revision = Some(next.to_string());
         state.view_ready = Some(true);
         drop(state);
         let notify = self

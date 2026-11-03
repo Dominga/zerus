@@ -177,9 +177,18 @@ fn an_unsaved_dirty_write_is_visible_and_retry_keeps_the_original_owner_and_leaf
     assert!(!owner.flush_within(Duration::ZERO));
     assert!(shared.lock().dirty);
     assert_eq!(fs::read(f.path()).unwrap(), raw());
+    // A known model remains editable while FILE writes are paused, so an
+    // oversized/unsaved change can be corrected before the explicit Retry.
+    owner
+        .try_update(
+            Default::default(),
+            [(key(), Some("corrected".into()))].into(),
+        )
+        .unwrap();
+    assert_eq!(fs::read(f.path()).unwrap(), raw());
     capture.request_retry();
     assert!(owner.flush_within(Duration::from_secs(3)));
-    assert_eq!(owner.snapshot().replies[&key()], "latest");
+    assert_eq!(owner.snapshot().replies[&key()], "corrected");
     assert_eq!(
         fs::read(f.root.join("local-read-preload-v1/original.bin")).unwrap(),
         raw()

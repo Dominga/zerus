@@ -9,9 +9,10 @@ export function createDesktopService() {
   let localReadReady: (() => void) | undefined, announced: string | undefined;
   const notifyLocalReadReady = (next: DesktopService | undefined) => {
     const capture = next?.retained_source_import?.local_read_capture;
-    if (capture?.paused) { announced = undefined; return; }
-    if (capture?.view_ready === true && capture.capture_id && capture.capture_id !== announced && localReadReady) {
-      announced = capture.capture_id;
+    if (capture?.paused || capture?.view_ready !== true) { announced = undefined; return; }
+    const view = `${capture.capture_id}/${capture.view_revision ?? "0"}`;
+    if (capture.capture_id && view !== announced && localReadReady) {
+      announced = view;
       localReadReady();
     }
   };

@@ -640,6 +640,7 @@ struct AttentionShared {
 #[derive(Default)]
 struct AttentionState {
     source_paused: bool,
+    source_loaded: bool,
     /// None until the writer thread has read the file.
     marks: Option<AttentionMarks>,
     /// A change the file does not have yet.
@@ -744,7 +745,10 @@ impl Attention {
     ) -> Result<(), String> {
         let changed = {
             let mut state = self.shared.loaded();
-            if state.closed || state.source_paused || state.marks.is_none() {
+            if state.closed
+                || self.shared.capture.is_some() && !state.source_loaded
+                || state.marks.is_none()
+            {
                 return Err(
                     "Local read marks are paused. Review the migration report and retry.".into(),
                 );

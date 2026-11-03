@@ -292,6 +292,8 @@ map; a larger captured original is retained, never exported after capping it.
 Capture failure pauses local-mark mutations and all file writes, including
 flush/drop and thread-spawn fallback, while presentation reads still answer.
 Review shows `local_read_capture` independently; Retry wakes the same writer.
+A loaded model retains editable unsaved changes after a failed file write;
+Retry checks the same live file object before saving them.
 Later writes check the canonical managed directory and the same live leaf
 identity/hash; a changed leaf is never adopted. Publication of this separate
 historical group is still a follow-up. Capture alone is not a Staged receipt,

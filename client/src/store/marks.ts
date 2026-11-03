@@ -160,7 +160,8 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
   let marks = new Map<string, Mark>();
   let replies = new Map<string, string>();
   let pending = new Map<string, ReadMark>();
-  let loaded = false;
+  let loaded = false, localRevision = 0;
+  let lastLocalWrite: Promise<void> = Promise.resolve();
   /**
    * Changes made before the stored marks arrived, applied over them and sent
    * with the load: a mark as the fields it sets, so an early Mark needs
@@ -409,6 +410,7 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
 
   function save(c: Change) {
     if (!c.saved) return;
+    localRevision++;
     if (!loaded) {
       for (const [key, mark] of Object.entries(c.marks)) {
         const before = early.marks.get(key);
@@ -422,7 +424,7 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     // The Rust side writes one update's entries in key order; so does this copy.
     newestInKeyOrder(marks, Object.keys(c.marks));
     newestInKeyOrder(replies, Object.keys(c.replies));
-    port.updateAttentionMarks(c.marks, c.replies).catch((error) => console.warn("Zerus Next: saving attention marks failed", error));
+    lastLocalWrite = port.updateAttentionMarks(c.marks, c.replies).catch((error) => console.warn("Zerus Next: saving attention marks failed", error));
   }
 
   function commit(c: Change, fresh: ReadMark[] = []) {
@@ -500,6 +502,14 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     return { review: mark.review === true, acknowledged: typeof mark.acknowledged === "string" ? mark.acknowledged : "" };
   }
 
+  function storedMaps(stored: AttentionSnapshot | undefined): [Map<string, Mark>, Map<string, string>] {
+    return [
+      inWriteOrder(stored?.marks, stored?.order?.marks, (value) => value && typeof value === "object"
+        ? { review: (value as Mark).review === true, acknowledged: typeof (value as Mark).acknowledged === "string" ? (value as Mark).acknowledged : "" }
+        : undefined),
+      inWriteOrder(stored?.replies, stored?.order?.replies, (value) => (typeof value === "string" ? value : undefined)),
+    ];
+  }
   let loading: Promise<void> | undefined;
   function load(): Promise<void> {
     if (loading) return loading;
@@ -518,7 +528,18 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
         // The first request may have observed paused/loading. Finish its
         // flight, then read the real model; at most one reload is pending.
         if (loading) await loading;
-        await load();
+        await lastLocalWrite;
+        const before = localRevision;
+        let stored: AttentionSnapshot | undefined;
+        try { stored = await port.attentionMarks(); } catch { stored = undefined; }
+        if (!stored) return;
+        // A current user action wins over an older snapshot. Coalesce another
+        // read, without repeating that action or creating a write queue.
+        if (before !== localRevision) { reloadAgain = true; continue; }
+        [marks, replies] = storedMaps(stored);
+        const c = change(); cap(marks, c); cap(replies, c); c.all = true;
+        bump(); refresh(c);
+        // Deliberately no save, fallback move, migration or shared-read send.
       } while (reloadAgain);
     })();
     reloadFlight = work;
@@ -531,10 +552,7 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     let stored: AttentionSnapshot | undefined;
     try { stored = await port.attentionMarks(); } catch { stored = undefined; }
     const c = change();
-    const nextMarks = inWriteOrder(stored?.marks, stored?.order?.marks, (value) => value && typeof value === "object"
-      ? { review: (value as Mark).review === true, acknowledged: typeof (value as Mark).acknowledged === "string" ? (value as Mark).acknowledged : "" }
-      : undefined);
-    const nextReplies = inWriteOrder(stored?.replies, stored?.order?.replies, (value) => (typeof value === "string" ? value : undefined));
+    const [nextMarks, nextReplies] = storedMaps(stored);
     // As Rust's update: the value an entry holds already is no change and keeps its place.
     const delta = change();
     for (const [key, fields] of early.marks) {

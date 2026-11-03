@@ -40,6 +40,7 @@ impl AttentionShared {
                             return Err(SourceError::SourceUnreadable);
                         }
                         state.marks = Some(view);
+                        state.source_loaded = true;
                         state.version += 1;
                         live = Some(guard);
                     }

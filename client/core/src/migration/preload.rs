@@ -159,6 +159,8 @@ pub struct Status {
     pub capture_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub view_ready: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub view_revision: Option<String>,
 }
 impl Default for Status {
     fn default() -> Self {
@@ -167,6 +169,7 @@ impl Default for Status {
             paused: true,
             capture_id: None,
             view_ready: None,
+            view_revision: None,
         }
     }
 }
@@ -187,6 +190,7 @@ impl Capture {
             state: Mutex::new(Status {
                 code: kind.code(0),
                 view_ready: (kind == Kind::LocalReads).then_some(false),
+                view_revision: (kind == Kind::LocalReads).then(|| "0".into()),
                 ..Status::default()
             }),
             retry: AtomicBool::new(true),

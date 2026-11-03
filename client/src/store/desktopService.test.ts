@@ -17,6 +17,10 @@ describe("desktop service presentation", () => {
     service.apply(view("local_read_source_ready")); service.apply(view("local_read_source_ready")); expect(reload).toHaveBeenCalledTimes(1);
     service.apply(view("local_read_source_writer_unavailable", true)); expect(reload).toHaveBeenCalledTimes(1);
     service.apply(view("local_read_source_ready")); expect(reload).toHaveBeenCalledTimes(2);
+    const next = view("local_read_source_ready");
+    next.retained_source_import!.local_read_capture!.view_revision = "2";
+    service.apply(next); expect(reload).toHaveBeenCalledTimes(3); // intermediate reset may have been coalesced
+    service.apply(next); expect(reload).toHaveBeenCalledTimes(3);
   });
 
   it("shows local read capture failure independently without granting transfer or masking creation capture", () => {

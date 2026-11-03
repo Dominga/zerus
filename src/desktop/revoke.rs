@@ -472,6 +472,49 @@ pub fn payload(command: &Command) -> Result<Value> {
     Ok(serde_json::to_value(command)?)
 }
 
+/// Read-only reconciliation for the exact installer rollback. This never
+/// submits or resumes a revoke and never supplies a held exclusion.
+#[cfg(any(windows, test))]
+pub(super) fn rollback_receipt(location: &Location, id: &str) -> Result<Value> {
+    ensure!(canonical_id(id), Declined("invalid_request_id"));
+    let (db, _verification) = hold::database(location)?;
+    let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    ensure!(
+        (15..=super::store::SCHEMA).contains(&version),
+        Declined("unsupported_schema")
+    );
+    let configuration: String = db.query_row(
+        "SELECT substr(configuration,1,65) FROM service WHERE id=1",
+        [],
+        |r| r.get(0),
+    )?;
+    ensure!(
+        configuration == location.configuration,
+        Declined("configuration_changed")
+    );
+    let saved = record_db(&db, id)?.context(Declined("request_not_found"))?;
+    ensure!(
+        saved.writer_epoch.as_deref().is_none_or(canonical_id),
+        Declined("invalid_writer_epoch")
+    );
+    let command = Command {
+        op: "revoke".into(),
+        request_id: id.into(),
+        reason: Reason::Rollback,
+    };
+    ensure!(
+        saved.reason == "rollback" && saved.fingerprint == command.fingerprint(location),
+        Declined("request_conflict")
+    );
+    if saved.state == "prepared" {
+        ensure!(saved.result.is_none(), Declined("invalid_prepared_receipt"));
+        return Ok(
+            json!({"request_id":id,"configuration":location.configuration,"accepted":true,"durable":true,
+            "revoked":false,"checkpointed":false,"writer_epoch":saved.writer_epoch,"code":"revocation_pending"}),
+        );
+    }
+    receipt(location, &command, &saved)
+}
 /// CLI-only absent-service path. Existing state requires owner.lock; a running
 /// but unreachable actor cannot be bypassed. No listener, manager or worker starts.
 pub fn offline(location: &Location, command: &Command) -> Result<Value> {
@@ -531,6 +574,53 @@ mod tests {
     use super::*;
     use zerus_desktop_migration::{canonical, Handoff, Phase, HANDOFF_FILE};
 
+    #[test]
+    fn installer_lookup_only_reads_the_exact_original_rollback_reservation() {
+        let mut f = Fixture::new();
+        let command = f.command();
+        let epoch = f.epoch.clone();
+        assert!(execute_scoped(
+            &f.location,
+            &mut f.store,
+            &command,
+            None,
+            Some(&epoch),
+            |_| anyhow::bail!("original drain pending")
+        )
+        .is_err());
+        let original = record(&f.store, command.id()).unwrap().unwrap();
+        let pending = rollback_receipt(&f.location, command.id()).unwrap();
+        assert_eq!(pending["request_id"], command.id());
+        assert_eq!(pending["writer_epoch"], epoch);
+        assert_eq!(pending["durable"], true);
+        assert_eq!(pending["checkpointed"], false);
+        assert_eq!(
+            record(&f.store, command.id()).unwrap().unwrap().state,
+            original.state
+        );
+        assert!(rollback_receipt(&f.location, &uuid::Uuid::new_v4().to_string()).is_err());
+        let settled = execute_scoped(
+            &f.location,
+            &mut f.store,
+            &command,
+            None,
+            Some(&epoch),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(
+            rollback_receipt(&f.location, command.id()).unwrap(),
+            settled
+        );
+        f.store
+            .db
+            .execute(
+                "UPDATE desktop_commands SET reason='manual' WHERE request_id=?1",
+                [command.id()],
+            )
+            .unwrap();
+        assert!(rollback_receipt(&f.location, command.id()).is_err());
+    }
     #[test]
     fn even_an_interrupted_revoke_blocks_background_restart() {
         let mut f = Fixture::new();

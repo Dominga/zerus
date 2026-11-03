@@ -1,8 +1,8 @@
 """Explicit Windows native suite, with exact CI-built CLI and frontend fixture.
 
-No WebView, native agent, logon task or production service is started. The
-foreground service has private state and stays passive: authenticated disabling
-commits, while enabling approvals remains unavailable.
+No WebView or native agent is started. WindowsFrontend uses a private passive
+foreground service. WindowsTaskMode additionally exercises its own disposable
+hosted-runner logon task and private service configuration.
 """
 from contextlib import closing
 import json
@@ -14,6 +14,8 @@ import subprocess
 import sys
 import unittest
 import uuid
+import base64
+import tempfile
 import test_desktop as kernel
 
 
@@ -168,6 +170,178 @@ class WindowsFrontend(unittest.TestCase):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = previous
+
+
+@unittest.skipUnless(os.name == 'nt' and os.environ.get('GITHUB_ACTIONS') == 'true'
+                     and os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted',
+                     'Task-mode fixture requires a disposable hosted Windows runner')
+class WindowsTaskMode(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix='zerus-task-mode-')).resolve()
+        self.cli_image = self.root / 'portable' / 'hgs.exe'
+        self.frontend = self.cli_image.with_name('hgs-tray.exe')
+        self.cli_image.parent.mkdir()
+        shutil.copy2(kernel.HGS, self.cli_image)
+        shutil.copy2(Path(os.environ['HGS_WINDOWS_FRONTEND_FIXTURE']).resolve(strict=True), self.frontend)
+        self.config = self.root / 'config'
+        self.config.mkdir()
+        (self.config / 'config').write_text('HGS_SELF=windows-mode-fixture\nHGS_PEERS=\n', encoding='utf-8')
+        self.state = self.root / 'state'
+        self.control = self.root / 'control.json'
+        self.env = {k:v for k,v in os.environ.items() if not k.upper().startswith('HGS_')}
+        # Task Scheduler uses the real interactive user's canonical instance
+        # namespace. Only configuration, service state and images are private.
+        profile = os.environ['USERPROFILE']
+        self.env.update(HOME=profile, USERPROFILE=profile, HGS_CONFIG_DIR=str(self.config),
+                        HGS_STATE_DIR=str(self.state), HGS_EXECUTABLE=str(self.cli_image), HGS_PEERS='')
+        self.task = None
+        self.installed = False
+        self.latest = None
+
+    def cli(self, *args):
+        result = subprocess.run([str(self.cli_image), *args], env=self.env,
+                                capture_output=True, text=True, encoding='utf-8', timeout=20)
+        self.assertEqual(result.returncode, 0, (result.stderr + result.stdout)[-8192:])
+        self.assertLessEqual(len(result.stdout.encode('utf-8')), 65536)
+        return json.loads(result.stdout)
+
+    def frontend_call(self, control, prefix):
+        self.control.write_text(json.dumps(dict(control, cli=str(self.cli_image))), encoding='utf-8')
+        result = subprocess.run([str(self.frontend), '--exact',
+                                 'instance::tests::evidence::native_frontend_request_fixture', '--nocapture'],
+                                env=dict(self.env, HGS_FRONTEND_TEST_CONTROL=str(self.control)),
+                                capture_output=True, text=True, timeout=30,
+                                creationflags=subprocess.CREATE_NO_WINDOW)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr)[-8192:])
+        values = [json.loads(line.removeprefix(prefix)) for line in result.stdout.splitlines()
+                  if line.startswith(prefix)]
+        self.assertEqual(len(values), 1, result.stdout[-8192:])
+        return values[0]
+
+    def mode(self, desired):
+        result = self.frontend_call(dict(case='mode_switch', desired=desired), 'MODE_CALLER_RESULT ')
+        self.assertEqual(result['code'], 0, result)
+        return json.loads(result['stdout'])
+
+    def grant(self):
+        status = self.cli('desktop', 'status', '--json')
+        ownership = self.cli('desktop', 'ownership-status', '--json')
+        result = self.frontend_call(dict(case='ownership_grant', configuration=status['configuration'],
+                                        journal=ownership['journal'], revision=ownership['revision'],
+                                        request_id=str(uuid.uuid4())), 'FRONTEND_RESULT ')
+        self.assertTrue(result['accepted'], result)
+        self.assertTrue(result['durable'], result)
+        self.assertEqual(result['outcome']['state'], 'granted', result)
+
+    def powershell(self, script, data):
+        # Fixture-only native COM observation/cleanup. No task-name-wide Stop,
+        # schtasks /End, PID kill or executable-pattern cleanup is used.
+        request = self.root / ('sdk-' + str(uuid.uuid4()) + '.json')
+        request.write_text(json.dumps(data), encoding='utf-8')
+        escaped = str(request).replace("'", "''")
+        body = "$ErrorActionPreference='Stop';$x=Get-Content -Raw -LiteralPath '" + escaped + "'|ConvertFrom-Json;" + script
+        command = [str(Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'),
+                   '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
+                   base64.b64encode(body.encode('utf-16le')).decode('ascii')]
+        result = subprocess.run(command, env=self.env, capture_output=True, text=True, timeout=12)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertLessEqual(len(result.stdout), 8192)
+        return json.loads(result.stdout)
+
+    def observe(self):
+        return self.powershell(r'''
+$s=New-Object -ComObject Schedule.Service;$s.Connect();$t=$s.GetFolder('\').GetTask($x.task);
+$items=@();foreach($i in $t.GetInstances(0)) {
+ $p=$null;try {$p=[Diagnostics.Process]::GetProcessById($i.EnginePID).ProcessName} catch {}
+ $items+=@{guid=$i.InstanceGuid;engine_pid=$i.EnginePID;engine_image=$p;state=[int]$i.State}
+};@{instances=$items;state=[int]$t.State}|ConvertTo-Json -Compress -Depth 4
+''', dict(task=self.task))
+
+    def stop_exact_passive(self, expected, *, wrong_birth=False):
+        return self.powershell(r'''
+$s=New-Object -ComObject Schedule.Service;$s.Connect();$t=$s.GetFolder('\').GetTask($x.task);
+$d=$t.Definition;
+if($d.Actions.Count-ne 1 -or $d.Actions.Item(1).Path-cne $x.image -or $d.Principal.UserId-ne $x.sid) {throw 'fixture task definition changed'};
+$values=@($t.GetInstances(0));if($values.Count-ne 1) {throw 'fixture task instance count changed'};
+$i=$values[0];$i.Refresh();if($i.InstanceGuid-cne $x.guid -or $i.EnginePID-ne $x.pid) {throw 'fixture original instance changed'};
+$p=[Diagnostics.Process]::GetProcessById($i.EnginePID);$handle=$p.Handle;
+if($p.HasExited -or $p.StartTime.ToFileTimeUtc()-ne $x.birth -or $p.MainModule.FileName-cne $x.image) {
+ @{stopped=$false;reason='original_birth_or_image_changed'}|ConvertTo-Json -Compress;exit 0
+};
+$i.Refresh();if($i.InstanceGuid-cne $x.guid -or $i.EnginePID-ne $p.Id) {throw 'fixture instance changed before stop'};
+$i.Stop();if(-not $p.WaitForExit(5000)) {throw 'fixture original process exit unconfirmed'};
+if(@($t.GetInstances(0)).Count-ne 0) {throw 'fixture instance remains'};
+@{stopped=$true;original_pid=$p.Id;original_guid=$i.InstanceGuid}|ConvertTo-Json -Compress
+''', dict(task=self.task, image=str(self.cli_image), sid=self.sid, guid=expected['guid'],
+          pid=expected['pid'], birth=expected['birth'] + (1 if wrong_birth else 0)))
+
+    def test_explicit_mode_round_trip_uses_the_own_task_and_preserves_unrelated_processes(self):
+        # Never touch a pre-existing per-user registration on a reused image.
+        initial = self.cli('desktop', 'registration', 'status', '--json')
+        self.assertFalse(initial['registered'], 'Task-mode fixture requires an unused disposable runner')
+        self.task = initial['task_name']
+        self.sid = self.task.removeprefix('hgs-desktop-')
+        shell = subprocess.Popen([str(Path(os.environ['SystemRoot']) / 'System32/cmd.exe'),
+                                  '/D', '/Q', '/C', 'set /p ZERUS_MODE_FIXTURE_WAIT='],
+                                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 creationflags=subprocess.CREATE_NO_WINDOW)
+        clean = False
+        try:
+            installed = self.cli('desktop', 'registration', 'install', '--json')
+            self.installed = True
+            self.assertFalse(installed['started'])
+            self.assertFalse(self.cli('desktop', 'status', '--json')['running'])
+            refused = self.mode('background')
+            self.assertFalse(refused['ok'], refused)
+            self.assertFalse(self.cli('desktop', 'status', '--json')['running'])
+            passive = self.mode('passive')
+            self.assertTrue(passive['ok'], passive)
+            self.latest = passive['instance']
+            self.assertEqual(passive['selected_mode'], 'passive')
+            self.assertIsNone(shell.poll())
+            self.grant()
+            background = self.mode('background')
+            self.assertTrue(background['ok'], background)
+            self.assertEqual(background['running_mode'], 'background')
+            self.latest = background['instance']
+            # Ordinary install/refresh preserves selection and the SAME runtime.
+            before = self.cli('desktop', 'status', '--json')['lifecycle']['pid']
+            refresh = self.cli('desktop', 'registration', 'install', '--json')
+            self.assertFalse(refresh['changed'])
+            self.assertFalse(refresh['started'])
+            self.assertFalse(refresh['stopped'])
+            self.assertEqual(refresh['selected_mode'], 'background')
+            self.assertEqual(self.cli('desktop', 'status', '--json')['lifecycle']['pid'], before)
+            self.assertIsNone(shell.poll())
+            rollback = self.mode('passive')
+            self.assertTrue(rollback['ok'], rollback)
+            self.latest = rollback['instance']
+            self.assertEqual(self.cli('desktop', 'ownership-status', '--json')['state'], 'revoked')
+            status = self.cli('desktop', 'registration', 'status', '--json')
+            self.assertEqual(status['selected_mode'], 'passive')
+            self.assertEqual(status['running_mode'], 'passive')
+            self.assertIsNone(status['pending_transition'])
+            self.assertEqual(status['completed_request_id'], rollback['request_id'])
+            self.assertFalse(self.stop_exact_passive(self.latest, wrong_birth=True)['stopped'])
+            self.assertTrue(self.cli('desktop', 'status', '--json')['running'])
+            self.assertTrue(self.stop_exact_passive(self.latest)['stopped'])
+            self.assertFalse(self.cli('desktop', 'status', '--json')['running'])
+            self.assertFalse(self.cli('desktop', 'registration', 'remove', '--json')['registered'])
+            self.installed = False
+            self.assertIsNone(shell.poll())
+            clean = True
+        finally:
+            shell.stdin.write(b'done\n'); shell.stdin.close()
+            shell.wait(timeout=5)
+            if clean:
+                shutil.rmtree(self.root)
+            else:
+                # An uncertain original instance is never killed or adopted.
+                # Preserve its exact paths; disposable VM teardown is the final
+                # boundary. The failed test remains failed/unqualified.
+                if self.installed:
+                    print('MODE_TASK_OBSERVATION ' + json.dumps(self.observe()), file=sys.stderr)
+                print('MODE_TASK_PRIVATE_ROOT_RETAINED ' + str(self.root), file=sys.stderr)
 
 
 if __name__ == '__main__':

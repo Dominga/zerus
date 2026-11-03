@@ -510,17 +510,41 @@ mod tests {
             assert!(bytes.len() <= 4096);
             let control: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             let mode = control["case"].as_str().unwrap().to_owned();
-            if mode == "mode_check" {
+            if matches!(mode.as_str(), "mode_check" | "mode_switch" | "mode_cancel") {
                 report_chain(std::process::id());
-                let invocation = zerus_client_core::Invocation {
-                    args: vec![
+                let mut args = vec![
+                    "desktop".into(),
+                    "registration".into(),
+                    "mode-check".into(),
+                    "--json".into(),
+                ];
+                if mode == "mode_switch" {
+                    let desired = control["desired"].as_str().unwrap();
+                    assert!(matches!(desired, "background" | "passive"));
+                    args = vec![
                         "desktop".into(),
                         "registration".into(),
-                        "mode-check".into(),
+                        "install".into(),
+                        "--mode".into(),
+                        desired.into(),
                         "--json".into(),
-                    ],
+                    ];
+                } else if mode == "mode_cancel" {
+                    let id = control["request_id"].as_str().unwrap();
+                    assert!(uuid::Uuid::parse_str(id).is_ok());
+                    args = vec![
+                        "desktop".into(),
+                        "registration".into(),
+                        "cancel-rollback".into(),
+                        "--json".into(),
+                        "--request-id".into(),
+                        id.into(),
+                    ];
+                }
+                let invocation = zerus_client_core::Invocation {
+                    args,
                     stdin: None,
-                    timeout: Duration::from_secs(8),
+                    timeout: Duration::from_secs(if mode == "mode_check" { 8 } else { 20 }),
                     request_id: None,
                 };
                 let environment: Vec<_> = std::env::vars()
@@ -590,9 +614,24 @@ mod tests {
             } else {
                 configuration.into()
             }));
-            let request = Request::AutomaticApprovals {
-                request_id: control["request_id"].as_str().unwrap().into(),
-                enabled: mode == "enable",
+            let request = if matches!(mode.as_str(), "ownership_grant" | "ownership_rearm") {
+                use zerus_client_core::desktop::ownership::{Action, Mode};
+                assert!(responder.configure_ownership_mode_once(Mode::Service));
+                Request::DesktopOwnership {
+                    request_id: control["request_id"].as_str().unwrap().into(),
+                    action: if mode == "ownership_grant" {
+                        Action::Grant
+                    } else {
+                        Action::Rearm
+                    },
+                    journal: Some(control["journal"].as_str().unwrap().into()),
+                    revision: control["revision"].as_u64().unwrap(),
+                }
+            } else {
+                Request::AutomaticApprovals {
+                    request_id: control["request_id"].as_str().unwrap().into(),
+                    enabled: mode == "enable",
+                }
             };
             let registration = responder
                 .prepare_ui_request(uuid::Uuid::new_v4().to_string(), request)

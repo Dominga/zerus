@@ -4,6 +4,8 @@ use serde_json::{json, Value};
 
 pub(super) const CAP: usize = 64 * 1024;
 
+pub(super) mod mode;
+
 /// Read only the original length-delimited request; never wait for pipe EOF.
 /// The caller's original process runner owns the deadline and physical wait.
 pub(super) fn read_frame(reader: &mut impl std::io::Read, length: usize) -> Result<Value> {
@@ -173,6 +175,8 @@ impl Plan {
                 idle: false,
                 network: false,
                 wake: false,
+                demand_start: true,
+                hard_terminate: true,
             },
         }
     }
@@ -210,6 +214,8 @@ pub(super) struct Settings {
     pub idle: bool,
     pub network: bool,
     pub wake: bool,
+    pub demand_start: bool,
+    pub hard_terminate: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Shape {
@@ -239,7 +245,7 @@ pub(super) struct Task {
     pub state: i32,
 }
 impl Task {
-    fn validate(&self, wanted: &Shape, sid: &str) -> Result<()> {
+    pub(super) fn validate(&self, wanted: &Shape, sid: &str) -> Result<()> {
         ensure!(
             self.shape == *wanted && self.enabled && (0..=4).contains(&self.state),
             "Existing task differs from this managed configuration; it was kept."
@@ -316,10 +322,51 @@ pub(super) fn perform(
     )
 }
 
+/// Ordinary refresh never selects a mode. Recognize both maintained shapes
+/// from the ACTUAL owned task and preserve its already selected variant.
+pub(super) fn perform_preserving_mode(
+    plan: &Plan,
+    wanted: &Shape,
+    scheduler: &mut impl Scheduler,
+) -> Result<Value> {
+    let mut plan = plan.clone();
+    let operation = plan.operation.clone();
+    let mut wanted = wanted.clone();
+    let mut background = false;
+    if let Some(current) = scheduler.read(&plan.name)? {
+        if current.validate(&wanted, &plan.sid).is_err() {
+            let mut candidate = wanted.clone();
+            candidate.action.arguments.push_str(" --background");
+            current.validate(&candidate, &plan.sid)?;
+            wanted = candidate;
+            background = true;
+            // If this task disappears during refresh, do NOT create it from
+            // the caller's passive XML or manufacture a new background choice.
+            if plan.operation == "install" {
+                plan.operation = "check".into();
+            }
+        }
+    }
+    let mut value = perform(&plan, &wanted, scheduler)?;
+    if background && operation != "remove" {
+        ensure!(
+            value["registered"] == true,
+            "Selected background task changed during refresh."
+        );
+    }
+    value["operation"] = operation.into();
+    value["selected_mode"] = if value["registered"] != true {
+        Value::Null
+    } else {
+        if background { "background" } else { "passive" }.into()
+    };
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn plan(op: &str) -> Plan {
+    pub(super) fn plan(op: &str) -> Plan {
         Plan::parse(&json!({"schema":1,"operation":op,"plan":{"schema":1,"operation":"preview","label":"hgs-desktop","configuration":"a".repeat(64),"user_sid":"S-1-5-21-1001","task_name":"hgs-desktop-S-1-5-21-1001","definition":"synthetic definition","argv":["C:/Example/hgs.exe","desktop","serve","--config-dir","C:/Example/config","--state-dir","C:/Example/state"],"session":{"kind":"interactive_user","allow_session_zero":false}}}), "S-1-5-21-1001").unwrap()
     }
     fn task(shape: Shape) -> Task {
@@ -374,6 +421,51 @@ mod tests {
         }
         assert_eq!(read_frame(&mut b"{}".as_slice(), 2).unwrap(), json!({}));
         assert_eq!(plan("status").definition, "synthetic definition");
+    }
+    #[test]
+    fn ordinary_refresh_preserves_the_actual_background_shape_without_selecting_or_starting_it() {
+        let plan = plan("install");
+        let passive = plan.shape("arguments".into());
+        let mut background = passive.clone();
+        background.action.arguments.push_str(" --background");
+        let mut fake = Fake {
+            task: Some(task(background)),
+            wanted: passive.clone(),
+            writes: Vec::new(),
+            fail_after_create: false,
+        };
+        let reply = perform_preserving_mode(&plan, &passive, &mut fake).unwrap();
+        assert_eq!(reply["operation"], "install");
+        assert_eq!(reply["selected_mode"], "background");
+        assert_eq!(reply["changed"], false);
+        assert!(fake.writes.is_empty());
+        fake.task = None;
+        assert_eq!(
+            perform_preserving_mode(&plan, &passive, &mut fake).unwrap()["selected_mode"],
+            "passive"
+        );
+        assert_eq!(fake.writes, ["create"]);
+    }
+    #[test]
+    fn a_disappearing_background_selection_is_not_recreated_by_an_ordinary_refresh() {
+        struct Disappears(Option<Task>);
+        impl Scheduler for Disappears {
+            fn read(&mut self, _: &str) -> Result<Option<Task>> {
+                Ok(self.0.take())
+            }
+            fn create_only(&mut self, _: &Plan) -> Result<()> {
+                panic!("refresh must not recreate a lost background selection")
+            }
+            fn delete(&mut self, _: &str) -> Result<()> {
+                panic!("refresh must not delete a task")
+            }
+        }
+        let plan = plan("install");
+        let wanted = plan.shape("arguments".into());
+        let mut background = wanted.clone();
+        background.action.arguments.push_str(" --background");
+        let mut scheduler = Disappears(Some(task(background)));
+        assert!(perform_preserving_mode(&plan, &wanted, &mut scheduler).is_err());
     }
     #[test]
     fn malformed_plans_refuse_before_the_scheduler_is_opened() {

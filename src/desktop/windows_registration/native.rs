@@ -58,6 +58,10 @@ macro_rules! boolean {
     };
 }
 
+mod hold_child;
+mod instances;
+pub(super) mod mode;
+
 struct Apartment;
 impl Apartment {
     fn new() -> Result<Self> {
@@ -321,6 +325,8 @@ fn shape(definition: &ITaskDefinition) -> Result<Shape> {
             idle: boolean!(settings, RunOnlyIfIdle),
             network: boolean!(settings, RunOnlyIfNetworkAvailable),
             wake: boolean!(settings, WakeToRun),
+            demand_start: boolean!(settings, AllowDemandStart),
+            hard_terminate: boolean!(settings, AllowHardTerminate),
         },
     })
 }
@@ -429,7 +435,7 @@ fn operation(args: &[String], trace: &mut Trace) -> Result<Value> {
     );
     let folder = unsafe { service.GetFolder(&BSTR::from("\\")) }?;
     trace.phase("folder");
-    let reply = policy::perform(&plan, &wanted, &mut Native { folder })?;
+    let reply = policy::perform_preserving_mode(&plan, &wanted, &mut Native { folder })?;
     trace.phase("done");
     Ok(reply)
 }

@@ -67,7 +67,7 @@ use std::{
 use store::{Location, Store};
 use transport::{Listener, Stream, TIMEOUT};
 
-const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] [--background] | status [--json] | startup --json | owner-status --json | ownership-status --json | ownership-result --json | watch --json | feed --json | request --json | catalog-relay --json | registration --json | registration install|remove|status --json (Windows) | notification-registration install|status --json | notification-registration remove --json --request-id UUID (Windows) | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
+const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] [--background] | status [--json] | startup --json | owner-status --json | ownership-status --json | ownership-result --json | watch --json | feed --json | request --json | catalog-relay --json | registration --json [--background] | registration install|remove|status --json (Windows) | registration install --mode background|passive --json (Windows) | registration cancel-rollback --json --request-id UUID (Windows) | notification-registration install|status --json | notification-registration remove --json --request-id UUID (Windows) | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
 const HEARTBEAT: Duration = Duration::from_secs(10);
 pub const STARTUP_REFUSED: i32 = 78;
 
@@ -193,8 +193,8 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
             }
             ["registration", "--json", "--background"] => {
                 ensure!(
-                    cfg!(any(target_os = "linux", target_os = "macos")),
-                    "background registration switching is currently supported on Linux and macOS"
+                    cfg!(any(target_os = "linux", target_os = "macos", windows)),
+                    "background registration is supported on Linux, macOS and Windows"
                 );
                 println!("{}", registration::preview_mode(config, &location, true)?);
                 Ok(())
@@ -229,6 +229,38 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                     let _ = operation;
                     anyhow::bail!(
                         "desktop registration install/remove/status is available only on Windows; use the maintained platform installer"
+                    )
+                }
+            }
+            ["registration", "install", "--mode", mode, "--json"] => {
+                #[cfg(windows)]
+                {
+                    println!(
+                        "{}",
+                        windows_registration::mode_command(config, &location, mode)?
+                    );
+                    Ok(())
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = mode;
+                    anyhow::bail!("Use the maintained platform installer to select desktop mode.")
+                }
+            }
+            ["registration", "cancel-rollback", "--json", "--request-id", id] => {
+                #[cfg(windows)]
+                {
+                    println!(
+                        "{}",
+                        windows_registration::cancel_rollback(config, &location, id)?
+                    );
+                    Ok(())
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = id;
+                    anyhow::bail!(
+                        "Use the maintained platform installer to cancel rollback metadata."
                     )
                 }
             }

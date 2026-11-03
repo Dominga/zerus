@@ -32,7 +32,8 @@ fn main() {
     {
         std::process::exit(code);
     }
-    // Fixed native implementation worker: bounded frame, no config/owner load.
+    // Native implementation workers validate a fixed bounded frame before
+    // selecting configuration or any ownership/manager operation.
     #[cfg(windows)]
     if let Some(code) =
         desktop::windows_registration_entry(&std::env::args().skip(1).collect::<Vec<_>>())

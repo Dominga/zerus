@@ -38,7 +38,7 @@ fn database_file(path: &std::path::Path) -> Result<std::fs::File> {
     Ok(file)
 }
 
-fn database(location: &Location) -> Result<(Connection, std::fs::File)> {
+pub(in crate::desktop) fn database(location: &Location) -> Result<(Connection, std::fs::File)> {
     location.check_existing()?;
     super::super::store::database_files(location)?;
     let path = location.root.join("state.sqlite3");

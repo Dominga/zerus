@@ -167,6 +167,29 @@ pub(super) fn service_granted(store: &Store, configuration: &str) -> Result<bool
     let current = status(store, configuration)?;
     Ok(current.state == State::Service && current.identity_current && !current.rearm_required)
 }
+
+/// Read the actual stored grant for an explicit registration transition. This
+/// is a prerequisite, never a runtime permit; startup still owns admission.
+#[cfg(windows)]
+pub(super) fn registration_granted(location: &Location) -> Result<bool> {
+    let (db, _verification) = super::revoke::hold::database(location)?;
+    let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    ensure!(
+        (15..=super::store::SCHEMA).contains(&version),
+        "unsupported ownership schema"
+    );
+    let configuration: String = db.query_row(
+        "SELECT substr(configuration,1,65) FROM service WHERE id=1",
+        [],
+        |r| r.get(0),
+    )?;
+    ensure!(
+        configuration == location.configuration,
+        "ownership configuration changed"
+    );
+    let status = row(&db, &location.configuration)?.status;
+    Ok(status.state == State::Service && status.identity_current && !status.rearm_required)
+}
 /// A retained grant read by the sole actor. It cannot be constructed from a
 /// status/receipt or caller JSON. Runtime preparations retain this exact owner
 /// incarnation through their original worker and recheck it before attachment.

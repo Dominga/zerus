@@ -249,7 +249,8 @@ The ordinary Next Start producer constructs its one actual delivery `TaskCall`
 before the durable checkpoint, then executes that same captured call. When the
 complete encoded checkpoint fits 1 MiB, `intent.retained_input` preserves the
 exact input string, including its original serialization. The size check counts
-the duplicated plan, JSON escaping and unknown record fields. If either input
+the duplicated plan, JSON escaping and unknown record fields, reserving 12 KiB
+for the worst-case 2048-character settlement error. If either input
 or checkpoint exceeds that bound, the producer omits this optional field and
 continues through the existing native Start path. Native 31 MiB plans and 32 MiB
 outboxes keep their limits; the 64 KiB frontend control frame stays separate.

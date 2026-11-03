@@ -146,15 +146,20 @@ fn call(action: &str, project: &str, task: &str, input: &Value, recover: bool) -
 // Keep the complete encoded checkpoint inside G1's original-record bound.
 // Missing input stays unavailable to that actor; never truncate it or reduce
 // the existing 31 MiB native plan / 32 MiB outbox limits to make it fit.
+const ERROR_CHARS: usize = 2048;
 fn retain_delivery_input(record: &mut Value, input: &str) {
     const LIMIT: usize = crate::operation_recovery::task_start::PRIVATE_BYTES;
+    // Settlement changes only phase and error. Every resulting phase is
+    // shorter than "delivering"; a control character needs at most six JSON
+    // bytes. Retention must fit the record that recovery actually reads.
+    const CHECKPOINT_LIMIT: usize = LIMIT - 6 * ERROR_CHARS;
     if input.len() > LIMIT {
         return;
     }
     struct Size(usize);
     impl std::io::Write for Size {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            if bytes.len() > LIMIT - self.0 {
+            if bytes.len() > CHECKPOINT_LIMIT - self.0 {
                 return Err(std::io::Error::other("task Start recovery size limit"));
             }
             self.0 += bytes.len();
@@ -331,7 +336,7 @@ pub fn start(
         "refused" => "released",
         _ => "review",
     });
-    settled["error"] = json!(error.chars().take(2048).collect::<String>());
+    settled["error"] = json!(error.chars().take(ERROR_CHARS).collect::<String>());
     checkpoint(store, project, task, &record, &settled)?;
     let mut view = open(store, project, task, None)?;
     view.outcome = Some(state);
@@ -624,6 +629,59 @@ mod tests {
         })
         .unwrap();
         assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn near_limit_uncertain_settlement_keeps_every_retained_record_inside_the_bound() {
+        const LIMIT: usize = crate::operation_recovery::task_start::PRIVATE_BYTES;
+        let s = Scratch::new();
+        let mut baseline = 0;
+        start_with_text(&s.0, "x", |_| {
+            let record = outbox::pending(&root(&s.0), "example", TASK)
+                .unwrap()
+                .unwrap();
+            assert!(record["intent"]["retained_input"].is_string());
+            baseline = serde_json::to_vec(&record).unwrap().len();
+            Ok(delivered(SECOND, "submitted"))
+        })
+        .unwrap();
+        // Each additional ASCII text byte occurs in plan and retained_input.
+        // Probe just inside the settlement-safe threshold and at the old
+        // delivering-only threshold; neither count relies on fixture captions.
+        let safe_text = 1 + (LIMIT - 6 * ERROR_CHARS - baseline) / 2;
+        let old_text = 1 + (LIMIT - baseline) / 2;
+        for (bytes, retained) in [(safe_text, true), (old_text, false)] {
+            let s = Scratch::new();
+            let text = "x".repeat(bytes);
+            let error = "\u{1}".repeat(ERROR_CHARS);
+            let view = start_with_text(&s.0, &text, |call| {
+                let record = outbox::pending(&root(&s.0), "example", TASK)
+                    .unwrap()
+                    .unwrap();
+                if record["intent"]["retained_input"].is_string() {
+                    assert!(
+                        record["intent"]["retained_input"].as_str() == Some(call.input.as_str())
+                    );
+                }
+                Err(error.clone())
+            })
+            .unwrap();
+            assert!(view.pending);
+            let record = outbox::pending(&root(&s.0), "example", TASK)
+                .unwrap()
+                .unwrap();
+            assert_eq!(record["phase"], "review");
+            assert!(record["error"].as_str() == Some(error.as_str()));
+            let bytes = std::fs::read(outbox::path(&root(&s.0), "example", TASK)).unwrap();
+            assert!(bytes.len() <= LIMIT);
+            assert_eq!(record["intent"]["retained_input"].is_string(), retained);
+            if retained {
+                assert!(
+                    bytes.len() >= LIMIT - 8,
+                    "exercise the actual size boundary"
+                );
+            }
+        }
     }
 
     #[test]

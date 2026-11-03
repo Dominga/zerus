@@ -2642,8 +2642,12 @@ The check and removal are separate: neither [Linux `unlinkat`](https://man7.org/
 nor [macOS `unlinkat`](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/vfs/vfs_syscalls.c)
 provides an expected-inode argument or directory removal through the open root
 itself. An empty directory swapped into the name between the check and removal
-can still be removed. No traversal enters that replacement; a nonempty
-replacement is refused by directory removal. Renaming the path into quarantine
+can still be removed. No userspace traversal enters that replacement. On Linux,
+directory removal refuses a nonempty replacement. On macOS, [XNU may clean up AppleDouble entries and retry directory removal](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/vfs/vfs_syscalls.c#L10670)
+after `ENOTEMPTY`: its cleanup
+can unlink ordinary files whose names start with `._`, such as `._payload`.
+A late macOS replacement therefore has no empty-only guarantee; its unreviewed
+`._*` files may be removed by the kernel. Renaming the path into quarantine
 would instead move an unreviewed folder and cannot guarantee race-free
 restoration, so it does not supply the missing inode-bound primitive. Only after those checks does deletion grant the
 owner write access to their own folders inside the reviewed tree, which is what

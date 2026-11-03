@@ -916,6 +916,9 @@ Terminal clear through the original supervised process, its held old rollout and
 the held successor's bounded native header, without inventing a clear request or
 replaying input. Process fixtures also require the complete owned reset before
 reopening the composer after that end; the end alone grants no input permission.
+They also refuse a nested interactive Codex even when the supervised process
+holds the successor, and an actually held successor outside the selected account's
+`sessions/` directory. The nearest native hook caller must be the supervised PID.
 A new session in a folder outside the fixture home,
 which Codex prints in full in its header, answers a first message from the localhost
 provider; idle polls must not treat that header above the history as a reset,

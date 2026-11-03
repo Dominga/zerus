@@ -339,6 +339,11 @@ pub(crate) struct Composer {
     pub(crate) uncertain: bool,
     pub(crate) error: bool,
     pub(crate) notice: String,
+    /// The waiting send of this draft was given up at its time limit, when
+    /// the session showed this (phase, activity). Its notice goes once the
+    /// session moves on to work or readiness, or the kept draft is sent or
+    /// cleared (zerus-le5s).
+    pub(crate) gave_up: Option<(String, String)>,
     pub(crate) storage_error: Option<String>,
     pub(crate) removed: Option<(usize, Attachment)>,
     pub(crate) attaching: bool,
@@ -385,6 +390,7 @@ impl Composer {
             uncertain: false,
             error: false,
             notice: String::new(),
+            gave_up: None,
             storage_error: None,
             removed: None,
             attaching: false,
@@ -426,6 +432,19 @@ impl Composer {
             form_state: self.form_state.clone(),
             sending: self.sending,
             uncertain: self.uncertain,
+        }
+    }
+
+    /// The kept draft of a given-up waiting send was cleared: its notice,
+    /// about that draft, goes.
+    fn draft_cleared(&mut self) {
+        if self.gave_up.is_some() && self.draft.text.is_empty() && self.draft.attachments.is_empty()
+        {
+            self.gave_up = None;
+            if !self.uncertain {
+                self.notice.clear();
+                self.error = false;
+            }
         }
     }
 
@@ -1075,6 +1094,7 @@ impl Composers {
         if !composer.error && !composer.uncertain {
             composer.notice.clear();
         }
+        composer.draft_cleared();
         self.save(composer);
         drop(hub);
         self.changed();
@@ -1185,6 +1205,7 @@ impl Composers {
         if let Some(removed) = composer.draft.remove(index) {
             composer.removed = Some((index, removed));
             composer.attachments_changed();
+            composer.draft_cleared();
             self.save(composer);
         }
         drop(hub);
@@ -1431,6 +1452,7 @@ impl Composers {
     fn after_observe(&self, accepted_details: bool) {
         self.reconcile();
         self.continue_open();
+        self.settle_gave_up();
         self.sync_questions();
         // Qt's pushInspected runs only for an accepted details read (3627,
         // 3653), never for an ended frame or an inspection failure.

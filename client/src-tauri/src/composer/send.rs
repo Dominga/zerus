@@ -1570,6 +1570,7 @@ impl Composers {
             composer.delivering = None;
             composer.sending = false;
             composer.waiting = None;
+            composer.gave_up = None;
             let kept = composer.kept.take();
             if preserve {
                 if let Some((error, notice)) = kept {
@@ -2588,10 +2589,63 @@ impl Composers {
     /// this one, so a late cancel never ends a newer continuation or the
     /// delivery that followed.
     fn cancel(&self, key: &str, start: bool, revision: u64, text: &str) {
-        if take_pending(&mut self.lock(), key, start, revision).is_none() {
+        let Some(pending) = take_pending(&mut self.lock(), key, start, revision) else {
             return;
-        }
+        };
         self.finish(key, Some(revision), false, text, false, false);
+        // A waiting send given up at its time limit says the session did not
+        // get there; the session can still get there later (zerus-le5s).
+        if [rules::NOT_READY, rules::NOT_COMPACTED].contains(&text) {
+            let seen = |key: &str| {
+                pending
+                    .evidence
+                    .as_deref()
+                    .and_then(|details| details.get(key))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned()
+            };
+            if let Some(composer) = self.lock().composers.get_mut(key) {
+                if composer.error && composer.notice == text {
+                    composer.gave_up = Some((seen("phase"), seen("activity")));
+                }
+            }
+        }
+    }
+
+    /// A given-up waiting send's notice goes once the open session shows it
+    /// moved on: from what it showed then to working, or to ready.
+    pub(crate) fn settle_gave_up(&self) {
+        let mut hub = self.lock();
+        let Some(key) = hub.open_key.clone() else {
+            return;
+        };
+        let Some(details) = Self::open_details(&hub, &key) else {
+            return;
+        };
+        let text = |key: &str| details.get(key).and_then(Value::as_str).unwrap_or("");
+        let (phase, activity) = (text("phase"), text("activity"));
+        let working = activity == "busy";
+        let ready = phase == "idle"
+            && activity == "idle"
+            && text("runtime_state") == "live"
+            && text("process_state") == "running";
+        let Some(composer) = hub.composers.get_mut(&key) else {
+            return;
+        };
+        let moved = composer
+            .gave_up
+            .as_ref()
+            .is_some_and(|(was_phase, was_activity)| {
+                (was_phase.as_str(), was_activity.as_str()) != (phase, activity)
+            });
+        if moved && (working || ready) {
+            composer.gave_up = None;
+            if !composer.uncertain {
+                composer.notice.clear();
+                composer.error = false;
+            }
+        }
     }
 
     /// Every reading of a continuation's session (an Activity state of the
@@ -6138,6 +6192,111 @@ mod continuations {
         assert!(sends(&fake).is_empty());
     }
 
+    /// zerus-le5s: the start gave up at 180 s, then the session moved on
+    /// (the owner unblocked it in Terminal). Its red notice must go once the
+    /// session shows it, or once the kept draft is cleared, never sooner.
+    fn gave_up_at(c: &Composers, fake: &Fake, details: &Value) -> super::super::ComposerView {
+        stopped(fake);
+        let view = opened(c, ready());
+        let SendReply::Start { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "kept".into(), 4, 4)
+        else {
+            panic!("no question")
+        };
+        let choice = StartChoice::Resume;
+        assert_eq!(
+            c.answer(token, Answer::Start { choice }),
+            SendReply::Sending
+        );
+        until(c, |_| called(fake, &Action::Resume));
+        {
+            let mut row = lock(&fake.row);
+            row.state = "running".into();
+            row.run_id = Some("run-2".into());
+        }
+        c.observe(&state(details.clone()));
+        *lock(&fake.now) += 181.0;
+        c.tick();
+        let view = until(c, |v| v.waiting.is_none());
+        assert_eq!(view.status, rules::NOT_READY);
+        assert!(view.status_error && view.text == "kept");
+        view
+    }
+
+    /// The notice and its error colour are gone; the status line may show
+    /// the session's own block reason instead.
+    fn gone(view: &super::super::ComposerView) -> bool {
+        view.status != rules::NOT_READY && !view.status_error
+    }
+
+    #[test]
+    fn a_given_up_start_notice_goes_once_the_session_moves_on() {
+        // Given up while the session still reported no status.
+        let root = dir("gave-up-moved");
+        let (c, fake) = send_hub(&root);
+        let mut unknown = ready();
+        unknown["run_id"] = json!("run-2");
+        unknown["phase"] = json!("unknown");
+        unknown["activity"] = json!("unknown");
+        gave_up_at(&c, &fake, &unknown);
+        // The same reading again changes nothing.
+        c.observe(&state(unknown.clone()));
+        assert_eq!(c.current().unwrap().status, rules::NOT_READY);
+        // A new turn starts: the notice goes, the kept draft stays.
+        let mut working = unknown;
+        working["phase"] = json!("working");
+        working["activity"] = json!("busy");
+        c.observe(&state(working));
+        let view = c.current().unwrap();
+        assert!(gone(&view), "{view:?}");
+        assert_eq!(view.text, "kept");
+        assert!(sends(&fake).is_empty());
+
+        // Given up while the session looked ready but could not take it: the
+        // same ready reading keeps the notice, a turn clears it.
+        let root = dir("gave-up-ready");
+        let (c, fake) = send_hub(&root);
+        let mut stuck = ready();
+        stuck["run_id"] = json!("run-2");
+        stuck["expected_id"] = json!("conv-1");
+        stuck["resume_message_can_send"] = json!(false);
+        gave_up_at(&c, &fake, &stuck);
+        c.observe(&state(stuck.clone()));
+        assert_eq!(c.current().unwrap().status, rules::NOT_READY);
+        let mut busy = stuck;
+        busy["activity"] = json!("busy");
+        busy["phase"] = json!("working");
+        c.observe(&state(busy.clone()));
+        assert!(gone(&c.current().unwrap()));
+        // Ready again after a given-up start that saw it working.
+        let root = dir("gave-up-busy");
+        let (c, fake) = send_hub(&root);
+        gave_up_at(&c, &fake, &busy);
+        let mut idle = busy;
+        idle["activity"] = json!("idle");
+        idle["phase"] = json!("idle");
+        idle["expected_id"] = json!("");
+        c.observe(&state(idle));
+        assert!(gone(&c.current().unwrap()));
+    }
+
+    #[test]
+    fn a_given_up_start_notice_goes_with_its_cleared_draft() {
+        let root = dir("gave-up-cleared");
+        let (c, fake) = send_hub(&root);
+        let mut unknown = ready();
+        unknown["run_id"] = json!("run-2");
+        unknown["phase"] = json!("unknown");
+        unknown["activity"] = json!("unknown");
+        let view = gave_up_at(&c, &fake, &unknown);
+        // Editing the kept draft keeps the notice; clearing it removes it.
+        c.edit(view.handle, 2, view.text_epoch, "kep".into(), 3, 3);
+        assert_eq!(c.current().unwrap().status, rules::NOT_READY);
+        c.edit(view.handle, 3, view.text_epoch, String::new(), 0, 0);
+        let view = c.current().unwrap();
+        assert!(gone(&view), "{view:?}");
+    }
+
     #[test]
     fn a_start_that_never_becomes_ready_gives_up_after_180_s() {
         let root = dir("timeout");
@@ -6829,6 +6988,60 @@ mod continuations {
         assert_eq!(sends.len(), 1);
         assert_eq!(sends[0].0.run_id, "run-2");
         assert_eq!(sends[0].1.as_deref(), Some("cmp-2"));
+    }
+
+    /// zerus-le5s: Compact and resume on Codex, which refuses /compact until
+    /// the resumed conversation is confirmed, and confirms it only with a new
+    /// turn. The waiting message must go, not wait for compaction for ever.
+    #[test]
+    fn resume_compact_sends_when_the_resumed_conversation_cannot_compact_yet() {
+        let root = dir("resume-unconfirmed");
+        let (c, fake) = send_hub(&root);
+        stopped(&fake);
+        let view = opened(&c, ready());
+        let SendReply::Start { token, .. } = c.send_message(
+            view.handle,
+            1,
+            view.text_epoch,
+            "restart the report".into(),
+            0,
+            0,
+        ) else {
+            panic!("no question")
+        };
+        let choice = StartChoice::ResumeCompact;
+        assert_eq!(
+            c.answer(token, Answer::Start { choice }),
+            SendReply::Sending
+        );
+        until(&c, |_| called(&fake, &Action::Resume));
+        {
+            let mut row = lock(&fake.row);
+            row.state = "running".into();
+            row.run_id = Some("run-2".into());
+        }
+        // `hgs inspect` as the owner's session showed it.
+        let unconfirmed = json!({"tracked": true, "run_id": "run-2", "conversation_id": "conv-1",
+            "expected_id": "conv-1", "runtime_state": "live", "process_state": "running",
+            "phase": "idle", "activity": "idle", "conversation_state": "unknown",
+            "resume_message_can_send": true, "resume_message_reason": "",
+            "compact_context_supported": false,
+            "compact_context_reason": "The agent has not confirmed the resumed conversation yet"});
+        c.observe(&state(unconfirmed.clone()));
+        c.observe(&state(unconfirmed));
+        until(&c, |v| v.waiting.is_none() && !v.sending && !v.compacting);
+        let sends = sends(&fake);
+        assert_eq!(sends.len(), 1);
+        assert_eq!(
+            (
+                sends[0].0.run_id.as_str(),
+                sends[0].0.conversation_id.as_str(),
+                sends[0].1.as_deref()
+            ),
+            ("run-2", "conv-1", None)
+        );
+        assert!(!called(&fake, &Action::CompactContext));
+        assert!(c.current().unwrap().text.is_empty());
     }
 
     #[test]

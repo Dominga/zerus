@@ -226,8 +226,12 @@ pub const CANCELLED_BY_USER: &str = "Pending send cancelled. Your draft is uncha
 pub const INTERRUPTED: &str = "Interrupted. Your draft was kept without sending.";
 const CHANGED: &str = "The session changed. Your draft was kept without sending.";
 const DRAFT_CHANGED: &str = "Draft changed. Send it when you are ready.";
-const NOT_READY: &str =
+/// A start-to-send given up at its time limit.
+pub const NOT_READY: &str =
     "The agent did not become ready. Check Terminal; your draft was kept without sending.";
+/// A compact-to-send given up at its time limit.
+pub const NOT_COMPACTED: &str =
+    "Compaction was not confirmed. Check Terminal; your draft was kept without sending.";
 /// How long a start may take before its message is given up.
 pub const START_LIMIT: f64 = 180.0;
 /// How long a compaction may take before its message is given up.
@@ -531,6 +535,22 @@ impl StartSend {
             return Step::Idle;
         }
         if self.choice == StartChoice::ResumeCompact {
+            // Codex confirms a resumed conversation only with its next turn,
+            // and refuses native /compact until then: waiting for compaction
+            // would never end (zerus-le5s). The resumed conversation already
+            // takes this message (`resume_message_can_send`), so it goes as
+            // is, to the same conversation, and Codex compacts on its own
+            // when it needs to.
+            let unconfirmed = !text(details, "expected_id").is_empty()
+                && flag(details, "resume_message_can_send")
+                && !flag(details, "compact_context_supported");
+            if unconfirmed && !conversation.is_empty() {
+                return Step::Send {
+                    run_id: run.into(),
+                    conversation_id: conversation.into(),
+                    compaction_id: None,
+                };
+            }
             if conversation.is_empty() || !flag(details, "compact_context_supported") {
                 return Step::Idle;
             }
@@ -687,9 +707,7 @@ impl CompactSend {
             );
         }
         if now - self.started > COMPACT_LIMIT {
-            return Step::Cancelled(
-                "Compaction was not confirmed. Check Terminal; your draft was kept without sending.".into(),
-            );
+            return Step::Cancelled(NOT_COMPACTED.into());
         }
         if *draft_now != self.draft {
             return Step::Cancelled(DRAFT_CHANGED.into());
@@ -742,7 +760,7 @@ impl CompactSend {
     /// The 2.5 s poll: past 600 s the message is given up.
     pub fn tick(&self, now: f64) -> Step {
         if now - self.started > COMPACT_LIMIT {
-            Step::Cancelled("Compaction was not confirmed. Check Terminal; your draft was kept without sending.".into())
+            Step::Cancelled(NOT_COMPACTED.into())
         } else {
             Step::Idle
         }
@@ -1176,6 +1194,72 @@ mod continuation_tests {
                 compaction_id: None
             }
         );
+    }
+
+    /// zerus-le5s: Codex resumed for Compact and resume, as `hgs inspect`
+    /// showed it: ready, but compaction refused until the resumed
+    /// conversation is confirmed, which only a new turn does.
+    fn resumed_unconfirmed() -> Value {
+        json!({"tracked": true, "run_id": "run-2", "conversation_id": "conv-1", "expected_id": "conv-1",
+               "runtime_state": "live", "process_state": "running", "phase": "idle", "activity": "idle",
+               "conversation_state": "unknown", "resume_message_can_send": true, "resume_message_reason": "",
+               "compact_context_supported": false,
+               "compact_context_reason": "The agent has not confirmed the resumed conversation yet"})
+    }
+
+    #[test]
+    fn compact_and_resume_sends_when_the_resumed_conversation_cannot_compact_yet() {
+        let mut start = begun(StartChoice::ResumeCompact);
+        // The message itself confirms the conversation; Codex compacts on its own.
+        assert_eq!(
+            start.inspected(&resumed_unconfirmed(), &draft(), false, false, 1.0),
+            Step::Send {
+                run_id: "run-2".into(),
+                conversation_id: "conv-1".into(),
+                compaction_id: None
+            }
+        );
+        // Not yet able to take the message: it waits, as before.
+        let mut unready = resumed_unconfirmed();
+        unready["resume_message_can_send"] = json!(false);
+        assert_eq!(
+            start.inspected(&unready, &draft(), false, false, 1.0),
+            Step::Idle
+        );
+        // A confirmed conversation that can compact still compacts first.
+        let mut confirmed = resumed_unconfirmed();
+        confirmed["expected_id"] = json!("");
+        confirmed["compact_context_supported"] = json!(true);
+        assert!(matches!(
+            start.inspected(&confirmed, &draft(), false, false, 1.0),
+            Step::Compact(..)
+        ));
+        // Compaction refused for another reason (no resume pending) still waits.
+        let mut busy = resumed_unconfirmed();
+        busy["expected_id"] = json!("");
+        busy["compact_context_reason"] = json!("A subagent is still working");
+        assert_eq!(
+            start.inspected(&busy, &draft(), false, false, 1.0),
+            Step::Idle
+        );
+        // The exact guards stay: the same run, another conversation, a stop.
+        let mut same_run = resumed_unconfirmed();
+        same_run["run_id"] = json!("run-1");
+        assert_eq!(
+            start.inspected(&same_run, &draft(), false, false, 1.0),
+            Step::Idle
+        );
+        assert_eq!(
+            start.inspected(&resumed_unconfirmed(), &draft(), false, true, 1.0),
+            Step::Idle
+        );
+        let mut other = resumed_unconfirmed();
+        other["conversation_id"] = json!("conv-9");
+        other["expected_id"] = json!("conv-9");
+        assert!(matches!(
+            begun(StartChoice::ResumeCompact).inspected(&other, &draft(), false, false, 1.0),
+            Step::Cancelled(_)
+        ));
     }
 
     /// zerus-dhnd: Codex after Clear or Start fresh, as `hgs inspect` showed it.

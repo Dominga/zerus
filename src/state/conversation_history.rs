@@ -1404,15 +1404,33 @@ fn voice_binding_matches(row: &Value, binding: &Value, correlation: &Value, sour
 /// Desktop inspection has a bounded journal window even before the paged
 /// history index is opened. Resolve its exact post-delivery journal sequence
 /// so the same voice card works when no phone has requested history yet.
+/// The journal rows a voice message may bind to: this session's own main
+/// prompts. A fork's inherited rows belong to its source and never bind
+/// (zerus-b4qk); the submission boundary keeps them out as well, since they
+/// all precede the fork.
+fn voice_candidates(detail: &Value) -> Vec<&Value> {
+    detail["message_events"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(detail["events"].as_array().into_iter().flatten())
+        .filter(|event| {
+            [
+                "UserPromptSubmit",
+                "UserPromptQueued",
+                "UserMessage",
+                "TurnStarted",
+            ]
+            .contains(&string(event, "type"))
+                && ["", "main"].contains(&string(event, "agent_id"))
+                && event.get("inherited_from").is_none()
+        })
+        .collect()
+}
+
 pub(super) fn inspected_voice_messages(record: &Value, detail: &Value, agent: Option<&str>) -> Value {
     let mut voices = voice::messages(record, agent);
-    let events: Vec<_> = detail["message_events"].as_array().into_iter().flatten()
-        .chain(detail["events"].as_array().into_iter().flatten())
-        .filter(|event| ["UserPromptSubmit","UserPromptQueued","UserMessage","TurnStarted"].contains(&string(event,"type"))
-            && ["","main"].contains(&string(event,"agent_id"))
-            // A fork's inherited rows belong to its source (zerus-b4qk).
-            && event.get("inherited_from").is_none())
-        .collect();
+    let events = voice_candidates(detail);
     let mut candidates = Vec::new();
     for (index,row) in voices.iter().enumerate() {
         let Some(correlation) = voice::correlation(record,string(row,"message_id")) else { continue; };
@@ -2187,6 +2205,28 @@ mod tests {
         assert!(!voice_after_boundary(&json!({"seq":41,"at":500.}),&correlation,&sources));
         assert!(voice_binding_matches(&json!({"original_ids":["journal:codex:You:native:41"]}),&json!({"journal_seq":41}),&correlation,&sources));
         assert!(!voice_binding_matches(&json!({"original_ids":["journal:codex:You:native:141"]}),&json!({"journal_seq":41}),&correlation,&sources));
+    }
+
+    /// #1235 review R3: a fork's voice message never binds to a row it
+    /// inherited, even one with the same words.
+    #[test]
+    fn a_forks_inherited_rows_are_never_voice_candidates() {
+        let detail = json!({
+            "message_events": [
+                {"seq":1,"type":"UserPromptSubmit","agent_id":"","detail":"Same words","inherited_from":"codex/p/source"},
+                {"seq":9,"type":"UserPromptSubmit","agent_id":"","detail":"Same words"},
+            ],
+            "events": [
+                {"seq":2,"type":"TurnStarted","agent_id":"main","detail":"Same words","inherited_from":"codex/p/source"},
+                {"seq":10,"type":"UserPromptSubmit","agent_id":"child","detail":"Same words"},
+                {"seq":11,"type":"Stop","agent_id":"","detail":"Same words"},
+            ],
+        });
+        let seqs: Vec<_> = voice_candidates(&detail)
+            .iter()
+            .filter_map(|event| event["seq"].as_i64())
+            .collect();
+        assert_eq!(seqs, [9]);
     }
 
     #[test]

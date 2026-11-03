@@ -381,7 +381,7 @@ function MediaCard(props: { item: MediaMessage; scope?: AttachmentScope; sourceI
     else void play(next);
   };
   return (
-    <article class="act-msg k-user media" id={`item-${it.id}`}>
+    <article class="act-msg k-user media" id={`item-${it.id}`} classList={{ inherited: !!it.inherited }}>
       <header>
         <b>{video ? tr("You (video)") : tr("You (voice)")}</b>
         <span class="grow" />
@@ -630,7 +630,7 @@ function EchoBody(props: { item: ActivityItem; scope?: AttachmentScope }) {
 function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?: string; postersEnabled?: boolean; expanded?: boolean; onExpanded?: (open: boolean) => void }) {
   const [open, toggleOpen] = layoutDisclosure(() => props.expanded, props.onExpanded);
   const it = props.item;
-  if (it.kind === "media") return <MediaCard item={it} scope={props.scope} sourceId={props.sourceId} postersEnabled={props.postersEnabled} expanded={props.expanded} onExpanded={props.onExpanded} />;
+  if (it.kind === "media") return <MediaCard item={it} scope={rowScope(it, props.scope)} sourceId={props.sourceId} postersEnabled={props.postersEnabled} expanded={props.expanded} onExpanded={props.onExpanded} />;
   if (it.kind === "context") return <div class="act-label eyebrow" id={`item-${it.id}`}>{it.body}</div>;
   if (it.kind === "thinking") return <div class="act-thinking" id={`item-${it.id}`} classList={{ inherited: !!it.inherited }}><span class="eyebrow">{tr("Thinking")}</span><p>{it.body}</p></div>;
   if (it.kind === "report")

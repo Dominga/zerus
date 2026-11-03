@@ -584,51 +584,128 @@ pub(super) const TIMELINE: &str = "name=?1 AND (conversation IS ?2 OR conversati
 // How many forks back a fork's Activity reaches into its sources (zerus-b4qk).
 const LINEAGE: usize = 4;
 
-/// A session's Activity rows: [`TIMELINE`] over `$.earlier` of the scope ?3,
-/// plus each `$.inherited` source's rows of its own conversation up to the
-/// sequence number where the fork began. Each source is one indexed range.
-/// Search and other per-session reads keep [`TIMELINE`]: a source's rows are
-/// found in the source, not again in each fork.
-pub(super) fn activity_filter() -> &'static str {
-    static FILTER: OnceLock<String> = OnceLock::new();
-    FILTER.get_or_init(|| {
-        let mut filter = String::from("((name=?1 AND (conversation IS ?2 OR conversation IN (SELECT value FROM json_each(?3, '$.earlier')))))");
-        for index in 0..LINEAGE {
-            filter.push_str(&format!(" OR (name=json_extract(?3, '$.inherited[{index}][0]') AND conversation=json_extract(?3, '$.inherited[{index}][1]') AND seq<=json_extract(?3, '$.inherited[{index}][2]'))"));
-        }
-        format!("({filter})")
+// A session's Activity: its own [`TIMELINE`] rows (the scope ?3's `$.earlier`
+// conversations) and each `$.inherited` source's rows of its conversation up
+// to the sequence number where the fork began. Every range is read on its
+// own (name, conversation, seq) index entries, ordered and limited there, so
+// a read touches at most one page per range however long a source is; only
+// those pages are merged. Search and other per-session reads keep
+// [`TIMELINE`]: a source's rows are found in the source, not again in a fork.
+const OWN_RANGE: &str = "name=?1 AND (conversation IS ?2 OR conversation IN (SELECT value FROM json_each(?3, '$.earlier')))";
+
+fn source_range(index: usize) -> String {
+    format!(
+        "name=json_extract(?3, '$.inherited[{index}][0]') AND conversation=json_extract(?3, '$.inherited[{index}][1]') \
+         AND seq<=json_extract(?3, '$.inherited[{index}][2]')"
+    )
+}
+
+/// `seq, payload, own, name` of the Activity rows that also match `extra`,
+/// by `seq` (descending when `newest`), at most `limit` of them.
+fn activity_query(extra: &str, newest: bool, limit: &str) -> String {
+    let order = if newest { "DESC" } else { "ASC" };
+    let branch = |own: u8, range: &str| {
+        format!("SELECT * FROM (SELECT seq, payload, {own} AS own, name FROM events WHERE {range}{extra} ORDER BY seq {order} LIMIT {limit})")
+    };
+    let mut branches = vec![branch(1, OWN_RANGE)];
+    branches.extend((0..LINEAGE).map(|index| branch(0, &source_range(index))));
+    format!(
+        "{} ORDER BY seq {order} LIMIT {limit}",
+        branches.join(" UNION ALL ")
+    )
+}
+
+/// The oldest Activity row: the least of each range's own first row.
+fn activity_oldest() -> &'static str {
+    static QUERY: OnceLock<String> = OnceLock::new();
+    QUERY.get_or_init(|| {
+        let mut branches = vec![format!(
+            "SELECT MIN(seq) AS seq FROM events WHERE {OWN_RANGE}"
+        )];
+        branches.extend(
+            (0..LINEAGE)
+                .map(|index| format!("SELECT MIN(seq) FROM events WHERE {}", source_range(index))),
+        );
+        format!("SELECT MIN(seq) FROM ({})", branches.join(" UNION ALL "))
     })
+}
+
+/// [`activity_query`] for a page of [`timeline_rows`]: after the cursor ?4,
+/// at most ?5 rows.
+fn activity_page(newest: bool) -> &'static str {
+    static OLDEST: OnceLock<String> = OnceLock::new();
+    static NEWEST: OnceLock<String> = OnceLock::new();
+    let query = if newest { &NEWEST } else { &OLDEST };
+    query.get_or_init(|| activity_query(" AND seq>?4", newest, "?5"))
 }
 
 /// The sources a fork's Activity inherits, oldest first, as `[journal name,
 /// conversation, last sequence number]`: what the fork recorded when it
-/// began, or for a fork recorded before that, its source's rows up to the
-/// fork's creation, under the source name it recorded.
+/// began, or for a fork recorded before that, what [`derived_lineage`] finds
+/// (which `inspect` saves once, so later reads do not search again).
 fn lineage(db: &Connection, record: &Value) -> Vec<Value> {
-    if let Some(recorded) = record["fork_lineage"].as_array() {
-        return recorded
+    match record["fork_lineage"].as_array() {
+        Some(recorded) => recorded
             .iter()
             .filter(|source| valid_source(source))
             .cloned()
-            .collect();
+            .collect(),
+        None => derived_lineage(db, record).unwrap_or_default(),
     }
+}
+
+/// A fork recorded before its lineage: the source name it recorded, that
+/// conversation's rows up to the fork's creation and before the fork's own
+/// first row. One indexed search backwards from that row. None for a
+/// session that is not such a fork.
+fn derived_lineage(db: &Connection, record: &Value) -> Option<Vec<Value>> {
     let (source, parent) = (
         string(record, "fork_source_name"),
         string(record, "fork_parent_id"),
     );
     let created = record["created"].as_f64().unwrap_or(0.0);
-    if source.is_empty() || parent.is_empty() || created <= 0.0 {
-        return Vec::new();
+    if source.is_empty() || parent.is_empty() || created <= 0.0 || record["fork_lineage"].is_array()
+    {
+        return None;
     }
-    db.query_row(
-        "SELECT MAX(seq) FROM events WHERE name=?1 AND conversation=?2 AND CAST(json_extract(payload, '$.at') AS REAL)<=?3",
-        params![source, parent, created],
-        |row| row.get::<_, Option<i64>>(0),
+    let own: Option<i64> = db
+        .query_row(
+            "SELECT MIN(seq) FROM events WHERE name=?1",
+            [journal_name(record)],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+    let seq: Option<i64> = db
+        .query_row(
+            "SELECT seq FROM events WHERE name=?1 AND conversation=?2 AND seq<?3 \
+             AND CAST(json_extract(payload, '$.at') AS REAL)<=?4 ORDER BY seq DESC LIMIT 1",
+            params![source, parent, own.unwrap_or(i64::MAX), created],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()?;
+    Some(
+        seq.map(|seq| vec![json!([source, parent, seq])])
+            .unwrap_or_default(),
     )
-    .ok()
-    .flatten()
-    .map(|seq| vec![json!([source, parent, seq])])
-    .unwrap_or_default()
+}
+
+/// Saves a derived lineage into the fork's own record, under the state lock
+/// `inspect` holds, when that record still names the same run.
+fn save_derived_lineage(db: &Connection, record: &mut Value) {
+    let Some(lineage) = derived_lineage(db, record) else {
+        return;
+    };
+    record["fork_lineage"] = json!(lineage);
+    let Ok(mut saved) = read(string(record, "name")) else {
+        return;
+    };
+    if saved["run_id"] != record["run_id"] || saved["fork_lineage"].is_array() {
+        return;
+    }
+    saved["fork_lineage"] = json!(lineage);
+    let _ = write(&mut saved);
 }
 
 fn valid_source(source: &Value) -> bool {
@@ -665,7 +742,7 @@ fn lineage_after(db: &Connection, source: &Value) -> String {
     json!(sources[keep..]).to_string()
 }
 
-/// The `?3` scope of [`activity_filter`] for a record.
+/// The `?3` scope of the Activity reads for a record.
 pub(super) fn activity_scope(db: &Connection, record: &Value) -> String {
     json!({"earlier": clear_context::earlier_conversations(record), "inherited": lineage(db, record)}).to_string()
 }
@@ -678,17 +755,14 @@ fn mark_inherited(event: &mut Value, own: bool, name: &str) {
     }
 }
 
-// Whether a selected row is the session's own, from the same scope.
-const OWN: &str = "(name=?1 AND (conversation IS ?2 OR conversation IN (SELECT value FROM json_each(?3, '$.earlier'))))";
-
 // The activity tail includes tools and children. Keep main public messages in
 // a separate bounded window so a cold reader does not lose its newest prompt
 // merely because that turn has produced more than one hundred tool events.
 fn message_events(db: &Connection, name: &str, conversation: Option<&str>, scope: &str) -> Result<(Vec<Value>, bool)> {
-    let mut query = db.prepare(&format!("SELECT seq,payload,{OWN},name FROM events WHERE {}
-        AND COALESCE(json_extract(payload, '$.agent_id'), '') IN ('', 'main')
-        AND json_extract(payload, '$.type') IN ('SessionCleared','UserPromptSubmit','UserPromptQueued','UserMessage','TurnStarted','QuestionAnswered','AgentMessage','Stop')
-        ORDER BY seq DESC LIMIT 101", activity_filter())).map_err(|e| e.to_string())?;
+    static QUERY: OnceLock<String> = OnceLock::new();
+    let query = QUERY.get_or_init(|| activity_query(" AND COALESCE(json_extract(payload, '$.agent_id'), '') IN ('', 'main') \
+        AND json_extract(payload, '$.type') IN ('SessionCleared','UserPromptSubmit','UserPromptQueued','UserMessage','TurnStarted','QuestionAnswered','AgentMessage','Stop')", true, "101"));
+    let mut query = db.prepare(query).map_err(|e| e.to_string())?;
     let rows = query.query_map(params![name, conversation, scope], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?, row.get::<_, String>(3)?))
         })
@@ -897,6 +971,10 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
         output["cache_hint"] = Value::Null;
     }
     let db = event_db()?;
+    // A fork recorded before its lineage finds its source once (zerus-b4qk).
+    if archive_id.is_none() {
+        save_derived_lineage(&db, &mut record);
+    }
     let journal_name = journal_name(&record);
     let conversation = record["conversation_id"].as_str();
     let cleared = clear_context::earlier_conversations(&record);
@@ -904,7 +982,7 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     let scope = activity_scope(&db, &record);
     let oldest: Option<i64> = db
         .query_row(
-            &format!("SELECT MIN(seq) FROM events WHERE {}", activity_filter()),
+            activity_oldest(),
             params![journal_name, conversation, scope],
             |row| row.get(0),
         )
@@ -969,10 +1047,9 @@ pub(super) fn timeline_rows(
     limit: usize,
     newest: bool,
 ) -> Result<Vec<TimelineRow>> {
-    let filter = activity_filter();
-    let mut statement = db.prepare(&if newest {
-        format!("SELECT seq, payload, {OWN}, name FROM events WHERE {filter} AND seq>?4 ORDER BY seq DESC LIMIT ?5")
-    } else { format!("SELECT seq, payload, {OWN}, name FROM events WHERE {filter} AND seq>?4 ORDER BY seq LIMIT ?5") }).map_err(|e| e.to_string())?;
+    let mut statement = db
+        .prepare(activity_page(newest))
+        .map_err(|e| e.to_string())?;
     let mut rows: Vec<TimelineRow> = statement
         .query_map(
             params![journal_name, conversation, scope, after, limit as i64],
@@ -1814,10 +1891,22 @@ mod attention_regressions {
         let legacy = json!({"name":"codex/p/legacy","conversation_id":"c-legacy","fork_parent_id":"c-root",
             "fork_source_name":"codex/p/root","created":15});
         assert_eq!(shown(&legacy), [inherited("root before", "codex/p/root")]);
+        // Its source's rows stop before its own first row, even one whose time
+        // is before the fork's creation but written after that row.
+        row("codex/p/legacy", "c-legacy", "legacy own", 16);
+        row("codex/p/root", "c-root", "late root row", 12);
+        assert_eq!(
+            shown(&legacy),
+            [inherited("root before", "codex/p/root"), own("legacy own")]
+        );
         // Not a fork, or a malformed lineage: only its own rows.
         assert_eq!(
             shown(&root),
-            [own("root before"), own("root after the first fork")]
+            [
+                own("root before"),
+                own("root after the first fork"),
+                own("late root row")
+            ]
         );
         let broken = json!({"name":"codex/p/first","conversation_id":"c-first","fork_lineage":[["codex/p/root","c-root","7"],"x"]});
         assert_eq!(
@@ -1836,6 +1925,110 @@ mod attention_regressions {
         assert_eq!(sources.len(), LINEAGE);
         assert_eq!(sources[LINEAGE - 1][0], "codex/p/deep4");
     }
+    /// #1235 review R1: a fork's Activity reads one page per range, never
+    /// every inherited row. SQLite's step count bounds the work, so a source
+    /// of any length costs a fork's page what a page costs the source.
+    #[test]
+    fn a_forks_activity_reads_stay_one_page_per_range() {
+        use rusqlite::StatementStatus;
+        let mut db = message_db();
+        let transaction = db.transaction().unwrap();
+        for at in 0..20_000 {
+            let kind = if at % 2 == 0 {
+                "UserPromptSubmit"
+            } else {
+                "Stop"
+            };
+            transaction.execute("INSERT INTO events(name,conversation,payload) VALUES('codex/p/source','c-source',?)",
+                [json!({"type":kind,"agent_id":"","at":at,"detail":"source"}).to_string()]).unwrap();
+        }
+        transaction.commit().unwrap();
+        let point: i64 = db
+            .query_row("SELECT MAX(seq) FROM events", [], |row| row.get(0))
+            .unwrap();
+        for at in 0..40 {
+            insert_message(
+                &db,
+                "codex/p/fork",
+                Some("c-fork"),
+                json!({"type":"Stop","agent_id":"","at":30_000 + at,"detail":"own"}),
+            );
+        }
+        let fork = json!({"name":"codex/p/fork","conversation_id":"c-fork","fork_lineage":[["codex/p/source","c-source",point]]});
+        let scope = activity_scope(&db, &fork);
+        let steps = |sql: &str, after: Option<(i64, i64)>| {
+            let mut statement = db.prepare(sql).unwrap();
+            let rows = match after {
+                Some((after, limit)) => statement
+                    .query_map(
+                        params!["codex/p/fork", "c-fork", scope, after, limit],
+                        |_| Ok(()),
+                    )
+                    .unwrap()
+                    .count(),
+                None => statement
+                    .query_map(params!["codex/p/fork", "c-fork", scope], |_| Ok(()))
+                    .unwrap()
+                    .count(),
+            };
+            (rows, statement.get_status(StatementStatus::VmStep))
+        };
+        let budget = 40_000;
+        let (rows, newest) = steps(activity_page(true), Some((0, 100)));
+        assert_eq!(rows, 100);
+        let (rows, page) = steps(activity_page(false), Some((point - 500, 200)));
+        assert_eq!(rows, 200);
+        let (_, oldest) = steps(activity_oldest(), None);
+        static WINDOW: OnceLock<String> = OnceLock::new();
+        let window = WINDOW.get_or_init(|| {
+            activity_query(
+                " AND COALESCE(json_extract(payload, '$.agent_id'), '') IN ('', 'main')",
+                true,
+                "101",
+            )
+        });
+        let (rows, messages) = steps(window, None);
+        assert_eq!(rows, 101);
+        for (read, used) in [
+            ("newest page", newest),
+            ("cursor page", page),
+            ("oldest row", oldest),
+            ("message window", messages),
+        ] {
+            assert!(
+                used < budget,
+                "{read}: {used} SQLite steps for one page of a 20000-row source"
+            );
+        }
+        // The same reads still return the right rows across the fork point.
+        let shown = timeline_rows(
+            &db,
+            "codex/p/fork",
+            Some("c-fork"),
+            &scope,
+            point - 2,
+            100,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            shown
+                .iter()
+                .map(|row| (row.seq, row.inherited_from.is_some()))
+                .take(3)
+                .collect::<Vec<_>>(),
+            [(point - 1, true), (point, true), (point + 1, false)]
+        );
+        let first: Option<i64> = db
+            .query_row(
+                activity_oldest(),
+                params!["codex/p/fork", "c-fork", scope],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(first, Some(1));
+    }
+
     #[test]
     fn kimi_scheduled_ticks_are_not_replies_while_a_recurring_job_remains() {
         let kimi = json!({"agent":"kimi","name":"example","conversation_id":"conversation"});

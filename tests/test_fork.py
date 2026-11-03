@@ -188,6 +188,12 @@ class Forks(Base):
             path=self.root/'state'/(hashlib.sha256(fork.encode()).hexdigest()+'.json')
             record=json.loads(path.read_text());record.pop('fork_lineage');path.write_text(json.dumps(record))
             self.assertEqual(talk(shown(fork)['events']),inherited+[('fork request',None),('fork reply',None)],agent)
+            # Found once and saved under the state lock, so later reads do not search.
+            [[derived_journal,derived_conversation,derived]]=self.binding(fork)['fork_lineage']
+            self.assertEqual((derived_journal,derived_conversation),(source,conversation))
+            self.assertLessEqual(derived,seq)
+            self.assertEqual(talk(shown(fork)['events']),inherited+[('fork request',None),('fork reply',None)],agent)
+            self.assertEqual(self.binding(fork)['fork_lineage'],[[source,conversation,derived]])
             # Search finds the source's words in the source, never again in its forks.
             hits=json.loads(self.hgs('search','--query','source request'))['results']
             self.assertIn(source,{h['name'] for h in hits},agent)

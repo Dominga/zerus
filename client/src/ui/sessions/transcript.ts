@@ -465,7 +465,7 @@ function transcriptItems(events: readonly ActivityEvent[], summary?: Record<stri
   // its own label, then a marker where this session's own activity begins.
   let source: string | undefined, marked = 0;
   const inherit = () => {
-    if (source) for (const item of items.slice(marked)) if (item.kind !== "media" && item.kind !== "context") item.inherited = true;
+    if (source) for (const item of items.slice(marked)) if (item.kind !== "context") item.inherited = true;
     marked = items.length;
   };
   for (let i = 0; i < events.length;) {

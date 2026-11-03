@@ -237,6 +237,8 @@ export type VoiceState =
 export interface MediaMessage {
   id: string;
   kind: "media";
+  /** A recording a fork inherited: its source's, never played through the fork. */
+  inherited?: boolean;
   media: "voice" | "video";
   at: string;
   state: VoiceState;

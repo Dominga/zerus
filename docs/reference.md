@@ -1969,8 +1969,10 @@ A fork's Activity first shows the history it began from, read-only: each source
 session's rows up to the moment of the fork, under an "Inherited from" label
 naming that session, then a "Forked here" marker and the fork's own activity.
 A fork records its sources when it starts (up to four forks back, so a fork of a
-fork shows both); a fork made before this records nothing and shows its source's
-rows up to its creation time. Inherited rows are muted and never act as the
+fork shows both); a fork made before this records nothing, so its first
+inspection finds its source's rows up to its creation time and before its own
+first row, and saves that. Each Activity page reads at most one page from each
+of these ranges, however long a source is. Inherited rows are muted and never act as the
 fork's own: they open no attachments, and search finds them only in their source.
 A provider that copies the history into the fork's own transcript adds nothing
 twice, because the fork's messages dated before its creation are not shown. The

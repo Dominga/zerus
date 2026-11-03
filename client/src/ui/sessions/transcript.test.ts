@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { buildTranscript, localFileAvailable, mergeLocal, createTranscriptProjection } from "./transcript";
 import type { ActivityEvent, EventAttachment, LocalMessage } from "../../types";
-import type { ActivityItem } from "./types";
+import type { ActivityItem, MediaMessage } from "./types";
+import { cardTarget, rowScope } from "./attachment-card";
 
 const local = (status: "sending" | "error" | "sent", uncertain = false, extra: Partial<LocalMessage> = {}): LocalMessage => ({
   id: `l-${status}-${uncertain}`, text: "hello", status, attachments: [], run_id: "r", conversation_id: "c",
@@ -273,6 +274,19 @@ describe("inherited fork history", () => {
     ]);
     // Never a local row's actions on an inherited row.
     expect(items.filter((i) => i.inherited).every((i) => !i.local)).toBe(true);
+  });
+  // #1235 review R2: an inherited recording is the source's, muted and never
+  // played or opened through the fork.
+  it("an inherited voice message is a muted card with no file in the fork", () => {
+    const voice: ActivityEvent = { ...ev(1, "UserPromptSubmit", "spoken request", "codex/p/root"), source: "hgs_voice",
+      voice: { state: "submitted", audio: { request_id: "source-request", index: 0, duration_ms: 1200 } } };
+    const items = buildTranscript([voice, ev(2, "UserPromptSubmit", "own request")]);
+    const card = items.find((i) => i.kind === "media") as MediaMessage;
+    expect(card.inherited).toBe(true);
+    expect(card.file).toMatchObject({ request_id: "source-request" });
+    const scope = { computer: "studio", name: "codex/p/fork", conversation_id: "c-fork", archive_id: null };
+    expect(cardTarget(card.file!, rowScope(card, scope))).toBeUndefined();
+    expect(items.map((i) => [i.kind, !!(i as ActivityItem).inherited])).toEqual([["context", false], ["media", true], ["context", false], ["user", false]]);
   });
   it("a session that is not a fork has no inherited sections", () => {
     const items = buildTranscript([ev(1, "UserPromptSubmit", "request"), ev(2, "Stop", "reply")]) as ActivityItem[];

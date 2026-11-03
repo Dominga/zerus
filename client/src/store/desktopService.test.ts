@@ -21,6 +21,14 @@ describe("desktop service presentation", () => {
     expect(retainedSourceNotice(serviceView({ retained_source_import: { ...report, required: false } }))).toBe("");
     expect(retainedSourceNotice(serviceView({ retained_source_import: { ...report, required: false, complete: true, code: "retained_import_staged", creations_capture: { code: "creation_source_unavailable", paused: true, capture_id: null } } }))).toContain("Session creation is paused");
   });
+  it("explains the archive and data-directory refusals without changing readiness", () => {
+    const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
+    const view = (code: string) => serviceView({ retained_source_import: { ...report, creations_capture: { code, paused: true, capture_id: null } } });
+    expect(retainedSourceNotice(view("creation_source_private_slot"))).toContain("0700 on Unix");
+    expect(retainedSourceNotice(view("creation_source_data_directory"))).toContain("owned by your user");
+    expect(retainedSourceNotice(view("creation_source_unavailable"))).toContain("0600 on Unix");
+    expect(view("creation_source_private_slot").connected).toBe(true);
+  });
   it("shows blocked read transfer and its existing Retry path until durable completion", () => {
     expect(pendingReadNotice(undefined)).toBe("");
     const pending = { required: true, complete: false, running: true, code: "pending_read_import_waiting", through: 0, superseded: 0, delivered: false as const };

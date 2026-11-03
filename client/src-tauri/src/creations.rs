@@ -1952,7 +1952,8 @@ mod tests {
         let capture =
             zerus_client_core::migration::preload::Capture::new(fake.dir.canonicalize().unwrap());
         let mut services = fake.services();
-        services.allowed = false;
+        services.allowed = true;
+        services.spawn = Arc::new(|_| {});
         let writes = Arc::new(AtomicUsize::new(0));
         let count = writes.clone();
         services.write = Arc::new(move |_, _| {
@@ -2010,6 +2011,8 @@ mod tests {
             entered.send(()).unwrap();
             lock(&resume).recv().unwrap();
         }));
+        // Existing fixture events belong to the earlier native-mode load.
+        lock(&fake.probe.events).clear();
         let mut services = fake.services();
         services.write = Arc::new(|_, _| panic!("quitting source wrote"));
         let host = CreationHost::new_with_capture(
@@ -2026,6 +2029,10 @@ mod tests {
             original
         );
         assert!(fake.log().is_empty());
+        assert!(
+            lock(&fake.probe.events).is_empty(),
+            "late load emitted a recovered creation"
+        );
     }
 
     #[test]

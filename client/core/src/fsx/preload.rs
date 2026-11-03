@@ -67,8 +67,12 @@ pub(crate) struct Parents {
 }
 impl Parents {
     pub fn open(path: &Path, create: bool) -> io::Result<Self> {
+        Self::open_with(path, create, true)
+    }
+    fn open_with(path: &Path, create: bool, private: bool) -> io::Result<Self> {
         #[cfg(windows)]
         {
+            let _ = private;
             Ok(Self {
                 _native: super::windows::Parents::open(path, create)?,
             })
@@ -108,11 +112,12 @@ impl Parents {
                     Err(e) => return Err(e),
                 };
                 let m = f.metadata()?;
-                // Ancestors may be /tmp or other managed roots. No component
-                // is followed; the final managed parent is owned and not writable by others.
+                // The canonical existing data directory needs owner identity,
+                // not a restrictive umask. The archive slot itself stays 0700.
                 if !m.is_dir()
                     || current == path
-                        && (m.uid() != unsafe { libc::geteuid() } || m.mode() & 0o022 != 0)
+                        && (m.uid() != unsafe { libc::geteuid() }
+                            || private && m.mode() & 0o077 != 0)
                 {
                     return Err(refused());
                 }
@@ -122,7 +127,7 @@ impl Parents {
         }
         #[cfg(not(any(unix, windows)))]
         {
-            let _ = (path, create);
+            let _ = (path, create, private);
             Err(io::ErrorKind::Unsupported.into())
         }
     }
@@ -146,17 +151,47 @@ impl Parents {
         Ok(())
     }
 }
+/// Resolve the NATIVE managed data directory once, off the GUI thread. Home,
+/// XDG_DATA_HOME and .local/share may be symlinks. Subsequent retries keep this
+/// same canonical object; retargeting an alias never selects a new source.
+#[cfg(unix)]
+pub(crate) struct ManagedData {
+    path: PathBuf,
+    parents: Parents,
+}
+#[cfg(unix)]
+impl ManagedData {
+    pub fn open(path: &Path) -> io::Result<Self> {
+        let path = std::fs::canonicalize(path)?;
+        let parents = Parents::open_with(&path, false, false)?;
+        Ok(Self { path, parents })
+    }
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+    pub fn recheck(&self) -> io::Result<()> {
+        self.parents.recheck()
+    }
+}
 fn parent(path: &Path) -> io::Result<Parents> {
     Parents::open(path.parent().ok_or_else(refused)?, false)
 }
 pub(crate) fn read(path: &Path, limit: usize) -> io::Result<Option<(Vec<u8>, Stamp)>> {
-    read_with(path, limit, false)
+    read_with(path, limit, false, true)
 }
 pub(crate) fn durable(path: &Path, limit: usize) -> io::Result<Option<(Vec<u8>, Stamp)>> {
-    read_with(path, limit, true)
+    read_with(path, limit, true, true)
 }
-fn read_with(path: &Path, limit: usize, sync: bool) -> io::Result<Option<(Vec<u8>, Stamp)>> {
-    let parents = parent(path)?;
+pub(crate) fn read_source(path: &Path, limit: usize) -> io::Result<Option<(Vec<u8>, Stamp)>> {
+    read_with(path, limit, false, false)
+}
+fn read_with(
+    path: &Path,
+    limit: usize,
+    sync: bool,
+    private: bool,
+) -> io::Result<Option<(Vec<u8>, Stamp)>> {
+    let parents = Parents::open_with(path.parent().ok_or_else(refused)?, false, private)?;
     if std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && m.len() > limit as u64) {
         return Err(io::ErrorKind::FileTooLarge.into());
     }

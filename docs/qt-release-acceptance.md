@@ -116,7 +116,8 @@ G3 or installed acceptance.
 ### Historical creation source capture
 
 In service mode, the original Next creation worker captures its managed
-`creations.json` before its first load, recovery normalization or journal write.
+`creations.json` before its first **service-mode** load, recovery normalization
+or journal write. A native-mode run still loads its journal without this capture.
 The fixed private `creation-preload-v1` slot contains the durable capture UUID,
 original source object/stamp/hash, exact bytes and a read-back receipt. Raw input
 is limited to 8 MiB and the existing schema-1 decoder's 128 operations; metadata
@@ -133,6 +134,18 @@ Failed/partial files remain for review, with the original capture UUID; Retry
 never overwrites a partial slot or adopts a newer source version. Connection,
 Grant, watch/catalog, ownership Resume and the separate G2 actor stay available.
 Do not clear the slot to manufacture a successful report.
+
+On Unix the capture resolves the managed data folder once and pins that canonical
+object; symlinks through home, `$XDG_DATA_HOME` and `.local/share` are supported.
+The existing data folder must be owned by the user; a group-writable mode such as
+0775 is preserved. The archive slot must remain user-owned and private (0700),
+and source/archive leaves remain private, owned, single-link and no-follow. A
+`creation_source_private_slot` refusal asks to check archive availability and
+restore its private permissions before Retry; `creation_source_data_directory`
+asks to check the managed data folder's availability and ownership.
+`creation_source_unavailable` asks to check private file access/ownership (0600
+on Unix) and review retained partial files before Retry. No permission
+or source repair happens automatically.
 
 After capture, normal live journal writes may resume. The archive is explicitly
 historical pre-load data: a later source recheck validates the retained private

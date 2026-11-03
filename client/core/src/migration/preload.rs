@@ -43,10 +43,31 @@ struct Receipt {
     snapshot: Option<Stamp>,
 }
 
+enum CaptureFailure {
+    Source(SourceError),
+    #[cfg(unix)]
+    DataDirectory,
+    PrivateSlot,
+}
+impl From<SourceError> for CaptureFailure {
+    fn from(source: SourceError) -> Self {
+        Self::Source(source)
+    }
+}
+impl CaptureFailure {
+    fn source(self) -> SourceError {
+        match self {
+            Self::Source(source) => source,
+            _ => SourceError::SourceUnreadable,
+        }
+    }
+}
 /// Managed native setup supplies only the original application data directory.
 /// No IPC/JS caller selects a path, capture identity or raw bytes.
 pub struct Capture {
     data: PathBuf,
+    #[cfg(unix)]
+    resolved: std::sync::OnceLock<Arc<disk::ManagedData>>,
     state: Mutex<Status>,
     retry: AtomicBool,
     preparing: Mutex<()>,
@@ -71,6 +92,8 @@ impl Capture {
     pub fn new(data: PathBuf) -> Arc<Self> {
         Arc::new(Self {
             data,
+            #[cfg(unix)]
+            resolved: std::sync::OnceLock::new(),
             state: Mutex::new(Status::default()),
             retry: AtomicBool::new(true),
             preparing: Mutex::new(()),
@@ -105,9 +128,14 @@ impl Capture {
         status.code = match &result {
             Ok(Prepared::Missing { .. }) => "creation_source_not_applicable",
             Ok(Prepared::Snapshot(_)) => "creation_source_captured",
-            Err(SourceError::SourceChanged) => "creation_source_changed",
-            Err(SourceError::TooLarge) => "creation_source_too_large",
-            Err(SourceError::UnsupportedSource) => "creation_source_unsupported",
+            Err(CaptureFailure::Source(SourceError::SourceChanged)) => "creation_source_changed",
+            Err(CaptureFailure::Source(SourceError::TooLarge)) => "creation_source_too_large",
+            Err(CaptureFailure::Source(SourceError::UnsupportedSource)) => {
+                "creation_source_unsupported"
+            }
+            #[cfg(unix)]
+            Err(CaptureFailure::DataDirectory) => "creation_source_data_directory",
+            Err(CaptureFailure::PrivateSlot) => "creation_source_private_slot",
             Err(_) => "creation_source_unavailable",
         };
         drop(status);
@@ -119,14 +147,29 @@ impl Capture {
         if let Some(notify) = notify {
             notify();
         }
-        result
+        result.map_err(CaptureFailure::source)
     }
-    fn prepare_inner(&self) -> SourceResult<Prepared> {
+    fn prepare_inner(&self) -> Result<Prepared, CaptureFailure> {
         if !self.data.is_absolute() {
-            return Err(SourceError::InvalidMetadata);
+            return Err(SourceError::InvalidMetadata.into());
         }
-        let root = self.data.join("creation-preload-v1");
-        let _parents = disk::Parents::open(&root, true).map_err(unreadable)?;
+        #[cfg(unix)]
+        let resolved = {
+            if self.resolved.get().is_none() {
+                let directory = disk::ManagedData::open(&self.data)
+                    .map_err(|_| CaptureFailure::DataDirectory)?;
+                let _ = self.resolved.set(Arc::new(directory));
+            }
+            self.resolved.get().unwrap().clone()
+        };
+        #[cfg(unix)]
+        resolved.recheck().map_err(|_| SourceError::SourceChanged)?;
+        #[cfg(unix)]
+        let data = resolved.path();
+        #[cfg(not(unix))]
+        let data = self.data.as_path();
+        let root = data.join("creation-preload-v1");
+        let _parents = disk::Parents::open(&root, true).map_err(|_| CaptureFailure::PrivateSlot)?;
         let _lock = disk::Lock::take(&root.join("capture.lock")).map_err(unreadable)?;
         let seed: Seed = match read_json(&root.join("identity.json"))? {
             Some((value, _)) => value,
@@ -141,7 +184,7 @@ impl Capture {
             }
         };
         if !seed.valid() {
-            return Err(SourceError::InvalidMetadata);
+            return Err(SourceError::InvalidMetadata.into());
         }
         self.state
             .lock()
@@ -149,12 +192,15 @@ impl Capture {
             .capture_id = Some(seed.capture_id.clone());
         let ready = root.join("receipt.json");
         if let Some((receipt, _)) = read_json::<Receipt>(&ready)? {
-            return Snapshot::open(root, receipt, &seed);
+            let prepared = Snapshot::open(root, receipt, &seed)?;
+            #[cfg(unix)]
+            resolved.recheck().map_err(|_| SourceError::SourceChanged)?;
+            return Ok(prepared);
         }
         let plan_path = root.join("source.json");
         let previous = read_json::<Plan>(&plan_path)?.map(|(p, _)| p);
-        let source_path = self.data.join("creations.json");
-        let source = disk::read(&source_path, RAW).map_err(unreadable)?;
+        let source_path = data.join("creations.json");
+        let source = disk::read_source(&source_path, RAW).map_err(unreadable)?;
         let (bytes, stamp) = match source {
             Some((b, s)) => (b, Some(s)),
             None => (Vec::new(), None),
@@ -167,7 +213,7 @@ impl Capture {
         };
         if let Some(previous) = previous {
             if previous != plan {
-                return Err(SourceError::SourceChanged);
+                return Err(SourceError::SourceChanged.into());
             }
         } else {
             create_json(&plan_path, &plan)?;
@@ -179,7 +225,7 @@ impl Capture {
             let actual = match disk::read(&path, RAW).map_err(unreadable)? {
                 Some((saved, identity)) => {
                     if saved != bytes {
-                        return Err(SourceError::SourceChanged);
+                        return Err(SourceError::SourceChanged.into());
                     }
                     identity
                 }
@@ -191,7 +237,7 @@ impl Capture {
         };
         // Reopen the source before releasing its original worker fence. This
         // verifies the source object/stamp/hash, not a normalized projection.
-        let check = disk::read(&source_path, RAW).map_err(unreadable)?;
+        let check = disk::read_source(&source_path, RAW).map_err(unreadable)?;
         if check.as_ref().map(|(_, s)| s) != plan.source.as_ref()
             || check
                 .as_ref()
@@ -199,7 +245,7 @@ impl Capture {
                 .unwrap_or_else(|| sha256(&[]))
                 != plan.sha256
         {
-            return Err(SourceError::SourceChanged);
+            return Err(SourceError::SourceChanged.into());
         }
         // An earlier successful byte write with an uncertain sync is not a
         // durable capture merely because a later read happens to see it.
@@ -211,12 +257,14 @@ impl Capture {
             let current = disk::read(&root.join(leaf), limit).map_err(unreadable)?;
             let synced = disk::durable(&root.join(leaf), limit).map_err(unreadable)?;
             if current != synced {
-                return Err(SourceError::SourceChanged);
+                return Err(SourceError::SourceChanged.into());
             }
         }
         let receipt = Receipt { plan, snapshot };
         create_json(&ready, &receipt)?;
-        Snapshot::open(root, receipt, &seed)
+        #[cfg(unix)]
+        resolved.recheck().map_err(|_| SourceError::SourceChanged)?;
+        Snapshot::open(root, receipt, &seed).map_err(Into::into)
     }
 }
 fn unreadable(error: std::io::Error) -> SourceError {
@@ -344,6 +392,8 @@ mod tests {
     impl Scratch {
         fn new() -> Self {
             let root = std::env::temp_dir()
+                .canonicalize()
+                .unwrap()
                 .join(format!("zerus-creation-preload-{}", uuid::Uuid::new_v4()));
             drop(disk::Parents::open(&root, true).unwrap());
             Self(root.canonicalize().unwrap())
@@ -516,6 +566,100 @@ mod tests {
             assert!(!s.0.join("creation-preload-v1/receipt.json").exists());
             assert_eq!(fs::read(other).unwrap(), raw());
         }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_group_writable_data_folder_keeps_its_mode_and_private_leaf() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let s = Scratch::new();
+        s.source(&raw());
+        fs::set_permissions(&s.0, fs::Permissions::from_mode(0o775)).unwrap();
+        let snapshot = s.snapshot();
+        assert_eq!(snapshot.bytes().unwrap(), raw());
+        assert_eq!(fs::metadata(&s.0).unwrap().mode() & 0o777, 0o775);
+        assert_eq!(
+            fs::metadata(s.0.join("creations.json")).unwrap().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(s.0.join("creation-preload-v1"))
+                .unwrap()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_above_or_at_the_native_data_folder_are_resolved_once() {
+        use std::os::unix::fs::symlink;
+        for kind in ["home", "xdg-data", "local-share", "data-folder"] {
+            let s = Scratch::new();
+            let data = s.0.join("real-home/.local/share/com.hgdev.hgs-tray");
+            fs::create_dir_all(&data).unwrap();
+            crate::fsx::write_private_durable(&data.join("creations.json"), &raw()).unwrap();
+            let alias = s.0.join(kind);
+            let (target, tail) = match kind {
+                "home" => (s.0.join("real-home"), ".local/share/com.hgdev.hgs-tray"),
+                "data-folder" => (data.clone(), ""),
+                _ => (s.0.join("real-home/.local/share"), "com.hgdev.hgs-tray"),
+            };
+            symlink(target, &alias).unwrap();
+            let capture = Capture::new(alias.join(tail));
+            let Prepared::Snapshot(original) = capture.prepare().unwrap() else {
+                panic!("missing")
+            };
+            assert_eq!(original.bytes().unwrap(), raw());
+            assert!(!capture.status().paused);
+            // A later alias retarget does not adopt another home's source.
+            let other = s.0.join("other");
+            fs::create_dir_all(other.join(tail)).unwrap();
+            crate::fsx::write_private_durable(
+                &other.join(tail).join("creations.json"),
+                br#"{"schema":1,"operations":{},"different":true}"#,
+            )
+            .unwrap();
+            fs::remove_file(&alias).unwrap();
+            symlink(&other, &alias).unwrap();
+            let Prepared::Snapshot(again) = capture.prepare().unwrap() else {
+                panic!("missing")
+            };
+            assert_eq!(again.capture_id(), original.capture_id());
+            assert_eq!(again.bytes().unwrap(), raw());
+            assert!(!other.join(tail).join("creation-preload-v1").exists());
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_canonical_data_directory_is_not_adopted_on_retry() {
+        let s = Scratch::new();
+        let data = s.0.join("data");
+        fs::create_dir(&data).unwrap();
+        crate::fsx::write_private_durable(&data.join("creations.json"), &raw()).unwrap();
+        let capture = Capture::new(data.clone());
+        assert!(capture.prepare().is_ok());
+        fs::rename(&data, s.0.join("old-data")).unwrap();
+        fs::create_dir(&data).unwrap();
+        crate::fsx::write_private_durable(&data.join("creations.json"), &raw()).unwrap();
+        assert!(matches!(capture.prepare(), Err(SourceError::SourceChanged)));
+        assert!(!data.join("creation-preload-v1").exists());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn a_nonprivate_archive_slot_has_a_specific_status_and_same_source_retry() {
+        use std::os::unix::fs::PermissionsExt;
+        let s = Scratch::new();
+        s.source(&raw());
+        let slot = s.0.join("creation-preload-v1");
+        fs::create_dir(&slot).unwrap();
+        fs::set_permissions(&slot, fs::Permissions::from_mode(0o775)).unwrap();
+        let capture = s.capture();
+        assert!(capture.prepare().is_err());
+        assert_eq!(capture.status().code, "creation_source_private_slot");
+        assert!(!slot.join("identity.json").exists());
+        assert_eq!(fs::read(s.0.join("creations.json")).unwrap(), raw());
+        fs::set_permissions(&slot, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(capture.prepare().is_ok());
     }
     #[cfg(windows)]
     #[test]

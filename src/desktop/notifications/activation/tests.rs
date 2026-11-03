@@ -363,3 +363,57 @@ fn a_changed_full_proof_cannot_deliver_a_click_during_the_cache_interval() {
     );
     assert!(router.pending.is_empty());
 }
+
+#[test]
+fn only_a_delivered_open_lends_foreground_to_its_exact_receiver() {
+    use std::sync::atomic::Ordering;
+    let f = Fixture::new();
+    let mut router = f.router();
+    let mut seq = 0;
+    let probe = |router: &mut Router| {
+        let probe = Arc::new(ui_authority::ActivationProbe::default());
+        router.waiting.as_mut().unwrap().peer.set_probe(
+            probe.clone(),
+            Instant::now() + std::time::Duration::from_secs(3600),
+        );
+        probe
+    };
+    // A timeout reply carries no click and lends nothing.
+    let (_, empty) = f.wait(&mut router);
+    let idle = probe(&mut router);
+    router.waiting.as_mut().unwrap().until = Instant::now();
+    router.poll(&f.store, Some(&f.outbox), &mut seq);
+    let frame: Value = serde_json::from_slice(&empty.take().unwrap()).unwrap();
+    assert!(frame["value"]["activation"].is_null());
+    assert_eq!(idle.foreground.load(Ordering::SeqCst), 0);
+    // A refused handoff keeps the known-unsent click and lends nothing.
+    router.offer(&f.store, &f.outbox, f.value.clone()).unwrap();
+    let (_, refused) = f.wait(&mut router);
+    let changed = probe(&mut router);
+    changed.valid.store(false, Ordering::SeqCst);
+    router.poll(&f.store, Some(&f.outbox), &mut seq);
+    assert!(refused.take().is_none());
+    assert_eq!(changed.foreground.load(Ordering::SeqCst), 0);
+    assert_eq!(router.pending.len(), 1);
+    // The delivered Open lends once to the receiver that gets it.
+    let (_, delivered) = f.wait(&mut router);
+    let current = probe(&mut router);
+    router.poll(&f.store, Some(&f.outbox), &mut seq);
+    let frame: Value = serde_json::from_slice(&delivered.take().unwrap()).unwrap();
+    assert_eq!(
+        frame["value"]["activation"]["post_request_id"],
+        f.value.request_id
+    );
+    assert_eq!(current.foreground.load(Ordering::SeqCst), 1);
+    assert_eq!(router.status()["foreground"], json!({"lent":1,"refused":0}));
+    // A receiver that cannot take the right still gets its click.
+    router.offer(&f.store, &f.outbox, f.value.clone()).unwrap();
+    let (_, without) = f.wait(&mut router);
+    let refusing = probe(&mut router);
+    refusing.foreground_right.store(false, Ordering::SeqCst);
+    router.poll(&f.store, Some(&f.outbox), &mut seq);
+    let frame: Value = serde_json::from_slice(&without.take().unwrap()).unwrap();
+    assert!(!frame["value"]["activation"].is_null());
+    assert_eq!(refusing.foreground.load(Ordering::SeqCst), 1);
+    assert_eq!(router.status()["foreground"], json!({"lent":1,"refused":1}));
+}

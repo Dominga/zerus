@@ -89,9 +89,18 @@ fn one_worker_child() {
     let (read, reader) = std::sync::mpsc::channel();
     let blocked = service.clone();
     let _reader = tauri::async_runtime::spawn(async move {
-        let connected = blocked.snapshot().connected;
+        let connected = blocked.shared.snapshot.lock().connected;
         let _ = read.send(connected);
     });
+    // zerus-hj2s: status answers meanwhile, from its copy, on a worker too.
+    let (status, answer) = std::sync::mpsc::channel();
+    let asked = service.clone();
+    let _status = tauri::async_runtime::spawn(async move {
+        let _ = status.send(asked.snapshot().connected);
+    });
+    assert!(answer
+        .recv_timeout(Duration::from_secs(5))
+        .expect("status answers while the view callback is blocked"));
     std::thread::sleep(Duration::from_millis(100));
     // A runtime timer and a command (a pump read, as commands do) still run.
     let (fired, timer) = std::sync::mpsc::channel();

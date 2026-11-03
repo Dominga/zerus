@@ -4,6 +4,7 @@ use std::{fs, path::Path, time::Instant};
 mod admission_starvation;
 mod notification_receipts;
 mod quit_deadline;
+mod readiness;
 mod restart;
 mod silent_watch;
 mod source_meta;

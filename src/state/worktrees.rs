@@ -56,8 +56,43 @@ pub(super) fn error(state: &'static str, detail: impl Into<String>) -> GitError 
 }
 
 pub(super) fn git(cwd: &Path, args: &[&str], deadline: Instant) -> std::result::Result<Vec<u8>, GitError> {
-    if mobile_stopped() || Instant::now() >= deadline { return Err(error("timeout", "Git operation cancelled or timed out")); }
+    git_holding(cwd, args, deadline, None)
+}
+
+/// Like [`git`], and on Unix the Git process also holds `lock`: it inherits
+/// that one descriptor (an flock belongs to the open file description), so
+/// the lock stays taken until Git and anything it starts have exited, even if
+/// this process is killed first. Only this child inherits it; every other
+/// descriptor, and every other child, keeps close-on-exec.
+pub(super) fn git_holding(
+    cwd: &Path,
+    args: &[&str],
+    deadline: Instant,
+    lock: Option<&fs::File>,
+) -> std::result::Result<Vec<u8>, GitError> {
+    if mobile_stopped() || Instant::now() >= deadline {
+        return Err(error("timeout", "Git operation cancelled or timed out"));
+    }
     let mut command = Command::new("git");
+    #[cfg(unix)]
+    if let Some(lock) = lock {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+        let fd = lock.as_raw_fd();
+        // SAFETY: runs in the forked child just before exec and calls only
+        // fcntl, which is async-signal-safe.
+        unsafe {
+            command.pre_exec(move || {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = lock;
     command
         .args(["--no-optional-locks", "-c", "core.fsmonitor=false", "-C"])
         .arg(cwd)
@@ -315,6 +350,11 @@ pub(super) fn catalog_until(path: &Path, refresh: bool, deadline: Instant) -> Va
             .map(|branch|json!(branch.trim_end_matches('\n'))).unwrap_or(Value::Null);
         snapshot["path"] = json!(path);
         snapshot["stale"] = json!(false);
+        // Partial-removal records of this repository, read fresh and never
+        // cached with the listing: a reader reviews the repository for them.
+        if let Ok(count) = super::worktree_maintenance::removal_count(&common) {
+            snapshot["leftovers"] = json!(count);
+        }
         Ok::<_, GitError>(snapshot)
     })();
     match result {
@@ -352,7 +392,23 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             "create" => create(&args[1..])?,
             "status" | "cancel" => super::worktree_requests::control(action, &args[1..])?,
             "review" => super::worktree_cleanup::review_command(&args[1..])?,
-            "keep-folder" => super::worktree_cleanup::keep_folder_command(&args[1..])?,
+            "keep-folder" => {
+                let (result, attempted) = super::worktree_cleanup::keep_folder_command(&args[1..]);
+                if let Err(detail) = &result {
+                    if args.iter().any(|s| s == "--json") {
+                        let option =
+                            |key| args.windows(2).find(|w| w[0] == key).map(|w| w[1].as_str());
+                        println!(
+                            "{}",
+                            json!({"operation":"worktree_leftover_keep","outcome_version":1,
+                            "status":if attempted {"unconfirmed"} else {"kept"},
+                            "path":option("--path"),"common_dir":option("--common-dir"),
+                            "request_id":option("--request-id"),"detail":detail})
+                        );
+                    }
+                }
+                result?
+            }
             "leftovers" => super::worktree_cleanup::leftovers_command(&args[1..])?,
             "delete-leftover" => {
                 let (result, attempted) =

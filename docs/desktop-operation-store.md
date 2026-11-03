@@ -49,6 +49,26 @@ limit still applies; this is not a hard WAL-size or physical-disk qualification.
 `admit(Admission)` freezes one original and returns its Admitted identity.
 An exact duplicate returns the original metadata; changing an admission UUID's
 identity, bodies, Binding or provenance refuses. It grants no execution.
+`admit_in`, `reserve_in` and `custody::reserve_in` require the main database
+already to be in SQLite's
+[WRITE transaction state](https://www.sqlite.org/c3ref/txn_state.html). An untouched or read-only
+DEFERRED transaction refuses before the call can upgrade it. The actor acquires
+the writer lock, rechecks its original opaque native proof and current lease,
+and only then calls these APIs. Each call uses a
+[savepoint](https://www.sqlite.org/lang_savepoint.html): an error rolls back
+its changes, even if the caller records a refusal and commits the outer
+transaction. Successful calls release only their savepoint; reservation and
+custody become durable together on the actor's outer commit. Savepoint-cleanup
+failure also requests outer rollback, retaining the original error and cleanup
+diagnostics. If SQLite rolled back the whole transaction, the error carries
+`OuterTransactionRolledBack` as a typed context and preserves the original cause.
+The caller must abandon that `Transaction`, without writing even a refusal
+through it: direct SQLite writes would now autocommit independently. Further
+`_in` calls on it refuse before any write. A later native-guard refusal still
+requires actor rollback.
+These APIs create no runtime permit or physical drain proof. The existing
+connection-based calls validate inputs before acquiring their IMMEDIATE writer
+lock and delegate to the same protected bodies.
 `load(operation_id)` returns one bounded private Frozen original for policy
 revalidation. Neither Admission nor Frozen implements Debug or Serialize.
 

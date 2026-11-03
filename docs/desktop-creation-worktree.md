@@ -41,7 +41,7 @@ are worktree-specific.
   the original custody lock released. A lost result is read from the original
   CLI receipt and is never re-run.
 - **Storage.** The ledger has its own tables, `desktop_creation_worktrees`
-  and `desktop_creation_worktree_budget`, added at Store schema 22 by merge
+  and `desktop_creation_worktree_budget`, added at Store schema 23 by merge
   order. The bounds are the same as clone's: 4096 IDs, 16 MiB, 32 unsettled
   charges and one effect worker.
 - **Accounting.** Its undrained charges join `operation_undrained` and the

@@ -4,10 +4,16 @@ import { invoke } from "@tauri-apps/api/core";
 import { toast } from "../../store/notices";
 import type { Inspection } from "../../store/terminationCleanup";
 export const PAGE = 256, LIMIT = 64;
-export const CATEGORIES = [trNoop("Cleanup candidates"), trNoop("Review work"), trNoop("In use"), trNoop("Not checked"), trNoop("Main folders")];
+export const CATEGORIES = [trNoop("Cleanup candidates"), trNoop("Review work"), trNoop("In use"), trNoop("Not checked"), trNoop("Main folders"), trNoop("Partially removed")];
+/** Partially removed folders: their own group, never part of a cleanup selection. */
+export const LEFTOVERS = 5;
+export const selectable = (category: number) => category < 4;
 export interface Filter { search: string; project: string; computer: string; category: number | null; show_main: boolean; sort: "size" | "activity" | "name" }
 export const emptyFilter = (): Filter => ({ search: "", project: "", computer: "", category: null, show_main: false, sort: "size" });
-export interface OverviewRow { id: string; path: string; branch: string; machine: string; computer: string; category: number; state: string; remains: string; size: string; fresh: boolean; sessions: string[] }
+export type Settled = { outcome: "deleted" } | { outcome: "forgotten" } | { outcome: "resolved" } | { outcome: "refused"; detail: string } | { outcome: "unknown"; detail: string };
+/** A reviewed leftover as the native side shows it; the folder and repository stay native. */
+export interface Leftover { branch: string; branch_retained: boolean | null; bytes: number | null; complete: boolean; stopped: string; interrupted: boolean; reasons: string[]; sessions: string[]; processes: number; fingerprint: string; consent: boolean; deletable: boolean; repository: boolean; reserved_at: number | null; outcome: Settled | null }
+export interface OverviewRow { id: string; path: string; branch: string; kind: string; machine: string; computer: string; category: number; state: string; remains: string; size: string; fresh: boolean; sessions: string[]; leftover: Leftover | null }
 export interface Frame { id: string; reading: boolean; processed: number; total: number; incomplete: number; pending: number; repositories: number; partial: boolean; updated: number | null; page: { index: number; total: number; groups: { name: string; category: number; total: number; rows: OverviewRow[] }[]; selected: number; selected_ids: string[]; candidates: number; estimated_bytes: number | null; partial: boolean } }
 export interface ManualRow { id: string; path: string; label: string; computer: string; machine: string; branch: string; size: string; status: "removed" | "kept" | "unknown" | "ready" | "checking" | "removing"; reason: string; details: string; ready: boolean; can_check: boolean; forgotten: boolean }
 export interface Consents { local_files: boolean; discard_changes: boolean; unchecked_processes: boolean; merged_branches: boolean }
@@ -68,6 +74,23 @@ export function createOverview(call: Call = invoke, warn = (e: unknown) => toast
     remove(consents: Consents) { return action(async () => { const current = batch()!; const value = await call<Manual>("worktree_manual_remove", { id: current.id, revision: current.revision, consents }); if (!closed) { setBatch(value); await updateBatch(); } }); },
     stop() { return action(async () => { const value = await call<Manual>("worktree_manual_stop", { id: batch()!.id, close: false }); if (!closed) { setBatch(value); await updateBatch(); } }); },
     async closeBatch() { if (closed || working() || batch()?.busy) return; await action(async () => { const key = batch()!.id; await call("worktree_manual_stop", { id: key, close: true }); if (!closed && batch()?.id === key) setBatch(undefined); }); if (!closed) { await call("worktree_overview_refresh", { id }).catch(warn); setGeneration((n) => n + 1); await pull(); } },
+    /** One explicit leftover action on the displayed row: Keep folder without
+     * consent, Delete remaining files with it. The native side checks the
+     * displayed fingerprint and runs the call once; its refusals before
+     * anything ran arrive as `refused`. A string is a reply that never came
+     * back, shown as unknown and never a reason to try again by itself. */
+    async leftover(row: OverviewRow, consent: boolean | null): Promise<Settled | string> {
+      const item = row.leftover;
+      if (closed || working() || !item) return "Worktrees are busy. Try again after the current action finishes.";
+      setWorking(true);
+      try {
+        const args = { id, row: row.id, fingerprint: item.fingerprint };
+        const value = consent === null ? await call<Settled>("worktree_leftover_keep", args) : await call<Settled>("worktree_leftover_delete", { ...args, consent });
+        void pull();
+        return value;
+      } catch (error) { return String(error); }
+      finally { if (!closed) setWorking(false); }
+    },
     inspect(row: string, file = "", offset = 0) { return call<Inspection>("worktree_overview_inspect", { id, row, file, offset }); },
     inspectBatch(key: string, row: string, file = "", offset = 0) { return call<Inspection>("worktree_manual_inspect", { id: key, row, file, offset }); },
     dispose() { closed = true; version++; if (batch()) void call("worktree_manual_stop", { id: batch()!.id, close: true }).catch(() => {}); if (id) void call("worktree_overview_close", { id }).catch(() => {}); },

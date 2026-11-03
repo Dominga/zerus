@@ -81,6 +81,13 @@ pub mod reason {
     pub const RESET: &str = "reset";
 }
 
+/// Codes of `error` frames that clients act on.
+pub mod code {
+    /// Fatal: an update replaced the `hgs` executable this stream runs.
+    /// Start the stream again to run the new version; rows stay as known.
+    pub const HGS_REPLACED: &str = "hgs_replaced";
+}
+
 /// One line of the stream.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Frame {

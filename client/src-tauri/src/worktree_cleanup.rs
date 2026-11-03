@@ -1,5 +1,6 @@
 //! Explicit Worktrees review. The existing core/CLI checks own removal;
 //! this bounded dialog retains immutable review rows and one-use confirmations.
+pub mod leftover;
 pub mod manual;
 pub mod reminder;
 

@@ -16,7 +16,7 @@ mod ledger;
 
 // Merge-order allocation: the next free Store version when this lands. A
 // later schema merge renumbers this one constant, never standalone DDL.
-pub(super) const SCHEMA: i64 = 22;
+pub(super) const SCHEMA: i64 = 23;
 /// Test rewind of this leaf for older-version upgrade fixtures; dropping the
 /// tables drops their triggers and indexes.
 #[cfg(test)]

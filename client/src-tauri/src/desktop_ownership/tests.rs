@@ -518,6 +518,401 @@ mod native {
     }
 
     #[test]
+    fn a_lost_grant_reply_is_looked_up_once_and_only_definitive_not_applied_admits_a_fresh_grant() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        tauri::async_runtime::block_on(async {
+            for definitive in [true, false] {
+                // The actual original child binds, loses its reply and exits.
+                let f = Fixture::new(
+                    Mode::Service,
+                    json!({"ready":true,"lost":true,"lost_once":true,"definitive":definitive}),
+                );
+                let (service, _) = f.service();
+                until("the original's reply is lost after its exit", || {
+                    f.calls("frontend-request").len() == 1 && f.calls("watch").len() == 1
+                })
+                .await;
+                let original = f.calls("frontend-request")[0]["value"]["request"].clone();
+                // Only an original with a verified exit is looked up at all.
+                until("the exact original is looked up", || {
+                    f.calls("ownership-result").len() == 1
+                })
+                .await;
+                let lookup = &f.calls("ownership-result")[0]["value"];
+                assert_eq!(lookup["original_request_id"], original["request_id"]);
+                assert_eq!(lookup["journal"], original["journal"]);
+                assert_eq!(lookup["revision"], original["revision"]);
+                if definitive {
+                    until("a fresh Grant after definitive not-applied", || {
+                        service
+                            .snapshot()
+                            .notification_ownership
+                            .as_ref()
+                            .is_some_and(|v| v["status"]["state"] == "service" && v["code"] == "")
+                    })
+                    .await;
+                    let calls = f.calls("frontend-request");
+                    assert_eq!(calls.len(), 2);
+                    let fresh = &calls[1]["value"]["request"];
+                    assert_eq!(fresh["action"], "grant");
+                    assert_ne!(fresh["request_id"], original["request_id"]);
+                } else {
+                    // Past the next two backoff steps: still fenced, one lookup.
+                    tokio::time::sleep(Duration::from_millis(3500)).await;
+                    assert_eq!(f.calls("frontend-request").len(), 1, "never resent");
+                    assert_eq!(f.calls("ownership-result").len(), 1);
+                    let view = service.snapshot().notification_ownership.unwrap();
+                    assert_eq!(view["pending"], true, "{view}");
+                    assert_eq!(view["code"], "ownership_unconfirmed", "{view}");
+                    assert_eq!(view["request_id"], original["request_id"], "{view}");
+                }
+                service.join().await.unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn an_authority_change_after_a_definitive_negative_fences_the_recovery_grant() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        tauri::async_runtime::block_on(async {
+            for (journal, revision) in [
+                ("00000000-0000-4000-8000-000000000005", 4),
+                ("00000000-0000-4000-8000-000000000007", 3),
+            ] {
+                let f = Fixture::new(
+                    Mode::Service,
+                    json!({"ready":true,"lost":true,"lost_once":true,"definitive":true}),
+                );
+                let (service, _) = f.service();
+                let code = || {
+                    service
+                        .snapshot()
+                        .notification_ownership
+                        .map(|v| v["code"].clone())
+                };
+                until("a definitive not-applied for the lost original", || {
+                    f.calls("ownership-result").len() == 1
+                        && code() == Some(json!("ownership_not_applied"))
+                })
+                .await;
+                // The authority moves on before recovery's next step; no
+                // explicit status read happens here.
+                fs::write(
+                    f.root.join("current.json"),
+                    json!({"abi":"desktop-ownership-v1","configuration":"a".repeat(64),
+                        "journal":journal,"revision":revision,"state":"passive",
+                        "rearm_required":false,"request_id":null,"owner_epoch":null,
+                        "identity_current":false})
+                    .to_string(),
+                )
+                .unwrap();
+                until("the fresh authority read fences recovery", || {
+                    code() == Some(json!("ownership_changed"))
+                })
+                .await;
+                tokio::time::sleep(Duration::from_millis(2500)).await;
+                assert_eq!(
+                    f.calls("frontend-request").len(),
+                    1,
+                    "no Grant at the changed {journal}/{revision}"
+                );
+                let view = service.snapshot().notification_ownership.unwrap();
+                assert_eq!(view["code"], "ownership_changed", "{view}");
+                assert_eq!(view["status"]["revision"], revision, "{view}");
+                assert_eq!(view["status"]["journal"], journal, "{view}");
+                service.join().await.unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn a_check_between_recovery_eligibility_and_admission_never_admits_an_unbound_grant() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        tauri::async_runtime::block_on(async {
+            let f = Fixture::new(
+                Mode::Service,
+                json!({"ready":true,"lost":true,"lost_once":true,"definitive":true}),
+            );
+            let (entered, paused) = std::sync::mpsc::channel();
+            let (resume, released) = tokio::sync::oneshot::channel();
+            crate::desktop_service::recovery_pause::arm(f.root.join("hgs"), entered, released);
+            let (service, _) = f.service();
+            let view = || {
+                service
+                    .snapshot()
+                    .notification_ownership
+                    .unwrap_or_default()
+            };
+            until("a definitive not-applied for the lost original", || {
+                f.calls("ownership-result").len() == 1 && view()["code"] == "ownership_not_applied"
+            })
+            .await;
+            // Recovery chose its fresh Grant step and holds before admission.
+            let held = std::sync::atomic::AtomicBool::new(false);
+            until("recovery paused before admission", || {
+                held.fetch_or(paused.try_recv().is_ok(), Ordering::AcqRel)
+                    || held.load(Ordering::Acquire)
+            })
+            .await;
+            assert_eq!(f.calls("frontend-request").len(), 1);
+            // The authority moves on and a real Check reads it in that window.
+            fs::write(
+                f.root.join("current.json"),
+                json!({"abi":"desktop-ownership-v1","configuration":"a".repeat(64),
+                    "journal":"00000000-0000-4000-8000-000000000005","revision":4,
+                    "state":"passive","rearm_required":false,"request_id":null,
+                    "owner_epoch":null,"identity_current":false})
+                .to_string(),
+            )
+            .unwrap();
+            let checked = service.ownership_result().await;
+            assert_eq!(checked.status.as_ref().unwrap().revision, 4, "{checked:?}");
+            assert_ne!(checked.code, "ownership_not_applied");
+            resume.send(()).unwrap();
+            tokio::time::sleep(Duration::from_millis(2500)).await;
+            assert_eq!(
+                f.calls("frontend-request").len(),
+                1,
+                "no unbound Grant after the allowance vanished"
+            );
+            let view = view();
+            assert_eq!(view["status"]["revision"], 4, "{view}");
+            assert_eq!(view["status"]["state"], "passive", "{view}");
+            service.join().await.unwrap();
+        });
+    }
+
+    fn status_at(journal: &str, revision: u64) -> Value {
+        json!({"abi":"desktop-ownership-v1","configuration":"a".repeat(64),
+            "journal":journal,"revision":revision,"state":"passive","rearm_required":false,
+            "request_id":null,"owner_epoch":null,"identity_current":false})
+    }
+
+    #[test]
+    fn the_retry_decision_table_never_downgrades_a_basis_or_admits_an_unverified_grant() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        // A retained basis: the real lost original plus its definitive lookup.
+        let f = Fixture::new(
+            Mode::Service,
+            json!({"lost":true,"missing":true,"definitive":true}),
+        );
+        assert!(f.run(Some(Action::Grant)).pending);
+        assert_eq!(f.run(None).code, "ownership_not_applied");
+        let basis = Controller::not_applied_basis(&f.owner.state()).unwrap();
+        let original = f.owner.state().status.clone().unwrap();
+        let mut revision = original.clone();
+        revision.revision += 1;
+        let mut journal = original.clone();
+        journal.journal = Some("00000000-0000-4000-8000-000000000007".into());
+        let mut rearm = original.clone();
+        rearm.rearm_required = true;
+        for code in [
+            "ownership_not_applied",
+            "ownership_transport_busy",
+            "",
+            "ownership_changed",
+        ] {
+            for (status, expected) in [
+                (Some(&original), Some(Reason::NotApplied(basis.clone()))),
+                (None, Some(Reason::NotApplied(basis.clone()))),
+                (Some(&revision), None),
+                (Some(&journal), None),
+                (Some(&rearm), None),
+            ] {
+                let mut state = f.owner.state();
+                state.code = code.into();
+                state.status = status.cloned();
+                // Never Capacity or Refused instead of the basis.
+                assert_eq!(
+                    Controller::grant_reason(&state),
+                    expected,
+                    "{code:?} {status:?}"
+                );
+            }
+        }
+        // A transient refusal retries only against its own unchanged status,
+        // also when a later local transport-busy code masks its code.
+        let r = Fixture::new(Mode::Service, json!({"refuse":"ownership_drain_pending"}));
+        r.run(Some(Action::Grant));
+        let current = r.owner.state().status.clone().unwrap();
+        let mut moved = current.clone();
+        moved.revision += 1;
+        // Bound to the refusal receipt's own authority scope.
+        let scope = Basis {
+            configuration: current.configuration.clone(),
+            journal: current.journal.clone(),
+            revision: current.revision,
+        };
+        for (code, status, expected) in [
+            (
+                "ownership_drain_pending",
+                Some(&current),
+                Some(Reason::Refused(scope.clone())),
+            ),
+            ("", Some(&current), Some(Reason::Refused(scope.clone()))),
+            (
+                "ownership_transport_busy",
+                Some(&current),
+                Some(Reason::Refused(scope.clone())),
+            ),
+            ("ownership_changed", Some(&current), None),
+            ("ownership_drain_pending", Some(&moved), None),
+            ("ownership_drain_pending", None, None),
+        ] {
+            let mut state = r.owner.state();
+            state.code = code.into();
+            state.status = status.cloned();
+            assert_eq!(
+                Controller::grant_reason(&state),
+                expected,
+                "{code:?} {status:?}"
+            );
+        }
+        // Capacity only at a cold start, before any original.
+        let cold = Fixture::new(Mode::Service, json!({}));
+        {
+            let mut state = cold.owner.state();
+            state.code = "ownership_transport_busy".into();
+            assert_eq!(Controller::grant_reason(&state), Some(Reason::Capacity));
+            state.running = true;
+            assert_eq!(Controller::grant_reason(&state), None);
+            state.running = false;
+            state.code.clear();
+            assert_eq!(Controller::grant_reason(&state), None);
+        }
+        // After any original (granted, or still unknown), capacity is no reason.
+        let granted = Fixture::new(Mode::Service, json!({}));
+        granted.run(Some(Action::Grant));
+        let unknown = Fixture::new(Mode::Service, json!({"lost":true,"missing":true}));
+        unknown.run(Some(Action::Grant));
+        for owner in [&granted.owner, &unknown.owner] {
+            let mut state = owner.state();
+            state.code = "ownership_transport_busy".into();
+            assert_eq!(Controller::grant_reason(&state), None);
+        }
+    }
+
+    #[test]
+    fn a_transient_refusal_retry_is_fenced_when_the_authority_scope_moves() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        tauri::async_runtime::block_on(async {
+            for (journal, revision) in [
+                ("00000000-0000-4000-8000-000000000005", 4),
+                ("00000000-0000-4000-8000-000000000007", 3),
+            ] {
+                // Startup's three bounded drain refusals, all at revision 3.
+                let f = Fixture::new(
+                    Mode::Service,
+                    json!({"ready":true,"refuse":"ownership_drain_pending","refuse_count":3}),
+                );
+                let (entered, paused) = std::sync::mpsc::channel();
+                let (resume, released) = tokio::sync::oneshot::channel();
+                crate::desktop_service::recovery_pause::arm(f.root.join("hgs"), entered, released);
+                let (service, _) = f.service();
+                let held = std::sync::atomic::AtomicBool::new(false);
+                until("recovery paused before its fresh retry", || {
+                    held.fetch_or(paused.try_recv().is_ok(), Ordering::AcqRel)
+                        || held.load(Ordering::Acquire)
+                })
+                .await;
+                assert_eq!(f.calls("frontend-request").len(), 3);
+                // The authority scope moves without any Check; the drain
+                // refusal is gone too.
+                f.config(json!({"ready":true}));
+                fs::write(
+                    f.root.join("current.json"),
+                    status_at(journal, revision).to_string(),
+                )
+                .unwrap();
+                resume.send(()).unwrap();
+                until("the fresh read fences the refusal retry", || {
+                    service
+                        .snapshot()
+                        .notification_ownership
+                        .is_some_and(|v| v["code"] == "ownership_changed")
+                })
+                .await;
+                tokio::time::sleep(Duration::from_millis(2500)).await;
+                assert_eq!(
+                    f.calls("frontend-request").len(),
+                    3,
+                    "no Grant at the moved {journal}/{revision}"
+                );
+                let view = service.snapshot().notification_ownership.unwrap();
+                assert_eq!(view["status"]["revision"], revision, "{view}");
+                assert_eq!(view["status"]["journal"], journal, "{view}");
+                service.join().await.unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn a_busy_check_never_turns_a_retained_basis_into_an_unbound_grant() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        tauri::async_runtime::block_on(async {
+            let f = Fixture::new(
+                Mode::Service,
+                json!({"lost":true,"missing":true,"definitive":true}),
+            );
+            assert!(f.run(Some(Action::Grant)).pending);
+            assert_eq!(f.run(None).code, "ownership_not_applied");
+            let statuses = f.calls("ownership-status").len();
+            // Both real gate charges are held while a real Check runs.
+            let held = [
+                f.owner.gate.admit(Role::Fleet).unwrap(),
+                f.owner.gate.admit(Role::Fleet).unwrap(),
+            ];
+            let checked = f.owner.request(None, Some("a".repeat(64)), None).await;
+            assert_eq!(checked.code, "ownership_transport_busy");
+            assert_eq!(
+                f.calls("ownership-status").len(),
+                statuses,
+                "no status read"
+            );
+            assert!(f.owner.retryable_grant(), "a busy Check masks no basis");
+            // The authority moves on before recovery's next step.
+            fs::write(
+                f.root.join("current.json"),
+                status_at("00000000-0000-4000-8000-000000000005", 4).to_string(),
+            )
+            .unwrap();
+            drop(held);
+            let view = f
+                .owner
+                .recovery_grant("a".repeat(64), Arc::new(AtomicBool::new(false)))
+                .await;
+            assert_eq!(view.code, "ownership_changed", "{view:?}");
+            assert_eq!(view.status.unwrap().revision, 4);
+            assert_eq!(f.calls("frontend-request").len(), 1, "no unbound Grant");
+            assert!(!f.owner.retryable_grant());
+        });
+    }
+
+    #[test]
+    fn only_a_verified_exit_and_unchanged_scope_let_not_applied_admit_a_grant() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        let f = Fixture::new(Mode::Service, json!({"lost":true,"missing":true}));
+        assert!(f.run(Some(Action::Grant)).pending);
+        assert!(f.owner.uncertain_grant().is_some());
+        f.owner.state().intent.as_mut().unwrap().exit_confirmed = false;
+        assert!(f.owner.uncertain_grant().is_none(), "ExitUnverified");
+        f.owner.state().intent.as_mut().unwrap().exit_confirmed = true;
+        // Missing but not definitive: still unknown and fenced.
+        assert!(f.run(None).pending);
+        assert!(!f.owner.retryable_grant());
+        f.config(json!({"missing":true,"definitive":true}));
+        let settled = f.run(None);
+        assert_eq!(settled.code, "ownership_not_applied");
+        assert!(f.owner.uncertain_grant().is_none());
+        assert!(f.owner.retryable_grant());
+        // A later status read that differs from the original's scope decides.
+        f.config(json!({"state":"revoked","rearm_required":true}));
+        f.run(None);
+        assert!(!f.owner.retryable_grant());
+        assert_eq!(f.calls("frontend-request").len(), 1);
+    }
+
+    #[test]
     fn connection_close_joins_a_long_grant_backoff_without_another_attempt() {
         let _process = crate::PROCESS_TREE.read().unwrap();
         tauri::async_runtime::block_on(async {

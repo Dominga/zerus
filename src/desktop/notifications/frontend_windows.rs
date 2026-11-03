@@ -185,6 +185,12 @@ impl SelectedFrontend {
     pub fn image(&self) -> &Path {
         &self.entry
     }
+    /// Volume serial and file index of the pinned image: the only image a
+    /// frontend pipe server may run (desktop::windows::verify_server).
+    pub fn image_id(&self) -> Result<(u64, u64)> {
+        zerus_client_core::desktop::windows::file_id(&self.image.file)
+            .context("frontend image identity unavailable")
+    }
     pub fn service_image(&self) -> &Path {
         &self.cli_path
     }

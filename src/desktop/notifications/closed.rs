@@ -140,7 +140,7 @@ impl Runtime {
                 );
                 grant.revalidate_image()?;
                 let image = scope.select_frontend(grant.image())?;
-                let observation = probe(&scope.configuration)?;
+                let observation = probe(&scope.configuration, &image)?;
                 image.revalidate()?;
                 grant.revalidate_image()?;
                 ensure!(
@@ -201,16 +201,17 @@ impl Drop for Runtime {
 }
 /// Read-only absence evidence from the frontend's own activation endpoint.
 #[cfg(target_os = "linux")]
-fn probe(configuration: &str) -> Result<desktop::Observation> {
+fn probe(configuration: &str, _: &SelectedFrontend) -> Result<desktop::Observation> {
     Ok(desktop::probe_at(
         &crate::desktop::owner::instance_path(),
         &uuid::Uuid::new_v4().to_string(),
         configuration,
     ))
 }
-/// The profile pipe that the Windows GUI listens on with its hello reply.
+/// The profile pipe that the Windows GUI listens on with its hello reply. Its
+/// server must be the selected, pinned image (desktop::windows::verify_server).
 #[cfg(windows)]
-fn probe(configuration: &str) -> Result<desktop::Observation> {
+fn probe(configuration: &str, image: &SelectedFrontend) -> Result<desktop::Observation> {
     let home =
         std::env::home_dir().ok_or_else(|| anyhow::anyhow!("profile directory unavailable"))?;
     Ok(desktop::windows::probe_at(
@@ -218,6 +219,7 @@ fn probe(configuration: &str) -> Result<desktop::Observation> {
         &uuid::Uuid::new_v4().to_string(),
         configuration,
         Instant::now() + desktop::PROBE_WAIT,
+        image.image_id()?,
     ))
 }
 fn bounded(error: anyhow::Error) -> String {

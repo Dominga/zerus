@@ -6,7 +6,8 @@ SessionStart hook returns those bytes, and the agent must hand the instructions
 to its model, a localhost fixture.
 
 Run with HGS_CLAUDE_TEST_BIN and HGS_CODEX_TEST_BIN (otherwise skipped).
-The Codex exec owns a fresh Linux subreaper; unknown settlement keeps its root.
+Linux Codex exec owns a fresh subreaper; unknown settlement keeps its root.
+Other hosts retain the original direct subprocess route.
 """
 import http.server
 import json
@@ -31,12 +32,15 @@ class Native(test_fork.Base):
         super().remove_fixture_root()
 
     def run_owned_codex(self, command, env, timeout=120, drain_seconds=6):
-        """Keep root removal fenced until the original private wrapper is waited.
+        """On Linux, fence root removal until the original private wrapper is waited.
 
         File-backed streams cannot keep communicate() waiting after a detached
         child inherits a pipe. Only a bounded, nonce/PID-matched exit receipt
         from that wrapper permits removal; no filesystem retry hides a writer.
         """
+        if sys.platform != "linux":
+            return subprocess.run(command, env=env, stdin=subprocess.DEVNULL,
+                                  capture_output=True, text=True, timeout=timeout)
         self.native_settled = False
         nonce = uuid.uuid4().hex
         receipt = self.root / ("native-settlement-" + nonce + ".json")

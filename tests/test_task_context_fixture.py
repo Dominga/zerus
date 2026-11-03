@@ -72,13 +72,28 @@ else:
         self.fixture.remove_fixture_root()
         self.assertFalse(self.fixture.root.exists())
 
+    def test_macos_uses_original_direct_subprocess_route(self):
+        command = ["fixture-codex", "exec", "--ephemeral", "Hello."]
+        completed = subprocess.CompletedProcess(command, 0, "native output", "")
+        with mock.patch.object(native.sys, "platform", "darwin"), \
+                mock.patch.object(native.subprocess, "run", return_value=completed) as direct, \
+                mock.patch.object(native.subprocess, "Popen", side_effect=AssertionError("macOS entered Linux custody")) as wrapper:
+            self.assertIs(self.fixture.run_owned_codex(command, self.env), completed)
+        direct.assert_called_once_with(command, env=self.env, stdin=subprocess.DEVNULL,
+                                       capture_output=True, text=True, timeout=120)
+        wrapper.assert_not_called()
+        self.assertFalse(hasattr(self.fixture, "native_settled"))
+        self.fixture.remove_fixture_root()
+        self.assertFalse(self.fixture.root.exists())
+
     def test_wrong_wrapper_receipt_retains_root(self):
         def start(command, **kwargs):
             path = Path(command[command.index("--receipt") + 1])
             nonce = command[command.index("--nonce") + 1]
             path.write_text(json.dumps(dict(settled=True, wrapper_pid=999, nonce=nonce)))
             return mock.Mock(pid=123, wait=mock.Mock(return_value=0))
-        with mock.patch.object(native.subprocess, "Popen", side_effect=start):
+        with mock.patch.object(native.sys, "platform", "linux"), \
+                mock.patch.object(native.subprocess, "Popen", side_effect=start):
             with self.assertRaisesRegex(AssertionError, "identity mismatch"):
                 self.fixture.run_owned_codex(["unused-native"], self.env)
         with self.assertRaisesRegex(AssertionError, "settlement unknown"):
@@ -86,7 +101,8 @@ else:
         self.assertTrue(self.fixture.root.exists())
 
     def test_missing_settlement_receipt_retains_root(self):
-        with mock.patch.object(native.subprocess, "Popen", return_value=mock.Mock(pid=123, wait=mock.Mock(return_value=0))):
+        with mock.patch.object(native.sys, "platform", "linux"), \
+                mock.patch.object(native.subprocess, "Popen", return_value=mock.Mock(pid=123, wait=mock.Mock(return_value=0))):
             with self.assertRaisesRegex(AssertionError, "settlement missing"):
                 self.fixture.run_owned_codex(["unused-native"], self.env)
         with self.assertRaisesRegex(AssertionError, "settlement unknown"):
@@ -95,7 +111,8 @@ else:
 
     def test_timed_out_original_wrapper_retains_root_and_stops_only_that_child(self):
         child = mock.Mock(pid=123, wait=mock.Mock(side_effect=[subprocess.TimeoutExpired("wrapper", 1), 0]))
-        with mock.patch.object(native.subprocess, "Popen", return_value=child):
+        with mock.patch.object(native.sys, "platform", "linux"), \
+                mock.patch.object(native.subprocess, "Popen", return_value=child):
             with self.assertRaises(subprocess.TimeoutExpired):
                 self.fixture.run_owned_codex(["unused-native"], self.env)
         child.kill.assert_called_once_with()

@@ -1246,3 +1246,144 @@ fn every_source_leads_the_index_in_turn_whatever_the_walk_visits() {
         assert!(seen.iter().any(|a| a == name), "{name}: {seen:?}");
     }
 }
+
+/// Inspections that hold their approval slot until the test releases them:
+/// each call waits for its own release, after the scans `hold` asks for.
+struct Held {
+    /// Each held call: the scan it started in, its sequence and release.
+    calls: Mutex<Vec<(usize, usize, mpsc::Sender<()>)>>,
+    names: Mutex<Vec<String>>,
+    scan: AtomicUsize,
+    sequence: AtomicUsize,
+}
+impl Held {
+    fn runner() -> (Runner, Arc<Held>) {
+        let held = Arc::new(Held {
+            calls: Mutex::new(Vec::new()),
+            names: Mutex::new(Vec::new()),
+            scan: AtomicUsize::new(0),
+            sequence: AtomicUsize::new(0),
+        });
+        let record = held.clone();
+        let run: Runner = Arc::new(move |inv, _, _, _| {
+            assert!(inv.args.iter().any(|a| a == "inspect"));
+            if let Some(name) = inv.args.iter().find(|a| a.starts_with("claude/example/")) {
+                record.names.lock().unwrap().push(name.clone());
+            }
+            let (release, wait) = mpsc::channel();
+            let sequence = record.sequence.fetch_add(1, Ordering::SeqCst);
+            record.calls.lock().unwrap().push((
+                record.scan.load(Ordering::SeqCst),
+                sequence,
+                release,
+            ));
+            let _ = wait.recv_timeout(Duration::from_secs(30));
+            Exit::TimedOut
+        });
+        (run, held)
+    }
+
+    /// One-second scans: before each, the inspections held `hold(sequence)`
+    /// scans return and are collected; the cooldown counts the second.
+    fn scans(&self, f: &mut Fixture, count: usize, hold: impl Fn(usize) -> usize) {
+        for scan in 1..=count {
+            self.scan.store(scan, Ordering::SeqCst);
+            self.calls
+                .lock()
+                .unwrap()
+                .retain(|(at, sequence, release)| {
+                    if scan - at >= hold(*sequence) {
+                        let _ = release.send(());
+                        false
+                    } else {
+                        true
+                    }
+                });
+            let held = self.calls.lock().unwrap().len();
+            f.tick_until(|r| r.jobs.len() == held);
+            f.scan();
+            // Every inspection the scan started has reached the runner.
+            let launched = f.runtime.jobs.len();
+            let until = Instant::now() + Duration::from_secs(5);
+            while self.calls.lock().unwrap().len() < launched {
+                assert!(Instant::now() < until, "a launched inspection never ran");
+                thread::sleep(Duration::from_millis(1));
+            }
+            for (_, at) in f.runtime.recent.iter_mut() {
+                *at = at.checked_sub(Duration::from_secs(1)).unwrap_or(*at);
+            }
+        }
+        for (_, _, release) in self.calls.lock().unwrap().drain(..) {
+            let _ = release.send(());
+        }
+        f.tick_until(|r| r.jobs.is_empty());
+    }
+}
+
+fn slow_rows(f: &mut Fixture) {
+    f.source_rows(
+        (0..96)
+            .map(|n| named(&format!("slow-{n}"), "approval", true))
+            .collect(),
+    );
+}
+
+#[test]
+fn slow_inspections_cannot_hand_every_admission_to_the_catalog_walk() {
+    // Review of #1191 R3: inspections that hold both slots for four scans.
+    // The turn flipped on every scan, busy or not, so each round of free
+    // slots fell on a walk-first scan and the walk re-asked slow-0 to slow-3
+    // as their cooldown ran out: slow-10 was never inspected. A turn now
+    // passes only on a scan with a free slot.
+    let (run, held) = Held::runner();
+    let mut f = Fixture::new(run);
+    f.active();
+    f.enabled(true);
+    slow_rows(&mut f);
+    held.scans(&mut f, 40, |_| 4);
+    let names = held.names.lock().unwrap();
+    assert!(
+        names.iter().any(|a| a == "claude/example/slow-10"),
+        "{names:?}"
+    );
+}
+
+#[test]
+fn staggered_inspections_share_admission_between_the_index_and_the_walk() {
+    // The two slots free on different scans (two and four scans held), but
+    // always on scans of the same parity, which a per-scan turn gave the walk.
+    let (run, held) = Held::runner();
+    let mut f = Fixture::new(run);
+    f.active();
+    f.enabled(true);
+    slow_rows(&mut f);
+    held.scans(&mut f, 60, |call| if call % 2 == 0 { 2 } else { 4 });
+    let names = held.names.lock().unwrap();
+    assert!(
+        names.iter().any(|a| a == "claude/example/slow-10"),
+        "{names:?}"
+    );
+}
+
+#[test]
+fn with_slow_inspections_every_source_still_leads_the_index_in_turn() {
+    // Leadership passes only on a scan that could admit, too: had busy
+    // index-first scans moved it on, the four held scans of every round
+    // would bring the same source back to lead each opportunity.
+    let (run, held) = Held::runner();
+    let mut f = Fixture::new(run);
+    f.active();
+    f.enabled(true);
+    let rows = |prefix: &str| -> Vec<CatalogItem> {
+        (0..96)
+            .map(|n| named(&format!("{prefix}-{n}"), "approval", true))
+            .collect()
+    };
+    f.source_rows_on("", rows("a"));
+    f.source_rows_on("peer", rows("b"));
+    held.scans(&mut f, 120, |_| 4);
+    let names = held.names.lock().unwrap();
+    for name in ["claude/example/a-10", "claude/example/b-10"] {
+        assert!(names.iter().any(|a| a == name), "{name}: {names:?}");
+    }
+}

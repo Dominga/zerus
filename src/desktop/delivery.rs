@@ -419,18 +419,21 @@ impl Runtime {
             }
         }
     }
-    fn lease(&mut self, kind: Kind) -> Option<Arc<Lease>> {
+    /// A slot of `kind` is free now.
+    fn free(&mut self, kind: Kind) -> bool {
         self.leases.retain(|lease| lease.strong_count() > 0);
         let limit = if kind == Kind::Read { READS } else { APPROVALS };
-        if self.leases.len() >= SLOTS
-            || self
+        self.leases.len() < SLOTS
+            && self
                 .leases
                 .iter()
                 .filter_map(Weak::upgrade)
                 .filter(|lease| lease.kind == kind)
                 .count()
-                >= limit
-        {
+                < limit
+    }
+    fn lease(&mut self, kind: Kind) -> Option<Arc<Lease>> {
+        if !self.free(kind) {
             return None;
         }
         let lease = Arc::new(Lease { kind });
@@ -637,11 +640,17 @@ impl Runtime {
             }
             // Sessions in an approval phase, whatever the catalog size, and
             // the one-page catalog walk as the backstop, taking turns to go
-            // first. Eligibility is unchanged.
+            // first. A turn passes only on a scan that could admit (a free
+            // approval slot): turns spent while slow inspections hold both
+            // slots would let every real admission fall to the same side.
+            // Eligibility is unchanged.
+            let open = self.free(Kind::Approval);
             let indexed_first = self.indexed_first;
-            self.indexed_first = !indexed_first;
+            if open {
+                self.indexed_first = !indexed_first;
+            }
             if indexed_first {
-                self.scan_indexed(store, true);
+                self.scan_indexed(store, open);
                 self.scan_page(store);
             } else {
                 self.scan_page(store);

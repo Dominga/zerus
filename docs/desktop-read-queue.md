@@ -239,8 +239,11 @@ row id order:
 Each indexed row then takes the same candidate, inspection, current-source and
 reservation path as before. The one-page catalog walk remains the backstop. The
 index and the walk take turns to go first, so neither keeps both approval slots.
-Each time the index goes first, it starts with the next source in turn. Every
-source's index therefore leads regularly, whatever sources the walk visits.
+A turn passes only on a scan that has a free approval slot. Otherwise, slow
+inspections that hold both slots could make every real admission fall to the
+same side. Each time the index goes first on such a scan, it starts with the
+next source in turn. Every source's index therefore leads regularly, whatever
+sources the walk visits.
 
 Rows stored before schema 22 have no flag until the scan backfills them. Each
 scan derives at most 1024 rows in one short transaction, reading their JSON one

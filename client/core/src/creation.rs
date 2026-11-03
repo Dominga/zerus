@@ -1902,6 +1902,10 @@ impl Creations {
         if text(&value, "worktree_id").is_empty() {
             value["worktree_id"] = Value::from(self.uuid());
         }
+        // The request's source folder. Preparation later moves `target` to the
+        // checkout; a service lookup of this original still needs its exact
+        // admitted plan.
+        value["worktree_source"] = value["target"].clone();
         value["worktree_receipts"] = Value::Bool(flag(&result, "creation_receipts_v1"));
         value["worktree_common"] = result["common_dir"].clone();
         self.put(id, value);

@@ -75,10 +75,12 @@ impl Plan {
             return None;
         }
         let text = |key| value[key].as_str().map(str::to_owned);
+        // Preparation moves `target` to the checkout; the admitted plan keeps
+        // the request's own source folder.
         let plan = Self {
             worktree_request_id: text("worktree_id")?,
             expected_machine: text("expected_machine")?,
-            path: text("target")?,
+            path: text("worktree_source").or_else(|| text("target"))?,
             common_dir: text("worktree_common")?,
             branch: text("branch")?,
             destination: text("destination")?,
@@ -253,6 +255,9 @@ impl Intent {
                 .get("resource_error")
                 .is_some_and(|error| error.as_str() != Some(""))
             || !clone_settled
+            || value
+                .get("worktree_source")
+                .is_some_and(|source| source.as_str() != Some(text("target")))
             || ["launch_id", "clone_id"].iter().any(|key| {
                 value
                     .get(*key)
@@ -800,6 +805,7 @@ mod tests {
         let (target, destination) = (long("/srv/repo"), long("/srv/repo-zerus-example"));
         let common = format!("{target}/.git");
         raw["target"] = json!(target);
+        raw["worktree_source"] = json!(target);
         raw["worktree_common"] = json!(common);
         raw["destination"] = json!(destination);
         intent.original = serde_json::to_string(&raw).unwrap();
@@ -841,6 +847,26 @@ mod tests {
             Some("worktree_result_unrepresentable")
         );
         assert!(project(&json!({"path":"\"".repeat(9000)})).is_none());
+    }
+
+    #[test]
+    fn the_admitted_plan_survives_preparation_moving_the_target() {
+        let verified = checkpoint().verify().unwrap();
+        let mut operation: Value = serde_json::from_str(&verified.intent.original).unwrap();
+        assert_eq!(operation["worktree_source"], json!("/srv/repo"));
+        // What prepared() leaves behind: the target is now the checkout.
+        operation["worktree_done"] = json!(true);
+        operation["target"] = json!(verified.plan.destination);
+        operation["state"] = json!("verifying");
+        let plan = Plan::from_operation(ID, &operation).unwrap();
+        assert!(plan == verified.plan, "the same exact plan and hash");
+        assert_eq!(plan.fingerprint(), verified.plan.fingerprint());
+        // A fresh intent whose source and target disagree is refused.
+        let mut intent = checkpoint();
+        let mut raw: Value = serde_json::from_str(&intent.original).unwrap();
+        raw["worktree_source"] = json!("/srv/other");
+        intent.original = serde_json::to_string(&raw).unwrap();
+        assert!(intent.verify().is_err());
     }
 
     #[test]

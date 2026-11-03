@@ -29,6 +29,14 @@ service
   resends and never falls back to the direct path.
 - **Older CLI.** If the CLI does not advertise the kind, a fresh intent fails
   as definitely unsent, and only then may the reducer retire its request UUID.
+- **Stable plan.** When it reserves the request, the reducer records its
+  source folder as `worktree_source`. Preparation later moves `target` to the
+  checkout, and the final receipt read, a resume or a restart still derive the
+  exact admitted plan and hash from that source.
+- **Status reads.** A settled Failed original answers a status read as the
+  direct `worktrees status` read does, with the failed receipt as its data, so
+  a definitely effect-free failure is recorded as Failed and its UUID retired.
+  The original create still answers it as an error.
 
 Cancel, remote creations, macOS and every creation outside desktop-service
 mode keep the existing direct `worktrees` calls.

@@ -12,10 +12,16 @@ use zerus_client_core::{
 pub(crate) const UNAVAILABLE: &str =
     zerus_client_core::source!("Worktree creation is not available from this desktop service.");
 
-/// The reducer's answer for a settled original, exactly like the direct path:
-/// a created receipt advances; a failed one carries its original receipt (so
-/// only a definitely effect-free failure may later get a new request ID).
-fn settled(receipt: &wire::Receipt, plan: &wire::Plan) -> Option<creation::Answer> {
+/// The reducer's answer for a settled original, exactly like the direct path.
+/// A created receipt advances. A failed one carries its original receipt, so
+/// only a definitely effect-free failure may later get a new request ID: for
+/// `create` as the direct create's error, and for a status read as the direct
+/// `worktrees status` read, which succeeds with that failed receipt.
+pub(crate) fn settled(
+    receipt: &wire::Receipt,
+    plan: &wire::Plan,
+    create: bool,
+) -> Option<creation::Answer> {
     Some(match receipt.result(plan)? {
         Ok(data) => creation::Answer {
             ok: true,
@@ -23,15 +29,17 @@ fn settled(receipt: &wire::Receipt, plan: &wire::Plan) -> Option<creation::Answe
             error: String::new(),
         },
         Err(error) => creation::Answer {
-            ok: false,
+            ok: !create,
             data: receipt.worktree.clone().unwrap_or(Value::Null),
-            error,
+            error: if create { error } else { String::new() },
         },
     })
 }
 
 /// Called only by the native creation host after its ordered journal barrier.
 /// `fresh` is consumed once from that host's new-submit set, never from JSON.
+/// `wait` marks the original create, which waits for its result; a status
+/// read does not.
 /// A missing or Unknown result never authorizes a resend or the direct path.
 pub(crate) fn call(
     service: Option<Arc<Service>>,
@@ -100,7 +108,7 @@ pub(crate) fn call(
             if !admission.matches(&intent) {
                 return Err(());
             }
-            if let Some(answer) = admission.receipt.and_then(|r| settled(&r, &plan)) {
+            if let Some(answer) = admission.receipt.and_then(|r| settled(&r, &plan, wait)) {
                 return Ok(answer);
             }
         }
@@ -124,7 +132,7 @@ pub(crate) fn call(
                 return Err(());
             }
             let receipt = lookup.receipt.ok_or(())?; // Missing never authorizes Start.
-            if let Some(answer) = settled(&receipt, &plan) {
+            if let Some(answer) = settled(&receipt, &plan, wait) {
                 return Ok(answer);
             }
             if !wait || receipt.drained || Instant::now() >= until {

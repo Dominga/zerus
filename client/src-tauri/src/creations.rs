@@ -2044,6 +2044,184 @@ mod tests {
         );
         fake.stop(host);
     }
+    /// A service stand-in with the transport's own checks: the fresh intent
+    /// is verified and its original stored once; every read derives the plan
+    /// from the current operation, and only a lookup of the exact admitted
+    /// plan answers, through the transport's `settled`.
+    struct Original {
+        status: &'static str,
+        /// Call indexes whose replies are lost.
+        lost: Vec<usize>,
+        receipt: Mutex<Option<zerus_client_core::desktop::creation_worktree::Receipt>>,
+        calls: Mutex<Vec<(bool, bool)>>,
+    }
+    fn faithful_service(fake: &Fake, original: Arc<Original>) -> Services {
+        use zerus_client_core::desktop::creation_worktree as wire;
+        const EPOCH: &str = "33333333-3333-4333-8333-333333333333";
+        let mut services = fake.services();
+        services.service_worktree = Some(Arc::new(move |id, operation, fresh, wait, _| {
+            let index = {
+                let mut calls = lock(&original.calls);
+                calls.push((fresh, wait));
+                calls.len() - 1
+            };
+            let unconfirmed = creation::Answer {
+                ok: false,
+                data: Value::Null,
+                error: zerus_client_core::repository::UNCONFIRMED_OPERATION.into(),
+            };
+            let scope = wire::Scope {
+                configuration: "a".repeat(64),
+                service_epoch: EPOCH.into(),
+            };
+            let Some(plan) = wire::Plan::from_operation(id, operation) else {
+                return unconfirmed;
+            };
+            if fresh {
+                let verified = wire::Intent {
+                    scope: scope.clone(),
+                    creation_id: id.into(),
+                    worktree_request_id: plan.worktree_request_id.clone(),
+                    revision: operation["revision"].as_u64().unwrap(),
+                    original: operation.to_string(),
+                }
+                .verify()
+                .unwrap();
+                let created = original.status == "created";
+                let mut receipt = json!({"schema":1,"request_id":plan.worktree_request_id,
+                    "fingerprint":plan.request_fingerprint().unwrap(),"status":original.status,
+                    "path":plan.destination,"common_dir":plan.common_dir,"branch":plan.branch,
+                    "effects_started":created});
+                if !created {
+                    receipt["detail"] = json!("The destination already exists.");
+                }
+                *lock(&original.receipt) = Some(wire::Receipt {
+                    binding: verified.binding,
+                    admission_epoch: EPOCH.into(),
+                    revision: 3,
+                    phase: if created {
+                        wire::Phase::Created
+                    } else {
+                        wire::Phase::Failed
+                    },
+                    drained: true,
+                    code: String::new(),
+                    worktree: wire::project(&receipt),
+                });
+            }
+            if original.lost.contains(&index) {
+                return unconfirmed;
+            }
+            let query = wire::Query::for_plan(scope.clone(), id.into(), &plan).unwrap();
+            let receipt = lock(&original.receipt).clone();
+            let lookup = wire::Lookup {
+                abi: wire::ABI.into(),
+                request_id: query.request_id.clone(),
+                scope,
+                read_only: true,
+                found: receipt.is_some(),
+                receipt,
+            };
+            if !lookup.matches(&query) {
+                return unconfirmed;
+            }
+            lookup
+                .receipt
+                .and_then(|r| crate::desktop_service::creation_worktree::settled(&r, &plan, wait))
+                .unwrap_or(unconfirmed)
+        }));
+        services
+    }
+    fn original(status: &'static str, lost: &[usize]) -> Arc<Original> {
+        Arc::new(Original {
+            status,
+            lost: lost.to_vec(),
+            receipt: Mutex::new(None),
+            calls: Mutex::new(Vec::new()),
+        })
+    }
+    fn launched_in_checkout(fake: &Fake) {
+        let commands = fake.log();
+        assert!(commands.iter().any(
+            |args| args.contains(&"codex".into()) && args.contains(&"/srv/repo-work-1".into())
+        ));
+        // Neither the original create nor its receipt went to the direct CLI.
+        assert!(!commands.iter().any(|args| {
+            args.iter().any(|v| v == "worktrees")
+                && args.iter().any(|v| v == "create" || v == "status")
+        }));
+    }
+    #[test]
+    fn a_created_service_worktree_verifies_its_exact_original_and_launches_in_the_checkout() {
+        let fake = Fake::new();
+        let original = original("created", &[]);
+        let host = CreationHost::new(
+            fake.dir.join("creations.json"),
+            faithful_service(&fake, original.clone()),
+        );
+        let id = admitted(&host, worktree_plan());
+        state(&host, &id, "confirming");
+        // The original create, then the final status read after preparation
+        // moved the target: both bound to the one admitted plan.
+        assert_eq!(*lock(&original.calls), [(true, true), (false, false)]);
+        let value = operation(&host, &id);
+        assert!(flag(&value, "worktree_done"));
+        assert_eq!(value["worktree_source"], json!("/srv/repo"));
+        assert_eq!(value["target"], json!("/srv/repo-work-1"));
+        launched_in_checkout(&fake);
+        fake.stop(host);
+    }
+    #[test]
+    fn a_prepared_service_worktree_resumes_after_restart_through_its_exact_original() {
+        let fake = Fake::new();
+        // The final status read's reply is lost once.
+        let original = original("created", &[1]);
+        let host = CreationHost::new(
+            fake.dir.join("creations.json"),
+            faithful_service(&fake, original.clone()),
+        );
+        let id = admitted(&host, worktree_plan());
+        state(&host, &id, "unknown");
+        assert!(flag(&operation(&host, &id), "worktree_done"));
+        fake.stop(host);
+        let host = CreationHost::new(
+            fake.dir.join("creations.json"),
+            faithful_service(&fake, original.clone()),
+        );
+        state(&host, &id, "recover");
+        host.action(id.clone(), CreationAction::Resume).unwrap();
+        state(&host, &id, "confirming");
+        assert_eq!(
+            *lock(&original.calls),
+            [(true, true), (false, false), (false, false)],
+            "one original create; recovery only reads it"
+        );
+        launched_in_checkout(&fake);
+        fake.stop(host);
+    }
+    #[test]
+    fn a_lost_reply_then_check_records_a_definite_failure_and_frees_its_request() {
+        let fake = Fake::new();
+        // The original failed before any effect; its admission reply is lost.
+        let original = original("failed", &[0]);
+        let host = CreationHost::new(
+            fake.dir.join("creations.json"),
+            faithful_service(&fake, original.clone()),
+        );
+        let id = admitted(&host, worktree_plan());
+        state(&host, &id, "unknown");
+        let request = operation(&host, &id)["worktree_id"].clone();
+        host.action(id.clone(), CreationAction::Check).unwrap();
+        state(&host, &id, "failed");
+        assert_eq!(*lock(&original.calls), [(true, true), (false, false)]);
+        let value = operation(&host, &id);
+        assert!(value.get("worktree_id").is_none(), "{value}");
+        assert!(value["worktree_previous"]
+            .as_array()
+            .unwrap()
+            .contains(&request));
+        fake.stop(host);
+    }
     #[test]
     fn a_definitely_unsent_service_worktree_fails_and_frees_its_request() {
         let fake = Fake::new();

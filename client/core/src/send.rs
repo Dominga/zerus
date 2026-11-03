@@ -229,6 +229,11 @@ const DRAFT_CHANGED: &str = "Draft changed. Send it when you are ready.";
 /// A start-to-send given up at its time limit.
 pub const NOT_READY: &str =
     "The agent did not become ready. Check Terminal; your draft was kept without sending.";
+/// The CLI's compaction refusal for a resumed conversation the agent has not
+/// confirmed yet (`clear_context::unavailable`). It is reported only after
+/// every earlier blocker (not running, unsupported, no conversation, another
+/// request or blocker) has passed.
+pub const RESUME_UNCONFIRMED: &str = "The agent has not confirmed the resumed conversation yet";
 /// A compact-to-send given up at its time limit.
 pub const NOT_COMPACTED: &str =
     "Compaction was not confirmed. Check Terminal; your draft was kept without sending.";
@@ -537,13 +542,15 @@ impl StartSend {
         if self.choice == StartChoice::ResumeCompact {
             // Codex confirms a resumed conversation only with its next turn,
             // and refuses native /compact until then: waiting for compaction
-            // would never end (zerus-le5s). The resumed conversation already
-            // takes this message (`resume_message_can_send`), so it goes as
-            // is, to the same conversation, and Codex compacts on its own
-            // when it needs to.
+            // would never end (zerus-le5s). Only when that is the refusal the
+            // CLI reports (so no earlier blocker holds, such as an unconfirmed
+            // compaction) and the resumed conversation already takes this
+            // message, it goes as is, to the same conversation; Codex compacts
+            // on its own when it needs to. Any other refusal still waits.
             let unconfirmed = !text(details, "expected_id").is_empty()
                 && flag(details, "resume_message_can_send")
-                && !flag(details, "compact_context_supported");
+                && !flag(details, "compact_context_supported")
+                && text(details, "compact_context_reason") == RESUME_UNCONFIRMED;
             if unconfirmed && !conversation.is_empty() {
                 return Step::Send {
                     run_id: run.into(),
@@ -1234,12 +1241,36 @@ mod continuation_tests {
             start.inspected(&confirmed, &draft(), false, false, 1.0),
             Step::Compact(..)
         ));
-        // Compaction refused for another reason (no resume pending) still waits.
+        // Compaction refused for another reason still waits, with the resume
+        // still pending too (review of #1220): an earlier blocker, such as an
+        // unconfirmed compaction, is what the CLI then reports.
+        let mut uncertain = resumed_unconfirmed();
+        uncertain["compact_context_request"] = json!({"status": "uncertain"});
+        uncertain["compact_context_reason"] =
+            json!("The last compaction was not confirmed. Check Terminal");
+        assert_eq!(
+            start.inspected(&uncertain, &draft(), false, false, 1.0),
+            Step::Idle
+        );
         let mut busy = resumed_unconfirmed();
-        busy["expected_id"] = json!("");
         busy["compact_context_reason"] = json!("A subagent is still working");
         assert_eq!(
             start.inspected(&busy, &draft(), false, false, 1.0),
+            Step::Idle
+        );
+        // Without any reason given (an older CLI), it waits as before.
+        let mut silent = resumed_unconfirmed();
+        silent["compact_context_reason"] = json!("");
+        assert_eq!(
+            start.inspected(&silent, &draft(), false, false, 1.0),
+            Step::Idle
+        );
+        // No resume pending, another reason: waits.
+        let mut other = resumed_unconfirmed();
+        other["expected_id"] = json!("");
+        other["compact_context_reason"] = json!("A subagent is still working");
+        assert_eq!(
+            start.inspected(&other, &draft(), false, false, 1.0),
             Step::Idle
         );
         // The exact guards stay: the same run, another conversation, a stop.

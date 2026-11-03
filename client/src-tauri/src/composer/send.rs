@@ -2594,7 +2594,8 @@ impl Composers {
         };
         self.finish(key, Some(revision), false, text, false, false);
         // A waiting send given up at its time limit says the session did not
-        // get there; the session can still get there later (zerus-le5s).
+        // get there; the session can still get there later (zerus-le5s). Its
+        // last reading names the target a later reading must match.
         if [rules::NOT_READY, rules::NOT_COMPACTED].contains(&text) {
             let seen = |key: &str| {
                 pending
@@ -2606,15 +2607,24 @@ impl Composers {
                     .to_owned()
             };
             if let Some(composer) = self.lock().composers.get_mut(key) {
-                if composer.error && composer.notice == text {
-                    composer.gave_up = Some((seen("phase"), seen("activity")));
+                if composer.error && composer.notice == text && !seen("run_id").is_empty() {
+                    composer.gave_up = Some(super::GaveUp {
+                        notice: text.to_owned(),
+                        run: seen("run_id"),
+                        conversation: seen("conversation_id"),
+                        phase: seen("phase"),
+                        activity: seen("activity"),
+                    });
                 }
             }
         }
     }
 
     /// A given-up waiting send's notice goes once the open session shows it
-    /// moved on: from what it showed then to working, or to ready.
+    /// moved on: a reading of the same run and conversation (a fresh one, when
+    /// the give-up saw none yet) that went from what it showed then to
+    /// working, or to ready. A stale or other target's reading, or a notice
+    /// another one replaced since, keeps it.
     pub(crate) fn settle_gave_up(&self) {
         let mut hub = self.lock();
         let Some(key) = hub.open_key.clone() else {
@@ -2633,13 +2643,17 @@ impl Composers {
         let Some(composer) = hub.composers.get_mut(&key) else {
             return;
         };
-        let moved = composer
-            .gave_up
-            .as_ref()
-            .is_some_and(|(was_phase, was_activity)| {
-                (was_phase.as_str(), was_activity.as_str()) != (phase, activity)
-            });
-        if moved && (working || ready) {
+        let Some(gave_up) = &composer.gave_up else {
+            return;
+        };
+        if !gave_up.shown(&composer.notice, composer.error) {
+            composer.gave_up = None;
+            return;
+        }
+        let target = text("run_id") == gave_up.run
+            && (gave_up.conversation.is_empty() || text("conversation_id") == gave_up.conversation);
+        let moved = (gave_up.phase.as_str(), gave_up.activity.as_str()) != (phase, activity);
+        if target && moved && (working || ready) {
             composer.gave_up = None;
             if !composer.uncertain {
                 composer.notice.clear();
@@ -6278,6 +6292,56 @@ mod continuations {
         idle["expected_id"] = json!("");
         c.observe(&state(idle));
         assert!(gone(&c.current().unwrap()));
+    }
+
+    /// Given up while the session still reported no status (review of #1220).
+    fn timed_out_unknown(c: &Composers, fake: &Fake) -> (super::super::ComposerView, Value) {
+        let mut details = ready();
+        details["run_id"] = json!("run-2");
+        details["phase"] = json!("unknown");
+        details["activity"] = json!("unknown");
+        let view = gave_up_at(c, fake, &details);
+        (view, details)
+    }
+
+    #[test]
+    fn a_given_up_start_never_dismisses_a_newer_error() {
+        let root = dir("gave-up-new-error");
+        let (c, fake) = send_hub(&root);
+        let (view, mut details) = timed_out_unknown(&c, &fake);
+        assert!(
+            c.can_attach(view.handle),
+            "attachment control must be available"
+        );
+        c.attach_paths(
+            view.handle,
+            vec![root.join("missing.txt")],
+            zerus_client_core::attachments::Selection::default(),
+        );
+        let failed = until(&c, |v| {
+            !v.attaching && v.status_error && v.status != rules::NOT_READY
+        });
+        assert!(!failed.status.is_empty());
+        details["phase"] = json!("working");
+        details["activity"] = json!("busy");
+        c.observe(&state(details));
+        let after = c.current().unwrap();
+        assert_eq!(after.status, failed.status, "the newer error stays");
+        assert!(after.status_error);
+    }
+
+    #[test]
+    fn a_given_up_start_notice_stays_for_another_run_or_conversation() {
+        for (key, value) in [("run_id", "run-1"), ("conversation_id", "conv-9")] {
+            let root = dir(&format!("gave-up-other-{key}"));
+            let (c, fake) = send_hub(&root);
+            let (_, mut details) = timed_out_unknown(&c, &fake);
+            details[key] = json!(value);
+            details["phase"] = json!("working");
+            details["activity"] = json!("busy");
+            c.observe(&state(details));
+            assert_eq!(c.current().unwrap().status, rules::NOT_READY, "{key}");
+        }
     }
 
     #[test]

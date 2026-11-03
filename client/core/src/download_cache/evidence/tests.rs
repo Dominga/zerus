@@ -3,6 +3,7 @@
 use super::super::maintenance::{Prepared, State};
 use super::super::{complete, lookup, reserve, trim, usage, Source, Writer};
 use super::*;
+use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const NOW: i64 = 1_800_000_000_000;
@@ -288,4 +289,71 @@ fn service_execute_never_unlinks_after_a_cancellation_during_the_commit() {
     during_commit(|| {});
     assert_eq!(receipt.files, vec![State::Kept]);
     assert_eq!(fs::read(folder.0.join("old.txt")).unwrap(), b"old cache");
+}
+
+/// fixes-u P2 on #1237: a committed receipt counts only if it is exactly a
+/// receipt for its slot. A corrupt one with the same capture ID refuses
+/// every later change and is never overwritten.
+#[test]
+fn a_corrupt_receipt_with_the_same_id_refuses_changes_and_is_kept() {
+    let corruptions: [fn(&mut Value); 5] = [
+        |r| r["format"] = json!("other-format"),
+        |r| r["boundary"] = json!("other-boundary"),
+        |r| r["directory"] = json!("0".repeat(64)),
+        |r| r["version"] = json!(2),
+        |r| r["index"] = json!("absent"),
+    ];
+    for corrupt in corruptions {
+        let folder = Folder::new();
+        folder.plain("a.txt", b"a", 90_000);
+        assert_eq!(ON.trim(&folder.0, 0, NOW).error, None);
+        let slot = fs::read_dir(folder.0.join(DIR))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let mut receipt: Value =
+            serde_json::from_slice(&fs::read(slot.join("receipt.json")).unwrap()).unwrap();
+        corrupt(&mut receipt);
+        let bytes = serde_json::to_vec(&receipt).unwrap();
+        fs::write(slot.join("receipt.json"), &bytes).unwrap();
+        let before = folder.index();
+        folder.plain("b.txt", b"b", 90_000);
+        let qt = folder.index();
+        let usage = ON.trim(&folder.0, 1, NOW);
+        assert_eq!(usage.error.as_deref(), Some(NOT_RECORDED), "{receipt}");
+        assert_eq!(folder.index(), qt, "no change after a corrupt receipt");
+        assert_ne!(qt, before);
+        assert_eq!(
+            fs::read(slot.join("receipt.json")).unwrap(),
+            bytes,
+            "kept as is"
+        );
+        assert_eq!(evidence(&folder.0), Evidence::Unreadable);
+    }
+}
+
+#[test]
+fn a_receipt_whose_original_is_missing_or_resized_refuses_changes() {
+    for damage in [0, 1] {
+        let folder = Folder::new();
+        folder.plain("a.txt", b"a", 90_000);
+        assert_eq!(ON.trim(&folder.0, 0, NOW).error, None);
+        let slot = fs::read_dir(folder.0.join(DIR))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        if damage == 0 {
+            fs::remove_file(slot.join("original.bin")).unwrap();
+        } else {
+            fs::write(slot.join("original.bin"), b"{}").unwrap();
+        }
+        assert_eq!(
+            ON.trim(&folder.0, 0, NOW).error.as_deref(),
+            Some(NOT_RECORDED)
+        );
+    }
 }

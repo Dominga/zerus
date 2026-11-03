@@ -81,6 +81,47 @@ pub struct Original {
     stamp: Option<Stamp>,
 }
 
+impl Original {
+    /// The receipt's own invariants against its slot's seed: the version,
+    /// format and boundary, the seed's identity and directory object, and a
+    /// consistent index kind.
+    fn valid(&self, seed: &Seed) -> bool {
+        self.version == 1
+            && self.format == FORMAT
+            && self.boundary == BOUNDARY
+            && self.capture_id == seed.capture_id
+            && self.directory == seed.directory
+            && digest(&self.directory)
+            && self.identity.as_deref().is_none_or(digest)
+            && match self.index {
+                Index::Absent => {
+                    self.bytes == 0
+                        && self.sha256.is_none()
+                        && self.identity.is_none()
+                        && self.stamp.is_none()
+                }
+                Index::Present => {
+                    self.bytes > 0
+                        && self.bytes <= ORIGINAL as u64
+                        && self.sha256.as_deref().is_some_and(digest)
+                        && self.stamp.is_some()
+                }
+            }
+    }
+
+    /// `original.bin` as the receipt describes it, by a bounded stat only:
+    /// absent for an absent index, else a regular file of the recorded size.
+    fn leaf_matches(&self, slot: &Path) -> bool {
+        let leaf = fs::symlink_metadata(slot.join("original.bin"));
+        match self.index {
+            Index::Absent => leaf.is_err_and(|error| error.kind() == io::ErrorKind::NotFound),
+            Index::Present => {
+                leaf.is_ok_and(|meta| meta.file_type().is_file() && meta.len() == self.bytes)
+            }
+        }
+    }
+}
+
 fn digest(value: &str) -> bool {
     value.len() == 64
         && value
@@ -229,8 +270,10 @@ impl Pending {
             return Err(refused());
         }
         if let Some(receipt) = read_json::<Original>(&slot.join("receipt.json"))? {
-            // An earlier first change already recorded this folder: final.
-            return if receipt.capture_id == seed.capture_id {
+            // An earlier first change already recorded this folder: final,
+            // and only if it is exactly a receipt for this slot. Anything
+            // else is refused, never overwritten or recreated.
+            return if receipt.valid(&seed) && receipt.leaf_matches(&slot) {
                 Ok(())
             } else {
                 Err(refused())
@@ -348,11 +391,7 @@ impl Snapshot {
             read_json(&slot.join("identity.json"))?.ok_or(io::ErrorKind::InvalidData)?;
         let receipt: Original =
             read_json(&slot.join("receipt.json"))?.ok_or(io::ErrorKind::NotFound)?;
-        if receipt.capture_id != seed.capture_id
-            || receipt.format != FORMAT
-            || receipt.boundary != BOUNDARY
-            || receipt.directory != seed.directory
-        {
+        if !receipt.valid(&seed) {
             return Err(refused());
         }
         let index = match (

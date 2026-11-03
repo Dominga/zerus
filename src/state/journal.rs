@@ -691,21 +691,30 @@ fn derived_lineage(db: &Connection, record: &Value) -> Option<Vec<Value>> {
     )
 }
 
-/// Saves a derived lineage into the fork's own record, under the state lock
-/// `inspect` holds, when that record still names the same run.
+/// Saves a derived lineage into the fork's own record. The journal search
+/// runs without the state lock (`inspect` has released it by then); only
+/// [`store_lineage`] takes it, briefly.
 fn save_derived_lineage(db: &Connection, record: &mut Value) {
     let Some(lineage) = derived_lineage(db, record) else {
         return;
     };
     record["fork_lineage"] = json!(lineage);
-    let Ok(mut saved) = read(string(record, "name")) else {
-        return;
-    };
+    let _ = store_lineage(record, &lineage);
+}
+
+/// Under the state lock: re-reads the saved record and adds only its lineage,
+/// when it still names the same run and has none yet. Whatever another writer
+/// saved in the meantime (a hook, resume or rename) is kept. False when
+/// nothing was written.
+fn store_lineage(record: &Value, lineage: &[Value]) -> Result<bool> {
+    let _guard = lock(None)?;
+    let mut saved = read(string(record, "name"))?;
     if saved["run_id"] != record["run_id"] || saved["fork_lineage"].is_array() {
-        return;
+        return Ok(false);
     }
     saved["fork_lineage"] = json!(lineage);
-    let _ = write(&mut saved);
+    write(&mut saved)?;
+    Ok(true)
 }
 
 fn valid_source(source: &Value) -> bool {
@@ -971,7 +980,8 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
         output["cache_hint"] = Value::Null;
     }
     let db = event_db()?;
-    // A fork recorded before its lineage finds its source once (zerus-b4qk).
+    // A fork recorded before its lineage finds its source once (zerus-b4qk),
+    // outside the state lock; saving it takes the lock again.
     if archive_id.is_none() {
         save_derived_lineage(&db, &mut record);
     }
@@ -1925,6 +1935,82 @@ mod attention_regressions {
         assert_eq!(sources.len(), LINEAGE);
         assert_eq!(sources[LINEAGE - 1][0], "codex/p/deep4");
     }
+    /// #1235 review R2-1: the lineage search runs unlocked, so a record write
+    /// can land before the save; the save re-reads under the lock and keeps it.
+    #[test]
+    fn saving_a_derived_lineage_keeps_a_concurrent_record_write() {
+        let root = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "state::journal::attention_regressions::lineage_save_probe",
+                "--exact",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", root.path())
+            .env("HGS_CONFIG_DIR", root.path().join("config"))
+            .env("HGS_STATE_DIR", root.path().join("state"))
+            .env("HGS_TEST_LINEAGE_PROBE", "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("lineage probe passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn lineage_save_probe() {
+        if std::env::var_os("HGS_TEST_LINEAGE_PROBE").is_none() {
+            return;
+        }
+        std::fs::create_dir_all(root()).unwrap();
+        let db = event_db().unwrap();
+        db.execute(
+            "INSERT INTO events(name,conversation,payload) VALUES('codex/p/source','c-source',?)",
+            [
+                json!({"type":"UserPromptSubmit","agent_id":"","at":10,"detail":"source"})
+                    .to_string(),
+            ],
+        )
+        .unwrap();
+        let record = json!({"version":1,"name":"codex/p/fork","agent":"codex","run_id":"run-1",
+            "conversation_id":"c-fork","fork_parent_id":"c-source","fork_source_name":"codex/p/source",
+            "created":20,"activity":"idle"});
+        write(&mut record.clone()).unwrap();
+        // The unlocked search, then another writer's change, then the save.
+        let lineage = derived_lineage(&db, &record).unwrap();
+        assert_eq!(lineage, [json!(["codex/p/source", "c-source", 1])]);
+        let mut concurrent = read("codex/p/fork").unwrap();
+        concurrent["activity"] = json!("busy");
+        write(&mut concurrent).unwrap();
+        assert!(store_lineage(&record, &lineage).unwrap());
+        let saved = read("codex/p/fork").unwrap();
+        assert_eq!(
+            (&saved["activity"], &saved["fork_lineage"]),
+            (&json!("busy"), &json!(lineage))
+        );
+        // A new run meanwhile, or a lineage already saved: nothing is written.
+        let mut resumed = saved.clone();
+        resumed["run_id"] = json!("run-2");
+        resumed.as_object_mut().unwrap().remove("fork_lineage");
+        write(&mut resumed).unwrap();
+        assert!(!store_lineage(&record, &lineage).unwrap());
+        assert!(read("codex/p/fork").unwrap().get("fork_lineage").is_none());
+        let mut again = record.clone();
+        again["run_id"] = json!("run-2");
+        assert!(store_lineage(&again, &lineage).unwrap());
+        assert!(!store_lineage(&again, &[]).unwrap());
+        assert_eq!(
+            read("codex/p/fork").unwrap()["fork_lineage"],
+            json!(lineage)
+        );
+        println!("lineage probe passed");
+    }
+
     /// #1235 review R1: a fork's Activity reads one page per range, never
     /// every inherited row. SQLite's step count bounds the work, so a source
     /// of any length costs a fork's page what a page costs the source.

@@ -468,13 +468,30 @@ function Get-OwnInstances($scheduler,$registered) {
  return $items
 };
 '''
-        body = "$ErrorActionPreference='Stop';$x=Get-Content -Raw -LiteralPath '" + escaped + "'|ConvertFrom-Json;" + lookup + script
+        # Keep the actual failure out of PowerShell's CLIXML error/progress
+        # stream, which can hide it behind first-use module messages in CI.
+        body = ("$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';"
+                "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);try {"
+                "$x=Get-Content -Raw -LiteralPath '" + escaped + "'|ConvertFrom-Json;" + lookup + script + r'''
+} catch {
+ $record=$_;$exception=$record.Exception;
+ for($depth=0;$depth-lt 4 -and $null-ne $exception.InnerException;$depth++) {$exception=$exception.InnerException};
+ $message=[string]$exception.Message;if($message.Length-gt 1024) {$message=$message.Substring(0,1024)};
+ $id=[string]$record.FullyQualifiedErrorId;if($id.Length-gt 256) {$id=$id.Substring(0,256)};
+ @{fixture_error=@{type=$exception.GetType().FullName;message=$message;hresult=[int]$exception.HResult;
+    id=$id;line=[int]$record.InvocationInfo.ScriptLineNumber}}|ConvertTo-Json -Compress -Depth 3;
+ exit 1
+}
+''')
         command = [str(Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'),
                    '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
                    base64.b64encode(body.encode('utf-16le')).decode('ascii')]
-        result = subprocess.run(command, env=self.env, capture_output=True, text=True, timeout=12)
-        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertLessEqual(len(result.stdout), 8192)
+        result = subprocess.run(command, env=self.env, capture_output=True, text=True,
+                                encoding='utf-8', timeout=12)
+        self.assertEqual(result.returncode, 0,
+                         'fixture PowerShell stdout: ' + result.stdout[-8192:]
+                         + '\nstderr: ' + result.stderr[-1024:])
+        self.assertLessEqual(len(result.stdout.encode('utf-8')), 8192)
         return json.loads(result.stdout)
 
     def observe(self):
@@ -548,24 +565,45 @@ $items=@();foreach($p in $x.paths) {
             self.assertEqual(item['owner'], self.sid, item)
 
     def stop_exact_passive(self, expected, *, wrong_birth=False):
+        # The maintained plan carries the exact registered (possibly verbatim)
+        # path. Python's resolved process image can have different spelling.
+        plan = self.cli('desktop', 'registration', '--json')
+        task_image = plan['argv'][0]
+        self.assertEqual(Path(task_image).resolve(strict=True), self.cli_image)
         return self.powershell(r'''
 $s=New-Object -ComObject Schedule.Service;$s.Connect();$t=$s.GetFolder('\').GetTask($x.task);
 $d=$t.Definition;
-if($d.Actions.Count-ne 1 -or $d.Actions.Item(1).Path-cne $x.image -or $d.Principal.UserId-ne $x.sid) {throw 'fixture task definition changed'};
+if($d.Actions.Count-ne 1) {throw 'fixture task action_count changed'};
+if($d.Actions.Item(1).Type-ne 0 -or $d.Actions.Item(1).Path-cne $x.task_image) {throw 'fixture task action_path changed'};
+$user=[string]$d.Principal.UserId;
+if([string]::IsNullOrEmpty($user)-or $user.Length-gt 256) {throw 'fixture task principal unavailable'};
+# As in the native adapter, compare the actual SID, not its account-name spelling.
+if($user.StartsWith('S-1-',[StringComparison]::Ordinal)) {
+ $sid=([Security.Principal.SecurityIdentifier]::new($user)).Value
+} else {$sid=([Security.Principal.NTAccount]::new($user)).Translate([Security.Principal.SecurityIdentifier]).Value};
+if($sid-cne $x.sid) {throw 'fixture task principal_sid changed'};
 $values=@(Get-OwnInstances $s $t);if($values.Count-ne 1) {throw 'fixture task instance count changed'};
 $i=$values[0];$i.Refresh();$guid=$i.InstanceGuid;if($guid-cne $x.guid -or $i.EnginePID-ne $x.pid) {throw 'fixture original instance changed'};
 $p=[Diagnostics.Process]::GetProcessById($i.EnginePID);$handle=$p.Handle;
-if($p.HasExited -or $p.StartTime.ToFileTimeUtc()-ne $x.birth -or $p.MainModule.FileName-cne $x.image) {
- @{stopped=$false;reason='original_birth_or_image_changed'}|ConvertTo-Json -Compress;exit 0
+if($p.HasExited) {@{stopped=$false;reason='original_exited'}|ConvertTo-Json -Compress;exit 0};
+if($p.StartTime.ToFileTimeUtc()-ne [int64]$x.birth) {
+ @{stopped=$false;reason='original_birth_changed'}|ConvertTo-Json -Compress;exit 0
+};
+if($p.MainModule.FileName-cne $x.image) {
+ @{stopped=$false;reason='original_image_changed'}|ConvertTo-Json -Compress;exit 0
 };
 $i.Refresh();if($i.InstanceGuid-cne $x.guid -or $i.EnginePID-ne $p.Id) {throw 'fixture instance changed before stop'};
 $i.Stop();if(-not $p.WaitForExit(5000)) {throw 'fixture original process exit unconfirmed'};
 if(@(Get-OwnInstances $s $t).Count-ne 0) {throw 'fixture instance remains'};
 @{stopped=$true;original_pid=$p.Id;original_guid=$guid}|ConvertTo-Json -Compress
-''', dict(task=self.task, image=str(self.cli_image), sid=self.sid, guid=expected['guid'],
+''', dict(task=self.task, task_image=task_image, image=str(self.cli_image), sid=self.sid, guid=expected['guid'],
           pid=expected['pid'], birth=expected['birth'] + (1 if wrong_birth else 0)))
 
     def test_explicit_mode_round_trip_uses_the_own_task_and_preserves_unrelated_processes(self):
+        # A deliberate fixture failure must retain its structured error on
+        # stdout, without a task, process mutation or CLIXML progress prefix.
+        with self.assertRaisesRegex(AssertionError, r'"fixture_error":'):
+            self.powershell("throw 'fixture diagnostic control'", {})
         # Never touch a pre-existing per-user registration on a reused image.
         initial = self.cli('desktop', 'registration', 'status', '--json')
         self.assertFalse(initial['registered'], 'Task-mode fixture requires an unused disposable runner')
@@ -649,8 +687,14 @@ if(@(Get-OwnInstances $s $t).Count-ne 0) {throw 'fixture instance remains'};
             self.assertTrue(final_passive['ok'], final_passive)
             self.latest = final_passive['instance']
             self.cancel_ready_rollback_after_authority_moves(next_background, final_passive, later_revoke=True)
-            self.assertFalse(self.stop_exact_passive(self.latest, wrong_birth=True)['stopped'])
-            self.assertTrue(self.cli('desktop', 'status', '--json')['running'])
+            before_refusal = self.observe()['instances']
+            refusal = self.stop_exact_passive(self.latest, wrong_birth=True)
+            self.assertFalse(refusal['stopped'], refusal)
+            self.assertEqual(refusal['reason'], 'original_birth_changed', refusal)
+            self.assertEqual(self.observe()['instances'], before_refusal)
+            still_running = self.cli('desktop', 'status', '--json')
+            self.assertTrue(still_running['running'])
+            self.assertEqual(still_running['lifecycle']['pid'], self.latest['pid'])
             self.assertTrue(self.stop_exact_passive(self.latest)['stopped'])
             self.assertFalse(self.cli('desktop', 'status', '--json')['running'])
             self.assertFalse(self.cli('desktop', 'registration', 'remove', '--json')['registered'])

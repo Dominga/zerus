@@ -1408,6 +1408,7 @@
   "Microphone access": "Доступ к микрофону",
   "Microphone on this device": "Микрофон на этом устройстве",
   "Migration report": "Отчёт о миграции",
+  "Migration report…": "Отчёт о миграции…",
   "Minimum inactivity for periodic cleanup": "Минимальное бездействие для периодической очистки",
   "Missing archive identity": "Отсутствует идентификатор архива",
   "Missing folders: only Git's record is removed.": "Отсутствующие папки: удаляется только запись Git.",

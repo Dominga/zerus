@@ -1444,12 +1444,24 @@ pub async fn set_notifications(
     };
     let hgs = default_hgs();
     let call_target = target.clone();
+    let projection = app.notification_projection(target);
     let confirmed = tauri::async_runtime::spawn_blocking(move || {
-        change_notifications(&hgs, &call_target, muted, expected_revision)
+        change_notifications_projected(&hgs, &call_target, muted, expected_revision, projection)
     })
     .await
     .map_err(|error| error.to_string())??;
-    app.apply_notifications(&target, &confirmed);
+    Ok(confirmed)
+}
+
+pub(crate) fn change_notifications_projected(
+    hgs: &std::path::Path,
+    target: &Target,
+    muted: bool,
+    expected_revision: Option<i64>,
+    projection: crate::commands::NotificationProjection,
+) -> Result<serde_json::Value, String> {
+    let confirmed = change_notifications(hgs, target, muted, expected_revision)?;
+    projection(&confirmed);
     Ok(confirmed)
 }
 

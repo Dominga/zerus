@@ -185,6 +185,7 @@ export const ownershipActions = createOwnershipActions(
 export function ownershipNotice(view: NotificationOwnership | undefined): string {
   if (!view) return "";
   if (view.pending) return tr("Background access is unconfirmed. Check the result before making another change.");
+  if (view.native_recovery) return tr("Background service is not ready. Some actions are unavailable.");
   if (view.status?.rearm_required) return tr("Background access was revoked. Resume it to let the service work while Zerus is closed.");
   if (view.code || view.status?.state !== "service" || !view.status.identity_current)
     return tr("Background access is unavailable. Retry to check the service.");
@@ -212,7 +213,7 @@ export function serviceStatus(state: DesktopService | undefined) {
   }
   const pending = pendingReadNotice(state), retained = retainedSourceNotice(state), owner = ownershipNotice(state.notification_ownership);
   const ownership = state.notification_ownership?.pending ? "check"
-    : state.notification_ownership?.status?.rearm_required ? "rearm" : undefined;
+    : state.notification_ownership?.native_recovery || state.notification_ownership?.status?.rearm_required ? "rearm" : undefined;
   if (!notice) {
     if (pending) label = state.pending_read_import?.running ? tr("Transferring read marks") : tr("Read marks need attention");
     else if (retained) label = tr("Migration report");

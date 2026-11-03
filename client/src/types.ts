@@ -159,6 +159,8 @@ export type EditOutcome = (
 
 /** Native ownership presentation only; this can never authorize a writer. */
 export interface NotificationOwnership {
+  /** Local startup recovery presentation; never a service grant. */
+  native_recovery?: boolean;
   status: null | { abi: string; configuration: string; journal: string | null; revision: number;
     state: "passive" | "preparing" | "service" | "draining" | "revoked" | "native" | "identity_changed" | "unavailable";
     rearm_required: boolean; request_id: string | null; owner_epoch: string | null; identity_current: boolean };

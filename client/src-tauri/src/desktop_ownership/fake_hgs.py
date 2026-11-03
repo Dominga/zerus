@@ -116,7 +116,11 @@ elif args == ['desktop', 'frontend-request', '--json']:
         while not (root / 'release-pipe').exists() and time.monotonic() < until:
             time.sleep(.005)
         os._exit(0)
-    print(json.dumps(receipt(request)))
+    if config.get('wire_refusal'):
+        print(json.dumps(dict(request_id=request['request_id'], accepted=False,
+                              durable=False, code=config['wire_refusal'])))
+    else:
+        print(json.dumps(receipt(request)))
 elif args == ['desktop', 'ownership-result', '--json']:
     original = json.loads((root / 'original.json').read_text())
     assert value['original_request_id'] == original['request_id']

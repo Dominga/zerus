@@ -87,7 +87,14 @@ retain the current page offset through its bounded FIFO. Finish waits for the
 worker's restored/ready acknowledgement, and stop waits for `try_join` plus
 native drain. The actor must continue polling original Closed callbacks through
 that join; a joined worker alone cannot settle the attachment. Native setup
-faults remain unavailable, and no registry repair occurs here.
+faults remain unavailable, and no registry repair occurs here. One user click
+can arrive through both the toast's Activated delegate and the registered COM
+activator. The worker forwards a delivered mapping's click at most once per
+five-second window. The suppression marker lives on that delivered mapping, so
+the 8192-mapping bound also bounds the markers. A marker leaves with its
+mapping and is never evicted while live; unknown requests leave no state. Runtime status reports
+forwarded clicks per native path (`clicks.activator`, `clicks.delegate`) and
+`clicks.coalesced`, so acceptance can show which path a real click used.
 
 Before allowing discovery effects, attachment restores at most sixteen indexed
 candidates per turn, then waits for the platform's original restoration
@@ -178,6 +185,17 @@ seconds, and never persists context. A proof refusal before any frame is offered
 its original 30-second age for a newly authenticated receiver. Once a handoff is
 attempted, a disconnected/uncertain outcome is not replayed automatically; the
 next wait is a new read and another native click is a distinct event.
+
+On Windows the toast activation gives the service, not the frontend, a
+short-lived foreground right. After the handoff proof passes and before the
+reply carrying an `Open` is offered, the service calls `AllowSetForegroundWindow`
+for the authenticated canonical frontend's PID only. The retained original
+process handle keeps that PID bound to the same process. Idle replies and
+refused proofs lend nothing, and `ASFW_ANY` is never used. A refusal is
+best-effort and does not hold back the click: the frontend restores its window
+and uses its own fallback. Router status counts `foreground.lent` and
+`foreground.refused`. The reply wire is unchanged; Windows has no platform
+context.
 
 The service's `Router::closed_frontend` checks a fresh canonical instance
 observation made off actor. Absence alone cannot authorize a launch: the Linux

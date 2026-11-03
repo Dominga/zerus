@@ -32,6 +32,31 @@ fn startup_diagnostics_select_only_closed_codes_and_never_child_content() {
 }
 
 #[test]
+fn only_a_closed_matching_negative_supplies_a_startup_diagnostic() {
+    let id = uuid::Uuid::new_v4().to_string();
+    let valid = json!({"request_id":id,"accepted":false,"durable":false,"code":"frontend_identity_expired"});
+    assert_eq!(
+        super::response_refusal(&serde_json::to_vec(&valid).unwrap(), &id),
+        Some("frontend_identity_expired")
+    );
+    for (key, value) in [
+        ("request_id", json!(uuid::Uuid::new_v4().to_string())),
+        ("accepted", json!(true)),
+        ("durable", json!(true)),
+        ("code", json!("private untrusted text")),
+        ("extra", json!("private")),
+    ] {
+        let mut wrong = valid.clone();
+        wrong[key] = value;
+        assert_eq!(
+            super::response_refusal(&serde_json::to_vec(&wrong).unwrap(), &id),
+            None,
+            "{key}"
+        );
+    }
+}
+
+#[test]
 fn a_remote_projection_cannot_supply_the_native_ownership_overlay() {
     let view: zerus_client_core::desktop::service::Snapshot = serde_json::from_value(json!({
         "notification_ownership":{"status":{"state":"service","identity_current":true}},
@@ -522,6 +547,171 @@ mod native {
             tokio::time::sleep(Duration::from_millis(100)).await;
             assert_eq!(f.calls("frontend-request").len(), 4);
         });
+    }
+
+    #[test]
+    fn recovery_watch_and_retry_are_read_only_until_explicit_resume() {
+        // A private exact libtest child isolates the process-wide startup mode.
+        // The fixed test name and one-way control prevent recursive dispatch.
+        const CONTROL: &str = "ZERUS_NATIVE_RECOVERY_TEST_CHILD";
+        const NAME: &str = "desktop_ownership::tests::native::recovery_watch_and_retry_are_read_only_until_explicit_resume";
+        if std::env::var(CONTROL).ok().as_deref() != Some("child") {
+            let call = Invocation {
+                args: vec!["--exact".into(), NAME.into(), "--test-threads=1".into()],
+                stdin: Some(vec![]),
+                timeout: Duration::from_secs(15),
+                request_id: None,
+            };
+            let result = zerus_client_core::run::run_owned(
+                &std::env::current_exe().unwrap(),
+                &call,
+                &[],
+                &AtomicBool::new(false),
+                |command| command.env(CONTROL, "child").spawn(),
+                Arc::new(()),
+            )
+            .unwrap();
+            assert!(String::from_utf8_lossy(&result).contains("1 passed"));
+            return;
+        }
+        async fn wait_for(label: &str, ready: impl Fn() -> bool) {
+            let until = Instant::now() + Duration::from_secs(5);
+            while !ready() {
+                assert!(Instant::now() < until, "{label}");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        crate::desktop_service::enter_startup_recovery();
+        assert!(crate::desktop_service::mode());
+        // No revocation bit: only the recovery latch can prevent an automatic
+        // startup Grant here, and the native display flag must still offer Resume.
+        let f = Fixture::new(
+            Mode::Service,
+            json!({"state":"passive","rearm_required":false}),
+        );
+        tauri::async_runtime::block_on(async {
+            let (service, _pump) = f.service();
+            // Preflight is earlier than the ownership action. The actual watch
+            // child is spawned only after that action's awaited completion.
+            wait_for("settled startup and original watch", || {
+                !f.calls("watch").is_empty() && service.snapshot().connected
+            })
+            .await;
+            let startup_mutations = f.calls("frontend-request");
+            if !startup_mutations.is_empty()
+                || !service
+                    .snapshot()
+                    .notification_ownership
+                    .as_ref()
+                    .is_some_and(|view| view["request_id"].is_null())
+            {
+                service.join().await.unwrap();
+                panic!("settled recovery startup emitted a mutation");
+            }
+            assert_eq!(
+                service.snapshot().notification_ownership.unwrap()["native_recovery"],
+                true
+            );
+            let watches = f.calls("watch").len();
+            service.retry();
+            wait_for("settled retry and replacement watch", || {
+                f.calls("watch").len() > watches && service.snapshot().connected
+            })
+            .await;
+            if !f.calls("frontend-request").is_empty()
+                || !service
+                    .snapshot()
+                    .notification_ownership
+                    .as_ref()
+                    .is_some_and(|view| view["request_id"].is_null())
+            {
+                service.join().await.unwrap();
+                panic!("settled recovery Retry emitted a mutation");
+            }
+            let view = service.ownership_rearm().await;
+            assert!(view.code.is_empty(), "{view:?}");
+            assert_eq!(
+                f.calls("frontend-request")
+                    .iter()
+                    .filter(|v| v["value"]["request"]["action"] == "rearm")
+                    .count(),
+                1
+            );
+            assert!(
+                crate::desktop_service::mode(),
+                "explicit Resume keeps consumer mode for this process"
+            );
+            service.join().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn closed_root_refusal_explains_failure_without_settling_or_replaying_original() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        let f = Fixture::new(
+            Mode::Native,
+            json!({"wire_refusal":"frontend_authentication_refused","missing":true}),
+        );
+        let original = f.run(Some(Action::NativeTakeover));
+        assert!(original.pending);
+        assert_eq!(
+            f.owner.state().diagnostic,
+            Some((
+                "native_takeover.frontend_response",
+                "frontend_authentication_refused"
+            ))
+        );
+        assert!(f.owner.state().intent.as_ref().unwrap().receipt.is_none());
+        let lookup = f.run(None);
+        assert!(lookup.pending);
+        assert_eq!(lookup.request_id, original.request_id);
+        assert_eq!(f.calls("frontend-request").len(), 1);
+        assert_eq!(f.calls("ownership-result").len(), 1);
+    }
+
+    #[test]
+    fn native_recovery_retains_the_original_controller_and_actual_last_pipe_charge() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        let f = Fixture::new(Mode::Native, json!({"held_pipe":true}));
+        struct Release(PathBuf);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                let _ = fs::write(&self.0, []);
+            }
+        }
+        let release = Release(f.root.join("release-pipe"));
+        let failure = match native_takeover_until(
+            f.owner.clone(),
+            Instant::now() + Duration::from_millis(750),
+        ) {
+            Ok(_) => panic!("a held original pipe cannot authorize native startup"),
+            Err(failure) => failure,
+        };
+        assert!(Arc::ptr_eq(&failure._owner, &f.owner));
+        assert!(f.owner.view().pending);
+        let original = f.owner.view().request_id.unwrap();
+        let closed = failure._owner.close();
+        assert_eq!(closed.wait_until(Instant::now()), Observation::Pending);
+        assert!(f.root.join("pipe-held").exists());
+        assert!(failure
+            ._owner
+            .admit(Some(Action::NativeTakeover), None, None)
+            .is_none());
+        drop(release);
+        assert_eq!(
+            closed.wait_until(Instant::now() + Duration::from_secs(5)),
+            Observation::Idle
+        );
+        assert_eq!(
+            f.owner.view().request_id.as_deref(),
+            Some(original.as_str())
+        );
+        assert!(
+            f.owner.view().pending,
+            "resource release does not upgrade an unknown intent"
+        );
+        assert_eq!(f.calls("frontend-request").len(), 1);
     }
 
     #[test]

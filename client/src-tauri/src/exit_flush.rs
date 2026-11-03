@@ -202,16 +202,46 @@ pub(crate) fn quit_with_flush(app: &AppHandle, code: i32) {
 
 fn finish_exit(app: AppHandle, code: i32) {
     #[cfg(feature = "live")]
-    if let Some(service) = app
-        .try_state::<crate::commands::AppState>()
-        .and_then(|source| source.desktop_service())
     {
-        // The draft handshake has ended. Join this GUI's owned proxy and view
-        // drain off the event loop before requesting the final native exit.
-        finish_service_exit(service, move || app.exit(code));
-        return;
+        let service = app
+            .try_state::<crate::commands::AppState>()
+            .and_then(|source| source.desktop_service());
+        let recovery = app
+            .try_state::<crate::desktop_ownership::NativeRecovery>()
+            .map(|original| original.close());
+        if service.is_some() || recovery.is_some() {
+            // Recovery keeps the SAME uncertain original alive through its
+            // actual last child/pipe release. A GUI timeout is not a drain.
+            let exit = move || match recovery {
+                Some(closed) => {
+                    tauri::async_runtime::spawn(async move {
+                        finish_native_recovery(closed).await;
+                        app.exit(code);
+                    });
+                }
+                // Called from the quit deadline thread too: no runtime hop.
+                None => app.exit(code),
+            };
+            // The draft handshake has ended. Join this GUI's owned proxy and
+            // view drain off the event loop before requesting the final exit.
+            match service {
+                Some(service) => finish_service_exit(service, exit),
+                None => exit(),
+            }
+            return;
+        }
     }
     app.exit(code);
+}
+
+#[cfg(feature = "live")]
+async fn finish_native_recovery(closed: zerus_client_core::desktop::drain::Closed) {
+    loop {
+        if closed.snapshot().is_ok_and(|view| view.admitted == 0) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 #[cfg(feature = "live")]
@@ -384,6 +414,28 @@ mod tests {
         };
         nonce
     }
+    #[cfg(feature = "live")]
+    #[test]
+    fn recovery_quit_cannot_finish_while_any_original_resource_is_retained() {
+        use zerus_client_core::desktop::drain::{Gate, Role};
+        tauri::async_runtime::block_on(async {
+            let gate = Gate::new(1).unwrap();
+            let original = gate.admit(Role::Fleet).unwrap();
+            let last_pipe = original.clone();
+            let closed = gate.close();
+            let mut quit = tauri::async_runtime::spawn(finish_native_recovery(closed));
+            drop(original);
+            assert!(tokio::time::timeout(Duration::from_millis(60), &mut quit)
+                .await
+                .is_err());
+            drop(last_pipe);
+            tokio::time::timeout(Duration::from_secs(2), &mut quit)
+                .await
+                .unwrap()
+                .unwrap();
+        });
+    }
+
     #[test]
     fn a_stalled_page_times_out_at_150_ms_without_hanging_the_exit_thread() {
         assert_eq!(EXIT_FLUSH.as_millis(), 150);

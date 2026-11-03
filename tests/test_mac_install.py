@@ -395,14 +395,19 @@ class TrayInstallGui(unittest.TestCase):
         (tools / 'npm').write_text('#!/bin/sh\nexit 0\n')
         calls = self.root / 'install-order.log'
         updater = self.root / 'tray/update-installed.py'
-        updater.write_text('''import sys, shutil
+        updater.write_text('''import sys, shutil, subprocess
 from pathlib import Path
 if '--check' not in sys.argv:
-    source, dest = map(Path, sys.argv[1:])
+    assert sys.argv[1] == '--refresh-macos-desktop'
+    runner = Path(sys.argv[2])
+    source, dest = map(Path, sys.argv[3:])
     assert (source / 'Contents/MacOS/hgs').is_file()
     if dest.exists(): shutil.rmtree(dest)
     shutil.copytree(source, dest)
     with Path(''' + repr(str(calls)) + ''').open('a') as log: log.write('swap\\n')
+    helper = Path(__file__).resolve().parents[1] / 'scripts/install-macos-desktop-service.py'
+    subprocess.run([sys.executable, str(helper), str(dest / 'Contents/MacOS/hgs'),
+                    '--restart', '--runner-hgs', str(runner)], check=True)
 ''')
         desktop = self.root / 'scripts/install-macos-desktop-service.py'
         desktop.write_text('''import sys

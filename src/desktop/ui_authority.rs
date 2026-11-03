@@ -450,6 +450,36 @@ impl ActivationReceiver {
         }
         valid
     }
+    /// Windows: a toast activation gives this service a short-lived foreground
+    /// right. Lend it to the exact authenticated frontend just before its click
+    /// reply. The held process handle keeps the PID bound to that process. A
+    /// refusal only means no right is held now; the frontend keeps its fallback.
+    #[cfg(any(windows, test))]
+    pub fn lend_foreground(&self) -> bool {
+        #[cfg(test)]
+        if let Some(probe) = &self.probe {
+            probe
+                .foreground
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return probe
+                .foreground_right
+                .load(std::sync::atomic::Ordering::SeqCst);
+        }
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
+            match &self.freshness {
+                // SAFETY: a plain Win32 call; the original handle is still held.
+                Freshness::Native { frontend, .. } => {
+                    frontend.current() && unsafe { AllowSetForegroundWindow(frontend.pid) } != 0
+                }
+                #[cfg(test)]
+                Freshness::Fixture => false,
+            }
+        }
+        #[cfg(not(windows))]
+        false
+    }
     #[cfg(test)]
     pub fn set_probe(&mut self, probe: std::sync::Arc<ActivationProbe>, next_full_check: Instant) {
         self.probe = Some(probe);
@@ -462,6 +492,8 @@ pub(super) struct ActivationProbe {
     pub valid: std::sync::atomic::AtomicBool,
     pub live_checks: std::sync::atomic::AtomicUsize,
     pub full_checks: std::sync::atomic::AtomicUsize,
+    pub foreground: std::sync::atomic::AtomicUsize,
+    pub foreground_right: std::sync::atomic::AtomicBool,
 }
 #[cfg(test)]
 impl Default for ActivationProbe {
@@ -471,6 +503,8 @@ impl Default for ActivationProbe {
             valid: std::sync::atomic::AtomicBool::new(true),
             live_checks: std::sync::atomic::AtomicUsize::new(0),
             full_checks: std::sync::atomic::AtomicUsize::new(0),
+            foreground: std::sync::atomic::AtomicUsize::new(0),
+            foreground_right: std::sync::atomic::AtomicBool::new(true),
         }
     }
 }

@@ -119,7 +119,7 @@ pub(super) fn save(record: &Value) -> Result<String> {
         archived["archived_at"] = json!(now());
         archived["state"] = json!("archived");
         archived.as_object_mut().unwrap().remove("pausing");
-        atomic(&path(&id)?, &format!("{archived}\n"))?;
+        atomic_record(&path(&id)?, &mut archived)?;
         id
     };
     if record_path(string(record, "name")).exists() {
@@ -363,7 +363,7 @@ pub(super) fn reserve_clear_source(record: &Value) -> Result<()> {
             .map_err(|error| error.to_string());
     }
     archived["restore_archive_clear_source"] = anchor.clone();
-    atomic(&path(id)?, &format!("{archived}\n"))
+    atomic_record(&path(id)?, &mut archived)
 }
 
 /// Commit the restore after its exact ID, or its explicitly cleared successor.
@@ -428,7 +428,7 @@ pub(super) fn failed_restore(record: &mut Value) -> Result<bool> {
     } else {
         string(record, "error")
     });
-    atomic(&path(id)?, &format!("{archived}\n"))?;
+    atomic_record(&path(id)?, &mut archived)?;
     remove_synced(&record_path(string(record, "name")))?;
     Ok(true)
 }

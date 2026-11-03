@@ -3470,6 +3470,13 @@ Recorded tool calls appear separately, with completed history collapsed. Equal
 command text does not prove that a tool record and OS tree are the same task.
 Rows expose owner, state, elapsed time and available folder/progress/output. OS
 trees show PID and child count; their stdout is not independently captured.
+Saved commands retain a UTF-8 preview of at most 512 bytes and a SHA-256 digest
+(`command_digest`); `command_truncated` identifies shortened previews. Processes
+and the CLI keep the preview in `command`. **Copy command** copies that displayed
+preview; command output and process identity/control are unchanged. Legacy full
+texts still load and are compacted on their next live or archive record write.
+For legacy jobs the digest covers the previously stored text, which older
+versions may already have clipped.
 The active count uses the maximum of confirmed tool records and OS trees, not
 the sum of overlapping sources. Unconfirmed records do not count as active.
 

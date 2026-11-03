@@ -1965,6 +1965,19 @@ the fork right after its original and opens it, once its inspection names the
 source conversation as its parent, even before a Codex fork has a conversation ID
 of its own. With an hgs that predates the parent field it waits for that ID.
 
+A fork's Activity first shows the history it began from, read-only: each source
+session's rows up to the moment of the fork, under an "Inherited from" label
+naming that session, then a "Forked here" marker and the fork's own activity.
+A fork records its sources when it starts (up to four forks back, so a fork of a
+fork shows both); a fork made before this records nothing, so its first
+inspection finds its source's rows up to its creation time and before its own
+first row, and saves that. Each Activity page reads at most one page from each
+of these ranges, however long a source is. Inherited rows are muted and never act as the
+fork's own: they open no attachments, and search finds them only in their source.
+A provider that copies the history into the fork's own transcript adds nothing
+twice, because the fork's messages dated before its creation are not shown. The
+source session is never changed. Rows the journal no longer keeps are not shown.
+
 Codex may defer `SessionStart` until the fork's first message. Activity enables
 Send once Zerus verifies that the supervised process owns an independent child
 history linked to the source conversation and its native composer is ready.
@@ -4102,12 +4115,30 @@ finishes. A timeout or uncertain result is shown for review and never retried
 automatically. Enabling local Windows sessions has its own confirmation and
 rechecks the original local machine identity and current host status.
 
-**Swarm worker.** Windows has no user service manager. The desktop app runs one
-hidden `hgs.exe swarm worker` and restarts it after an exit. The delay doubles
-from one second up to five minutes and resets after a run of a minute or more. A
-kill-on-close job ends the worker with the app, also after a crash. Without the
-desktop app, run `hgs swarm worker` in a terminal or `hgs swarm sync` when needed.
-`hgs swarm get` reports `worker: {running, current}` as elsewhere.
+**Swarm worker.** In background mode, the durable Windows desktop service runs
+one hidden `hgs.exe swarm worker`, including while the GUI is closed or consumes
+the service. It restarts its own child after an exit, with a delay from one second
+up to five minutes, reset after a run of at least a minute. The child starts
+suspended in its own job before running. Stop and restart retain the original
+process/job and service owner until physical exit and job drain are confirmed;
+unknown cleanup is reported in `swarm_runtime` and prevents a replacement.
+
+`hgs desktop swarm-restart --json` asks an already-running background service to
+restart only its own worker. Passive, stopping and offline services refuse it;
+it never starts the service or GUI, or stops a PID from `worker.json`. Stale-worker
+checks use this same bounded request, with the existing ten-minute attempt limit
+and default-configuration restriction. `hgs swarm get` still reports
+`worker: {running, current}`. The standalone GUI retains its compatibility
+supervisor outside desktop-service mode; `hgs swarm worker` and `hgs swarm sync`
+remain available for manual use.
+
+The explicit restart command has one two-second deadline from process entry,
+including Windows PATH preparation, configuration reads and the pipe exchange.
+An expected-machine guard reads only the existing catalog identity; it never
+initializes or refreshes the store, takes its write lock, or saves metadata.
+On timeout it prints one JSON result with `outcome: "unknown"` and
+`retry_allowed: false`, then exits with code 3. Inspect service status before
+another attempt; the timed-out request is never replayed automatically.
 
 **Desktop app.** It uses the `hgs.exe` next to `hgs-tray.exe`, then the one on
 `PATH`; `--hgs` or `hgs=` in `tray.conf` overrides both, and the Linux and macOS

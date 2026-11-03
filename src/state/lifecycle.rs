@@ -196,10 +196,18 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             let source = nonempty_env("HGS_FORK_SOURCE_NAME").unwrap_or_default();
             record["fork_source_name"] = json!(source);
             fork_source = Some((source, nonempty_env("HGS_FORK_SOURCE_ARCHIVE")));
+            // The source rows its Activity shows, up to where the fork began.
+            if let Some(lineage) = nonempty_env("HGS_FORK_LINEAGE")
+                .and_then(|lineage| serde_json::from_str::<Value>(&lineage).ok())
+                .filter(Value::is_array)
+            {
+                record["fork_lineage"] = lineage;
+            }
         }
         std::env::remove_var("HGS_FORK_PARENT_ID");
         std::env::remove_var("HGS_FORK_SOURCE_NAME");
         std::env::remove_var("HGS_FORK_SOURCE_ARCHIVE");
+        std::env::remove_var("HGS_FORK_LINEAGE");
         agent_hint::inherit_fork(&mut record, fork_hint_revision.as_deref());
         if let Some(expected) = expected {
             let previous = read(&name)?;
@@ -240,6 +248,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
                 "pending_settings",
                 "fork_parent_id",
                 "fork_source_name",
+                "fork_lineage",
                 "cleared_conversations",
             ] {
                 if let Some(value) = previous.get(key) {

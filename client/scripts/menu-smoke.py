@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--url", default="http://127.0.0.1:1437/scripts/menu-smoke.html")
@@ -21,6 +22,9 @@ parser.add_argument("--real-display", action="store_true")
 parser.add_argument("--title", default="Zerus menu regression (synthetic)")
 parser.add_argument("--probe-display", action="store_true", help="verify the isolated display without opening a window")
 parser.add_argument("--xvfb-child", action="store_true", help=argparse.SUPPRESS)
+parser.add_argument("--paint-column", type=int, metavar="X",
+                    help="check the presented frames of a page that reports `morphs`: a 4 px column at X "
+                         "through a magenta collapsing card must never grow again (row-collapse-smoke)")
 args = parser.parse_args()
 if not args.url.startswith("http://127.0.0.1:"):
     parser.error("use the local Vite server")
@@ -34,6 +38,8 @@ if not args.real_display and not args.xvfb_child:
     env.pop("WAYLAND_DISPLAY", None)
     # The child owns the window, its title and the title-named deadline.
     command = ["xvfb-run", "-a", sys.executable, __file__, "--xvfb-child", "--url", args.url, "--title", args.title]
+    if args.paint_column is not None:
+        command += ["--paint-column", str(args.paint_column)]
     if args.probe_display:
         command.append("--probe-display")
     child = subprocess.Popen(command, env=env, start_new_session=True)
@@ -66,6 +72,41 @@ def unlocked():
 
 if args.real_display and not unlocked():
     raise SystemExit("Screen is locked or its state is unknown; no window opened")
+
+def painted_collapse(frames, morphs, height):
+    """Each collapse's painted card (magenta) must only shrink and the next
+    card (cyan) only rise, from the first smaller frame until the morph ends."""
+    def column(data):
+        stride = len(data) // height
+        out = []
+        for y in range(height):
+            b, g, r = data[y * stride + 4], data[y * stride + 5], data[y * stride + 6]
+            out.append("M" if r > 200 and g < 60 and b > 200 else "C" if r < 60 and g > 200 and b > 200 else ".")
+        return out
+    cases, failures = [], []
+    for index, start in enumerate(m / 1000 for m in morphs):
+        shown = [(t, column(data)) for t, data in frames if start - 0.03 <= t <= start + 0.85]
+        lowest_card = lowest_next = None
+        shrinking, taller = False, []
+        for t, col in shown:
+            card = [y for y, c in enumerate(col) if c == "M"]
+            if not card:
+                continue
+            nxt = next((y for y in range(card[-1] + 1, height) if col[y] == "C"), None)
+            if lowest_card is not None and len(card) < lowest_card:
+                shrinking = True
+            if shrinking and (len(card) > lowest_card + 1 or (nxt is not None and lowest_next is not None and nxt > lowest_next + 1)):
+                taller.append({"ms": round((t - start) * 1000), "card": len(card), "next": nxt})
+            lowest_card = len(card) if lowest_card is None else min(lowest_card, len(card))
+            if nxt is not None:
+                lowest_next = nxt if lowest_next is None else min(lowest_next, nxt)
+        cases.append({"collapse": index, "painted_frames": len(shown), "taller": taller[:5]})
+        if len(shown) < 5:
+            failures.append(f"collapse {index}: only {len(shown)} painted frames were captured")
+        if taller:
+            failures.append(f"collapse {index}: {len(taller)} painted frames were taller after the collapse began")
+    return {"paint": cases, "paint_failures": failures}
+
 
 with tempfile.TemporaryDirectory(prefix="zerus-menu-") as scratch:
     for variable, directory in [("HOME", "home"), ("XDG_CONFIG_HOME", "config"),
@@ -127,6 +168,25 @@ with tempfile.TemporaryDirectory(prefix="zerus-menu-") as scratch:
             return False
         return True
 
+    # What WebKit hands GTK each frame, polled in-process: no screen capture.
+    painted, PAINT_HEIGHT = [], 800
+    if args.paint_column is not None:
+        import cairo
+        surface = cairo.ImageSurface(cairo.FORMAT_RGB24, 4, PAINT_HEIGHT)
+
+        def poll_paint():
+            cr = cairo.Context(surface)
+            cr.set_source_rgb(0, 0, 0)
+            cr.paint()
+            cr.translate(-args.paint_column, 0)
+            view.draw(cr)
+            surface.flush()
+            data = bytes(surface.get_data())
+            if not painted or painted[-1][1] != data:
+                painted.append((time.time(), data))
+            return window.get_visible()
+        GLib.timeout_add(2, poll_paint)
+
     manager.connect("script-message-received::result", received)
     window.connect("delete-event", lambda *_: finish({"failures": ["Regression window closed early"]}))
     GLib.timeout_add_seconds(30, deadline)
@@ -135,6 +195,9 @@ with tempfile.TemporaryDirectory(prefix="zerus-menu-") as scratch:
     view.load_uri(args.url)
     window.show_all()
     Gtk.main()
+    if args.paint_column is not None:
+        result = {**result, **painted_collapse(painted, result.get("morphs", []), PAINT_HEIGHT)}
+        result["failures"] = result.get("failures", []) + result.pop("paint_failures")
     print(json.dumps({**result, **display_info, "real_display": args.real_display,
                       "webkit": f"{WebKit2.get_major_version()}.{WebKit2.get_minor_version()}.{WebKit2.get_micro_version()}"}, indent=2))
     raise SystemExit(1 if result.get("failures") else 0)

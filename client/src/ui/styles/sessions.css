@@ -85,7 +85,6 @@
   .scard.compact[data-emphasis]::before { top: 4px; bottom: 4px; }
   /* While a card and its compact row morph into each other the card clips its lines. */
   .scard.morph { overflow: hidden; }
-  .sp-scroll.morphing .vrow { transition: transform 220ms cubic-bezier(.33, 1, .68, 1); }
   .scard[data-emphasis="attention"], .scard[data-emphasis="unread"] { --edge: var(--z-list-edge-attention); }
   .scard[data-emphasis="error"] { --edge: var(--z-list-edge-error); }
   .scard[data-emphasis="draft"] { --edge: var(--z-list-edge-draft); }

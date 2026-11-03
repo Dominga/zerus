@@ -673,16 +673,28 @@ elif a and a[0]=='worktrees':
         QCOMPARE(choices(next)->currentItem()->data(Qt::UserRole).toString(),QString("work"));
     }
     // WhiteWh fork: the worktree type of the last started session is the next default.
+    void lastWorktreeTypeIsRemembered_data() {
+        QTest::addColumn<bool>("background");
+        QTest::newRow("foreground")<<false;QTest::newRow("background")<<true;
+    }
     void lastWorktreeTypeIsRemembered() {
+        QFETCH(bool,background);
         flag("repo");QSettings().remove("workspace/launchWorktree");
+        SessionCreationController controller(program());
         {
             NewSessionDialog dialog(program(),fleet(),{},"codex");dialog.selectPath("/workspace/example");dialog.show();
+            dialog.setBackgroundCreation(background);
+            connect(&dialog,&NewSessionDialog::creationRequested,&controller,[&](const QJsonObject &plan){
+                QCOMPARE(plan["worktree_choice"].toString(),QString("none"));
+                QVERIFY(!controller.submit(plan).isEmpty());
+            });
             auto *automatic=dialog.findChild<QPushButton *>("automaticLaunchWorktree");auto *plain=dialog.findChild<QPushButton *>("launchWithoutWorktree");
             QTRY_VERIFY(automatic->isChecked());plain->click();QVERIFY(plain->isChecked());
             auto *start=dialog.findChild<QPushButton *>("primary");QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);
-            QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launched.size(),1);
+            QSignalSpy created(&dialog,&NewSessionDialog::creationRequested);
+            QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(background?created.size():launched.size(),1);
         }
-        QCOMPARE(Settings::value("workspace/launchWorktree").toString(),QString("none"));
+        QTRY_COMPARE(Settings::value("workspace/launchWorktree").toString(),QString("none"));
         NewSessionDialog next(program(),fleet(),{},"codex");next.selectPath("/workspace/example");next.show();
         auto *automatic=next.findChild<QPushButton *>("automaticLaunchWorktree");auto *plain=next.findChild<QPushButton *>("launchWithoutWorktree");
         // Auto stays available for this repository; only the default changed.

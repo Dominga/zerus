@@ -846,6 +846,7 @@ void NewSessionDialog::start()
             {"model",model},{"effort",model.isEmpty()?QString():m_effort->currentData().toString()},
             {"terminal",m_openTerminal->isChecked()&&agent()!="dsh"&&agent()!="opencode"},
             {"repository",m_repositorySource}};
+        if(m_worktreeChosen)plan["worktree_choice"]=m_autoPreferred?"auto":"none";
         // WhiteWh fork: this session's permission mode and a local model
         // account's model (hgs --permissions, --local-model) travel in the plan.
         if(const auto permissions=m_permissions->currentData().toString();!permissions.isEmpty()&&permissions!=QStringLiteral("__editor__"))plan["permissions"]=permissions;

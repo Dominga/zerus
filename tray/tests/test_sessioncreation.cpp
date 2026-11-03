@@ -10,6 +10,7 @@
 #include <memory>
 #include "SessionCreationController.h"
 #include "FakeCli.h"
+#include "Settings.h"
 
 class TestSessionCreation:public QObject {
     Q_OBJECT
@@ -93,6 +94,23 @@ elif a[0]=='worktrees':
         const auto id=controller.submit(plan());QCOMPARE(controller.operation(id)["state"].toString(),QString("saving"));
         QTRY_VERIFY(entered.available()>0);QVERIFY(calls().isEmpty());release.release();
         QTRY_VERIFY(QFile::exists(m_fixture.filePath("checking")));
+    }
+    void remembersOnlyExplicitWorktreeChoice_data(){
+        QTest::addColumn<QString>("choice");QTest::addColumn<QString>("previous");QTest::addColumn<QString>("expected");
+        QTest::newRow("auto")<<QString("auto")<<QString("none")<<QString("auto");
+        QTest::newRow("none")<<QString("none")<<QString("auto")<<QString("none");
+        QTest::newRow("implicit-direct-folder")<<QString()<<QString("auto")<<QString("auto");
+        QTest::newRow("invalid-choice")<<QString("invalid")<<QString("none")<<QString("none");
+    }
+    void remembersOnlyExplicitWorktreeChoice(){
+        QFETCH(QString,choice);QFETCH(QString,previous);QFETCH(QString,expected);
+        Settings::set("workspace/launchWorktree",previous);
+        flag("fail-check");SessionCreationController controller(program());
+        auto choices=plan();if(!choice.isEmpty())choices["worktree_choice"]=choice;
+        const auto id=controller.submit(choices);QVERIFY(!id.isEmpty());
+        QTRY_COMPARE(controller.operation(id)["state"].toString(),QString("failed"));
+        QCOMPARE(Settings::value("workspace/launchWorktree").toString(),expected);
+        QSettings().remove("workspace/launchWorktree");
     }
     void stopDuringReadNeverCreatesCheckoutOrAgent(){
         flag("hold-check");SessionCreationController controller(program());QSignalSpy launch(&controller,&SessionCreationController::launchRequested);

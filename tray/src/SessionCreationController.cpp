@@ -244,6 +244,10 @@ void SessionCreationController::persist(const QString &id,std::function<void()> 
         if(error.isEmpty()&&remember){
             Settings::set("workspace/launchOpenTerminal",choices.value("terminal").toBool());
             Settings::set("workspace/launchAgent",choices.value("cmd").toString());
+            // Only an explicit Auto/None choice changes the next dialog's default.
+            // A non-Git folder or an existing checkout can disable Auto for this launch.
+            const auto worktree=choices.value("worktree_choice").toString();
+            if(worktree=="auto"||worktree=="none")Settings::set("workspace/launchWorktree",worktree);
             if(!choices.value("account").toString().isEmpty()){
                 auto accounts=SettingsJson::object(QStringLiteral("workspace/launchAccounts"));
                 auto machine=accounts[choices.value("host").toString()].toObject();machine[choices.value("cmd").toString()]=choices.value("account");

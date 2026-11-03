@@ -47,7 +47,9 @@ pub(super) async fn catalog_loop(
             {
                 failures.remove(&computer);
             }
-            let epoch = admission(&shared.snapshot)
+            let epoch = shared
+                .snapshot
+                .lock()
                 .epoch
                 .clone()
                 .ok_or("service_unavailable")?;
@@ -154,8 +156,14 @@ fn insert_key(
 impl Shared {
     /// Park only this local baseline; hold neither a relay nor an RPC slot.
     /// Hello application takes the same hub/dirty lock order and wakes it.
+    ///
+    /// `dirty` is taken with a plain wait while the details hub is held
+    /// (reviewed for zerus-hj2s). The hub-then-dirty order is what keeps the
+    /// identity wakeup from being lost, and no std lock may be held across
+    /// `block_in_place`. The wait lasts only while a view callback holds
+    /// `dirty`, and only while the local identity is not ready yet.
     fn park_until_source_identity(&self, computer: &str, source: &SourceVersion) -> bool {
-        if !computer.is_empty() || !admission(&self.snapshot).details_available {
+        if !computer.is_empty() || !self.snapshot.lock().details_available {
             return false;
         }
         let hub = self.details.lock().unwrap_or_else(PoisonError::into_inner);
@@ -173,6 +181,9 @@ impl Shared {
         }
         true
     }
+    /// Called with the details hub held (the same order as
+    /// `park_until_source_identity`), only after a source's hello; its plain
+    /// wait for `dirty` was reviewed with that one for zerus-hj2s.
     pub(super) fn catalog_identity_ready(&self, computer: &str, generation: u64) {
         let mut dirty = self.dirty.lock().unwrap_or_else(PoisonError::into_inner);
         if dirty

@@ -538,6 +538,8 @@ fn a_paused_original_callback_cannot_record_after_a_recovery_fence() {
 
 // Control (c): the original gate lands after the recovery's lookup but before
 // its fence. The fence compare-and-swap refuses; the original publishes alone.
+// Its final write may overlap the recovery's journal lock, as it did on macOS:
+// holding that lock for a moment must delay the original, never fail it.
 #[test]
 fn a_gate_recorded_before_the_fence_makes_recovery_refuse() {
     let _process = crate::PROCESS_TREE.read().unwrap();
@@ -561,6 +563,12 @@ fn a_gate_recorded_before_the_fence_makes_recovery_refuse() {
                 .flatten()
                 .is_some_and(|s| s.record.recorded_attempt == Some(1))
         });
+        #[cfg(unix)]
+        {
+            let held = fs::File::open(root.join("creations-retained-import-v1.lock")).unwrap();
+            held.lock().unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
     }));
     assert_eq!(
         rerun(&f, &restarted, true),

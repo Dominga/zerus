@@ -321,3 +321,38 @@ fn rollback_reader_refuses_v2_and_the_bounded_loader_never_defaults_a_missing_co
     assert!(s.journal().load().is_err());
     assert_eq!(fs::read(s.0.join(FILE)).unwrap(), oversized);
 }
+// A recovery's refused fence and the original's final write may overlap: a
+// save waits for the other run's bounded compare/write instead of failing,
+// but never writes without the lock.
+#[test]
+fn a_concurrent_save_waits_for_the_journal_lock_and_never_writes_without_it() {
+    let s = Scratch::new();
+    let j = s.journal();
+    let initial = s.initial();
+    let path = s.0.join("creations-retained-import-v1.lock");
+    let held = crate::fsx::preload::Lock::take_managed(&path).unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        drop(held);
+    });
+    let started = Instant::now();
+    let attempted = update(&j, initial, |r| {
+        r.phase = Phase::Attempted;
+        r.attempt = 1;
+    });
+    assert!(started.elapsed() >= Duration::from_millis(250));
+    release.join().unwrap();
+    assert_eq!(j.load().unwrap().unwrap().sha256, attempted.sha256);
+    // A holder that outlasts the bounded wait leaves the record unchanged.
+    let held = crate::fsx::preload::Lock::take_managed(&path).unwrap();
+    let mut next = attempted.record.clone();
+    next.phase = Phase::Unknown;
+    let started = Instant::now();
+    assert!(matches!(
+        j.save(next, Some(&attempted.sha256)),
+        Err(SourceError::SourceUnreadable)
+    ));
+    assert!(started.elapsed() >= LOCK_WAIT);
+    drop(held);
+    assert_eq!(j.load().unwrap().unwrap().sha256, attempted.sha256);
+}

@@ -2567,6 +2567,7 @@ mod tests {
             reserved_at: 1.0,
             status: "partial".into(),
             detail: String::new(),
+            volumes: None,
         };
         let context = Context {
             common: common.clone(),

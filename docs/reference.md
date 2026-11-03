@@ -2573,7 +2573,11 @@ that worktree, such as the cleanup after Terminate) as a **leftover**
 (`worktree-leftovers-v1`), with a fresh bounded listing of the remaining files,
 the retained branch and current processes or sessions. The cleanup after
 Terminate keeps such a folder with "Git no longer tracks this folder, but files
-remain" instead of an unverified-folder error. A missing Git
+remain" instead of an unverified-folder error. A targeted review matches the
+worktree's whole path, as given or resolved through links, never a prefix. The
+targeted reviews behind `hgs worktrees inspect` and `remove` therefore also
+resolve that worktree's own record under the rules below, so inspection, otherwise
+read-only, may drop a record whose folder is gone or that Git tracks again. A missing Git
 registration is never treated as proof of deletion, and the removal is never
 retried. **Keep folder, forget record** (`hgs worktrees keep-folder`) checks the
 reviewed leftover again under the repository lock and drops only its record;
@@ -2612,9 +2616,27 @@ worktree inherits the repository lock (an flock belongs to the open file, and on
 that Git receives it), and hgs releases the lock by closing it, never by an explicit
 unlock. The lock therefore stays taken while that Git, or anything it started, still
 runs, even after hgs is killed, and no review resolves the record in that time. On
-Windows the lock ends with hgs. A leftover whose repository is gone is listed
+Windows the lock ends with hgs. If worktree operations keep reporting that another
+one is running (for example because a custom `git` wrapper left a helper behind),
+`fuser -v` or `lsof` on the repository's `worktree-cache/repo-*.lock` file in the
+hgs state folder shows which process still holds it. A leftover whose repository is gone is listed
 by `hgs worktrees leftovers` and can still be kept; a record whose repository and
-folder are both gone resolves. One review or listing reports at most 32 leftovers
+folder are both gone resolves.
+
+A missing folder or repository counts as gone only on the filesystem that held it.
+Each reservation records that filesystem in a separate private table that older
+CLIs never read: on Linux the device and the `statfs` filesystem ID (derived from
+the filesystem UUID on ext4, btrfs and xfs), on macOS the filesystem ID and mount
+point. A missing path is gone only when the nearest existing folder above it is on
+that same filesystem. A volume that is unmounted, replaced by another one at the
+same place, or that cannot be identified (for example a zero filesystem ID, as on
+some tmpfs and network filesystems) leaves the record uncertain: it stays visible
+and can be kept by hand, and it never resolves by itself. On btrfs the device is a
+per-subvolume number that can change across remounts; such records also stay
+uncertain until kept. A block-level clone of a filesystem shares its ID, but
+mounted at the same place it normally has another device, so it is not taken for
+the original. Records written by an older CLI have no volume row and keep the plain
+missing-path check, as does every record on Windows. One review or listing reports at most 32 leftovers
 within 1 MiB and marks the rest with `leftovers_partial` (review) or `partial`
 (listing); they stay recorded for a later review. The folder catalog
 (`hgs worktrees --path`) reports a repository's record count as `leftovers`, read

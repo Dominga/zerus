@@ -609,6 +609,48 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         live=self.linked('still-live');data=self.review(worktree=live)
         self.assertEqual([row['path'] for row in data['worktrees']],[str(live.resolve())]);self.assertEqual(data['leftovers'],[])
         self.assertEqual(len(self.records()),2)
+    def volumes(self):
+        import sqlite3
+        database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3'
+        with contextlib.closing(sqlite3.connect(database)) as db:return db.execute('SELECT path,folder,repository FROM removal_volumes ORDER BY path').fetchall()
+    # zerus-ty94 #5: a reservation records which filesystem held the folder
+    # and the repository; a missing path counts as gone only there.
+    @unittest.skipUnless(sys.platform in ('linux','darwin'),'volume identities exist on Linux and macOS')
+    def test_a_vanished_record_resolves_only_on_its_recorded_filesystem(self):
+        import sqlite3
+        tree,_,_=self.partial('volume-witness')
+        [(path,folder,repository)]=self.volumes()
+        self.assertEqual(path,str(tree.resolve()))
+        if not folder:self.skipTest('this filesystem has no identity (zero fsid)')
+        self.assertTrue(folder.startswith(('linux:','macos:')));self.assertEqual(folder,repository)
+        database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3';gone_repository=str(self.root/'gone-repository/.git')
+        cases={'older-cli':None,'unrecorded':('',''),'same':(folder,folder),'foreign':('linux:1:00000000000000ff','linux:1:00000000000000ff')}
+        with contextlib.closing(sqlite3.connect(database)) as db,db:
+            for name,volume in cases.items():
+                db.execute("INSERT INTO removals VALUES (?,?,?,?,?,?,?,?,?)",(str(self.root/name),gone_repository,'b','0'*40,'f'*64,'',1.0,'partial',''))
+                if volume:db.execute("INSERT INTO removal_volumes VALUES (?,?,?)",(str(self.root/name),*volume))
+        listed=subprocess.run([str(HGS),'worktrees','leftovers','--json'],env=self.env,text=True,capture_output=True,timeout=60)
+        self.assertEqual(listed.returncode,0,listed.stderr)
+        paths=[path for path,_ in self.records()]
+        # Gone for good: today's check for an older CLI's record, and a missing
+        # folder and repository whose filesystem is still there.
+        self.assertNotIn(str(self.root/'older-cli'),paths);self.assertNotIn(str(self.root/'same'),paths)
+        # Uncertain, never gone: an unrecorded or another filesystem.
+        self.assertIn(str(self.root/'unrecorded'),paths);self.assertIn(str(self.root/'foreign'),paths)
+        self.assertEqual(sorted(p for p,_,_ in self.volumes()),sorted([str(tree.resolve()),str(self.root/'unrecorded'),str(self.root/'foreign')]))
+        # The record a live removal settled keeps its volume row with it.
+        shutil.rmtree(tree,ignore_errors=True)
+        if tree.exists():(tree/'target'/'readonly').chmod(0o755);shutil.rmtree(tree)
+        self.assertIsNone(self.leftover(tree));self.assertNotIn(str(tree.resolve()),[p for p,_,_ in self.volumes()])
+    # #1206 review: the targeted filter matches whole paths, never a prefix,
+    # and resolves a linked target to its record.
+    def test_a_targeted_review_matches_whole_paths_and_resolved_links(self):
+        pre,_,_=self.partial('pre');self.partial('pre-x')
+        data=self.review(worktree=pre)
+        self.assertEqual([row['path'] for row in data['leftovers']],[str(pre.resolve())])
+        link=self.root/'link-to-pre';os.symlink(pre,link)
+        data=self.review(worktree=link)
+        self.assertEqual([row['path'] for row in data['leftovers']],[str(pre.resolve())])
     def test_an_interrupted_removal_stays_pending_for_review(self):
         self.fake("if any(sys.argv[i:i+2]==['worktree','remove'] for i in range(len(sys.argv)-1)):\n import signal,subprocess\n subprocess.run(["+repr(GIT)+",*sys.argv[1:]])\n os.kill(os.getppid(),signal.SIGKILL);sys.exit(1)\nelse: os.execv("+repr(GIT)+",["+repr(GIT)+",*sys.argv[1:]])\n")
         tree,row,result=self.partial('interrupted')

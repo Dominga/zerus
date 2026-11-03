@@ -535,6 +535,21 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         self.assertIn('synthetic forget failure',outcome['detail'])
         self.assertEqual(self.records(),[(str(tree.resolve()),'partial')])
         self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
+    def test_an_unreadable_record_store_is_never_taken_as_no_record(self):
+        if os.geteuid()==0:self.skipTest('root ignores directory permissions')
+        tree,_,_=self.partial('unreadable-store');left=self.leftover(tree)
+        store=self.root/'state'/'worktree-maintenance';store.chmod(0o000)
+        try:
+            kept=self.keep(tree,left['fingerprint']);data=self.review()
+            catalog=self.catalog()
+        finally:
+            store.chmod(0o700)
+        self.assertNotEqual(kept.returncode,0);outcome=json.loads(kept.stdout)
+        self.assertEqual(outcome['status'],'kept')
+        self.assertNotIn('No partial-removal record',outcome['detail']);self.assertIn('Permission denied',outcome['detail'])
+        self.assertEqual(data['leftovers'],[]);self.assertIn('Permission denied',data['leftovers_unavailable'])
+        self.assertNotIn('leftovers',catalog)
+        self.assertEqual(self.records(),[(str(tree.resolve()),'partial')])
     def test_an_interrupted_removal_stays_pending_for_review(self):
         self.fake("if any(sys.argv[i:i+2]==['worktree','remove'] for i in range(len(sys.argv)-1)):\n import signal,subprocess\n subprocess.run(["+repr(GIT)+",*sys.argv[1:]])\n os.kill(os.getppid(),signal.SIGKILL);sys.exit(1)\nelse: os.execv("+repr(GIT)+",["+repr(GIT)+",*sys.argv[1:]])\n")
         tree,row,result=self.partial('interrupted')

@@ -648,12 +648,16 @@ mod tests {
         // Each additional ASCII text byte occurs in plan and retained_input.
         // Probe just inside the settlement-safe threshold and at the old
         // delivering-only threshold; neither count relies on fixture captions.
-        let safe_text = 1 + (LIMIT - 6 * ERROR_CHARS - baseline) / 2;
+        let error = "\u{1}".repeat(ERROR_CHARS);
+        let encoded_error = serde_json::to_vec(&error).unwrap().len() - 2;
+        let safe_text = 1 + (LIMIT - encoded_error - baseline) / 2;
+        // Between a five-byte reserve and the actual encoded error size: a
+        // too-small reserve must retain this input and then exceed the bound.
+        let between_text = 1 + (LIMIT - (encoded_error - ERROR_CHARS / 2) - baseline) / 2;
         let old_text = 1 + (LIMIT - baseline) / 2;
-        for (bytes, retained) in [(safe_text, true), (old_text, false)] {
+        for (bytes, retained) in [(safe_text, true), (between_text, false), (old_text, false)] {
             let s = Scratch::new();
             let text = "x".repeat(bytes);
-            let error = "\u{1}".repeat(ERROR_CHARS);
             let view = start_with_text(&s.0, &text, |call| {
                 let record = outbox::pending(&root(&s.0), "example", TASK)
                     .unwrap()

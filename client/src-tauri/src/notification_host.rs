@@ -217,7 +217,7 @@ fn worker(mut work: Worker) -> Result<(), &'static str> {
 fn turn(progressed: bool) {
     let started = Instant::now();
     let delay = if progressed { 0.0 } else { 0.1 };
-    autoreleasepool(|_| {
+    native_turn(|| {
         NSRunLoop::mainRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(delay))
     });
     // An empty native run loop may return immediately; keep that idle case
@@ -227,6 +227,13 @@ fn turn(progressed: bool) {
     } else if let Some(left) = Duration::from_millis(50).checked_sub(started.elapsed()) {
         thread::sleep(left);
     }
+}
+
+/// SDK work must register temporary objects in the pool for THIS turn. A pool
+/// opened later, only for the run-loop wait, cannot release earlier objects.
+/// Callback entry points use this too: the framework may call on another thread.
+fn native_turn<T>(work: impl FnOnce() -> T) -> T {
+    autoreleasepool(|_| work())
 }
 fn start() -> Result<(), &'static str> {
     let (socket, owner) = inherited()?;
@@ -278,55 +285,22 @@ fn drive(
     };
     let mut host = Host::new(session.clone()).ok_or("notification_session")?;
     let mtm = MainThreadMarker::new().ok_or("notification_main_thread")?;
-    let app = NSApplication::sharedApplication(mtm);
-    if !app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited) {
-        return Err("notification_headless_policy");
-    }
-    let center = center::HostCenter::new(owner.clone());
-    let mut delegate = Some(delegate::Installed::new(host.native_resources(), owner));
-    app.finishLaunching();
+    let (_app, center, mut delegate) = native_turn(|| {
+        let app = NSApplication::sharedApplication(mtm);
+        if !app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited) {
+            return Err("notification_headless_policy");
+        }
+        let center = center::HostCenter::new(owner.clone());
+        let delegate = Some(delegate::Installed::new(host.native_resources(), owner));
+        app.finishLaunching();
+        Ok((app, center, delegate))
+    })?;
     let mut stopping = false;
     let mut pending = None;
     loop {
-        let mut progressed = false;
-        if closed.load(Ordering::Acquire) && !stopping {
-            host.receive(
-                wire::ToHost::Stop {
-                    session: session.clone(),
-                },
-                &center,
-                Instant::now(),
-            )?;
-            stopping = true;
-        }
-        for _ in 0..16 {
-            if !stopping {
-                if let Ok(frame) = incoming.try_recv() {
-                    progressed = true;
-                    let requested_stop = matches!(frame, wire::ToHost::Stop { .. });
-                    if host.receive(frame, &center, Instant::now()).is_err() {
-                        quit.store(true, Ordering::Release);
-                        host.receive(
-                            wire::ToHost::Stop {
-                                session: session.clone(),
-                            },
-                            &center,
-                            Instant::now(),
-                        )?;
-                        stopping = true;
-                    } else if requested_stop {
-                        stopping = true;
-                    }
-                } else {
-                    break;
-                }
-            } else {
-                break;
-            }
-        }
-        if let Some(delegate) = delegate.as_ref().filter(|_| !stopping) {
-            if delegate.failed() {
-                quit.store(true, Ordering::Release);
+        let finished = native_turn(|| -> Result<bool, &'static str> {
+            let mut progressed = false;
+            if closed.load(Ordering::Acquire) && !stopping {
                 host.receive(
                     wire::ToHost::Stop {
                         session: session.clone(),
@@ -336,12 +310,33 @@ fn drive(
                 )?;
                 stopping = true;
             }
-            for _ in 0..32 {
-                let Some(envelope) = delegate.next() else {
+            for _ in 0..16 {
+                if !stopping {
+                    if let Ok(frame) = incoming.try_recv() {
+                        progressed = true;
+                        let requested_stop = matches!(frame, wire::ToHost::Stop { .. });
+                        if host.receive(frame, &center, Instant::now()).is_err() {
+                            quit.store(true, Ordering::Release);
+                            host.receive(
+                                wire::ToHost::Stop {
+                                    session: session.clone(),
+                                },
+                                &center,
+                                Instant::now(),
+                            )?;
+                            stopping = true;
+                        } else if requested_stop {
+                            stopping = true;
+                        }
+                    } else {
+                        break;
+                    }
+                } else {
                     break;
-                };
-                progressed = true;
-                if host.clicked(&envelope).is_err() {
+                }
+            }
+            if let Some(delegate) = delegate.as_ref().filter(|_| !stopping) {
+                if delegate.failed() {
                     quit.store(true, Ordering::Release);
                     host.receive(
                         wire::ToHost::Stop {
@@ -351,48 +346,69 @@ fn drive(
                         Instant::now(),
                     )?;
                     stopping = true;
+                }
+                for _ in 0..32 {
+                    let Some(envelope) = delegate.next() else {
+                        break;
+                    };
+                    progressed = true;
+                    if host.clicked(&envelope).is_err() {
+                        quit.store(true, Ordering::Release);
+                        host.receive(
+                            wire::ToHost::Stop {
+                                session: session.clone(),
+                            },
+                            &center,
+                            Instant::now(),
+                        )?;
+                        stopping = true;
+                        break;
+                    }
+                }
+            }
+            host.poll(&center, Instant::now());
+            for _ in 0..32 {
+                if pending.is_none() {
+                    pending = host.next_output();
+                }
+                if let Some(emission) = pending.take() {
+                    let stopped = matches!(emission.frame, wire::FromHost::Stopped { .. });
+                    if closed.load(Ordering::Acquire) {
+                        progressed = true;
+                        drop(emission); // Exact socket is physically closed already.
+                        if stopped {
+                            return Ok(true);
+                        }
+                    } else {
+                        match outgoing.try_send(emission) {
+                            Ok(()) if stopped => return Ok(true),
+                            Ok(()) => progressed = true,
+                            Err(mpsc::TrySendError::Full(emission)) => {
+                                pending = Some(emission);
+                                break;
+                            }
+                            Err(mpsc::TrySendError::Disconnected(emission)) => {
+                                drop(emission); // Worker's Drop closed its original socket first.
+                                if stopped {
+                                    return Ok(true);
+                                }
+                                progressed = true;
+                            }
+                        }
+                    }
+                } else {
                     break;
                 }
             }
-        }
-        host.poll(&center, Instant::now());
-        for _ in 0..32 {
-            if pending.is_none() {
-                pending = host.next_output();
+            if host.native_close_requested() && pending.is_none() {
+                drop(delegate.take());
             }
-            if let Some(emission) = pending.take() {
-                let stopped = matches!(emission.frame, wire::FromHost::Stopped { .. });
-                if closed.load(Ordering::Acquire) {
-                    progressed = true;
-                    drop(emission); // Exact socket is physically closed already.
-                    if stopped {
-                        return Ok(());
-                    }
-                } else {
-                    match outgoing.try_send(emission) {
-                        Ok(()) if stopped => return Ok(()),
-                        Ok(()) => progressed = true,
-                        Err(mpsc::TrySendError::Full(emission)) => {
-                            pending = Some(emission);
-                            break;
-                        }
-                        Err(mpsc::TrySendError::Disconnected(emission)) => {
-                            drop(emission); // Worker's Drop closed its original socket first.
-                            if stopped {
-                                return Ok(());
-                            }
-                            progressed = true;
-                        }
-                    }
-                }
-            } else {
-                break;
-            }
+            turn(progressed);
+            Ok(false)
+        })?;
+        if finished {
+            return Ok(());
         }
-        if host.native_close_requested() && pending.is_none() {
-            drop(delegate.take());
-        }
-        turn(progressed);
     }
 }
 

@@ -227,6 +227,11 @@ agreed its contract on 2026-10-30. It has no actor integration, process runner,
 SQL, positive job IPC or executing permission. The dedicated operation
 table/API remains G1's lane, separate from native `desktop-ledger::Kind`.
 
+The [closed native request boundary](desktop-task-start-reconcile.md) carries
+bounded exact producer checkpoints in a distinct TaskStartReconcile lane. Its
+current backend still refuses execution; it adds no worker or general Operations
+permission and leaves the background profile unchanged.
+
 `Key` separates kind (`task_start_reconcile`), schema 1, configuration,
 project/task and the original request UUID from every reconciliation-attempt
 UUID. `Binding` adds the exact marker, original executor's stable machine,

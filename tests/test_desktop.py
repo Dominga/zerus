@@ -203,6 +203,21 @@ finally:
         self.assertIn('Desktop creation clone ABI: desktop-creation-clone-v1', help_text)
         self.assertNotIn('desktop-creation-worktree', help_text)
 
+    def test_task_start_reconcile_is_closed_and_not_yet_advertised(self):
+        self.serve()
+        status = self.cli('desktop', 'status', '--json')
+        intent = dict(scope=dict(configuration=status['configuration'], service_epoch=status['epoch']),
+                      reconcile_id=str(uuid.uuid4()), binding={}, original='{}')
+        refused = self.cli('desktop', 'request', '--json', data=dict(op='task_start_reconcile', intent=intent))
+        self.assertFalse(refused['accepted'])
+        self.assertEqual(refused['code'], 'frontend_authentication_required')
+        help_text = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True).stdout
+        self.assertNotIn('Desktop task Start reconcile ABI:', help_text)
+        self.assertNotIn('task-start-reconcile-v1', help_text)
+        with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_operations').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_operation_attempts').fetchone()[0], 0)
+
     @unittest.skipUnless(sys.platform.startswith('linux') or sys.platform == 'darwin', 'Unix registration mode')
     def test_registration_variant_is_read_only_and_service_reports_its_requested_mode(self):
         passive = self.cli('desktop', 'registration', '--json')
@@ -1261,6 +1276,10 @@ finally:
 
     @staticmethod
     def remove_catalog_reason_schema(db):
+        # Rewind the later schema-22 leaf too, never leaving it labelled older.
+        db.execute('DROP INDEX desktop_catalog_approval')
+        db.execute('DROP INDEX desktop_catalog_approval_pending')
+        db.execute('ALTER TABLE desktop_catalog_rows DROP COLUMN approval')
         db.execute('ALTER TABLE desktop_catalog_changes DROP COLUMN reason')
 
     @classmethod

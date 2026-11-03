@@ -367,7 +367,7 @@ fn retained_delivery_refuses_a_new_epoch_and_shutdown_does_not_wait_for_a_stalle
         let (service, rx) = start(&fixture, responder);
         let delivery = receive(&rx).await;
         assert!(delivery.current());
-        service.shared.snapshot.lock().unwrap().epoch = Some(uuid::Uuid::new_v4().to_string());
+        service.shared.snapshot.lock().epoch = Some(uuid::Uuid::new_v4().to_string());
         assert!(!delivery.current());
         let completion = delivery.completion();
         let outcome = consume(delivery, true);

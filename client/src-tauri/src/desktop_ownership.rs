@@ -654,7 +654,7 @@ fn native_takeover_until(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 fn native_takeover(hgs: PathBuf, responder: Arc<Responder>) -> Result<NativeReady, &'static str> {
     native_takeover_recoverable(hgs, responder).map_err(|failure| failure.code)
 }

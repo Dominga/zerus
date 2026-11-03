@@ -14,8 +14,10 @@ symbolic, not physical worker evidence. Follow-up examples use explicitly
 independent fixture databases, without claiming continuous release or retry of
 an uncertain attempt. Exact old-epoch still-reserved results may settle after
 revoke, while terminal Unknown, changed originals and forged tickets refuse.
-No production actor, task call, callback, timer, custody or current Operations
-admission is qualified; G1 `.22`, G2 `.4.2` and later kinds remain unfinished.
+Those conformance harnesses alone qualify no production actor, task call,
+callback, timer, custody or current Operations admission. The separate guarded
+[Task Start actor](desktop-task-start-reconcile.md) consumes native admission;
+later kinds and the remaining G2 integrations stay separate.
 
 The additional test-only `operations::tests::owned` slice sends the unchanged
 proposed argv and input to fixed private synthetic executables through the
@@ -229,8 +231,10 @@ table/API remains G1's lane, separate from native `desktop-ledger::Kind`.
 
 The [closed native request boundary](desktop-task-start-reconcile.md) carries
 bounded exact producer checkpoints in a distinct TaskStartReconcile lane. Its
-current backend still refuses execution; it adds no worker or general Operations
-permission and leaves the background profile unchanged.
+Linux/macOS actor admits only the fixed, explicitly requested recover-only
+worker under its current native guard. Windows and unsupported originals stay
+refused. This adds no general Operations permission and leaves the background
+profile unchanged.
 
 `Key` separates kind (`task_start_reconcile`), schema 1, configuration,
 project/task and the original request UUID from every reconciliation-attempt

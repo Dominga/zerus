@@ -479,7 +479,24 @@ fn usage_text(tmux: bool) -> Cow<'static, str> {
         .into()
 }
 
-pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
+#[cfg(any(windows, test))]
+mod swarm_restart;
+
+pub fn dispatch(args: Vec<String>) -> Result<i32> {
+    dispatch_at(args, Instant::now())
+}
+
+pub(crate) fn dispatch_at(args: Vec<String>, entered: Instant) -> Result<i32> {
+    #[cfg(any(windows, test))]
+    if let Some(request) = swarm_restart::select(&args) {
+        return swarm_restart::dispatch(request, entered);
+    }
+    #[cfg(not(any(windows, test)))]
+    let _ = entered;
+    dispatch_normal(args)
+}
+
+fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
     if crate::desktop::launchd_command(&args) {
         args.pop();
         return dispatch(args).map_err(|mut error| {

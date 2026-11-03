@@ -783,3 +783,5 @@ fn copied_loose_modes_links_and_other_configuration_are_refused() {
     fs::copy(&db, other_dir.join("index.sqlite3")).unwrap();
     assert!(Store::open(&other_dir).is_err());
 }
+
+mod chunks;

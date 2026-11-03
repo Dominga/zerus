@@ -60,6 +60,18 @@ async function run() {
   desktopService.apply({ ...state, retained_source_import: { ...report, creations_report: { ...report, code: "creations_import_before_record", phase: "unknown" } } });
   await settle();
   check(!dialog?.textContent?.includes("not sent because local preparation failed") && dialog?.textContent?.includes("checks the original report"), "a stale preparation code relabeled unknown publication");
+  desktopService.apply({ ...state, retained_source_import: { ...report,
+    local_read_capture: { code: "local_read_source_unsupported", paused: true, capture_id: "original" },
+    local_reads_report: { ...report, code: "local_reads_import_original_result_unconfirmed", phase: "unknown" } } });
+  await settle();
+  check(dialog?.textContent?.includes("local_read_source_unsupported") && dialog?.textContent?.includes("local_reads_import_original_result_unconfirmed") && dialog?.textContent?.includes("retained_import_qt_unavailable"), "local capture or historical report masked another reason");
+  check(calls === 0 && desktopService.ready("fleet"), "historical report review granted authority or invoked native IPC");
+  desktopService.apply({ ...state, retained_source_import: { ...report,
+    worktree_cache_capture: { code: "worktree_cache_source_changed", paused: true, capture_id: "cache-original" },
+    drafts_capture: { code: "draft_capture_next_earlier_run", writes: true, paused: false, capture_id: "draft-original", manifests: 1 } } });
+  await settle();
+  check(dialog?.textContent?.includes("worktree_cache_source_changed") && dialog?.textContent?.includes("draft_capture_next_earlier_run") && dialog?.textContent?.includes("retained_import_qt_unavailable"), "cache capture masked drafts or settings");
+  check(calls === 0 && desktopService.ready("fleet"), "cache review invoked native IPC or changed readiness");
   dialog?.dispatchEvent(new Event("cancel", { cancelable: true })); await settle(); await settle();
   check(!root.querySelector("dialog") && document.activeElement === review, "Escape/cancel did not close and restore focus");
   check(calls === 0 && desktopService.ready("fleet"), "Review or dismissal changed native state");

@@ -20,8 +20,15 @@ use windows_sys::Win32::{
     Foundation::*,
     Storage::FileSystem::*,
     System::{Pipes::*, Threading::*},
-    UI::WindowsAndMessaging::AllowSetForegroundWindow,
 };
+
+#[cfg(test)]
+use adversarial::allow_foreground as AllowSetForegroundWindow;
+#[cfg(not(test))]
+use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
+#[cfg(test)]
+#[path = "instance_windows_adversarial.rs"]
+mod adversarial;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Activation {

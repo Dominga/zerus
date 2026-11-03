@@ -702,7 +702,11 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(termination_cleanup::TerminationCleanup::default());
                 app.manage(worktree_cleanup::WorktreeCleanup::default());
                 app.manage(recovery::start(app.handle()));
-                app.manage(files::start());
+                // Only the maintained production build records the cache
+                // folder's original index before changing it (G3).
+                app.manage(files::start(zerus_client_core::download_cache::Writer {
+                    evidence: app.state::<identity::Identity>().records_evidence(replay),
+                }));
                 app.manage(analytics::start(app.handle()));
                 app.manage(worktree_policy::start(app.handle()));
                 app.manage(mobile::start(app.handle()));
@@ -742,7 +746,11 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(task_forms::TaskForms::default());
                 app.manage(task_start::TaskStarts::default());
                 app.manage(actions::ActivityReads::default());
-                app.manage(actions::Attention::new(dir.join(actions::attention_file(replay))));
+                let local_read_path = dir.join(actions::attention_file(replay));
+                app.manage(match app.state::<commands::AppState>().local_read_capture() {
+                    Some(capture) => actions::Attention::new_with_capture(local_read_path, Some(capture)),
+                    None => actions::Attention::new(local_read_path),
+                });
                 let pump = app.state::<commands::AppState>().pump();
                 app.manage(approvals::start(
                     pump.clone(),
@@ -793,19 +801,42 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(screens);
                 app.manage(newsession::NewSession::tauri(Some(dir.join(if replay {
                     "worktree-snapshots-replay.json"
-                } else { "worktree-snapshots.json" }))));
+                } else { "worktree-snapshots.json" })), app.state::<commands::AppState>().worktree_cache_capture()));
                 let creations = creations::start(app.handle(), &dir, replay, allowed);
                 app.state::<commands::AppState>().set_creations(creations.clone());
                 app.manage(creations);
                 app.manage(terminal::Terminals::new(zerus_client_core::default_hgs(), allowed));
                 // A replay never touches the real drafts either.
-                let drafts = std::sync::Arc::new(zerus_client_core::drafts::DraftStore::open(
-                    drafts_root(&dir, replay),
-                ));
+                let seeds_qt = app.state::<identity::Identity>().seeds_qt(replay);
+                // Every switch-build run records Next's drafts first (G3,
+                // zerus-5wmh.66.5.2.1.2), in service mode or not: the capture
+                // is the store's first job, before the import and any load
+                // or save. Only service mode publishes its status and Retry.
+                let capture = zerus_client_core::migration::draft_preload::Capture::for_run(
+                    seeds_qt,
+                    app.state::<commands::AppState>().draft_capture(),
+                    &dir,
+                );
+                let drafts = std::sync::Arc::new(match &capture {
+                    Some(capture) => zerus_client_core::drafts::DraftStore::open_captured(
+                        drafts_root(&dir, replay),
+                        capture.clone(),
+                    ),
+                    None => zerus_client_core::drafts::DraftStore::open(drafts_root(&dir, replay)),
+                });
+                if let Some(capture) = &capture {
+                    // Weak: the store flushes when the app drops it.
+                    let store = std::sync::Arc::downgrade(&drafts);
+                    capture.hook_retry(std::sync::Arc::new(move || {
+                        if let Some(store) = store.upgrade() {
+                            store.retry_import();
+                        }
+                    }));
+                }
                 // The switch build takes Qt's and the dev app's drafts once,
-                // as the store's first job (zerus-5wmh.13.1); the dev identity
+                // right after the capture (zerus-5wmh.13.1); the dev identity
                 // and a replay never import.
-                if app.state::<identity::Identity>().seeds_qt(replay) {
+                if seeds_qt {
                     zerus_client_core::drafts::import_at_start(&drafts);
                 }
                 #[cfg(feature = "media")]
@@ -1463,6 +1494,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         settings::skins::user_skin_import,
         settings::skins::user_skins_open,
         settings::settings_get,
+        settings::settings_qt_preferences,
         settings::settings_set,
         desk::desk_take_pending,
         window_layer::window_layer_state,

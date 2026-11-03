@@ -308,6 +308,62 @@ keep the shared report admission charged until actual completion. Publication
 runs off the UI/legacy worker and never gates Grant, watch/catalog or Resume.
 Capture/report success alone does not complete G3 or installed acceptance.
 
+The service-mode, non-replay native local-mark writer also preserves the exact
+`attention-marks.json` bytes before its first load/normalization in a separate
+`local-read-preload-v1` slot. This historical boundary is specific to local
+presentation marks, not the shared host-read queue or `attention-observed.json`.
+The original pair order, duplicates and unknown fields remain in the private
+snapshot. The existing decoder still refuses more than 20,000 entries in either
+map; a larger captured original is retained, never exported after capping it.
+Capture failure pauses local-mark mutations and all file writes, including
+flush/drop and thread-spawn fallback, while presentation reads still answer.
+Review shows `local_read_capture` independently; Retry wakes the same writer.
+A loaded model retains editable unsaved changes after a failed file write;
+Retry checks the same live file object before saving them.
+Later writes check the canonical managed directory and the same live leaf
+identity/hash; a changed leaf is never adopted. Every current file is classified
+without normalization before a restarted model is installed, even when an older
+historical receipt exists.
+
+The separate `local_reads_report` publishes that original snapshot and its
+historical provenance through the existing Staged publisher after paired
+canonical configuration is known. Its fixed scope and private journal are
+separate from the Qt/Settings and creations reports. Review keeps capture and
+publication reasons separate. Later local writes do not change the original;
+publication rechecks the retained snapshot's private identity and raw hash.
+A lost or uncertain result only looks up the original import UUID. Explicit
+Retry can repeat only a verified not-committed attempt or a durably proven
+failure before the final record, with the same snapshot/configuration/receipt
+and a compare-and-swap fence against a late original callback. All groups share
+the existing single report admission and original helper/pipe resource charges;
+report failure never gates Grant, watch/catalog or Resume.
+
+These are source/component controls. A Staged receipt is historical evidence,
+not shared-read delivery or acknowledgement, notification suppression,
+current-source completeness, ownership or permission to act. Installed import
+and upgrade acceptance remain pending.
+
+The native NewSession owner also preserves `worktree-snapshots.json` in a fixed
+`worktree-cache-preload-v1` slot before its first service-mode load or file write.
+The exact historical original and capture ID remain unchanged after later cache
+writes. Both the original and today's restarted file pass the existing strict
+64-record/8 MiB cache decoder before the pruning model runs (raw reads stay
+bounded to 16 MiB). Opaque cache hashes never prove current checkout ownership.
+Only this legacy cache's read accepts an owned, single-link 0644 Unix source;
+group/other writes, links and changed canonical identities refuse capture.
+The source is never chmodded. Archive/metadata and replacement cache files stay
+private (0600); Windows native ACL/reparse checks are unchanged. The existing
+local-disk and ancestor-list requirements still apply; a redirected UNC source
+remains unavailable.
+
+A failure pauses only cache file persistence. Fresh folder queries and separately
+authorized session creation remain available; dirty in-memory cache data stays
+bounded and unsaved until an explicit same-owner Retry passes its original
+source checks. Quit refuses late model installation and new cache writes.
+Review shows `worktree_cache_capture` separately from drafts, local read marks
+and published reports. This is component/source coverage: config-bound Staged
+publication is a later slice, and no installed acceptance row is promoted.
+
 ## macOS
 
 For a coordinator-approved private click fixture, opt in to actual GUI selection

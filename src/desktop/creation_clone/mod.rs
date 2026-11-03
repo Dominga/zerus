@@ -4,6 +4,8 @@
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(in crate::desktop) mod lease;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(in crate::desktop) use lease::{Lease, Machine};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod runtime;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) use runtime::Runtime;

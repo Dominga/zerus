@@ -275,9 +275,11 @@ The coordinator and owner then check on the real display:
 
 Use `python3 tray/update-installed.py --rollback ~/.local/bin/hgs-tray` to
 restore a verified previous Next build through the same draft/process checks.
-After a Qt-to-Next switch, the first Next-to-Next update retains Qt separately
-under `~/.local/share/hgs/desktop-qt-legacy/`, then places the replaced Next
-build in `desktop-previous`. Later updates refresh that usable Next rollback;
-the retained Qt image is never deleted or selected by `--rollback`. Qt source
-builds and `HGS_LINUX_GUI=qt` are retired. The old Qt image is manual-recovery
-material, not permission to start its background duties alongside the service.
+Each successful update keeps its verified replaced Next build in
+`desktop-previous`. A displaced Qt or unclassified rollback image gets a unique
+entry under `~/.local/share/hgs/desktop-qt-legacy/qt-*/`; multiple older versions
+can coexist and are never deleted or selected by `--rollback`. A failed legacy
+move keeps the original in a named location and does not skip draft/process or
+provenance checks for the verified Next update. Qt source builds and the
+`HGS_LINUX_GUI=qt` selection are retired. Retained images are manual recovery,
+not permission to start their background duties alongside the service.

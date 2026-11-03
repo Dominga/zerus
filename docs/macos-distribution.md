@@ -650,7 +650,7 @@ bash tray/install.sh
   7. verifies the drafts, the native processes and Qt's settings keys.
 
   A failure or interrupt before step 6 puts Qt back, or keeps it in `~/Applications/.hgs-tray-kept-*/previous/hgs-tray.app` and prints where. Later updates list such folders and never remove them.
-- **Later client updates.** The first Next-to-Next update after the switch moves Qt once to `~/.local/share/hgs/desktop-qt-legacy/hgs-tray.app` for manual recovery, never deleting or offering it as rollback. Each verified replaced Next build then takes `desktop-previous`. Qt settings remain at their compatible export path. Failed-upgrade restoration and draft/native-process checks remain unchanged.
+- **Later client updates.** Each displaced Qt rollback image gets a unique `~/.local/share/hgs/desktop-qt-legacy/qt-*/hgs-tray.app` entry for manual recovery. Older versions may coexist and are never deleted or offered as rollback. A failed archive move keeps its image named and retained while the verified Next update completes its remaining checks. Each verified replaced Next build then takes `desktop-previous`. Qt settings remain at their compatible export path. Failed-upgrade restoration and draft/native-process checks remain unchanged.
 - **Dev numbers.** The updater refuses to replace a numbered Dev install with a build that has neither a Dev number nor a local preview label, also for `HGS_TRAY_RESTART=0` (`docs/reference.md`). `HGS_TRAY_RESTART=0` never switches between Qt and the client.
 
 ### Rollback
@@ -659,7 +659,7 @@ bash tray/install.sh
 python3 tray/update-installed.py --rollback ~/Applications/hgs-tray.app
 ```
 
-The rollback reinstalls a verified previous Next build through the same quit, snapshot, start and verification steps. It refuses a Qt image. After the first later Next update, Qt is retained separately in `desktop-qt-legacy` for manual recovery only; it is never offered as a rollback. The existing Qt settings export and both draft stores remain preserved. A retained image does not authorize starting Qt alongside service-owned background duties.
+The rollback reinstalls a verified previous Next build through the same quit, snapshot, start and verification steps. It refuses a Qt image. Displaced Qt images are retained in distinct `desktop-qt-legacy/qt-*` entries for manual recovery only; it is never offered as a rollback. The existing Qt settings export and both draft stores remain preserved. A retained image does not authorize starting Qt alongside service-owned background duties.
 
 ### Privacy identity
 
@@ -797,7 +797,7 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
    - the owner's sessions, and the drafts in Qt's store, are where they were; Qt drafts and the dev app's drafts appear in the client (the import of step 7);
    - the settings seed: a key from step 7's list shows Qt's value in Settings (for example the theme in Settings > Appearance), automatic approvals are off, and Voice input asks for the microphone again;
    - after the Mac's next sleep and wake, `launchctl print gui/$(id -u)/com.hgdev.hgs-tray | grep 'pid ='` shows the same pid as before, and `~/Library/Logs/hgs-tray.log` has no `main thread unresponsive` line.
-9. **Later Dev rollouts.** Run the same maintained Next installer with the exact new Dev number. The replaced verified Next becomes the usable rollback; a retained Qt image moves once to `desktop-qt-legacy` for manual recovery. Failed-upgrade restoration and the numbered Dev guard remain unchanged.
+9. **Later Dev rollouts.** Run the same maintained Next installer with the exact new Dev number. The replaced verified Next becomes the usable rollback; each displaced Qt image gets a unique `desktop-qt-legacy/qt-*` manual-recovery entry. Failed-upgrade restoration and the numbered Dev guard remain unchanged.
 10. **Rollback.** From the clean checkout, in Terminal:
     ```sh
     cd "${CLONE:?}" && python3 tray/update-installed.py --rollback ~/Applications/hgs-tray.app

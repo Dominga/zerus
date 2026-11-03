@@ -621,10 +621,12 @@ To install on a Mac from another machine:
 
 Fresh installs and upgrades use Zerus Next, including upgrades from Qt.
 Qt installer selections are refused. The maintained updater preserves drafts and
-one usable previous Next build. On the first Next-to-Next update after a Qt
-switch, the original Qt image moves to `desktop-qt-legacy` beside
-`desktop-previous`; it is retained for manual recovery and is never offered by
-`--rollback`. Qt's settings export stays at its existing compatible path.
+one usable previous Next build. Each displaced Qt rollback image gets a unique
+entry under `desktop-qt-legacy/qt-*/` beside `desktop-previous`; older versions
+can coexist. These are manual recovery only and are never offered by `--rollback`
+or deleted. An archive-move failure keeps the image named and retained while the
+verified Next update completes its remaining checks. Qt's settings export stays
+at its existing compatible path.
 
 Desktop signing uses the Mac's existing keychain. An optional
 `HGS_MACOS_SIGN_IDENTITY` selector is forwarded to the remote installer; private

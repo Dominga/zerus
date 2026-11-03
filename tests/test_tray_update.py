@@ -550,7 +550,7 @@ class TrayUpdate(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual([variant for variant, _ in self.running()], ['client-2'])
         self.assertIn("'client-1'", slot.read_text())
-        legacy = prefix / 'share/hgs/desktop-qt-legacy/hgs-tray'
+        [legacy] = (prefix / 'share/hgs/desktop-qt-legacy').glob('qt-*/hgs-tray')
         self.assertIn("'qt-first'", legacy.read_text())
         retained = legacy.read_bytes()
         self.assertEqual(json.loads((client_drafts / 'kept/draft.json').read_text())['text'], 'from the client')

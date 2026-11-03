@@ -16,8 +16,8 @@ export function MigrationReportDialog(props: { origin: HTMLElement; close(): voi
     <div class="dlg-head"><h2 id="migration-report-title">{tr("Migration report")}</h2></div>
     <div class="dlg-body">
       <Show when={details()} fallback={<p>{tr("No migration report is available for this connection.")}</p>}>
-        <For each={["settings", "creations", "capture", "localReads", "localReadsReport", "drafts"] as const}>{(key) => <Show when={details()?.[key]}>{(value) => <section>
-          <h3>{key === "settings" ? tr("Qt and Zerus settings") : key === "creations" ? tr("Saved creation report") : key === "capture" ? tr("Session creation journal") : key === "localReads" ? tr("Local read marks") : key === "drafts" ? tr("Drafts") : tr("Historical local read-mark report")}</h3>
+        <For each={["settings", "creations", "capture", "localReads", "localReadsReport", "drafts", "worktreeCache"] as const}>{(key) => <Show when={details()?.[key]}>{(value) => <section>
+          <h3>{key === "settings" ? tr("Qt and Zerus settings") : key === "creations" ? tr("Saved creation report") : key === "capture" ? tr("Session creation journal") : key === "localReads" ? tr("Local read marks") : key === "drafts" ? tr("Drafts") : key === "worktreeCache" ? tr("Saved folder catalogs") : tr("Historical local read-mark report")}</h3>
           <p>{value().reason}</p>
           <p class="hint">{value().next}</p>
           <details><summary>{tr("Technical details")}</summary>

@@ -195,6 +195,10 @@ impl Runtime {
         if authority.operation() == "creation_worktree" {
             return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"creation_worktree_unsupported"});
         }
+        // A recognized native request is still not executing-kind admission.
+        if authority.operation() == "task_start_reconcile" {
+            return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"task_start_reconcile_unsupported"});
+        }
         if authority.operation() == "automatic_approvals" {
             return self.delivery.frontend_request(store, authority);
         }

@@ -278,7 +278,16 @@ impl Prepared {
                 }
                 Ok(())
             })();
-            if verified.is_err() || self.verify().is_err() || live(cancel, self.at).is_err() {
+            if verified.is_err() {
+                continue;
+            }
+            // The folder's original index is committed before the first
+            // unlink; a refusal keeps this file and every later one. The
+            // commit may take time, so every final check below follows it.
+            if self.ledger.before_change().is_err() {
+                continue;
+            }
+            if self.verify().is_err() || live(cancel, self.at).is_err() {
                 continue;
             }
             // The existing Qt lock excludes all cooperating cache writers.
@@ -286,11 +295,6 @@ impl Prepared {
             if identity(&self.files[i], false).ok().as_ref() != Some(&candidate.identity)
                 || !same_file(&self.files[i], &self.ledger.root.join(&candidate.name))
             {
-                continue;
-            }
-            // The folder's original index is committed before its first
-            // unlink; a refusal keeps this file and every later one.
-            if self.ledger.before_change().is_err() {
                 continue;
             }
             states[i] = unlink_outcome(fs::remove_file(self.ledger.root.join(&candidate.name)));

@@ -251,3 +251,41 @@ fn service_preparation_without_evidence_never_records() {
     );
     assert!(!folder.0.join(DIR).exists());
 }
+
+/// fixes-u P1 on #1237: the commit may be slow, so the worker's final
+/// checks follow it. A replacement or a cancellation during the commit
+/// keeps every file.
+fn during_commit(hook: impl FnMut() + 'static) {
+    DURING_COMMIT.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[test]
+fn service_execute_never_unlinks_a_file_replaced_during_the_commit() {
+    let folder = Folder::new();
+    folder.plain("old.txt", b"old cache", 90_000);
+    let prepared = Prepared::open(&folder.0, 1, NOW, &AtomicBool::new(false), true).unwrap();
+    let root = folder.0.clone();
+    during_commit(move || {
+        fs::rename(root.join("old.txt"), root.join("moved.txt")).unwrap();
+        fs::write(root.join("old.txt"), b"replacement").unwrap();
+    });
+    let receipt = prepared.execute(&[true], &AtomicBool::new(false));
+    during_commit(|| {});
+    assert_eq!(receipt.files, vec![State::Kept]);
+    assert_eq!(fs::read(folder.0.join("old.txt")).unwrap(), b"replacement");
+    assert!(folder.0.join("moved.txt").exists());
+}
+
+#[test]
+fn service_execute_never_unlinks_after_a_cancellation_during_the_commit() {
+    let folder = Folder::new();
+    folder.plain("old.txt", b"old cache", 90_000);
+    let prepared = Prepared::open(&folder.0, 1, NOW, &AtomicBool::new(false), true).unwrap();
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    let set = cancel.clone();
+    during_commit(move || set.store(true, Ordering::Release));
+    let receipt = prepared.execute(&[true], &cancel);
+    during_commit(|| {});
+    assert_eq!(receipt.files, vec![State::Kept]);
+    assert_eq!(fs::read(folder.0.join("old.txt")).unwrap(), b"old cache");
+}

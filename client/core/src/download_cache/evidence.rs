@@ -236,6 +236,12 @@ impl Pending {
                 Err(refused())
             };
         }
+        #[cfg(test)]
+        DURING_COMMIT.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().as_mut() {
+                hook();
+            }
+        });
         // No receipt, so no change followed any earlier attempt: its leftover
         // copy is replaced by this load's version.
         remove(&slot.join("original.bin"))?;
@@ -271,6 +277,13 @@ impl Pending {
             },
         )
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Runs inside a commit on this thread: what a slow capture lets happen.
+    pub(crate) static DURING_COMMIT: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// The locked load's phase, read-only: the folder and the index exactly as

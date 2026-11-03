@@ -82,6 +82,13 @@ and the selected record are checked again after the writer lock and before input
 release. Missing, paused, archived, external, changed or unverifiable executor
 layouts remain unavailable. A historical sent receipt proves no current process.
 
+The supervisor check compares the exact executable file object with the running
+service's image. Agents launched by an earlier hgs image can therefore remain
+ineligible for a new reconciliation after an update. They keep running; an
+update never restarts them to regain eligibility. Manual review remains
+available until their normal user-directed lifecycle changes the supervisor.
+Historical result reads below do not require or establish a live executor.
+
 The only permitted worker is the unchanged original
 `hgs task start-deliver TASK --project PROJECT --json --recover-only` input.
 It is a metadata reconciliation effect: existing receipt checks may record task
@@ -128,3 +135,29 @@ The current pure Task Start policy still excludes task-reserved new-session
 creation. Its original launch-result boundary and native caller integration
 remain separate. Larger originals and Windows custody also remain unavailable;
 no missing evidence becomes a launcher or an automatic retry.
+
+## Original-attempt result reads
+
+`task_start_reconcile_result` is a distinct bounded indexed read, including on
+a passive service. Its closed `Query` carries the fresh selected service scope,
+an independent read UUID, the original reconciliation UUID and its full binding.
+The service reads its current scope, the immutable stored ticket, frozen original
+and outcome under one SQLite snapshot. It verifies the original raw/UI/input
+digests and exact admission/revision/binding before returning metadata.
+
+`desktop-task-start-result-v1` returns at most 16 KiB. It contains only the exact
+stored binding, ticket, phase, closed outcome and durable drain flag; source,
+input, provenance and private task/error views are absent. An old ticket's
+service/writer epochs and admission ID stay original even when the query uses a
+new service epoch. Unknown cannot become submitted because of a later read.
+Only exact submitted metadata together with actual durable drain is eligible
+for the future native caller's CAS of its still-unchanged outbox. The redacted
+five fields are never expanded into a canonical CLI reply.
+
+Missing is only an observation. It proves no absence of an earlier effect,
+current executor, physical drain or permission to offer again. This path cannot
+admit/reserve, start a worker, release a record or mint a reconciliation ID. A
+changed/malformed query or stored binding returns
+`task_start_result_unavailable`. The native caller still needs its offered-unknown
+journal and retained selected-service resources. No per-kind capability marker
+is advertised until both that caller and this query are callable.

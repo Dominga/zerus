@@ -28,3 +28,31 @@ export class ActivityHeights {
   }
   clear() { this.widths.clear(); }
 }
+
+/** Per transcript update: a row whose content changed loses its estimates,
+ * and only loaded rows keep any, so the cache stays bounded by the current
+ * transcript (older pages, a trimmed tail or a new target drop the rest). */
+export function syncActivityHeights(heights: ActivityHeights, previous: ReadonlyMap<string, string>, next: ReadonlyMap<string, string>) {
+  for (const [key, value] of next) if (value !== previous.get(key)) heights.invalidate(key);
+  heights.retain(new Set(next.keys()));
+}
+
+/** How long widths must stay unchanged before scrolling gets its overscan back. */
+export const ACTIVITY_RESIZE_SETTLE_MS = 250;
+export const activityOverscan = (resizing: boolean) => resizing ? ACTIVITY_RESIZE_OVERSCAN : ACTIVITY_OVERSCAN;
+
+/** A width change uses the small resize overscan; ACTIVITY_OVERSCAN returns
+ * ACTIVITY_RESIZE_SETTLE_MS after the last one, then `settled` runs once. */
+export function createActivityResize(setResizing: (resizing: boolean) => void, settled: () => void,
+  timers: { set(run: () => void, ms: number): unknown; clear(id: unknown): void } = {
+    set: (run, ms) => setTimeout(run, ms), clear: (id) => clearTimeout(id as ReturnType<typeof setTimeout>) }) {
+  let timer: unknown;
+  return {
+    resized() {
+      setResizing(true);
+      if (timer !== undefined) timers.clear(timer);
+      timer = timers.set(() => { timer = undefined; setResizing(false); settled(); }, ACTIVITY_RESIZE_SETTLE_MS);
+    },
+    dispose() { if (timer !== undefined) timers.clear(timer); timer = undefined; },
+  };
+}

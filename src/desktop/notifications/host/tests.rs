@@ -204,7 +204,7 @@ fn run_child(selected: &str, chatty: bool) {
 }
 
 #[test]
-fn original_child_inherits_owner_lock_and_receipt_waits_for_actual_release() {
+fn original_child_keeps_owner_lock_and_receipt_precedes_actual_release() {
     exercise_driver(false, false);
 }
 #[test]
@@ -302,13 +302,17 @@ fn exercise_driver(chatty: bool, churn: bool) {
     };
     assert_eq!(
         state(&store),
-        "reserved",
-        "a receipt alone cannot free native resources"
+        "delivered",
+        "the exact receipt settles before native resource release"
+    );
+    assert!(
+        !outbox.operations_idle(),
+        "the original child still holds resources"
     );
     std::fs::write(&gate, b"release").unwrap();
     wait(|| {
         outbox.poll(&mut store, Instant::now());
-        state(&store) == "delivered"
+        outbox.operations_idle()
     });
     assert!(
         checks.load(Ordering::SeqCst) >= 3,

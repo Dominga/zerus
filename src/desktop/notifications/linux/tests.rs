@@ -862,10 +862,15 @@ fn actual_early_close_keeps_original_dispatch_charge_and_never_resurrects() {
     let held = h.outbox.pending[0].shared.clone();
     server.called.recv_timeout(WAIT).unwrap();
     until(|| h.outbox.event_count.load(Ordering::Acquire) > 0);
-    h.outbox.poll(&mut h.store, Instant::now());
-    assert_eq!(h.state(&request), "reserved");
-    drop(held);
     h.settle(&request, "delivered");
+    assert!(
+        !h.outbox.operations_idle(),
+        "original resources remain charged"
+    );
+    assert!(h.mappings().is_empty());
+    drop(held);
+    h.outbox.poll(&mut h.store, Instant::now());
+    assert!(h.outbox.operations_idle());
     assert!(h.mappings().is_empty());
     h.stop(&mut runtime);
 }

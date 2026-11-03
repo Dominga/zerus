@@ -63,8 +63,8 @@ fn policy_off_waits_for_original_post_and_withdrawal_resources_before_idle() {
     assert!(f.runtime.retiring());
     assert!(!ledger::current(&f.store.db, &intent, 1).unwrap());
     assert!(
-        f.host.try_next().is_err(),
-        "wait for the original post receipt/resources"
+        !f.outbox.operations_idle(),
+        "the original post resources remain charged after its receipt"
     );
     drop(post_hold);
     retire_ticks(&mut f, 2);

@@ -464,23 +464,22 @@ impl Outbox {
             if !pending.committed {
                 if pending.terminal.is_none() {
                     let released = Arc::strong_count(&pending.shared) == 1;
-                    let completed = if released {
-                        pending
-                            .shared
-                            .reply
-                            .lock()
-                            .ok()
-                            .and_then(|r| r.clone())
-                            .filter(|r| {
-                                r.at < pending.until
-                                    && pending
-                                        .command
-                                        .as_ref()
-                                        .is_some_and(|command| r.receipt.matches(command))
-                            })
-                    } else {
-                        None
-                    };
+                    // The original completion and native resource release are
+                    // independent. A retained callback/pipe must keep its charge,
+                    // never hide an on-time receipt until the deadline wins.
+                    let completed = pending
+                        .shared
+                        .reply
+                        .lock()
+                        .ok()
+                        .and_then(|r| r.clone())
+                        .filter(|r| {
+                            r.at < pending.until
+                                && pending
+                                    .command
+                                    .as_ref()
+                                    .is_some_and(|command| r.receipt.matches(command))
+                        });
                     if let Some(finished) = completed {
                         // Scheduling/SQL latency is not a native timeout. The
                         // timestamp comes from the original completion handle.

@@ -113,6 +113,14 @@ verified **before-call** Refused outcome permits an explicit `retry_of`.
 Timeout, disconnect, cancellation or error after possible issue is Unknown;
 Unknown never becomes permission to post again, including after restart.
 
+The service actor settles a matching receipt by its original completion time,
+independently of native resource release. An on-time receipt can be durably
+Delivered while its callback, child or pipe still holds the original operation
+charge. It cannot become Deadline merely because those resources outlive the
+reply. Resource accounting, capacity and shutdown still wait for every original
+release and actual host/worker join. A late or missing receipt remains Unknown;
+neither a receipt nor SDK submission success proves an observed OS banner/click.
+
 The proposed private mapping binds configuration, original intent/revision and
 exact target identity, attention token, native request ID, original Post ticket
 and adapter/lease epochs, a random

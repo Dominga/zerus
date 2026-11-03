@@ -294,9 +294,36 @@ fn expired_wire_publication_slices_resume_the_original_cursor() {
     let fixture = Fixture::new();
     let mut store = fixture.store();
     fixture.prepare_publication(&mut store);
+    let key: String = store
+        .index
+        .connection()
+        .query_row("SELECT id FROM sources", [], |row| row.get(0))
+        .unwrap();
+    let mut writer = Index::new(
+        Connection::open(store.directory.join("index.sqlite3")).unwrap(),
+        DEFAULT_FILE_BYTES,
+    )
+    .unwrap();
     let mut slices = 0;
     let reply = fixture.publish_with_slices(&mut store, || {
         slices += 1;
+        if slices == 2 {
+            // This row is newer than the first expired slice's snapshot.
+            writer
+                .ingest(
+                    &key,
+                    &[Message {
+                        id: "newer".into(),
+                        at: 42001.0,
+                        role: Role::Assistant,
+                        kind: "AgentMessage".into(),
+                        source: "kimi_wire".into(),
+                        seq: 0,
+                        text: "needle newer".into(),
+                    }],
+                )
+                .unwrap();
+        }
         let mut slice = budget();
         if slices <= 2 {
             slice.deadline = Instant::now();
@@ -306,6 +333,12 @@ fn expired_wire_publication_slices_resume_the_original_cursor() {
     assert!((3..=32).contains(&slices));
     assert_eq!(reply["results"].as_array().unwrap().len(), 1);
     assert_eq!(reply["results"][0]["message_id"], "native-one");
+    let fresh = fixture.publish(&mut store);
+    assert!(fresh["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|hit| hit["message_id"] == "newer"));
 }
 
 #[test]

@@ -1798,6 +1798,32 @@ mod tests {
         fake.stop(host);
     }
     #[test]
+    fn a_definitely_unsent_service_clone_fails_with_its_original_identity() {
+        let fake = Fake::new();
+        let mut services = fake.services();
+        services.service_clone = Some(Arc::new(|_, operation, fresh, _, _| {
+            assert!(fresh);
+            creation::Answer {
+                ok: true,
+                error: String::new(),
+                data: json!({"status":"failed", "request_id":operation["clone_id"],
+                    "path":operation["target"], "detail":crate::desktop_service::creation_clone::UNAVAILABLE}),
+            }
+        }));
+        let host = CreationHost::new(fake.dir.join("creations.json"), services);
+        let id = admitted(&host, repository_plan());
+        state(&host, &id, "failed");
+        let value = operation(&host, &id);
+        assert_eq!(value["failed_stage"], "cloning");
+        assert!(!text(&value, "clone_id").is_empty());
+        assert_eq!(
+            value["error"],
+            crate::desktop_service::creation_clone::UNAVAILABLE
+        );
+        fake.stop(host);
+    }
+
+    #[test]
     fn task_reserved_creation_identity_cannot_authorize_a_fresh_service_clone() {
         let fake = Fake::new();
         let calls = Arc::new(Mutex::new(Vec::new()));

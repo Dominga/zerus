@@ -6,6 +6,12 @@ use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static STARTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static REFUSE_START: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn image_proof(identity: crate::platform::FileIdentity) -> String {
     format!(
         "{}:{}:{}:{}",
@@ -39,6 +45,13 @@ pub(super) fn run(
     seconds: u64,
     control: Option<&Control<'_>>,
 ) -> Result<Vec<u8>> {
+    #[cfg(test)]
+    {
+        STARTS.with(|count| count.set(count.get() + 1));
+        if REFUSE_START.with(std::cell::Cell::get) {
+            return Err("fixture Git worker entry".into());
+        }
+    }
     #[cfg(target_os = "linux")]
     let executable = PathBuf::from("/proc/self/exe");
     #[cfg(not(target_os = "linux"))]

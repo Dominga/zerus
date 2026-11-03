@@ -5,6 +5,8 @@ if sys.argv[1:] == ['--help']:
     import json
     from pathlib import Path
     c = json.loads((Path(__file__).parent / 'fixture.json').read_text())
+    if c.get('clone_help_fail'):
+        sys.exit(1)
     if not c.get('clone_no_abi'):
         print('Desktop creation clone ABI: desktop-creation-clone-v1', flush=True)
 elif sys.argv[1:3] in [['desktop', 'frontend-request'], ['desktop', 'request']]:

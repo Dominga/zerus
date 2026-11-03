@@ -590,6 +590,60 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn exact_clone_gate_refusal_never_enters_the_git_worker() {
+        let (folder, custody) = owned_fixture();
+        let state = folder.join("selected-state");
+        let calls = std::sync::Mutex::new(Vec::new());
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let check = |step| {
+            calls.lock().unwrap().push(step);
+            if step == Step::Clone {
+                Err("creation_lease_revoked".into())
+            } else {
+                Ok(())
+            }
+        };
+        let starts = worker::STARTS.with(std::cell::Cell::get);
+        // Keep a missing-gate mutation bounded without starting a Git helper.
+        worker::REFUSE_START.with(|value| value.set(true));
+        let id = "33333333-3333-4333-8333-333333333333";
+        let receipt = clone_owned(
+            &state,
+            id,
+            "https://example.invalid/project.git",
+            folder.to_str().unwrap(),
+            "checkout",
+            &Control {
+                before: &check,
+                cancelled: &cancelled,
+                custody: &custody,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            worker::STARTS.with(std::cell::Cell::get),
+            starts,
+            "a refused Clone must not start even the original Git worker"
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [Step::Reserve, Step::Create, Step::Clone]
+        );
+        assert_eq!(receipt["status"], "failed");
+        assert_eq!(receipt["detail"], "creation_lease_revoked");
+        assert!(
+            folder.join("checkout").is_dir(),
+            "keep the original partial checkout"
+        );
+        assert!(!folder.join("checkout/.git").exists());
+        assert_eq!(read_receipt(&state, id).unwrap(), receipt);
+        worker::REFUSE_START.with(|value| value.set(false));
+        drop(custody);
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
     fn accepts_only_repository_addresses() {
         for url in [
             "https://example.test/team/repo.git",

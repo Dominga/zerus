@@ -308,6 +308,23 @@ keep the shared report admission charged until actual completion. Publication
 runs off the UI/legacy worker and never gates Grant, watch/catalog or Resume.
 Capture/report success alone does not complete G3 or installed acceptance.
 
+The service-mode, non-replay native local-mark writer also preserves the exact
+`attention-marks.json` bytes before its first load/normalization in a separate
+`local-read-preload-v1` slot. This historical boundary is specific to local
+presentation marks, not the shared host-read queue or `attention-observed.json`.
+The original pair order, duplicates and unknown fields remain in the private
+snapshot. The existing decoder still refuses more than 20,000 entries in either
+map; a larger captured original is retained, never exported after capping it.
+Capture failure pauses local-mark mutations and all file writes, including
+flush/drop and thread-spawn fallback, while presentation reads still answer.
+Review shows `local_read_capture` independently; Retry wakes the same writer.
+A loaded model retains editable unsaved changes after a failed file write;
+Retry checks the same live file object before saving them.
+Later writes check the canonical managed directory and the same live leaf
+identity/hash; a changed leaf is never adopted. Publication of this separate
+historical group is still a follow-up. Capture alone is not a Staged receipt,
+shared-read acknowledgement, current-source completeness or permission to act.
+
 ## macOS
 
 For a coordinator-approved private click fixture, opt in to actual GUI selection

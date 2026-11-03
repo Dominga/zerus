@@ -196,7 +196,7 @@ export interface DesktopService {
   /** Native frozen-read transfer; completion is durable queueing, not host ACK. */
   pending_read_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; through: number; superseded: number; delivered: false };
   /** Best-effort Staged report only; its outcome never grants or gates service work. */
-  retained_source_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null; creations_capture?: { code: string; paused: boolean; capture_id: string | null }; creations_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null } };
+  retained_source_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null; creations_capture?: { code: string; paused: boolean; capture_id: string | null }; local_read_capture?: { code: string; paused: boolean; capture_id: string | null; view_ready?: boolean; view_revision?: string }; creations_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null } };
   notification_ownership?: NotificationOwnership;
   code: string;
 }
@@ -347,6 +347,8 @@ export interface Details {
   resume_message_can_send: boolean;
   fork_supported?: boolean;
   fork_reason?: string;
+  /** The conversation a fork came from; `null` when this is no fork, absent from an older hgs. */
+  fork_parent_id?: string | null;
   allowed_actions: string[] | null;
   action_reasons: Record<string, string>;
   /** The host can interrupt this turn (Stop). */

@@ -69,6 +69,11 @@ impl Parents {
     pub fn open(path: &Path, create: bool) -> io::Result<Self> {
         Self::open_with(path, create, true)
     }
+    /// The existing canonical application data directory is owner-checked;
+    /// unlike new archive slots it need not have a 0700 umask.
+    pub(crate) fn managed_data(path: &Path) -> io::Result<Self> {
+        Self::open_with(path, false, false)
+    }
     fn open_with(path: &Path, create: bool, private: bool) -> io::Result<Self> {
         #[cfg(windows)]
         {

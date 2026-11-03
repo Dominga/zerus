@@ -6,10 +6,22 @@ import { tr } from "../i18n";
 /** Presence of this projection is the startup mode. It never grants writer authority. */
 export function createDesktopService() {
   const [state, setState] = createSignal<DesktopService>();
+  let localReadReady: (() => void) | undefined, announced: string | undefined;
+  const notifyLocalReadReady = (next: DesktopService | undefined) => {
+    const capture = next?.retained_source_import?.local_read_capture;
+    if (capture?.paused || capture?.view_ready !== true) { announced = undefined; return; }
+    const view = `${capture.capture_id}/${capture.view_revision ?? "0"}`;
+    if (capture.capture_id && view !== announced && localReadReady) {
+      announced = view;
+      localReadReady();
+    }
+  };
   return {
-    state, apply: (next: DesktopService) => setState(next),
+    state, apply: (next: DesktopService) => { setState(next); notifyLocalReadReady(next); },
     enabled: () => state() !== undefined,
     ready: (component: string) => !!state()?.connected && state()?.background[component]?.ready === true,
+    /** One bounded presentation reload after the actual native model is ready. */
+    onLocalReadReady: (listener: () => void) => { localReadReady = listener; notifyLocalReadReady(state()); },
   };
 }
 export const desktopService = createDesktopService();
@@ -23,12 +35,19 @@ export function pendingReadNotice(state: DesktopService | undefined): string {
     : tr("Saved read marks could not be transferred. Marking sessions as read is paused. Retry to continue.");
 }
 
-export function retainedSourceNotice(state: DesktopService | undefined): string {
-  const report = state?.retained_source_import;
+function creationCaptureNotice(report: DesktopService["retained_source_import"]): string {
   if (report?.creations_capture?.paused && report.creations_capture.code === "creation_source_private_slot") return tr("Session creation is paused. Check that the journal archive folder is available and private (0700 on Unix), then retry.");
   if (report?.creations_capture?.paused && report.creations_capture.code === "creation_source_data_directory") return tr("Session creation is paused. Check that the desktop data folder is available and owned by your user, then retry.");
   if (report?.creations_capture?.paused && report.creations_capture.code === "creation_source_unavailable") return tr("Session creation is paused. Check journal and archive access, ownership and private file permissions (0600 on Unix); review retained partial files before retrying.");
   if (report?.creations_capture?.paused) return tr("Session creation is paused while its original journal is preserved. Review migration status or retry.");
+  return "";
+}
+
+export function retainedSourceNotice(state: DesktopService | undefined): string {
+  const report = state?.retained_source_import;
+  if (report?.local_read_capture?.paused) return tr("Local read marks are paused while their original file is preserved. Review the migration report and retry.");
+  const captureNotice = creationCaptureNotice(report);
+  if (captureNotice) return captureNotice;
   const creations = report?.creations_report;
   if (creations?.required && !creations.complete) {
     if (creations.running) return tr("Preparing the saved creation report. Your sessions remain available.");
@@ -42,16 +61,23 @@ export function retainedSourceNotice(state: DesktopService | undefined): string 
 }
 
 export interface MigrationReportDetail { reason: string; next: string; code: string; phase: string | null }
-export type MigrationReportDetails = Partial<Record<"settings" | "creations" | "capture", MigrationReportDetail>>;
+export type MigrationReportDetails = Partial<Record<"settings" | "creations" | "capture" | "localReads", MigrationReportDetail>>;
 
 /** Independent native report reasons. Reviewing never retries or publishes. */
 export function retainedSourceDetails(state: DesktopService | undefined): MigrationReportDetails | undefined {
   const report = state?.retained_source_import;
   if (!report) return;
   const details: MigrationReportDetails = {};
+  if (report.local_read_capture?.paused) details.localReads = {
+    reason: tr("Local read marks are paused while their original file is preserved. Review the migration report and retry."),
+    next: report.local_read_capture.code === "local_read_source_owner_unavailable"
+      ? tr("The local read-mark writer did not start. Restart Zerus to retry; the original file is unchanged.")
+      : tr("Check access to the local read-mark file and its private archive. Keep unsupported or changed originals for review; retry does not replace a saved original."),
+    code: report.local_read_capture.code, phase: null,
+  };
   const capture = report.creations_capture;
   if (capture?.paused) details.capture = {
-    reason: retainedSourceNotice(state), next: tr("Check the original journal and archive access before retrying."),
+    reason: creationCaptureNotice(report), next: tr("Check the original journal and archive access before retrying."),
     code: capture.code, phase: null,
   };
   const code = report.code;

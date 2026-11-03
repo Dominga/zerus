@@ -112,7 +112,7 @@ private slots:
         for(const auto &name:{"fail","removed","slow-mac","released","missing","ended","quota-probes","mac-started","duplicates","other-scope","machine-accounts","slow-catalog-mac","catalog-started","empty-catalog","opencode","uncached","hold-probes","opencode-models","opencode-stopped","service-started","opencode-ids",
             "model-calls","favorite-calls","favorite-fails","models-stopped","old-hgs","favorites","slow-models","slow-favorite","favorite-started",
             "hold-next-models","models-held","project-inference","canonical-directory","clone-calls","clone-worktree","clone-uncertain","clone-receipt","prefill-linked","hold-creation-folder","creation-folder-started","release-creation-folder",
-            "ux","ux-calls"})flag(name,false);
+            "ux","ux-calls","claude-signed_out","claude-expired","claude-signed-in"})flag(name,false);
         QFile::remove(QSettings().fileName()+".creations.json");
         QVERIFY(FakeCli::install(m_fixture.filePath("hgs"),R"PY(#!/usr/bin/env python3
 import json,pathlib,sys,time
@@ -157,6 +157,7 @@ def status(i,provider):
  if provider=='opencode':result.update(status='configured',identity={},windows=[])
  for state in ('signed_out','expired'):
   if provider=='claude' and (root/('claude-'+state)).exists():result.update(status=state,identity={},windows=[])
+ if provider=='claude' and (root/'claude-signed-in').exists():result['auth_status']='signed_in'
  if (root/'other-scope').exists() and i=='claude-copy':result['identity']['organization']='Other team'
  if (root/'machine-accounts').exists():result['identity']['email']=('mac' if host=='mac' else 'pc')+'@example.invalid'
  return result
@@ -1565,6 +1566,26 @@ elif a and a[0]=='worktrees':
         flag("claude-signed_out",false);flag("claude-expired");dialog.findChild<QPushButton *>("refreshLaunchAccounts")->click();
         QTRY_VERIFY2(tip(dialog,"claude").endsWith("\nSign-in expired"),qPrintable(tip(dialog,"claude")));
         flag("claude-expired",false);
+    }
+    void expiredClaudeUsageTokenDoesNotRequireSignIn() {
+        flag("claude-expired");flag("claude-signed-in");
+        NewSessionDialog dialog(program(),fleet(),{},"claude");dialog.selectPath("/workspace/example",false);dialog.show();
+        QTRY_VERIFY(row(dialog,"claude")>=0);
+        QTRY_VERIFY2(tip(dialog,"claude").endsWith("\nUsage token expired"),qPrintable(tip(dialog,"claude")));
+        auto *start=dialog.findChild<QPushButton *>("primary");QTRY_VERIFY(start->isEnabled());
+        QVERIFY(!dialog.findChild<QPushButton *>("denseSignIn")->isVisible());
+        bool found=false;
+        for(auto *button:dialog.findChildren<QAbstractButton *>())if(auto *tile=dynamic_cast<NewSessionDense::AgentButton *>(button);tile&&tile->agent().key=="claude"){
+            found=true;
+            QVERIFY(tile->agent().connected);
+            for(const auto &account:tile->agent().accounts)QVERIFY(account.connected);
+        }
+        QVERIFY(found);
+        if(const auto shots=qEnvironmentVariable("ZERUS_TEAM_SHOTS");!shots.isEmpty())
+            QVERIFY(dialog.grab().save(shots+"/claude-signed-in-expired-usage.png"));
+        flag("claude-signed-in",false);dialog.findChild<QPushButton *>("refreshLaunchAccounts")->click();
+        QTRY_VERIFY(!start->isEnabled());
+        QTRY_VERIFY(dialog.findChild<QPushButton *>("denseSignIn")->isVisible());
     }
     void unknownAndEndedWindowsStayUnavailable() {
         flag("missing");NewSessionDialog dialog(program(),fleet(),{},"codex");dialog.show();

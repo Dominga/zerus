@@ -20,6 +20,12 @@
 #include "WorkspaceIcons.h"
 
 namespace AccountUsage {
+// Native sign-in and quota availability are independent: Claude may confirm
+// its login while the short-lived token used to read usage has expired.
+inline QString signInStatus(const QJsonObject &data) {
+    const auto auth=data["auth_status"].toString();
+    return auth.isEmpty()?data["status"].toString():auth;
+}
 inline QString credits(const QString &value) {
     bool ok=false;const double number=value.toDouble(&ok);
     return ok && std::isfinite(number)?QLocale().toString(number,'f',2):QStringLiteral("—");
@@ -145,7 +151,7 @@ inline QString launchSummary(const QJsonObject &data) {
     const auto status=data["status"].toString();
     if(data["refreshing"].toBool()||status=="loading")return QObject::tr("Checking limits…");
     if(status=="signed_out"&&data["provider"]!="dsh")return QObject::tr("Sign in required");
-    if(status=="expired")return QObject::tr("Sign-in expired");
+    if(status=="expired")return signInStatus(data)=="signed_in"?QObject::tr("Usage token expired"):QObject::tr("Sign-in expired");
     if(status=="configured"&&data["identity"].toObject()["auth_method"]=="Ollama")
         return QObject::tr("Local model %1").arg(data["identity"].toObject()["plan"].toString());
     return QObject::tr("limits n/a");
@@ -206,7 +212,9 @@ inline QString state(const QJsonObject &data) {
         : data.value("status")=="configured" && data.value("identity").toObject().value("auth_method")=="Ollama"
             ? QObject::tr("Local Ollama model %1. Plan limits do not apply.").arg(data.value("identity").toObject().value("plan").toString())
         : data.value("status")=="configured" ? QObject::tr("API key configured. Usage is available in the DeepSeek console.")
-        : data.value("offline").toBool() || data.value("status")=="offline" ? QObject::tr("Machine is offline. Showing the last available account data.") : data.value("status")=="expired" ? QObject::tr("Native sign-in has expired. Open the agent or sign in again, then refresh usage.")
+        : data.value("offline").toBool() || data.value("status")=="offline" ? QObject::tr("Machine is offline. Showing the last available account data.")
+        : data.value("status")=="expired" && signInStatus(data)=="signed_in" ? QObject::tr("The native agent is signed in. Its usage token has expired. Open the agent, then refresh usage.")
+        : data.value("status")=="expired" ? QObject::tr("Native sign-in has expired. Open the agent or sign in again, then refresh usage.")
         : data.value("status")=="signed_out" && data.value("provider")=="dsh" ? QObject::tr("DeepSeek account is signed out. API-key connections are configured separately in the native settings.")
         : data.value("status")=="signed_out" ? QObject::tr("No native subscription sign-in found. API-key sessions may still work.")
         : data.value("status")=="credentials_locked" ? QObject::tr("Saved sign-in is in the locked macOS Keychain. Unlock it in Keychain Access, then refresh.")
@@ -369,7 +377,7 @@ private:
     }
     QString summaryText() const {
         const auto balances=balanceSummary(m_data);
-        return !balances.isEmpty()?balances:m_data.value("status")=="configured"?(m_data.value("provider")=="opencode"?tr("Configured"):m_data.value("identity").toObject().value("auth_method")=="Ollama"?tr("Ollama"):tr("API key")):m_data.value("status")=="signed_out"?tr("Sign in required"):m_data.value("status")=="expired"?tr("Sign-in expired"):tr("Unavailable");
+        return !balances.isEmpty()?balances:m_data.value("status")=="configured"?(m_data.value("provider")=="opencode"?tr("Configured"):m_data.value("identity").toObject().value("auth_method")=="Ollama"?tr("Ollama"):tr("API key")):m_data.value("status")=="signed_out"?tr("Sign in required"):m_data.value("status")=="expired"?(signInStatus(m_data)=="signed_in"?tr("Usage token expired"):tr("Sign-in expired")):tr("Unavailable");
     }
     int contentWidth() const {
         const auto windows=m_data.value("windows").toArray();const bool loading=m_data.isEmpty() || m_data.value("status")=="loading";

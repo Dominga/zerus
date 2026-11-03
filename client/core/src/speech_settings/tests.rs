@@ -469,6 +469,71 @@ fn a_conflict_keeps_the_form_and_never_retries() {
 }
 
 #[test]
+fn provider_checkpoints_keep_original_revisions_and_profile_without_credentials() {
+    for action in ["profile_upsert", "profile_remove", "profile_test"] {
+        let mut providers = page("", Defaults::default(), "");
+        let mut profile = russian();
+        profile["revision"] = json!(7);
+        loaded(&mut providers, json!([profile]));
+        let effects = match action {
+            "profile_upsert" => {
+                assert!(providers.open_editor(false));
+                let ticket = editor(&providers).ticket;
+                let mut form = remote_form();
+                form.id = "russian".into();
+                providers.save(ticket, form)
+            }
+            "profile_remove" => {
+                let ask = providers.ask_remove().unwrap();
+                providers.remove(ask.ticket, true)
+            }
+            _ => providers.test(),
+        };
+        let [Effect::StorePending(encoded)] = effects.as_slice() else {
+            panic!("expected a durable provider checkpoint");
+        };
+        assert!(!encoded.contains(KEY));
+        let pending: Value = serde_json::from_str(encoded).unwrap();
+        let call = calls(&providers.stored(true, now())).remove(0);
+        if action == "profile_upsert" {
+            assert_eq!(call.payload["credential"]["value"], KEY);
+        }
+        assert_eq!(pending["profile_id"], "russian");
+        assert_eq!(pending["action"], action);
+        assert_eq!(pending["request_id"], call.payload["request_id"]);
+        if action == "profile_test" {
+            assert_eq!(pending["expected_profile_revision"], 7);
+            assert!(pending.get("expected_revision").is_none());
+        } else {
+            assert_eq!(pending["expected_revision"], 1);
+            assert!(pending.get("expected_profile_revision").is_none());
+        }
+        assert!(pending.get("credential").is_none());
+        assert!(pending.get("profile").is_none());
+
+        let mut restored = page("", Defaults::default(), encoded);
+        // A newer listing must never replace the original recovery binding.
+        let mut newer = russian();
+        newer["revision"] = json!(9);
+        loaded(&mut restored, json!([newer]));
+        assert_eq!(
+            restored.pending.as_ref().unwrap(),
+            pending.as_object().unwrap()
+        );
+        let status = calls(&restored.check(now())).remove(0);
+        assert_eq!(
+            status.payload,
+            json!({"action":"config_status",
+            "operation_id":pending["request_id"], "expected_machine_id":MACHINE})
+        );
+        assert_eq!(
+            restored.pending.as_ref().unwrap(),
+            pending.as_object().unwrap()
+        );
+    }
+}
+
+#[test]
 fn a_lost_save_is_checked_by_its_receipt_after_a_restart() {
     let mut providers = page("", Defaults::default(), "");
     loaded(&mut providers, json!([russian()]));

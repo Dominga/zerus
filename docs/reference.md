@@ -2554,7 +2554,25 @@ the retained branch and current processes or sessions. A missing Git
 registration is never treated as proof of deletion, and the removal is never
 retried. **Keep folder, forget record** (`hgs worktrees keep-folder`) checks the
 reviewed leftover again under the repository lock and drops only its record;
-the folder, its files and the branch stay. A record resolves by itself once its
+the folder, its files and the branch stay. **Delete remaining files**
+(`hgs worktrees delete-leftover`, `worktree-leftover-delete-v1`) needs an
+explicit confirmation and the fingerprint of the fresh review the owner saw. It
+checks everything again under the repository and session locks and refuses
+saved or running sessions, other running programs, nested Git repositories,
+special files, folders on another filesystem or owned by another user, and an
+incomplete listing. The narrow manual exception for programs whose folders
+cannot be read works as it does for worktree removal: it is bound to the exact
+leftover path and its fresh-review fingerprint and expires after five minutes,
+the known-use, session, ownership and file protections still apply, and
+automatic cleanup never uses it. Deletion never follows links and never crosses
+into another filesystem: each folder is opened without following links and
+checked through its open descriptor, so a link or mount that appears after the
+review stops the deletion. It grants the owner write access only to their own
+folders inside the reviewed tree, which is what blocked Git, and never touches
+the branch. If it
+stops partway, the record stays with the reason and the deletion is never
+retried; review the folder again. Deleting leftover files is available on Linux
+and macOS. A record resolves by itself once its
 folder is gone, or once a fresh worktree list taken under the repository lock shows
 that Git tracks the worktree again. A leftover whose repository is gone is listed
 by `hgs worktrees leftovers` and can still be kept; a record whose repository and

@@ -1093,12 +1093,142 @@ fn leftover(
             "The remaining files could not be fully listed. Review again later.",
         ));
     }
+    let (scanned, blockers) = scan_leftover(&path, step(total, WALK_TIME.as_secs()));
+    if !scanned && complete {
+        reasons.push(reason(
+            "status_unavailable",
+            "The remaining folders could not be fully checked. Review again later.",
+        ));
+    }
+    reasons.extend(blockers);
     row["fingerprint"] = json!(fingerprint(json!({"record":record,"manifest":manifest,
         "complete":complete,"branch_head":row["branch_head"],"processes":row["processes"],
-        "sessions":row["sessions"]})));
+        "sessions":row["sessions"],"reasons":reasons})));
+    // The same narrow manual exception as worktree removal: a complete scan
+    // whose only uncertainty is processes with unreadable folders.
+    if context
+        .processes
+        .as_ref()
+        .is_ok_and(|p| !p.unreadable.is_empty())
+        && reasons.len() == 1
+        && reasons[0]["code"] == "processes_unavailable"
+    {
+        row["process_fingerprint"] = json!(process_consent(&row, common, now() as u64));
+    }
+    row["deletable"] = json!(reasons.is_empty() && !listing_partial);
     let mut row = finish(row, reasons, notes);
     row["verdict"] = json!("partially_removed");
     row
+}
+
+/// What would stop a guarded deletion of a leftover: nested repositories,
+/// special files, folders on another filesystem or owned by another user.
+/// Bounded and never follows links; `false` means the scan was incomplete.
+#[cfg(unix)]
+fn scan_leftover(root: &Path, deadline: Instant) -> (bool, Vec<Value>) {
+    use std::os::unix::fs::MetadataExt;
+    let uid = unsafe { libc::geteuid() };
+    let top = match fs::symlink_metadata(root) {
+        Ok(top) => top,
+        Err(_) => return (false, Vec::new()),
+    };
+    if !top.is_dir() {
+        let blocker = reason("not_a_folder", "The leftover is not a plain folder.");
+        return (true, vec![blocker]);
+    }
+    let device = top.dev();
+    let mut blockers = Vec::new();
+    if root
+        .parent()
+        .and_then(|parent| fs::symlink_metadata(parent).ok())
+        .is_none_or(|parent| parent.dev() != device)
+    {
+        blockers.push(reason(
+            "mount_point",
+            "The leftover folder is a mount point. Unmount it first.",
+        ));
+        return (true, blockers);
+    }
+    let mut pending = vec![root.to_path_buf()];
+    let mut count = 0;
+    let mut complete = true;
+    while let Some(path) = pending.pop() {
+        count += 1;
+        if count > WALK_ENTRIES || Instant::now() >= deadline {
+            complete = false;
+            break;
+        }
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            complete = false;
+            continue;
+        };
+        let git = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case(".git"));
+        // The leftover's own stale `.git` pointer file is expected.
+        if git && (path.parent() != Some(root) || metadata.is_dir()) {
+            blockers.push(reason(
+                "nested_repository",
+                format!(
+                    "Contains a Git repository: {}. Move it out first.",
+                    path.display()
+                ),
+            ));
+            continue;
+        }
+        if metadata.is_dir() {
+            if metadata.dev() != device {
+                blockers.push(reason(
+                    "other_filesystem",
+                    format!(
+                        "{} is on another filesystem. Move it out first.",
+                        path.display()
+                    ),
+                ));
+                continue;
+            }
+            if metadata.uid() != uid {
+                blockers.push(reason(
+                    "foreign_owner",
+                    format!("{} belongs to another user.", path.display()),
+                ));
+                continue;
+            }
+            match fs::read_dir(&path) {
+                Ok(children) => {
+                    for child in children {
+                        match child {
+                            Ok(child) => pending.push(child.path()),
+                            Err(_) => complete = false,
+                        }
+                    }
+                }
+                Err(_) => complete = false,
+            }
+        } else if !metadata.is_file() && !metadata.file_type().is_symlink() {
+            blockers.push(reason(
+                "special_files",
+                format!(
+                    "Contains a special file: {}. Remove or move it explicitly first.",
+                    path.display()
+                ),
+            ));
+        }
+        if blockers.len() >= MAX_SAMPLES {
+            break;
+        }
+    }
+    (complete, blockers)
+}
+
+#[cfg(not(unix))]
+fn scan_leftover(_root: &Path, _deadline: Instant) -> (bool, Vec<Value>) {
+    let blocker = reason(
+        "unsupported_platform",
+        "Deleting leftover files is available on Linux and macOS. Keep the folder or delete it manually.",
+    );
+    (true, vec![blocker])
 }
 
 pub(super) fn review(path: &Path, only: Option<&Path>, total: Instant) -> Value {
@@ -1234,6 +1364,309 @@ pub(super) fn leftovers_command(args: &[String]) -> Result<Value> {
         .collect();
     Ok(json!({"schema":1,"leftovers":rows,"sampled_at":now(),
         "machine":crate::config::Config::load().map(|c| c.host().to_owned()).unwrap_or_default()}))
+}
+
+/// Explicit, guarded deletion of a leftover's remaining files. Requires the
+/// owner's confirmation and the fingerprint of the fresh review they saw, and
+/// re-checks everything under the repository and session locks. The branch is
+/// never touched. A failure after deletion starts keeps the record for review
+/// and is never retried.
+pub(super) fn delete_leftover_command(args: &[String]) -> (Result<Value>, bool) {
+    let mut attempted = false;
+    let result = delete_leftover(args, &mut attempted);
+    (result, attempted)
+}
+
+fn delete_leftover(args: &[String], attempted: &mut bool) -> Result<Value> {
+    const USAGE: &str = "usage: hgs worktrees delete-leftover --path FOLDER --common-dir DIR --fingerprint HASH --confirm-delete [--process-fingerprint HASH] [--request-id ID] [--json]";
+    let mut options = BTreeMap::new();
+    let mut confirmed = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => {}
+            "--confirm-delete" => confirmed = true,
+            key @ ("--path"
+            | "--common-dir"
+            | "--fingerprint"
+            | "--process-fingerprint"
+            | "--request-id") => {
+                i += 1;
+                let value = args.get(i).ok_or_else(|| format!("{key} needs a value"))?;
+                if value.is_empty() || value.chars().any(char::is_control) {
+                    return Err(format!(
+                        "{key} cannot be empty or contain control characters"
+                    ));
+                }
+                if options.insert(key, value.as_str()).is_some() {
+                    return Err(format!("duplicate {key}"));
+                }
+            }
+            _ => return Err(USAGE.into()),
+        }
+        i += 1;
+    }
+    if !confirmed {
+        return Err("Deleting leftover files requires --confirm-delete.".into());
+    }
+    let required = |key| {
+        options
+            .get(key)
+            .copied()
+            .ok_or_else(|| format!("{key} is required"))
+    };
+    let target = Path::new(required("--path")?);
+    let common = Path::new(required("--common-dir")?);
+    let expected = required("--fingerprint")?;
+    if !target.is_absolute() || !common.is_absolute() {
+        return Err("Folder and repository must be absolute paths".into());
+    }
+    let common = crate::platform::canonical(common).map_err(|e| format!("Repository: {e}"))?;
+    let actual = git(
+        &common,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        Instant::now() + Duration::from_secs(5),
+    )
+    .map_err(|e| e.detail)?;
+    if crate::platform::canonical(text(actual)).ok().as_ref() != Some(&common) {
+        return Err("Repository changed. Review the worktrees again.".into());
+    }
+    let guard = repository_lock(&common)?;
+    let waited = Instant::now() + Duration::from_secs(10);
+    while guard.try_lock_exclusive().is_err() {
+        if Instant::now() >= waited {
+            return Err(
+                "Another worktree operation is running. Try again after it finishes.".into(),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let _lock = crate::platform::FileLock::held(guard);
+    // The same lock order as removal: a new session binding cannot race it.
+    let _state_lock = storage::writer_until(Instant::now() + Duration::from_secs(10))?
+        .ok_or("Session state is busy. Try again after the current operation finishes.")?;
+    let resolved = crate::platform::canonical(target).ok();
+    let record = super::worktree_maintenance::removals(&common)?
+        .into_iter()
+        .find(|r| Path::new(&r.path) == target || resolved.as_deref() == Some(Path::new(&r.path)))
+        .ok_or("No partial-removal record exists for this folder. Review the worktrees again.")?;
+    let total = Instant::now() + Duration::from_secs(20);
+    let (trees, partial) = list(&common, &common, step(total, 5)).map_err(|e| e.detail)?;
+    let path = PathBuf::from(&record.path);
+    if trees.iter().any(|tree| tree["path"] == json!(path)) {
+        return Err("Git tracks this folder again. Review it as a worktree.".into());
+    }
+    if partial {
+        return Err("The worktree list was incomplete. Review the folder again.".into());
+    }
+    let context = context(&common, &trees, step(total, 3));
+    let row = leftover(&record, &common, partial, &context, total);
+    if row["fingerprint"] != expected {
+        return Err("The leftover folder changed since the review. Review it again.".into());
+    }
+    let consent = options.get("--process-fingerprint").copied();
+    if row["deletable"] != true
+        && !consent.is_some_and(|proof| valid_process_consent(proof, &row, &common, now() as u64))
+    {
+        let reasons: Vec<_> = row["reasons"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|r| string(r, "message").to_owned())
+            .collect();
+        return Err(format!(
+            "Cannot delete {}: {}",
+            path.display(),
+            reasons.join(" ")
+        ));
+    }
+    *attempted = true;
+    let deleted = delete_tree(&path, Instant::now() + Duration::from_secs(300));
+    match fs::symlink_metadata(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            super::worktree_maintenance::forget_removal(&record.path)?;
+            Ok(json!({"status":"deleted","path":path,"common_dir":common,
+                "bytes":row["size"],"branch":record.branch,"request_id":options.get("--request-id"),
+                "machine":crate::config::Config::load().map(|c| c.host().to_owned()).unwrap_or_default()}))
+        }
+        _ => {
+            let detail = match deleted {
+                Err(e) => format!("Deleting the leftover stopped: {e}"),
+                Ok(()) => "Deleting the leftover could not be confirmed.".to_owned(),
+            };
+            let _ = super::worktree_maintenance::settle_removal(&record, Some(&detail));
+            Err(format!(
+                "{detail}\nSome files may remain; review the folder again. The deletion is never retried."
+            ))
+        }
+    }
+}
+
+/// Deletes the reviewed tree without following links or crossing into another
+/// filesystem. Every folder is opened with O_NOFOLLOW relative to its parent's
+/// descriptor and checked through that descriptor (device, owner) before its
+/// entries are unlinked, so a link or mount that appears after the review is
+/// refused rather than followed. Owner access is granted only to the owner's
+/// own folders, which is what readonly folders denied to Git.
+#[cfg(unix)]
+fn delete_tree(root: &Path, deadline: Instant) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+    struct Frame {
+        fd: std::os::fd::OwnedFd,
+        names: Vec<CString>,
+        name: Option<CString>,
+    }
+    let uid = unsafe { libc::geteuid() };
+    let parent = root
+        .parent()
+        .ok_or_else(|| std::io::Error::other("the leftover has no parent folder"))?;
+    let parent_device = fs::symlink_metadata(parent)?.dev();
+    let path = CString::new(root.as_os_str().as_bytes())?;
+    let fd = deletion::open(libc::AT_FDCWD, &path)?;
+    let device = deletion::checked(&fd, uid)?;
+    if device != parent_device {
+        return Err(std::io::Error::other(
+            "the leftover folder is a mount point; deletion stopped",
+        ));
+    }
+    let names = deletion::entries(&fd)?;
+    let mut stack = vec![Frame {
+        fd,
+        names,
+        name: None,
+    }];
+    let mut visited = 0;
+    loop {
+        visited += 1;
+        if Instant::now() >= deadline || visited > 2 * WALK_ENTRIES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the deletion ran out of time",
+            ));
+        }
+        let frame = stack
+            .last_mut()
+            .expect("the root frame stays until the end");
+        let Some(name) = frame.names.pop() else {
+            let done = stack.pop().expect("a frame was just inspected");
+            drop(done.fd);
+            match (done.name, stack.last()) {
+                (Some(name), Some(parent)) => {
+                    deletion::unlink(parent.fd.as_raw_fd(), &name, libc::AT_REMOVEDIR)?
+                }
+                _ => break,
+            }
+            continue;
+        };
+        if deletion::is_directory(frame.fd.as_raw_fd(), &name)? {
+            let child = deletion::open(frame.fd.as_raw_fd(), &name)?;
+            if deletion::checked(&child, uid)? != device {
+                return Err(std::io::Error::other(format!(
+                    "{} is on another filesystem; deletion stopped",
+                    name.to_string_lossy()
+                )));
+            }
+            let names = deletion::entries(&child)?;
+            stack.push(Frame {
+                fd: child,
+                names,
+                name: Some(name),
+            });
+        } else {
+            deletion::unlink(frame.fd.as_raw_fd(), &name, 0)?;
+        }
+    }
+    fs::remove_dir(root)
+}
+
+#[cfg(unix)]
+mod deletion {
+    use std::ffi::{CStr, CString};
+    use std::io::{Error, Result};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+
+    pub(super) fn open(at: RawFd, name: &CStr) -> Result<OwnedFd> {
+        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        let fd = unsafe { libc::openat(at, name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(Error::last_os_error());
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    /// The opened folder's device, after checking it is still the owner's
+    /// folder and granting the owner access to it.
+    pub(super) fn checked(fd: &OwnedFd, uid: libc::uid_t) -> Result<u64> {
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(fd.as_raw_fd(), &mut stat) } != 0 {
+            return Err(Error::last_os_error());
+        }
+        if stat.st_mode & libc::S_IFMT != libc::S_IFDIR || stat.st_uid != uid {
+            return Err(Error::other("the leftover folder changed during deletion"));
+        }
+        let owner = 0o700 as libc::mode_t;
+        if stat.st_mode & owner != owner
+            && unsafe { libc::fchmod(fd.as_raw_fd(), (stat.st_mode & 0o7777) | owner) } != 0
+        {
+            return Err(Error::last_os_error());
+        }
+        #[allow(clippy::unnecessary_cast)]
+        Ok(stat.st_dev as u64)
+    }
+
+    pub(super) fn is_directory(at: RawFd, name: &CStr) -> Result<bool> {
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        let flags = libc::AT_SYMLINK_NOFOLLOW;
+        if unsafe { libc::fstatat(at, name.as_ptr(), &mut stat, flags) } != 0 {
+            return Err(Error::last_os_error());
+        }
+        Ok(stat.st_mode & libc::S_IFMT == libc::S_IFDIR)
+    }
+
+    pub(super) fn unlink(at: RawFd, name: &CStr, flags: libc::c_int) -> Result<()> {
+        if unsafe { libc::unlinkat(at, name.as_ptr(), flags) } != 0 {
+            return Err(Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// A read error ends the listing early; removing the folder then fails
+    /// as not empty, so nothing is skipped silently.
+    pub(super) fn entries(fd: &OwnedFd) -> Result<Vec<CString>> {
+        let copy = unsafe { libc::dup(fd.as_raw_fd()) };
+        if copy < 0 {
+            return Err(Error::last_os_error());
+        }
+        let folder = unsafe { libc::fdopendir(copy) };
+        if folder.is_null() {
+            let error = Error::last_os_error();
+            unsafe { libc::close(copy) };
+            return Err(error);
+        }
+        let mut names = Vec::new();
+        loop {
+            let entry = unsafe { libc::readdir(folder) };
+            if entry.is_null() {
+                break;
+            }
+            let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+            if name.to_bytes() != b"." && name.to_bytes() != b".." {
+                names.push(name.to_owned());
+            }
+        }
+        unsafe { libc::closedir(folder) };
+        Ok(names)
+    }
+}
+
+#[cfg(not(unix))]
+fn delete_tree(_path: &Path, _deadline: Instant) -> std::io::Result<()> {
+    Err(std::io::Error::other(
+        "deleting leftover files is not supported here",
+    ))
 }
 
 /// "Keep folder, forget record": the leftover folder and its files stay as
@@ -1703,5 +2136,91 @@ mod tests {
         }
         row["verdict"] = json!("ready");row["reasons"] = json!([]);
         assert!(valid_process_consent(&proof, &row, common, 1000), "Complete readable coverage also satisfies the accepted risk");
+    }
+    /// A filesystem mounted inside a leftover after its review: the deletion
+    /// must stop at that folder and leave the other filesystem's files alone.
+    /// Runs the probe in a private user and mount namespace when available.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn deletion_stops_at_another_filesystem_inside_the_leftover() {
+        let base = tempfile::tempdir().unwrap();
+        let Ok(output) = std::process::Command::new("unshare")
+            .args(["--user", "--map-root-user", "--mount", "--"])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "state::worktree_cleanup::tests::leftover_mount_probe",
+                "--nocapture",
+            ])
+            .env("HGS_TEST_LEFTOVER_MOUNT", base.path())
+            .env_remove("HGS_SESSION")
+            .env_remove("HGS_RUN_ID")
+            .output()
+        else {
+            eprintln!("skipped: unshare is unavailable");
+            return;
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stdout.contains("leftover mount probe ran") {
+            eprintln!("skipped: user and mount namespaces are unavailable: {stderr}");
+            return;
+        }
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        assert!(
+            stdout.contains("leftover mount probe passed"),
+            "{stdout}\n{stderr}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn leftover_mount_probe() {
+        use std::os::unix::ffi::OsStrExt;
+        let Some(base) = std::env::var_os("HGS_TEST_LEFTOVER_MOUNT") else {
+            return;
+        };
+        println!("leftover mount probe ran");
+        let mount = |path: &Path| {
+            let target = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+            let rc = unsafe {
+                libc::mount(
+                    c"none".as_ptr(),
+                    target.as_ptr(),
+                    c"tmpfs".as_ptr(),
+                    0,
+                    std::ptr::null(),
+                )
+            };
+            assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+        };
+        let base = PathBuf::from(base);
+        let deadline = || Instant::now() + Duration::from_secs(10);
+        let root = base.join("leftover");
+        fs::create_dir_all(root.join("build/out")).unwrap();
+        fs::write(root.join("build/out/file"), "build").unwrap();
+        let mounted = root.join("mounted");
+        fs::create_dir(&mounted).unwrap();
+        mount(&mounted);
+        fs::write(mounted.join("keep"), "other filesystem").unwrap();
+        let error = delete_tree(&root, deadline()).unwrap_err();
+        assert!(error.to_string().contains("another filesystem"), "{error}");
+        assert_eq!(
+            fs::read_to_string(mounted.join("keep")).unwrap(),
+            "other filesystem"
+        );
+        // A leftover root that is itself a mount point is refused before
+        // anything is deleted.
+        let top = base.join("mounted-root");
+        fs::create_dir(&top).unwrap();
+        mount(&top);
+        fs::write(top.join("keep"), "mounted root").unwrap();
+        let error = delete_tree(&top, deadline()).unwrap_err();
+        assert!(error.to_string().contains("mount point"), "{error}");
+        assert_eq!(
+            fs::read_to_string(top.join("keep")).unwrap(),
+            "mounted root"
+        );
+        println!("leftover mount probe passed");
     }
 }

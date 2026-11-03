@@ -147,7 +147,14 @@ impl Original {
                         && self.bytes <= ORIGINAL as u64
                         && self.sha256.as_deref().is_some_and(digest)
                         && self.stamp.is_some()
-                        && self.more.len() + 1 == part_sizes(self.bytes).len()
+                        // Each recorded part is exactly its share of the
+                        // recorded length: the length binds the stamps.
+                        && self
+                            .stamp
+                            .iter()
+                            .chain(&self.more)
+                            .map(Stamp::size)
+                            .eq(part_sizes(self.bytes).into_iter().map(|size| size as u64))
                 }
             }
     }

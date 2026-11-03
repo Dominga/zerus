@@ -559,3 +559,31 @@ fn an_original_over_one_part_is_kept_in_exact_parts() {
     );
     assert_eq!(folder.original(), Some(index));
 }
+
+/// review-n P2 on #1237 R5: the recorded length binds the recorded part
+/// sizes on the writer path too: a receipt whose length alone changes
+/// refuses, and no cached copy is removed.
+#[test]
+fn a_receipt_whose_length_disagrees_with_its_parts_refuses() {
+    for delta in [1i64, -1] {
+        let folder = Folder::new();
+        folder.plain("first.txt", b"first", 90_000);
+        assert_eq!(ON.trim(&folder.0, 0, NOW).error, None);
+        let (canonical, object, birth) = super::folder(&folder.0).unwrap();
+        let slot = slot(&canonical, &object, birth.as_deref());
+        let mut receipt: Value =
+            serde_json::from_slice(&fs::read(slot.join("receipt.json")).unwrap()).unwrap();
+        let bytes = receipt["bytes"].as_i64().unwrap() + delta;
+        receipt["bytes"] = json!(bytes);
+        fs::write(
+            slot.join("receipt.json"),
+            serde_json::to_vec(&receipt).unwrap(),
+        )
+        .unwrap();
+        folder.plain("old.txt", b"old cache", 90_000);
+        let usage = ON.trim(&folder.0, 1, NOW);
+        assert_eq!(usage.error.as_deref(), Some(NOT_RECORDED), "{delta}");
+        assert_eq!(fs::read(folder.0.join("old.txt")).unwrap(), b"old cache");
+        assert_eq!(evidence(&folder.0), Evidence::Unreadable);
+    }
+}

@@ -15,6 +15,12 @@ pub(crate) struct Stamp {
     size: u64,
     modified: [i64; 2],
 }
+impl Stamp {
+    /// The leaf's recorded length in bytes.
+    pub(crate) fn size(&self) -> u64 {
+        self.size
+    }
+}
 fn refused() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,

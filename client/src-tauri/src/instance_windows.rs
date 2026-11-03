@@ -1,11 +1,7 @@
 //! Per-user Windows activation, matching Qt's `sessions\n` / `show\n` pipe.
 //! The private exclusive file is the lifetime lock; a foreign pipe cannot
 //! grant ownership. Only the current SID can access a pipe we create.
-#[cfg(not(feature = "live"))]
-use crate::platform::windows::{own_integrity, token_integrity};
 use crate::platform::windows::{own_sid, owned, token_sid, wide, Security};
-#[cfg(not(feature = "live"))]
-use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::os::windows::{
@@ -20,8 +16,6 @@ use std::sync::{
 };
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-#[cfg(not(feature = "live"))]
-use unicode_casefold::UnicodeCaseFold;
 use windows_sys::Win32::{
     Foundation::*,
     Storage::FileSystem::*,
@@ -157,22 +151,9 @@ impl InstanceState {
     }
 }
 
-#[cfg(feature = "live")]
 fn key(name: &str, home: &Path) -> String {
     zerus_client_core::desktop::windows::activation_name(name, home)
 }
-#[cfg(not(feature = "live"))]
-fn key(name: &str, home: &Path) -> String {
-    let digest = Sha256::digest(
-        home.to_string_lossy()
-            .replace('\\', "/")
-            .case_fold()
-            .collect::<String>()
-            .as_bytes(),
-    );
-    format!("{name}-{:x}", digest)[..name.len() + 17].to_owned()
-}
-
 pub(crate) fn same_user(pipe: &OwnedHandle) -> bool {
     let mut pid = 0;
     if unsafe { GetNamedPipeClientProcessId(pipe.as_raw_handle(), &mut pid) } == 0 || pid == 0 {
@@ -213,23 +194,16 @@ enum Forward {
 /// activation has been written.
 struct Trusted {
     pid: u32,
-    #[cfg(feature = "live")]
     _peer: zerus_client_core::desktop::windows::Peer,
-    #[cfg(not(feature = "live"))]
-    _process: OwnedHandle,
 }
 /// The one shared check (desktop::windows::verify_server): same user and
 /// logon session, integrity no lower than ours, and this process's own image.
 /// FIRST_PIPE_INSTANCE and the user-only DACL protect pipes this process
 /// creates, not a pre-existing one it opens. Anything but a verified server
 /// is Untrusted: no byte or foreground right reaches it.
-#[cfg(feature = "live")]
-fn trusted_server(pipe: &OwnedHandle, _sid: &str) -> Result<Trusted, Forward> {
-    use zerus_client_core::desktop::windows::{own_facts, verify_server, Server};
-    let image = own_facts()
-        .and_then(|own| own.image)
-        .ok_or(Forward::Untrusted)?;
-    match verify_server(pipe, image) {
+fn trusted_server(pipe: &OwnedHandle, until: Instant) -> Result<Trusted, Forward> {
+    use zerus_client_core::desktop::windows::{verify_own_server_until, Server};
+    match verify_own_server_until(pipe, until) {
         Server::Verified(peer) => Ok(Trusted {
             pid: peer.pid,
             _peer: peer,
@@ -237,47 +211,14 @@ fn trusted_server(pipe: &OwnedHandle, _sid: &str) -> Result<Trusted, Forward> {
         Server::Refused(_) | Server::Unknown => Err(Forward::Untrusted),
     }
 }
-/// Builds without the desktop core keep the user and integrity part.
-#[cfg(not(feature = "live"))]
-fn trusted_server(pipe: &OwnedHandle, sid: &str) -> Result<Trusted, Forward> {
-    let mut pid = 0;
-    if unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle(), &mut pid) } == 0 {
-        return Err(Forward::Unavailable);
-    }
-    let process = owned(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) })
-        .map_err(|_| Forward::Untrusted)?;
-    let mut token = std::ptr::null_mut();
-    if unsafe {
-        OpenProcessToken(
-            process.as_raw_handle(),
-            windows_sys::Win32::Security::TOKEN_QUERY,
-            &mut token,
-        )
-    } == 0
-    {
-        return Err(Forward::Untrusted);
-    }
-    let token = owned(token).map_err(|_| Forward::Untrusted)?;
-    let own = own_integrity().map_err(|_| Forward::Untrusted)?;
-    match (token_sid(&token), token_integrity(&token)) {
-        (Ok(user), Ok(level)) if user == sid && level >= own => Ok(Trusted {
-            pid,
-            _process: process,
-        }),
-        _ => Err(Forward::Untrusted),
-    }
-}
 
 fn forward(name: &str, activation: &Activation) -> Forward {
+    let end = Instant::now() + Duration::from_millis(200);
     let bytes = activation.line();
     if bytes.is_empty() {
         return Forward::Unavailable;
     }
-    let Ok(sid) = own_sid() else {
-        return Forward::Unavailable;
-    };
     let pipe = wide(&format!(r"\\.\pipe\{name}"));
-    let end = Instant::now() + Duration::from_millis(200);
     loop {
         let handle = unsafe {
             CreateFileW(
@@ -292,10 +233,13 @@ fn forward(name: &str, activation: &Activation) -> Forward {
         };
         if let Ok(handle) = owned(handle) {
             // Checked before any byte or foreground right reaches the server.
-            let server = match trusted_server(&handle, &sid) {
+            let server = match trusted_server(&handle, end) {
                 Ok(server) => server,
                 Err(refused) => return refused,
             };
+            if !server._peer.current() || Instant::now() >= end {
+                return Forward::Untrusted;
+            }
             let pid = server.pid;
             if activation.opens_window() {
                 unsafe {
@@ -315,9 +259,11 @@ fn forward(name: &str, activation: &Activation) -> Forward {
                 return Forward::Unavailable;
             }
             // A nonblocking write may accept part of a long target line.
-            let end = Instant::now() + Duration::from_millis(200);
             let mut sent = 0;
             while sent < bytes.len() {
+                if !server._peer.current() || Instant::now() >= end {
+                    return Forward::Untrusted;
+                }
                 let mut written = 0;
                 if unsafe {
                     WriteFile(

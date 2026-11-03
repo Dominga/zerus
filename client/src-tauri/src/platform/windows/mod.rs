@@ -74,57 +74,6 @@ pub(crate) fn token_sid(token: &OwnedHandle) -> io::Result<String> {
     }
     result
 }
-/// The mandatory integrity RID of a token (low 0x1000, medium 0x2000, ...).
-/// Live builds use desktop::windows::verify_server instead.
-#[cfg(not(feature = "live"))]
-pub(crate) fn token_integrity(token: &OwnedHandle) -> io::Result<u32> {
-    let mut needed = 0;
-    unsafe {
-        GetTokenInformation(
-            token.as_raw_handle(),
-            TokenIntegrityLevel,
-            std::ptr::null_mut(),
-            0,
-            &mut needed,
-        );
-    }
-    if needed == 0 || needed > 64 * 1024 {
-        return Err(io::Error::other("Cannot read the Windows integrity level"));
-    }
-    let mut buffer = vec![0u64; (needed as usize).div_ceil(8)];
-    if unsafe {
-        GetTokenInformation(
-            token.as_raw_handle(),
-            TokenIntegrityLevel,
-            buffer.as_mut_ptr().cast(),
-            needed,
-            &mut needed,
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    let label = unsafe { &*(buffer.as_ptr().cast::<TOKEN_MANDATORY_LABEL>()) };
-    let sid = label.Label.Sid;
-    // SAFETY: the label SID lives in `buffer`; an integrity SID has one sub-authority.
-    unsafe {
-        if IsValidSid(sid) == 0 || *GetSidSubAuthorityCount(sid) == 0 {
-            return Err(io::Error::other("Invalid Windows integrity label"));
-        }
-        Ok(*GetSidSubAuthority(
-            sid,
-            u32::from(*GetSidSubAuthorityCount(sid)) - 1,
-        ))
-    }
-}
-#[cfg(not(feature = "live"))]
-pub(crate) fn own_integrity() -> io::Result<u32> {
-    let mut token = std::ptr::null_mut();
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    token_integrity(&owned(token)?)
-}
 pub(crate) fn own_sid() -> io::Result<String> {
     let mut token = std::ptr::null_mut();
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {

@@ -4039,6 +4039,12 @@ and default-configuration restriction. `hgs swarm get` still reports
 supervisor outside desktop-service mode; `hgs swarm worker` and `hgs swarm sync`
 remain available for manual use.
 
+The explicit restart command has one two-second deadline from process entry,
+including Windows PATH preparation, configuration reads and the pipe exchange.
+On timeout it prints one JSON result with `outcome: "unknown"` and
+`retry_allowed: false`, then exits with code 3. Inspect service status before
+another attempt; the timed-out request is never replayed automatically.
+
 **Desktop app.** It uses the `hgs.exe` next to `hgs-tray.exe`, then the one on
 `PATH`; `--hgs` or `hgs=` in `tray.conf` overrides both, and the Linux and macOS
 fallback to `~/.local/bin` and Homebrew does not apply. Without `--hgs` or `hgs=`,

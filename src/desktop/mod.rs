@@ -1442,7 +1442,7 @@ fn restart_swarm(config: &Config) -> Result<Value> {
     })
 }
 #[cfg(any(windows, test))]
-static SWARM_RESTART_ACQUIRING: AtomicBool = AtomicBool::new(false);
+pub(crate) static SWARM_RESTART_ACQUIRING: AtomicBool = AtomicBool::new(false);
 #[cfg(any(windows, test))]
 fn bounded_swarm_restart(
     config: &Config,
@@ -1482,7 +1482,7 @@ fn bounded_swarm_restart(
         .context("desktop swarm restart outcome is unconfirmed; do not repeat this attempt")?
 }
 #[cfg(windows)]
-fn restart_swarm_until(config: &Config, until: Instant) -> Result<Value> {
+pub(crate) fn restart_swarm_until(config: &Config, until: Instant) -> Result<Value> {
     #[cfg(test)]
     use swarm_cli_test::Location;
     use zerus_client_core::desktop::windows::{verify_own_server_until, Server};

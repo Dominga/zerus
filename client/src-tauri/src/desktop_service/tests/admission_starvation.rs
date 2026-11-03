@@ -128,8 +128,9 @@ fn one_worker_child() {
 }
 
 /// block_in_place panics on a current-thread runtime (#[tokio::test]'s
-/// default) and inside a LocalSet; the admission helper must take the plain
-/// wait there, outside any runtime and on a blocking-pool thread.
+/// default); the admission helper must take the plain wait there, outside any
+/// runtime and on a blocking-pool thread. (A LocalSet is not supported: see
+/// `no_production_code_runs_a_local_set`.)
 #[test]
 fn admission_waits_without_block_in_place_outside_the_worker_pool() {
     let lock = Arc::new(Mutex::new(0u32));
@@ -174,4 +175,40 @@ fn admission_waits_without_block_in_place_outside_the_worker_pool() {
         .unwrap();
     thread.join().unwrap();
     assert_eq!(*lock.lock().unwrap(), 4);
+}
+
+/// zerus-uq02: a LocalSet on the multi-thread runtime reports MultiThread, so
+/// a contended admission() inside one would enter block_in_place and panic.
+/// The helper cannot detect that context; no production code may create one.
+#[test]
+fn no_production_code_runs_a_local_set() {
+    fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if name != "tests" {
+                    sources(&path, out);
+                }
+            } else if name.ends_with(".rs") && name != "tests.rs" && !name.ends_with("_tests.rs") {
+                out.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    sources(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    assert!(files.len() > 50, "the source walk found the crate");
+    let offenders: Vec<_> = files
+        .iter()
+        .filter(|path| {
+            let text = fs::read_to_string(path).unwrap();
+            ["LocalSet::", "task::LocalSet", "spawn_local("]
+                .iter()
+                .any(|use_| text.contains(use_))
+        })
+        .collect();
+    assert!(offenders.is_empty(), "{offenders:?}");
 }

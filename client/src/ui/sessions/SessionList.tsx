@@ -490,6 +490,9 @@ function useRows(strip: boolean) {
 
 /** The panel slide in flight, and the timer that ends it. */
 let sliding: { animation: Animation; timer: number } | undefined;
+/** Every slide request takes the next number; a queued opening runs only
+ * while its number is still the latest (see slideOpenLater). */
+let slideRequest = 0;
 
 /**
  * Slides the full panel out from under the strip (transform only). Like the
@@ -500,6 +503,7 @@ let sliding: { animation: Animation; timer: number } | undefined;
  * slide replaces the one in flight; that one's `done` is not run.
  */
 function slide(el: HTMLElement | undefined, width: number, opening: boolean, done?: () => void) {
+  slideRequest++;
   if (sliding) {
     clearTimeout(sliding.timer);
     sliding.animation.cancel();
@@ -516,6 +520,16 @@ function slide(el: HTMLElement | undefined, width: number, opening: boolean, don
     done?.();
   }, OPEN_MS + 40);
   sliding = { animation, timer };
+}
+
+/**
+ * Opens the panel in the next frame, once it is shown. A newer slide request
+ * before then (a close in the same turn, say) supersedes it: it never runs,
+ * so it cannot cancel that close and leave the panel open (#1158 review).
+ */
+function slideOpenLater(el: () => HTMLElement | undefined, width: () => number) {
+  const request = ++slideRequest;
+  requestAnimationFrame(() => { if (request === slideRequest) slide(el(), width(), true); });
 }
 
 export function SessionList() {
@@ -556,13 +570,13 @@ export function SessionList() {
       setPeek(false);
       setStripMode(false);
       setPanelVisible(true);
-      requestAnimationFrame(() => slide(panel, sessionsWidth(), true));
+      slideOpenLater(() => panel, sessionsWidth);
     }
   };
   // Peek: the full panel lies over the conversation; the strip stays put.
   createEffect(on(peek, (open, was) => {
     if (!stripMode() || open === was) return;
-    if (open) { setPanelVisible(true); requestAnimationFrame(() => slide(panel, sessionsWidth(), true)); }
+    if (open) { setPanelVisible(true); slideOpenLater(() => panel, sessionsWidth); }
     else slide(panel, sessionsWidth(), false, () => { if (!peek() && stripMode()) setPanelVisible(false); });
   }, { defer: true }));
 

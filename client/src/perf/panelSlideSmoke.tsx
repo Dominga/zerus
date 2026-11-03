@@ -73,6 +73,9 @@ async function run() {
   applyBatch(batchOf({ computers: [{ computer: "", status: "live", attempt: 0 }], upserts: Array.from({ length: 10 }, (_, n) => ({ computer: "", key: `run:run-${n}`, row: row(n) })) }));
   await sleep(1500);
   const panel = document.querySelector<HTMLElement>(".sp-panel")!.getBoundingClientRect();
+  // The search field's centre: what a click there reaches while the panel is shown.
+  const field = document.querySelector<HTMLElement>(".sp-panel .sp-search input")!.getBoundingClientRect();
+  const probe = { x: field.x + field.width / 2, y: field.y + field.height / 2 };
   const slides: { at: number; opening: boolean; name: string }[] = [];
   const slide = async (name: string, opening: boolean, act: () => void) => {
     busy(performance.now() + 600);
@@ -89,7 +92,34 @@ async function run() {
     await slide(`strip to docked ${cycle}`, true, () => click(".strip-toggle"));
     if (stripMode()) failures.push(`cycle ${cycle}: the panel did not dock`);
   }
-  const report = { failures, slides, panel: { x: panel.x, y: panel.y, width: panel.width, height: panel.height }, userAgent: navigator.userAgent };
+  // Interrupted slides (#1158 review): a queued opening that a newer slide
+  // request superseded never runs, and a cancelled slide never runs `done`.
+  // 450 ms later the panel is hidden or shown as the final state says, with
+  // no animation left and the hit test agreeing.
+  const toggle = () => click(".sp-panel .sp-head button:nth-of-type(2)");
+  const interruptions: unknown[] = [];
+  const interrupted = async (name: string, act: () => Promise<void> | void, open: boolean, strip: boolean) => {
+    await act();
+    await sleep(450);
+    const node = document.querySelector<HTMLElement>(".sp-panel")!;
+    const hit = document.elementFromPoint(probe.x, probe.y);
+    const state = { name, hidden: node.hidden, animations: node.getAnimations().length, hit: hit?.tagName ?? null,
+      inPanel: !!hit && node.contains(hit), strip: stripMode(), peek: peek() };
+    interruptions.push(state);
+    if (state.strip !== strip || state.peek !== (open && strip)) failures.push(`${name}: ended with strip ${state.strip} and peek ${state.peek}`);
+    if (state.hidden === open) failures.push(`${name}: the panel is ${state.hidden ? "hidden" : "shown"} at 450 ms`);
+    if (state.animations) failures.push(`${name}: ${state.animations} panel animations still run at 450 ms`);
+    if (state.inPanel !== open) failures.push(`${name}: the hit test ${state.inPanel ? "reaches" : "misses"} the panel (${state.hit})`);
+    await sleep(500);
+  };
+  await interrupted("same-turn strip, dock, strip", () => { toggle(); toggle(); toggle(); }, false, true);
+  await interrupted("same-turn peek reversal", () => { setPeek(true); setPeek(false); }, false, true);
+  await interrupted("5 ms peek reversal", async () => { setPeek(true); await sleep(5); setPeek(false); }, false, true);
+  // The newest request still wins: a reopened peek stays open and usable.
+  await interrupted("same-turn peek open, close, open", () => { setPeek(true); setPeek(false); setPeek(true); }, true, true);
+  setPeek(false);
+  await sleep(600);
+  const report = { failures, slides, interruptions, panel: { x: panel.x, y: panel.y, width: panel.width, height: panel.height }, userAgent: navigator.userAgent };
   (window as unknown as { webkit: { messageHandlers: { result: { postMessage: (text: string) => void } } } }).webkit.messageHandlers.result.postMessage(JSON.stringify(report));
 }
 void run().catch((error) => {

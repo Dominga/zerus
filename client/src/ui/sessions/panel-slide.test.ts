@@ -32,4 +32,14 @@ describe("panel slide", () => {
     // Reduced motion and a missing panel still settle at once.
     expect(block).toMatch(/if \(!el \|\| motionReduced\(\)\) \{ done\?\.\(\); return; \}/);
   });
+
+  it("never runs a queued opening that a newer slide request superseded", () => {
+    // #1158 review: a close in the same turn (or 5 ms later) used to be
+    // cancelled by the opening queued before it, leaving the panel open.
+    expect(block).toMatch(/function slide\(el: HTMLElement \| undefined, width: number, opening: boolean, done\?: \(\) => void\) \{\s*slideRequest\+\+;/);
+    expect(block).toMatch(/const request = \+\+slideRequest;\s*requestAnimationFrame\(\(\) => \{ if \(request === slideRequest\) slide\(el\(\), width\(\), true\); \}\);/);
+    // Every queued opening goes through it.
+    expect(list).not.toMatch(/requestAnimationFrame\(\(\) => slide\(/);
+    expect(list.match(/slideOpenLater\(\(\) => panel, sessionsWidth\)/g)).toHaveLength(2);
+  });
 });

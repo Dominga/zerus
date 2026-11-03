@@ -13,6 +13,23 @@ const row = (key: string, name: string, extra: Partial<ViewRow> = {}, computer =
 const batchOf = (part: Partial<Batch>): Batch => ({ ...emptyBatch(), ...part });
 
 describe("applyBatch", () => {
+  it("retains row identity and order while a service source reconnects", () => {
+    createRoot((dispose) => {
+      const { catalog, applyBatch } = createCatalog();
+      applyBatch(batchOf({
+        upserts: [row("run:a", "codex/p/a"), row("run:b", "codex/p/b")],
+        computers: [{ computer: "", status: "live", attempt: 0 }],
+      }));
+      const a = catalog.rows[rowId("", "run:a")], b = catalog.rows[rowId("", "run:b")];
+      const order = [...catalog.order];
+      applyBatch(batchOf({ computers: [{ computer: "", status: "reconnecting", attempt: 1 }] }));
+      expect(catalog.order).toEqual(order);
+      expect(catalog.rows[rowId("", "run:a")]).toBe(a);
+      expect(catalog.rows[rowId("", "run:b")]).toBe(b);
+      expect(catalog.computers[""].status).toBe("reconnecting");
+      dispose();
+    });
+  });
   it("keeps sh as Qt's Shell presentation rather than a Claude provider", () => {
     expect(agentKind("sh")).toBe("sh"); expect(agentKind("SH")).toBe("sh");
     const shell = toSession("", "run:shell", view("sh/example/probe", { agent: "sh", model: "", effort: null }));

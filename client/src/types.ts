@@ -180,6 +180,7 @@ export interface DesktopService {
     code: string;
   };
   connected: boolean;
+  reconnecting?: boolean;
   epoch: string | null;
   generation: number | null;
   background: Record<string, { ready: boolean; code: string }>;

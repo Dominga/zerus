@@ -691,6 +691,7 @@ finally:
         with closing(sqlite3.connect(database)) as db:
             # Rebuild the real predecessor so startup must take a write
             # transaction. Hold it until the read-only readiness probe returns.
+            self.remove_attention_retention_schema(db)
             db.executescript('DROP TRIGGER desktop_cache_effect_monotone; DROP TRIGGER desktop_cache_kept_original; '
                              'ALTER TABLE desktop_cache_operations DROP COLUMN effect_started; '
                              'ALTER TABLE desktop_cache_operations DROP COLUMN kept_receipt; PRAGMA user_version=18;')
@@ -1207,7 +1208,15 @@ finally:
             self.assertEqual(db.execute('SELECT configuration FROM service').fetchone()[0], configuration)
 
     @staticmethod
-    def remove_cache_schema(db):
+    def remove_attention_retention_schema(db):
+        db.execute('DROP TRIGGER desktop_attention_edge_remove')
+        db.execute('DROP INDEX desktop_attention_compact')
+        db.execute('DROP TABLE desktop_attention_tombstones')
+        db.execute('DROP TABLE desktop_attention_gc')
+
+    @classmethod
+    def remove_cache_schema(cls, db):
+        cls.remove_attention_retention_schema(db)
         for trigger in ('desktop_cache_unknown_preserve', 'desktop_cache_unknown_immutable'):
             db.execute(f'DROP TRIGGER {trigger}')
         for table in ('desktop_cache_unknown', 'desktop_cache_files', 'desktop_cache_operations', 'desktop_cache_roots'):
@@ -1273,6 +1282,7 @@ finally:
         self.stop(process)
         database = self.desktop / 'state.sqlite3'
         with closing(sqlite3.connect(database)) as db, db:
+            self.remove_attention_retention_schema(db)
             db.execute('DROP TRIGGER desktop_cache_effect_monotone')
             db.execute('DROP TRIGGER desktop_cache_kept_original')
             db.execute('ALTER TABLE desktop_cache_operations DROP COLUMN effect_started')

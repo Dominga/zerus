@@ -321,9 +321,27 @@ Review shows `local_read_capture` independently; Retry wakes the same writer.
 A loaded model retains editable unsaved changes after a failed file write;
 Retry checks the same live file object before saving them.
 Later writes check the canonical managed directory and the same live leaf
-identity/hash; a changed leaf is never adopted. Publication of this separate
-historical group is still a follow-up. Capture alone is not a Staged receipt,
-shared-read acknowledgement, current-source completeness or permission to act.
+identity/hash; a changed leaf is never adopted. Every current file is classified
+without normalization before a restarted model is installed, even when an older
+historical receipt exists.
+
+The separate `local_reads_report` publishes that original snapshot and its
+historical provenance through the existing Staged publisher after paired
+canonical configuration is known. Its fixed scope and private journal are
+separate from the Qt/Settings and creations reports. Review keeps capture and
+publication reasons separate. Later local writes do not change the original;
+publication rechecks the retained snapshot's private identity and raw hash.
+A lost or uncertain result only looks up the original import UUID. Explicit
+Retry can repeat only a verified not-committed attempt or a durably proven
+failure before the final record, with the same snapshot/configuration/receipt
+and a compare-and-swap fence against a late original callback. All groups share
+the existing single report admission and original helper/pipe resource charges;
+report failure never gates Grant, watch/catalog or Resume.
+
+These are source/component controls. A Staged receipt is historical evidence,
+not shared-read delivery or acknowledgement, notification suppression,
+current-source completeness, ownership or permission to act. Installed import
+and upgrade acceptance remain pending.
 
 ## macOS
 

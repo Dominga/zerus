@@ -48,6 +48,12 @@ export function retainedSourceNotice(state: DesktopService | undefined): string 
   if (report?.local_read_capture?.paused) return tr("Local read marks are paused while their original file is preserved. Review the migration report and retry.");
   const captureNotice = creationCaptureNotice(report);
   if (captureNotice) return captureNotice;
+  const local = report?.local_reads_report;
+  if (local?.required && !local.complete) {
+    if (local.running) return tr("Preparing the historical local read-mark report. Your sessions remain available.");
+    if (local.phase !== "unknown" && ["local_reads_import_waiting", "local_reads_import_source_resources_pending", "local_reads_import_handoff_busy", "local_reads_import_before_record"].includes(local.code)) return tr("The historical local read-mark report is deferred. Retry keeps the original report identity.");
+    return tr("The historical local read-mark report needs review. An unconfirmed publication will only be looked up, never resent.");
+  }
   const creations = report?.creations_report;
   if (creations?.required && !creations.complete) {
     if (creations.running) return tr("Preparing the saved creation report. Your sessions remain available.");
@@ -61,7 +67,7 @@ export function retainedSourceNotice(state: DesktopService | undefined): string 
 }
 
 export interface MigrationReportDetail { reason: string; next: string; code: string; phase: string | null }
-export type MigrationReportDetails = Partial<Record<"settings" | "creations" | "capture" | "localReads", MigrationReportDetail>>;
+export type MigrationReportDetails = Partial<Record<"settings" | "creations" | "capture" | "localReads" | "localReadsReport", MigrationReportDetail>>;
 
 /** Independent native report reasons. Reviewing never retries or publishes. */
 export function retainedSourceDetails(state: DesktopService | undefined): MigrationReportDetails | undefined {
@@ -75,6 +81,30 @@ export function retainedSourceDetails(state: DesktopService | undefined): Migrat
       : tr("Check access to the local read-mark file and its private archive. Keep unsupported or changed originals for review; retry does not replace a saved original."),
     code: report.local_read_capture.code, phase: null,
   };
+  const local = report.local_reads_report;
+  if (local?.required) {
+    let reason: string, next: string;
+    if (local.phase === "unknown" || ["local_reads_import_original_result_unconfirmed", "local_reads_import_result_unavailable"].includes(local.code)) {
+      reason = tr("The original migration report result is unconfirmed.");
+      next = tr("Retry checks the original report result. It does not publish another copy of an unconfirmed report.");
+    } else if (local.running) {
+      reason = tr("Preparing the historical local read-mark report. Your sessions remain available.");
+      next = tr("Your sessions remain available while the report is prepared.");
+    } else if (local.phase === "before_record" && local.code === "local_reads_import_before_record") {
+      reason = tr("The historical local read-mark report was not sent because local preparation failed.");
+      next = tr("Check access to the original journal and the Zerus data folder, then use Retry. The original report identity is preserved.");
+    } else if (local.complete) {
+      reason = tr("The migration report has been saved for review.");
+      next = tr("This historical local read-mark report does not confirm delivery to a host or grant background access.");
+    } else if (["local_reads_import_waiting", "local_reads_import_source_resources_pending", "local_reads_import_handoff_busy"].includes(local.code)) {
+      reason = tr("The historical local read-mark report is deferred. Retry keeps the original report identity.");
+      next = tr("Wait for background work to finish, then retry.");
+    } else {
+      reason = tr("The historical local read-mark report needs review. An unconfirmed publication will only be looked up, never resent.");
+      next = tr("Keep the original settings and report for review before attempting another migration.");
+    }
+    details.localReadsReport = { reason, next, code: local.code, phase: local.phase };
+  }
   const capture = report.creations_capture;
   if (capture?.paused) details.capture = {
     reason: creationCaptureNotice(report), next: tr("Check the original journal and archive access before retrying."),

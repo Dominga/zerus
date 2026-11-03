@@ -190,6 +190,11 @@ impl Runtime {
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"creation_clone_unsupported"});
         }
+        // The worktree actor is a separate leaf; until it lands no service
+        // advertises this kind, and an authenticated request is refused.
+        if authority.operation() == "creation_worktree" {
+            return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"creation_worktree_unsupported"});
+        }
         if authority.operation() == "automatic_approvals" {
             return self.delivery.frontend_request(store, authority);
         }

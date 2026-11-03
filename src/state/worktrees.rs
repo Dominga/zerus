@@ -503,13 +503,15 @@ impl Owned<'_> {
         args: &[&str],
         seconds: u64,
     ) -> Result<Vec<u8>> {
-        self.git_sharing(directory, None, args, seconds)
+        self.git_sharing(directory, &[], Default::default(), args, seconds)
     }
-    /// Git in `directory` that also holds `share` as its own descriptor.
+    /// Git in `directory` that also holds each `share` as its own descriptor,
+    /// with `bind` naming them as its `GIT_DIR` and `GIT_COMMON_DIR`.
     fn git_sharing(
         &self,
         directory: &super::repositories::directory::Directory,
-        share: Option<&super::repositories::directory::Directory>,
+        share: &[&super::repositories::directory::Directory],
+        bind: super::repositories::Bind,
         args: &[&str],
         seconds: u64,
     ) -> Result<Vec<u8>> {
@@ -518,6 +520,7 @@ impl Owned<'_> {
         super::repositories::owned_git(
             directory,
             share,
+            bind,
             args,
             seconds,
             self.control.cancelled,
@@ -533,6 +536,9 @@ thread_local! {
     /// Runs after the checkout's final identity checks, just before Git
     /// starts: the window where only a descriptor-bound Git is safe.
     pub(super) static BEFORE_OWNED_CHECKOUT: Hook = const { std::cell::RefCell::new(None) };
+    /// Runs after the reset's final identity checks, just before Git starts:
+    /// the second window where only descriptor-bound Git is safe.
+    pub(super) static BEFORE_OWNED_RESET: Hook = const { std::cell::RefCell::new(None) };
 }
 #[cfg(all(test, unix))]
 fn hook(slot: &'static std::thread::LocalKey<Hook>) {
@@ -569,6 +575,32 @@ fn owned_metadata(
     let entry = common.child("worktrees")?.child(name)?;
     check_metadata(&entry, destination, branch)?;
     Ok(entry)
+}
+
+/// Whether `git version` output names a Git with `git hook run` (2.36).
+#[cfg(unix)]
+fn runs_hooks(version: &str) -> bool {
+    let mut parts = version
+        .strip_prefix("git version ")
+        .unwrap_or("")
+        .split(|c: char| !c.is_ascii_digit())
+        .map(|part| part.parse::<u32>().ok());
+    matches!((parts.next(), parts.next()), (Some(Some(major)), Some(Some(minor))) if (major, minor) >= (2, 36))
+}
+#[cfg(all(test, unix))]
+#[test]
+fn only_git_with_hook_run_owns_a_checkout() {
+    for (version, runs) in [
+        ("git version 2.56.0", true),
+        ("git version 2.36.0", true),
+        ("git version 3.0.1 (Apple Git-200)", true),
+        ("git version 2.35.8", false),
+        ("git version 2.9.5", false),
+        ("git version unknown", false),
+        ("", false),
+    ] {
+        assert_eq!(runs_hooks(version), runs, "{version}");
+    }
 }
 
 /// The pinned entry's own backlink, branch and common link, read through it.
@@ -695,6 +727,12 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
         Some(_) => Some(super::repositories::directory::Directory::open(&common)?),
         None => None,
     };
+    // The owned checkout runs Git's post-checkout hook through `git hook run`
+    // (Git 2.36). Older Git is refused here, before any effect.
+    #[cfg(unix)]
+    if owned.is_some() && !runs_hooks(&read(&["version"])?) {
+        return Err("Owned worktree creation needs Git 2.36 or later.".into());
+    }
     let branch = required("--branch")?;
     if branch.starts_with('-') {
         return Err("Branch name cannot start with '-'".into());
@@ -791,11 +829,19 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
             let (Some(pinned), Some(common_pin)) = (&pinned, &common_pin) else {
                 return Err("Owned worktree pins are missing".into());
             };
-            // Git is bound to both objects it writes: the admitted destination
+            // Git is bound to every object it writes. The admitted destination
             // is its working directory (path "."), and the pinned common
-            // directory is its own inherited descriptor. Neither is a pathname
-            // a later swap can redirect. Absolute links keep the backlinks
-            // that Own checks exact.
+            // directory is its own inherited descriptor; neither is a pathname
+            // a later swap can redirect. `worktree add` would start its own
+            // checkout child with an absolute GIT_DIR, so it only creates the
+            // branch, entry and gitfile here (--no-checkout). Absolute links
+            // keep the backlinks that Own checks exact.
+            let left = || {
+                total_deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_secs()
+                    .max(1)
+            };
             let git_dir = format!("--git-dir=/proc/self/fd/{}", common_pin.descriptor());
             common_pin.verify()?;
             pinned.verify()?;
@@ -803,13 +849,15 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
             hook(&BEFORE_OWNED_CHECKOUT);
             owned.git_sharing(
                 pinned,
-                Some(common_pin),
+                &[common_pin],
+                Default::default(),
                 &[
                     "-c",
                     "worktree.useRelativePaths=false",
                     git_dir.as_str(),
                     "worktree",
                     "add",
+                    "--no-checkout",
                     "--quiet",
                     "-b",
                     branch,
@@ -817,13 +865,48 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
                     ".",
                     head.as_str(),
                 ],
-                300,
+                left(),
             )?;
             common_pin.verify()?;
             pinned.verify()?;
-            // Pin the metadata entry this checkout just made, by descriptor;
-            // Own later writes only through this pinned object.
-            owned_metadata(pinned, common_pin, branch).map(Some)
+            // Pin the metadata entry `worktree add` just made, by descriptor;
+            // the checkout and Own write only through this pinned object.
+            let entry = owned_metadata(pinned, common_pin, branch)?;
+            // The checkout `worktree add` itself runs (reset --hard, then the
+            // post-checkout hook), with GIT_DIR and GIT_COMMON_DIR bound to the
+            // pinned entry and common directory, inherited by every child.
+            let bind = super::repositories::Bind {
+                git_dir: Some(entry.descriptor()),
+                common_dir: Some(common_pin.descriptor()),
+            };
+            let zero = "0".repeat(head.len());
+            for args in [
+                &["--work-tree=.", "reset", "--hard", "--no-recurse-submodules", "--quiet"][..],
+                &[
+                    "--work-tree=.",
+                    "hook",
+                    "run",
+                    "--ignore-missing",
+                    "post-checkout",
+                    "--",
+                    zero.as_str(),
+                    head.as_str(),
+                    "1",
+                ][..],
+            ] {
+                entry.verify()?;
+                common_pin.verify()?;
+                pinned.verify()?;
+                #[cfg(test)]
+                if args.contains(&"reset") {
+                    hook(&BEFORE_OWNED_RESET);
+                }
+                owned.git_sharing(pinned, &[common_pin, &entry], bind, args, left())?;
+            }
+            entry.verify()?;
+            common_pin.verify()?;
+            pinned.verify()?;
+            Ok(Some(entry))
         }),
         None => git(
             &source,

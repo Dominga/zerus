@@ -74,8 +74,14 @@ pub fn page(
         for item in items {
             let json = row_json(item)?;
             tx.execute(
-                "INSERT INTO desktop_catalog_rows(generation,key,json,bytes) VALUES(?1,?2,?3,?4)",
-                params![stage, item.key, json, charge(&item.key, &json)],
+                "INSERT INTO desktop_catalog_rows(generation,key,json,bytes,approval) VALUES(?1,?2,?3,?4,?5)",
+                params![
+                    stage,
+                    item.key,
+                    json,
+                    charge(&item.key, &json),
+                    super::approvals::approval_phase(&item.row) as i64
+                ],
             )?;
         }
         let rows: i64 = tx.query_row(

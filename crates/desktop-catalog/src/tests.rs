@@ -63,7 +63,12 @@ pub(super) fn snapshot(
         }),
     )
 }
-fn delta(seq: u64, cursor: i64, upsert: Vec<watch::CatalogItem>, remove: &[usize]) -> Frame {
+pub(super) fn delta(
+    seq: u64,
+    cursor: i64,
+    upsert: Vec<watch::CatalogItem>,
+    remove: &[usize],
+) -> Frame {
     frame(
         seq,
         Body::Delta(watch::Delta {

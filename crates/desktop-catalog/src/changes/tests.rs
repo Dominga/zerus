@@ -421,6 +421,9 @@ fn reason_migration_keeps_retained_removals_reasonless() {
     let mut db = Connection::open_in_memory().unwrap();
     crate::migrate_base(&db).unwrap();
     super::migrate(&db).unwrap();
+    // Today's row writers store the approval flag (schema 22); the change
+    // journal under test still predates its reason column (schema 21).
+    crate::approvals::migrate(&db).unwrap();
     begin_service(&mut db, "actor-1").unwrap();
     let source = Source {
         computer: "peer".into(),

@@ -32,6 +32,9 @@ use zerus_desktop_ledger::reads;
 pub(super) const SCHEMA: i64 = 22;
 #[cfg(test)]
 pub(super) fn remove_approval_fixture(db: &Connection) {
+    // Rewind the later schema-23 creation worktree leaf too, never leaving it
+    // labelled older.
+    super::creation_worktree::remove_fixture(db);
     db.execute_batch(
         "DROP INDEX desktop_catalog_approval; DROP INDEX desktop_catalog_approval_pending;
         ALTER TABLE desktop_catalog_rows DROP COLUMN approval;",

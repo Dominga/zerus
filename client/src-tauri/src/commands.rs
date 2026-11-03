@@ -92,6 +92,15 @@ impl AppState {
             .map(|inputs| inputs.creations.clone())
     }
 
+    pub(crate) fn worktree_cache_capture(
+        &self,
+    ) -> Option<Arc<zerus_client_core::migration::preload::Capture>> {
+        self.live
+            .retained_import_source
+            .get()
+            .map(|inputs| inputs.worktree_cache.clone())
+    }
+
     pub(crate) fn local_read_capture(
         &self,
     ) -> Option<Arc<zerus_client_core::migration::preload::Capture>> {

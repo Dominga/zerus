@@ -21,6 +21,7 @@ pub(crate) struct Inputs {
     qt: Option<QtStore>,
     pub(crate) creations: Arc<zerus_client_core::migration::preload::Capture>,
     pub(crate) local_reads: Arc<zerus_client_core::migration::preload::Capture>,
+    pub(crate) worktree_cache: Arc<zerus_client_core::migration::preload::Capture>,
     /// The G3 drafts capture (zerus-5wmh.66.5.2.1.2): the Next draft store
     /// runs it as its first job; its status and Retry go through this report.
     pub(crate) drafts: Arc<zerus_client_core::migration::draft_preload::Capture>,
@@ -35,6 +36,9 @@ impl Inputs {
         (identifier == crate::identity::SWITCH_ID && !replay).then(|| Self {
             creations: zerus_client_core::migration::preload::Capture::new(data.clone()),
             local_reads: zerus_client_core::migration::preload::Capture::local_reads(data.clone()),
+            worktree_cache: zerus_client_core::migration::preload::Capture::worktree_cache(
+                data.clone(),
+            ),
             drafts: Arc::new(zerus_client_core::migration::draft_preload::Capture::native(&data)),
             data,
             settings,
@@ -91,6 +95,7 @@ pub(super) struct Report {
     state: Mutex<State>,
     creations: Mutex<creations::CreationState>,
     local_reads: Mutex<creations::CreationState>,
+    worktree_cache: Mutex<creations::CreationState>,
     capture: Gate,
     work: Gate,
 }
@@ -104,6 +109,9 @@ impl Report {
             )),
             local_reads: Mutex::new(creations::CreationState::new(
                 migration::creation_report::Group::LocalReads,
+            )),
+            worktree_cache: Mutex::new(creations::CreationState::new(
+                migration::creation_report::Group::WorktreeCache,
             )),
             capture: Gate::new(1).unwrap(),
             work: Gate::new(1).unwrap(),
@@ -121,7 +129,8 @@ impl Report {
     }
     pub fn hook_creations(&self, notify: Arc<dyn Fn() + Send + Sync>) {
         self.inputs.creations.hook(notify.clone());
-        self.inputs.local_reads.hook(notify);
+        self.inputs.local_reads.hook(notify.clone());
+        self.inputs.worktree_cache.hook(notify);
     }
     pub fn hook_drafts(&self, notify: Arc<dyn Fn() + Send + Sync>) {
         self.inputs.drafts.hook(notify);
@@ -130,6 +139,7 @@ impl Report {
         self.retry_creations();
         self.inputs.creations.request_retry();
         self.inputs.local_reads.request_retry();
+        self.inputs.worktree_cache.request_retry();
         self.inputs.drafts.request_retry();
         self.state().retry_requested = true;
     }
@@ -138,7 +148,7 @@ impl Report {
     }
     pub fn status(&self) -> Value {
         let state = self.state();
-        json!({"creations_report":self.group_status(migration::creation_report::Group::Creations),"local_reads_report":self.group_status(migration::creation_report::Group::LocalReads),"creations_capture":self.inputs.creations.status(),"local_read_capture":self.inputs.local_reads.status(),"drafts_capture":self.inputs.drafts.status(),"scope":SCOPE,"running":state.running,"code":state.code,
+        json!({"creations_report":self.group_status(migration::creation_report::Group::Creations),"local_reads_report":self.group_status(migration::creation_report::Group::LocalReads),"worktree_cache_report":self.group_status(migration::creation_report::Group::WorktreeCache),"creations_capture":self.inputs.creations.status(),"local_read_capture":self.inputs.local_reads.status(),"drafts_capture":self.inputs.drafts.status(),"worktree_cache_capture":self.inputs.worktree_cache.status(),"scope":SCOPE,"running":state.running,"code":state.code,
             "required":!state.not_applicable,
             "complete":state.stored.as_ref().is_some_and(|s| s.record.phase == Phase::Published),
             "import_id":state.stored.as_ref().map(|s|&s.record.import_id),

@@ -207,7 +207,7 @@ mod tests {
         for invalid in [SCREEN.replace(HINT, "enter continue · esc"), SCREEN.replace("  2. Skip", "› 2. Skip"),
             SCREEN.replace("chatgpt.com", "example.com"), SCREEN.replace("3. Skip until next version", "↑"),
             SCREEN.replace("0.160.1", "0.160.1 beta"), SCREEN.replace("releases/latest", "releases"),
-            SCREEN.replace("  2. Skip\n", ""), format!("Agent said:\n{SCREEN}"), format!("{SCREEN}\n› composer"),
+            SCREEN.replace("  2. Skip\n", ""), format!("Agent said:\n{SCREEN}"), format!("{SCREEN}\n› composer"), format!("{SCREEN}\n›"), format!("{SCREEN}\n› Ask Codex to do anything"),
             "  Update available · 0.0.0\n  → 9.9.9\n  Release notes:\n  https://github.com/openai/codex/releases/latest\n↑\n› 3. Skip until next version\n\n  enter continue · esc skip".into()] {
             assert!(parse(&invalid).is_none(), "{invalid}");
         }

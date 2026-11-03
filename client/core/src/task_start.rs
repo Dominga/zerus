@@ -12,6 +12,9 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+pub mod capture;
+
 pub const UNCERTAIN: &str =
     "the previous start of this task may already have reached its executor.";
 pub const RELEASE_FAILED: &str = "Could not release the start record.";
@@ -500,6 +503,45 @@ mod tests {
                 _ => panic!("unexpected fixture call"),
             },
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_capture_reads_the_actual_lost_reply_checkpoint_without_another_delivery() {
+        let s = Scratch::new();
+        let view = attempt(&s.0, FIRST, "lost");
+        assert!(view.pending);
+        let file = outbox::path(&root(&s.0), "example", TASK);
+        let before = std::fs::read(&file).unwrap();
+        let scope = crate::desktop::task_start_reconcile::Scope {
+            configuration: "a".repeat(64),
+            service_epoch: "00000006-1111-4111-8111-111111111111".into(),
+        };
+        let captured =
+            capture::Captured::read(&s.0, "example", TASK, FIRST, &view.snapshot, scope).unwrap();
+        let intent = captured.intent(SECOND).unwrap();
+        assert_eq!(intent.original.as_bytes(), before);
+        let record = outbox::pending(&root(&s.0), "example", TASK)
+            .unwrap()
+            .unwrap();
+        let verified = intent.verify().unwrap();
+        let crate::operation_recovery::task_start::Decision::Proposed(proposal) =
+            verified.original.step(
+                crate::operation_recovery::task_start::Input::LookupRequested,
+                false,
+            )
+        else {
+            panic!("capture is a data proposal only")
+        };
+        assert_eq!(
+            proposal.input(),
+            record["intent"]["retained_input"]
+                .as_str()
+                .unwrap()
+                .as_bytes()
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), before);
+        assert!(captured.current());
     }
 
     #[test]

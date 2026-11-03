@@ -1,7 +1,8 @@
 //! The actor owns clone admission, fixed plans and actual original custody.
 //! Creation records remain separate from task-start reconciliation bindings.
+// Its Machine/Lease guard is shared with the worktree leaf; Consent is not.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-mod lease;
+pub(in crate::desktop) mod lease;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(in crate::desktop) use lease::{Lease, Machine};
 #[cfg(any(target_os = "linux", target_os = "macos"))]

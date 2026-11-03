@@ -105,6 +105,10 @@ fn launch_fixture() {
             return;
         }
         Claim::Failed(error) => panic!("fixture GUI owner: {error}"),
+        Claim::Untrusted => {
+            fs::write(root.join(format!("{scope}.untrusted")), b"refused").unwrap();
+            return;
+        }
     };
     fs::write(root.join(format!("{scope}.ready")), b"owner").unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -195,7 +199,7 @@ fn a_normal_quit_finishing_during_the_handoff_wait_is_reacquired() {
     fs::write(fixture.0.join("exiting.stop"), b"").unwrap();
     fixture.wait_for("exiting.released", &mut owner);
     let mut observed = false;
-    let result = canonical_claim_observed(name, Activation::Sessions, || {
+    let result = canonical_claim_observed(name, &Activation::Sessions, || {
         if !observed {
             observed = true;
             fs::write(fixture.0.join("exiting.exit"), b"").unwrap();

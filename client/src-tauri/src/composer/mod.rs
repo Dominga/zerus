@@ -91,6 +91,25 @@ const OPENED: usize = 512;
 /// first.
 const COMPOSER_EVENTS: usize = 16;
 
+/// A waiting send given up at its time limit: the notice it left and the
+/// reading of its target then. Only that notice, still shown, goes, and only
+/// on a later reading of the same run and conversation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GaveUp {
+    pub(crate) notice: String,
+    pub(crate) run: String,
+    pub(crate) conversation: String,
+    pub(crate) phase: String,
+    pub(crate) activity: String,
+}
+
+impl GaveUp {
+    /// The notice still is this give-up's own.
+    fn shown(&self, notice: &str, error: bool) -> bool {
+        error && notice == self.notice
+    }
+}
+
 /// What Rust tells the webview besides the views: a notice (Qt's
 /// `showNotice`), or the Terminal tab to open. Drained with each batch.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -339,6 +358,10 @@ pub(crate) struct Composer {
     pub(crate) uncertain: bool,
     pub(crate) error: bool,
     pub(crate) notice: String,
+    /// The waiting send of this draft was given up at its time limit
+    /// (zerus-le5s): its notice goes once the session moves on to work or
+    /// readiness, or the kept draft is sent or cleared.
+    pub(crate) gave_up: Option<GaveUp>,
     pub(crate) storage_error: Option<String>,
     pub(crate) removed: Option<(usize, Attachment)>,
     pub(crate) attaching: bool,
@@ -385,6 +408,7 @@ impl Composer {
             uncertain: false,
             error: false,
             notice: String::new(),
+            gave_up: None,
             storage_error: None,
             removed: None,
             attaching: false,
@@ -429,8 +453,24 @@ impl Composer {
         }
     }
 
+    /// The kept draft of a given-up waiting send was cleared: its notice,
+    /// about that draft, goes.
+    fn draft_cleared(&mut self) {
+        if !self.draft.text.is_empty() || !self.draft.attachments.is_empty() {
+            return;
+        }
+        if let Some(gave_up) = self.gave_up.take() {
+            if gave_up.shown(&self.notice, self.error) && !self.uncertain {
+                self.notice.clear();
+                self.error = false;
+            }
+        }
+    }
+
     /// Qt's `showError`: the status line shows it in the error colour.
     pub(crate) fn show_error(&mut self, text: impl Into<String>) {
+        // A newer error is not the given-up send's to dismiss.
+        self.gave_up = None;
         self.notice = text.into();
         self.error = true;
     }
@@ -1075,6 +1115,7 @@ impl Composers {
         if !composer.error && !composer.uncertain {
             composer.notice.clear();
         }
+        composer.draft_cleared();
         self.save(composer);
         drop(hub);
         self.changed();
@@ -1185,6 +1226,7 @@ impl Composers {
         if let Some(removed) = composer.draft.remove(index) {
             composer.removed = Some((index, removed));
             composer.attachments_changed();
+            composer.draft_cleared();
             self.save(composer);
         }
         drop(hub);
@@ -1431,6 +1473,7 @@ impl Composers {
     fn after_observe(&self, accepted_details: bool) {
         self.reconcile();
         self.continue_open();
+        self.settle_gave_up();
         self.sync_questions();
         // Qt's pushInspected runs only for an accepted details read (3627,
         // 3653), never for an ended frame or an inspection failure.

@@ -216,7 +216,7 @@ impl Grant {
                 && now.origin.as_ref() == Some(&self.origin),
         )
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     pub(super) fn image(&self) -> &Path {
         &self.origin.image
     }

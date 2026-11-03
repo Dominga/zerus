@@ -482,7 +482,9 @@ function AttachmentCard(props: { file: ItemAttachment; scope?: AttachmentScope }
     </Show>
     <span class="att-caption">{props.file.caption}</span>
     <span class="dim">{props.file.meta}</span>
-    <span class="att-open" style={{ visibility: target() ? "visible" : "hidden" }}>{tr("Open →")}</span>
+    {/* "inherit", never "visible": a row inside the column that is still
+        hidden while it is placed must stay hidden (zerus-ig5q). */}
+    <span class="att-open" style={{ visibility: target() ? "inherit" : "hidden" }}>{tr("Open →")}</span>
   </button>;
 }
 
@@ -1161,9 +1163,12 @@ export function ActivityView(props: { source?: ActivitySource }) {
           </section>}</Show>
           <Show when={!preview()}>
           <div class="act-history-header">
+          {/* The two labels swap with "inherit", never "visible": a child set
+              visible shows through the column that stays hidden until it is
+              placed, so the loading heading was drawn twice (zerus-ig5q). */}
           <div class="act-label eyebrow" style={{ position: "relative", flex: "1", "min-width": "0" }}>
-            <span style={{ visibility: source().loadingOlder() ? "hidden" : "visible" }}>{tr("Recorded activity — messages and tool excerpts")}</span>
-            <span class="act-older hint" style={{ position: "absolute", inset: "0", padding: "0", display: "flex", "align-items": "center", "justify-content": "center", "text-transform": "none", "letter-spacing": "normal", "font-weight": "normal", visibility: source().loadingOlder() ? "visible" : "hidden" }} aria-hidden={!source().loadingOlder()}>{tr("Reading earlier activity…")}</span>
+            <span style={{ visibility: source().loadingOlder() ? "hidden" : "inherit" }}>{tr("Recorded activity — messages and tool excerpts")}</span>
+            <span class="act-older hint" style={{ position: "absolute", inset: "0", padding: "0", display: "flex", "align-items": "center", "justify-content": "center", "text-transform": "none", "letter-spacing": "normal", "font-weight": "normal", visibility: source().loadingOlder() ? "inherit" : "hidden" }} aria-hidden={!source().loadingOlder()}>{tr("Reading earlier activity…")}</span>
           </div>
           <Show when={!source().olderDone() && source().events().length > 0}>
             <button type="button" class="btn small ghost act-read-older" disabled={source().loadingOlder()} onClick={() => source().loadOlder()}>{tr("Read earlier activity")}</button>

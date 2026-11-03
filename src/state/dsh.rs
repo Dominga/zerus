@@ -688,8 +688,10 @@ fn normalize(record: &Value, row: &Value, inspected: &Value) -> Value {
     }
     value["account_id"] = json!("native-dsh");
     value["account_home"] = record["agent_home"].clone();
+    // Always present, null for a non-fork: as fork::summary, so a client tells
+    // a session that is not a fork from an older hgs without these fields.
     for key in ["fork_parent_id", "fork_source_name"] {
-        if record[key].is_string() { value[key] = record[key].clone(); }
+        value[key] = if record[key].is_string() { record[key].clone() } else { Value::Null };
     }
     // Present only while the official Schedule bundle is loaded.
     if row["schedules"].is_object() {
@@ -862,8 +864,9 @@ pub(super) fn fork(
     {
         return Err("source session changed; refresh before forking".into());
     }
+    // An archived session's name is free for a new one, as for other agents.
     let mut occupied: std::collections::BTreeSet<String> = binding_records().iter()
-        .chain(records()?.iter()).chain(archive::records()?.iter())
+        .chain(records()?.iter())
         .map(|record| string(record, "name").to_owned()).collect();
     occupied.insert(name.to_owned());
     let target = fork::choose_name(name, tag, &occupied)?;
@@ -915,6 +918,10 @@ pub(super) fn fork(
         "conversation_id":child,"run_id":run,"created":now(),"launch_id":null,"paused":false,
         "fork_parent_id":record["conversation_id"],"fork_source_name":name}))?;
     let _ = fs::remove_file(&pending);
+    // A fork starts in its source session's project (zerus-zjsj).
+    if let Ok(config) = crate::config::Config::load() {
+        crate::swarm::inherit_fork_project(&config, &target, name, None);
+    }
     match scope {
         Some(scope) => scope.result(&target, &run, child, None),
         None => println!("hgs: forked {name} as {target}"),

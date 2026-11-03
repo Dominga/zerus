@@ -104,8 +104,7 @@ impl Scope {
     }
     /// Bind an explicit maintained-image choice; this never discovers one from
     /// PATH or turns an inbound path check into a launch/worker permission.
-    #[cfg(target_os = "linux")]
-    #[allow(dead_code)] // Consumed by the following Linux UI-closed launch slice.
+    #[cfg(any(target_os = "linux", windows))]
     pub fn select_frontend(
         &self,
         image: &Path,
@@ -278,6 +277,8 @@ impl Validated {
                     | Request::CacheMaintenance { .. }
                     | Request::CreationClone { .. }
                     | Request::CreationWorktree { .. }
+                    | Request::CreationLaunch { .. }
+                    | Request::TaskStartReconcile { .. }
             ),
             "native controls require their typed boundary"
         );
@@ -290,6 +291,18 @@ impl Validated {
         self.check()?;
         let Request::CreationClone { intent } = self.0 else {
             anyhow::bail!("not a creation clone");
+        };
+        Ok(*intent)
+    }
+    /// Only the per-kind actor may consume this after BEGIN IMMEDIATE, then
+    /// recheck its actual current source/lease and freeze the original bytes.
+    #[allow(dead_code)] // The executing actor follows this closed refusal-only slice.
+    pub fn task_start_reconcile(
+        self,
+    ) -> Result<zerus_client_core::desktop::task_start_reconcile::Intent> {
+        self.check()?;
+        let Request::TaskStartReconcile { intent } = self.0 else {
+            anyhow::bail!("not a task Start reconciliation");
         };
         Ok(*intent)
     }
@@ -737,6 +750,22 @@ fn validate(
             "creation does not match the native service frontend"
         );
     }
+    if let Request::CreationLaunch { intent } = &envelope.request {
+        ensure!(
+            reply.request.ownership_mode
+                == Some(zerus_client_core::desktop::ownership::Mode::Service)
+                && intent.scope.configuration == configuration,
+            "creation does not match the native service frontend"
+        );
+    }
+    if let Request::TaskStartReconcile { intent } = &envelope.request {
+        ensure!(
+            reply.request.ownership_mode
+                == Some(zerus_client_core::desktop::ownership::Mode::Service)
+                && intent.scope.configuration == configuration,
+            "task reconciliation does not match the native service frontend"
+        );
+    }
     if let Request::NotificationControl { scope, control } = &envelope.request {
         let native = reply
             .request
@@ -799,6 +828,8 @@ enum OrderedOperation {
     CacheMaintenance,
     CreationClone,
     CreationWorktree,
+    CreationLaunch,
+    TaskStartReconcile,
     ActivationWait,
     AutomaticApprovals,
     MaintenanceConfigure,
@@ -814,6 +845,8 @@ impl From<&Request> for OrderedOperation {
             Request::CacheMaintenance { .. } => Self::CacheMaintenance,
             Request::CreationClone { .. } => Self::CreationClone,
             Request::CreationWorktree { .. } => Self::CreationWorktree,
+            Request::CreationLaunch { .. } => Self::CreationLaunch,
+            Request::TaskStartReconcile { .. } => Self::TaskStartReconcile,
             Request::ActivationWait { .. } => Self::ActivationWait,
             Request::AutomaticApprovals { .. } => Self::AutomaticApprovals,
             Request::MaintenanceConfigure { .. } => Self::MaintenanceConfigure,
@@ -1289,6 +1322,153 @@ mod tests {
         reply.request.fingerprint = envelope.request.fingerprint();
         assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
     }
+    #[test]
+    fn creation_launch_has_its_own_lane_and_never_passes_the_generic_boundary() {
+        use zerus_client_core::desktop::{
+            creation_launch::{Intent, Scope},
+            ownership::Mode,
+        };
+        let (mut envelope, caller, frontend, mut reply) = fixture();
+        let original = serde_json::json!({"id":id(80),"creation_schema":1,"created":1,"revision":6,
+            "cmd":"codex","tag":"example","host":"","state":"launching","auto":false,
+            "target":"/srv/repo","launch_id":id(2),"launch_dispatched":true,
+            "expected_machine":id(81)});
+        envelope.request = Request::CreationLaunch {
+            intent: Box::new(Intent {
+                scope: Scope {
+                    configuration: "a".repeat(64),
+                    service_epoch: id(91),
+                },
+                creation_id: id(80),
+                launch_id: id(2),
+                revision: 6,
+                original: original.to_string(),
+            }),
+        };
+        assert_eq!(
+            OrderedOperation::from(&envelope.request),
+            OrderedOperation::CreationLaunch
+        );
+        for other in [
+            OrderedOperation::CreationClone,
+            OrderedOperation::CreationWorktree,
+            OrderedOperation::TaskStartReconcile,
+        ] {
+            assert_ne!(OrderedOperation::CreationLaunch, other);
+        }
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Native);
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Service);
+        validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).unwrap();
+        // Only a future typed actor accessor may consume it.
+        assert!(Validated::fixture(&serde_json::json!(envelope.request))
+            .into_request()
+            .is_err());
+        if let Request::CreationLaunch { intent } = &mut envelope.request {
+            intent.scope.configuration = "b".repeat(64);
+        }
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+    }
+    #[test]
+    fn task_start_reconcile_is_native_service_bound_and_excluded_from_generic_requests() {
+        use zerus_client_core::desktop::{
+            ownership::Mode,
+            task_start_reconcile::{Intent, Scope},
+        };
+        let (mut envelope, caller, frontend, mut reply) = fixture();
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../client/fixtures/desktop-operation-port-v1.json"
+        ))
+        .unwrap();
+        let mut record: Value =
+            serde_json::from_str(fixture["raw_record"].as_str().unwrap()).unwrap();
+        record["intent"]["retained_input"] = fixture["retained_input"].clone();
+        let original = record.to_string();
+        let mut binding: zerus_client_core::operation_recovery::task_start::Binding =
+            serde_json::from_value(fixture["binding"].clone()).unwrap();
+        binding.key.configuration = "a".repeat(64);
+        binding.source_record_sha256 = zerus_desktop_migration::sha256(original.as_bytes());
+        binding.ui_snapshot_sha256 = zerus_client_core::tasks_write::outbox::snapshot(&record);
+        let intent = Intent {
+            scope: Scope {
+                configuration: "a".repeat(64),
+                service_epoch: id(91),
+            },
+            reconcile_id: id(83),
+            binding,
+            original,
+        };
+        intent.clone().verify().unwrap();
+        envelope.request = Request::TaskStartReconcile {
+            intent: Box::new(intent.clone()),
+        };
+        assert_eq!(
+            OrderedOperation::from(&envelope.request),
+            OrderedOperation::TaskStartReconcile
+        );
+        assert_ne!(
+            OrderedOperation::TaskStartReconcile,
+            OrderedOperation::CreationClone
+        );
+        assert_ne!(
+            OrderedOperation::TaskStartReconcile,
+            OrderedOperation::CreationWorktree
+        );
+        reply.request.request_id = envelope.request.id().into();
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Native);
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Service);
+        validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).unwrap();
+        reply.request.request_id = intent.binding.key.request_id.clone();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.request_id = intent.reconcile_id.clone();
+        assert!(Validated::fixture(&serde_json::json!(envelope.request))
+            .into_request()
+            .is_err());
+        assert_eq!(
+            Validated::fixture(&serde_json::json!(envelope.request))
+                .task_start_reconcile()
+                .unwrap(),
+            intent
+        );
+        let expired = Validated(
+            envelope.request.clone(),
+            Freshness::Native {
+                caller: caller.clone(),
+                frontend: frontend.clone(),
+                until: Instant::now(),
+                #[cfg(windows)]
+                windows: None,
+            },
+            Metadata::default(),
+        );
+        assert!(expired.task_start_reconcile().is_err());
+        #[cfg(unix)]
+        {
+            let mut order = Order::default();
+            live_authorized(envelope.request.clone(), 7)
+                .into_request(&mut order)
+                .unwrap()
+                .task_start_reconcile()
+                .unwrap();
+            assert!(live_authorized(envelope.request.clone(), 7)
+                .into_request(&mut order)
+                .is_err());
+        }
+        if let Request::TaskStartReconcile { intent } = &mut envelope.request {
+            intent.scope.configuration = "b".repeat(64);
+            intent.binding.key.configuration = "b".repeat(64);
+            intent.as_ref().clone().verify().unwrap();
+        }
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+    }
+
     #[test]
     fn notification_controls_require_cached_service_mode_and_matching_native_scope() {
         use zerus_client_core::desktop::notification_control::{

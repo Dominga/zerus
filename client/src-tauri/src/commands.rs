@@ -92,6 +92,15 @@ impl AppState {
             .map(|inputs| inputs.creations.clone())
     }
 
+    pub(crate) fn local_read_capture(
+        &self,
+    ) -> Option<Arc<zerus_client_core::migration::preload::Capture>> {
+        self.live
+            .retained_import_source
+            .get()
+            .map(|inputs| inputs.local_reads.clone())
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     pub fn set_desktop_responder(&self, responder: Arc<zerus_client_core::desktop::Responder>) {
         let _ = self.live.desktop_responder.set(responder);
@@ -1071,11 +1080,27 @@ pub fn perf_config() -> Value {
         // The actions smoke runs only on a replay with an explicit fake hgs.
         "actions_smoke": actions_smoke_allowed(),
         "smoke_file": var("ZERUS_CLIENT_SMOKE_FILE"),
+        "acceptance_selection": crate::selection_diagnostic::enabled(),
         // A replay run measures a synthetic Activity (the auto run tries every session for it).
         "replay": var("ZERUS_CLIENT_REPLAY").is_some(),
         // The Linux WebKit renderer decision (renderer, reason, nvidia, wayland, marker_state).
         "renderer": crate::renderer::diagnostics(),
     })
+}
+
+/// Test-only observation from the main GUI's actual selection. This command
+/// cannot select a session, navigate, grant permission, or reach the service.
+#[tauri::command]
+pub async fn acceptance_selection(
+    window: tauri::WebviewWindow,
+    observation: crate::selection_diagnostic::Observation,
+) -> Result<(), String> {
+    if window.label() != crate::MAIN_WINDOW || !crate::selection_diagnostic::enabled() {
+        return Err("selection readback disabled".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || crate::selection_diagnostic::record(observation))
+        .await
+        .map_err(|_| "selection readback unavailable".to_owned())?
 }
 
 #[cfg(feature = "live")]

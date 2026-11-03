@@ -931,7 +931,15 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         {
                             creation_clone::query(&store, hello.request.as_ref().unwrap())
                         } else if hello.request.as_ref().is_some_and(|v| {
-                            matches!(v["op"].as_str(), Some("creation_clone" | "creation_worktree"))
+                            matches!(
+                                v["op"].as_str(),
+                                Some(
+                                    "creation_clone"
+                                        | "creation_worktree"
+                                        | "creation_launch"
+                                        | "task_start_reconcile"
+                                )
+                            )
                         }) {
                             frontend_refused(
                                 hello.request.as_ref(),

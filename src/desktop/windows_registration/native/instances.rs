@@ -95,7 +95,7 @@ impl Service {
         let Some(stream) = crate::desktop::connection(location, "status", None)? else {
             return Ok(None);
         };
-        let pid = transport::peer_pid(&stream)?;
+        let pid = transport::server_pid(&stream)?;
         ensure!(
             process.pid == pid && process.own && process.current(),
             "Desktop process identity unavailable."
@@ -167,7 +167,7 @@ impl Service {
         let mut stream =
             transport::connect(location)?.context("Original desktop pipe disconnected.")?;
         ensure!(
-            transport::peer_pid(&stream)? == self.process.pid && self.process.current(),
+            transport::server_pid(&stream)? == self.process.pid && self.process.current(),
             "Original desktop pipe peer changed."
         );
         let remaining = until
@@ -254,7 +254,7 @@ impl Running {
         ))?;
         stream.set_write_timeout(Some(crate::desktop::TIMEOUT))?;
         ensure!(
-            transport::peer_pid(&stream)? == self.service.process.pid,
+            transport::server_pid(&stream)? == self.service.process.pid,
             "Desktop service changed before rollback; no request was offered."
         );
         self.check()?;

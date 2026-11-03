@@ -20,6 +20,7 @@ cargo test --locked --manifest-path crates/presence-sampler/Cargo.toml || native
 cargo build --locked --bin hgs
 cargo test --locked desktop::ui_authority || native_status=1
 cargo test --locked host::token::private_creation || native_status=1
+cargo test --locked desktop::transport || native_status=1
 for selected in actions::read_barrier:: desktop_service::cache::tests desktop_service::frontend::tests::cache_ windows_shell::tests instance::tests platform::windows::startup::tests platform::windows::drawing::tests cli::tests lifecycle::tests window_layer::tests; do
     cargo test --locked --manifest-path client/src-tauri/Cargo.toml --lib "$selected" || native_status=1
 done

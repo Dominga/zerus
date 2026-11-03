@@ -55,6 +55,11 @@ original named pipe, exact configuration/argv, executable file object and
 lifecycle epoch. `EnginePID` alone is insufficient. A separate/shared engine
 that cannot be bound to that exact service process refuses before stopping it.
 The native Windows round-trip fixture must qualify the supported SDK topology.
+Outgoing controller connections verify the kernel pipe server PID and its
+actual user token, then join it to that same retained process. Incoming actor
+connections keep their client impersonation and integrity checks. These are
+separate endpoint roles; a failed check never falls back to the opposite role
+or the checking process's own PID.
 
 A registered CLI that refuses startup with exit code 78 retains its last bounded
 error in the existing private desktop state's `startup-failure.json`, when that
@@ -186,6 +191,9 @@ integrity, session, default DACL and parent token remain unchanged, and an
 impersonating thread refuses. Hosted CI must execute this control without an
 eligibility skip. The task round-trip independently checks the actual scheduled
 service's file owners in each mode.
+The native gate also runs a separate-process pipe-role control: the client end
+refuses server-only client impersonation, verifies the actual server PID, and
+the server end independently authenticates the original child PID.
 
 `tests/windows_frontend_auth.py` includes the disposable hosted-Windows task
 round-trip. The maintained registration installer stages the stable CLI under

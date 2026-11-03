@@ -85,7 +85,8 @@ the same service process handle to signal actual exit and the original instance
 GUID to disappear. It never stops all instances, selects a process by name or
 uses a failed identity check as evidence of exit. Replacement is UPDATE-only,
 preserves verified security, and ignores registration triggers. A single
-`RunEx` explicitly selects the verified current session. Its successful return
+`RunEx` explicitly selects the verified current session and marks its user
+argument as the verified SID (`TASK_RUN_USE_SESSION_ID | TASK_RUN_USER_SID`). Its successful return
 is insufficient: the same returned instance must reach exact service
 process/pipe readiness.
 

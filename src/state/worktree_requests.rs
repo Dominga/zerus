@@ -728,14 +728,14 @@ mod tests {
             "the branch is in the pinned repository"
         );
 
-        // The checkout's reset runs after `worktree add`, with GIT_DIR and
+        // The tree checkout runs after `worktree add`, with GIT_DIR and
         // GIT_COMMON_DIR bound to the pinned entry and common directory. A
         // common directory or entry replaced in between receives nothing.
-        for (name, swap_common) in [("reset-common", true), ("reset-entry", false)] {
+        for (name, swap_common) in [("tree-common", true), ("tree-entry", false)] {
             let repo = repository(&base.join(name), false);
             let foreign = repository(&base.join(name).join("foreign"), false);
             let (git, foreign_git) = (repo.join(".git"), foreign.join(".git"));
-            super::super::worktrees::BEFORE_OWNED_RESET.with(|hook| {
+            super::super::worktrees::BEFORE_OWNED_TREE.with(|hook| {
                 *hook.borrow_mut() = Some(Box::new(move || {
                     if swap_common {
                         std::fs::rename(&git, git.with_file_name(".git-admitted")).unwrap();
@@ -762,10 +762,102 @@ mod tests {
             assert!(written.join("index").is_file(), "{name}: pinned entry");
             assert!(
                 std::fs::read_dir(&untouched).unwrap().next().is_none(),
-                "{name}: the replacement receives no index or ORIG_HEAD"
+                "{name}: the replacement receives no index"
             );
             assert!(destination.join(".git").is_file(), "{name}: the checkout is kept");
         }
+
+        // The common directory replaced while Git runs the tree checkout,
+        // after its setup: a smudge filter is the scheduling point. Git's
+        // files ref backend would resolve refs through the real path it took
+        // at startup, so a ref update here would land in the foreign
+        // repository, which has a branch of the same name. The checkout
+        // updates no ref, and the foreign repository receives nothing.
+        let root = base.join("tree-during");
+        let repo = repository(&root, false);
+        let foreign = repository(&root.join("foreign"), false);
+        let fixture = |dir: &std::path::Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args([
+                    "-c",
+                    "user.name=fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{args:?}: {output:?}");
+        };
+        fixture(
+            &foreign,
+            &["commit", "-q", "--allow-empty", "-m", "foreign"],
+        );
+        fixture(&foreign, &["branch", "zerus-owned"]);
+        std::fs::write(repo.join(".gitattributes"), "* filter=swap\n").unwrap();
+        std::fs::write(repo.join("file"), "content\n").unwrap();
+        fixture(&repo, &["add", ".gitattributes", "file"]);
+        fixture(&repo, &["commit", "-q", "-m", "filtered"]);
+        let (mark, script) = (root.join("swapped"), root.join("swap.sh"));
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nif [ ! -e '{mark}' ]; then : > '{mark}'; mv '{git}' '{git}-admitted' && ln -s '{foreign}' '{git}'; fi\nexec cat\n",
+                mark = mark.display(),
+                git = repo.join(".git").display(),
+                foreign = foreign.join(".git").display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        fixture(
+            &repo,
+            &["config", "filter.swap.smudge", script.to_str().unwrap()],
+        );
+        let tree = |dir: &std::path::Path| {
+            let mut found = std::collections::BTreeMap::new();
+            let mut pending = vec![dir.to_path_buf()];
+            while let Some(next) = pending.pop() {
+                for item in std::fs::read_dir(&next).unwrap() {
+                    let path = item.unwrap().path();
+                    let kind = std::fs::symlink_metadata(&path).unwrap();
+                    let content = if kind.is_dir() {
+                        pending.push(path.clone());
+                        Vec::new()
+                    } else if kind.is_symlink() {
+                        std::fs::read_link(&path)
+                            .unwrap()
+                            .into_os_string()
+                            .into_encoded_bytes()
+                    } else {
+                        std::fs::read(&path).unwrap()
+                    };
+                    found.insert(path, content);
+                }
+            }
+            found
+        };
+        let before = tree(&foreign.join(".git"));
+        let (destination, receipt) = owned_git_create(&repo, &id(), |_| Ok(()));
+        assert!(mark.exists(), "the swap ran inside the tree checkout");
+        assert_eq!(receipt["status"], "unconfirmed", "{receipt}");
+        assert_eq!(
+            tree(&foreign.join(".git")),
+            before,
+            "the foreign repository receives no ref, reflog or lock"
+        );
+        assert!(
+            repo.join(".git-admitted/worktrees/-/index").is_file(),
+            "the index is in the pinned entry"
+        );
+        assert_eq!(
+            std::fs::read_to_string(destination.join("file")).unwrap(),
+            "content\n",
+            "the work tree was checked out"
+        );
 
         // Checkout pins the metadata entry it just made; Own writes only
         // through that object. A replacement at the same path (even a full

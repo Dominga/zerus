@@ -213,8 +213,8 @@ describe("the app's archived Activity", () => {
     setSelectedKey("\nrun:run-live");
     expect(archiveActivity.target()).toBeUndefined();
     expect(archiveActivity.events()).toEqual([]);
-    expect(mocked.activityPort.follow).toHaveBeenCalledWith(expect.objectContaining({ key: "run:run-live" }));
     await flush();
+    expect(mocked.activityPort.follow).toHaveBeenCalledWith(expect.objectContaining({ key: "run:run-live" }));
     expect(mocked.composerOpen).toHaveBeenLastCalledWith({ computer: "", key: "run:run-live", name: "codex/example/live", archive_id: null });
     vi.advanceTimersByTime(10_000);
     expect(reads.length).toBe(2);

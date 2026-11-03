@@ -2602,7 +2602,9 @@ stops partway, the record stays with the reason and the deletion is never
 retried; review the folder again. Deleting leftover files is available on Linux
 and macOS. A record resolves by itself once its
 folder is gone, or once a fresh worktree list taken under the repository lock shows
-that Git tracks the worktree again. A leftover whose repository is gone is listed
+that Git tracks the worktree again. A pending record younger than 330 seconds is not
+resolved that way: if hgs was killed, the lock is free while the Git it started may
+not have deregistered the worktree yet. A leftover whose repository is gone is listed
 by `hgs worktrees leftovers` and can still be kept; a record whose repository and
 folder are both gone resolves. One review or listing reports at most 32 leftovers
 within 1 MiB and marks the rest with `leftovers_partial` (review) or `partial`

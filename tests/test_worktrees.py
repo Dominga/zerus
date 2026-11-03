@@ -578,6 +578,31 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         left=self.leftover(tree);self.assertIsNotNone(left)
         self.assertEqual(left['removal']['status'],'pending');self.assertEqual(left['verdict'],'partially_removed')
         self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
+    # zerus-ty94 #6: hgs is killed before Git starts removing; the lock is
+    # free while that orphaned Git has not deregistered the worktree yet. A
+    # review then must keep the recent pending record, so the folder Git
+    # leaves behind is still a reviewable leftover.
+    def test_a_review_never_resolves_a_removal_an_orphaned_git_is_still_running(self):
+        go=self.root/'orphan-go';done=self.root/'orphan-done'
+        self.fake("args=sys.argv[1:]\n"
+                  "if any(args[i:i+2]==['worktree','remove'] for i in range(len(args)-1)):\n"
+                  " import signal,subprocess\n os.kill(os.getppid(),signal.SIGKILL)\n end=time.time()+30\n"
+                  " while not os.path.exists("+repr(str(go))+") and time.time()<end: time.sleep(0.05)\n"
+                  " r=subprocess.run(["+repr(GIT)+",*args],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode\n"
+                  " open("+repr(str(done))+",'w').close();sys.exit(r)\n"
+                  "os.execv("+repr(GIT)+",["+repr(GIT)+",*args])\n")
+        tree,row,result=self.partial('orphaned-git')
+        self.assertEqual(result.returncode,-9,result.stderr)
+        self.assertEqual(self.records(),[(str(tree.resolve()),'pending')])
+        # Git has not started: the worktree is still registered and the lock is free.
+        data=self.review();self.assertIn(str(tree.resolve()),[r['path'] for r in data['worktrees']])
+        self.assertEqual(self.records(),[(str(tree.resolve()),'pending')])
+        go.touch();end=time.time()+30
+        while not done.exists() and time.time()<end:time.sleep(0.05)
+        self.assertTrue(done.exists());(self.home/'.local/bin/git').unlink()
+        left=self.leftover(tree);self.assertIsNotNone(left)
+        self.assertEqual(left['removal']['status'],'pending')
+        self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
     def test_resolved_and_stale_records_drop_and_the_bound_fails_closed(self):
         import sqlite3
         tree,_,_=self.partial('resolved');self.assertEqual(len(self.records()),1)

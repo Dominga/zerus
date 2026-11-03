@@ -21,6 +21,10 @@ const PROCESS_CONSENT_SECONDS: u64 = 300;
 /// Leftover rows in one reply, and their bytes: the rest stay recorded and
 /// the reply is marked partial, so many records never blank a bounded reply.
 const LEFTOVER_ROWS: usize = 32;
+/// A manual removal gives Git 300 s. A pending record younger than that, plus
+/// a margin, may belong to a Git that outlived a killed hgs: the repository
+/// lock is free while Git has not deregistered the worktree yet.
+const ORPHANED_GIT_GRACE: f64 = 330.0;
 const LEFTOVER_BYTES: usize = 1024 * 1024;
 
 fn admit_leftover(used: &mut usize, row: &Value) -> bool {
@@ -1042,6 +1046,11 @@ fn leftovers(
             continue;
         }
         if registered {
+            // A recent pending removal may still be running in a Git whose
+            // hgs was killed; never resolve it from under that Git.
+            if record.status == "pending" && now() - record.reserved_at < ORPHANED_GIT_GRACE {
+                continue;
+            }
             // The review's list can be seconds old. Only a fresh list, taken
             // while no removal holds the repository lock, may resolve the
             // record; a folder Git stopped tracking meanwhile is shown.

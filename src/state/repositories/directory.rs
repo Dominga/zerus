@@ -148,6 +148,133 @@ impl Directory {
         Ok(directory)
     }
 
+    /// An existing child directory, opened relative to this pinned one
+    /// without following a link: no pathname is resolved again.
+    pub fn child(&self, name: &str) -> Result<Self> {
+        if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+            return Err("Invalid directory entry name".into());
+        }
+        Ok(Self {
+            path: self.path.join(name),
+            file: open_at(&self.file, std::ffi::OsStr::new(name))?,
+        })
+    }
+
+    /// At most `limit` bytes of a regular file in this pinned directory,
+    /// opened relative to it without following a link.
+    pub fn read_file(&self, name: &str, limit: usize) -> Result<Vec<u8>> {
+        use std::io::Read;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::fs::FileTypeExt;
+        if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+            return Err("Invalid file name".into());
+        }
+        let name = c_name(std::ffi::OsStr::new(name))?;
+        // SAFETY: the parent is pinned; name is one NUL-free component.
+        let fd = unsafe {
+            libc::openat(
+                self.file.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        // SAFETY: this call owns the new descriptor.
+        let file = unsafe { File::from_raw_fd(fd) };
+        let kind = file.metadata().map_err(|e| e.to_string())?.file_type();
+        if !kind.is_file() || kind.is_fifo() {
+            return Err("Expected a regular file".into());
+        }
+        let mut bytes = Vec::new();
+        file.take(limit as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        if bytes.len() > limit {
+            return Err("File is too large".into());
+        }
+        Ok(bytes)
+    }
+
+    /// Publishes a new private file in this pinned directory: written under a
+    /// private staging name, synced, then renamed without replacing anything.
+    pub fn write_new(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        use std::io::Write;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+            return Err("Invalid file name".into());
+        }
+        let staging = c_name(std::ffi::OsStr::new(&format!(
+            ".{name}.{}",
+            uuid::Uuid::new_v4()
+        )))?;
+        let to = c_name(std::ffi::OsStr::new(name))?;
+        let dir = self.file.as_raw_fd();
+        // SAFETY: the parent is pinned; the staging name is new and NUL-free.
+        let fd = unsafe {
+            libc::openat(
+                dir,
+                staging.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600 as libc::c_uint,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        // SAFETY: this call owns the new descriptor.
+        let mut file = unsafe { File::from_raw_fd(fd) };
+        let written = file
+            .write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|e| e.to_string());
+        drop(file);
+        #[cfg(target_os = "linux")]
+        let rc = written.as_ref().map_or(-1, |_| unsafe {
+            libc::renameat2(dir, staging.as_ptr(), dir, to.as_ptr(), libc::RENAME_NOREPLACE)
+        });
+        #[cfg(target_os = "macos")]
+        let rc = written.as_ref().map_or(-1, |_| unsafe {
+            libc::renameatx_np(dir, staging.as_ptr(), dir, to.as_ptr(), libc::RENAME_EXCL)
+        });
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let rc = -1; // Refuse publication without an atomic no-replace primitive.
+        if rc != 0 {
+            let error = std::io::Error::last_os_error().to_string();
+            // SAFETY: removes only this call's own staging name in the pinned parent.
+            unsafe { libc::unlinkat(dir, staging.as_ptr(), 0) };
+            written?;
+            return Err(format!("Cannot publish {}: {error}", to.to_string_lossy()));
+        }
+        Ok(())
+    }
+
+    /// This pinned directory's descriptor number in this process.
+    pub fn descriptor(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd;
+        self.file.as_raw_fd()
+    }
+
+    /// Keeps this descriptor open, at its own number, in the program the
+    /// command execs. Register it after any descriptor whitelist.
+    pub fn share(&self, command: &mut Command) -> std::os::fd::RawFd {
+        use std::os::{fd::AsRawFd, unix::process::CommandExt};
+        let fd = self.file.as_raw_fd();
+        // SAFETY: only fcntl and errno access run between fork and exec. The
+        // pinned file outlives spawn, which returns after exec or its failure.
+        unsafe {
+            command.pre_exec(move || {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        fd
+    }
+
     pub fn anchor(&self, command: &mut Command) -> Result<()> {
         use std::os::{fd::AsRawFd, unix::process::CommandExt};
         let fd = self.file.as_raw_fd();

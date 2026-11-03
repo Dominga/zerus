@@ -56,6 +56,7 @@ fn verify_image(expected: &str, actual: Option<crate::platform::FileIdentity>) -
 
 pub(super) fn run(
     directory: &directory::Directory,
+    share: Option<&directory::Directory>,
     args: &[&str],
     seconds: u64,
     control: Option<&Control<'_>>,
@@ -97,6 +98,11 @@ pub(super) fn run(
                 .custody
                 .inherit(&mut command)
                 .map_err(|e| e.to_string())?;
+        }
+        // After the whitelist: the worker keeps this pinned descriptor for
+        // Git, which inherits it at the same number.
+        if let Some(share) = share {
+            share.share(&mut command);
         }
         command
             .spawn()
@@ -202,7 +208,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         }
     };
     let refs: Vec<&str> = args[2..].iter().map(String::as_str).collect();
-    let result = run_git(None, &refs, seconds, &cancelled);
+    let result = run_git(None, None, &refs, seconds, &cancelled);
     // All Git work is finished before writing. A dead reader cannot leave an
     // operation running while this worker blocks or exits on a broken pipe.
     let encoded = serde_json::to_vec(&result).map_err(|e| e.to_string())?;
@@ -231,7 +237,7 @@ mod tests {
     fn clone_worker_entry_in_a_unit_image_is_always_refused() {
         let root = tempfile::tempdir().unwrap();
         let directory = directory::Directory::open(&root.path().canonicalize().unwrap()).unwrap();
-        let error = run(&directory, &["clone"], 600, None).unwrap_err();
+        let error = run(&directory, None, &["clone"], 600, None).unwrap_err();
         assert_eq!(error, crate::self_exec::TEST_IMAGE);
     }
 

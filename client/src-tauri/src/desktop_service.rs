@@ -381,6 +381,7 @@ impl Service {
             report.hook_creations(Arc::new(move || {
                 if let Some(shared) = weak.upgrade() {
                     shared.publish_retained_import();
+                    retained_import::creations::schedule_current(&shared);
                 }
             }));
         }
@@ -1153,9 +1154,22 @@ async fn run(shared: Arc<Shared>, mut control: watch::Receiver<Control>) {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(stop.clone());
         let mut greeted = None;
-        let result = connection(shared.clone(), &mut control, stop.clone(), automatic, &mut greeted).await;
+        let result = connection(
+            shared.clone(),
+            &mut control,
+            stop.clone(),
+            automatic,
+            &mut greeted,
+        )
+        .await;
         let code = result.err().unwrap_or("service_unavailable");
-        let retry = backoff.next(code, greeted.is_some_and(|at: tokio::time::Instant| at.elapsed() >= Duration::from_secs(30)))
+        let retry = backoff
+            .next(
+                code,
+                greeted.is_some_and(|at: tokio::time::Instant| {
+                    at.elapsed() >= Duration::from_secs(30)
+                }),
+            )
             .map(|delay| tokio::time::Instant::now() + delay);
         shared.notification_controls.disconnect();
         *shared.relay.lock().unwrap_or_else(PoisonError::into_inner) = None;
@@ -1217,7 +1231,9 @@ async fn run(shared: Arc<Shared>, mut control: watch::Receiver<Control>) {
                 _ = tokio::time::sleep_until(retry_at) => automatic = true,
             }
         } else {
-            if control.changed().await.is_err() { break; }
+            if control.changed().await.is_err() {
+                break;
+            }
             automatic = false;
             backoff.reset();
         }
@@ -1265,7 +1281,10 @@ async fn connection(
         if automatic {
             // Reopening a read stream is never a new Grant/Rearm or replay of
             // a retained migration, approval, send or other native intent.
-            shared.ownership.request(None, Some(configuration.clone()), Some(stop.clone())).await;
+            shared
+                .ownership
+                .request(None, Some(configuration.clone()), Some(stop.clone()))
+                .await;
         } else {
             shared
                 .ownership
@@ -1366,6 +1385,7 @@ async fn connection(
                         for projection in &shared.projections { projection(Some(&frame)); }
                         last_frame = tokio::time::Instant::now();
                         shared.publish(state.snapshot().clone());
+                        retained_import::creations::schedule_current(&shared);
                         if frame["t"] == "hello" && notification_worker.is_none()
                             && shared.notification_supported.load(Ordering::Acquire)
                             && shared.notification_controls.enabled() {

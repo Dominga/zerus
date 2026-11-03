@@ -189,7 +189,8 @@ Grant, watch/catalog, ownership Resume and the separate G2 actor stay available.
 Do not clear the slot to manufacture a successful report.
 
 On Unix the capture resolves the managed data folder once and pins that canonical
-object; symlinks through home, `$XDG_DATA_HOME` and `.local/share` are supported.
+object for capture and the original legacy journal load/writes; symlinks through
+home, `$XDG_DATA_HOME` and `.local/share` are supported.
 The existing data folder must be owned by the user; a group-writable mode such as
 0775 is preserved. The archive slot must remain user-owned and private (0700),
 and source/archive leaves remain private, owned, single-link and no-follow. A
@@ -200,14 +201,34 @@ asks to check the managed data folder's availability and ownership.
 on Unix) and review retained partial files before Retry. No permission
 or source repair happens automatically.
 
+These are endpoint identity rechecks, not an exclusive namespace hold. Deliberate
+same-user rename-and-back between checks is outside this protection. Other users
+in a shared writable data-directory group can rename the archive slot away, just
+as they can the live journal; private leaves and rechecks do not make 0775 a
+hostile-writer exclusion guarantee. Missing/replaced data remains unavailable and
+never grants current coverage or effect authority.
+
 After capture, normal live journal writes may resume. The archive is explicitly
 historical pre-load data: a later source recheck validates the retained private
 snapshot's native identity and raw hash, not today's mutable journal. It is not
 Drained, current-source completeness, worker ownership or execution consent.
 This exception does not relax the Qt/Settings source leases. The separate
-creations-group configuration binding and Staged publication caller remain
-follow-up work; capture alone does not complete G3 or any installed acceptance
-row.
+creation report binds this exact capture ID once to the paired canonical service
+configuration. It publishes the unchanged creation source and
+an explicit historical provenance source through the existing Staged publisher;
+its own `creations-retained-import-v1.json` retains the configuration, snapshot
+reference, attempt and expected receipt. It never uses the Qt/Settings journal's
+hash fields. Attempts/unknown results keep their original ID and are lookup-only.
+A complete exact negative permits explicit Retry of the same record after fresh
+snapshot validation. A confirmed local callback failure before the final record
+write has its own durable `before_record` state: no final record was sent, so
+explicit Retry may prepare that same identity again without inventing a receipt.
+Missing, partial or lost child output never establishes this state. The native
+metadata lock is explicitly unlocked before close, so a forked child's inherited
+descriptor cannot prolong it. Retained SDK/helper/pipe resources
+keep the shared report admission charged until actual completion. Publication
+runs off the UI/legacy worker and never gates Grant, watch/catalog or Resume.
+Capture/report success alone does not complete G3 or installed acceptance.
 
 ## macOS
 

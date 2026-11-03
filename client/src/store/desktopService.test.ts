@@ -29,6 +29,17 @@ describe("desktop service presentation", () => {
     expect(retainedSourceNotice(view("creation_source_unavailable"))).toContain("0600 on Unix");
     expect(view("creation_source_private_slot").connected).toBe(true);
   });
+  it("keeps the creation group visible when the separate Qt report is complete", () => {
+    const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
+    const creation = { required: true, complete: false, running: false, code: "creations_import_handoff_busy", phase: "not_committed" };
+    const view = (patch = {}) => serviceView({ retained_source_import: { ...report, creations_report: { ...creation, ...patch } } });
+    expect(retainedSourceNotice(view())).toContain("keeps the original report identity");
+    expect(retainedSourceNotice(view({ phase: "before_record", code: "creations_import_before_record" }))).toContain("deferred");
+    expect(retainedSourceNotice(view({ running: true }))).toContain("Preparing the saved creation report");
+    expect(retainedSourceNotice(view({ code: "creations_import_original_result_unconfirmed", phase: "unknown" }))).toContain("never resent");
+    expect(retainedSourceNotice(view({ complete: true }))).toBe("");
+    expect(view().connected).toBe(true);
+  });
   it("shows blocked read transfer and its existing Retry path until durable completion", () => {
     expect(pendingReadNotice(undefined)).toBe("");
     const pending = { required: true, complete: false, running: true, code: "pending_read_import_waiting", through: 0, superseded: 0, delivered: false as const };

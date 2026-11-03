@@ -295,7 +295,13 @@ pub(crate) struct Lock {
 }
 impl Lock {
     pub fn take(path: &Path) -> io::Result<Self> {
-        let parents = parent(path)?;
+        Self::take_with(path, true)
+    }
+    pub fn take_managed(path: &Path) -> io::Result<Self> {
+        Self::take_with(path, false)
+    }
+    fn take_with(path: &Path, private: bool) -> io::Result<Self> {
+        let parents = Parents::open_with(path.parent().ok_or_else(refused)?, false, private)?;
         #[cfg(unix)]
         let file = {
             use std::{
@@ -328,13 +334,58 @@ impl Lock {
         };
         #[cfg(not(any(unix, windows)))]
         let file = return Err(io::Error::from(io::ErrorKind::Unsupported));
-        if stamp(&file)?.size != 0 {
-            return Err(refused());
-        }
-        parents.recheck()?;
-        Ok(Self {
+        let held = Self {
             _file: file,
             _parents: parents,
-        })
+        };
+        if stamp(&held._file)?.size != 0 {
+            return Err(refused());
+        }
+        held._parents.recheck()?;
+        Ok(held)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Lock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // Another thread may have forked while this description was locked.
+        // Close alone leaves its flock held by that child until exec/exit.
+        let _ = unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+#[cfg(all(test, unix))]
+mod lock_tests {
+    use super::*;
+    #[test]
+    fn dropping_the_lock_releases_it_even_while_an_inherited_description_remains_open() {
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("zerus-preload-lock-{}", uuid::Uuid::new_v4()));
+        drop(Parents::open(&root, true).unwrap());
+        let path = root.join("capture.lock");
+        for managed in [false, true] {
+            let take = || {
+                if managed {
+                    Lock::take_managed(&path)
+                } else {
+                    Lock::take(&path)
+                }
+            };
+            let held = take().unwrap();
+            // fork inherits this SAME open file description, just as dup does.
+            // Keep it alive without creating a process in the parallel suite.
+            let inherited = held._file.try_clone().unwrap();
+            assert!(matches!(take(), Err(e) if e.kind()==io::ErrorKind::WouldBlock));
+            drop(held);
+            let next = take().expect("the original owner explicitly released its flock");
+            assert_eq!(inherited.metadata().unwrap().len(), 0);
+            drop(next);
+            drop(inherited);
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

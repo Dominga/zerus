@@ -95,12 +95,14 @@ mod tests {
         let held = status.lock();
         let (answered, answer) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
-            scope.spawn(|| answered.send(status.copy().code).unwrap());
-            assert_eq!(
-                answer.recv_timeout(std::time::Duration::from_secs(5)),
-                Ok("replaced".to_owned())
-            );
+            scope.spawn(|| {
+                let _ = answered.send(status.copy().code);
+            });
+            let answer = answer.recv_timeout(std::time::Duration::from_secs(5));
+            // Released before the assertion: a copy that waited for the lock
+            // then finishes, so the scope's join cannot hang the failure.
+            drop(held);
+            assert_eq!(answer, Ok("replaced".to_owned()));
         });
-        drop(held);
     }
 }

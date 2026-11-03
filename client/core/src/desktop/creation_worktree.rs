@@ -602,13 +602,14 @@ mod tests {
         assert_eq!(verified.plan.branch, "zerus-example");
         assert_eq!(verified.plan.destination, "/srv/repo-zerus-example");
         assert_eq!(verified.plan.expected_machine, MACHINE);
-        // The same argument recipe as the direct `worktrees create` call.
+        // The same argument recipe as the direct `worktrees create` call,
+        // whose reducer path always passes the literal base HEAD.
         let direct = worktrees::create_invocation(
             &ComputerId::local(),
             &verified.plan.path,
             &verified.plan.common_dir,
             &verified.plan.branch,
-            BASE,
+            "HEAD",
             &verified.plan.destination,
             &verified.plan.worktree_request_id,
             true,

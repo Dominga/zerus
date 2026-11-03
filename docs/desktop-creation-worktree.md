@@ -47,6 +47,75 @@ existing CLI receipt fingerprint over those arguments. That fingerprint
 identifies the original request and receipt. It is neither execution authority
 nor a physical repository or destination identity.
 
+## Owned effect
+
+`worktree_requests::create_owned` is the only owned entry. It is Linux-only:
+elsewhere it is refused with `creation_worktree_unsupported` before any
+reservation, receipt or effect (see Git binding below). The actor's Reserve
+check runs before the original receipt is reserved. The same receipt store as
+the direct path (request UUID plus argument fingerprint) keeps an original
+from ever being replayed. The direct CLI path keeps its behavior.
+
+Every Git command runs through the repository worker under the effect's
+close-only custody lock and cancellation lifeline. Each command is anchored in
+a pinned directory object.
+
+- **Pins.** The repository folder, the destination's parent and the
+  repository's common Git directory are pinned by identity (no-follow
+  component walks). Each pin is re-verified around every Git command and step.
+- **Git binding.** Git never receives a pathname for an object it writes. The
+  checkout runs with the pinned destination as its working directory (path
+  `.`) and the pinned common directory as Git's own inherited descriptor,
+  `--git-dir=/proc/self/fd/N`. The descriptor stays open only after the
+  custody whitelist, through the worker into Git. A swap of either pathname
+  after the final identity checks therefore cannot redirect Git; the checks
+  after the command then leave the result unconfirmed. macOS has no such
+  descriptor link, so the owned path refuses there and the direct path keeps
+  serving it. `worktree add` would start its own checkout child (`reset
+  --hard`) with an absolute `GIT_DIR`, so the owned path runs it with
+  `--no-checkout`, which creates only the branch, the metadata entry and the
+  gitfile. After pinning that entry, it checks the tree out itself: `read-tree
+  --reset -u --no-recurse-submodules <head>`, then the `post-checkout` hook
+  through `git hook run`. Both run with `GIT_DIR` and `GIT_COMMON_DIR` bound to
+  the pinned entry and common directory as `/proc/self/fd/N`. The binding
+  does not cover refs: for a linked worktree, Git's files ref backend re-reads
+  the entry's `commondir` and resolves its real path at startup, so a swap
+  during a command could redirect a ref write. The checkout therefore updates
+  no ref (unlike `reset --hard`); `read-tree` writes only the index, through
+  the entry, and the work tree. Hooks and filters are the repository's own
+  code: Git commands they start inherit the binding but resolve refs the same
+  way, so a ref-writing hook is not bound. This needs Git 2.44 or later, the
+  first whose `worktree add` creates the new HEAD in-process (2.36 to 2.43
+  still run `git symbolic-ref` through the gitfile's real path); older Git is
+  refused before any effect. The checkout forces `worktree.useRelativePaths=false`, so the
+  links Own checks are absolute. Because the path is `.`, Git names the
+  linked-worktree metadata entry `-` (then `-1`, ...); nothing derives meaning
+  from that name.
+- **Destination.** A private staging folder is published with a no-replace
+  rename; Git then creates the checkout inside that published object.
+- **Steps.** Destination, Checkout, Verify, Track and Own are separate actor
+  checks, so no write after `worktree add` goes unchecked.
+- **Track.** Always a checked step. With a safe inherited upstream, its
+  writes run inside the pinned common directory (`--git-dir=.`, so Git
+  resolves the held object's own path), with no checkout or path indirection.
+  Without one it writes nothing, so every repository passes the same six steps.
+- **Metadata entry.** Right after `worktree add --no-checkout`, the entry Git made is pinned
+  by descriptor: named by the gitfile read through the pinned destination,
+  opened through the pinned common directory's `worktrees`, and accepted only
+  when its `gitdir` backlink, `HEAD` branch and `commondir` link, read through
+  the entry itself, are that checkout's.
+- **Own.** Own re-reads those links through the pinned entry, requires Git's
+  own `--absolute-git-dir` for the checkout to be that same object, and writes
+  `zerus-owner.json` through the entry with a no-replace rename: an existing
+  owner file is never overwritten. Every pin is re-verified afterwards. The
+  record itself is returned as the receipt's ownership evidence; no later
+  plain-Git lookup runs.
+
+After effects start, any refusal, pin or identity mismatch, or read or write
+failure records the original receipt as `unconfirmed`, never `created` or
+`failed`. Branches and partial files are kept, with no cleanup and no new
+UUID.
+
 ## Result and recovery
 
 The original CLI worktree request receipt is the original result and is never

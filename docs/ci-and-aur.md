@@ -210,6 +210,13 @@ save them.
 
 Quick and relay checks reclaim only unused Android, .NET, Haskell and CodeQL installations on disposable hosted Ubuntu runners. Disk checkpoints record free bytes and build-directory sizes. Quick shares one Cargo target across its crates; the new cache family avoids restoring the former duplicated debug and incremental trees. Relay removes its completed host Cargo targets before Docker compiles the deployment image; the remaining memory-envelope checks run that image. PostgreSQL containers and volumes, Cargo registries and the Python test environment stay available. Runner classes and the repository cache limit are unchanged.
 
+The hosted Linux native-client job reports disk use after checkout, dependency
+installation and cache restore, between its existing build phases, and after
+checks even when they fail. Reports include sizes for `target/client-native` and the Cargo
+registry/Git caches. This job has reporting permission only; tool and target
+cleanup remain restricted to Quick and relay. Local native-check script runs
+skip these checkpoints.
+
 The Windows real-agent job restores the `windows-cli-` family of the Windows
 desktop job for its release build and never saves it, so two jobs cannot race to
 save one key.

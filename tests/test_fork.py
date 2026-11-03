@@ -122,6 +122,38 @@ class Forks(Base):
         self.hgs('archive',reused['name'])
         self.assertEqual(self.binding(self.start('claude','reused'))['name'],'claude/p/reused')
 
+    def swarm(self,*args,request=None):
+        import subprocess
+        p=subprocess.run([str(test_pause.HGS),'swarm',*args],input=None if request is None else json.dumps(request),
+                         env=self.env,capture_output=True,text=True,timeout=20)
+        self.assertEqual(p.returncode,0,p.stdout+p.stderr);return json.loads(p.stdout)
+
+    def project_of(self,name,node):
+        import uuid
+        record=self.binding(name)
+        return self.swarm('session-project','--json',request={'request_id':str(uuid.uuid4()),'name':name,
+            'expected_run_id':record['run_id'],'expected_conversation_id':record['conversation_id'],
+            'expected_machine_id':node})['current_project_id']
+
+    # zerus-zjsj: a fork starts in its source session's project, live or
+    # archived, written by the catalog owner when the fork's binding exists.
+    def test_a_fork_starts_in_its_source_sessions_project(self):
+        source=self.start('codex')
+        saved,_=self.saved_v1('codex',tag='kept')
+        self.hgs('archive',saved['name'])
+        archive_id=json.loads(next((self.root/'state/archives').glob('*.json')).read_text())['archive_id']
+        loose=self.start('claude','loose')
+        node=self.swarm('hello')['node_id']
+        self.swarm('initialize',request={'projects':[dict(id='work',name='Work',color='#123456',folders=[],
+            sessions=[node+'\n'+source,node+'\narchive\n'+archive_id])]})
+        self.assertEqual(self.project_of(source,node),'work')
+        self.assertEqual(self.project_of(self.fork(source,'placed'),node),'work')
+        self.hgs('fork',saved['name'],'-n','from-archive','-d','--archive',archive_id)
+        self.wait(lambda:self.binding('codex/p/from-archive').get('conversation_id'))
+        self.assertEqual(self.project_of('codex/p/from-archive',node),'work')
+        # A source in the default project leaves its fork there too.
+        self.assertEqual(self.project_of(self.fork(loose,'loose-fork'),node),'ungrouped')
+
     def test_provider_returning_source_id_is_not_confirmed_as_a_fork(self):
         source=self.start('claude');(self.root/'broken-fork').touch()
         self.hgs('fork',source,'-n','broken','-d')

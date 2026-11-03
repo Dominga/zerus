@@ -2,7 +2,7 @@ import { nativeRoute } from "./native-entry";
 import { tr } from "../../i18n";
 import { createActivityScroll } from "./activity-scroll";
 import { activityReadingRows, createActivityAnchor } from "./activity-anchor";
-import { ACTIVITY_OVERSCAN, ACTIVITY_RESIZE_OVERSCAN, ActivityHeights, activityMeasureWindow } from "./activity-heights";
+import { ActivityHeights, activityMeasureWindow, activityOverscan, createActivityResize, syncActivityHeights } from "./activity-heights";
 import { searchPreview, clearSearchPreview } from "../../store/searchSelection";
 import { SearchHighlight } from "./SearchHighlight";
 import { For, Show, batch, createContext, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack, useContext, type JSX } from "solid-js";
@@ -777,7 +777,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
   const heights = new ActivityHeights();
   let measurementWidth = 0;
   const [resizing, setResizing] = createSignal(false);
-  const overscan = () => resizing() ? ACTIVITY_RESIZE_OVERSCAN : ACTIVITY_OVERSCAN;
+  const overscan = () => activityOverscan(resizing());
   // Items keep their identity while events append, including across the virtual window.
   const [view, setView] = createStore<{ items: TranscriptItem[]; expired: boolean; loaded: boolean; pane: ReturnType<typeof paneStates>; tool: string }>({ items: [], expired: false, loaded: false, pane: paneStates(source(), s()), tool: "" });
   const local = createMemo(() => localRows(source(), s()), undefined, { equals: (a, b) => a === b || (a.length === 0 && b.length === 0) });
@@ -799,8 +799,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
     motion.update(() => untrack(() => {
       settleReading(true);
       const content = new Map(items.map((item) => [item.id, JSON.stringify(item)]));
-      for (const [key, value] of content) if (value !== measuredContent.get(key)) heights.invalidate(key);
-      heights.retain(new Set(content.keys()));
+      syncActivityHeights(heights, measuredContent, content);
       const pending = new Set(measuring().map((index) => view.items[index]?.id));
       setMeasuring(items.flatMap((item, index) => pending.has(item.id) || content.get(item.id) !== measuredContent.get(item.id) ? [index] : []));
       measuredContent = content;
@@ -1003,21 +1002,13 @@ export function ActivityView(props: { source?: ActivitySource }) {
         setMeasuring(pending);
       });
     };
-    let resizeTimer: ReturnType<typeof setTimeout> | undefined;
-    const resizingWidth = () => {
-      setResizing(true);
-      clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(() => {
-        resizeTimer = undefined;
-        setResizing(false); // Restore scroll overscan only after width changes stop.
-        end.settle(); settleReading();
-      }, 250);
-    };
+    // Restore scroll overscan only after width changes stop.
+    const widths = createActivityResize(setResizing, () => { end.settle(); settleReading(); });
     const resize = new ResizeObserver(() => {
       const width = column?.getBoundingClientRect().width ?? scroller.clientWidth;
       if (Math.abs(width - measurementWidth) > .5) {
         measurementWidth = width;
-        if (placed()) { resizingWidth(); measureWindow(); }
+        if (placed()) { widths.resized(); measureWindow(); }
       }
       end.settle(); settleReading();
     });
@@ -1035,7 +1026,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
       changed();
     };
     document.fonts?.addEventListener("loadingdone", fontChanged);
-    onCleanup(() => { clearTimeout(resizeTimer); document.removeEventListener("selectionchange", selectionChanged); resize.disconnect(); mutations.disconnect(); scroller.removeEventListener("load", changed, true); scroller.removeEventListener("contentvisibilityautostatechange", changed, true); document.fonts?.removeEventListener("loadingdone", fontChanged); });
+    onCleanup(() => { widths.dispose(); document.removeEventListener("selectionchange", selectionChanged); resize.disconnect(); mutations.disconnect(); scroller.removeEventListener("load", changed, true); scroller.removeEventListener("contentvisibilityautostatechange", changed, true); document.fonts?.removeEventListener("loadingdone", fontChanged); });
   });
   onCleanup(() => {
     end.dispose(); reading.dispose(); motion.dispose();

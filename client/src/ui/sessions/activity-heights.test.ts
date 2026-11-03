@@ -1,5 +1,6 @@
-import { expect, it } from "vitest";
-import { ActivityHeights, activityMeasureWindow } from "./activity-heights";
+import { expect, it, vi } from "vitest";
+import { ACTIVITY_OVERSCAN, ACTIVITY_RESIZE_OVERSCAN, ACTIVITY_RESIZE_SETTLE_MS, ActivityHeights, activityMeasureWindow,
+  activityOverscan, createActivityResize, syncActivityHeights } from "./activity-heights";
 
 it("remeasures only the visible window and eight rows on each side, regardless of loaded count", () => {
   const range = { startIndex: 50, endIndex: 53 };
@@ -48,4 +49,55 @@ it("does not store zero or invalid geometry", () => {
   const heights = new ActivityHeights();
   for (const [width, height] of [[0, 100], [600, 0], [600, NaN], [Infinity, 100]]) heights.set("row", width, height);
   expect(heights.get("row", 600)).toBeUndefined();
+});
+
+it("keeps estimates only for loaded rows across transcript updates (the cache bound)", () => {
+  // #1155 review: the update path, not only retain() itself.
+  const heights = new ActivityHeights();
+  const page = (ids: string[], changed = "") => new Map(ids.map((id) => [id, id === changed ? `${id}*` : id]));
+  let loaded = page(["a", "b", "c"]);
+  syncActivityHeights(heights, new Map(), loaded);
+  for (const id of ["a", "b", "c"]) heights.set(id, 800, 100);
+  // An older page lands and the tail is trimmed; "b" changed.
+  const next = page(["older", "a", "b"], "b");
+  syncActivityHeights(heights, loaded, next); loaded = next;
+  expect(heights.get("a", 800)).toBe(100);
+  expect(heights.get("b", 800)).toBeUndefined();
+  expect(heights.get("c", 800)).toBeUndefined();
+  // Another target: nothing of the old transcript remains.
+  heights.set("a", 800, 100);
+  syncActivityHeights(heights, loaded, page(["x"]));
+  for (const id of ["older", "a", "b", "c"]) expect(heights.get(id, 800)).toBeUndefined();
+});
+
+it("returns the scroll overscan to eight once widths stop changing", () => {
+  vi.useFakeTimers();
+  try {
+    let resizing = false, settled = 0;
+    const widths = createActivityResize((value) => { resizing = value; }, () => { settled++; });
+    expect(activityOverscan(resizing)).toBe(ACTIVITY_OVERSCAN);
+    widths.resized();
+    expect(activityOverscan(resizing)).toBe(ACTIVITY_RESIZE_OVERSCAN);
+    vi.advanceTimersByTime(ACTIVITY_RESIZE_SETTLE_MS - 1);
+    widths.resized(); // another width change restarts the wait
+    vi.advanceTimersByTime(ACTIVITY_RESIZE_SETTLE_MS - 1);
+    expect([activityOverscan(resizing), settled]).toEqual([ACTIVITY_RESIZE_OVERSCAN, 0]);
+    vi.advanceTimersByTime(1);
+    expect([activityOverscan(resizing), settled]).toEqual([8, 1]);
+    // Disposal cancels a pending return without settling.
+    widths.resized(); widths.dispose(); vi.advanceTimersByTime(ACTIVITY_RESIZE_SETTLE_MS);
+    expect([resizing, settled]).toEqual([true, 1]);
+  } finally { vi.useRealTimers(); }
+});
+
+it("is wired into Activity's transcript updates, virtualizer and width observer", async () => {
+  // Read from disk, as row-morph.test.ts does.
+  const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: URL, encoding: "utf8"): string };
+  const activity = fs.readFileSync(new URL("./Activity.tsx", import.meta.url), "utf8");
+  expect(activity).toContain("syncActivityHeights(heights, measuredContent, content);");
+  expect(activity).toMatch(/const overscan = \(\) => activityOverscan\(resizing\(\)\);/);
+  expect(activity).toMatch(/get overscan\(\) \{ return overscan\(\); \}/);
+  expect(activity).toMatch(/const widths = createActivityResize\(setResizing, /);
+  expect(activity).toContain("if (placed()) { widths.resized(); measureWindow(); }");
+  expect(activity).toMatch(/onCleanup\(\(\) => \{ widths\.dispose\(\);/);
 });

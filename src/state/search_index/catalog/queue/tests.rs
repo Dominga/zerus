@@ -670,3 +670,99 @@ fn a_step_that_sqlite_cancelled_refuses_further_step_writes() {
     store.end_step(true).unwrap();
     assert!(store.index.connection().is_autocommit());
 }
+
+#[test]
+fn a_cancelled_snapshot_put_never_persists_a_cursor_past_rolled_back_rows() {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    use std::sync::Arc;
+    let (_temp, state, mut store) = fixture(false);
+    let path = state.join(format!(
+        "{:x}.json",
+        Sha256::digest(b"codex/example/search")
+    ));
+    let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    record["last_message"] = json!("needle snapshot");
+    record["last_event_at"] = json!(43);
+    fs::write(&path, record.to_string()).unwrap();
+    let identity = Identity {
+        name: "codex/example/search".into(),
+        run_id: "fixture-run".into(),
+        conversation_id: record["conversation_id"].as_str().unwrap().into(),
+        archive_id: String::new(),
+    };
+    let budget = || Budget {
+        deadline: Instant::now() + Duration::from_secs(2),
+        ..budget(128)
+    };
+    let database = state.join("content-search-v1/index.sqlite3");
+    let durable = || {
+        let other = rusqlite::Connection::open_with_flags(
+            &database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let count = |table: &str| -> i64 {
+            other
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap()
+        };
+        (count("messages"), count("input_cursors"))
+    };
+    let inserted = Arc::new(AtomicUsize::new(0));
+    let armed = Arc::new(AtomicBool::new(false));
+    let (count, arm, fire) = (inserted.clone(), armed.clone(), armed.clone());
+    store.index.connection().update_hook(Some(
+        move |action: rusqlite::hooks::Action, _: &str, table: &str, _: i64| {
+            if action == rusqlite::hooks::Action::SQLITE_INSERT
+                && table == "messages"
+                && count.fetch_add(1, SeqCst) == 6
+            {
+                arm.store(true, SeqCst);
+            }
+        },
+    ));
+    store
+        .index
+        .connection()
+        .progress_handler(1, Some(move || fire.swap(false, SeqCst)));
+    let cancelled = store.step(
+        &state,
+        std::slice::from_ref(&identity),
+        &budget(),
+        &AtomicBool::new(false),
+    );
+    store
+        .index
+        .connection()
+        .progress_handler(1, None::<fn() -> bool>);
+    store
+        .index
+        .connection()
+        .update_hook(None::<fn(rusqlite::hooks::Action, &str, &str, i64)>);
+    assert!(inserted.load(SeqCst) >= 7, "the snapshot put never ran");
+    assert!(store.index.connection().is_autocommit());
+    assert!(cancelled.is_err(), "the cancelled step reported success");
+    let (messages, cursors) = durable();
+    assert_eq!(
+        cursors, 0,
+        "cursor persisted past {} rolled-back rows (durable rows: {messages})",
+        6
+    );
+    for _ in 0..32 {
+        store
+            .step(
+                &state,
+                std::slice::from_ref(&identity),
+                &budget(),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        if durable().0 == 7 {
+            break;
+        }
+    }
+    assert_eq!(
+        store.index.query("needle", 100, None).unwrap().hits.len(),
+        7
+    );
+}

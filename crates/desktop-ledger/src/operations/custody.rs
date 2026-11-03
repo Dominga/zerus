@@ -80,16 +80,29 @@ pub fn migrate(tx: &Transaction<'_>) -> Result<()> {
 /// custody binding commit together, before any helper is spawned. A coalesced
 /// ticket is status-only; a file prepared for a different ticket is never used.
 pub fn reserve(db: &mut Connection, request: &Reserve, prepared: &Prepared) -> Result<Reservation> {
+    super::validate_reserve(request)?;
+    prepared.validate()?;
+    json(prepared, 8192)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let result = reserve_in(&tx, request, prepared)?;
     tx.commit()?;
     Ok(result)
 }
 
-/// Pair reservation and original custody in the actor's already-held IMMEDIATE
-/// transaction, after its current native checks. No commit or execution permit
-/// is supplied here. Any error requires rollback of the whole transaction.
+/// Pair reservation and original custody in an already-acquired main write
+/// transaction after current native checks. A savepoint undoes both on error;
+/// success still waits for the actor's outer commit and grants no execution.
 pub fn reserve_in(
+    tx: &Transaction<'_>,
+    request: &Reserve,
+    prepared: &Prepared,
+) -> Result<Reservation> {
+    super::protected_in(tx, "hgs_operation_custody", || {
+        reserve_original(tx, request, prepared)
+    })
+}
+
+fn reserve_original(
     tx: &Transaction<'_>,
     request: &Reserve,
     prepared: &Prepared,

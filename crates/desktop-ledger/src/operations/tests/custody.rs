@@ -44,6 +44,79 @@ fn setup() -> (Connection, Reserve, store::Prepared) {
 }
 
 #[test]
+fn custody_error_cannot_survive_a_callers_refusal_commit() {
+    let (mut db, request, prepared) = setup();
+    db.execute_batch("CREATE TRIGGER refuse_custody BEFORE INSERT ON desktop_operation_custody BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+    let tx = refusal_transaction(&mut db);
+    assert!(store::reserve_in(&tx, &request, &prepared).is_err());
+    assert!(store::pending(&tx).unwrap().is_none());
+    commit_refusal(tx);
+    assert!(store::pending(&db).unwrap().is_none());
+    assert_eq!(totals(&db).unwrap().undrained, 0);
+    for table in ["desktop_operation_attempts", "desktop_operation_custody"] {
+        assert_eq!(
+            db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM fixture_refusals", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+}
+
+#[test]
+fn custody_refuses_a_deferred_or_read_transaction() {
+    let (mut db, request, prepared) = setup();
+    for read in [false, true] {
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .unwrap();
+        if read {
+            tx.query_row("SELECT count(*) FROM desktop_operations", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap();
+        }
+        assert!(store::reserve_in(&tx, &request, &prepared)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("acquired main write transaction"));
+        tx.commit().unwrap();
+    }
+    assert!(store::pending(&db).unwrap().is_none());
+}
+
+#[test]
+fn invalid_legacy_custody_refuses_before_a_contended_writer_lock() {
+    let (_db, request, mut prepared) = setup();
+    prepared.service.pid = 0;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.sqlite3");
+    let mut owner = Connection::open(&path).unwrap();
+    owner
+        .execute_batch("CREATE TABLE fixture(value TEXT)")
+        .unwrap();
+    let mut caller = Connection::open(&path).unwrap();
+    caller.busy_timeout(std::time::Duration::ZERO).unwrap();
+    let _held = owner
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    assert_eq!(
+        store::reserve(&mut caller, &request, &prepared)
+            .err()
+            .unwrap()
+            .to_string(),
+        "invalid custody process"
+    );
+}
+
+#[test]
 fn actor_transaction_commits_or_discards_reservation_and_custody_together() {
     for commit in [false, true] {
         let (mut db, request, prepared) = setup();

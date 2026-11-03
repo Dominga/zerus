@@ -326,6 +326,46 @@ pub fn migrate(tx: &Transaction<'_>) -> Result<()> {
         UPDATE desktop_operation_totals SET undrained=undrained+(NEW.drained=0)-(OLD.drained=0) WHERE id=1; END;")?;
     Ok(())
 }
+// Each storage call is independently error-atomic, even when the actor records
+// a refusal and commits its surrounding transaction. Names are fixed internal
+// literals; custody nests a distinct reserve savepoint in its own savepoint.
+fn protected_in<T>(
+    tx: &Transaction<'_>,
+    name: &'static str,
+    apply: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    ensure!(
+        tx.transaction_state(Some(rusqlite::DatabaseName::Main))?
+            == rusqlite::TransactionState::Write,
+        "operation requires an acquired main write transaction"
+    );
+    tx.execute_batch(&format!("SAVEPOINT {name}"))?;
+    let outcome = apply();
+    match outcome {
+        Ok(value) => match tx.execute_batch(&format!("RELEASE {name}")) {
+            Ok(()) => Ok(value),
+            Err(error) => {
+                rollback_call(tx, name)?;
+                Err(error.into())
+            }
+        },
+        Err(error) => {
+            rollback_call(tx, name)?;
+            Err(error)
+        }
+    }
+}
+
+fn rollback_call(tx: &Transaction<'_>, name: &'static str) -> Result<()> {
+    let result = tx.execute_batch(&format!("ROLLBACK TO {name}; RELEASE {name}"));
+    if result.is_err() && !tx.is_autocommit() {
+        // If savepoint cleanup itself failed, invalidate the outer transaction
+        // rather than leave partial work eligible for the caller's commit.
+        tx.execute_batch("ROLLBACK")?;
+    }
+    result.map_err(Into::into)
+}
+
 fn allowed(tx: &Connection, writer: &str, service: &str) -> Result<()> {
     uuid(writer)?;
     uuid(service)?;
@@ -367,16 +407,21 @@ const ATTEMPT: &str = "seq,ticket,state,outcome_json,drained";
 /// Requires already verified explicit G2 Original and current actor guard.
 /// Exact duplicates coalesce without changing bodies or providing execution.
 pub fn admit(db: &mut Connection, request: &Admission<'_>) -> Result<Admitted> {
+    admission_fields(request)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let original = admit_in(&tx, request)?;
     tx.commit()?;
     Ok(original)
 }
 
-/// Freeze within the actor's original IMMEDIATE transaction, after its native
-/// proof/current guard has been rechecked under the writer lock. This neither
-/// supplies that proof nor commits; any error requires caller rollback.
+/// Freeze inside an already-acquired main write transaction, after the actor's
+/// native proof/current guard has been rechecked under its writer lock. Errors
+/// roll back this call's savepoint; success still requires the actor's commit.
 pub fn admit_in(tx: &Transaction<'_>, request: &Admission<'_>) -> Result<Admitted> {
+    protected_in(tx, "hgs_operation_admit", || admit_original(tx, request))
+}
+
+fn admission_fields(request: &Admission<'_>) -> Result<(String, String, String, String)> {
     uuid(request.admission_id)?;
     let operation_id = request.binding.validate()?;
     ensure!(
@@ -395,6 +440,11 @@ pub fn admit_in(tx: &Transaction<'_>, request: &Admission<'_>) -> Result<Admitte
     let binding = json(request.binding, METADATA_BYTES)?;
     let provenance = json(request.provenance, METADATA_BYTES)?;
     let binding_sha256 = hash(binding.as_bytes());
+    Ok((operation_id, binding, provenance, binding_sha256))
+}
+
+fn admit_original(tx: &Transaction<'_>, request: &Admission<'_>) -> Result<Admitted> {
+    let (operation_id, binding, provenance, binding_sha256) = admission_fields(request)?;
     let key = &request.binding.key;
     let executor = &request.binding.executor;
     let prior_id: Option<String> = tx
@@ -433,18 +483,41 @@ pub fn admit_in(tx: &Transaction<'_>, request: &Admission<'_>) -> Result<Admitte
 /// original, after actor guard validation. Never call this from a retry timer.
 /// fresh=false carries the exact existing ticket and is status-only.
 pub fn reserve(db: &mut Connection, request: &Reserve) -> Result<Reservation> {
+    validate_reserve(request)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let result = reserve_in(&tx, request)?;
     tx.commit()?;
     Ok(result)
 }
 
-/// Reserve inside the actor's original IMMEDIATE transaction after its current
-/// native checks. Does not commit or grant execution; roll back on any error.
+/// Reserve in an already-acquired main write transaction after the actor's
+/// native checks. Errors undo only this call; success does not commit or grant
+/// execution. An exact coalesced ticket remains observation only.
 pub fn reserve_in(tx: &Transaction<'_>, request: &Reserve) -> Result<Reservation> {
+    protected_in(tx, "hgs_operation_reserve", || {
+        reserve_original(tx, request)
+    })
+}
+
+fn validate_reserve(request: &Reserve) -> Result<()> {
     digest(&request.operation_id)?;
-    uuid(&request.attempt_id)?;
-    uuid(&request.lease)?;
+    for value in [
+        &request.attempt_id,
+        &request.writer_epoch,
+        &request.service_epoch,
+        &request.lease,
+    ] {
+        uuid(value)?;
+    }
+    ensure!(
+        (1..=i64::MAX as u64).contains(&request.revision),
+        "invalid operation revision"
+    );
+    Ok(())
+}
+
+fn reserve_original(tx: &Transaction<'_>, request: &Reserve) -> Result<Reservation> {
+    validate_reserve(request)?;
     let original = tx.query_row(
         &format!("SELECT {ADMITTED} FROM desktop_operations WHERE operation_id=?1"),
         [&request.operation_id],

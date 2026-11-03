@@ -64,6 +64,31 @@ fn reconnect_refollows_every_topic_and_keeps_projects_while_metadata_is_warming(
                 .count()
                 >= 2
         );
+        // Every desired topic must be followed on the first lease before the
+        // socket gap. Otherwise a topic the detail worker has not reached yet
+        // is followed only once, on the new lease, and never shows two IDs.
+        readiness
+            .until(
+                "all four desired topics followed on the first lease",
+                |_| {
+                    let calls = fixture.calls();
+                    ["activity", "processes", "tasks", "organization"]
+                        .iter()
+                        .all(|topic| {
+                            calls
+                                .iter()
+                                .filter(|c| {
+                                    c["value"]["op"] == "detail_follow"
+                                        && c["value"]["subscription"]["topic"] == *topic
+                                })
+                                .filter_map(|c| c["value"]["id"].as_str())
+                                .collect::<BTreeSet<_>>()
+                                .len()
+                                == 1
+                        })
+                },
+            )
+            .await;
         fs::write(
             fixture.0.join("runtime-epoch"),
             uuid::Uuid::new_v4().to_string(),

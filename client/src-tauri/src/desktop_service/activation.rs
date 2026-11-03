@@ -220,10 +220,10 @@ fn read(
     if !reply.matches(&id, configuration, epoch) {
         return Err(ReadError::Retryable(Reason::ReplyIdentity));
     }
-    // Wayland activation tokens belong only to Linux. A Mac delivery comes
-    // from its native host and has no platform context; never interpret a
-    // foreign platform's presentation hint as a Mac click.
-    #[cfg(target_os = "macos")]
+    // Wayland activation tokens belong only to Linux. Mac and Windows
+    // deliveries come from their native hosts with no platform context; never
+    // interpret a foreign platform's presentation hint as a local click.
+    #[cfg(not(target_os = "linux"))]
     if reply
         .activation
         .as_ref()
@@ -346,5 +346,6 @@ pub(super) async fn run(shared: Arc<Shared>, configuration: String, stop: Arc<At
     }
 }
 
-#[cfg(test)]
+// The fixtures use the Unix test harness and process-tree lock.
+#[cfg(all(test, unix))]
 mod tests;

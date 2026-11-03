@@ -1,6 +1,6 @@
 //! Native callback lifetime and admission, separate from the eight effect slots.
 use std::sync::{
-    atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering},
     mpsc, Arc,
 };
 use std::thread::Thread;
@@ -20,6 +20,8 @@ struct Shared {
     phase: AtomicU8,
     retained: AtomicUsize,
     overflow: AtomicBool,
+    /// Forwarded clicks by native path: COM activator, then Activated delegate.
+    clicks: [AtomicU64; 2],
     wake: Thread,
     // The original Runtime's ownership charge, not one of its eight command
     // charges. A native reference survives even an abandoned Rust handle.
@@ -52,6 +54,7 @@ impl Slot {
                     phase: AtomicU8::new(0),
                     retained: AtomicUsize::new(0),
                     overflow: AtomicBool::new(false),
+                    clicks: [AtomicU64::new(0), AtomicU64::new(0)],
                     wake,
                     _resources: resources,
                 }),
@@ -78,6 +81,25 @@ impl Slot {
     }
     pub fn overflow(&self) -> bool {
         self.shared.overflow.load(Ordering::Acquire)
+    }
+    /// Forwarded clicks as (COM activator, Activated delegate). Diagnostic only.
+    pub fn clicks(&self) -> (u64, u64) {
+        let [activator, delegate] = &self.shared.clicks;
+        (
+            activator.load(Ordering::Acquire),
+            delegate.load(Ordering::Acquire),
+        )
+    }
+    fn counted(&self, path: usize, request_id: String) -> bool {
+        let sent = self.send(Candidate::Clicked(request_id));
+        if sent {
+            self.shared.clicks[path].fetch_add(1, Ordering::AcqRel);
+        }
+        sent
+    }
+    /// The in-process Activated delegate of a toast this worker posted.
+    pub fn delegate_click(&self, request_id: String) -> bool {
+        self.counted(1, request_id)
     }
     pub fn hold(&self) -> Option<Retained> {
         self.shared
@@ -116,7 +138,7 @@ impl Slot {
         if !zerus_desktop_migration::canonical_uuid(request_id) {
             return false;
         }
-        self.send(Candidate::Clicked(request_id.into()))
+        self.counted(0, request_id.into())
     }
 }
 
@@ -139,9 +161,18 @@ mod tests {
             receive.try_recv().unwrap(),
             Candidate::Clicked(request.clone())
         );
+        assert!(slot.delegate_click(request.clone()));
+        assert_eq!(
+            receive.try_recv().unwrap(),
+            Candidate::Clicked(request.clone())
+        );
+        assert_eq!(slot.clicks(), (1, 1));
         slot.request_stop();
         assert!(!slot.finish_restoration());
         assert!(!slot.activate(super::super::wire::APPLICATION, &args, 0));
+        assert!(!slot.delegate_click(request.clone()));
+        // Refused clicks are not counted as forwarded.
+        assert_eq!(slot.clicks(), (1, 1));
         assert!(slot.send(Candidate::Closed(request.clone())));
         assert_eq!(receive.try_recv().unwrap(), Candidate::Closed(request));
     }

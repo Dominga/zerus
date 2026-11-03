@@ -4021,7 +4021,10 @@ refuses mobile creation, path/worktree/Git/file operations, peers and voice/spee
 Windows desktop presence is not recorded, so desktop activity does not delay
 phone alerts. See [Windows gateway setup](mobile-deployment.md#windows-gateway).
 Attention notices are tray notifications with the Zerus icon and a taskbar
-badge. A start without options opens the workspace, because Windows 11 first
+badge. With the desktop service, the service posts its own toasts and the app
+posts none; a toast click opens its exact run and conversation in the running
+window and brings it to the front, or flashes its taskbar button when Windows
+keeps another program in front. A start without options opens the workspace, because Windows 11 first
 hides a new notification
 icon in the overflow; `--background` starts in the notification area only, as a
 Startup-folder shortcut should. Starting `hgs-tray.exe` again opens the running

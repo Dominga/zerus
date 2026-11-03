@@ -189,6 +189,44 @@ impl Installation {
     }
 }
 
+fn escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+/// The original Toast object for one post: launch correlation, untrusted text
+/// as escaped content and the exact tag/group. No posting effect, registry or
+/// notifier access happens here; malformed text refuses before any Show.
+fn toast(
+    request_id: &str,
+    title: &str,
+    body: &str,
+    tag: &str,
+    group: &str,
+) -> Result<ToastNotification, Refusal> {
+    let xml = XmlDocument::new().map_err(|_| Refusal::Unsupported)?;
+    let document = format!(
+        "<toast launch=\"{}{}\"><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual></toast>",
+        super::callbacks::PREFIX,
+        escape(request_id),
+        escape(title),
+        escape(body)
+    );
+    xml.LoadXml(&HSTRING::from(document))
+        .map_err(|_| Refusal::InvalidCommand)?;
+    let toast =
+        ToastNotification::CreateToastNotification(&xml).map_err(|_| Refusal::Unsupported)?;
+    toast
+        .SetTag(&HSTRING::from(tag))
+        .and_then(|()| toast.SetGroup(&HSTRING::from(group)))
+        .map_err(|_| Refusal::InvalidCommand)?;
+    Ok(toast)
+}
+
 struct Observed {
     toast: ToastNotification,
     activated: Option<i64>,
@@ -343,23 +381,7 @@ impl Native for Backend {
         if self.observed.contains_key(&command.binding.request_id) {
             return Err(Refusal::InvalidCommand);
         }
-        let xml = XmlDocument::new().map_err(|_| Refusal::Unsupported)?;
-        let escape = |s: &str| {
-            s.replace('&', "&amp;")
-                .replace('<', "&lt;")
-                .replace('>', "&gt;")
-                .replace('"', "&quot;")
-                .replace('\'', "&apos;")
-        };
-        let document=format!("<toast launch=\"{}{}\"><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual></toast>",super::callbacks::PREFIX,command.binding.request_id,escape(title),escape(body));
-        xml.LoadXml(&HSTRING::from(document))
-            .map_err(|_| Refusal::InvalidCommand)?;
-        let toast =
-            ToastNotification::CreateToastNotification(&xml).map_err(|_| Refusal::Unsupported)?;
-        toast
-            .SetTag(&HSTRING::from(tag))
-            .and_then(|()| toast.SetGroup(&HSTRING::from(group)))
-            .map_err(|_| Refusal::InvalidCommand)?;
+        let toast = toast(&command.binding.request_id, title, body, tag, group)?;
         let request = command.binding.request_id.clone();
         self.observed.insert(
             request.clone(),
@@ -384,7 +406,7 @@ impl Native for Backend {
                 .Activated(&TypedEventHandler::<ToastNotification, IInspectable>::new(
                     move |_, _| {
                         let _held = &held;
-                        sink.send(Candidate::Clicked(id.clone()));
+                        sink.delegate_click(id.clone());
                         Ok(())
                     },
                 ))
@@ -452,3 +474,6 @@ impl Native for Backend {
             .map_err(|_| ())
     }
 }
+
+#[cfg(test)]
+mod tests;

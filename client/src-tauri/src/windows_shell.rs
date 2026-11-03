@@ -106,6 +106,41 @@ pub fn restart_delay(previous: u64, uptime: std::time::Duration) -> u64 {
     }
 }
 
+/// The only calls a Windows presentation may make to come to the front. The
+/// seam deliberately has no input injection (SendInput/keybd_event), no
+/// AttachThreadInput and no foreground-lock change: Tao's set_focus falls back
+/// to a synthetic Alt press, which must never reach the app in front.
+pub trait Foreground {
+    fn minimized(&self) -> bool;
+    /// ShowWindow(SW_RESTORE).
+    fn restore(&self);
+    fn in_front(&self) -> bool;
+    /// One SetForegroundWindow call.
+    fn take_front(&self) -> bool;
+    /// A bounded FlashWindowEx on the taskbar button.
+    fn flash(&self);
+}
+#[derive(Debug, PartialEq, Eq)]
+pub enum Front {
+    Already,
+    Taken,
+    Flashed,
+}
+/// One direct attempt; on refusal only the taskbar button flashes.
+pub fn bring_to_front(window: &impl Foreground) -> Front {
+    if window.minimized() {
+        window.restore();
+    }
+    if window.in_front() {
+        return Front::Already;
+    }
+    if window.take_front() && window.in_front() {
+        return Front::Taken;
+    }
+    window.flash();
+    Front::Flashed
+}
+
 /// Windows native strings are bounded in UTF-16 without splitting a surrogate.
 pub fn wide_text<const N: usize>(text: &str) -> [u16; N] {
     let mut out = [0; N];
@@ -212,6 +247,89 @@ mod tests {
         assert_eq!(clicks.clicked().as_deref(), Some("current"));
         clicks.cleared(&["current".into()]);
         assert_eq!(clicks.clicked(), None);
+    }
+    #[derive(Default)]
+    struct Recorded {
+        minimized: bool,
+        front: std::cell::Cell<bool>,
+        grant: bool,
+        calls: std::cell::RefCell<Vec<&'static str>>,
+    }
+    impl Foreground for Recorded {
+        fn minimized(&self) -> bool {
+            self.calls.borrow_mut().push("minimized");
+            self.minimized
+        }
+        fn restore(&self) {
+            self.calls.borrow_mut().push("restore");
+        }
+        fn in_front(&self) -> bool {
+            self.calls.borrow_mut().push("in_front");
+            self.front.get()
+        }
+        fn take_front(&self) -> bool {
+            self.calls.borrow_mut().push("take_front");
+            self.front.set(self.grant);
+            self.grant
+        }
+        fn flash(&self) {
+            self.calls.borrow_mut().push("flash");
+        }
+    }
+    #[test]
+    fn a_refused_foreground_makes_one_attempt_and_only_flashes() {
+        let refused = Recorded {
+            minimized: true,
+            ..Default::default()
+        };
+        assert_eq!(bring_to_front(&refused), Front::Flashed);
+        assert_eq!(
+            *refused.calls.borrow(),
+            ["minimized", "restore", "in_front", "take_front", "flash"]
+        );
+        let granted = Recorded {
+            grant: true,
+            ..Default::default()
+        };
+        assert_eq!(bring_to_front(&granted), Front::Taken);
+        assert_eq!(
+            *granted.calls.borrow(),
+            ["minimized", "in_front", "take_front", "in_front"]
+        );
+        let already = Recorded::default();
+        already.front.set(true);
+        assert_eq!(bring_to_front(&already), Front::Already);
+        assert_eq!(*already.calls.borrow(), ["minimized", "in_front"]);
+    }
+    #[test]
+    fn windows_presentation_never_injects_input_or_uses_tao_focus() {
+        // The adapter and the Windows presentation path are the only callers.
+        let adapter = include_str!("platform/windows/foreground.rs");
+        for forbidden in [
+            "SendInput",
+            "keybd_event",
+            "AttachThreadInput",
+            "LockSetForegroundWindow",
+            "SystemParametersInfo",
+            "ASFW_ANY",
+            "set_focus",
+        ] {
+            assert!(!adapter.contains(forbidden), "{forbidden}");
+        }
+        for (source, file) in [
+            (include_str!("window_layer.rs"), "window_layer.rs"),
+            (include_str!("lifecycle.rs"), "lifecycle.rs"),
+        ] {
+            for (at, _) in source.match_indices(".set_focus()") {
+                let before = &source[..at];
+                let gate = before.rfind("#[cfg(").map(|i| &before[i..]);
+                assert!(
+                    gate.is_some_and(|gate| gate.starts_with("#[cfg(not(windows))]")
+                        || gate.starts_with("#[cfg(target_os = \"macos\")]")),
+                    "{file}: set_focus reachable on Windows"
+                );
+            }
+        }
     }
     #[test]
     fn windows_text_limits_preserve_unicode_and_termination() {

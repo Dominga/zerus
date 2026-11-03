@@ -4,7 +4,7 @@ use super::{wire, Dispatch};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use wire::{
     Action, Activation, Command, NativeId, Outcome, Platform, Refusal, Session, Uncertainty,
 };
@@ -29,6 +29,9 @@ pub(in crate::desktop) fn cold_entry() -> i32 {
 /// Tag and group limits are UTF-16 limits in the native Toast API. Our values
 /// are fixed ASCII, while restored values must be accepted without truncation.
 const ID_UNITS: usize = 16;
+/// One user click can arrive through both the in-process Activated delegate and
+/// the registered COM activator. Within this window it is forwarded once.
+const CLICK_COALESCE: Duration = Duration::from_secs(5);
 
 trait Native {
     /// No posting/withdrawal effect is allowed during preparation. Registration
@@ -48,13 +51,22 @@ trait Native {
     }
 }
 
+/// A delivered mapping and its click-suppression marker. The marker shares the
+/// mapping's bound and leaves with it; no live marker is ever evicted.
+struct Delivered {
+    activation: Activation,
+    clicked: Option<Instant>,
+}
+
 struct Mappings {
     session: Session,
     restored: bool,
     closing: bool,
     last_seq: i64,
-    delivered: BTreeMap<String, Activation>,
+    delivered: BTreeMap<String, Delivered>,
     native: BTreeMap<(String, String), String>,
+    /// Second reports of one click that were not forwarded. Diagnostic only.
+    coalesced: u64,
 }
 
 fn key(native_id: &NativeId) -> Option<(String, String)> {
@@ -92,6 +104,7 @@ impl Mappings {
             last_seq: 0,
             delivered: BTreeMap::new(),
             native: BTreeMap::new(),
+            coalesced: 0,
         })
     }
 
@@ -109,14 +122,19 @@ impl Mappings {
             return false;
         };
         if let Some(old) = self.delivered.get(&activation.request_id) {
-            return old == &activation;
+            return old.activation == activation;
         }
         if self.delivered.len() >= wire::MAPPINGS || self.native.contains_key(&id) {
             return false;
         }
         self.native.insert(id, activation.request_id.clone());
-        self.delivered
-            .insert(activation.request_id.clone(), activation);
+        self.delivered.insert(
+            activation.request_id.clone(),
+            Delivered {
+                activation,
+                clicked: None,
+            },
+        );
         true
     }
 
@@ -136,14 +154,32 @@ impl Mappings {
         if !self.restored || self.closing {
             return None;
         }
-        self.delivered.get(request_id).cloned()
+        self.delivered
+            .get(request_id)
+            .map(|value| value.activation.clone())
+    }
+
+    /// A native click for a known delivered mapping, forwarded at most once per
+    /// coalescing window. Unknown requests leave no state.
+    fn click(&mut self, request_id: &str, now: Instant) -> Option<Activation> {
+        let value = self.clicked(request_id)?;
+        let mapping = self.delivered.get_mut(request_id)?;
+        if mapping
+            .clicked
+            .is_some_and(|at| now.saturating_duration_since(at) < CLICK_COALESCE)
+        {
+            self.coalesced = self.coalesced.saturating_add(1);
+            return None;
+        }
+        mapping.clicked = Some(now);
+        Some(value)
     }
 
     fn closed(&mut self, request_id: &str) -> Option<Activation> {
         if !self.restored {
             return None;
         }
-        let value = self.delivered.remove(request_id)?;
+        let value = self.delivered.remove(request_id)?.activation;
         self.native.remove(&key(&value.native_id)?);
         Some(value)
     }
@@ -204,6 +240,7 @@ impl Mappings {
                 let Some(original) = key(native_id)
                     .and_then(|id| self.native.get(&id))
                     .and_then(|request| self.delivered.get(request))
+                    .map(|value| &value.activation)
                     .filter(|value| value.token == *token && value.native_id == *native_id)
                 else {
                     return refuse(Refusal::NotReady);
@@ -244,11 +281,14 @@ impl Mappings {
             );
             self.delivered.insert(
                 command.binding.request_id.clone(),
-                Activation {
-                    request_id: command.binding.request_id.clone(),
-                    token: command.action.token().into(),
-                    native_id: actual.clone(),
-                    platform_context: None,
+                Delivered {
+                    activation: Activation {
+                        request_id: command.binding.request_id.clone(),
+                        token: command.action.token().into(),
+                        native_id: actual.clone(),
+                        platform_context: None,
+                    },
+                    clicked: None,
                 },
             );
         }

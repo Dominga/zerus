@@ -87,7 +87,14 @@ retain the current page offset through its bounded FIFO. Finish waits for the
 worker's restored/ready acknowledgement, and stop waits for `try_join` plus
 native drain. The actor must continue polling original Closed callbacks through
 that join; a joined worker alone cannot settle the attachment. Native setup
-faults remain unavailable, and no registry repair occurs here.
+faults remain unavailable, and no registry repair occurs here. One user click
+can arrive through both the toast's Activated delegate and the registered COM
+activator. The worker forwards a delivered mapping's click at most once per
+five-second window. The suppression marker lives on that delivered mapping, so
+the 8192-mapping bound also bounds the markers. A marker leaves with its
+mapping and is never evicted while live; unknown requests leave no state. Runtime status reports
+forwarded clicks per native path (`clicks.activator`, `clicks.delegate`) and
+`clicks.coalesced`, so acceptance can show which path a real click used.
 
 Before allowing discovery effects, attachment restores at most sixteen indexed
 candidates per turn, then waits for the platform's original restoration

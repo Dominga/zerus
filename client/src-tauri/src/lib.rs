@@ -1064,6 +1064,14 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                         })) as desk::LoadAttention
                     });
                     desk::start(app.handle(), &pump, dir.clone(), desk::load_windows_mode(&dir, conf.as_deref()), attention);
+                    // The service posts the toast and grants foreground; this GUI only routes the click.
+                    if desktop_service::mode() {
+                        if let Some(sender) = desk::sender(app.handle()) {
+                            app.state::<commands::AppState>().register_service_activation(std::sync::Arc::new(move |delivery| {
+                                let _ = sender.send(desk::DeskInput::ServiceClicked(Box::new(delivery)));
+                            })).map_err(std::io::Error::other)?;
+                        }
+                    }
                     if switch && !replay && !desktop_service::mode() {
                         match platform::windows::worker::Worker::start(zerus_client_core::default_hgs()) {
                             Ok(worker) => { app.manage(worker); }

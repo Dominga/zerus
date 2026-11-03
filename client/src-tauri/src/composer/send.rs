@@ -358,8 +358,15 @@ impl Composers {
     /// retry; Tasks 4b and later call it after their actions, and Task 6's
     /// Refresh, where Qt calls `inspect()`.
     pub(crate) fn refresh_details(&self) {
+        self.read_details(false);
+    }
+
+    fn read_details(&self, waiting_send: bool) {
         let mut hub = self.lock();
-        if hub.closed || hub.followed.inspecting.is_some() || hub.followed.streamed {
+        if hub.closed
+            || hub.followed.inspecting.is_some()
+            || (hub.followed.streamed && !waiting_send)
+        {
             return;
         }
         let Some(ctx) = self.context(&hub) else {
@@ -375,6 +382,7 @@ impl Composers {
         hub.followed.inspecting = Some(number);
         hub.followed.inspected = Some(Basis::of(&ctx.row));
         hub.followed.inspected_at = self.now();
+        let observed = hub.followed.details.clone();
         drop(hub);
         let target = Target {
             computer: ctx.session.computer.clone(),
@@ -418,9 +426,16 @@ impl Composers {
                 return;
             }
             hub.followed.inspecting = None;
-            // A state frame that arrived meanwhile is newer.
+            // A waiting send needs its own readiness/compaction poll even
+            // when a previous stream frame said "starting". A frame received
+            // during that read still wins over its response.
             let mut accepted_details = false;
-            if !hub.followed.streamed {
+            let unchanged = match (&observed, &hub.followed.details) {
+                (Some(before), Some(now)) => Arc::ptr_eq(before, now),
+                (None, None) => true,
+                _ => false,
+            };
+            if !hub.followed.streamed || (waiting_send && unchanged) {
                 match read {
                     Ok((details, expiry, events)) => {
                         accepted_details = true;
@@ -2689,8 +2704,8 @@ impl Composers {
 
     /// One reading of a continuation's session. The open one reads through
     /// `refresh_details`, so its details are the ones the send is checked
-    /// against; nothing reads it while the stream keeps them, since their
-    /// states feed the continuation. Another session gets its own inspect,
+    /// against. A continuation polls even with a stream: its last state may
+    /// predate resume readiness or compaction completion. Another session gets its own inspect,
     /// one at a time per continuation, whose details only the continuation
     /// sees. An offline computer is not read (4573, 4585).
     fn poll(&self, key: &str, start: bool, revision: u64) {
@@ -2723,7 +2738,7 @@ impl Composers {
             }
         };
         let Some(target) = target else {
-            return self.refresh_details();
+            return self.read_details(true);
         };
         let me = self.clone();
         let owned = key.to_owned();
@@ -6608,6 +6623,109 @@ mod continuations {
         assert_eq!(view.waiting.as_deref(), Some(WAITING_START));
         assert_eq!(revision(&c, true), second);
         assert!(sends(&fake).is_empty());
+    }
+
+    #[test]
+    fn a_new_stream_frame_wins_over_a_waiting_send_readiness_poll() {
+        let root = dir("resume-stream-read-race");
+        let (c, fake) = send_hub(&root);
+        stopped(&fake);
+        let view = opened(&c, ready());
+        let SendReply::Start { token, .. } = c.send_message(
+            view.handle,
+            1,
+            view.text_epoch,
+            "only when ready".into(),
+            0,
+            0,
+        ) else {
+            panic!("start question");
+        };
+        c.answer(
+            token,
+            Answer::Start {
+                choice: StartChoice::Resume,
+            },
+        );
+        until(&c, |_| called(&fake, &Action::Resume));
+        {
+            let mut row = lock(&fake.row);
+            row.state = "running".into();
+            row.run_id = Some("run-2".into());
+        }
+        let mut after = ready();
+        after["run_id"] = json!("run-2");
+        let mut starting = after.clone();
+        starting["phase"] = json!("starting");
+        c.observe(&state(starting));
+        let mut held = lock(&fake.inspected);
+        *held = Some(after.clone());
+        *lock(&fake.now) += POLL;
+        c.tick();
+        eventually(|| fake.inspects.load(Ordering::SeqCst) == 1);
+        let mut approval = after.clone();
+        approval["phase"] = json!("approval");
+        c.observe(&state(approval.clone()));
+        drop(held);
+        eventually(|| c.lock().followed.inspecting.is_none());
+        assert_eq!(c.lock().followed.details.as_deref(), Some(&approval));
+        assert!(sends(&fake).is_empty());
+        c.observe(&state(after));
+        until(&c, |v| v.waiting.is_none() && !v.sending);
+        assert_eq!(sends(&fake).len(), 1);
+    }
+
+    #[test]
+    fn resumed_send_polls_past_a_streamed_starting_snapshot_without_switching_views() {
+        let root = dir("resume-streamed-starting");
+        let (c, fake) = send_hub(&root);
+        stopped(&fake);
+        compacts_as(&fake, "cmp-polled");
+        let view = opened(&c, ready());
+        let SendReply::Start { token, .. } = c.send_message(
+            view.handle,
+            1,
+            view.text_epoch,
+            "send once after resume".into(),
+            0,
+            0,
+        ) else {
+            panic!("start question");
+        };
+        c.answer(
+            token,
+            Answer::Start {
+                choice: StartChoice::ResumeCompact,
+            },
+        );
+        until(&c, |_| called(&fake, &Action::Resume));
+        {
+            let mut row = lock(&fake.row);
+            row.state = "running".into();
+            row.run_id = Some("run-2".into());
+        }
+        let mut after = ready();
+        after["run_id"] = json!("run-2");
+        let mut starting = after.clone();
+        starting["phase"] = json!("starting");
+        c.observe(&state(starting));
+        *lock(&fake.inspected) = Some(after.clone());
+        *lock(&fake.now) += POLL;
+        c.tick();
+        until(&c, |_| called(&fake, &Action::CompactContext));
+        assert_eq!(call_of(&fake, &Action::CompactContext).run_id, "run-2");
+        assert!(sends(&fake).is_empty());
+        after["compact_context_request"] = json!({"request_id":"cmp-polled","status":"completed"});
+        *lock(&fake.inspected) = Some(after);
+        *lock(&fake.now) += POLL;
+        c.tick();
+        until(&c, |v| v.waiting.is_none() && !v.sending);
+        assert_eq!(sends(&fake).len(), 1);
+        assert_eq!(sends(&fake)[0].0.run_id, "run-2");
+        assert_eq!(sends(&fake)[0].1.as_deref(), Some("cmp-polled"));
+        *lock(&fake.now) += POLL;
+        c.tick();
+        assert_eq!(sends(&fake).len(), 1);
     }
 
     #[test]

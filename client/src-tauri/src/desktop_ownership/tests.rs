@@ -657,6 +657,152 @@ mod native {
         });
     }
 
+    fn status_at(journal: &str, revision: u64) -> Value {
+        json!({"abi":"desktop-ownership-v1","configuration":"a".repeat(64),
+            "journal":journal,"revision":revision,"state":"passive","rearm_required":false,
+            "request_id":null,"owner_epoch":null,"identity_current":false})
+    }
+
+    #[test]
+    fn the_retry_decision_table_never_downgrades_a_basis_or_admits_an_unverified_grant() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        // A retained basis: the real lost original plus its definitive lookup.
+        let f = Fixture::new(
+            Mode::Service,
+            json!({"lost":true,"missing":true,"definitive":true}),
+        );
+        assert!(f.run(Some(Action::Grant)).pending);
+        assert_eq!(f.run(None).code, "ownership_not_applied");
+        let basis = Controller::not_applied_basis(&f.owner.state()).unwrap();
+        let original = f.owner.state().status.clone().unwrap();
+        let mut revision = original.clone();
+        revision.revision += 1;
+        let mut journal = original.clone();
+        journal.journal = Some("00000000-0000-4000-8000-000000000007".into());
+        let mut rearm = original.clone();
+        rearm.rearm_required = true;
+        for code in [
+            "ownership_not_applied",
+            "ownership_transport_busy",
+            "",
+            "ownership_changed",
+        ] {
+            for (status, expected) in [
+                (Some(&original), Some(Reason::NotApplied(basis.clone()))),
+                (None, Some(Reason::NotApplied(basis.clone()))),
+                (Some(&revision), None),
+                (Some(&journal), None),
+                (Some(&rearm), None),
+            ] {
+                let mut state = f.owner.state();
+                state.code = code.into();
+                state.status = status.cloned();
+                // Never Capacity or Refused instead of the basis.
+                assert_eq!(
+                    Controller::grant_reason(&state),
+                    expected,
+                    "{code:?} {status:?}"
+                );
+            }
+        }
+        // A transient refusal retries only against its own unchanged status,
+        // also when a later local transport-busy code masks its code.
+        let r = Fixture::new(Mode::Service, json!({"refuse":"ownership_drain_pending"}));
+        r.run(Some(Action::Grant));
+        let current = r.owner.state().status.clone().unwrap();
+        let mut moved = current.clone();
+        moved.revision += 1;
+        for (code, status, expected) in [
+            (
+                "ownership_drain_pending",
+                Some(&current),
+                Some(Reason::Refused),
+            ),
+            ("", Some(&current), Some(Reason::Refused)),
+            (
+                "ownership_transport_busy",
+                Some(&current),
+                Some(Reason::Refused),
+            ),
+            ("ownership_changed", Some(&current), None),
+            ("ownership_drain_pending", Some(&moved), None),
+            ("ownership_drain_pending", None, None),
+        ] {
+            let mut state = r.owner.state();
+            state.code = code.into();
+            state.status = status.cloned();
+            assert_eq!(
+                Controller::grant_reason(&state),
+                expected,
+                "{code:?} {status:?}"
+            );
+        }
+        // Capacity only at a cold start, before any original.
+        let cold = Fixture::new(Mode::Service, json!({}));
+        {
+            let mut state = cold.owner.state();
+            state.code = "ownership_transport_busy".into();
+            assert_eq!(Controller::grant_reason(&state), Some(Reason::Capacity));
+            state.running = true;
+            assert_eq!(Controller::grant_reason(&state), None);
+            state.running = false;
+            state.code.clear();
+            assert_eq!(Controller::grant_reason(&state), None);
+        }
+        // After any original (granted, or still unknown), capacity is no reason.
+        let granted = Fixture::new(Mode::Service, json!({}));
+        granted.run(Some(Action::Grant));
+        let unknown = Fixture::new(Mode::Service, json!({"lost":true,"missing":true}));
+        unknown.run(Some(Action::Grant));
+        for owner in [&granted.owner, &unknown.owner] {
+            let mut state = owner.state();
+            state.code = "ownership_transport_busy".into();
+            assert_eq!(Controller::grant_reason(&state), None);
+        }
+    }
+
+    #[test]
+    fn a_busy_check_never_turns_a_retained_basis_into_an_unbound_grant() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        tauri::async_runtime::block_on(async {
+            let f = Fixture::new(
+                Mode::Service,
+                json!({"lost":true,"missing":true,"definitive":true}),
+            );
+            assert!(f.run(Some(Action::Grant)).pending);
+            assert_eq!(f.run(None).code, "ownership_not_applied");
+            let statuses = f.calls("ownership-status").len();
+            // Both real gate charges are held while a real Check runs.
+            let held = [
+                f.owner.gate.admit(Role::Fleet).unwrap(),
+                f.owner.gate.admit(Role::Fleet).unwrap(),
+            ];
+            let checked = f.owner.request(None, Some("a".repeat(64)), None).await;
+            assert_eq!(checked.code, "ownership_transport_busy");
+            assert_eq!(
+                f.calls("ownership-status").len(),
+                statuses,
+                "no status read"
+            );
+            assert!(f.owner.retryable_grant(), "a busy Check masks no basis");
+            // The authority moves on before recovery's next step.
+            fs::write(
+                f.root.join("current.json"),
+                status_at("00000000-0000-4000-8000-000000000005", 4).to_string(),
+            )
+            .unwrap();
+            drop(held);
+            let view = f
+                .owner
+                .recovery_grant("a".repeat(64), Arc::new(AtomicBool::new(false)))
+                .await;
+            assert_eq!(view.code, "ownership_changed", "{view:?}");
+            assert_eq!(view.status.unwrap().revision, 4);
+            assert_eq!(f.calls("frontend-request").len(), 1, "no unbound Grant");
+            assert!(!f.owner.retryable_grant());
+        });
+    }
+
     #[test]
     fn only_a_verified_exit_and_unchanged_scope_let_not_applied_admit_a_grant() {
         let _process = crate::PROCESS_TREE.read().unwrap();

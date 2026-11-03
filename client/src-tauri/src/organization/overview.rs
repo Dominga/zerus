@@ -1,11 +1,13 @@
 //! Bounded GUI-owned overview reads. The existing catalog/review/inspection
 //! stack performs every I/O. Display rows never admit a removal or G1 capture.
 use super::*;
-use crate::worktree_cleanup::WorktreeCleanup;
+use crate::worktree_cleanup::{leftover as calls_for, WorktreeCleanup};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, Ordering};
-use zerus_client_core::{creation::canonical_uuid, worktree_overview as view, ComputerId};
+use zerus_client_core::{
+    creation::canonical_uuid, worktree_leftover as leftover, worktree_overview as view, ComputerId,
+};
 
 const CHANGED: &str = "This worktree overview changed. Open it again.";
 fn locked<T>(m: &Mutex<T>) -> Result<MutexGuard<'_, T>, String> {
@@ -50,6 +52,8 @@ struct StateModel {
     queue: VecDeque<(Arc<Dataset>, usize, Calls)>,
     inspections: usize,
     workers: usize,
+    /// One explicit leftover action at a time; a refresh waits for it.
+    acting: bool,
 }
 #[derive(Clone, Default)]
 pub struct Overview(Arc<Mutex<StateModel>>);
@@ -57,12 +61,15 @@ type Catalog = Arc<dyn Fn(&str, &str, bool) -> Result<Value, String> + Send + Sy
 type Snapshot = Arc<dyn Fn(&str, &str) -> Value + Send + Sync>;
 type Review = Arc<dyn Fn(&str, &str, &str) -> Result<Value, String> + Send + Sync>;
 type Unknown = Arc<dyn Fn(&str, &str, &str) -> bool + Send + Sync>;
+type Leftovers = Arc<dyn Fn(&str, &str) -> Result<(Vec<Value>, bool), String> + Send + Sync>;
 #[derive(Clone)]
 struct Calls {
     catalog: Catalog,
     snapshot: Snapshot,
     review: Review,
     unknown: Unknown,
+    /// One bounded vanished-repository listing per computer.
+    leftovers: Leftovers,
     changed: Arc<dyn Fn(&str) + Send + Sync>,
     org: Organization,
 }
@@ -185,6 +192,9 @@ impl Overview {
         {
             let mut state = locked(&self.0)?;
             if refresh {
+                if state.acting {
+                    return Err("A leftover folder action is still running.".into());
+                }
                 let window = state.window.as_mut().ok_or(CHANGED)?;
                 if window.pending.is_some()
                     || locked(&window.current.data)?.done < window.current.bindings.len()
@@ -279,11 +289,14 @@ impl Overview {
                     }
                     _ => failed = true,
                 }
+                // A repository whose last linked worktree became a leftover
+                // is reviewed for its records too.
                 if live
                     && catalog["state"] == "ok"
-                    && catalog["worktrees"]
+                    && (catalog["worktrees"]
                         .as_array()
                         .is_some_and(|a| a.iter().any(|r| r["kind"] == "linked"))
+                        || catalog["leftovers"].as_u64().is_some_and(|n| n > 0))
                 {
                     if let Some(common) = catalog["common_dir"]
                         .as_str()
@@ -304,6 +317,23 @@ impl Overview {
                 }
             } else {
                 failed = true;
+            }
+            // The computer's first source lists its vanished repositories'
+            // leftovers: one bounded call per computer, never per row.
+            let first = index == 0
+                || dataset.bindings[index - 1].source.computer != binding.source.computer;
+            let mut orphans = None;
+            let mut unlisted = false;
+            if first
+                && !dataset.closed.load(Ordering::Acquire)
+                && current(&calls.org, binding, true).is_ok()
+            {
+                match (calls.leftovers)(&binding.source.computer, &binding.machine) {
+                    Ok(value) if current(&calls.org, binding, true).is_ok() => {
+                        orphans = Some(value)
+                    }
+                    _ => unlisted = true,
+                }
             }
             if dataset.closed.load(Ordering::Acquire) {
                 continue;
@@ -388,6 +418,53 @@ impl Overview {
                     data.model.partial = true;
                 }
             }
+            let scope = format!(
+                "{:x}",
+                Sha256::digest(
+                    serde_json::to_vec(&("leftover", &binding.machine, &binding.source.computer))
+                        .unwrap_or_default(),
+                )
+            );
+            if let Some(checked) = &checked {
+                let rows = checked["leftovers"].as_array();
+                data.model.partial |= checked["leftovers_partial"] == true
+                    || checked["leftovers_unavailable"].is_string()
+                    || rows.is_some_and(|a| a.len() > leftover::ROWS);
+                for raw in rows.into_iter().flatten().take(leftover::ROWS) {
+                    let row = (raw["common_dir"] == common)
+                        .then(|| {
+                            view::project_leftover(&scope, index, &binding.source, raw, true, now())
+                        })
+                        .flatten();
+                    let Some(mut row) = row else {
+                        data.model.partial = true;
+                        continue;
+                    };
+                    if let Some(previous) = data.model.row(&row.id) {
+                        row.projects.extend(previous.projects.iter().cloned());
+                        row.project_names
+                            .extend(previous.project_names.iter().cloned());
+                        row.projects.sort();
+                        row.projects.dedup();
+                        row.project_names.sort();
+                        row.project_names.dedup();
+                    }
+                    data.model.put(row);
+                }
+            }
+            data.model.partial |= unlisted;
+            if let Some((rows, partial)) = &orphans {
+                data.model.partial |= *partial;
+                for raw in rows {
+                    match view::project_leftover(&scope, index, &binding.source, raw, false, now())
+                    {
+                        Some(row) => {
+                            data.model.put(row);
+                        }
+                        None => data.model.partial = true,
+                    }
+                }
+            }
             data.common[index] = common.into();
             data.completed[index] = true;
             data.updated[index] = Some(now());
@@ -424,7 +501,9 @@ impl Overview {
                             .selection()
                             .into_iter()
                             .filter(|id| {
-                                next.model.row(id).is_some_and(|r| r.category != 4)
+                                next.model
+                                    .row(id)
+                                    .is_some_and(|r| view::selectable(r.category))
                                     && (old
                                         .owners
                                         .get(id)
@@ -576,6 +655,81 @@ impl Overview {
         state.queue.clear();
         Ok(())
     }
+    /// One explicit action on the displayed leftover row. The row must still
+    /// carry the fingerprint the owner saw and no outcome yet; no refresh may
+    /// be pending and no other action running. The outcome stays on the row
+    /// until a fresh review replaces it; nothing is retried.
+    fn act(
+        &self,
+        org: &Organization,
+        id: &str,
+        row: &str,
+        fingerprint: &str,
+        action: calls_for::Action,
+        run: &calls_for::Runner,
+    ) -> Result<(leftover::Settled, String, String), String> {
+        let (binding, item, dataset) = {
+            let mut state = locked(&self.0)?;
+            if state.acting {
+                return Err("A leftover folder action is still running.".into());
+            }
+            let window = state
+                .window
+                .as_ref()
+                .filter(|w| w.id == id)
+                .ok_or(CHANGED)?;
+            if window.pending.is_some() {
+                return Err("Worktrees are still being read.".into());
+            }
+            let data = locked(&window.current.data)?;
+            let found = data.model.row(row).ok_or(CHANGED)?;
+            let item = found.leftover.as_ref().ok_or(CHANGED)?;
+            if item.outcome.is_some() {
+                return Err("Review again before acting on this folder.".into());
+            }
+            if item.fingerprint != fingerprint {
+                return Err("This folder changed since it was shown. Review it again.".into());
+            }
+            if let calls_for::Action::Delete { consent } = action {
+                if !item.repository || !(item.deletable || (consent && item.consent)) {
+                    return Err("These files cannot be deleted now. Review them again.".into());
+                }
+            }
+            let binding = window
+                .current
+                .bindings
+                .get(found.source)
+                .cloned()
+                .ok_or(CHANGED)?;
+            let taken = (binding, item.clone(), Arc::clone(&window.current));
+            drop(data);
+            state.acting = true;
+            taken
+        };
+        struct Acting<'a>(&'a Overview);
+        impl Drop for Acting<'_> {
+            fn drop(&mut self) {
+                if let Ok(mut state) = locked(&self.0 .0) {
+                    state.acting = false;
+                }
+            }
+        }
+        let _acting = Acting(self);
+        current(org, &binding, true)?;
+        let settled = calls_for::act(
+            run,
+            &binding.source.computer,
+            &binding.machine,
+            &item,
+            action,
+        );
+        if let Ok(mut data) = locked(&dataset.data) {
+            if data.model.settle(row, settled.clone()) {
+                data.revision += 1;
+            }
+        }
+        Ok((settled, binding.source.computer, item.common_dir))
+    }
 }
 
 /// Fixed-size evidence of the exact observed checkout nonce, including absence.
@@ -658,6 +812,9 @@ fn calls(
         }),
         review: Arc::new(|computer, machine, common| {
             crate::worktree_cleanup::read(computer, machine, common, "")
+        }),
+        leftovers: Arc::new(|computer, machine| {
+            calls_for::listing(&calls_for::system, computer, machine)
         }),
         unknown: Arc::new(move |machine, common, path| {
             cleanup.unknown(machine, common, path)
@@ -763,10 +920,11 @@ pub async fn worktree_overview_select(
             .filter(|w| w.id == id)
             .ok_or(CHANGED)?;
         let mut data = locked(&window.current.data)?;
-        if ids
-            .iter()
-            .any(|id| data.model.row(id).is_none_or(|r| r.category == 4))
-        {
+        if ids.iter().any(|id| {
+            data.model
+                .row(id)
+                .is_none_or(|r| !view::selectable(r.category))
+        }) {
             return Err(CHANGED.into());
         }
         if replace {
@@ -817,6 +975,99 @@ pub fn worktree_overview_close(
 ) -> Result<(), String> {
     main(&window)?;
     state.close(&id)
+}
+#[allow(clippy::too_many_arguments)]
+async fn leftover_action(
+    app: tauri::AppHandle,
+    state: &Overview,
+    org: &Organization,
+    catalogs: &crate::newsession::NewSession,
+    id: String,
+    row: String,
+    fingerprint: String,
+    action: calls_for::Action,
+) -> Result<leftover::Settled, String> {
+    use tauri::Emitter;
+    if id.len() > 64 || row.len() > 64 || fingerprint.len() > 64 {
+        return Err(CHANGED.into());
+    }
+    let (own, org, catalogs) = (state.clone(), org.clone(), catalogs.clone());
+    let changed = id.clone();
+    // A lost worker may have run the call: unknown, never a refusal.
+    let Ok(done) = tauri::async_runtime::spawn_blocking(move || {
+        own.act(&org, &id, &row, &fingerprint, action, &calls_for::system)
+    })
+    .await
+    else {
+        return Ok(leftover::Settled::Unknown {
+            detail: "The action could not be confirmed. Review again.".into(),
+        });
+    };
+    // Every refusal of `act` comes before anything ran: nothing changed.
+    let (settled, computer, common) = match done {
+        Ok(done) => done,
+        Err(detail) => return Ok(leftover::Settled::Refused { detail }),
+    };
+    let _ = app.emit(
+        "worktrees-overview-changed",
+        serde_json::json!({"id":changed}),
+    );
+    catalogs.invalidate_worktrees(&ComputerId(computer), &common);
+    Ok(settled)
+}
+/// Keep folder: forget the reviewed leftover's record; its files stay.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn worktree_leftover_keep(
+    window: tauri::Webview,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Overview>,
+    org: tauri::State<'_, Organization>,
+    catalogs: tauri::State<'_, crate::newsession::NewSession>,
+    id: String,
+    row: String,
+    fingerprint: String,
+) -> Result<leftover::Settled, String> {
+    main(&window)?;
+    leftover_action(
+        app,
+        state.inner(),
+        org.inner(),
+        catalogs.inner(),
+        id,
+        row,
+        fingerprint,
+        calls_for::Action::Keep,
+    )
+    .await
+}
+/// Delete remaining files, after the owner's explicit confirmation of the
+/// displayed review. The branch is never touched.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn worktree_leftover_delete(
+    window: tauri::Webview,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Overview>,
+    org: tauri::State<'_, Organization>,
+    catalogs: tauri::State<'_, crate::newsession::NewSession>,
+    id: String,
+    row: String,
+    fingerprint: String,
+    consent: bool,
+) -> Result<leftover::Settled, String> {
+    main(&window)?;
+    leftover_action(
+        app,
+        state.inner(),
+        org.inner(),
+        catalogs.inner(),
+        id,
+        row,
+        fingerprint,
+        calls_for::Action::Delete { consent },
+    )
+    .await
 }
 #[tauri::command]
 pub async fn worktree_overview_inspect(
@@ -927,6 +1178,7 @@ mod tests {
                 catalog: Arc::new(|_, path, _| Ok(catalog(path))),
                 review: Arc::new(|_, _, path| Ok(review(path, "owner-1"))),
                 unknown: Arc::new(|_, _, _| false),
+                leftovers: Arc::new(|_, _| Ok((Vec::new(), false))),
                 changed: Arc::new(|_| {}),
             }
         }
@@ -1116,6 +1368,276 @@ mod tests {
         settled(&own);
         assert!(own.header().unwrap().partial);
         assert!(linked(&own, &head.id).is_empty());
+    }
+    fn left(path: &str, common: &str, repository: bool, deletable: bool) -> Value {
+        let mut row = json!({"path":path,"kind":"leftover","verdict":"partially_removed",
+            "common_dir":common,"branch":"feature/left","branch_retained":true,"size":4096,
+            "size_complete":true,"sessions":[],"process_count":0,"reasons":[],
+            "deletable":deletable,"fingerprint":"ab".repeat(32),
+            "removal":{"path":path,"status":"partial","detail":"Permission denied"}});
+        if !repository {
+            row["repository_available"] = json!(false);
+        }
+        if !deletable {
+            row["reasons"] = json!([{"code":"processes_unavailable","message":"Hidden programs."}]);
+            row["process_fingerprint"] = json!("v2:1:proof");
+        }
+        row
+    }
+    fn leftovers(own: &Overview, id: &str) -> Vec<view::Row> {
+        own.page(id, &view::Filter::default(), 0)
+            .unwrap()
+            .page
+            .groups
+            .into_iter()
+            .filter(|g| g.category == view::LEFTOVERS)
+            .flat_map(|g| g.rows)
+            .collect()
+    }
+    /// A repository without linked worktrees but with leftover records.
+    fn leftover_calls(
+        f: &Fixture,
+        listed: Arc<AtomicUsize>,
+        reviewed: Arc<AtomicUsize>,
+        deletable: bool,
+    ) -> Calls {
+        let mut calls = f.calls();
+        calls.catalog = Arc::new(|_, path, _| {
+            let mut v = catalog(path);
+            if path.ends_with("/0") {
+                v["worktrees"].as_array_mut().unwrap().truncate(1);
+                v["leftovers"] = json!(1);
+            }
+            Ok(v)
+        });
+        calls.review = Arc::new(move |_, _, common| {
+            reviewed.fetch_add(1, Ordering::SeqCst);
+            if common == "/srv/example/0/.git" {
+                Ok(json!({"state":"ok","common_dir":common,"worktrees":[],
+                    "leftovers":[left("/srv/example/0-left", common, true, deletable)],
+                    "leftovers_partial":false}))
+            } else {
+                Ok(review(common, "owner-1"))
+            }
+        });
+        calls.leftovers = Arc::new(move |_, machine| {
+            assert_eq!(machine, MACHINE);
+            listed.fetch_add(1, Ordering::SeqCst);
+            Ok((
+                vec![left("/srv/gone/w", "/srv/gone/.git", false, false)],
+                false,
+            ))
+        });
+        calls
+    }
+    #[test]
+    fn leftovers_join_the_overview_with_one_listing_per_computer() {
+        let f = Fixture::new(3);
+        let own = Overview::default();
+        let (listed, reviewed) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let head = own
+            .start(
+                &f.org,
+                false,
+                false,
+                leftover_calls(&f, listed.clone(), reviewed.clone(), true),
+            )
+            .unwrap();
+        settled(&own);
+        // The leftover count alone makes the first repository reviewed.
+        assert_eq!(reviewed.load(Ordering::SeqCst), 3);
+        assert_eq!(listed.load(Ordering::SeqCst), 1);
+        let rows = leftovers(&own, &head.id);
+        assert_eq!(rows.len(), 2);
+        let page = own
+            .page(&head.id, &view::Filter::default(), 0)
+            .unwrap()
+            .page;
+        assert_eq!(page.groups[0].category, view::LEFTOVERS);
+        let kept = rows
+            .iter()
+            .find(|r| r.path == "/srv/example/0-left")
+            .unwrap();
+        assert_eq!(
+            (kept.state.as_str(), kept.projects.as_slice()),
+            ("Partially removed", ["alpha".to_owned()].as_slice())
+        );
+        let orphan = rows.iter().find(|r| r.path == "/srv/gone/w").unwrap();
+        assert_eq!(orphan.state, "Repository missing");
+        assert!(orphan.projects.is_empty());
+        assert!(!own.header().unwrap().partial);
+        // Leftovers never join a cleanup selection.
+        {
+            let state = locked(&own.0).unwrap();
+            let w = state.window.as_ref().unwrap();
+            let mut data = locked(&w.current.data).unwrap();
+            assert!(!data.model.select(&kept.id, true));
+            assert!(!data.model.replace_selection(std::slice::from_ref(&kept.id)));
+        }
+        // A failed listing or a partial leftover review is shown as incomplete.
+        let mut calls = leftover_calls(&f, listed.clone(), reviewed.clone(), true);
+        calls.leftovers = Arc::new(|_, _| Err("timed out".into()));
+        own.start(&f.org, false, true, calls).unwrap();
+        settled(&own);
+        assert!(own.header().unwrap().partial);
+        assert_eq!(leftovers(&own, &head.id).len(), 1);
+        // A row naming another repository is not shown.
+        let mut calls = leftover_calls(&f, listed, reviewed, true);
+        calls.review = Arc::new(|_, _, common| {
+            Ok(json!({"state":"ok","common_dir":common,"worktrees":[],
+                "leftovers":[left("/srv/example/0-left", "/srv/other/.git", true, true)]}))
+        });
+        calls.leftovers = Arc::new(|_, _| Ok((Vec::new(), false)));
+        own.start(&f.org, false, true, calls).unwrap();
+        settled(&own);
+        assert!(own.header().unwrap().partial);
+        assert!(leftovers(&own, &head.id).is_empty());
+    }
+    #[test]
+    fn leftover_actions_bind_the_displayed_review_and_record_one_outcome() {
+        let f = Fixture::new(1);
+        let own = Overview::default();
+        let counts = || (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (listed, reviewed) = counts();
+        let head = own
+            .start(
+                &f.org,
+                false,
+                false,
+                leftover_calls(&f, listed, reviewed, false),
+            )
+            .unwrap();
+        settled(&own);
+        let rows = leftovers(&own, &head.id);
+        let row = rows
+            .iter()
+            .find(|r| r.path == "/srv/example/0-left")
+            .unwrap();
+        let orphan = rows.iter().find(|r| r.path == "/srv/gone/w").unwrap();
+        let fingerprint = "ab".repeat(32);
+        let ran = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let seen = ran.clone();
+        let run = move |inv: &zerus_client_core::Invocation, _: usize| {
+            seen.lock().unwrap().push(inv.args.clone());
+            let at = inv.args.iter().position(|a| a == "--request-id");
+            Some(zerus_client_core::Exit::Code {
+                code: 0,
+                stdout: match at {
+                    None => b"guarded-create-v1 worktree-leftovers-v1 worktree-leftover-delete-v1"
+                        .to_vec(),
+                    Some(at) => json!({"status":"deleted","path":"/srv/example/0-left",
+                        "common_dir":"/srv/example/0/.git","request_id":inv.args[at + 1]})
+                    .to_string()
+                    .into_bytes(),
+                },
+                stderr: String::new(),
+            })
+        };
+        let delete = |consent| calls_for::Action::Delete { consent };
+        // Another review's fingerprint, a missing consent or a vanished
+        // repository's row runs nothing.
+        assert!(own
+            .act(
+                &f.org,
+                &head.id,
+                &row.id,
+                &"cd".repeat(32),
+                delete(true),
+                &run
+            )
+            .is_err());
+        assert!(own
+            .act(&f.org, &head.id, &row.id, &fingerprint, delete(false), &run)
+            .is_err());
+        assert!(own
+            .act(
+                &f.org,
+                &head.id,
+                &orphan.id,
+                &fingerprint,
+                delete(true),
+                &run
+            )
+            .is_err());
+        assert!(own
+            .act(&f.org, "other", &row.id, &fingerprint, delete(true), &run)
+            .is_err());
+        assert!(ran.lock().unwrap().is_empty());
+        // While another action runs, neither an action nor a refresh starts.
+        locked(&own.0).unwrap().acting = true;
+        assert!(own
+            .act(&f.org, &head.id, &row.id, &fingerprint, delete(true), &run)
+            .is_err());
+        let (listed, reviewed) = counts();
+        assert!(own
+            .start(
+                &f.org,
+                false,
+                true,
+                leftover_calls(&f, listed, reviewed, false)
+            )
+            .is_err());
+        locked(&own.0).unwrap().acting = false;
+        let (settled_as, computer, common) = own
+            .act(&f.org, &head.id, &row.id, &fingerprint, delete(true), &run)
+            .unwrap();
+        assert_eq!(settled_as, leftover::Settled::Deleted);
+        assert_eq!(
+            (computer.as_str(), common.as_str()),
+            ("", "/srv/example/0/.git")
+        );
+        assert_eq!(ran.lock().unwrap().len(), 2);
+        assert!(ran.lock().unwrap()[1].contains(&"--process-fingerprint".to_owned()));
+        assert!(!locked(&own.0).unwrap().acting);
+        let shown = leftovers(&own, &head.id);
+        let done = shown.iter().find(|r| r.id == row.id).unwrap();
+        assert_eq!(done.state, "Files deleted");
+        // The outcome is never replayed; only a fresh review allows a new action.
+        assert!(own
+            .act(&f.org, &head.id, &row.id, &fingerprint, delete(true), &run)
+            .is_err());
+        assert_eq!(ran.lock().unwrap().len(), 2);
+        let (listed, reviewed) = counts();
+        own.start(
+            &f.org,
+            false,
+            true,
+            leftover_calls(&f, listed, reviewed, false),
+        )
+        .unwrap();
+        settled(&own);
+        let fresh = leftovers(&own, &head.id);
+        let fresh = fresh.iter().find(|r| r.id == row.id).unwrap();
+        assert_eq!(fresh.state, "Partially removed");
+        assert!(fresh.leftover.as_ref().unwrap().outcome.is_none());
+        // Keep folder works for a vanished repository's row.
+        let run = |inv: &zerus_client_core::Invocation, _: usize| {
+            let at = inv.args.iter().position(|a| a == "--request-id");
+            Some(zerus_client_core::Exit::Code {
+                code: 0,
+                stdout: match at {
+                    None => b"guarded-create-v1 worktree-leftovers-v1 worktree-leftover-keep-v1"
+                        .to_vec(),
+                    Some(at) => {
+                        json!({"status":"kept","path":"/srv/gone/w","request_id":inv.args[at + 1]})
+                            .to_string()
+                            .into_bytes()
+                    }
+                },
+                stderr: String::new(),
+            })
+        };
+        let (kept, _, _) = own
+            .act(
+                &f.org,
+                &head.id,
+                &orphan.id,
+                &fingerprint,
+                calls_for::Action::Keep,
+                &run,
+            )
+            .unwrap();
+        assert_eq!(kept, leftover::Settled::Forgotten);
     }
     #[test]
     fn ownership_index_only_keeps_admitted_rows_and_fixed_size_nonce_digests() {

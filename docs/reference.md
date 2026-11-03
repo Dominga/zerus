@@ -2495,6 +2495,25 @@ After complete success the dialog closes and the overview shows the result.
 Partial results and errors remain open; uncertain replies are not replayed. **Stop after this folder**
 lets the current operation finish and leaves the remaining folders untouched.
 
+Folders a removal left behind (see partial removal below) appear first, in a
+separate **Partially removed** group shown only when there are any. A repository
+with partial-removal records is reviewed even when no linked worktree remains,
+and each computer's vanished-repository leftovers come from one bounded
+`hgs worktrees leftovers` call; there is no per-row call. These rows never join a
+cleanup selection. The panel shows the remaining size (a lower bound when the
+listing was incomplete), whether the branch is kept, moved or unchecked, why the
+removal stopped, and the sessions and programs that use the folder. It offers no
+file browsing. **Keep folder…** asks for a simple confirmation and forgets only
+the record. **Delete remaining files…** opens an explicit confirmation whose
+default focus is Cancel: it states that the files cannot be restored and that
+the branch is kept, and shows the unchecked **Delete even if some running
+programs cannot be checked** box only when the review offered that acceptance.
+Each confirmation sends the fingerprint of the review on screen exactly once.
+The outcome stays on the row until a fresh review: **Files deleted**, **Folder
+kept**, **Nothing changed** with the reason, or **Result unknown** with **Review
+again**. Nothing is retried automatically. A row whose repository is gone shows
+**Repository missing** and offers Keep folder only.
+
 Integration evidence distinguishes ancestor commits, identical file trees and
 cherry-pick-equivalent patches. Equivalent content is useful when reviewing
 squash/cherry-pick workflows, but only Git ancestry permits optional branch
@@ -2554,7 +2573,11 @@ the retained branch and current processes or sessions. A missing Git
 registration is never treated as proof of deletion, and the removal is never
 retried. **Keep folder, forget record** (`hgs worktrees keep-folder`) checks the
 reviewed leftover again under the repository lock and drops only its record;
-the folder, its files and the branch stay. **Delete remaining files**
+the folder, its files and the branch stay. With `--json`, a failure prints a
+request-bound outcome (`worktree-leftover-keep-v1`): `kept` before the record is
+touched, `unconfirmed` once forgetting it may have started. A client reports
+**Nothing changed** only for `kept`; an unreachable computer, a crash or any
+other reply is **Result unknown**. **Delete remaining files**
 (`hgs worktrees delete-leftover`, `worktree-leftover-delete-v1`) needs an
 explicit confirmation and the fingerprint of the fresh review the owner saw. It
 checks everything again under the repository and session locks and refuses
@@ -2581,7 +2604,12 @@ and macOS. A record resolves by itself once its
 folder is gone, or once a fresh worktree list taken under the repository lock shows
 that Git tracks the worktree again. A leftover whose repository is gone is listed
 by `hgs worktrees leftovers` and can still be kept; a record whose repository and
-folder are both gone resolves. At most 512 unresolved records
+folder are both gone resolves. One review or listing reports at most 32 leftovers
+within 1 MiB and marks the rest with `leftovers_partial` (review) or `partial`
+(listing); they stay recorded for a later review. The folder catalog
+(`hgs worktrees --path`) reports a repository's record count as `leftovers`, read
+through its index on every call, so a reader reviews that repository even when no
+linked worktree is left. At most 512 unresolved records
 are kept per computer; at that bound new removals are refused with a visible
 reason, and no record is evicted. Automatic cleanup never acts on these records.
 

@@ -134,10 +134,14 @@ impl Fixture {
     }
     /// A native source of many rows, in legacy pages of the largest size.
     fn source_rows(&mut self, rows: Vec<CatalogItem>) {
+        self.source_rows_on("", rows);
+    }
+    /// `source_rows` for the computer `computer` ("" is this one).
+    fn source_rows_on(&mut self, computer: &str, rows: Vec<CatalogItem>) {
         self.generation += 1;
         let pages: Vec<Vec<CatalogItem>> = rows.chunks(128).map(<[_]>::to_vec).collect();
         let mut packets = vec![feed::Packet::LegacyBegin {
-            computer: String::new(),
+            computer: computer.into(),
             generation: self.generation,
             metadata: json!({"machine_id":"fixture"}),
             rows: rows.len(),
@@ -145,14 +149,14 @@ impl Fixture {
         }];
         for (index, items) in pages.into_iter().enumerate() {
             packets.push(feed::Packet::LegacyPage {
-                computer: String::new(),
+                computer: computer.into(),
                 generation: self.generation,
                 index,
                 items,
             });
         }
         packets.push(feed::Packet::LegacyComplete {
-            computer: String::new(),
+            computer: computer.into(),
             generation: self.generation,
         });
         for packet in packets {
@@ -160,7 +164,7 @@ impl Fixture {
                 .apply(&mut self.store, &self.producer, &packet)
                 .unwrap();
         }
-        self.runtime.sources.native_fixture(&self.store, "");
+        self.runtime.sources.native_fixture(&self.store, computer);
     }
     fn tick_until(&mut self, predicate: impl Fn(&Runtime) -> bool) {
         let end = Instant::now() + Duration::from_secs(5);
@@ -1214,4 +1218,31 @@ fn the_catalog_walk_still_gets_approval_slots_while_the_index_is_busy() {
         seen.iter().any(|a| a == "claude/example/unflagged"),
         "{seen:?}"
     );
+}
+
+#[test]
+fn every_source_leads_the_index_in_turn_whatever_the_walk_visits() {
+    // Review of #1191 R2: with two sources, the index's starting source and
+    // the walk-first turns changed every scan in step, so one source's index
+    // always came after its walk, which kept both slots with its first
+    // manual-only questions as their cooldown ran out: a-10 was never
+    // inspected. The index now moves to the next source only when it leads.
+    let (run, seen) = inspections();
+    let mut f = Fixture::new(run);
+    f.active();
+    f.enabled(true);
+    let rows = |prefix: &str| -> Vec<CatalogItem> {
+        (0..96)
+            .map(|n| named(&format!("{prefix}-{n}"), "approval", true))
+            .collect()
+    };
+    f.source_rows_on("", rows("a"));
+    f.source_rows_on("peer", rows("b"));
+    for _ in 0..60 {
+        f.second();
+    }
+    let seen = seen.lock().unwrap();
+    for name in ["claude/example/a-10", "claude/example/b-10"] {
+        assert!(seen.iter().any(|a| a == name), "{name}: {seen:?}");
+    }
 }

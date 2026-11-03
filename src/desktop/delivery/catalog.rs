@@ -222,8 +222,11 @@ impl Sources {
     }
 
     /// The approval-phase index (zerus-5wmh.66.3.33): at most `limit` flagged
-    /// rows per scan over the current native sources, starting with a
-    /// different source each scan. Each source walks a pass in id order, from
+    /// rows per scan over the current native sources. A scan whose index goes
+    /// before the catalog walk (`leads`) starts with the next source, so each
+    /// source leads in turn, whatever the number of sources or the walk's own
+    /// rotation (which a per-scan rotation would fall in step with, leaving one
+    /// source's index always behind its walk). Each source walks a pass in id order, from
     /// the last row it handled to the highest flagged id when the pass began
     /// (ids only grow and an update keeps its id, so arrivals neither shift
     /// nor extend a pass; they and rows that entered the phase behind it come
@@ -231,7 +234,7 @@ impl Sources {
     /// once [`Self::handled`] says the scan decided it. Candidates go through
     /// the same policy, `same()`, native inspection and durable reservation
     /// as the catalog walk's.
-    pub fn approvals(&mut self, store: &Store, limit: usize) -> Result<Vec<Indexed>> {
+    pub fn approvals(&mut self, store: &Store, limit: usize, leads: bool) -> Result<Vec<Indexed>> {
         self.approval_after
             .retain(|computer, _| self.native.contains_key(computer));
         let sources: Vec<Stamp> = self
@@ -243,7 +246,9 @@ impl Sources {
             return Ok(Vec::new());
         }
         let first = self.approval_next % sources.len();
-        self.approval_next = first + 1;
+        if leads {
+            self.approval_next = first + 1;
+        }
         let mut indexed = Vec::new();
         let mut budget = limit;
         for offset in 0..sources.len() {

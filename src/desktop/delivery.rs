@@ -641,11 +641,11 @@ impl Runtime {
             let indexed_first = self.indexed_first;
             self.indexed_first = !indexed_first;
             if indexed_first {
-                self.scan_indexed(store);
+                self.scan_indexed(store, true);
                 self.scan_page(store);
             } else {
                 self.scan_page(store);
-                self.scan_indexed(store);
+                self.scan_indexed(store, false);
             }
         }
     }
@@ -658,11 +658,11 @@ impl Runtime {
     /// a row only once it was inspected or found to need nothing; at the first
     /// candidate without a free approval slot the scan stops, and the next one
     /// starts there, so no row is skipped while both slots are busy.
-    fn scan_indexed(&mut self, store: &Store) {
+    fn scan_indexed(&mut self, store: &Store, leads: bool) {
         if !self.approving() {
             return;
         }
-        match self.sources.approvals(store, INDEXED) {
+        match self.sources.approvals(store, INDEXED, leads) {
             Ok(rows) => {
                 for row in rows {
                     if let Some(candidate) = row.candidate.clone() {

@@ -461,6 +461,7 @@ fn projection(
 }
 
 enum Event {
+    ApprovalAudit(Hello, mpsc::SyncSender<approval_audit::worker::Reply>),
     ImportOwner(String, mpsc::SyncSender<import_evidence::held::Loan>),
     Command(Hello, Arc<Queue>, Option<Box<ui_authority::Authorized>>),
     FeedOpen(Hello, mpsc::SyncSender<feed::Opened>),
@@ -495,7 +496,12 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     let active = Arc::new(AtomicUsize::new(0));
     let mut feed = feed::Broker::new(&epoch);
     let mut reads = catalog_read::Reader::default();
-    let mut audit = approval_audit::Reader::new(config, &location, &epoch);
+    let audit = Arc::new(approval_audit::worker::Worker::new(
+        config,
+        &location,
+        &epoch,
+        stopped.clone(),
+    ));
     let mut notification_controls =
         notification_controls::Runtime::new(&store, &location.configuration, &epoch)?;
     let mut frontend = frontend::Cache::default();
@@ -661,6 +667,11 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         epoch: epoch.clone(),
                         seq,
                     });
+                }
+                Ok(Event::ApprovalAudit(hello, reply)) => {
+                    // Only bounded validation/admission occurs here. The same
+                    // original client worker owns query I/O and transport cleanup.
+                    let _ = reply.try_send(audit.admit(hello, owner.clone(), seq));
                 }
                 Ok(Event::Command(hello, queue, authority)) => {
                     let mut value = projection(
@@ -907,7 +918,9 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                 Some("approval_audit_list" | "approval_audit_detail")
                             )
                         }) {
-                            audit.request(hello.request.as_ref().unwrap())
+                            // Native client dispatch routes these through the
+                            // original bounded I/O worker before this generic lane.
+                            audit.unavailable(hello.request.as_ref().unwrap())
                         } else if hello
                             .request
                             .as_ref()
@@ -1174,6 +1187,10 @@ fn client(
         return import_evidence::held::client(stream, hello, send, stopped, location);
     }
     ensure!(!stopped.load(Ordering::SeqCst), "desktop is stopping");
+    if approval_audit::worker::recognizes(&hello) {
+        drop(reader);
+        return approval_audit::worker::client(stream, hello, send);
+    }
     if hello.op == "feed" {
         return feed::client(stream, reader, hello, send, stopped, ingress);
     }

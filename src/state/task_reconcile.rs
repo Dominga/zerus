@@ -42,21 +42,21 @@ struct RecordFields {
     #[serde(rename = "supervisor")]
     _supervisor: SupervisorFields,
     #[serde(rename = "launch_id")]
-    _launch: Option<serde::de::IgnoredAny>,
+    _launch: Option<String>,
     #[serde(rename = "exited_at")]
     _exited: Option<serde::de::IgnoredAny>,
     #[serde(rename = "pausing")]
     _pausing: Option<serde::de::IgnoredAny>,
     #[serde(rename = "paused")]
-    _paused: Option<serde::de::IgnoredAny>,
+    _paused: Option<bool>,
     #[serde(rename = "resume_pending")]
-    _resuming: Option<serde::de::IgnoredAny>,
+    _resuming: Option<bool>,
     #[serde(rename = "archive_id")]
-    _archive: Option<serde::de::IgnoredAny>,
+    _archive: Option<String>,
     #[serde(rename = "expected_id")]
-    _expected: Option<serde::de::IgnoredAny>,
+    _expected: Option<String>,
     #[serde(rename = "restore_archive_id")]
-    _restore: Option<serde::de::IgnoredAny>,
+    _restore: Option<String>,
     #[serde(rename = "clear_context_request")]
     _clear: Option<serde::de::IgnoredAny>,
 }
@@ -591,6 +591,89 @@ mod tests {
         f.record["run_id"] = json!(replacement);
         f.write();
         assert!(f.capture().is_err());
+    }
+    fn malformed_lifecycle_fields() -> Vec<(&'static str, Value)> {
+        let mut values = Vec::new();
+        for field in ["paused", "resume_pending"] {
+            for value in [json!("true"), json!(42), json!({}), json!([])] {
+                values.push((field, value));
+            }
+        }
+        for field in [
+            "archive_id",
+            "expected_id",
+            "restore_archive_id",
+            "launch_id",
+        ] {
+            for value in [json!(true), json!(42), json!({}), json!([])] {
+                values.push((field, value));
+            }
+        }
+        values
+    }
+    #[test]
+    fn capture_refuses_malformed_optional_lifecycle_fields() {
+        let mut f = Fixture::new();
+        for (field, value) in malformed_lifecycle_fields() {
+            f.record[field] = value.clone();
+            f.write();
+            assert!(f.capture().is_err(), "capture accepted {field}={value}");
+            f.record.as_object_mut().unwrap().remove(field);
+            f.write();
+            // Each refusal must be this field's shape, with the original
+            // executor, image and run marker still valid between cases.
+            assert!(f.capture().is_ok(), "original executor lost after {field}");
+        }
+    }
+    #[test]
+    fn retained_current_refuses_malformed_optional_lifecycle_fields() {
+        let mut f = Fixture::new();
+        let original = f.capture().unwrap();
+        for (field, value) in malformed_lifecycle_fields() {
+            f.record[field] = value.clone();
+            f.write();
+            assert!(
+                original.current(until()).is_err(),
+                "retained executor accepted {field}={value}"
+            );
+            f.record.as_object_mut().unwrap().remove(field);
+            f.write();
+            original.current(until()).unwrap();
+        }
+    }
+    #[test]
+    fn canonical_optional_shapes_and_unrelated_future_fields_still_pass() {
+        let mut f = Fixture::new();
+        let original = f.capture().unwrap();
+        for field in ["paused", "resume_pending"] {
+            for value in [Value::Null, json!(false)] {
+                f.record[field] = value;
+                f.write();
+                f.capture().unwrap();
+                original.current(until()).unwrap();
+            }
+        }
+        for field in [
+            "archive_id",
+            "expected_id",
+            "restore_archive_id",
+            "launch_id",
+        ] {
+            for value in [Value::Null, json!("")] {
+                f.record[field] = value;
+                f.write();
+                f.capture().unwrap();
+                original.current(until()).unwrap();
+            }
+        }
+        f.record["future_executor_metadata"] = json!({"shape":[null,true,42,{"nested":"data"}]});
+        f.write();
+        original.current(until()).unwrap();
+        let launch = uuid::Uuid::new_v4().to_string();
+        f.record["launch_id"] = json!(launch);
+        f.target.session_id = format!("launch_id:{launch}");
+        f.write();
+        f.capture().unwrap().current(until()).unwrap();
     }
     #[test]
     fn duplicate_current_identity_fields_cannot_hide_a_different_binding_or_archive() {

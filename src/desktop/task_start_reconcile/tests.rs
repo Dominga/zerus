@@ -229,6 +229,30 @@ impl Fixture {
         self.runtime
             .poll(&mut self.store, Some(self.exclusion.clone()));
     }
+    fn prepared(&mut self) {
+        let until = Instant::now() + Duration::from_secs(1);
+        while !matches!(&self.runtime.work, Some(Work::Preparing(p)) if p.worker.is_finished()) {
+            assert!(
+                Instant::now() < until,
+                "original preparation did not finish"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        let Some(Work::Preparing(pending)) = &mut self.runtime.work else {
+            unreachable!()
+        };
+        // Prove capture and custody succeeded before the test changes anything.
+        // Return those SAME objects to the actor, without cloning/recreating a
+        // native proof, altering a permit or letting poll admit them early.
+        let prepared = pending.ready.try_recv().unwrap().unwrap();
+        prepared
+            .0
+            .current(Instant::now() + Duration::from_secs(2))
+            .unwrap();
+        let (send, ready) = mpsc::sync_channel(1);
+        assert!(send.send(Ok(prepared)).is_ok());
+        pending.ready = ready;
+    }
     fn until(&mut self, done: impl Fn(&Self) -> bool) {
         let end = Instant::now() + Duration::from_secs(8);
         while !done(self) {
@@ -304,6 +328,44 @@ fn fixed_worker_registers_same_child_before_exact_input_and_original_lookup_neve
     assert_eq!(f.counts(), (1, 1, 1));
 }
 #[test]
+fn refused_same_child_registration_never_releases_original_input() {
+    let mut f = Fixture::new("reply");
+    let helper = HELPER.replace(
+        "body=sys.stdin.buffer.read()",
+        "body=sys.stdin.buffer.read()\n(p/'registration-input').write_bytes(body)",
+    );
+    fs::write(f.runtime.image.as_ref().unwrap(), helper).unwrap();
+    f.store.db.execute_batch("CREATE TRIGGER refuse_original_registration BEFORE UPDATE OF helper ON desktop_operation_custody BEGIN SELECT RAISE(ABORT,'fixture registration refused'); END;").unwrap();
+    let queue = f.request();
+    f.until(|f| f.runtime.work.is_none());
+    let frame: Value = serde_json::from_slice(&queue.take().unwrap()).unwrap();
+    assert_eq!(frame["value"]["code"], "reserved");
+    assert_eq!(f.counts(), (1, 1, 1));
+    assert_eq!(f.state(), "unknown");
+    assert!(!f.runtime.failed);
+    assert!(f.runtime.status()["ready"].as_bool().unwrap());
+    let helper: Option<String> = f
+        .store
+        .db
+        .query_row("SELECT helper FROM desktop_operation_custody", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(helper.is_none());
+    let received = match fs::read(f.path("registration-input")) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("original helper input evidence unavailable: {error}"),
+    };
+    assert!(
+        received.is_empty(),
+        "refused registration released original input"
+    );
+    assert!(!f.path("input").exists());
+    assert!(!f.path("entered").exists());
+    assert_eq!(ledger::totals(&f.store.db).unwrap().undrained, 0);
+}
+#[test]
 fn revoked_worker_retains_same_ticket_and_finishes_unknown_without_another_child() {
     let mut f = Fixture::new("wait");
     f.request();
@@ -366,6 +428,59 @@ fn changed_executor_during_preparation_refuses_before_any_sql_or_helper() {
     f.agent.wait().unwrap();
     f.until(|f| f.runtime.work.is_none());
     assert_eq!(f.counts(), (0, 0, 0));
+    assert!(!f.path("entered").exists());
+    let frame: Value = serde_json::from_slice(&queue.take().unwrap()).unwrap();
+    assert_eq!(frame["value"]["accepted"], false, "{frame}");
+}
+#[test]
+fn executor_changed_after_successful_preparation_refuses_before_admission() {
+    let mut f = Fixture::new("reply");
+    let queue = f.request();
+    f.prepared();
+    f.agent.kill().unwrap();
+    f.agent.wait().unwrap();
+    f.until(|f| f.runtime.work.is_none());
+    assert_eq!(f.counts(), (0, 0, 0));
+    assert!(!f.path("entered").exists());
+    let frame: Value = serde_json::from_slice(&queue.take().unwrap()).unwrap();
+    assert_eq!(frame["value"]["accepted"], false, "{frame}");
+}
+#[test]
+fn another_kind_admitted_after_preparation_blocks_the_reservation() {
+    use zerus_desktop_ledger::operations::cache;
+    let mut f = Fixture::new("reply");
+    let queue = f.request();
+    f.prepared();
+    assert_eq!(f.counts(), (0, 0, 0));
+    assert_eq!(f.store.operation_undrained().unwrap(), 0);
+    // Use the real independent kind's intake transaction. Its charge is not
+    // covered by the task-only partial unique index or task totals.
+    let original = cache::Original {
+        preparation_id: uuid::Uuid::new_v4().to_string(),
+        operation_id: uuid::Uuid::new_v4().to_string(),
+        configuration: f.intent.scope.configuration.clone(),
+        root: f.path("private-cache").to_str().unwrap().into(),
+        limit: 1,
+        defer_ms: 0,
+        policy_change: true,
+        revision: 0,
+        service_epoch: f.intent.scope.service_epoch.clone(),
+        writer_epoch: f.runtime.lease.as_ref().unwrap().writer_epoch.clone(),
+        lease: uuid::Uuid::new_v4().to_string(),
+    };
+    let tx = f
+        .store
+        .db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    assert!(cache::begin(&tx, &original, &"f".repeat(64)).unwrap());
+    tx.commit().unwrap();
+    assert_eq!(cache::undrained(&f.store.db).unwrap(), 1);
+    assert_eq!(ledger::totals(&f.store.db).unwrap().undrained, 0);
+    assert_eq!(f.store.operation_undrained().unwrap(), 1);
+    f.until(|f| f.runtime.work.is_none());
+    assert_eq!(f.counts(), (0, 0, 0));
+    assert_eq!(cache::undrained(&f.store.db).unwrap(), 1);
     assert!(!f.path("entered").exists());
     let frame: Value = serde_json::from_slice(&queue.take().unwrap()).unwrap();
     assert_eq!(frame["value"]["accepted"], false, "{frame}");
@@ -454,6 +569,50 @@ fn restart_unknown_is_immutable_and_a_new_actor_does_not_reconstruct_consent() {
             .unwrap(),
         outcome
     );
+    assert_eq!(f.counts(), (1, 1, 1));
+}
+#[test]
+fn stopped_runtime_without_work_keeps_old_epoch_custody_charged_until_actual_release() {
+    let mut f = Fixture::new("wait");
+    f.request();
+    f.until(|f| f.path("entered").exists());
+    let (_, record) = ledger::custody::pending(&f.store.db).unwrap().unwrap();
+    let record = record.unwrap();
+    assert!(matches!(
+        custody::probe(&f.runtime.location, &record),
+        custody::Observation::Held
+    ));
+    let next = uuid::Uuid::new_v4().to_string();
+    assert_ne!(record.prepared.ticket.service_epoch, next);
+    f.store = Store::open(&f.runtime.location, &next).unwrap();
+    assert_eq!(f.state(), "unknown");
+    let mut restarted = Runtime::new(&f.config, &next, f.runtime.owner.clone()).unwrap();
+    restarted.request_stop();
+    for _ in 0..3 {
+        f.store.retry_operation_custody();
+        restarted.poll(&mut f.store, Some(f.exclusion.clone()));
+        assert!(restarted.work.is_none());
+        assert_eq!(restarted.charges, Some(1));
+        assert!(
+            !restarted.drained(),
+            "no in-memory work is not original drain"
+        );
+    }
+    assert!(matches!(
+        custody::probe(&f.runtime.location, &record),
+        custody::Observation::Held
+    ));
+    fs::write(
+        f.path("release"),
+        b"original helper and its actual custody release",
+    )
+    .unwrap();
+    f.until(|f| f.runtime.work.is_none());
+    restarted.poll(&mut f.store, Some(f.exclusion.clone()));
+    assert!(restarted.work.is_none());
+    assert_eq!(restarted.charges, Some(0));
+    assert!(restarted.drained());
+    assert_eq!(f.state(), "unknown");
     assert_eq!(f.counts(), (1, 1, 1));
 }
 

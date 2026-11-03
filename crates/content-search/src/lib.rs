@@ -134,6 +134,15 @@ pub struct Hit {
     pub message: Message,
     pub match_start: usize,
     pub match_end: usize,
+    /// The matching public window, when the original exceeds one document.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub part: Option<PartMatch>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PartMatch {
+    pub offset: usize,
+    pub total: usize,
 }
 #[derive(Debug, Serialize)]
 pub struct Page {
@@ -152,6 +161,8 @@ struct Cursor {
     upper: i64,
     at: f64,
     id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parts: Option<parts::Position>,
 }
 
 pub struct Index {
@@ -438,17 +449,28 @@ impl Index {
             (2..=256).contains(&query.chars().count()) && (1..=200).contains(&limit),
             "invalid indexed search query or limit"
         );
-        let cursor = Cursor {
+        let cursor = self.cursor(hash(&serde_json::to_vec(&(query, limit))?))?;
+        Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&cursor)?))
+    }
+
+    fn cursor(&self, query: String) -> Result<Cursor> {
+        // Capture both insertion bounds in one SQLite read snapshot.
+        let _read = self
+            .db
+            .is_autocommit()
+            .then(|| self.db.unchecked_transaction())
+            .transpose()?;
+        Ok(Cursor {
             version: 1,
             database: self.identity.clone(),
-            query: hash(&serde_json::to_vec(&(query, limit))?),
+            query,
             upper: self
                 .db
                 .query_row("SELECT COALESCE(MAX(id),0) FROM messages", [], |r| r.get(0))?,
             at: f64::MAX,
             id: i64::MAX,
-        };
-        Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&cursor)?))
+            parts: self.parts_position()?,
+        })
     }
 
     pub fn query(&self, query: &str, limit: usize, cursor: Option<&str>) -> Result<Page> {
@@ -484,27 +506,22 @@ impl Index {
                         && decoded.upper >= 0
                         && decoded.id > 0
                         && decoded.at.is_finite()
-                        && decoded.at >= 0.0,
+                        && decoded.at >= 0.0
+                        && decoded.parts.as_ref().is_none_or(parts::Position::valid),
                     "stale or mismatched search cursor"
                 );
                 decoded
             }
-            None => Cursor {
-                version: 1,
-                database: self.identity.clone(),
-                query: fingerprint,
-                upper: self
-                    .db
-                    .query_row("SELECT COALESCE(MAX(id),0) FROM messages", [], |r| r.get(0))?,
-                at: f64::MAX,
-                id: i64::MAX,
-            },
+            None => self.cursor(fingerprint)?,
         };
         let folded = fold(query);
         let gram: String = folded.chars().take(2).collect();
         let pattern = RegexBuilder::new(&regex::escape(query))
             .case_insensitive(true)
             .build()?;
+        if position.parts.is_some() {
+            return self.query_parts(&gram, &pattern, position, take);
+        }
         let mut statement = self.db.prepare_cached(CANDIDATE_SQL)?;
         let mut rows = statement.query(params![gram, position.at, position.id, CANDIDATES + 1])?;
         let mut hits = Vec::new();
@@ -540,6 +557,7 @@ impl Index {
                         match_start: found.start(),
                         match_end: found.end(),
                         message,
+                        part: None,
                     });
                 }
             }

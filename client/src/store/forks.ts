@@ -8,8 +8,9 @@ import { tr } from "../i18n";
 type Neighbor = Pick<Session, "key" | "computer" | "name">;
 /** `taken`: the names live and saved sessions on that computer used when the
  * fork was sent, so a suffix `hgs` chose for a name taken meanwhile still finds
- * the new session. `failures`: inspections of a candidate that did not answer. */
-interface Pending { name: string; taken: ReadonlySet<string>; checked: Set<string>; failures: Map<string, number>; source: ActionRow; group: string; before?: Neighbor; succeeded: boolean }
+ * the new session. `failures`: inspections of a candidate that did not answer.
+ * `legacy`: that computer's hgs predates `fork_parent_id`. */
+interface Pending { name: string; taken: ReadonlySet<string>; checked: Set<string>; failures: Map<string, number>; legacy: boolean; source: ActionRow; group: string; before?: Neighbor; succeeded: boolean }
 /** How long a started fork waits to be recognized before it is reported as not confirmed. */
 export const FORK_CONFIRM_MS = 120_000;
 /** Inspections of one candidate before it is no longer retried. */
@@ -50,7 +51,9 @@ export function createForks(deps: ForkDeps) {
     const wait = pending();
     if (!wait?.succeeded) return;
     for (const row of deps.rows()) {
-      if (row.computer !== wait.source.computer || row.state !== "running" || !row.runId || !row.conversationId
+      // A Codex fork may have no conversation ID until its first message; its
+      // inspected fork parent identifies it (zerus-zjsj). An older hgs cannot.
+      if (row.computer !== wait.source.computer || row.state !== "running" || !row.runId || (!row.conversationId && wait.legacy)
         || row.conversationId === wait.source.conversationId || wait.checked.has(row.key)) continue;
       const exact = row.name === wait.name;
       if (!exact && !(suffixed(row.name, wait.name) && !wait.taken.has(row.name))) continue;
@@ -62,7 +65,8 @@ export function createForks(deps: ForkDeps) {
   /** Places and opens a candidate only once its inspection names the source
    * conversation as its fork parent: a session that took the name meanwhile is
    * never adopted. A null parent is a session that is not a fork; only an older
-   * hgs without the field is trusted, for the exact name. A failed inspection
+   * hgs without the field is trusted, for the exact name once the row has its
+   * own conversation, which a later list change brings. A failed inspection
    * proves nothing: the candidate is inspected again on a later list change,
    * at most INSPECT_ATTEMPTS times. */
   async function adopt(wait: Pending, row: Session, exact: boolean): Promise<void> {
@@ -75,7 +79,11 @@ export function createForks(deps: ForkDeps) {
       return;
     }
     const parent = details.fork_parent_id;
-    if (parent === undefined ? !exact : parent !== wait.source.conversationId) return;
+    if (parent === undefined) {
+      wait.legacy = true;
+      if (!exact) return;
+      if (!row.conversationId) { wait.checked.delete(row.key); return; }
+    } else if (parent !== wait.source.conversationId) return;
     clearTimeout(expiry);
     setPending(undefined);
     const group = deps.hasGroup(wait.group) ? wait.group : deps.defaultGroup();
@@ -110,7 +118,7 @@ export function createForks(deps: ForkDeps) {
       const group = deps.groupOf(source.key), before = deps.next(source, group);
       // Send the free name the dialog showed; `hgs` still suffixes one taken meanwhile.
       tag = resolved(source, tag);
-      const wait: Pending = { source: snapshotOf(source), name: forkName(source, tag), taken: occupied(source, deps.rows()), checked: new Set(), failures: new Map(), group,
+      const wait: Pending = { source: snapshotOf(source), name: forkName(source, tag), taken: occupied(source, deps.rows()), checked: new Set(), failures: new Map(), legacy: false, group,
         before: before && { key: before.key, computer: before.computer, name: before.name }, succeeded: false };
       setPending(wait);
       delivered = true;

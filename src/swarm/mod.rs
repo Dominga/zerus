@@ -5,7 +5,7 @@ mod bootstrap;
 mod catalog;
 mod launch_project;
 mod infer_project;
-pub(crate) use infer_project::{directory_project, infer_new_session};
+pub(crate) use infer_project::{directory_project, infer_new_session, inherit_fork_project};
 mod session_project;
 #[cfg(unix)]
 pub(crate) use session_project::validate_payload as validate_session_project;

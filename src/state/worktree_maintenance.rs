@@ -90,7 +90,9 @@ fn database() -> Result<Connection> {
         path TEXT PRIMARY KEY, common_dir TEXT NOT NULL, branch TEXT NOT NULL, head TEXT NOT NULL,
         fingerprint TEXT NOT NULL, request_id TEXT NOT NULL, reserved_at REAL NOT NULL,
         status TEXT NOT NULL CHECK(status IN ('pending','partial')), detail TEXT NOT NULL);
-        CREATE INDEX IF NOT EXISTS removals_repository ON removals(common_dir,path);")
+        CREATE INDEX IF NOT EXISTS removals_repository ON removals(common_dir,path);
+        CREATE TABLE IF NOT EXISTS removal_volumes (
+        path TEXT PRIMARY KEY, folder TEXT NOT NULL, repository TEXT NOT NULL);")
         .map_err(|e| e.to_string())?;
     Ok(db)
 }
@@ -307,6 +309,92 @@ pub(super) struct Removal {
     pub reserved_at: f64,
     pub status: String,
     pub detail: String,
+    /// The filesystems recorded at reservation, in the separate
+    /// `removal_volumes` table older CLIs never read. `None` for a record an
+    /// older CLI wrote: it keeps the plain missing-path check.
+    #[serde(skip)]
+    pub volumes: Option<Volumes>,
+}
+
+/// Which filesystem held a removal's folder and repository. An empty identity
+/// could not be recorded: that path is never taken as gone.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct Volumes {
+    pub folder: String,
+    pub repository: String,
+}
+
+const SELECT_REMOVALS: &str = "SELECT r.path,r.common_dir,r.branch,r.head,r.fingerprint,
+    r.request_id,r.reserved_at,r.status,r.detail,v.folder,v.repository
+    FROM removals r LEFT JOIN removal_volumes v ON v.path=r.path";
+
+fn removal(r: &rusqlite::Row) -> rusqlite::Result<Removal> {
+    let folder: Option<String> = r.get(9)?;
+    let repository: Option<String> = r.get(10)?;
+    Ok(Removal {
+        path: r.get(0)?,
+        common_dir: r.get(1)?,
+        branch: r.get(2)?,
+        head: r.get(3)?,
+        fingerprint: r.get(4)?,
+        request_id: r.get(5)?,
+        reserved_at: r.get(6)?,
+        status: r.get(7)?,
+        detail: r.get(8)?,
+        volumes: folder
+            .zip(repository)
+            .map(|(folder, repository)| Volumes { folder, repository }),
+    })
+}
+
+/// The filesystem holding `path`: on Linux its device and `statfs` filesystem
+/// ID (derived from the filesystem UUID on ext4, btrfs and xfs), on macOS its
+/// filesystem ID and mount point. `None` when it cannot be identified,
+/// including a zero filesystem ID (some tmpfs and network filesystems).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn volume(path: &Path) -> Option<String> {
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(name.as_ptr(), &mut stat) } != 0 {
+        return None;
+    }
+    // fsid_t keeps its value private; compare its bytes.
+    let fsid = unsafe {
+        std::slice::from_raw_parts(
+            (&stat.f_fsid as *const libc::fsid_t).cast::<u8>(),
+            std::mem::size_of::<libc::fsid_t>(),
+        )
+    };
+    if fsid.iter().all(|b| *b == 0) {
+        return None;
+    }
+    let fsid: String = fsid.iter().map(|b| format!("{b:02x}")).collect();
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let dev = fs::metadata(path).ok()?.dev();
+        Some(format!("linux:{dev}:{fsid}"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let on = unsafe { std::ffi::CStr::from_ptr(stat.f_mntonname.as_ptr()) };
+        Some(format!("macos:{fsid}:{}", on.to_string_lossy()))
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(super) fn volume(_path: &Path) -> Option<String> {
+    None
+}
+
+/// What a new record notes about its filesystems. Platforms without a volume
+/// identity write no row and keep the plain missing-path check.
+fn recorded_volumes(removal: &Removal) -> Option<Volumes> {
+    cfg!(any(target_os = "linux", target_os = "macos")).then(|| Volumes {
+        folder: volume(Path::new(&removal.path)).unwrap_or_default(),
+        repository: volume(Path::new(&removal.common_dir)).unwrap_or_default(),
+    })
 }
 
 fn upsert(db: &Connection, r: &Removal) -> Result<()> {
@@ -359,34 +447,83 @@ pub(super) fn reserve_removal(removal: &Removal) -> Result<()> {
         }
     }
     upsert(&tx, removal)?;
+    if let Some(volumes) = recorded_volumes(removal) {
+        tx.execute(
+            "INSERT OR REPLACE INTO removal_volumes VALUES (?1,?2,?3)",
+            params![removal.path, volumes.folder, volumes.repository],
+        )
+        .map_err(|e| e.to_string())?;
+    }
     tx.commit().map_err(|e| e.to_string())
 }
 
-fn gone(path: &str) -> bool {
+/// Nothing has this name: not even a link. An unreadable path is not missing.
+fn missing(path: &str) -> bool {
     fs::symlink_metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// Whether a missing path is gone for good. With a recorded filesystem, the
+/// nearest existing folder above it must be on that same filesystem: a volume
+/// that is unmounted, replaced or unidentifiable leaves the path uncertain,
+/// never gone. A record without a volume row (an older CLI) keeps the plain
+/// missing-path check.
+pub(super) fn vanished(path: &str, recorded: Option<&str>) -> bool {
+    if !missing(path) {
+        return false;
+    }
+    let Some(recorded) = recorded else {
+        return true;
+    };
+    if recorded.is_empty() {
+        return false;
+    }
+    for above in Path::new(path).ancestors().skip(1) {
+        match fs::symlink_metadata(above) {
+            Ok(_) => return volume(above).as_deref() == Some(recorded),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+fn forget(db: &Connection, path: &str) -> Result<usize> {
+    let changed = db
+        .execute("DELETE FROM removals WHERE path=?1", [path])
+        .map_err(|e| e.to_string())?;
+    db.execute("DELETE FROM removal_volumes WHERE path=?1", [path])
+        .map_err(|e| e.to_string())?;
+    Ok(changed)
 }
 
 /// A record whose repository and folder are both gone has nothing left to
 /// review; it must not hold the bound forever.
 fn resolve_vanished(db: &Connection) -> Result<usize> {
     let mut statement = db
-        .prepare("SELECT path,common_dir FROM removals ORDER BY path LIMIT ?1")
+        .prepare(&format!("{SELECT_REMOVALS} ORDER BY r.path LIMIT ?1"))
         .map_err(|e| e.to_string())?;
     let vanished: Vec<String> = statement
-        .query_map([MAX_REMOVALS + 1], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })
+        .query_map([MAX_REMOVALS + 1], removal)
         .map_err(|e| e.to_string())?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| e.to_string())?
         .into_iter()
-        .filter(|(path, common)| gone(common) && gone(path))
-        .map(|(path, _)| path)
+        .filter(|r| {
+            let volumes = r.volumes.as_ref();
+            vanished(&r.common_dir, volumes.map(|v| v.repository.as_str()))
+                && vanished(&r.path, volumes.map(|v| v.folder.as_str()))
+        })
+        .map(|r| r.path)
         .collect();
     for path in &vanished {
-        db.execute("DELETE FROM removals WHERE path=?1", [path])
-            .map_err(|e| e.to_string())?;
+        forget(db, path)?;
     }
+    // Rows an older CLI left behind when it forgot their records.
+    db.execute(
+        "DELETE FROM removal_volumes WHERE path NOT IN (SELECT path FROM removals)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(vanished.len())
 }
 
@@ -399,29 +536,18 @@ pub(super) fn orphan_removals() -> Result<Vec<Removal>> {
     let db = database()?;
     resolve_vanished(&db)?;
     let mut statement = db
-        .prepare(
-            "SELECT path,common_dir,branch,head,fingerprint,request_id,reserved_at,status,detail
-            FROM removals ORDER BY path LIMIT ?1",
-        )
+        .prepare(&format!("{SELECT_REMOVALS} ORDER BY r.path LIMIT ?1"))
         .map_err(|e| e.to_string())?;
     let rows = statement
-        .query_map([MAX_REMOVALS], |r| {
-            Ok(Removal {
-                path: r.get(0)?,
-                common_dir: r.get(1)?,
-                branch: r.get(2)?,
-                head: r.get(3)?,
-                fingerprint: r.get(4)?,
-                request_id: r.get(5)?,
-                reserved_at: r.get(6)?,
-                status: r.get(7)?,
-                detail: r.get(8)?,
-            })
-        })
+        .query_map([MAX_REMOVALS], removal)
         .map_err(|e| e.to_string())?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| e.to_string())?;
-    Ok(rows.into_iter().filter(|r| gone(&r.common_dir)).collect())
+    // Listed wherever the repository cannot be found, gone or unmounted.
+    Ok(rows
+        .into_iter()
+        .filter(|r| missing(&r.common_dir))
+        .collect())
 }
 
 /// `None` drops the record after a confirmed outcome; `Some` keeps the folder
@@ -430,11 +556,7 @@ pub(super) fn orphan_removals() -> Result<Vec<Removal>> {
 pub(super) fn settle_removal(removal: &Removal, partial: Option<&str>) -> Result<()> {
     let db = database()?;
     match partial {
-        None => {
-            db.execute("DELETE FROM removals WHERE path=?1", [&removal.path])
-                .map_err(|e| e.to_string())?;
-            Ok(())
-        }
+        None => forget(&db, &removal.path).map(|_| ()),
         Some(detail) => upsert(
             &db,
             &Removal {
@@ -454,25 +576,12 @@ pub(super) fn removals(common: &Path) -> Result<Vec<Removal>> {
     }
     let db = database()?;
     let mut statement = db
-        .prepare(
-            "SELECT path,common_dir,branch,head,fingerprint,request_id,reserved_at,status,detail
-            FROM removals WHERE common_dir=?1 ORDER BY path LIMIT ?2",
-        )
+        .prepare(&format!(
+            "{SELECT_REMOVALS} WHERE r.common_dir=?1 ORDER BY r.path LIMIT ?2"
+        ))
         .map_err(|e| e.to_string())?;
     let rows = statement
-        .query_map(params![common.to_string_lossy(), MAX_REMOVALS], |r| {
-            Ok(Removal {
-                path: r.get(0)?,
-                common_dir: r.get(1)?,
-                branch: r.get(2)?,
-                head: r.get(3)?,
-                fingerprint: r.get(4)?,
-                request_id: r.get(5)?,
-                reserved_at: r.get(6)?,
-                status: r.get(7)?,
-                detail: r.get(8)?,
-            })
-        })
+        .query_map(params![common.to_string_lossy(), MAX_REMOVALS], removal)
         .map_err(|e| e.to_string())?;
     rows.collect::<rusqlite::Result<_>>()
         .map_err(|e| e.to_string())
@@ -494,11 +603,7 @@ pub(super) fn removal_count(common: &Path) -> Result<i64> {
 }
 
 pub(super) fn forget_removal(path: &str) -> Result<bool> {
-    let db = database()?;
-    let changed = db
-        .execute("DELETE FROM removals WHERE path=?1", [path])
-        .map_err(|e| e.to_string())?;
-    Ok(changed == 1)
+    Ok(forget(&database()?, path)? == 1)
 }
 
 pub(super) fn worker() {
@@ -511,4 +616,131 @@ pub(super) fn worker() {
             std::thread::sleep(Duration::from_secs(30));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// zerus-ty94 #5: a missing path is gone only on its recorded filesystem.
+    #[test]
+    fn a_missing_path_is_gone_only_while_its_recorded_filesystem_is_there() {
+        let base = tempfile::tempdir().unwrap();
+        let base = fs::canonicalize(base.path()).unwrap();
+        let text = |p: &Path| p.to_string_lossy().into_owned();
+        let folder = base.join("worktree");
+        let repository = base.join("repository/.git");
+        // Something is there, even a dangling link: never gone.
+        fs::create_dir(&folder).unwrap();
+        assert!(!vanished(&text(&folder), None));
+        #[cfg(unix)]
+        {
+            let link = base.join("link");
+            std::os::unix::fs::symlink(base.join("nowhere"), &link).unwrap();
+            // The plain missing check: a link that follows nowhere is still there.
+            assert!(!vanished(&text(&link), None));
+        }
+        fs::remove_dir(&folder).unwrap();
+        // A record from an older CLI keeps the plain missing check; one whose
+        // volume could not be recorded, or another filesystem's, is uncertain.
+        assert!(vanished(&text(&folder), None));
+        assert!(!vanished(&text(&folder), Some("")));
+        assert!(!vanished(&text(&folder), Some("linux:1:00000000000000ff")));
+        let Some(here) = volume(&base) else {
+            // Every macOS filesystem has an identity: the log must prove it ran.
+            if cfg!(target_os = "macos") {
+                panic!("no macOS volume identity for {}", base.display());
+            }
+            eprintln!("skipped: no volume identity here (Windows, or a zero Linux fsid)");
+            return;
+        };
+        assert!(vanished(&text(&folder), Some(&here)));
+        // A deleted repository: the nearest existing folder above decides.
+        assert!(vanished(&text(&repository), Some(&here)));
+    }
+
+    /// Unmounting or replacing the volume leaves the path uncertain. Runs the
+    /// probe in a private user and mount namespace when available.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_missing_path_on_an_unmounted_volume_is_never_gone() {
+        let base = tempfile::tempdir().unwrap();
+        let Ok(output) = std::process::Command::new("unshare")
+            .args(["--user", "--map-root-user", "--mount", "--"])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "state::worktree_maintenance::tests::volume_probe",
+                "--nocapture",
+            ])
+            .env("HGS_TEST_VOLUME_PROBE", base.path())
+            .env_remove("HGS_SESSION")
+            .env_remove("HGS_RUN_ID")
+            .output()
+        else {
+            eprintln!("skipped: unshare is unavailable");
+            return;
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stdout.contains("volume probe ran") {
+            eprintln!("skipped: user and mount namespaces are unavailable: {stderr}");
+            return;
+        }
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        assert!(stdout.contains("volume probe passed"), "{stdout}\n{stderr}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn volume_probe() {
+        use std::os::unix::ffi::OsStrExt;
+        let Some(base) = std::env::var_os("HGS_TEST_VOLUME_PROBE") else {
+            return;
+        };
+        println!("volume probe ran");
+        let target = PathBuf::from(base).join("volume");
+        fs::create_dir(&target).unwrap();
+        let path = std::ffi::CString::new(target.as_os_str().as_bytes()).unwrap();
+        let mount = || {
+            let rc = unsafe {
+                libc::mount(
+                    c"none".as_ptr(),
+                    path.as_ptr(),
+                    c"tmpfs".as_ptr(),
+                    0,
+                    std::ptr::null(),
+                )
+            };
+            assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+        };
+        let text = |p: &Path| p.to_string_lossy().into_owned();
+        mount();
+        let folder = target.join("worktrees/leftover");
+        fs::create_dir_all(&folder).unwrap();
+        // What a reservation records; a zero fsid records nothing usable.
+        let recorded = volume(&folder).unwrap_or_default();
+        println!(
+            "volume probe recorded {}",
+            if recorded.is_empty() {
+                "nothing (zero fsid)"
+            } else {
+                "an identity"
+            }
+        );
+        fs::remove_dir(&folder).unwrap();
+        assert_eq!(
+            vanished(&text(&folder), Some(&recorded)),
+            !recorded.is_empty()
+        );
+        // Unmounted: the empty mount point is on the outer filesystem.
+        assert_eq!(unsafe { libc::umount(path.as_ptr()) }, 0);
+        assert!(!vanished(&text(&folder), Some(&recorded)));
+        // Another volume at the same place, with the same folders: not it.
+        mount();
+        fs::create_dir_all(folder.parent().unwrap()).unwrap();
+        assert!(!vanished(&text(&folder), Some(&recorded)));
+        assert_eq!(unsafe { libc::umount(path.as_ptr()) }, 0);
+        println!("volume probe passed");
+    }
 }

@@ -1055,9 +1055,10 @@ fn leftovers(
             continue;
         }
         let registered = trees.iter().any(|tree| tree["path"] == json!(path));
-        let present = !matches!(fs::symlink_metadata(&path),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound);
-        if !present && !registered {
+        // A missing folder resolves only when it is gone for good; on an
+        // unmounted or unidentifiable volume it stays as an uncertain row.
+        let folder = record.volumes.as_ref().map(|v| v.folder.as_str());
+        if !registered && super::worktree_maintenance::vanished(&record.path, folder) {
             super::worktree_maintenance::forget_removal(&record.path)?;
             continue;
         }
@@ -2400,6 +2401,7 @@ fn remove(args: &[String], attempted: &mut bool, observed: &mut Option<Value>) -
         reserved_at: now(),
         status: "pending".into(),
         detail: String::new(),
+        volumes: None,
     };
     super::worktree_maintenance::reserve_removal(&removal)?;
     if automatic || preserve_restore {

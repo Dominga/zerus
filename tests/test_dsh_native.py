@@ -854,6 +854,16 @@ class NativeHarness(unittest.TestCase):
     def bindings(self):
         return {b['name']: b for b in (json.loads(p.read_text()) for p in (self.state / 'dsh/bindings').glob('*.json'))}
 
+    def swarm(self, *args, request=None):
+        result = self.hgs('swarm', *args, request=request)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return json.loads(result.stdout)
+
+    def project_of(self, record, node):
+        return self.swarm('session-project', '--json', request={
+            'request_id': str(uuid.uuid4()), 'name': record['name'], 'expected_run_id': record['run_id'],
+            'expected_conversation_id': record['conversation_id'], 'expected_machine_id': node})['current_project_id']
+
     def test_native_fork_binds_the_exact_new_session_and_keeps_the_source(self):
         source = self.create()
         tag = 'fork-' + uuid.uuid4().hex[:8]
@@ -871,6 +881,11 @@ class NativeHarness(unittest.TestCase):
         ready = self.wait(lambda: d if (d := self.cli('inspect', source))['fork_supported'] else None)
         self.assertEqual(ready['fork_reason'], '')
         self.assertIn('fork', ready['allowed_actions'])
+        # zerus-zjsj: the fork starts in its source session's project.
+        node = self.swarm('hello')['node_id']
+        self.swarm('initialize', request={'projects': [dict(id='work', name='Work', color='#123456', folders=[],
+                                                            sessions=[node + '\n' + source['name']])]})
+        self.assertEqual(self.project_of(source, node), 'work')
         stale = self.hgs('fork', source['name'], '-n', tag, '-d', '--expected-run-id', 'old-run')
         self.assertNotEqual(stale.returncode, 0)
         forked = self.hgs('fork', source['name'], '-n', tag, '-d', '--expected-run-id', source['run_id'],
@@ -886,6 +901,7 @@ class NativeHarness(unittest.TestCase):
         for key in ('agent_home', 'cwd'):
             self.assertEqual(fork[key], source[key])
         self.assertEqual((fork['fork_parent_id'], fork['fork_source_name']), (source['conversation_id'], source['name']))
+        self.assertEqual(self.project_of(fork, node), 'work')
         self.assertFalse(list((self.state / 'dsh/forks').glob('*.json')))
         row = next(r for r in self.rpc('list')['items'] if r['sessionId'] == fork['conversation_id'])
         self.assertEqual(row['parentSessionId'], source['conversation_id'])

@@ -501,6 +501,78 @@ fn finish(mut row: Value, reasons: Vec<Value>, notes: Vec<Value>) -> Value {
     row
 }
 
+fn uses(references: &[Reference], path: &Path) -> Vec<String> {
+    let mut names: Vec<String> = references
+        .iter()
+        .filter(|r| r.folders.iter().any(|folder| inside(folder, path)))
+        .map(|r| r.name.clone())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Running processes and saved sessions that use a folder. Shared by worktree
+/// rows and partial-removal leftovers.
+fn occupants(path: &Path, context: &Context, row: &mut Value, reasons: &mut Vec<Value>) {
+    // Without the running processes' folders, nothing may count as unused.
+    let mut samples: Vec<_> = match &context.processes {
+        Ok(processes) => {
+            if !processes.unreadable.is_empty() {
+                reasons.push(reason("processes_unavailable", format!(
+                    "Zerus cannot check whether some running programs use this folder ({} with hidden paths).",
+                    plural(processes.unreadable.len(), "process")
+                )));
+                row["unreadable_processes"] = json!(processes.unreadable);
+            }
+            processes.paths.iter()
+                .filter(|(_, cwd, _)| inside(cwd, path))
+                .collect()
+        }
+        Err(error) => {
+            reasons.push(reason(
+                "processes_unavailable",
+                format!("{error}, so a program may still use this folder."),
+            ));
+            Vec::new()
+        }
+    };
+    samples.sort_by_key(|(pid, _, _)| *pid);
+    samples.dedup_by_key(|(pid, _, _)| *pid);
+    row["process_count"] = json!(samples.len());
+    row["processes"] = json!(samples
+        .iter()
+        .take(MAX_SAMPLES)
+        .map(|(pid, _, name)| json!({"pid":pid,"command":name}))
+        .collect::<Vec<_>>());
+    if !samples.is_empty() {
+        let names: Vec<_> = samples
+            .iter()
+            .take(MAX_SAMPLES)
+            .map(|(pid, _, name)| format!("{name} ({pid})"))
+            .collect();
+        reasons.push(reason(
+            "processes",
+            format!(
+                "{} use this folder: {}. Close them first.",
+                plural(samples.len(), "running process"),
+                names.join(", ")
+            ),
+        ));
+    }
+    let sessions = uses(&context.bindings, path);
+    if !sessions.is_empty() {
+        reasons.push(reason(
+            "sessions",
+            format!(
+                "Zerus sessions use this folder: {}. Archive them first.",
+                sessions.join(", ")
+            ),
+        ));
+    }
+    row["sessions"] = json!(sessions);
+}
+
 fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> Value {
     let path = PathBuf::from(tree["path"].as_str().unwrap_or(""));
     let head = string(tree, "head").to_owned();
@@ -561,73 +633,8 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
         return finish(row, reasons, notes);
     }
 
-    // Without the running processes' folders, nothing may count as unused.
-    let mut samples: Vec<_> = match &context.processes {
-        Ok(processes) => {
-            if !processes.unreadable.is_empty() {
-                reasons.push(reason("processes_unavailable", format!(
-                    "Zerus cannot check whether some running programs use this folder ({} with hidden paths).",
-                    plural(processes.unreadable.len(), "process")
-                )));
-                row["unreadable_processes"] = json!(processes.unreadable);
-            }
-            processes.paths.iter()
-                .filter(|(_, cwd, _)| inside(cwd, &path))
-                .collect()
-        }
-        Err(error) => {
-            reasons.push(reason(
-                "processes_unavailable",
-                format!("{error}, so a program may still use this folder."),
-            ));
-            Vec::new()
-        }
-    };
-    samples.sort_by_key(|(pid, _, _)| *pid);
-    samples.dedup_by_key(|(pid, _, _)| *pid);
-    row["process_count"] = json!(samples.len());
-    row["processes"] = json!(samples
-        .iter()
-        .take(MAX_SAMPLES)
-        .map(|(pid, _, name)| json!({"pid":pid,"command":name}))
-        .collect::<Vec<_>>());
-    if !samples.is_empty() {
-        let names: Vec<_> = samples
-            .iter()
-            .take(MAX_SAMPLES)
-            .map(|(pid, _, name)| format!("{name} ({pid})"))
-            .collect();
-        reasons.push(reason(
-            "processes",
-            format!(
-                "{} use this folder: {}. Close them first.",
-                plural(samples.len(), "running process"),
-                names.join(", ")
-            ),
-        ));
-    }
-    let uses = |references: &[Reference]| -> Vec<String> {
-        let mut names: Vec<String> = references
-            .iter()
-            .filter(|r| r.folders.iter().any(|folder| inside(folder, &path)))
-            .map(|r| r.name.clone())
-            .collect();
-        names.sort();
-        names.dedup();
-        names
-    };
-    let sessions = uses(&context.bindings);
-    if !sessions.is_empty() {
-        reasons.push(reason(
-            "sessions",
-            format!(
-                "Zerus sessions use this folder: {}. Archive them first.",
-                sessions.join(", ")
-            ),
-        ));
-    }
-    row["sessions"] = json!(sessions);
-    let archived = uses(&context.archives).len();
+    occupants(&path, context, &mut row, &mut reasons);
+    let archived = uses(&context.archives, &path).len();
     row["archived_sessions"] = json!(archived);
     if !context.archives_complete {
         notes.push(reason("archives_unavailable","Archive references could not be fully checked. Automatic cleanup keeps this worktree."));
@@ -947,6 +954,137 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
 
 /// Assessment of the checkouts of the repository containing `path`; `only`
 /// limits it to one worktree, which may already be missing.
+enum Settled {
+    Removed,
+    Registered,
+    Partial,
+    Unknown(String),
+}
+
+/// What a removal left, from a fresh worktree list and a no-follow check of
+/// the folder. A missing registration alone never proves complete deletion.
+fn settle(common: &Path, path: &Path) -> Settled {
+    let (trees, partial) = match list(common, common, Instant::now() + Duration::from_secs(5)) {
+        Ok(listed) => listed,
+        Err(e) => return Settled::Unknown(e.detail),
+    };
+    if trees.iter().any(|tree| tree["path"] == json!(path)) {
+        return Settled::Registered;
+    }
+    match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Settled::Removed,
+        // A truncated list could omit a still-registered worktree.
+        Ok(_) if partial => {
+            Settled::Unknown("The worktree list was incomplete; review the folder again.".into())
+        }
+        Ok(_) => Settled::Partial,
+        Err(e) => Settled::Unknown(e.to_string()),
+    }
+}
+
+fn repository_lock(common: &Path) -> Result<std::fs::File> {
+    let cache = cache_file("repo", &common.to_string_lossy());
+    private_dir(cache.parent().unwrap())?;
+    crate::platform::private_open(
+        OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true),
+    )
+    .open(cache.with_extension("lock"))
+    .map_err(|e| e.to_string())
+}
+
+/// Folders a recorded removal left behind: Git no longer tracks them, yet they
+/// exist. Each row is a fresh, bounded review of the remaining files, the
+/// retained branch and current occupants. Records whose folder is gone are
+/// resolved; a record whose worktree is still registered is resolved only when
+/// no removal holds the repository lock. Nothing here deletes or retries.
+fn leftovers(
+    common: &Path,
+    trees: &[Value],
+    listing_partial: bool,
+    context: &Context,
+    total: Instant,
+) -> Result<Vec<Value>> {
+    let mut rows = Vec::new();
+    for record in super::worktree_maintenance::removals(common)? {
+        let path = PathBuf::from(&record.path);
+        let registered = trees.iter().any(|tree| tree["path"] == json!(path));
+        let present = !matches!(fs::symlink_metadata(&path),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound);
+        if !present && !registered {
+            super::worktree_maintenance::forget_removal(&record.path)?;
+            continue;
+        }
+        if registered {
+            let lock = repository_lock(common)?;
+            if lock.try_lock_exclusive().is_ok() {
+                super::worktree_maintenance::forget_removal(&record.path)?;
+            }
+            continue;
+        }
+        rows.push(leftover(&record, common, listing_partial, context, total));
+    }
+    Ok(rows)
+}
+
+fn leftover(
+    record: &super::worktree_maintenance::Removal,
+    common: &Path,
+    listing_partial: bool,
+    context: &Context,
+    total: Instant,
+) -> Value {
+    let path = PathBuf::from(&record.path);
+    let mut reasons = Vec::new();
+    let mut notes = vec![reason(
+        "partially_removed",
+        "Git no longer tracks this folder, but files remain. Review them; the removal is never retried.",
+    )];
+    let mut row = json!({"path":path,"kind":"leftover","available":true,"branch":record.branch,
+        "head":record.head,"common_dir":common,"removal":record});
+    let reference = format!("refs/heads/{}", record.branch);
+    let branch_head = (!record.branch.is_empty())
+        .then(|| {
+            git(
+                common,
+                &["rev-parse", "--verify", "--end-of-options", &reference],
+                step(total, 2),
+            )
+            .ok()
+            .map(text)
+        })
+        .flatten();
+    row["branch_head"] = json!(branch_head);
+    row["branch_retained"] = json!(branch_head.as_deref() == Some(record.head.as_str()));
+    if listing_partial {
+        notes.push(reason(
+            "status_unavailable",
+            "The worktree list was incomplete; Git may still track this folder.",
+        ));
+    }
+    occupants(&path, context, &mut row, &mut reasons);
+    let mut entries = 0;
+    let (bytes, complete, manifest) =
+        measure(&path, &mut entries, step(total, WALK_TIME.as_secs()));
+    row["size"] = json!(bytes);
+    row["size_complete"] = json!(complete);
+    if !complete {
+        reasons.push(reason(
+            "status_unavailable",
+            "The remaining files could not be fully listed. Review again later.",
+        ));
+    }
+    row["fingerprint"] = json!(fingerprint(json!({"record":record,"manifest":manifest,
+        "complete":complete,"branch_head":row["branch_head"],"processes":row["processes"],
+        "sessions":row["sessions"]})));
+    let mut row = finish(row, reasons, notes);
+    row["verdict"] = json!("partially_removed");
+    row
+}
+
 pub(super) fn review(path: &Path, only: Option<&Path>, total: Instant) -> Value {
     let machine = crate::config::Config::load()
         .map(|c| c.host().to_owned())
@@ -999,10 +1137,18 @@ pub(super) fn review(path: &Path, only: Option<&Path>, total: Instant) -> Value 
             rows.push(assess(tree, &trees, &context, total));
         }
         let base: Vec<_> = context.bases.iter().map(|(name, _)| name.clone()).collect();
-        Ok::<_, GitError>(
-            json!({"state":"ok","path":path,"common_dir":common,"base":base,
-            "partial":partial || cut,"worktrees":rows,"machine":machine,"sampled_at":now()}),
-        )
+        let mut value = json!({"state":"ok","path":path,"common_dir":common,"base":base,
+            "partial":partial || cut,"worktrees":rows,"machine":machine,"sampled_at":now()});
+        if only.is_none() {
+            match leftovers(&common, &trees, partial, &context, total) {
+                Ok(rows) => value["leftovers"] = json!(rows),
+                Err(detail) => {
+                    value["leftovers"] = json!([]);
+                    value["leftovers_unavailable"] = json!(detail);
+                }
+            }
+        }
+        Ok::<_, GitError>(value)
     })();
     result.unwrap_or_else(|e| {
         json!({"path":path,"state":e.state,"detail":e.detail,"worktrees":[],"machine":machine,"sampled_at":now()})
@@ -1043,6 +1189,87 @@ pub(super) fn review_command(args: &[String]) -> Result<Value> {
         only.as_deref(),
         Instant::now() + Duration::from_secs(20),
     ))
+}
+
+/// "Keep folder, forget record": the leftover folder and its files stay as
+/// they are; only the private removal record goes. Bound under the repository
+/// lock to the fresh review the owner confirmed.
+pub(super) fn keep_folder_command(args: &[String]) -> Result<Value> {
+    const USAGE: &str = "usage: hgs worktrees keep-folder --path FOLDER --common-dir DIR --fingerprint HASH [--request-id ID] [--json]";
+    let mut options = BTreeMap::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => {}
+            key @ ("--path" | "--common-dir" | "--fingerprint" | "--request-id") => {
+                i += 1;
+                let value = args.get(i).ok_or_else(|| format!("{key} needs a value"))?;
+                if value.is_empty() || value.chars().any(char::is_control) {
+                    return Err(format!(
+                        "{key} cannot be empty or contain control characters"
+                    ));
+                }
+                if options.insert(key, value.as_str()).is_some() {
+                    return Err(format!("duplicate {key}"));
+                }
+            }
+            _ => return Err(USAGE.into()),
+        }
+        i += 1;
+    }
+    let required = |key| {
+        options
+            .get(key)
+            .copied()
+            .ok_or_else(|| format!("{key} is required"))
+    };
+    let target = Path::new(required("--path")?);
+    let common = Path::new(required("--common-dir")?);
+    let expected = required("--fingerprint")?;
+    if !target.is_absolute() || !common.is_absolute() {
+        return Err("Folder and repository must be absolute paths".into());
+    }
+    let common = crate::platform::canonical(common).map_err(|e| format!("Repository: {e}"))?;
+    let actual = git(
+        &common,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        Instant::now() + Duration::from_secs(5),
+    )
+    .map_err(|e| e.detail)?;
+    if crate::platform::canonical(text(actual)).ok().as_ref() != Some(&common) {
+        return Err("Repository changed. Review the worktrees again.".into());
+    }
+    let guard = repository_lock(&common)?;
+    let waited = Instant::now() + Duration::from_secs(10);
+    while guard.try_lock_exclusive().is_err() {
+        if Instant::now() >= waited {
+            return Err(
+                "Another worktree operation is running. Try again after it finishes.".into(),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let _lock = crate::platform::FileLock::held(guard);
+    let resolved = crate::platform::canonical(target).ok();
+    let record = super::worktree_maintenance::removals(&common)?
+        .into_iter()
+        .find(|r| Path::new(&r.path) == target || resolved.as_deref() == Some(Path::new(&r.path)))
+        .ok_or("No partial-removal record exists for this folder. Review the worktrees again.")?;
+    let total = Instant::now() + Duration::from_secs(20);
+    let (trees, partial) = list(&common, &common, step(total, 5)).map_err(|e| e.detail)?;
+    let path = PathBuf::from(&record.path);
+    if trees.iter().any(|tree| tree["path"] == json!(path)) {
+        return Err("Git tracks this folder again. Review it as a worktree.".into());
+    }
+    let context = context(&common, &trees, step(total, 3));
+    let row = leftover(&record, &common, partial, &context, total);
+    if row["fingerprint"] != expected {
+        return Err("The leftover folder changed since the review. Review it again.".into());
+    }
+    super::worktree_maintenance::forget_removal(&record.path)?;
+    Ok(json!({"status":"kept","path":path,"common_dir":common,
+        "request_id":options.get("--request-id"),"machine":crate::config::Config::load()
+            .map(|c| c.host().to_owned()).unwrap_or_default()}))
 }
 
 pub(super) fn remove_command(args: &[String]) -> Result<Value> {
@@ -1276,9 +1503,31 @@ fn remove(args: &[String], attempted: &mut bool, observed: &mut Option<Value>) -
         return Err("Review the local files outside Git and explicitly confirm their deletion before removing this worktree.".into());
     }
     let missing = row["verdict"] == "missing";
+    // Reserve the private removal record before anything else can change, and
+    // before Git: its deregistration can succeed while file deletion fails.
+    let removal = super::worktree_maintenance::Removal {
+        path: path.to_string_lossy().into_owned(),
+        common_dir: common.to_string_lossy().into_owned(),
+        branch: string(&row, "branch").to_owned(),
+        head: string(&row, "head").to_owned(),
+        fingerprint: string(&row, "fingerprint").to_owned(),
+        request_id: options
+            .get("--request-id")
+            .copied()
+            .unwrap_or("")
+            .to_owned(),
+        reserved_at: now(),
+        status: "pending".into(),
+        detail: String::new(),
+    };
+    super::worktree_maintenance::reserve_removal(&removal)?;
     if automatic || preserve_restore {
-        super::worktree_lifecycle::prepare_removal(&common, &row)?;
-        super::worktree_maintenance::reserve(&common, &path)?;
+        if let Err(e) = super::worktree_lifecycle::prepare_removal(&common, &row)
+            .and_then(|_| super::worktree_maintenance::reserve(&common, &path))
+        {
+            let _ = super::worktree_maintenance::settle_removal(&removal, None);
+            return Err(e);
+        }
     }
     let spelling = path.to_string_lossy();
     let mut command = vec!["worktree", "remove"];
@@ -1287,22 +1536,54 @@ fn remove(args: &[String], attempted: &mut bool, observed: &mut Option<Value>) -
     }
     command.extend(["--", &spelling]);
     *attempted = true;
-    git(
+    let removed = git(
         &common,
         &command,
         Instant::now() + Duration::from_secs(if automatic { 3 } else { 300 }),
-    )
-    .map_err(|e| {
-        format!(
-            "Removal could not be confirmed: {}\nReview the worktree again before retrying.",
-            e.detail
-        )
-    })?;
+    );
     let _ = fs::remove_file(&cache);
-    let (trees, _) = list(&common, &common, Instant::now() + Duration::from_secs(5))
-        .map_err(|e| format!("Removal could not be confirmed: {}", e.detail))?;
-    if trees.iter().any(|tree| tree["path"] == json!(path)) || (!missing && path.exists()) {
-        return Err("Removal could not be confirmed. Review the worktree again.".into());
+    let settled = settle(&common, &path);
+    let _ = match &settled {
+        Settled::Removed | Settled::Registered => {
+            super::worktree_maintenance::settle_removal(&removal, None)
+        }
+        Settled::Partial => super::worktree_maintenance::settle_removal(
+            &removal,
+            Some(match &removed {
+                Err(e) => e.detail.as_str(),
+                Ok(_) => "Git reported success, but the folder remains.",
+            }),
+        ),
+        // Interrupted or unreadable: the pending record stays for review.
+        Settled::Unknown(_) => Ok(()),
+    };
+    if let Err(e) = removed {
+        return Err(match settled {
+            Settled::Partial => format!(
+                "Git stopped tracking this worktree, but files remain in {}: {}\nReview the leftover folder; the removal is never retried.",
+                path.display(),
+                e.detail
+            ),
+            _ => format!(
+                "Removal could not be confirmed: {}\nReview the worktree again before retrying.",
+                e.detail
+            ),
+        });
+    }
+    match settled {
+        Settled::Removed => {}
+        Settled::Unknown(detail) => {
+            return Err(format!("Removal could not be confirmed: {detail}"))
+        }
+        Settled::Partial => {
+            return Err(format!(
+                "Git stopped tracking this worktree, but its folder remains: {}. Review the leftover folder.",
+                path.display()
+            ))
+        }
+        Settled::Registered => {
+            return Err("Removal could not be confirmed. Review the worktree again.".into())
+        }
     }
 
     let branch = string(&row, "branch").to_owned();

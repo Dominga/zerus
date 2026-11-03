@@ -1,6 +1,8 @@
 use super::*;
 use std::{fs, path::Path, time::Instant};
 
+mod silent_watch;
+
 pub(super) struct Fixture(pub(super) PathBuf);
 
 struct ReleaseView(std::sync::mpsc::Sender<()>);

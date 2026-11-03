@@ -41,7 +41,21 @@ pub(in crate::desktop) struct Loan {
 struct Session {
     stream: Stream,
     loan: Option<Loan>,
-    _admission: Admission,
+    pending: Option<mpsc::Receiver<Loan>>,
+    _admission: Option<Admission>,
+}
+impl Session {
+    fn respond(&mut self, value: Value) -> Result<()> {
+        let (epoch, seq) = self
+            .loan
+            .as_ref()
+            .map(|loan| (loan.epoch.as_str(), loan.seq))
+            .unwrap_or(("", 0));
+        let response = super::super::frame(epoch, seq, "response", value);
+        self.stream.write_all(&protocol::encode(&response)?)?;
+        self.stream.flush()?;
+        Ok(())
+    }
 }
 impl Drop for Session {
     fn drop(&mut self) {
@@ -89,7 +103,7 @@ impl Reference {
     }
 }
 
-fn directory_handle(path: &Path) -> Result<fs::File> {
+pub(super) fn directory_handle(path: &Path) -> Result<fs::File> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
     platform::no_follow(&mut options);
@@ -111,7 +125,7 @@ fn directory_handle(path: &Path) -> Result<fs::File> {
     );
     Ok(file)
 }
-fn key(file: &fs::File) -> Result<[u64; 2]> {
+pub(super) fn key(file: &fs::File) -> Result<[u64; 2]> {
     let id = FileIdentity::of(file)?;
     Ok([id.device, id.inode])
 }
@@ -124,7 +138,7 @@ fn cleanup_original(path: &Path, pin: &fs::File) -> Result<()> {
                 key(&directory_handle(path)?)? == key(pin)?,
                 "managed import directory replaced"
             );
-            fs::remove_dir_all(path)?;
+            super::stages::discard_input(path, key(pin)?)?;
             Ok(())
         }
     }
@@ -132,7 +146,7 @@ fn cleanup_original(path: &Path, pin: &fs::File) -> Result<()> {
 
 /// Called only after this CLI fully validates and syncs the original stream and
 /// the actual local try-lock is contended. Unknown RPC outcomes never retry.
-pub(super) fn route(location: &Location, staged: Staged) -> Result<Value> {
+pub(super) fn route(location: &Location, mut staged: Staged) -> Result<Value> {
     let pin = directory_handle(staged.stage.path())?;
     let reference = json!({"version":1,"stage":staged.stage.path().file_name().and_then(|s|s.to_str()).context("invalid staging leaf")?,
         "import_id":staged.start.import_id,"record_sha256":sha256(&staged.manifest),
@@ -141,6 +155,7 @@ pub(super) fn route(location: &Location, staged: Staged) -> Result<Value> {
     let expected = staged.receipt();
     // Transfer custody BEFORE the RPC can become uncertain. This process's
     // TempDir Drop or death cannot remove an admitted finalizer's input.
+    staged.ownership.retain();
     let path = staged.stage.keep();
     let result = super::super::exchange(location, OP, Some(reference));
     let value = match result {
@@ -148,7 +163,9 @@ pub(super) fn route(location: &Location, staged: Staged) -> Result<Value> {
         Ok(None) => negative, // no connection/request was admitted
         _ => anyhow::bail!("owned import finalization is unconfirmed"), // keep original managed stage
     };
-    cleanup_original(&path, &pin)?;
+    if cleanup_original(&path, &pin).is_ok() {
+        staged.ownership.discard();
+    }
     Ok(value)
 }
 
@@ -170,27 +187,44 @@ fn client_with(
     after_claim: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<()> {
     ensure!(
-        hello.abi == protocol::ABI
-            && hello.configuration == location.configuration
-            && !stopped.load(Ordering::Acquire),
+        hello.abi == protocol::ABI && hello.configuration == location.configuration,
         "invalid import finalization scope"
     );
     let reference = Reference::parse(hello.request.context("missing managed import reference")?)?;
-    let admission = Admission::take()?;
     let mut session = Session {
         stream,
         loan: None,
-        _admission: admission,
+        pending: None,
+        _admission: None,
     };
+    let negative = reference.not_committed(location);
+    if stopped.load(Ordering::Acquire) {
+        return session.respond(negative);
+    }
+    let Ok(admission) = Admission::take() else {
+        return session.respond(negative);
+    };
+    session._admission = Some(admission);
     let (reply, receive) = mpsc::sync_channel(1);
-    send.try_send(super::super::Event::ImportOwner(
-        location.configuration.clone(),
-        reply,
-    ))
-    .map_err(|_| anyhow::anyhow!("import owner admission unavailable"))?;
-    let loan = receive
+    session.pending = Some(receive);
+    if send
+        .try_send(super::super::Event::ImportOwner(
+            location.configuration.clone(),
+            reply,
+        ))
+        .is_err()
+    {
+        return session.respond(negative);
+    }
+    let Ok(loan) = session
+        .pending
+        .as_ref()
+        .expect("original admission receiver")
         .recv_timeout(super::super::transport::TIMEOUT)
-        .map_err(|_| anyhow::anyhow!("import owner admission unconfirmed"))?;
+    else {
+        return session.respond(negative);
+    };
+    session.pending = None;
     session.loan = Some(loan);
     let loan = session
         .loan
@@ -199,23 +233,31 @@ fn client_with(
     let value = if let Some(owner) = &loan.owner {
         // The actor supplied this same original Owner, including its serve
         // lock and preparation charge, rather than a reconstructed role.
-        finalize(
+        match finalize(
             location,
             &reference,
             &owner.handoff(),
             &stopped,
             after_claim,
-        )?
+        ) {
+            Ok(value) => value,
+            Err(error) if !error.rename_entered => negative,
+            Err(error) => return Err(error.error),
+        }
     } else {
         reference.not_committed(location)
     };
-    let response = super::super::frame(&loan.epoch, loan.seq, "response", value);
-    session.stream.write_all(&protocol::encode(&response)?)?;
-    session.stream.flush()?;
-    Ok(())
+    session.respond(value)
+}
+
+#[derive(Debug)]
+struct FinalizeError {
+    rename_entered: bool,
+    error: anyhow::Error,
 }
 
 struct Claimed {
+    ownership: super::stages::Lease,
     directory: Option<tempfile::TempDir>,
     keep: bool,
 }
@@ -234,49 +276,69 @@ fn finalize(
     lock: &super::super::store::HandoffLock,
     stopped: &AtomicBool,
     after_claim: impl FnOnce(&Path) -> Result<()>,
-) -> Result<Value> {
-    let until = Instant::now() + TOTAL;
-    lock.verify(location)?;
-    location.check_existing()?;
-    let imports = location.root.join("imports");
-    ensure!(
-        platform::verify_private(&imports, platform::Private::Directory)?,
-        "unsafe import root"
-    );
-    let original = imports.join(&reference.stage);
-    let pin = directory_handle(&original)?;
-    ensure!(
-        key(&pin)? == reference.directory,
-        "managed import directory replaced"
-    );
-    ensure!(!stopped.load(Ordering::Acquire), "service stopping");
-    let directory = tempfile::Builder::new()
-        .prefix(".held-import-")
-        .tempdir_in(&imports)?;
-    platform::restrict_dir(directory.path())?;
-    let owned = directory.path().join("input");
-    let mut claimed = Claimed {
-        directory: Some(directory),
-        keep: true,
-    };
-    fs::rename(&original, &owned)?;
-    ensure!(
-        key(&directory_handle(&owned)?)? == reference.directory,
-        "managed import directory replaced during transfer"
-    );
-    platform::sync_dir(&imports)?;
-    after_claim(&owned)?;
-    let input = Replay::new(&owned, reference, location, stopped, until)?;
-    let prepared = stage(location, &mut BufReader::new(input))?;
-    ensure!(
-        sha256(&prepared.manifest) == reference.record_sha256
-            && !stopped.load(Ordering::Acquire)
-            && Instant::now() < until,
-        "import finalization changed or stopped"
-    );
-    let value = prepared.commit(location, lock, |_| Ok(()))?;
-    claimed.keep = false; // only exact validated, bounded managed files are removed
-    Ok(value)
+) -> std::result::Result<Value, FinalizeError> {
+    let mut rename_entered = false;
+    let result = (|| -> Result<Value> {
+        let until = Instant::now() + TOTAL;
+        lock.verify(location)?;
+        location.check_existing()?;
+        let imports = location.root.join("imports");
+        ensure!(
+            platform::verify_private(&imports, platform::Private::Directory)?,
+            "unsafe import root"
+        );
+        let original = imports.join(&reference.stage);
+        let pin = directory_handle(&original)?;
+        ensure!(
+            key(&pin)? == reference.directory,
+            "managed import directory replaced"
+        );
+        ensure!(!stopped.load(Ordering::Acquire), "service stopping");
+        let directory = tempfile::Builder::new()
+            .prefix(".held-import-")
+            .tempdir_in(&imports)?;
+        platform::restrict_dir(directory.path())?;
+        let mut ownership = super::stages::Lease::claim(
+            location,
+            directory.path(),
+            &reference.import_id,
+            &reference.stage,
+            reference.directory,
+        )?;
+        ownership.retain();
+        let owned = directory.path().join("input");
+        let mut claimed = Claimed {
+            ownership,
+            directory: Some(directory),
+            keep: true,
+        };
+        // Set before the syscall: even a failed/uncertain rename must not grant a
+        // pre-claim negative, let alone allow reuse after UUID reservation.
+        rename_entered = true;
+        fs::rename(&original, &owned)?;
+        ensure!(
+            key(&directory_handle(&owned)?)? == reference.directory,
+            "managed import directory replaced during transfer"
+        );
+        platform::sync_dir(&imports)?;
+        after_claim(&owned)?;
+        let input = Replay::new(&owned, reference, location, stopped, until)?;
+        let prepared = stage(location, &mut BufReader::new(input))?;
+        ensure!(
+            sha256(&prepared.manifest) == reference.record_sha256
+                && !stopped.load(Ordering::Acquire)
+                && Instant::now() < until,
+            "import finalization changed or stopped"
+        );
+        let value = prepared.commit(location, lock, |_| Ok(()))?;
+        claimed.keep = false; // only exact validated, bounded managed files are removed
+        claimed.ownership.discard();
+        Ok(value)
+    })();
+    result.map_err(|error| FinalizeError {
+        rename_entered,
+        error,
+    })
 }
 
 struct Body {
@@ -313,7 +375,7 @@ impl PinnedDirectory {
         Ok(())
     }
 }
-fn read_body(path: &Path, limit: usize) -> Result<(Vec<u8>, FileIdentity)> {
+pub(super) fn read_body(path: &Path, limit: usize) -> Result<(Vec<u8>, FileIdentity)> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
     platform::no_follow(&mut options);

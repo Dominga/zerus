@@ -2,6 +2,8 @@
 //! attention marks ([`crate::marks`]), the organization's pending edits
 //! ([`crate::swarm::draft`]) and the files the app saves for its owner.
 pub(crate) mod checkpoint;
+#[cfg(windows)]
+pub(crate) mod windows;
 
 use std::fs::{File, OpenOptions};
 use std::hash::{BuildHasher, Hasher};
@@ -15,7 +17,14 @@ pub fn read_private_bounded(path: &Path, limit: usize) -> io::Result<Option<Vec<
     if limit == 0 || limit > 16 << 20 {
         return Err(io::ErrorKind::InvalidInput.into());
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let Some(mut source) = windows::capture(path, limit)? else {
+            return Ok(None);
+        };
+        source.unchanged_bytes(path, limit).map(Some)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (path, limit);
         Err(io::ErrorKind::Unsupported.into())
@@ -44,7 +53,20 @@ pub fn write_private_durable(path: &Path, bytes: &[u8]) -> io::Result<()> {
         write_private_atomic(path, bytes, true)?;
         checkpoint::sync_parent(path)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let limit = 16 << 20;
+        let old = windows::current(path, limit)?;
+        windows::publish(path, bytes, old, limit)
+            .map(|_| ())
+            .map_err(|failure| match failure {
+                windows::PublicationFailure::Before(e) => e,
+                windows::PublicationFailure::Unknown(e) => {
+                    io::Error::other(format!("private publication outcome unknown: {e}"))
+                }
+            })
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (path, bytes);
         Err(io::ErrorKind::Unsupported.into())

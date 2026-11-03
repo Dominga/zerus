@@ -25,6 +25,7 @@ const IDLE: Duration = Duration::from_secs(10);
 pub(super) const TOTAL: Duration = Duration::from_secs(120);
 
 pub(super) mod held;
+mod stages;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -162,6 +163,7 @@ fn publish(location: &Location, input: &mut impl BufRead) -> Result<Value> {
 }
 struct Staged {
     start: Start,
+    ownership: stages::Lease,
     stage: tempfile::TempDir,
     manifest: Vec<u8>,
     bytes: u64,
@@ -207,6 +209,7 @@ fn stage(location: &Location, input: &mut impl BufRead) -> Result<Staged> {
     // protects the creation -> restriction interval on platforms using umask.
     platform::restrict_dir(stage.path())?;
     directory(stage.path())?;
+    let ownership = stages::Lease::input(location, stage.path(), &start.import_id)?;
     for kind in ["snapshots", "pages"] {
         directory(&stage.path().join(kind))?;
     }
@@ -312,6 +315,7 @@ fn stage(location: &Location, input: &mut impl BufRead) -> Result<Staged> {
     }
     platform::sync_dir(stage.path())?;
     Ok(Staged {
+        ownership,
         bytes: start.max_bytes - budget,
         snapshots: snapshots.len(),
         pages: pages.len(),
@@ -342,6 +346,9 @@ impl Staged {
         after_reservation: impl FnOnce(&Path) -> Result<()>,
     ) -> Result<Value> {
         lock.verify(location)?;
+        // Best-effort bounded generated-stage cleanup is never publication or
+        // replay authority. Live input/claim leases are skipped physically.
+        let _ = stages::sweep(location, lock);
         let start = &self.start;
         let imports = location.root.join("imports");
         let target = imports.join(&start.import_id);

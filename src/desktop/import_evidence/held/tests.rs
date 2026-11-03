@@ -172,17 +172,15 @@ fn malformed_replaced_linked_and_over_limit_stages_never_reserve_a_uuid() {
             }
             _ => unreachable!(),
         }
-        assert!(
-            finalize(
-                &f.location,
-                &reference,
-                &lock,
-                &AtomicBool::new(false),
-                |_| Ok(())
-            )
-            .is_err(),
-            "{change}"
-        );
+        let failure = finalize(
+            &f.location,
+            &reference,
+            &lock,
+            &AtomicBool::new(false),
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        assert_eq!(failure.rename_entered, change != "directory", "{change}");
         assert!(
             !f.location.root.join("imports").join(import).exists(),
             "{change}"
@@ -213,16 +211,24 @@ fn transfer_failure_and_panic_preserve_the_admitted_input_without_reserving() {
                 },
             )
         }));
-        assert!(result.is_err() || result.unwrap().is_err());
+        if panic {
+            assert!(result.is_err());
+        } else {
+            assert!(
+                result.unwrap().unwrap_err().rename_entered,
+                "a failure after custody transfer stays unknown"
+            );
+        }
         assert!(!f.location.root.join("imports").join(import).exists());
         let retained: Vec<_> = fs::read_dir(f.location.root.join("imports"))
             .unwrap()
             .map(|e| e.unwrap().path())
             .filter(|p| {
-                p.file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .starts_with(".held-import-")
+                p.is_dir()
+                    && p.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(".held-import-")
             })
             .collect();
         assert_eq!(retained.len(), 1);
@@ -318,7 +324,13 @@ fn managed_reference_has_a_closed_small_scope_and_a_finite_budget() {
 #[test]
 #[cfg(target_os = "linux")]
 fn cli_route_cleans_only_a_complete_exact_negative_and_retains_unknown_input() {
-    for mode in ["negative", "mismatched", "partial", "disconnect"] {
+    for mode in [
+        "negative",
+        "cleanup_refused",
+        "mismatched",
+        "partial",
+        "disconnect",
+    ] {
         let f = Fixture::new();
         f.location.prepare().unwrap();
         let lock = f.location.handoff_lock().unwrap();
@@ -361,6 +373,9 @@ fn cli_route_cleans_only_a_complete_exact_negative_and_retains_unknown_input() {
             if mode == "disconnect" {
                 return;
             }
+            if mode == "cleanup_refused" {
+                private_write(&original.join("unknown.txt"), b"keep for review").unwrap();
+            }
             let mut value = reference.not_committed(&location);
             if mode == "mismatched" {
                 value["import_record"]["sha256"] = "0".repeat(64).into();
@@ -383,15 +398,24 @@ fn cli_route_cleans_only_a_complete_exact_negative_and_retains_unknown_input() {
             .unwrap()
             .map(|e| e.unwrap().path())
             .filter(|p| {
-                p.file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .starts_with(".stage-")
+                p.is_dir()
+                    && p.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(".stage-")
             })
             .collect();
-        if mode == "negative" {
+        if matches!(mode, "negative" | "cleanup_refused") {
             assert_eq!(result.unwrap()["this_attempt_not_committed"], true);
-            assert!(stages.is_empty());
+            if mode == "negative" {
+                assert!(stages.is_empty());
+            } else {
+                assert_eq!(stages.len(), 1);
+                assert_eq!(
+                    fs::read(stages[0].join("unknown.txt")).unwrap(),
+                    b"keep for review"
+                );
+            }
         } else {
             assert!(result.is_err(), "{mode}");
             assert_eq!(stages.len(), 1, "{mode}");
@@ -506,9 +530,16 @@ pub(in crate::desktop) fn pending(location: &Location, owner: Arc<Owner>) -> Pen
 
 #[test]
 #[cfg(target_os = "linux")]
-fn ownerless_and_shutdown_admission_preserve_the_stage_and_release_original_connections() {
+fn preclaim_refusals_return_the_exact_negative_and_release_original_connections() {
     let _serial = CLIENT_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    for shutdown in [false, true] {
+    for mode in [
+        "ownerless",
+        "shutdown",
+        "full",
+        "timeout",
+        "stopped",
+        "busy",
+    ] {
         let f = Fixture::new();
         let import_id = id();
         let (reference, original) = transfer(staged(&f.location, &import_id));
@@ -520,6 +551,15 @@ fn ownerless_and_shutdown_admission_preserve_the_stage_and_release_original_conn
         .unwrap();
         let (peer, stream) = std::os::unix::net::UnixStream::pair().unwrap();
         let (send, receive) = mpsc::sync_channel(1);
+        let _busy = if mode == "busy" {
+            Some(Admission::take().unwrap())
+        } else {
+            None
+        };
+        if mode == "full" {
+            send.try_send(super::super::super::Event::ListenerFailed)
+                .unwrap_or_else(|_| panic!("fixture queue"));
+        }
         let location = Location {
             root: f.location.root.clone(),
             configuration: f.location.configuration.clone(),
@@ -529,38 +569,54 @@ fn ownerless_and_shutdown_admission_preserve_the_stage_and_release_original_conn
                 stream,
                 hello,
                 send,
-                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(mode == "stopped")),
                 &location,
             )
         });
-        match receive.recv_timeout(Duration::from_secs(2)).unwrap() {
-            super::super::super::Event::ImportOwner(_, reply) => {
-                if shutdown {
-                    drop(reply);
-                } else {
-                    reply
-                        .send(Loan {
-                            owner: None,
-                            epoch: "same-original-epoch".into(),
-                            seq: 1,
-                        })
-                        .unwrap_or_else(|_| panic!("receiver closed"));
+        let mut delayed = None;
+        if matches!(mode, "ownerless" | "shutdown" | "timeout") {
+            match receive.recv_timeout(Duration::from_secs(2)).unwrap() {
+                super::super::super::Event::ImportOwner(_, reply) => {
+                    if mode == "shutdown" {
+                        drop(reply);
+                    } else if mode == "timeout" {
+                        delayed = Some(reply);
+                    } else {
+                        reply
+                            .send(Loan {
+                                owner: None,
+                                epoch: "same-original-epoch".into(),
+                                seq: 1,
+                            })
+                            .unwrap_or_else(|_| panic!("receiver closed"));
+                    }
                 }
+                _ => panic!("unexpected request"),
             }
-            _ => panic!("unexpected request"),
         }
-        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        peer.set_read_timeout(Some(
+            super::super::super::transport::TIMEOUT + Duration::from_secs(1),
+        ))
+        .unwrap();
         let bytes = protocol::line(&mut BufReader::new(peer), protocol::FRAME_BYTES).unwrap();
-        if shutdown {
-            assert!(worker.join().unwrap().is_err());
-            assert!(bytes.is_none());
-        } else {
-            worker.join().unwrap().unwrap();
-            let response: Value = serde_json::from_slice(&bytes.unwrap()).unwrap();
-            assert_eq!(response["value"], negative);
+        worker.join().unwrap().unwrap();
+        let response: Value = serde_json::from_slice(&bytes.unwrap()).unwrap();
+        assert_eq!(response["value"], negative, "{mode}");
+        if let Some(reply) = delayed {
+            assert!(
+                reply
+                    .try_send(Loan {
+                        owner: None,
+                        epoch: "late-original-epoch".into(),
+                        seq: 1
+                    })
+                    .is_err(),
+                "expired admission never accepts a late loan"
+            );
         }
         assert!(original.join("record-v1.json").is_file());
         assert!(!f.location.root.join("imports").join(import_id).exists());
+        drop(_busy);
         assert!(Admission::take().is_ok());
     }
 }

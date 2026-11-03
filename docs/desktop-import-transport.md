@@ -106,14 +106,18 @@ counts. Compare all identities before accepting the result. Reports contain no
 snapshot bodies or source paths. Errors are nonzero and redacted.
 
 There is one closed negative response: after all input and the final manifest
-have been validated, contention from the actual `try_lock_exclusive` call,
-without an admitted current service owner,
-may
+have been validated, contention from the actual `try_lock_exclusive` call
+without an admitted current service owner may
 return exit zero with `published:false`, `code:"handoff_busy"`,
 `this_attempt_not_committed:true`, and the exact ABI, configuration, import UUID
 and `import_record:{version:1,sha256}`. This invocation has not attempted the
-UUID directory reservation. Path, open, privacy, identity and permission errors
-are not this response. Any failure after reservation remains unknown.
+UUID directory reservation. The owner-assisted path also returns this exact
+attempt-only negative for a busy finalizer, full/closed actor queue, loan timeout,
+failed owner query, stop or failed pre-claim filesystem check. The boundary is
+before entering the custody rename syscall. Once that syscall is entered, any
+rename/validation/commit/reply uncertainty remains unknown, including an error
+before UUID reservation. Invalid/mismatched request framing is refused. Ordinary
+local lock open/path/privacy errors do not become a typed OS-contention result.
 
 Accept that negative only after the original child exits successfully and its
 input writer and both output pipes finish completely, and only against the
@@ -146,7 +150,7 @@ startup Grant. Explicit Resume uses the same ordering. The report is best-effort
 busy, quarantined, unavailable and unconfirmed outcomes are recorded separately
 and never prevent Grant, watch, catalog or normal preference edits. This first report slice
 uses the existing Qt family decoders and the current local Settings bytes: 17
-Qt families on Linux (16 on macOS), plus three paired Next policy/recovery
+Qt families on Linux (16 on macOS and Windows), plus three paired Next policy/recovery
 families, with at most 64 MiB, 1,024 snapshots and 1,024 pages. It is a private
 Staged report, not materialization of these families into workers.
 
@@ -160,9 +164,38 @@ This is source-specific exclusion,
 not proof that Qt or the whole desktop drained. Every helper, writer and pipe
 retains its original resources through actual completion. Shutdown reports
 unconfirmed work rather than declaring an outstanding resource group drained.
-The generic Windows Qt/Settings capture and private report-journal adapter
-remain unavailable in this slice; the separate Windows pending-read checkpoint
-is unchanged. Missing Qt is reported as not applicable without inventing an
+On Windows source captures require local disk paths, pinned no-reparse
+ancestors, private ACL and single-link checks. The parent chain includes the
+local drive root, each intervening directory and the final source folder.
+Each opens with `FILE_LIST_DIRECTORY`, attributes/security reads and read/write
+sharing without delete sharing. Directory data access is needed for the
+[Windows sharing check](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fsa/8c0e3f4f-0729-49f4-a14d-7f7add593819);
+attributes-only handles do not prevent renames. No directory enumeration occurs.
+An ancestor that does not permit this read access refuses capture; permissions
+are never repaired. Native tests rename only their owned scratch/outer/hgdev
+folders, not the system/profile/temp ancestors outside those fixtures.
+
+The foreign Qt INI is read-only
+with read/write/delete sharing during each bounded read, then its leaf handle
+closes. Only its parent pins, original volume serial/file index, size, last-write
+time and hash remain during report publication and receipt waits. Recheck opens
+the exact path no-reparse, repeats verification and stamp/hash comparison, and
+closes before returning. No leaf handle remains during report/helper waits to
+block Qt's classic `MoveFileExW(..., MOVEFILE_REPLACE_EXISTING)` save.
+Replacement or in-place changes quarantine the report without adopting a new source.
+Next's own Settings, journal and pending-read checkpoint keep exclusive
+leaf handles. Settings mutations remain paused by its original writer lease until
+all original capture references drop. A pre-open sharing violation can retry at
+most twenty times at ten milliseconds within the original deadline; other
+failures refuse without a source rewrite. UNC/redirected or junction-backed
+stores stay unavailable and keep the report deferred. The pending-read state
+machine and its unknown-publication rule are unchanged.
+
+The Windows private report journal uses the same checked CREATE_NEW temporary,
+original-handle rename, sync and bounded readback as the checkpoint. Its original
+UUID and immutable expected record survive restart; a rename/sync uncertainty
+is not converted into a replay. No adapter repairs source permissions, truncates
+files, creates an absent source or adds a worker, schema or effect authority. Missing Qt is reported as not applicable without inventing an
 empty source or a successful import.
 
 The private managed `qt-retained-import-v1.json` retains the original UUID,
@@ -188,8 +221,30 @@ runtime owner and separate one-slot finalizer admission remain charged through
 filesystem work and original stream cleanup. Revoke closes new admissions and
 waits for this same resource; disconnect does not remove its input or release
 its charge early. Lost replies and all post-reservation uncertainty remain
-original-ID lookup only. Unknown or malformed stages are retained, never
-automatically replayed or repaired.
+original-ID lookup only. Temporary-copy cleanup cannot change the certainty of
+a complete exact reply; a cleanup refusal keeps the copy for review instead.
+
+Native staging has private adjacent ownership and empty OS-lease sidecars; they
+are outside the fixed three-entry input directory and never enter an immutable
+import manifest. They bind configuration, import UUID, random native nonce,
+directory and lease-file identities and creation time. The creator retains its
+lease through the original request; a claimed container has its own worker
+lease. These local cleanup records grant no effect/writer authority.
+
+Before immutable commit, a best-effort sweep under the actual handoff lock
+considers at most 256 directory entries and retires at most two verified stages or orphan sidecar sets
+older than 24 hours. A pass admits another candidate only within 100 ms; each
+candidate has finite file/metadata limits (1,024 snapshots, 1,024 pages, one
+record, 64 MiB aggregate). No body scan or actor-thread I/O is added. The sweep
+requires every retained creator/job lease to be free, private no-follow single-link files,
+exact native ownership/directory/file identities and a closed data inventory.
+An existing native claimed-container record still binds its exact input after
+the creator's sidecars are gone; an unmarked standalone legacy stage does not.
+Live, fresh, replaced, oversized, malformed and unverified legacy stages stay.
+Published UUID directories and original source stores are never sweep targets.
+Cleanup ends at any uncertain check and never authorizes publication replay or
+settles an unknown original import. Unknown outcomes remain original-ID lookup
+only even after a stale generated copy is removed.
 
 This report does not replace the existing frozen pending-read capture or its
 separate authenticated safe-passive page transfer. That transfer may wait for

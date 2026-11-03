@@ -24,8 +24,17 @@ CURRENT_SCHEMA = 17
 
 
 class Desktop(unittest.TestCase):
-    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux private foreground holder')
+    @unittest.skipUnless(sys.platform.startswith(('linux', 'darwin')), 'Unix private foreground holder')
     def test_installer_retains_the_real_original_hold_through_private_passive_restart(self):
+        """Real holder in isolated non-agent CI/private foreground ancestry."""
+        if sys.platform == 'darwin':
+            from macos_ancestry import topology, unsupported_hosted_foreign
+            chain = topology()
+            print('MACOS_HOLD_TOPOLOGY ' + json.dumps(chain), file=sys.stderr, flush=True)
+            unsupported = unsupported_hosted_foreign(chain, os.geteuid(), os.environ)
+            if unsupported is not None:
+                self.skipTest('Hosted runner has unsupported foreign ancestor: ' + json.dumps(unsupported)
+                              + '; native macOS permission remains refused')
         import pty
         service, _ = self.serve()
         self.stop(service)
@@ -153,13 +162,14 @@ finally:
             self.assertEqual(db.execute('SELECT rows,bytes,active FROM desktop_creation_clone_budget').fetchone(), (0, 0, 0))
         self.assertEqual(status['operation_queue']['kinds']['creation_clone']['undrained'], 0)
 
-    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux registration mode')
+    @unittest.skipUnless(sys.platform.startswith('linux') or sys.platform == 'darwin', 'Unix registration mode')
     def test_registration_variant_is_read_only_and_service_reports_its_requested_mode(self):
         passive = self.cli('desktop', 'registration', '--json')
         background = self.cli('desktop', 'registration', '--json', '--background')
         self.assertEqual(passive['mode'], 'passive')
         self.assertEqual(background['mode'], 'background')
-        self.assertEqual(background['argv'], passive['argv'] + ['--background'])
+        self.assertEqual(background['argv'], (passive['argv'][:-1] + ['--background', '--launchd'])
+                         if sys.platform == 'darwin' else passive['argv'] + ['--background'])
         self.assertEqual(background['configuration'], passive['configuration'])
         self.assertFalse(self.desktop.exists())
         process, status = self.serve()

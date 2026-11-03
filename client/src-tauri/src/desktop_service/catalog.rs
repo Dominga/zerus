@@ -311,16 +311,25 @@ async fn row(
 /// One journal revision: the changes of one native watch delta frame (the
 /// journal records one revision per frame), held until the revision ends,
 /// even across change pages, so it is bounded by that frame. Its upserts go
-/// first, so a view batch boundary never leaves selection on a removed run,
-/// and each removal learns which names this frame lists again: the native
-/// watch's `replaced` (zerus-uutz). The walk's key bookkeeping keeps the
-/// journal's order.
+/// first, so a view batch boundary never leaves selection on a removed run.
+/// A service that journals the native removal reason supplies it, including
+/// for a replacement paged into another frame (zerus-ic13). An older service
+/// omits it; each such removal then learns which names this frame lists
+/// again: the native watch's `replaced` (zerus-uutz). The walk's key
+/// bookkeeping keeps the journal's order.
 #[derive(Default)]
 struct Frame {
     upserts: Vec<Change>,
-    removals: Vec<String>,
+    removals: Vec<(String, Option<String>)>,
     names: BTreeSet<String>,
 }
+/// The removal reasons `Change::Remove` keeps; another one is no reason.
+const REASONS: [&str; 4] = [
+    zerus_watch_protocol::reason::REPLACED,
+    zerus_watch_protocol::reason::ARCHIVED,
+    zerus_watch_protocol::reason::FORGOTTEN,
+    zerus_watch_protocol::reason::ENDED,
+];
 impl Frame {
     async fn deliver(
         &mut self,
@@ -334,17 +343,19 @@ impl Frame {
         for change in std::mem::take(&mut self.upserts) {
             row(shared, computer, source, epoch, stop, change).await?;
         }
-        for key in std::mem::take(&mut self.removals) {
-            let listed = listed.clone();
-            deliver(
-                shared,
-                computer,
-                source,
-                epoch,
-                stop,
-                CatalogValue::Removal { key, listed },
-            )
-            .await?;
+        for (key, reason) in std::mem::take(&mut self.removals) {
+            let value = match reason {
+                Some(reason) => CatalogValue::Row(Box::new(Change::Remove {
+                    computer: ComputerId::from(computer),
+                    key,
+                    reason: Some(reason),
+                })),
+                None => CatalogValue::Removal {
+                    key,
+                    listed: listed.clone(),
+                },
+            };
+            deliver(shared, computer, source, epoch, stop, value).await?;
         }
         Ok(())
     }
@@ -439,7 +450,8 @@ async fn walk(
                         frame.upserts.push(Change::Upsert { computer: ComputerId::from(computer), key: item.key.clone(), row });
                     } else {
                         if let Some(keys) = keys.as_mut() { if keys.remove(&item.key) { key_bytes -= item.key.len(); } }
-                        frame.removals.push(item.key.clone());
+                        let reason = item.reason.clone().filter(|r| REASONS.contains(&r.as_str()));
+                        frame.removals.push((item.key.clone(), reason));
                     }
                     previous = Some(item);
                 }

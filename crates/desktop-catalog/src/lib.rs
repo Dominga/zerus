@@ -99,7 +99,8 @@ pub fn totals(db: &Connection) -> Result<Totals> {
 
 pub fn migrate(db: &Connection) -> Result<()> {
     migrate_base(db)?;
-    changes::migrate(db)
+    changes::migrate(db)?;
+    changes::migrate_reasons(db)
 }
 
 /// Original catalog schema, for the service's ordered historical migrations.

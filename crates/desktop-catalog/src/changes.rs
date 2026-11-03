@@ -41,6 +41,9 @@ pub struct Change {
     pub revision: i64,
     pub key: String,
     pub json: Option<String>,
+    /// A removal's native reason (`REASONS`); upserts and reasonless removals
+    /// have none.
+    pub reason: Option<String>,
 }
 pub struct Page {
     pub items: Vec<Change>,
@@ -88,6 +91,22 @@ pub(super) fn publish(tx: &Transaction<'_>, source: &Source, old: Option<i64>) -
     Ok(())
 }
 
+/// Native watch removal reasons the journal keeps (watch `Removal.reason`).
+/// Another or missing reason stays absent, as the view's catalog reads it.
+pub const REASONS: [&str; 4] = [
+    watch::reason::REPLACED,
+    watch::reason::ARCHIVED,
+    watch::reason::FORGOTTEN,
+    watch::reason::ENDED,
+];
+/// Root schema 21, after attention retention 20. Retained removals without a
+/// reason stay reasonless: the journal never invents one for history it
+/// recorded before.
+pub fn migrate_reasons(db: &Connection) -> Result<()> {
+    db.execute_batch("ALTER TABLE desktop_catalog_changes ADD COLUMN reason TEXT;")?;
+    Ok(())
+}
+
 pub fn watermark(db: &Connection, computer: &str) -> Result<Watermark> {
     let s = state(db, computer)?.context("unknown catalog source")?;
     let view = db.query_row(
@@ -116,12 +135,15 @@ pub fn watermark(db: &Connection, computer: &str) -> Result<Watermark> {
 pub(super) fn record(tx: &Transaction<'_>, generation: i64, delta: &watch::Delta) -> Result<()> {
     // One upstream frame bounds both this temporary map and the work it admits.
     // A key appearing repeatedly in a revision has exactly its final outcome.
+    // A removal keeps its known native reason; the fixed per-item overhead in
+    // `charge` covers those few bytes.
     let mut rows = BTreeMap::new();
     for item in &delta.upsert {
-        rows.insert(item.key.clone(), Some(row_json(item)?));
+        rows.insert(item.key.clone(), (Some(row_json(item)?), None));
     }
     for item in &delta.remove {
-        rows.insert(item.key.clone(), None);
+        let reason = item.reason.as_deref().filter(|r| REASONS.contains(r));
+        rows.insert(item.key.clone(), (None, reason));
     }
     let head: i64 = tx.query_row(
         "SELECT head FROM desktop_catalog_change_views WHERE generation=?1",
@@ -131,7 +153,7 @@ pub(super) fn record(tx: &Transaction<'_>, generation: i64, delta: &watch::Delta
     let revision = head.checked_add(1).context("catalog revisions exhausted")?;
     let bytes: i64 = rows
         .iter()
-        .map(|(k, v)| charge(k, v.as_deref().unwrap_or("")))
+        .map(|(k, (v, _))| charge(k, v.as_deref().unwrap_or("")))
         .sum();
     let usage = |db: &Connection| -> Result<(i64, i64)> {
         Ok(db.query_row(
@@ -158,9 +180,9 @@ pub(super) fn record(tx: &Transaction<'_>, generation: i64, delta: &watch::Delta
         )?;
         return Ok(());
     }
-    for (key, json) in rows {
+    for (key, (json, reason)) in rows {
         let bytes = charge(&key, json.as_deref().unwrap_or(""));
-        tx.execute("INSERT INTO desktop_catalog_changes(generation,revision,key,json,bytes) VALUES(?1,?2,?3,?4,?5)", params![generation,revision,key,json,bytes])?;
+        tx.execute("INSERT INTO desktop_catalog_changes(generation,revision,key,json,bytes,reason) VALUES(?1,?2,?3,?4,?5,?6)", params![generation,revision,key,json,bytes,reason])?;
     }
     Ok(())
 }
@@ -211,7 +233,7 @@ pub fn page(db: &Connection, scope: &Scope, since: i64, cursor: Option<&Cursor>)
         "invalid catalog changes cursor"
     );
     let mut stmt = db.prepare(
-        "SELECT revision,key,json,bytes FROM desktop_catalog_changes
+        "SELECT revision,key,json,bytes,reason FROM desktop_catalog_changes
         WHERE generation=?1 AND (revision,key)>(?2,?3) AND revision<=?4
         ORDER BY revision,key LIMIT ?5",
     )?;
@@ -234,10 +256,13 @@ pub fn page(db: &Connection, scope: &Scope, since: i64, cursor: Option<&Cursor>)
             break;
         }
         bytes += charge as usize;
+        let json: Option<String> = row.get(2)?;
+        let reason: Option<String> = row.get(4)?;
         items.push(Change {
             revision: row.get(0)?,
             key: row.get(1)?,
-            json: row.get(2)?,
+            reason: reason.filter(|r| json.is_none() && REASONS.contains(&r.as_str())),
+            json,
         });
     }
     let through = c.through;

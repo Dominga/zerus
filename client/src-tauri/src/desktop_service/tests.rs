@@ -1015,6 +1015,40 @@ fn a_resumed_run_in_one_service_revision_keeps_the_native_replaced_reason() {
     });
 }
 #[test]
+fn a_journaled_native_reason_keeps_a_paged_start_fresh_replaced() {
+    // zerus-ic13: the successor is in another revision and conversation, so
+    // only the service's journaled native reason can say `replaced`.
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({"paged_fresh":true}));
+        let pump = crate::pump::Pump::default();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let observe = seen.clone();
+        pump.tap(Box::new(move |change| match change {
+            Change::Upsert { key, .. } => observe.lock().unwrap().push((key.clone(), None)),
+            Change::Remove { key, reason, .. } => observe
+                .lock()
+                .unwrap()
+                .push((key.clone(), Some(reason.clone()))),
+            _ => {}
+        }));
+        let (service, pump) = fixture.start_with_pump(true, pump, None);
+        eventually("fresh run after its paged removal", || {
+            pump.row("", "run:1-new").is_some() && pump.row("", "run:0-old").is_none()
+        })
+        .await;
+        service.join().await.unwrap();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                ("run:0-old".to_owned(), None),
+                ("run:0-old".to_owned(), Some(Some("replaced".to_owned()))),
+                ("run:1-new".to_owned(), None),
+            ]
+        );
+    });
+}
+#[test]
 fn stuck_view_callback_cannot_hold_the_quit_completion_past_its_deadline() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {

@@ -1208,7 +1208,13 @@ finally:
             self.assertEqual(db.execute('SELECT configuration FROM service').fetchone()[0], configuration)
 
     @staticmethod
-    def remove_attention_retention_schema(db):
+    def remove_catalog_reason_schema(db):
+        db.execute('ALTER TABLE desktop_catalog_changes DROP COLUMN reason')
+
+    @classmethod
+    def remove_attention_retention_schema(cls, db):
+        # Rewind the later schema-21 leaf too, never leaving it labelled older.
+        cls.remove_catalog_reason_schema(db)
         db.execute('DROP TRIGGER desktop_attention_edge_remove')
         db.execute('DROP INDEX desktop_attention_compact')
         db.execute('DROP TABLE desktop_attention_tombstones')

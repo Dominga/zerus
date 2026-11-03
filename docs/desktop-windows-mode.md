@@ -120,6 +120,22 @@ resent. After the settled receipt, the original selected `revoke-hold` child
 physically excludes Rearm/native takeover throughout the task transition.
 Its original stdin writer is not inherited by another child.
 
+The current service epoch and an optional captured notification-writer epoch
+are separate identities. If notification admission has not captured a writer,
+the actor resolves only the canonical durable writer under its original
+handoff exclusion, after checking the durable writer's service binding against
+that actor. A captured writer must still match exactly. The service epoch is
+never substituted for an absent writer; genuine no-writer cases retain the
+existing null/marker protocol. Notification admission publishes its captured
+epoch only after ledger authorization commits.
+
+An existing command and receipt keep their original UUID and writer target,
+including a receipt recorded incorrectly by an older build. They are never
+rewritten to match a later writer. The hold continues to require exact receipt
+equality. A refused readiness frame reports a closed decline code, or a static
+receipt field name when a ready frame differs; it does not expose child text
+or treat a diagnostic as authority.
+
 Only the retained instance's `IRunningTask::Stop` is called. The helper requires
 the same service process handle to signal actual exit and the original instance
 GUID to disappear. It never stops all instances, selects a process by name or

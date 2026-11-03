@@ -341,38 +341,119 @@ fn query_scoped(
     receipt(location, &command, &record)
 }
 
+/// Resolve an uncaptured writer only while the original physical exclusion
+/// is held. Serve identity and writer identity are deliberately separate.
+fn runtime_writer_target(
+    location: &Location,
+    store: &Store,
+    serve_epoch: &str,
+    captured_writer_epoch: Option<&str>,
+    lock: &HandoffLock,
+) -> Result<Option<String>> {
+    lock.verify(location)?;
+    ensure!(canonical_id(serve_epoch), Declined("service_epoch_changed"));
+    let (configuration, service): (String, String) = store.db.query_row(
+        "SELECT substr(configuration,1,65),substr(epoch,1,37) FROM service WHERE id=1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    ensure!(
+        configuration == location.configuration,
+        Declined("configuration_changed")
+    );
+    let (writer, bound_service): (Option<String>, String) = store.db.query_row(
+        "SELECT substr(epoch,1,37),substr(service_epoch,1,37) FROM desktop_writer WHERE id=1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    ensure!(
+        service == serve_epoch && bound_service == serve_epoch,
+        Declined("service_epoch_changed")
+    );
+    ensure!(
+        writer.as_deref().is_none_or(canonical_id),
+        Declined("writer_epoch_changed")
+    );
+    if let Some(captured) = captured_writer_epoch {
+        ensure!(
+            canonical_id(captured) && writer.as_deref() == Some(captured),
+            Declined("writer_epoch_changed")
+        );
+    }
+    Ok(captured_writer_epoch.map(str::to_owned).or(writer))
+}
+
 pub(super) fn request_with_runtime(
     location: &Location,
     store: &mut Store,
     value: &Value,
-    runtime_epoch: &str,
+    serve_epoch: &str,
+    captured_writer_epoch: Option<&str>,
     held: Option<&HandoffLock>,
     drain: impl FnOnce(&mut Store) -> Result<()>,
 ) -> Value {
-    let result = if value["op"] == "revoke_status" {
+    // None means resolution failed; Some(None) is a verified no-writer case.
+    let mut original_target: Option<Option<String>> = None;
+    let result = (|| -> Result<Value> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Query {
             op: String,
             request_id: String,
         }
-        match serde_json::from_value::<Query>(value.clone()) {
-            Ok(query) if query.op == "revoke_status" && canonical_id(&query.request_id) => {
-                query_scoped(
-                    location,
-                    store,
-                    &query.request_id,
-                    Some(runtime_epoch),
-                    held,
-                )
-            }
-            _ => Err(anyhow::anyhow!("invalid revoke query")),
+        let query = if value["op"] == "revoke_status" {
+            let query: Query = serde_json::from_value(value.clone())?;
+            ensure!(
+                query.op == "revoke_status" && canonical_id(&query.request_id),
+                "invalid revoke query"
+            );
+            Some(query)
+        } else {
+            None
+        };
+        let command = if query.is_none() {
+            let command: Command = serde_json::from_value(value.clone())?;
+            command.validate()?;
+            Some(command)
+        } else {
+            None
+        };
+        let acquired = if held.is_none() {
+            Some(step(location.handoff_lock(), "handoff_unavailable")?)
+        } else {
+            None
+        };
+        let lock = held
+            .or(acquired.as_ref())
+            .context("missing original handoff lock")?;
+        let target =
+            runtime_writer_target(location, store, serve_epoch, captured_writer_epoch, lock)?;
+        // Preserve the existing marker fallback only for a genuine no-writer
+        // case. This is used for error bookkeeping, never to rebind a receipt.
+        original_target = Some(match &target {
+            Some(writer) => Some(writer.clone()),
+            None => step(handoff::marker(location, lock), "unsupported_handoff")?
+                .map(|m| m.writer_epoch),
+        });
+        if let Some(query) = query {
+            query_scoped(
+                location,
+                store,
+                &query.request_id,
+                target.as_deref(),
+                Some(lock),
+            )
+        } else {
+            execute_scoped(
+                location,
+                store,
+                &command.expect("validated command"),
+                Some(lock),
+                target.as_deref(),
+                drain,
+            )
         }
-    } else if let Ok(command) = serde_json::from_value::<Command>(value.clone()) {
-        execute_scoped(location, store, &command, held, Some(runtime_epoch), drain)
-    } else {
-        Err(anyhow::anyhow!("invalid revoke request"))
-    };
+    })();
     result.unwrap_or_else(|error| {
         let accepted = serde_json::from_value::<Command>(value.clone())
             .ok()
@@ -383,7 +464,9 @@ pub(super) fn request_with_runtime(
                     .flatten()
                     .map(|record| {
                         record.fingerprint == command.fingerprint(location)
-                            && record.writer_epoch.as_deref() == Some(runtime_epoch)
+                            && original_target
+                                .as_ref()
+                                .is_some_and(|target| &record.writer_epoch == target)
                     })
             })
             .unwrap_or(false);
@@ -696,6 +779,112 @@ mod tests {
     }
 
     #[test]
+    fn runtime_capture_and_current_service_are_checked_before_reservation() {
+        let mut f = Fixture::new();
+        let writer = uuid::Uuid::new_v4().to_string();
+        zerus_desktop_ledger::authorize(&mut f.store.db, &writer, &f.epoch).unwrap();
+        let other = uuid::Uuid::new_v4().to_string();
+        for (service, captured, code) in [
+            (f.epoch.clone(), Some(other.clone()), "writer_epoch_changed"),
+            (other, None, "service_epoch_changed"),
+        ] {
+            let command = f.command();
+            let result = request_with_runtime(
+                &f.location,
+                &mut f.store,
+                &payload(&command).unwrap(),
+                &service,
+                captured.as_deref(),
+                None,
+                |_| panic!("refused target cannot drain"),
+            );
+            assert_eq!(result["code"], code);
+            assert!(!result["accepted"].as_bool().unwrap());
+            assert!(record(&f.store, command.id()).unwrap().is_none());
+        }
+        f.store
+            .db
+            .execute(
+                "UPDATE desktop_writer SET service_epoch=?1 WHERE id=1",
+                [uuid::Uuid::new_v4().to_string()],
+            )
+            .unwrap();
+        let command = f.command();
+        let result = request_with_runtime(
+            &f.location,
+            &mut f.store,
+            &payload(&command).unwrap(),
+            &f.epoch,
+            None,
+            None,
+            |_| panic!("another service binding cannot drain"),
+        );
+        assert_eq!(result["code"], "service_epoch_changed");
+        assert!(record(&f.store, command.id()).unwrap().is_none());
+    }
+
+    #[test]
+    fn an_old_incorrect_service_epoch_receipt_is_never_rewritten_or_upgraded() {
+        let mut f = Fixture::new();
+        let writer = uuid::Uuid::new_v4().to_string();
+        zerus_desktop_ledger::authorize(&mut f.store.db, &writer, &f.epoch).unwrap();
+        let command = f.command();
+        // Historical pre-fix receipt: service UUID was used as writer UUID.
+        let old = execute_scoped(
+            &f.location,
+            &mut f.store,
+            &command,
+            None,
+            Some(&f.epoch),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let before = record(&f.store, command.id()).unwrap().unwrap().result;
+        assert_ne!(old["writer_epoch"], writer);
+        let result = request_with_runtime(
+            &f.location,
+            &mut f.store,
+            &payload(&command).unwrap(),
+            &f.epoch,
+            None,
+            None,
+            |_| panic!("historical command cannot drain another target"),
+        );
+        assert_eq!(result["code"], "writer_epoch_changed");
+        assert_eq!(
+            record(&f.store, command.id()).unwrap().unwrap().result,
+            before
+        );
+    }
+
+    #[test]
+    fn runtime_without_a_writer_preserves_the_null_and_marker_protocols() {
+        for imported in [false, true] {
+            let mut f = Fixture::new();
+            let marker = imported.then(|| f.marker());
+            let command = f.command();
+            let result = request_with_runtime(
+                &f.location,
+                &mut f.store,
+                &payload(&command).unwrap(),
+                &f.epoch,
+                None,
+                None,
+                |_| Ok(()),
+            );
+            assert_eq!(result["checkpointed"], true, "{result}");
+            assert_eq!(
+                result["writer_epoch"],
+                marker
+                    .map(|m| Value::String(m.writer_epoch))
+                    .unwrap_or(Value::Null)
+            );
+            let held = hold::acquire_for_test(&f.location, command.id()).unwrap();
+            drop(held);
+        }
+    }
+
+    #[test]
     fn runtime_query_keeps_the_closed_request_shape() {
         let mut f = Fixture::new();
         let id = uuid::Uuid::new_v4().to_string();
@@ -705,6 +894,7 @@ mod tests {
             &mut f.store,
             &json!({"op":"revoke_status","request_id":id,"extra":true}),
             &epoch,
+            Some(&epoch),
             None,
             |_| panic!("query cannot drain"),
         );

@@ -1028,12 +1028,13 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                 Some("revoke" | "revoke_status")
                             ) {
                                 let handoff = runtime.handoff();
-                                let revoke_epoch = runtime.revocation_epoch(&epoch);
+                                let captured_writer = runtime.captured_writer_epoch();
                                 let result = revoke::request_with_runtime(
                                     &location,
                                     &mut store,
                                     request_value,
-                                    &revoke_epoch,
+                                    &epoch,
+                                    captured_writer.as_deref(),
                                     handoff.as_deref(),
                                     |store| runtime.drain(store, Duration::from_millis(750)),
                                 );

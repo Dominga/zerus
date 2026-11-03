@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 
 pub(super) const CAP: usize = 64 * 1024;
 
+pub(super) mod hold;
 pub(super) mod mode;
 pub(super) mod running;
 

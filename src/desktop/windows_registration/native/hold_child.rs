@@ -216,7 +216,8 @@ impl Hold {
                     frame["abi"] == HOLD_ABI
                         && frame["held"] == true
                         && frame["receipt"] == value.receipt,
-                    "Original hold readiness does not match the settled rollback."
+                    "Original hold readiness does not match the settled rollback ({}).",
+                    policy::hold::readiness_difference(&frame, &value.receipt)
                 );
                 value.check()?;
                 return Ok(value);

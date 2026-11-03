@@ -1137,6 +1137,31 @@ mod tests {
     }
 
     #[test]
+    fn a_skipped_navigation_frame_never_submits() {
+        let home = tempfile::tempdir().unwrap();
+        let record = record(home.path());
+        for mode in ["manual", "yolo"] {
+            let event = request(mode);
+            let card = only(&record, &event);
+            let mut io = docked_delivery(&event, 0, 0);
+            io.screens[1] = docked_screen(&event, 2, 78);
+            assert!(drive(
+                &mut io,
+                &mut || Ok(()),
+                &event["request"],
+                &card,
+                &answer("auto")
+            )
+            .is_err());
+            assert_eq!(
+                io.keys,
+                ["Down"],
+                "a skipped choice must stop before the next key"
+            );
+        }
+    }
+
+    #[test]
     fn fullscreen_delivery_checks_every_description_before_the_submission_key() {
         let home = tempfile::tempdir().unwrap();
         let record = record(home.path());

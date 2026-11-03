@@ -28,6 +28,7 @@ fn database_file(path: &std::path::Path) -> Result<std::fs::File> {
         use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
         platform::refuse_link(&mut options).share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
     }
+    #[cfg(windows)]
     platform::never_block(&mut options);
     let file = options.open(path)?;
     ensure!(
@@ -429,6 +430,17 @@ mod tests {
         assert!(f.hold().is_err());
         std::fs::remove_file(alias).unwrap();
         assert!(f.hold().is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verification_open_refuses_a_symlink_to_an_otherwise_valid_database() {
+        let f = Fixture::new();
+        let path = f.location.root.join("state.sqlite3");
+        assert!(database_file(&path).is_ok());
+        let alias = f.location.root.join("database-symlink");
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        assert!(database_file(&alias).is_err());
     }
 
     #[test]

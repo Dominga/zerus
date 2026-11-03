@@ -187,14 +187,17 @@ pub fn private_open(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
     options.mode(0o600)
 }
 /// Refuse a symbolic link as the final component and never block on a FIFO.
+/// Sets both custom flags together; separate setters replace, rather than add flags.
 pub fn no_follow(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
     options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
 }
 /// Refuse a symbolic link as the final component.
+/// Replaces custom flags. Use `no_follow` when nonblocking mode is also required.
 pub fn refuse_link(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
     options.custom_flags(libc::O_NOFOLLOW)
 }
 /// Never block on a FIFO.
+/// Replaces custom flags. Use `no_follow` when final links must also be refused.
 pub fn never_block(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
     options.custom_flags(libc::O_NONBLOCK)
 }

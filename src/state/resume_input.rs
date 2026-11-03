@@ -193,6 +193,13 @@ fn history_directory(path: &Path) -> Result<fs::File> {
     Ok(file)
 }
 
+#[cfg(all(unix, test))]
+fn history_candidate_options() -> fs::OpenOptions {
+    let mut options = fs::OpenOptions::new();
+    crate::platform::no_follow(&mut options);
+    options
+}
+
 #[cfg(any(windows, test))]
 struct ForkScan<'a, H, E> {
     record: &'a Value,
@@ -282,9 +289,14 @@ where
             return Err("Fork history candidate escaped the selected account".into());
         }
         let path = canonical.as_path();
+        #[cfg(unix)]
+        let mut options = history_candidate_options();
+        #[cfg(windows)]
         let mut options = fs::OpenOptions::new();
         options.read(true);
+        #[cfg(windows)]
         crate::platform::refuse_link(&mut options);
+        #[cfg(windows)]
         crate::platform::never_block(&mut options);
         #[cfg(windows)]
         {
@@ -933,6 +945,26 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(!queried);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fork_history_verification_open_refuses_a_candidate_replaced_by_a_symlink() {
+        use std::os::{fd::AsRawFd, unix::fs::symlink};
+        let fixture = ForkHistory::new();
+        let canonical = crate::platform::canonical(&fixture.rollout).unwrap();
+        assert!(canonical.starts_with(&fixture.sessions));
+        let mut options = history_candidate_options();
+        options.read(true);
+        let file = options.open(&canonical).unwrap();
+        let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0 && flags & libc::O_NONBLOCK != 0);
+        drop(file);
+        // Replace the already checked path before the actual verification open.
+        let target = fixture.temporary.path().join("outside-history.jsonl");
+        fs::rename(&fixture.rollout, &target).unwrap();
+        symlink(&target, &fixture.rollout).unwrap();
+        assert!(options.open(&canonical).is_err());
     }
 
     #[cfg(unix)]

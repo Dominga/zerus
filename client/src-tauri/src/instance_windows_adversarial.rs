@@ -48,12 +48,8 @@ fn native_lower_integrity_server_never_forwards_or_claims_a_gui() {
     );
     let own = windows::own_facts().unwrap();
     assert!(own.integrity >= 0x2000);
-    let image = OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ)
-        .open(std::env::current_exe().unwrap())
-        .unwrap();
-    let image_id = windows::file_id(&image).unwrap();
+    let image = windows::image::PinnedImage::open(&std::env::current_exe().unwrap()).unwrap();
+    let image_id = image.id();
     for (low, mode) in [
         (false, "reply"),
         (true, "reply"),

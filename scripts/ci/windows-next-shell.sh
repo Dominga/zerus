@@ -30,6 +30,7 @@ for selected in actions::read_barrier:: desktop_service::cache::tests desktop_se
     cargo test --locked --manifest-path client/src-tauri/Cargo.toml --lib "$selected" || native_status=1
 done
 bash scripts/ci/windows-frontend-adversary.sh frontend || native_status=1
+bash scripts/ci/windows-frontend-adversary.sh frontend-replay || native_status=1
 cargo test --locked --manifest-path client/src-tauri/Cargo.toml --lib --no-run --message-format=json > "$CARGO_TARGET_DIR/windows-native-tests.jsonl"
 export HGS_TEST_BIN
 HGS_TEST_BIN=$(cygpath -w "$CARGO_TARGET_DIR/debug/hgs.exe")

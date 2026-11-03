@@ -19,11 +19,12 @@ case "$1" in
         args=(--bin hgs)
         selected=desktop::notifications::activation::tests::native_refused_frontend_keeps_the_original_launch_unspent
         ;;
-    frontend)
+    frontend|frontend-replay)
         args=(--manifest-path client/src-tauri/Cargo.toml --lib)
+        if [ "$1" = frontend-replay ]; then args+=(--no-default-features); fi
         selected=instance::adversarial::native_lower_integrity_server_never_forwards_or_claims_a_gui
         ;;
-    *) echo 'usage: windows-frontend-adversary.sh core|actor|frontend' >&2; exit 2 ;;
+    *) echo 'usage: windows-frontend-adversary.sh core|actor|frontend|frontend-replay' >&2; exit 2 ;;
 esac
 mkdir -p artifacts/test-results
 log="artifacts/test-results/windows-frontend-adversary-$1.log"

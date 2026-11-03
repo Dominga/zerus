@@ -4,10 +4,7 @@
 mod native_peer;
 use native_peer::{client, marker, sid_text, Child, DONE};
 use std::{
-    env,
-    fs::OpenOptions,
-    io,
-    os::windows::fs::OpenOptionsExt,
+    env, io,
     os::windows::io::AsRawHandle,
     panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     ptr, thread,
@@ -15,7 +12,7 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::{ERROR_ACCESS_DENIED, ERROR_NO_DATA, ERROR_PIPE_BUSY},
-    Storage::FileSystem::{ReadFile, WriteFile, FILE_SHARE_READ},
+    Storage::FileSystem::{ReadFile, WriteFile},
     System::Pipes::{GetNamedPipeServerProcessId, SetNamedPipeHandleState, PIPE_NOWAIT},
 };
 use zerus_client_core::desktop::{self, server_trust::Verdict, windows, Hello, Observation};
@@ -107,12 +104,8 @@ fn hosted_same_user_frontend_impostors_are_unknown() {
         env::var("RUNNER_ENVIRONMENT").as_deref(),
         Ok("github-hosted")
     );
-    let image = OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ)
-        .open(env::current_exe().unwrap())
-        .unwrap();
-    let image_id = windows::file_id(&image).unwrap();
+    let image = windows::image::PinnedImage::open(&env::current_exe().unwrap()).unwrap();
+    let image_id = image.id();
     let own = windows::own_facts().unwrap();
     assert!(own.integrity >= 0x2000);
     let home = env::temp_dir().join(format!("zerus-native-peer-{}", uuid::Uuid::new_v4()));
@@ -137,7 +130,15 @@ fn hosted_same_user_frontend_impostors_are_unknown() {
             for (index, name) in names.iter().enumerate() {
                 if mode == "reply" {
                     let connection = client(name).unwrap();
-                    let verified = windows::verify_server(&connection, image_id);
+                    assert!(matches!(
+                        windows::verify_server_until(&connection, &image, Instant::now()),
+                        windows::Server::Unknown
+                    ));
+                    let verified = windows::verify_server_until(
+                        &connection,
+                        &image,
+                        Instant::now() + desktop::PROBE_WAIT,
+                    );
                     if low {
                         assert!(matches!(
                             verified,
@@ -169,7 +170,7 @@ fn hosted_same_user_frontend_impostors_are_unknown() {
                         &uuid::Uuid::new_v4().to_string(),
                         &"a".repeat(64),
                         Instant::now() + desktop::PROBE_WAIT,
-                        image_id,
+                        &image,
                     );
                     if low {
                         assert!(

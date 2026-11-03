@@ -22,11 +22,11 @@ use windows_sys::Win32::{
     System::{Pipes::*, Threading::*},
 };
 
-#[cfg(all(test, feature = "live"))]
+#[cfg(test)]
 use adversarial::allow_foreground as AllowSetForegroundWindow;
-#[cfg(not(all(test, feature = "live")))]
+#[cfg(not(test))]
 use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
-#[cfg(all(test, feature = "live"))]
+#[cfg(test)]
 #[path = "instance_windows_adversarial.rs"]
 mod adversarial;
 

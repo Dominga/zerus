@@ -426,23 +426,15 @@ mod native_peer;
 #[test]
 #[ignore = "mandatory hosted native peer; CI invokes only this exact parent"]
 fn native_refused_frontend_keeps_the_original_launch_unspent() {
-    use std::{
-        os::windows::fs::OpenOptionsExt,
-        panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
-    };
-    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+    use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
     use zerus_client_core::desktop::windows;
     assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
     assert_eq!(
         std::env::var("RUNNER_ENVIRONMENT").as_deref(),
         Ok("github-hosted")
     );
-    let image = std::fs::OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ)
-        .open(std::env::current_exe().unwrap())
-        .unwrap();
-    let image_id = windows::file_id(&image).unwrap();
+    let image = windows::image::PinnedImage::open(&std::env::current_exe().unwrap()).unwrap();
+    let image_id = image.id();
     let own = windows::own_facts().unwrap();
     for mode in ["reply", "denied", "busy"] {
         let mut f = Fixture::new();
@@ -465,7 +457,7 @@ fn native_refused_frontend_keeps_the_original_launch_unspent() {
                 &id(),
                 &"a".repeat(64),
                 Instant::now() + desktop::PROBE_WAIT,
-                image_id,
+                &image,
             );
             assert!(matches!(observation, desktop::Observation::Unknown));
             // This is a real pending delivered click and a valid model grant,

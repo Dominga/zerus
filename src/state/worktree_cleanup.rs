@@ -1115,6 +1115,14 @@ fn leftover(
             "The worktree list was incomplete; Git may still track this folder.",
         ));
     }
+    // An incomplete inventory is unknown use, never an empty set of sessions.
+    // Keep the same completeness gate as ordinary worktree assessment.
+    if !context.bindings_complete {
+        reasons.push(reason(
+            "sessions_unavailable",
+            "Saved sessions could not be checked. Review again before removal.",
+        ));
+    }
     occupants(&path, context, &mut row, &mut reasons);
     let mut entries = 0;
     let (bytes, complete, manifest) =
@@ -2399,7 +2407,7 @@ mod tests {
         let mut row = json!({"fingerprint":"checkout", "process_fingerprint":"available", "verdict":"blocked"});
         let proof = process_consent(&row, common, 1000);
         row.as_object_mut().unwrap().remove("process_fingerprint");
-        for code in ["processes", "sessions", "processes_unavailable", "status_unavailable", "locked"] {
+        for code in ["processes", "sessions", "sessions_unavailable", "processes_unavailable", "status_unavailable", "locked"] {
             row["reasons"] = json!([{"code":code}]);
             assert!(!valid_process_consent(&proof, &row, common, 1000));
         }

@@ -933,6 +933,67 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         left=self.leftover(tree);self.assertIn('nested_repository',codes(left['reasons']));self.assertFalse(left['deletable'])
         self.assertNotEqual(self.delete(tree,left['fingerprint']).returncode,0)
         self.assertTrue((nested/'.git').is_dir());self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
+    def test_leftover_deletion_refuses_an_incomplete_saved_binding_inventory(self):
+        for failure in ('unreadable-file','malformed-record','unreadable-directory'):
+            with self.subTest(failure=failure):
+                tree,row,_=self.partial('binding-'+failure)
+                name='codex/protected-'+failure;self.binding(name,tree)
+                known=self.root/'state'/(hashlib.sha256(name.encode()).hexdigest()+'.json')
+                self.assertIn('sessions',codes(self.leftover(tree)['reasons']))
+                unrelated='codex/unrelated-'+failure;self.binding(unrelated,self.root)
+                bad=self.root/'state'/(hashlib.sha256(unrelated.encode()).hexdigest()+'.json')
+                original=bad.read_text()
+                directory=self.root/'state'/'bindings';directory.mkdir(exist_ok=True)
+                if failure=='unreadable-file':bad.chmod(0)
+                elif failure=='malformed-record':bad.write_text('{invalid')
+                else:directory.chmod(0)
+                try:
+                    current=self.leftover(tree)
+                    # Use the fresh proof: refusal cannot rely on an old one
+                    # becoming stale, nor on the known record being unreadable.
+                    result=self.delete(tree,current['fingerprint'])
+                    self.assertNotEqual(result.returncode,0,result.stdout)
+                    self.assertIn('Saved sessions could not be checked',result.stderr)
+                    self.assertEqual(tuple(json.loads(result.stdout)[key] for key in ('operation','outcome_version','status')),('worktree_leftover_delete',1,'kept'))
+                    self.assertFalse(current['deletable'])
+                    self.assertIn('sessions_unavailable',codes(current['reasons']))
+                    self.assertFalse(current.get('process_fingerprint'))
+                    self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
+                    self.assertIn(row['branch'],self.git('-C',str(self.repo),'branch','--list',row['branch']))
+                finally:
+                    bad.chmod(0o600);bad.write_text(original);directory.chmod(0o700)
+                # A repaired inventory still protects the real saved reference.
+                repaired=self.leftover(tree)
+                self.assertIn('sessions',codes(repaired['reasons']));self.assertFalse(repaired['deletable'])
+                known.unlink();bad.unlink()
+                ready=self.leftover(tree);self.assertTrue(ready['deletable'])
+                allowed=self.delete(tree,ready['fingerprint']);self.assertEqual(allowed.returncode,0,allowed.stderr)
+                self.assertFalse(tree.exists())
+
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux protected-process review')
+    def test_process_only_consent_never_overrides_an_unreadable_binding_inventory(self):
+        tree,_,_=self.partial('binding-consent')
+        child=subprocess.Popen([sys.executable,'-I','-c',
+            'import ctypes,time; assert ctypes.CDLL(None).prctl(4,0,0,0,0)==0; print("ready",flush=True); time.sleep(90)'],
+            cwd=self.root,stdout=subprocess.PIPE,text=True)
+        self.addCleanup(child.stdout.close);self.addCleanup(child.wait);self.addCleanup(lambda:child.poll() is None and child.kill())
+        self.assertEqual(child.stdout.readline().strip(),'ready')
+        before=self.leftover(tree)
+        self.assertEqual(codes(before['reasons']),['processes_unavailable'])
+        self.assertTrue(before['process_fingerprint'])
+        name='codex/unreadable-consent';self.binding(name,self.root)
+        bad=self.root/'state'/(hashlib.sha256(name.encode()).hexdigest()+'.json');bad.chmod(0)
+        try:
+            current=self.leftover(tree)
+            result=self.delete(tree,current['fingerprint'],extra=('--process-fingerprint',before['process_fingerprint']))
+            self.assertNotEqual(result.returncode,0,result.stdout)
+            self.assertEqual(tuple(json.loads(result.stdout)[key] for key in ('operation','outcome_version','status')),('worktree_leftover_delete',1,'kept'))
+            self.assertIn('sessions_unavailable',codes(current['reasons']))
+            self.assertIn('processes_unavailable',codes(current['reasons']))
+            self.assertFalse(current.get('process_fingerprint'))
+            self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
+        finally:bad.chmod(0o600)
+
     def test_a_stopped_deletion_keeps_its_record_and_is_never_retried(self):
         tree,_,_=self.partial('stopped');left=self.leftover(tree)
         parent=tree.parent;mode=parent.stat().st_mode;parent.chmod(0o555);self.addCleanup(lambda:parent.chmod(mode))

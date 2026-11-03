@@ -145,6 +145,31 @@ fn unknown_without_an_expected_record_cannot_invent_one_later() {
         assert!(j.save(fabricated, Some(&unknown.sha256)).is_err());
     }
     assert_eq!(j.load().unwrap().unwrap().sha256, unknown.sha256);
+    let mut unsent = unknown.record;
+    unsent.phase = Phase::BeforeRecord;
+    assert!(j.save(unsent, Some(&unknown.sha256)).is_err());
+}
+#[test]
+fn a_confirmed_before_record_failure_keeps_its_identity_without_inventing_a_receipt() {
+    let s = Scratch::new();
+    let j = s.journal();
+    let attempted = update(&j, s.initial(), |r| {
+        r.phase = Phase::Attempted;
+        r.attempt = 1;
+    });
+    let before = update(&j, attempted, |r| r.phase = Phase::BeforeRecord);
+    assert!(before.record.expected.is_none());
+    assert_eq!(j.load().unwrap().unwrap().record, before.record);
+    let original = before.record.clone();
+    let retried = update(&j, before, |r| {
+        r.phase = Phase::Attempted;
+        r.attempt += 1;
+    });
+    assert_eq!(retried.record.import_id, original.import_id);
+    assert_eq!(retried.record.source, original.source);
+    assert_eq!(retried.record.configuration, original.configuration);
+    assert_eq!(retried.record.created_at, original.created_at);
+    assert!(retried.record.expected.is_none());
 }
 #[cfg(unix)]
 #[test]

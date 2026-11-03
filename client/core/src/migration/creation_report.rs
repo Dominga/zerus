@@ -2,10 +2,7 @@
 //! only; reuses desktop-import-v1 and never carries Qt/Settings hashes, worker
 //! authority, consent or a mutable creation operation.
 use super::{
-    journal::{Phase, MAX_ATTEMPTS},
-    preload::Reference,
-    transport::StagedReceipt,
-    SourceError, SourceResult,
+    journal::MAX_ATTEMPTS, preload::Reference, transport::StagedReceipt, SourceError, SourceResult,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -13,6 +10,19 @@ use zerus_desktop_migration::{sha256, Evidence};
 pub const SCOPE: &str = "next-creations-preload-v1";
 const BYTES: usize = 64 << 10;
 const FILE: &str = "creations-retained-import-v1.json";
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    Reserved,
+    Attempted,
+    /// This attempt's encoding callback failed before any final record write.
+    /// Distinct from a child receipt and never inferred from missing output.
+    BeforeRecord,
+    NotCommitted,
+    Published,
+    Unknown,
+    Quarantined,
+}
 fn digest(s: &str) -> bool {
     s.len() == 64
         && s.bytes()
@@ -91,11 +101,14 @@ impl Record {
         }
         match (old.phase, self.phase) {
             (Phase::Reserved, Phase::Attempted) => self.attempt == 1,
-            (Phase::NotCommitted, Phase::Attempted) => self.attempt == old.attempt + 1,
+            (Phase::NotCommitted | Phase::BeforeRecord, Phase::Attempted) => {
+                self.attempt == old.attempt + 1
+            }
             (Phase::Reserved, Phase::Reserved | Phase::Quarantined)
             | (
                 Phase::Attempted,
                 Phase::Attempted
+                | Phase::BeforeRecord
                 | Phase::NotCommitted
                 | Phase::Published
                 | Phase::Unknown
@@ -103,6 +116,7 @@ impl Record {
             )
             | (Phase::Unknown, Phase::Unknown | Phase::Published)
             | (Phase::NotCommitted, Phase::NotCommitted | Phase::Quarantined)
+            | (Phase::BeforeRecord, Phase::BeforeRecord | Phase::Quarantined)
             | (Phase::Published, Phase::Published)
             | (Phase::Quarantined, Phase::Quarantined) => self.attempt == old.attempt,
             _ => false,

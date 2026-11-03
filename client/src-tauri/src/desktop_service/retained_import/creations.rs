@@ -3,11 +3,14 @@
 use super::*;
 use zerus_client_core::migration::{
     creation_report::{
-        Journal as CreationJournal, Record as CreationRecord, Stored as CreationStored,
+        Journal as CreationJournal, Phase, Record as CreationRecord, Stored as CreationStored,
         SCOPE as CREATION_SCOPE,
     },
     preload::Prepared,
 };
+#[cfg(test)]
+type BeforeRecordHook =
+    Box<dyn FnOnce(&migration::transport::StagedReceipt) -> Box<dyn Send> + Send>;
 
 pub(super) struct CreationState {
     stored: Option<CreationStored>,
@@ -16,6 +19,8 @@ pub(super) struct CreationState {
     explicit: bool,
     not_applicable: bool,
     code: &'static str,
+    #[cfg(test)]
+    before_record: Option<BeforeRecordHook>,
 }
 impl Default for CreationState {
     fn default() -> Self {
@@ -26,6 +31,8 @@ impl Default for CreationState {
             explicit: false,
             not_applicable: false,
             code: "creations_import_waiting",
+            #[cfg(test)]
+            before_record: None,
         }
     }
 }
@@ -136,6 +143,9 @@ impl Report {
             if record.phase == Phase::NotCommitted && !explicit {
                 return Err("creations_import_handoff_busy");
             }
+            if record.phase == Phase::BeforeRecord && !explicit {
+                return Err("creations_import_before_record");
+            }
         }
         let snapshot = match self
             .inputs
@@ -210,7 +220,7 @@ impl Report {
         if publisher.configuration() != configuration {
             return Err("creations_import_configuration");
         }
-        let attempt = self
+        let attempted = self
             .save_creation(&journal, |r| {
                 if r.attempt == MAX_ATTEMPTS {
                     return Err(SourceError::TooLarge);
@@ -219,29 +229,70 @@ impl Report {
                 r.phase = Phase::Attempted;
                 Ok(())
             })
-            .map_err(|_| "creations_import_record_unavailable")?
-            .attempt;
+            .map_err(|_| "creations_import_record_unavailable")?;
+        let attempt = attempted.attempt;
         let report = self.clone();
         let save = journal.clone();
+        let failed_preparation = Arc::new(Mutex::new(None));
+        let failed = failed_preparation.clone();
         let result = publisher.publish_with_receipt(bundle, move |expected| {
-            if stop.load(Ordering::Acquire) {
-                return Err(SourceError::SourceUnreadable);
+            let prepared = (|| {
+                if stop.load(Ordering::Acquire) {
+                    return Err(SourceError::SourceUnreadable);
+                }
+                if snapshot.reference()? != reference {
+                    return Err(SourceError::SourceChanged);
+                }
+                #[cfg(test)]
+                let hook = report.creation_state().before_record.take();
+                #[cfg(test)]
+                let _held = hook.map(|hook| hook(expected));
+                report
+                    .save_creation(&save, |r| {
+                        if r.attempt != attempt {
+                            return Err(SourceError::SourceChanged);
+                        }
+                        r.expected = Some(expected.clone());
+                        Ok(())
+                    })
+                    .map(|_| ())
+            })();
+            if prepared == Err(SourceError::SourceUnreadable) {
+                *failed.lock().unwrap_or_else(PoisonError::into_inner) = Some(expected.clone());
             }
-            if snapshot.reference()? != reference {
-                return Err(SourceError::SourceChanged);
-            }
-            report
-                .save_creation(&save, |r| {
-                    if r.attempt != attempt {
-                        return Err(SourceError::SourceChanged);
-                    }
-                    r.expected = Some(expected.clone());
-                    Ok(())
-                })
-                .map(|_| ())
+            prepared
         });
         let (phase, code) = match result {
             Ok(_) => (Phase::Published, None),
+            Err(e)
+                if e.reason == PublishError::Source(SourceError::SourceUnreadable)
+                    && failed_preparation
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .is_some() =>
+            {
+                // encode returned this exact callback error BEFORE its final
+                // frame. This is not inferred from an absent/lost child reply.
+                let expected = failed_preparation
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone()
+                    .unwrap();
+                let current = journal
+                    .load()
+                    .map_err(|_| "creations_import_record_unavailable")?
+                    .ok_or("creations_import_record_unavailable")?;
+                let mut recorded = attempted.clone();
+                recorded.expected = Some(expected);
+                // A failed write/readback may have persisted the expected
+                // receipt. Reconcile only this SAME attempted metadata, never
+                // an unknown, different attempt, identity or payload.
+                if current.record != attempted && current.record != recorded {
+                    return Err("creations_import_record_unavailable");
+                }
+                self.creation_state().stored = Some(current);
+                (Phase::BeforeRecord, Some("creations_import_before_record"))
+            }
             Err(e) if e.reason == PublishError::HandoffBusy => {
                 (Phase::NotCommitted, Some("creations_import_handoff_busy"))
             }

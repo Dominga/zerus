@@ -664,6 +664,15 @@ elif args == ['desktop', 'catalog-relay', '--json']:
             desktop_request()
         response = json.loads(captured.getvalue())
         print(json.dumps({'abi': 'desktop-catalog-relay-v1', 'request_id': str(uuid.uuid4()) if fault == 'identity' else value['request_id'], 'value': response}), flush=True)
+        pause = int(config.get('recovered_response_pause_ms', 0))
+        assert 0 <= pause <= 2000
+        if pause and value['op'] == 'catalog_page' and response.get('start_revision') == '5':
+            # The baseline reply is flushed, but the final catch-up request
+            # has not been consumed by this private relay yet.
+            (root / 'recovered-baseline-flushed').touch()
+            until = time.monotonic() + pause / 1000
+            while not (root / 'release-recovered-response').exists() and time.monotonic() < until:
+                time.sleep(.005)
     relay_event('stdin-eof')
     # Every reply was flushed above. This private proxy has no shutdown work;
     # don't put interpreter finalizers inside the real child's bounded join.

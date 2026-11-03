@@ -6,6 +6,12 @@ use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static STARTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static REFUSE_START: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn image_proof(identity: crate::platform::FileIdentity) -> String {
     format!(
         "{}:{}:{}:{}",
@@ -37,7 +43,15 @@ pub(super) fn run(
     directory: &directory::Directory,
     args: &[&str],
     seconds: u64,
+    control: Option<&Control<'_>>,
 ) -> Result<Vec<u8>> {
+    #[cfg(test)]
+    {
+        STARTS.with(|count| count.set(count.get() + 1));
+        if REFUSE_START.with(std::cell::Cell::get) {
+            return Err("fixture Git worker entry".into());
+        }
+    }
     #[cfg(target_os = "linux")]
     let executable = PathBuf::from("/proc/self/exe");
     #[cfg(not(target_os = "linux"))]
@@ -60,18 +74,31 @@ pub(super) fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     directory.anchor(&mut command)?;
-    let mut child = crate::platform::spawn_in_turn(&mut command)
-        .map_err(|e| format!("Cannot start Git worker: {e}"))?;
+    let mut child = {
+        let _turn = crate::platform::spawn_turn();
+        if let Some(control) = control {
+            // Final hook: only this exact admitted lock survives exec. The Git
+            // deadline owner and its descendants retain it after service exit.
+            control
+                .custody
+                .inherit(&mut command)
+                .map_err(|e| e.to_string())?;
+        }
+        command
+            .spawn()
+            .map_err(|e| format!("Cannot start Git worker: {e}"))?
+    };
     let lifeline = child.stdin.take();
     let mut encoded = Vec::new();
     // Git's two 64 KiB byte arrays / escaped error fit within this envelope.
-    let read = child
-        .stdout
-        .take()
-        .unwrap()
-        .take(524_289)
-        .read_to_end(&mut encoded);
-    drop(lifeline); // Also cancel on a broken/oversized worker result.
+    let read = with_lifeline(lifeline, control.map(|v| v.cancelled), || {
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .take(524_289)
+            .read_to_end(&mut encoded)
+    });
     let status = child
         .wait()
         .map_err(|e| format!("Cannot wait for Git worker: {e}"))?;
@@ -81,6 +108,43 @@ pub(super) fn run(
     }
     serde_json::from_slice::<Result<Vec<u8>>>(&encoded)
         .map_err(|_| "Invalid Git worker result".to_string())?
+}
+
+/// Cancellation closes only the original worker's input. Its deadline owner
+/// remains retained until output EOF and real exit; it is never killed merely
+/// because the actor asked to drain. Ordinary CLI acquisition needs no watcher.
+fn with_lifeline<T>(
+    lifeline: Option<std::process::ChildStdin>,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+    read: impl FnOnce() -> T,
+) -> T {
+    let Some(cancelled) = cancelled else {
+        let result = read();
+        drop(lifeline);
+        return result;
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let finished = AtomicBool::new(false);
+    struct Finished<'a>(&'a AtomicBool);
+    impl Drop for Finished<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    std::thread::scope(|scope| {
+        let finished = &finished;
+        let watch = scope.spawn(move || {
+            while !finished.load(Ordering::Acquire) && !cancelled.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            drop(lifeline);
+        });
+        let completion = Finished(finished);
+        let result = read();
+        drop(completion);
+        watch.join().expect("owned Git lifeline watcher panicked");
+        result
+    })
 }
 
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
@@ -133,6 +197,57 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn actor_cancellation_closes_the_lifeline_without_releasing_the_original_reader() {
+        use std::{
+            os::fd::AsRawFd,
+            sync::atomic::{AtomicBool, Ordering},
+        };
+        let mut command = Command::new("python3");
+        command.args(["-c", "import sys\nsys.stdout.write('ready');sys.stdout.flush()\nsys.stdin.buffer.read()\nsys.stdout.write('closed');sys.stdout.flush()"])
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        let mut child = crate::platform::spawn_in_turn(&mut command).unwrap();
+        let input = child.stdin.take();
+        let mut output = child.stdout.take().unwrap();
+        let fd = output.as_raw_fd();
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            assert!(flags >= 0);
+            assert_eq!(libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK), 0);
+        }
+        let cancelled = AtomicBool::new(false);
+        let mut bytes = Vec::new();
+        let eof = with_lifeline(input, Some(&cancelled), || {
+            let until = Instant::now() + Duration::from_secs(4);
+            loop {
+                let mut chunk = [0; 64];
+                match output.read(&mut chunk) {
+                    Ok(0) => return true,
+                    Ok(n) => bytes.extend_from_slice(&chunk[..n]),
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                        ) => {}
+                    other => panic!("{other:?}"),
+                }
+                if bytes.starts_with(b"ready") {
+                    cancelled.store(true, Ordering::Release);
+                }
+                if Instant::now() >= until {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+        assert!(child.wait().unwrap().success());
+        assert!(
+            eof,
+            "the original reader did not observe EOF after actor cancellation"
+        );
+        assert_eq!(bytes, b"readyclosed");
+    }
 
     fn identity() -> crate::platform::FileIdentity {
         crate::platform::FileIdentity {

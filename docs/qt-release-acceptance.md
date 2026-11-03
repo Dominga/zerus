@@ -113,6 +113,49 @@ complete one-time-import and upgrade acceptance rows. The completed service
 read/approval implementation `.66.3.29` is separate; its closure does not close
 G3 or installed acceptance.
 
+### Historical creation source capture
+
+In service mode, the original Next creation worker captures its managed
+`creations.json` before its first **service-mode** load, recovery normalization
+or journal write. A native-mode run still loads its journal without this capture.
+The fixed private `creation-preload-v1` slot contains the durable capture UUID,
+original source object/stamp/hash, exact bytes and a read-back receipt. Raw input
+is limited to 8 MiB and the existing schema-1 decoder's 128 operations; metadata
+leaves are limited to 64 KiB. Nothing lists other source files or starts a second
+queue. The original worker proceeds only after the complete capture is synced,
+read back and rechecked. A verified missing source is not-applicable, not an
+empty imported journal.
+
+Unsupported, oversized, unreadable or changed input keeps that original legacy
+owner paused, including Hide/Show/Stop and writes. Its redacted
+`retained_source_import.creations_capture` status is visible beside the
+independent Qt/Settings report; normal service Retry wakes that same worker.
+Failed/partial files remain for review, with the original capture UUID; Retry
+never overwrites a partial slot or adopts a newer source version. Connection,
+Grant, watch/catalog, ownership Resume and the separate G2 actor stay available.
+Do not clear the slot to manufacture a successful report.
+
+On Unix the capture resolves the managed data folder once and pins that canonical
+object; symlinks through home, `$XDG_DATA_HOME` and `.local/share` are supported.
+The existing data folder must be owned by the user; a group-writable mode such as
+0775 is preserved. The archive slot must remain user-owned and private (0700),
+and source/archive leaves remain private, owned, single-link and no-follow. A
+`creation_source_private_slot` refusal asks to check archive availability and
+restore its private permissions before Retry; `creation_source_data_directory`
+asks to check the managed data folder's availability and ownership.
+`creation_source_unavailable` asks to check private file access/ownership (0600
+on Unix) and review retained partial files before Retry. No permission
+or source repair happens automatically.
+
+After capture, normal live journal writes may resume. The archive is explicitly
+historical pre-load data: a later source recheck validates the retained private
+snapshot's native identity and raw hash, not today's mutable journal. It is not
+Drained, current-source completeness, worker ownership or execution consent.
+This exception does not relax the Qt/Settings source leases. The separate
+creations-group configuration binding and Staged publication caller remain
+follow-up work; capture alone does not complete G3 or any installed acceptance
+row.
+
 ## macOS
 
 Use the signed/notarized Next bundle/cask and the maintained local installer for

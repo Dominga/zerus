@@ -338,6 +338,13 @@ fn file_access(path: &Path, create: bool, writable: bool) -> io::Result<File> {
     Ok(file)
 }
 
+// The pre-load archive uses CREATE_NEW, never a replacing writer. Its caller
+// pins/validates the managed parent and retains partial/unknown files as data.
+pub(super) fn preload_file(path: &Path, create: bool) -> io::Result<File> {
+    filename(path)?;
+    file_access(path, create, true)
+}
+
 // Only for an unpublished CREATE_NEW file whose original DELETE-capable
 // handle we still own. Never select a cleanup target by a later path lookup.
 // https://learn.microsoft.com/windows/win32/api/winbase/ns-winbase-file_disposition_info

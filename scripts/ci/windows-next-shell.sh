@@ -19,7 +19,7 @@ cargo test --locked --manifest-path crates/presence-sampler/Cargo.toml || native
 # The service/relay binary and native tests come from this exact checkout.
 cargo build --locked --bin hgs
 cargo test --locked desktop::ui_authority || native_status=1
-for selected in actions::read_barrier:: windows_shell::tests instance::tests platform::windows::startup::tests platform::windows::drawing::tests cli::tests lifecycle::tests window_layer::tests; do
+for selected in actions::read_barrier:: desktop_service::cache::tests desktop_service::frontend::tests::cache_ windows_shell::tests instance::tests platform::windows::startup::tests platform::windows::drawing::tests cli::tests lifecycle::tests window_layer::tests; do
     cargo test --locked --manifest-path client/src-tauri/Cargo.toml --lib "$selected" || native_status=1
 done
 cargo test --locked --manifest-path client/src-tauri/Cargo.toml --lib --no-run --message-format=json > "$CARGO_TARGET_DIR/windows-native-tests.jsonl"

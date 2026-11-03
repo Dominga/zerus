@@ -87,6 +87,7 @@ fn write(base: &Path, value: Observation) -> std::io::Result<()> {
     }
     private_directory(base)?;
     let folder = base.join("hgs");
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut dir = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {

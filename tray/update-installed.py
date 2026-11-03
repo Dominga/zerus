@@ -18,7 +18,7 @@ tray/install.sh runs this whenever its build differs from the installed GUI.
    (~/.local/share/hgs/desktop-previous) does not change, until the new GUI
    was verified: running, or, when no GUI was running and none is started,
    by its signature and its own --build-info. Then the replaced GUI becomes
-   the usable rollback copy. A Qt image already in the slot moves once to
+   the usable rollback copy. Each Qt image displaced from the slot gets a unique entry in
    desktop-qt-legacy for manual recovery, never deletion or offered rollback.
    An unclassified old slot is retained conservatively too. A replaced
    bundle without its identity, executable or valid signature never becomes
@@ -729,23 +729,40 @@ def take_slot(previous, progress):
         remove(previous)
     if replaced is not None:
         if bundle_kind(replaced) != 'tauri':
-            # Never delete or offer the retired Qt image as a rollback. The
-            # settings export stays at its compatible path beside the new slot.
-            legacy = ROLLBACK.parent / 'desktop-qt-legacy'
-            if legacy.is_symlink() or (legacy.exists() and not legacy.is_dir()):
-                raise UpdateError(f'{legacy} is not a private retained directory; Qt remains in {replaced}')
-            legacy.mkdir(mode=0o700, exist_ok=True)
-            if legacy.stat().st_uid != os.getuid() or legacy.stat().st_mode & 0o077:
-                raise UpdateError(f'{legacy} is not private; Qt remains in {replaced}')
-            target = legacy / replaced.name
-            if target.exists() or target.is_symlink():
-                raise UpdateError(f'{target} is already occupied; Qt remains in {replaced}')
-            say(f'preserving retired Qt for manual recovery: {replaced} -> {target}')
-            os.rename(replaced, target)
-            replaced.parent.rmdir()
-            say(f'the retired Qt image is kept for manual recovery in {target}')
+            retain_legacy_image(replaced)
         else:
             shutil.rmtree(replaced.parent)
+
+
+def retain_legacy_image(previous):
+    """Best-effort manual retention after the usable Next slot is committed.
+    Each old Qt/unknown image gets its own entry; failure never undoes a verified
+    update or skips draft/provenance checks, and never deletes either copy."""
+    legacy = ROLLBACK.parent / 'desktop-qt-legacy'
+    entry = target = None
+    try:
+        if legacy.is_symlink() or (legacy.exists() and not legacy.is_dir()):
+            raise UpdateError(f'{legacy} is not a private retained directory')
+        legacy.mkdir(mode=0o700, exist_ok=True)
+        if legacy.stat().st_uid != os.getuid() or legacy.stat().st_mode & 0o077:
+            raise UpdateError(f'{legacy} is not private')
+        entry = Path(tempfile.mkdtemp(prefix='qt-', dir=legacy))
+        target = entry / previous.name
+        say(f'preserving retired Qt for manual recovery: {previous} -> {target}')
+        os.rename(previous, target)
+        previous.parent.rmdir()
+        say(f'the retired Qt image is kept for manual recovery in {target}')
+    except (OSError, UpdateError) as error:
+        # A rename may be uncertain. Name both locations and keep every image;
+        # no retry/copy/delete is inferred from a failed move or cleanup.
+        where = f'{previous} or {target}' if target is not None else str(previous)
+        say(f'legacy archive did not settle ({error}); the image is retained in {where}; '
+            'the verified Next update continues')
+        if entry is not None:
+            try:
+                entry.rmdir()  # Only an empty directory made by this invocation.
+            except OSError:
+                pass
 
 
 def verify_signature(path):

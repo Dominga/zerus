@@ -3774,11 +3774,13 @@ for a GUI that is not running, by its signature and its own `--build-info`) and
 only then becomes the one rollback copy in `~/.local/share/hgs/desktop-previous`;
 a new GUI that does not start is replaced by it again. A replaced bundle without
 its identity, executable or valid signature never becomes the rollback copy, and
-a Zerus process started during the update stops the change. After a Qt switch, the first successful Next-to-Next update moves the Qt image
-once to `~/.local/share/hgs/desktop-qt-legacy` for manual recovery only; the
-replaced Next then takes `desktop-previous`. Qt is never deleted or offered by
-`--rollback`. Its settings export remains at its compatible path. Interrupted or
-unverifiable replacements remain in a named kept folder. Links at the
+a Zerus process started during the update stops the change. Each displaced Qt/unclassified rollback image gets a unique entry under
+`~/.local/share/hgs/desktop-qt-legacy/qt-*/` for manual recovery; the replaced
+Next takes `desktop-previous`. Older retained images are never overwritten,
+deleted or offered by `--rollback`. The settings export stays at its compatible
+path. An archive-move failure keeps the image named and retained while the
+verified Next update continues its draft/process/provenance checks. Interrupted
+or unverifiable replacements remain in a named kept folder. Links at the
 installed path or in the rollback folder are refused. The update confirms the
 running image, unchanged nonempty drafts and native agent and tmux processes. It records the
 installed builds in `~/.local/share/hgs/build-provenance.json`, then removes hidden

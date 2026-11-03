@@ -567,7 +567,7 @@ class UpdateFlow(Flow):
         self.domain({'attention.observed': b'{}'})
         self.assertEqual(updater.update(self.bundle('client-1', 'tauri'), self.installed), 0)
         self.assertEqual(updater.update(self.bundle('client-2', 'tauri'), self.installed), 0)
-        legacy = updater.ROLLBACK.parent / 'desktop-qt-legacy/hgs-tray.app'
+        [legacy] = (updater.ROLLBACK.parent / 'desktop-qt-legacy').glob('qt-*/hgs-tray.app')
         retained = (legacy / 'Contents/MacOS/hgs-tray').read_bytes()
         self.assertEqual((self.variant(self.slot), self.variant(legacy)), ('client-1', 'qt'))
         self.assertEqual(updater.update(self.bundle('client-3', 'tauri'), self.installed), 0)
@@ -577,18 +577,52 @@ class UpdateFlow(Flow):
         self.assertEqual((legacy / 'Contents/MacOS/hgs-tray').read_bytes(), retained)
         self.assertTrue(updater.SETTINGS_SNAPSHOT.is_file())
 
-    def test_an_occupied_manual_recovery_location_never_overwrites_either_qt(self):
-        self.install('client-1', 'tauri', self.installed)
+    def test_each_older_qt_gets_a_unique_archive_without_losing_post_update_checks(self):
+        self.install('qt', 'qt', self.installed)
         self.install('qt-old', 'qt', self.slot)
-        legacy = updater.ROLLBACK.parent / 'desktop-qt-legacy/hgs-tray.app'
-        self.install('qt-kept', 'qt', legacy)
-        legacy.parent.chmod(0o700)
-        with self.assertRaisesRegex(updater.UpdateError, 'already occupied; Qt remains'):
-            updater.update(self.bundle('client-2', 'tauri'), self.installed)
-        self.assertEqual((self.variant(self.installed), self.variant(self.slot), self.variant(legacy)),
-                         ('client-2', 'client-1', 'qt-kept'))
-        [old] = updater.ROLLBACK.glob('.replaced-*/hgs-tray.app')
-        self.assertEqual(self.variant(old), 'qt-old')
+        self.domain({'attention.observed': b'{}'})
+        with mock.patch.object(updater, 'provenance') as provenance, \
+                mock.patch.object(updater, 'changed_drafts', wraps=updater.changed_drafts) as drafts:
+            self.assertEqual(updater.update(self.bundle('client-1', 'tauri'), self.installed), 0)
+            self.assertEqual(updater.update(self.bundle('client-2', 'tauri'), self.installed), 0)
+            self.assertEqual(provenance.call_count, 2)
+            self.assertEqual(drafts.call_count, 2)
+        images = list((updater.ROLLBACK.parent / 'desktop-qt-legacy').glob('qt-*/hgs-tray.app'))
+        self.assertEqual({self.variant(p) for p in images}, {'qt', 'qt-old'})
+        self.assertEqual(len(images), 2)
+        self.assertEqual(self.variant(self.slot), 'client-1')
+
+    def test_legacy_move_errors_are_nonfatal_named_retention_and_main_has_no_traceback(self):
+        for code, after in ((errno.EXDEV, False), (errno.EACCES, False), (errno.EIO, True)):
+            with self.subTest(code=code, after=after):
+                for path in (self.installed.parent, updater.ROLLBACK, updater.ROLLBACK.parent / 'desktop-qt-legacy'):
+                    shutil.rmtree(path, ignore_errors=True)
+                self.install('client-1', 'tauri', self.installed)
+                self.install('qt', 'qt', self.slot)
+                rename = updater.os.rename
+                def fail_legacy(source, target):
+                    if Path(target).parent.parent.name == 'desktop-qt-legacy':
+                        if after:
+                            rename(source, target)
+                        raise OSError(code, 'fixture legacy move')
+                    return rename(source, target)
+                errors = io.StringIO()
+                argv = ['update-installed.py', str(self.bundle('client-2', 'tauri')), str(self.installed)]
+                with mock.patch.object(updater.os, 'rename', fail_legacy), \
+                        mock.patch.object(updater, 'provenance') as provenance, \
+                        mock.patch.object(updater, 'changed_drafts', wraps=updater.changed_drafts) as drafts, \
+                        mock.patch.object(sys, 'argv', argv), mock.patch('sys.stderr', errors):
+                    self.assertEqual(updater.main(), 0)
+                provenance.assert_called_once()
+                drafts.assert_called_once()
+                self.assertEqual((self.variant(self.installed), self.variant(self.slot)), ('client-2', 'client-1'))
+                candidates = list(updater.ROLLBACK.glob('.replaced-*/hgs-tray.app')) + \
+                    list((updater.ROLLBACK.parent / 'desktop-qt-legacy').glob('qt-*/hgs-tray.app'))
+                [kept] = candidates
+                self.assertEqual(self.variant(kept), 'qt')
+                self.assertIn(str(kept), '\n'.join(self.lines))
+                self.assertNotIn('Traceback', errors.getvalue())
+                self.assertTrue(any('the verified Next update continues' in line for line in self.lines))
 
     def test_a_partial_qt_in_the_slot_keeps_the_replaced_client(self):
         # main's replace() put any installed bundle into the slot, so a partial Qt can sit there.
@@ -603,7 +637,7 @@ class UpdateFlow(Flow):
                 self.assertEqual(updater.update(self.bundle('client-2', 'tauri'), self.installed), 0)
                 self.assertEqual(self.variant(self.installed), 'client-2')
                 self.assertEqual(self.variant(self.slot), 'client-1')
-                kept = updater.ROLLBACK.parent / 'desktop-qt-legacy/hgs-tray.app'
+                [kept] = (updater.ROLLBACK.parent / 'desktop-qt-legacy').glob('qt-*/hgs-tray.app')
                 self.assertEqual(updater.bundle_info(kept)['CFBundleIdentifier'], TEST_ID)
                 self.assertFalse((kept / 'Contents/MacOS/hgs-tray').exists())
                 self.assertNotIn('the Qt GUI stays the rollback copy', ' '.join(self.lines))
@@ -684,7 +718,7 @@ class UpdateFlow(Flow):
                             self.assertEqual(updater.update(self.bundle('client-2', 'tauri'), self.installed), 0)
                         if target == 'slot':
                             self.assertEqual(self.variant(self.slot), 'client-1')
-                            kept_qt = updater.ROLLBACK.parent / 'desktop-qt-legacy/hgs-tray.app'
+                            [kept_qt] = (updater.ROLLBACK.parent / 'desktop-qt-legacy').glob('qt-*/hgs-tray.app')
                             self.assertEqual(self.variant(kept_qt), 'qt')
                             continue
                         [kept] = self.installed.parent.glob('.hgs-tray-kept-*/previous/hgs-tray.app')

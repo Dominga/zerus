@@ -5,7 +5,7 @@ use objc2::{
     define_class, msg_send,
     rc::{autoreleasepool, Retained},
     runtime::{NSObject, NSObjectProtocol},
-    AnyThread, DefinedClass,
+    AnyThread,
 };
 
 struct BlockIvars {
@@ -129,6 +129,72 @@ fn authorization_autorelease_destruction_and_last_native_copy_gate_release() {
 #[test]
 fn post_autorelease_destruction_and_last_native_copy_gate_release() {
     copied_completion(true);
+}
+
+#[test]
+fn earlier_settings_copy_outlives_a_delivered_post_until_its_actual_destruction() {
+    autoreleasepool(|_| {
+        let command = command();
+        let mut host = Host::new(command.binding.session.clone()).unwrap();
+        drop(host.next_output());
+        let fake = Fake::default();
+        let now = Instant::now();
+        host.receive(wire::ToHost::Command(command), &fake, now)
+            .unwrap();
+        let root =
+            std::env::temp_dir().join(format!("zerus-settings-block-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let owner = Arc::new(
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(root.join("owner"))
+                .unwrap(),
+        );
+        let weak = Arc::downgrade(&owner);
+        let earlier_copy = native_turn(|| {
+            let callback = fake.0.lock().unwrap().take().unwrap();
+            let settings = settings_reply(callback.clone(), owner.clone());
+            let settings_copy = settings.copy();
+            autorelease_copy(RcBlock::new(move || {
+                let _retained = &settings_copy;
+            }));
+            let authorization = authorization_reply(callback, owner.clone());
+            authorization.call((Bool::YES, std::ptr::null_mut()));
+            host.poll(&fake, now);
+            let post = post_reply(fake.0.lock().unwrap().take().unwrap(), owner);
+            let post_copy = post.copy();
+            autorelease_copy(RcBlock::new(move || {
+                post_copy.call((std::ptr::null_mut(),))
+            }));
+            post.call((std::ptr::null_mut(),));
+            host.poll(&fake, now);
+            assert!(matches!(
+                host.next_output().unwrap().frame,
+                wire::FromHost::Receipt(wire::Receipt {
+                    outcome: wire::Outcome::Delivered { .. },
+                    ..
+                })
+            ));
+            settings
+        });
+        host.poll(&fake, now);
+        assert!(
+            host.next_output().is_none(),
+            "earlier settings block still owns the post"
+        );
+        assert!(weak.upgrade().is_some());
+        drop(earlier_copy);
+        host.poll(&fake, now);
+        assert!(matches!(
+            host.next_output().unwrap().frame,
+            wire::FromHost::Released { .. }
+        ));
+        assert!(weak.upgrade().is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    });
 }
 
 #[test]

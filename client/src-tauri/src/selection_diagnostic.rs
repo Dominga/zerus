@@ -173,7 +173,7 @@ mod tests {
         symlink(&elsewhere, root.join("hgs")).unwrap();
         assert!(write(&root, observation()).is_err());
         let mut v = serde_json::to_value(observation()).unwrap();
-        v["permission"] = true;
+        v["permission"] = true.into();
         assert!(serde_json::from_value::<Observation>(v).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }

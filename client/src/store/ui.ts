@@ -68,12 +68,20 @@ let menuRevision = 0;
 /** A native child must acknowledge hiding before an app menu can cover it. */
 export function bindMenuBarrier(barrier: typeof menuBarrier) { menuBarrier = barrier; }
 export const nativeOverlayBarrier = (scope: string, opening: boolean) => menuBarrier?.(scope, opening);
-export function setMenu(value: Menu | undefined) {
+export function setMenu(value: Menu | undefined, ready?: Promise<MenuEntry[]>) {
   const revision = ++menuRevision;
   rememberMenu(value);
   const wait = nativeOverlayBarrier("menu", !!value);
-  if (!value || !wait) { publishMenu(value); return; }
-  void wait.then(() => { if (revision === menuRevision) publishMenu(value); }).catch(() => {});
+  if (!value || (!wait && !ready)) { publishMenu(value); return; }
+  // Keep the context target available for dismissal/highlighting, but paint
+  // only the final item snapshot after both preparation and native hiding.
+  if (ready) publishMenu(undefined);
+  void Promise.all([wait, ready]).then(([, items]) => {
+    if (revision !== menuRevision) return;
+    const prepared = items ? { ...value, items } : value;
+    rememberMenu(prepared);
+    publishMenu(prepared);
+  }).catch(() => {});
 }
 export const [contentScale, setContentScale] = createSignal(1);
 /** A row the session list scrolls to once it lists it (Qt's `revealRow`); a new selection drops it. */

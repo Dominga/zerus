@@ -47,7 +47,7 @@ import { archivedSession } from "../../store/archive";
 import { applyBatch, toSession } from "../../store/catalog";
 import { composer } from "../../store/composer";
 import { composerClearControl, composerOpen, copyText, inspectSession, runAction, sessionFolderOpen, sessionFolderStatus, sessionReference } from "../../bridge";
-import { detailTab, menu, multi, peek, selectedKey, setDetailTab, setMenu, setMulti, setPeek, setSelectedKey, setStripMode, setSubagentOpen, subagentOpen, type MenuEntry } from "../../store/ui";
+import { detailTab, menu, visibleMenu, multi, peek, selectedKey, setDetailTab, setMenu, setMulti, setPeek, setSelectedKey, setStripMode, setSubagentOpen, subagentOpen, type MenuEntry } from "../../store/ui";
 import { clearMulti } from "./organize";
 import { setSetting } from "../../store/settings";
 import { emptyBatch, type ComposerView, type ViewRow } from "../../types";
@@ -139,6 +139,35 @@ const menuItem = (label: string, items = menu()?.items ?? []) => {
 };
 
 describe("session context targeting", () => {
+  it.each([false, true])("publishes one final snapshot after folder, inspection and Clear settle (failure=%s)", async (failure) => {
+    const tag = failure ? "final-failed" : "final-ready";
+    const row: ViewRow = { name: `codex/context/${tag}`, agent: "codex", state: "running", status: "ready", run_id: tag, conversation_id: `conversation-${tag}`, cwd: "/example/menu" };
+    applyBatch({ ...emptyBatch(), computers: [{ computer: "", status: "live", attempt: 0 }], upserts: [{ computer: "", key: `run:${tag}`, row }] });
+    const target = toSession("", `run:${tag}`, row);
+    let folder!: (value: Awaited<ReturnType<typeof sessionFolderStatus>>) => void;
+    let inspected!: (value: Awaited<ReturnType<typeof inspectSession>>) => void;
+    let cleared!: (value: Awaited<ReturnType<typeof composerClearControl>>) => void;
+    vi.mocked(sessionFolderStatus).mockImplementationOnce(() => new Promise((resolve) => { folder = resolve; }));
+    vi.mocked(inspectSession).mockImplementationOnce(() => new Promise((resolve) => { inspected = resolve; }));
+    vi.mocked(composerClearControl).mockImplementationOnce(() => new Promise((resolve) => { cleared = resolve; }));
+    sessionContextMenu(contextEvent(), target);
+    const initial = menu();
+    expect(initial?.sessionKey).toBe(target.key); expect(visibleMenu()).toBeUndefined();
+    folder({ folder: !failure, shell: !failure, folder_hint: "" });
+    await Promise.resolve(); await Promise.resolve();
+    expect(menu()).toBe(initial); expect(visibleMenu()).toBeUndefined();
+    inspected(null);
+    await Promise.resolve(); await Promise.resolve();
+    expect(menu()).toBe(initial); expect(visibleMenu()).toBeUndefined();
+    cleared(failure ? null : { enabled: true, dismiss: false, title: "Clear session?", text: "", confirm: "Clear session", run: tag, conversation: row.conversation_id!, cache_enabled: true, running: false, reason: "", cache_reason: "" });
+    await vi.waitFor(() => expect(visibleMenu()?.sessionKey).toBe(target.key));
+    const final = visibleMenu();
+    expect(menuItem("Open folder").disabled).toBe(failure);
+    expect(menuItem("Clear session…").disabled).toBe(failure);
+    await Promise.resolve(); expect(visibleMenu()).toBe(final);
+    expect(composerClearControl).toHaveBeenCalledTimes(1); // A failed preparation is not retried while building the final entries.
+  });
+
   it.each([false, true])("opening and closing a context menu preserves the conversation, draft and selection (strip=%s)", async (strip) => {
     const [open, target] = contextRows();
     setStripMode(strip); setSelectedKey(open.key); setSubagentOpen("open-child");

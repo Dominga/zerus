@@ -21,6 +21,44 @@ function barrier() {
 afterEach(() => { bindMenuBarrier(undefined); setMenu(undefined); });
 
 describe("native child menu admission", () => {
+  it.each([false, true])("waits for both final items and native hiding (items first=%s)", async (itemsFirst) => {
+    const hidden = barrier();
+    let prepared!: (items: { label: string; disabled: boolean }[]) => void;
+    const ready = new Promise<{ label: string; disabled: boolean }[]>((resolve) => { prepared = resolve; });
+    const initial = { x: 20, y: 40, sessionKey: "pending-context", items: [{ label: "Open folder", disabled: true }] };
+    setMenu(initial, ready);
+    expect(menu()).toBe(initial); expect(visibleMenu()).toBeUndefined();
+    const final = [{ label: "Open folder", disabled: false }];
+    if (itemsFirst) prepared(final); else hidden();
+    await tick(); expect(visibleMenu()).toBeUndefined();
+    if (itemsFirst) hidden(); else prepared(final);
+    await tick();
+    expect(visibleMenu()?.items).toBe(final);
+    expect(menu()).toBe(visibleMenu());
+    expect(menu()?.sessionKey).toBe("pending-context");
+  });
+
+  it.each([false, true])("discards final items after close or replacement (replace=%s)", async (replace) => {
+    let prepared!: (items: { label: string }[]) => void;
+    const ready = new Promise<{ label: string }[]>((resolve) => { prepared = resolve; });
+    setMenu({ x: 20, y: 40, items: [] }, ready);
+    const replacement = replace ? { x: 40, y: 60, items: [{ label: "New target" }] } : undefined;
+    setMenu(replacement);
+    prepared([{ label: "Old target" }]); await tick();
+    expect(menu()).toBe(replacement); expect(visibleMenu()).toBe(replacement);
+  });
+
+  it("retains the painted snapshot during a scope update's native barrier", async () => {
+    const initial = { x: 10, y: 20, items: [{ label: "Computer (1)" }] };
+    setMenu(initial);
+    const hidden = barrier();
+    const updated = { ...initial, items: [{ label: "Computer (2)" }] };
+    setMenu(updated);
+    expect(menu()).toBe(updated); expect(visibleMenu()).toBe(initial);
+    hidden(); await tick();
+    expect(visibleMenu()).toBe(updated);
+  });
+
   it("retains logical menu identity and independent read updates while hiding the child", async () => {
     const hidden = barrier();
     const initial = { x: 10, y: 20, sessionKey: "context-target", items: [{ label: "Fork session…", disabled: true }] };

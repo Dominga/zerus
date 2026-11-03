@@ -961,6 +961,14 @@ versions only. Its separate native and approval workflows qualify one latest
 Kimi release for affected PRs or manual runs. DeepSeek's latest-release keyless
 contract fixture runs in full Linux CLI CI.
 
+The Kimi approval gate covers CreateGoal in both regular and fullscreen mode.
+The fullscreen panel shows only the selected choice's description; inspection
+checks that visible text without navigating. An explicit answer verifies every
+choice's description through guarded navigation before submitting the requested
+option. Changed or clipped descriptions, a changed request or a layout transition
+refuse further input. Both modes retain native decision, permission-mode and
+single goal-creation checks.
+
 The Kimi native inventory includes launching with an initial message, waiting
 at folder trust without sending it, then delivering it exactly once through
 guarded input and preserving the conversation across pause/resume without

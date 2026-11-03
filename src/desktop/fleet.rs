@@ -93,6 +93,7 @@ impl Runtime {
     /// Called only after lifecycle ownership, configuration lock and epoch.
     /// No standalone/GUI activation route is provided by this module.
     pub fn start(config: &Config, epoch: &str) -> Result<Self> {
+        let hgs = crate::self_exec::current()?;
         let location = Location::new(config)?;
         let root = location.root;
         let factory: source::SpoolFactory = Arc::new(move || {
@@ -103,7 +104,7 @@ impl Runtime {
             }
             Ok(Box::new(file))
         });
-        Self::start_with(std::env::current_exe()?, epoch, factory, Timing::default())
+        Self::start_with(hgs, epoch, factory, Timing::default())
     }
 
     fn start_with(

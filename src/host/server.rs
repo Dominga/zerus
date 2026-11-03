@@ -488,6 +488,7 @@ mod windows {
         );
         host.complete_launch_reports_in(crate::state::launches::folder_in(state));
         host.supervise_recovery_with(|| {
+            crate::self_exec::ensure().map_err(|error| error.to_string())?;
             let cli = worker::stable_cli()?;
             Worker::start("hgs-recovery-worker", move || {
                 console::spawn_hidden(&cli, &["recovery".into(), "worker".into()])

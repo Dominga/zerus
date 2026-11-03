@@ -889,10 +889,12 @@ fn worker() -> Result<i32> {
 /// being replaced.
 #[cfg(windows)]
 fn ensure_worker() -> Result<()> {
+    crate::self_exec::ensure().map_err(|e| e.to_string())?;
     backend::host::HOST.supervise_recovery()
 }
 #[cfg(not(windows))]
 fn ensure_worker() -> Result<()> {
+    let executable = crate::self_exec::current().map_err(|e| e.to_string())?;
     // Policy refresh must not race the installed supervisor with a detached
     // executor. Starting an active unit preserves its PID and current delivery.
     #[cfg(target_os = "linux")]
@@ -907,7 +909,7 @@ fn ensure_worker() -> Result<()> {
     }
     // Detached from both SSH and GUI lifetime; service installation additionally
     // restarts the worker after login. The worker lock handles competing GUIs.
-    let mut cmd = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
+    let mut cmd = Command::new(executable);
     cmd.args(["recovery", "worker"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1159,6 +1161,18 @@ fn scoped_action(request: Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_image_refuses_before_service_activation() {
+        crate::self_exec::private_probe("state::recovery::tests::service_activation_probe");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "run by test_image_refuses_before_service_activation"]
+    fn service_activation_probe() {
+        crate::self_exec::probe_child("state::recovery::tests::service_activation_probe");
+        assert_eq!(ensure_worker().unwrap_err(), crate::self_exec::TEST_IMAGE);
+    }
     fn codex_copy(snapshot: &mut Value) {
         let original = failure_id(snapshot);
         snapshot["provider_error"]["source"] = json!("codex_native_log");

@@ -1283,6 +1283,29 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
     def test_a_hook_allowed_codex_command_does_not_request_human_approval(self):
         self.check_continuing_permission(self.tool_approval_fixture(automatic=True))
 
+    def test_codex_model_review_does_not_request_human_approval(self):
+        self.ARGS = ()
+        config = self.agent_home / "config.toml"
+        config.write_text(config.read_text(encoding="utf-8")
+                          .replace('approval_policy = "never"', 'approval_policy = "on-request"\n'
+                                   'approvals_reviewer = "auto_review"')
+                          .replace('sandbox_mode = "danger-full-access"', 'sandbox_mode = "read-only"'),
+                          encoding="utf-8")
+        name = self.launch("tool-review", self.NO_HOOK_REVIEW)
+        self.send(name, self.message(self.ready(name), api.CODEX_ESCALATION))
+        try:
+            self.until("the local model reviewer", lambda: (self.project / api.CODEX_REVIEW_STARTED).is_file())
+            self.until("the native review status with command details",
+                       lambda: "Reviewing approval request" in self.capture(name) and "└" in self.capture(name))
+            self.assertFalse((self.project / api.CODEX_STARTED).exists())
+            self.assertEqual(self.record(name)["phase"], "approval")
+            for _ in range(3):
+                for view in (self.row(name), self.inspect(name)):
+                    self.assertEqual((view["phase"], view["session_state"]), ("tool", "working"), view)
+        finally:
+            (self.project / api.CODEX_REVIEW_RELEASE).touch()
+        self.check_continuing_permission(name)
+
     def test_a_codex_terminal_approval_clears_before_the_command_finishes(self):
         name = self.tool_approval_fixture(automatic=False)
         self.until("the native permission chooser", lambda: "Would you like to run the following command?" in self.capture(name))

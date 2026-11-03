@@ -21,25 +21,42 @@ fn working_screen(screen: &str) -> bool {
         })
     });
     let screen = without_queue.as_deref().unwrap_or(screen);
-    let rows: Vec<_> = screen.lines().map(str::trim).collect();
+    let rows: Vec<_> = screen.lines().collect();
     // The live composer follows the work indicator. A permission dialog
     // replaces it; quoted indicators in history and its footer are not work.
     let Some(composer) = rows.iter()
-        .rposition(|row| row.starts_with('›') || row.starts_with('»')) else {
+        .rposition(|row| row.trim().starts_with('›') || row.trim().starts_with('»')) else {
         return false;
     };
     // The same marker highlights a choice in a native dialog.
-    let content = rows[composer].trim_start_matches(['›', '»']).trim_start();
+    let content = rows[composer].trim().trim_start_matches(['›', '»']).trim_start();
     if content.split_once(". ").is_some_and(|(number, _)| {
         !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
     }) {
         return false;
     }
-    rows[..composer].iter().rev().find(|row| !row.is_empty()).is_some_and(|row| {
-        (row.starts_with('•') || row.starts_with('◦'))
-            && row.split_once("esc to interrupt)")
-                .is_some_and(|(_, suffix)| suffix.is_empty() || suffix.starts_with(" · "))
-    })
+    let Some(end) = rows[..composer].iter().rposition(|row| !row.trim().is_empty()) else {
+        return false;
+    };
+    if work_indicator(rows[end]) {
+        return true;
+    }
+    // Automatic model review has a native details block below the indicator:
+    // "  └ command", with wrapped/parallel requests indented by four spaces.
+    // Keep that framing and adjacency; arbitrary history before the composer
+    // must not turn a pending human permission into observed work.
+    let Some(details) = rows[..=end].iter().rposition(|row| row.starts_with("  └ ")) else {
+        return false;
+    };
+    details > 0 && work_indicator(rows[details - 1])
+        && rows[details + 1..=end].iter().all(|row| row.starts_with("    "))
+}
+
+fn work_indicator(row: &str) -> bool {
+    let row = row.trim();
+    (row.starts_with('•') || row.starts_with('◦'))
+        && row.split_once("esc to interrupt)")
+            .is_some_and(|(_, suffix)| suffix.is_empty() || suffix.starts_with(" · "))
 }
 
 #[cfg(test)]
@@ -48,7 +65,7 @@ mod tests {
 
     #[test]
     fn only_a_live_work_indicator_before_the_composer_proves_continuation() {
-        for label in ["Working", "Reviewing command", "Running command"] {
+        for label in ["Working", "Reviewing command", "Running command", "Reviewing approval request", "Reviewing 2 approval requests"] {
             for composer in ['›', '»'] {
                 for spinner in ['•', '◦'] {
                     let screen = format!("• A previous message\n\n{spinner} {label} (3s • esc to interrupt)\n\n{composer} Ask Codex to do anything\n\n  GPT-6.1-Sol default · /fixture\n  ? for shortcuts\n");
@@ -56,6 +73,19 @@ mod tests {
                     assert!(working_screen(&screen.replace("esc to interrupt)", "esc to interrupt) · Running hook")));
                     let queued = screen.replace(&format!("{composer} Ask"), &format!("• Queued follow-up inputs\n  ↳ Another request\n    shift+← edit last queued message\n\n{composer} Ask"));
                     assert!(working_screen(&queued), "{queued}");
+                    for details in [
+                        "  └ inspect the fixture folder\n",
+                        "  └ inspect a fixture command that wraps onto\n    another terminal row\n",
+                        "  └ • inspect fixture one\n    • inspect fixture two\n",
+                        "  └ inspect a clipped fixture command…\n",
+                    ] {
+                        let review = screen.replace(&format!("\n\n{composer} Ask"),
+                            &format!("\n{details}\n{composer} Ask"));
+                        assert!(working_screen(&review), "{review}");
+                        let queued_review = queued.replace("\n\n• Queued",
+                            &format!("\n{details}\n• Queued"));
+                        assert!(working_screen(&queued_review), "{queued_review}");
+                    }
                 }
             }
         }
@@ -64,6 +94,11 @@ mod tests {
             "• Working (3s • esc to interrupt)\n\n• A later assistant message\n\n› Ask Codex to do anything\n",
             "• Working (3s • esc to interrupt)\n",
             "Quoted: • Working (3s • esc to interrupt)\n\n› Ask Codex to do anything\n",
+            "• Reviewing approval request (3s • esc to interrupt)\n  └ inspect the fixture folder\n\n• A later assistant message\n\n› Ask Codex to do anything\n",
+            "• Reviewing approval request (3s • esc to interrupt)\n  └ inspect the fixture folder\nUnrelated unindented text\n\n› Ask Codex to do anything\n",
+            "• Reviewing approval request (3s • esc to interrupt)\n\n  └ quoted details in a later message\n\n› Ask Codex to do anything\n",
+            "  └ a clipped review without its live indicator\n\n› Ask Codex to do anything\n",
+            "• Reviewing approval request (3s • esc to interrupt)\n  └ inspect the fixture folder\n\nWould you like to run the following command?\n› 1. Yes, proceed\n  2. No\n\nPress enter to confirm or esc to cancel\n",
             "• Working (3s • esc to interrupt)\n\n› 1. Trust and continue\n  2. Quit\n\nenter continue · esc quit\n",
             "",
         ] {
@@ -76,6 +111,7 @@ mod tests {
         fn capture(&self, pane: &str, _: backend::Capture) -> Result<Vec<u8>> {
             match pane {
                 "running" => Ok("◦ Working (3s • esc to interrupt)\n\n› Ask Codex to do anything\n".as_bytes().to_vec()),
+                "reviewing" => Ok("• Reviewing approval request (3s • esc to interrupt)\n  └ inspect the fixture folder\n\n› Ask Codex to do anything\n".as_bytes().to_vec()),
                 "approval" => Ok("Would you like to run the following command?\n› 1. Yes, proceed\n  2. No\n\nPress enter to confirm or esc to cancel\n".as_bytes().to_vec()),
                 "unreadable" => Err("snapshot unavailable".into()),
                 _ => panic!("must not capture an unrelated or stopped session"),
@@ -97,11 +133,14 @@ mod tests {
                 journal::update_activity(&mut record, &event);
             }
             let original = record.clone();
-            for (pane, expected) in [("running", "tool"), ("approval", "approval"), ("unreadable", "approval")] {
+            for (pane, expected) in [("running", "tool"), ("reviewing", "tool"), ("approval", "approval"), ("unreadable", "approval")] {
                 record["pane"] = json!(pane);
                 let output = journal::normalized_activity(&record, true);
                 assert_eq!(output["phase"], expected, "{pane}");
                 assert_eq!(output["activity"], "busy");
+                let (state, reason) = session_state::compute(&output, None, now());
+                assert_eq!(state, if expected == "approval" { "user" } else { "working" }, "{pane}");
+                assert_eq!(reason.is_some(), expected == "approval", "{pane}");
                 assert_eq!(record["attention_started"], original["attention_started"]);
                 assert_eq!(record["active_tools"], original["active_tools"]);
                 assert_eq!(record["phase"], "approval", "observations never consume a pending permission");
@@ -111,9 +150,11 @@ mod tests {
             record["agent"] = json!("claude");
             assert_eq!(journal::normalized_activity(&record, true)["phase"], "approval");
             record["agent"] = json!("codex");
-            record["pane"] = json!("running");
             record["active_tools"] = json!({});
-            assert_eq!(journal::normalized_activity(&record, true)["phase"], "working");
+            for pane in ["running", "reviewing"] {
+                record["pane"] = json!(pane);
+                assert_eq!(journal::normalized_activity(&record, true)["phase"], "working");
+            }
             journal::update_activity(&mut record, &json!({"hook_event_name":"PostToolUse","tool_name":"Bash","tool_use_id":"call-1"}));
             record["pane"] = json!("must-not-read");
             assert_eq!(journal::normalized_activity(&record, true)["phase"], "working");

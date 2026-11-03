@@ -20,6 +20,8 @@ one of these phrases (not a request that quotes it, such as a title request):
   hgs grows a pane no client views (question_terminal::MAX_UNVIEWED_ROWS), so it stays clipped.
 - CODEX_ESCALATION: a Windows exec_command that explicitly requests escalation and
   waits for a private fixture file, keeping approval and execution observable.
+  Automatic model review waits for CODEX_REVIEW_RELEASE before returning an allow
+  decision, so the test can observe the native reviewer while it is still pending.
 
 After the tool's result the turn ends with DONE. Side requests (titles, token counts) get
 the plain reply.
@@ -32,6 +34,7 @@ from pathlib import Path
 import socketserver
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
@@ -50,6 +53,8 @@ LONG_LINES = 240
 CODEX_ESCALATION = "Run the Codex approval fixture now."
 CODEX_STARTED = "codex-command-started"
 CODEX_RELEASE = "codex-command-release"
+CODEX_REVIEW_STARTED = "codex-review-started"
+CODEX_REVIEW_RELEASE = "codex-review-release"
 # The questions of tests/test_claude_questions_native.py, which the Windows screen fixtures
 # tests/fixtures/claude-question-*-windows.txt were recorded with.
 QUESTION_ITEMS = [
@@ -139,6 +144,10 @@ def plan(body, project):
     """What to answer: ("text", TEXT) or ("tool", NAME, INPUT)."""
     # The whole typed text: a request that quotes it, such as Codex's title request, is not it.
     offered, prompt = tool_names(body), (typed(body) or "").strip()
+    # Codex gives its automatic reviewer a structured final-output contract.
+    # Keep that request separate from the parent tool loop and from real accounts.
+    if codex_review(body):
+        return ("text", '{"outcome":"allow"}')
     if results(body):
         return ("text", DONE)
     if prompt == CODEX_ESCALATION and project:
@@ -161,6 +170,11 @@ def plan(body, project):
     if prompt == LONG_BASH and "Bash" in offered:
         return ("tool", "Bash", dict(BASH_INPUT, command=":\n" * LONG_LINES + BASH_INPUT["command"]))
     return ("text", REPLY)
+
+
+def codex_review(body):
+    schema = ((body.get("text") or {}).get("format") or {}).get("schema") or {}
+    return set((schema.get("properties") or {})) == {"risk_level", "user_authorization", "outcome", "rationale"}
 
 
 def anthropic_message(body, answer, number):
@@ -273,6 +287,12 @@ class Handler(BaseHTTPRequestHandler):
                                           for text in self.server.sentinels}
         self.server.record(entry)
         try:
+            if codex_review(body) and self.server.project:
+                project = Path(self.server.project)
+                (project / CODEX_REVIEW_STARTED).touch()
+                deadline = time.monotonic() + 60
+                while not (project / CODEX_REVIEW_RELEASE).exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
             if route.endswith("/count_tokens"):
                 return self.reply(200, {"input_tokens": 100})
             if route.endswith("/messages"):

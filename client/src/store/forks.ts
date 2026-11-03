@@ -1,14 +1,19 @@
-import { createEffect, createSignal, untrack } from "solid-js";
+import { createEffect, createSignal, onCleanup, untrack } from "solid-js";
 import type { Action, Details, Outcome } from "../types";
 import type { Session } from "../ui/sessions/types";
 import { snapshotOf, type ActionRow } from "../ui/sessions/actions-ui";
-import { FORK_CHANGED, forkAvailable, forkName, forkProblem, forkTag, freeForkTag, sameForkSource } from "../ui/sessions/fork-ui";
+import { FORK_CHANGED, forkAvailable, forkName, forkProblem, forkTag, freeForkTag, occupied, sameForkSource } from "../ui/sessions/fork-ui";
 import { tr } from "../i18n";
 
 type Neighbor = Pick<Session, "key" | "computer" | "name">;
-/** `taken`: the names on that computer when the fork was sent, so a suffix
- * `hgs` chose for a name taken meanwhile still finds the new session. */
-interface Pending { name: string; taken: ReadonlySet<string>; checked: Set<string>; source: ActionRow; group: string; before?: Neighbor; succeeded: boolean }
+/** `taken`: the names live and saved sessions on that computer used when the
+ * fork was sent, so a suffix `hgs` chose for a name taken meanwhile still finds
+ * the new session. `failures`: inspections of a candidate that did not answer. */
+interface Pending { name: string; taken: ReadonlySet<string>; checked: Set<string>; failures: Map<string, number>; source: ActionRow; group: string; before?: Neighbor; succeeded: boolean }
+/** How long a started fork waits to be recognized before it is reported as not confirmed. */
+export const FORK_CONFIRM_MS = 120_000;
+/** Inspections of one candidate before it is no longer retried. */
+const INSPECT_ATTEMPTS = 3;
 export interface ForkDeps {
   rows(): readonly Session[];
   current(key: string): Session | undefined;
@@ -26,11 +31,13 @@ export interface ForkDeps {
   notify(tone: "info" | "error", text: string, sticky?: boolean): void;
 }
 
-/** One fork and one catalog follow-up, as Qt's m_pending/m_forkKey. No timer,
- * background read, durable replay or second launch path. */
+/** One fork and one catalog follow-up, as Qt's m_pending/m_forkKey. No
+ * background read, durable replay or second launch path; one bounded wait. */
 export function createForks(deps: ForkDeps) {
   const [working, setWorking] = createSignal(false);
   const [pending, setPending] = createSignal<Pending>();
+  let expiry: ReturnType<typeof setTimeout> | undefined;
+  onCleanup(() => clearTimeout(expiry));
   const busy = () => working() || !!pending();
   const available = (row: ActionRow, details?: Details) => forkAvailable(row, details, deps.online(row.computer), busy() || deps.busy(row));
   const problem = (row: ActionRow, tag: string) => forkProblem(row, tag);
@@ -54,12 +61,22 @@ export function createForks(deps: ForkDeps) {
 
   /** Places and opens a candidate only once its inspection names the source
    * conversation as its fork parent: a session that took the name meanwhile is
-   * never adopted. An older hgs without that field is trusted for the exact name. */
+   * never adopted. A null parent is a session that is not a fork; only an older
+   * hgs without the field is trusted, for the exact name. A failed inspection
+   * proves nothing: the candidate is inspected again on a later list change,
+   * at most INSPECT_ATTEMPTS times. */
   async function adopt(wait: Pending, row: Session, exact: boolean): Promise<void> {
     const details = await deps.inspect(snapshotOf(row)).catch(() => undefined);
     if (pending() !== wait) return;
-    const parent = details?.fork_parent_id;
+    if (!details) {
+      const failures = (wait.failures.get(row.key) ?? 0) + 1;
+      wait.failures.set(row.key, failures);
+      if (failures < INSPECT_ATTEMPTS) wait.checked.delete(row.key);
+      return;
+    }
+    const parent = details.fork_parent_id;
     if (parent === undefined ? !exact : parent !== wait.source.conversationId) return;
+    clearTimeout(expiry);
     setPending(undefined);
     const group = deps.hasGroup(wait.group) ? wait.group : deps.defaultGroup();
     const before = wait.before ? deps.current(wait.before.key) : undefined;
@@ -93,8 +110,7 @@ export function createForks(deps: ForkDeps) {
       const group = deps.groupOf(source.key), before = deps.next(source, group);
       // Send the free name the dialog showed; `hgs` still suffixes one taken meanwhile.
       tag = resolved(source, tag);
-      const taken = new Set(deps.rows().filter((r) => r.computer === source.computer).map((r) => r.name));
-      const wait: Pending = { source: snapshotOf(source), name: forkName(source, tag), taken, checked: new Set(), group,
+      const wait: Pending = { source: snapshotOf(source), name: forkName(source, tag), taken: occupied(source, deps.rows()), checked: new Set(), failures: new Map(), group,
         before: before && { key: before.key, computer: before.computer, name: before.name }, succeeded: false };
       setPending(wait);
       delivered = true;
@@ -102,8 +118,17 @@ export function createForks(deps: ForkDeps) {
       deps.notify("info", tr("Forking session on %1…", source.machine));
       const out = await deps.perform({ ...source, runId: details.run_id || source.runId, conversationId: details.conversation_id },
         { kind: "fork", tag, archive_id: source.archiveId ?? null });
-      if (out.outcome === "done") setPending({ ...wait, succeeded: true });
-      else { setPending(undefined); deps.notify("error", out.detail, true); }
+      if (out.outcome === "done") {
+        // Not recognized in time: say so and enable Fork again; never adopt later.
+        const started = { ...wait, succeeded: true };
+        setPending(started);
+        clearTimeout(expiry);
+        expiry = setTimeout(() => {
+          if (pending() !== started) return;
+          setPending(undefined);
+          deps.notify("error", tr("Fork not confirmed: the new session from %1 did not appear in time. It may still be starting; check the session list.", source.name), true);
+        }, FORK_CONFIRM_MS);
+      } else { setPending(undefined); deps.notify("error", out.detail, true); }
     } catch (error) {
       setPending(undefined);
       if (delivered || !signal.aborted) deps.notify("error", error instanceof Error ? error.message : String(error), true);

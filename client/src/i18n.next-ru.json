@@ -224,6 +224,7 @@
   "Forgetting %1 sessions": "Будут забыты сессии: %1",
   "Forgetting session": "Сессия будет забыта",
   "Fork": "Разветвить",
+  "Fork not confirmed: the new session from %1 did not appear in time. It may still be starting; check the session list.": "Форк не подтверждён: новая сессия из %1 не появилась вовремя. Возможно, она ещё запускается; проверьте список сессий.",
   "From the previous Zerus app": "Из прежнего приложения Zerus",
   "Full system update: %1": "Полное обновление системы: %1",
   "Full-width Overview": "Обзор во всю ширину",

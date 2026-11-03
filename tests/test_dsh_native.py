@@ -859,6 +859,8 @@ class NativeHarness(unittest.TestCase):
         tag = 'fork-' + uuid.uuid4().hex[:8]
         # Native fork copies a completed turn; an empty conversation has none.
         empty = self.cli('inspect', source)
+        # A session that is not a fork says so; only an older hgs omits the fields.
+        self.assertEqual((empty['fork_parent_id'], empty['fork_source_name']), (None, None))
         self.assertFalse(empty['fork_supported'])
         self.assertEqual(empty['fork_reason'], 'Wait for a completed reply before forking')
         self.assertNotIn('fork', empty['allowed_actions'])

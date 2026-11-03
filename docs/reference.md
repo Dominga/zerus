@@ -1941,7 +1941,14 @@ blocks a new session or a fork from its name. Without `-n` the fork is named
 `TAG-fork`; a name a live or saved session already uses gets the first free `-2`,
 `-3`… instead of failing, with or without `-n`. The fork dialog shows the name the
 fork will get, and the new session is recognized by its fork parent, never by a
-name another session took meanwhile.
+name another session took meanwhile. Inspection reports `fork_parent_id` and
+`fork_source_name` as null for a session that is not a fork; only an hgs that
+predates these fields is trusted for the exact name. A failed inspection never
+adopts a session and is retried, at most three times, as the list changes. A
+fork the desktop has not recognized within two minutes is reported as not
+confirmed and Fork is available again; the session may still be starting.
+An hgs older than this behaviour still refuses a name that only an archived
+session holds; update that computer or choose another name.
 
 Codex may defer `SessionStart` until the fork's first message. Activity enables
 Send once Zerus verifies that the supervised process owns an independent child

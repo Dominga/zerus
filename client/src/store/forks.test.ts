@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createRoot, createSignal } from "solid-js";
-import { createForks } from "./forks";
+import { FORK_CONFIRM_MS, createForks } from "./forks";
 import { detailsFromInspection, snapshotOf, type ActionRow } from "../ui/sessions/actions-ui";
 import { forkAvailable, forkProblem, forkTag, freeForkTag } from "../ui/sessions/fork-ui";
 import type { Session } from "../ui/sessions/types";
@@ -75,6 +75,109 @@ describe("Fork session", () => {
       expect(t.forks.busy()).toBe(false);
       dispose();
     });
+  });
+  // #1223 review: a DeepSeek session that is not a fork says so (null), and is
+  // never adopted by its exact name; only an absent field means an older hgs (P1).
+  it("never adopts a session whose inspection says it is not a fork", async () => {
+    await createRoot(async (dispose) => {
+      const t = setup();
+      await t.submit("review-fork");
+      const raced = row({ key: "raced", name: "codex/example/review-fork", runId: "x", conversationId: "x" });
+      const fork = row({ key: "new", name: "codex/example/review-fork-2", runId: "new", conversationId: "new-conversation" });
+      t.inspect.mockImplementation(async (r) => ({ ...details(), fork_parent_id: r.name === fork.name ? "c" : null }));
+      t.setRows([t.source, raced]); await ticks();
+      expect(t.select).not.toHaveBeenCalled();
+      t.setRows([t.source, raced, fork]); await ticks();
+      expect(t.select).toHaveBeenCalledExactlyOnceWith(fork);
+      expect(t.forks.busy()).toBe(false);
+      dispose();
+    });
+  });
+  // P2 and P3: a failed inspection adopts nothing and is retried on a later list
+  // change, so neither the session that took the name nor a stuck Fork results.
+  it("retries a failed inspection and never treats it as an older hgs", async () => {
+    await createRoot(async (dispose) => {
+      const t = setup();
+      await t.submit("review-fork");
+      const raced = row({ key: "raced", name: "codex/example/review-fork", runId: "x", conversationId: "x" });
+      const fork = row({ key: "new", name: "codex/example/review-fork-2", runId: "new", conversationId: "new-conversation" });
+      t.inspect.mockRejectedValue(new Error("inspection timed out"));
+      t.setRows([t.source, raced, fork]); await ticks();
+      expect(t.inspect).toHaveBeenCalledTimes(3);
+      expect(t.select).not.toHaveBeenCalled();
+      t.inspect.mockImplementation(async (r) => ({ ...details(), fork_parent_id: r.name === fork.name ? "c" : null }));
+      t.setRows([t.source, { ...raced }, { ...fork }]); await ticks();
+      expect(t.select).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ key: "new" }));
+      expect(t.place).toHaveBeenCalledTimes(1);
+      expect(t.forks.busy()).toBe(false);
+      dispose();
+    });
+  });
+  it("stops inspecting a candidate after three failures", async () => {
+    await createRoot(async (dispose) => {
+      const t = setup();
+      await t.submit("review-fork");
+      t.inspect.mockResolvedValue(undefined as unknown as Details);
+      const fork = row({ key: "new", name: "codex/example/review-fork", runId: "new", conversationId: "new-conversation" });
+      for (let i = 0; i < 5; i++) { t.setRows([t.source, { ...fork }]); await ticks(); }
+      expect(t.inspect).toHaveBeenCalledTimes(1 + 3);
+      expect(t.select).not.toHaveBeenCalled();
+      expect(t.forks.busy()).toBe(true);
+      dispose();
+    });
+  });
+  // P4: an archived row never holds a name, so hgs may give the fork its name.
+  it("finds a suffix that only an archived session had", async () => {
+    await createRoot(async (dispose) => {
+      const t = setup(), archived = row({ key: "old", name: "codex/example/review-fork-2", state: "archived", archiveId: "a1", runId: "o", conversationId: "o" });
+      t.setRows([t.source, archived]);
+      await t.submit("review-fork");
+      expect(t.perform).toHaveBeenCalledExactlyOnceWith(expect.anything(), { kind: "fork", tag: "review-fork", archive_id: null });
+      const raced = row({ key: "raced", name: "codex/example/review-fork", runId: "x", conversationId: "x" });
+      const fork = row({ key: "new", name: "codex/example/review-fork-2", runId: "new", conversationId: "new-conversation" });
+      t.inspect.mockImplementation(async (r) => ({ ...details(), fork_parent_id: r.name === fork.name ? "c" : null }));
+      t.setRows([t.source, archived, raced, fork]); await ticks();
+      expect(t.select).toHaveBeenCalledExactlyOnceWith(fork);
+      expect(t.forks.busy()).toBe(false);
+      dispose();
+    });
+  });
+  // Review item 5: a started fork that never appears is reported, not dropped.
+  it("reports a fork that is not confirmed in time and enables Fork again", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      await createRoot(async (dispose) => {
+        const t = setup();
+        await t.submit("review-fork");
+        expect(t.forks.busy()).toBe(true);
+        vi.advanceTimersByTime(FORK_CONFIRM_MS - 1);
+        expect(t.forks.busy()).toBe(true);
+        vi.advanceTimersByTime(1);
+        expect(t.forks.busy()).toBe(false);
+        expect(t.notify).toHaveBeenLastCalledWith("error", expect.stringContaining("Fork not confirmed"), true);
+        expect(t.notify.mock.lastCall?.[1]).toContain("codex/example/review");
+        // A late session is not adopted after the report.
+        t.setRows([t.source, row({ key: "new", name: "codex/example/review-fork", runId: "new", conversationId: "new" })]); await ticks();
+        expect(t.inspect).toHaveBeenCalledTimes(1);
+        expect(t.select).not.toHaveBeenCalled();
+        dispose();
+      });
+    } finally { vi.useRealTimers(); }
+  });
+  it("an adopted fork cancels its expiry", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      await createRoot(async (dispose) => {
+        const t = setup();
+        await t.submit("review-fork");
+        t.setRows([t.source, row({ key: "new", name: "codex/example/review-fork", runId: "new", conversationId: "new" })]); await ticks();
+        expect(t.select).toHaveBeenCalledTimes(1);
+        const notices = t.notify.mock.calls.length;
+        vi.advanceTimersByTime(FORK_CONFIRM_MS);
+        expect(t.notify).toHaveBeenCalledTimes(notices);
+        dispose();
+      });
+    } finally { vi.useRealTimers(); }
   });
   it.each(["run", "conversation", "offline", "busy", "closed"])("refuses %s changes while its inspection is pending", async (change) => {
     await createRoot(async (dispose) => {

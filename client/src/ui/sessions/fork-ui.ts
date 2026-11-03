@@ -20,7 +20,8 @@ export function sameForkSource(a: ActionRow, b: ActionRow): boolean {
 export function forkName(row: ActionRow, tag: string): string { return renameParts(row.name).prefix + tag; }
 /** Names a fork cannot take on this computer: live and saved sessions. An
  * archived session's name is free, as `hgs fork` treats it (names are labels). */
-function occupied(row: ActionRow, rows: readonly ActionRow[]): Set<string> {
+/** Names live and saved sessions on the row's computer use; archives hold none. */
+export function occupied(row: ActionRow, rows: readonly ActionRow[]): Set<string> {
   return new Set(rows.filter((r) => r.computer === row.computer && r.state !== "archived").map((r) => r.name));
 }
 /** The tag the fork gets: `tag`, or `tag-2`, `tag-3`… while a session uses it, as `hgs fork` chooses. */

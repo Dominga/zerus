@@ -54,6 +54,43 @@ class BoundedProcess(unittest.TestCase):
                         process.terminate()
                         process.communicate(timeout=6)
 
+    def test_transient_signal_denials_retain_custody_until_cleanup_can_finish(self):
+        # No real privilege transition: deny each retained-fd operation once
+        # inside a second owned supervisor, with an outer cleanup bound too.
+        code = f'''import importlib.util,sys,signal
+spec=importlib.util.spec_from_file_location('bounded', {str(RUNNER)!r})
+b=importlib.util.module_from_spec(spec);spec.loader.exec_module(b)
+original=b.signal.pidfd_send_signal
+remaining={{0:1,signal.SIGSTOP:1,signal.SIGKILL:1}}
+def transient(fd,sig,*args):
+ if remaining.get(sig,0):
+  remaining[sig]-=1
+  raise PermissionError(1,'synthetic transient signal denial')
+ return original(fd,sig,*args)
+b.signal.pidfd_send_signal=transient
+sys.exit(b.supervise([sys.executable,'-c','import os,time;print(os.getpid(),flush=True);time.sleep(30)'],.2,8))
+'''
+        result = self.run_fixture(code)
+        self.assertEqual(result.returncode, 124, result.stderr)
+        self.assertFalse(Path('/proc', result.stdout.strip()).exists())
+
+    def test_unconfirmed_cleanup_fails_with_original_identities_and_outer_owner_reaps(self):
+        code = f'''import importlib.util,sys,signal
+spec=importlib.util.spec_from_file_location('bounded', {str(RUNNER)!r})
+b=importlib.util.module_from_spec(spec);spec.loader.exec_module(b)
+original=b.signal.pidfd_send_signal
+def denied(fd,sig,*args):
+ if sig==signal.SIGKILL: raise PermissionError(1,'synthetic retained kill denial')
+ return original(fd,sig,*args)
+b.signal.pidfd_send_signal=denied
+sys.exit(b.supervise([sys.executable,'-c','import os,time;print(os.getpid(),flush=True);time.sleep(30)'],.4,8))
+'''
+        result = self.run_fixture(code, seconds=5)
+        self.assertEqual(result.returncode, 126, result.stderr)
+        self.assertIn('original identities', result.stderr)
+        self.assertIn('original descendants remain', result.stderr)
+        self.assertFalse(Path('/proc', result.stdout.strip()).exists())
+
 
 if __name__ == '__main__':
     unittest.main()

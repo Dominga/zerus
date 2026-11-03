@@ -73,6 +73,9 @@ process-budget overflow. It never selects processes by name, path or shared
 process group. CLI fixtures additionally require actual CLI help, so a libtest
 image cannot be selected as `HGS_TEST_BIN`. An interrupted test's parent exiting
 is not evidence that its descendants were cleaned up.
+Temporary signal permission failures retain the original pidfd and are retried
+within the same cleanup deadline. If cleanup remains unconfirmed, the fixture
+fails with a bounded PID/birth record; permission denial never counts as exit.
 
 Worktree creation, placement, launch and remote creation remain separate leaves
 of the creation migration. The desktop-service switch remains default-off.

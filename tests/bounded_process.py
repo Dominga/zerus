@@ -19,9 +19,9 @@ def children(pid):
         for thread in (Path('/proc') / str(pid) / 'task').iterdir():
             try:
                 result.update(map(int, (thread / 'children').read_text().split()))
-            except FileNotFoundError:
+            except (FileNotFoundError, PermissionError):
                 pass
-    except FileNotFoundError:
+    except (FileNotFoundError, PermissionError):
         pass
     return result
 
@@ -52,7 +52,7 @@ class Tree:
                     if entry is None or identity(parent)[1] != entry[0]:
                         continue
                     signal.pidfd_send_signal(entry[1], 0)
-                except (FileNotFoundError, ProcessLookupError):
+                except (FileNotFoundError, ProcessLookupError, PermissionError):
                     continue
             for pid in children(parent):
                 if deadline is not None and time.monotonic() >= deadline:
@@ -75,7 +75,7 @@ class Tree:
                     if before[0] == parent and parent != os.getpid():
                         try:
                             signal.pidfd_send_signal(self.owned[parent][1], 0)
-                        except ProcessLookupError:
+                        except (ProcessLookupError, PermissionError):
                             os.close(fd)
                             continue
                     previous = self.owned.get(pid)
@@ -87,7 +87,7 @@ class Tree:
                     pending.append(pid)
                     if not freeze and len(self.owned) > self.limit:
                         return
-                except (FileNotFoundError, ProcessLookupError):
+                except (FileNotFoundError, ProcessLookupError, PermissionError):
                     pass
 
     def prune(self):
@@ -97,6 +97,10 @@ class Tree:
             except ProcessLookupError:
                 os.close(fd)
                 del self.owned[pid]
+            except PermissionError:
+                # A sandbox transition may temporarily change signal rights.
+                # Keep the original pidfd; unreadable never means exited.
+                pass
 
     def cleanup(self):
         deadline = time.monotonic() + 3
@@ -107,7 +111,7 @@ class Tree:
             for _, fd in self.owned.values():
                 try:
                     signal.pidfd_send_signal(fd, signal.SIGKILL)
-                except ProcessLookupError:
+                except (ProcessLookupError, PermissionError):
                     pass
             while True:
                 try:
@@ -157,6 +161,11 @@ def supervise(command, seconds, limit):
         for sig in previous:
             signal.signal(sig, signal.SIG_IGN)
         clean = tree.cleanup()
+        if not clean:
+            # Content-free original identities for an explicit failed cleanup;
+            # the cap is diagnostic only and never changes the cleanup result.
+            identities = ','.join(f'{pid}:{entry[0]}' for pid, entry in list(tree.owned.items())[:128])
+            print(f'bounded fixture: original identities {identities}; retained={len(tree.owned)}', file=sys.stderr, flush=True)
         tree.close()
         for sig, handler in previous.items():
             signal.signal(sig, handler)

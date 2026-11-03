@@ -6,7 +6,9 @@ import { tr } from "../../i18n";
 export function DesktopServiceStatus(props: { counts?: boolean }) {
   const notice = createMemo(() => {
     const state = desktopService.state();
-    if (!state?.connected) return tr("Background service unavailable. Retry to reconnect.");
+    if (!state?.connected) return state?.reconnecting
+      ? tr("Background service unavailable. Reconnecting automatically; showing last known sessions.")
+      : tr("Background service unavailable. Retry to reconnect.");
     if (state.code === "explicit_handoff_required") return tr("Background service is waiting for an explicit handoff.");
     if (state.code || !["fleet", "presence", "reads", "attention", "approvals"].every(desktopService.ready)) return tr("Background service is not ready. Some actions are unavailable.");
     if (!state.details_available) return tr("Activity, processes and project tasks are unavailable with this background service connection.");

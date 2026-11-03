@@ -49,6 +49,8 @@ pub struct Snapshot {
     #[serde(skip_deserializing)]
     pub retained_source_import: Option<Value>,
     pub connected: bool,
+    #[serde(default)]
+    pub reconnecting: bool,
     pub epoch: Option<String>,
     pub generation: Option<u64>,
     pub background: BTreeMap<String, Component>,
@@ -66,6 +68,7 @@ impl Default for Snapshot {
             pending_read_import: None,
             retained_source_import: None,
             connected: false,
+            reconnecting: false,
             epoch: None,
             generation: None,
             background: BTreeMap::new(),
@@ -199,6 +202,7 @@ impl State {
             notification_ownership: None,
             notification_preferences: None,
             connected: true,
+            reconnecting: false,
             pending_read_import: None,
             retained_source_import: None,
             epoch: Some(epoch.into()),

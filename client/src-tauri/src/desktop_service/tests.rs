@@ -2,6 +2,7 @@ use super::*;
 use std::{fs, path::Path, time::Instant};
 
 mod silent_watch;
+mod restart;
 
 pub(super) struct Fixture(pub(super) PathBuf, pub(super) Arc<AtomicBool>);
 

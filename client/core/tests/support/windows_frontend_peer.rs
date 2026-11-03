@@ -205,6 +205,26 @@ impl Drop for Attributes {
         }
     }
 }
+fn process_birth(process: &OwnedHandle) -> io::Result<u64> {
+    let mut times = [FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    }; 4];
+    check(unsafe {
+        GetProcessTimes(
+            process.as_raw_handle(),
+            &mut times[0],
+            &mut times[1],
+            &mut times[2],
+            &mut times[3],
+        )
+    })?;
+    let birth = (u64::from(times[0].dwHighDateTime) << 32) | u64::from(times[0].dwLowDateTime);
+    if birth == 0 {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    Ok(birth)
+}
 struct Resources {
     process: OwnedHandle,
     job: OwnedHandle,
@@ -221,6 +241,7 @@ pub struct Child {
     cleanup: Cleanup,
     output: Vec<u8>,
     pub pid: u32,
+    pub birth: u64,
 }
 type CleanupInput = (Resources, Vec<u8>, mpsc::SyncSender<io::Result<Capture>>);
 struct Cleanup {
@@ -291,10 +312,10 @@ fn read_available(handle: &OwnedHandle, output: &mut Vec<u8>) -> io::Result<bool
                 ptr::null_mut(),
             )
         })?;
-        output.extend_from_slice(&bytes[..count as usize]);
-        if output.len() > OUTPUT_LIMIT {
+        if count as usize > OUTPUT_LIMIT.saturating_sub(output.len()) {
             return Err(io::ErrorKind::InvalidData.into());
         }
+        output.extend_from_slice(&bytes[..count as usize]);
     }
     Ok(false)
 }
@@ -473,6 +494,7 @@ impl Child {
             cleanup,
             output: Vec::new(),
             pid: info.dwProcessId,
+            birth: 0,
         };
         let resources = child.resources.as_ref().unwrap();
         let assigned = check(unsafe {
@@ -481,7 +503,10 @@ impl Child {
                 resources.process.as_raw_handle(),
             )
         });
-        let resumed = assigned.and_then(|()| {
+        let created =
+            assigned.and_then(|()| process_birth(&child.resources.as_ref().unwrap().process));
+        let resumed = created.and_then(|birth| {
+            child.birth = birth;
             if unsafe { ResumeThread(thread.as_raw_handle()) } == u32::MAX {
                 Err(io::Error::last_os_error())
             } else {
@@ -504,6 +529,10 @@ impl Child {
             }
             thread::sleep(Duration::from_millis(2));
         }
+        println!(
+            "original native peer pid={} birth={}",
+            child.pid, child.birth
+        );
         Ok(child)
     }
     pub fn facts(&self) -> Option<ProcessFacts> {
@@ -554,6 +583,14 @@ pub fn client(name: &str) -> io::Result<OwnedHandle> {
             ptr::null_mut(),
         )
     })
+}
+/// Read-only cleanup evidence, never a license to adopt or stop another server.
+pub fn assert_pipes_absent(names: &[String]) {
+    for name in names {
+        let error =
+            client(name).expect_err("owned fixture pipe must be absent after physical exit");
+        assert_eq!(error.raw_os_error(), Some(ERROR_FILE_NOT_FOUND as i32));
+    }
 }
 fn pipe(name: &str, mode: &str) -> io::Result<Pipe> {
     let handle = owned(unsafe {

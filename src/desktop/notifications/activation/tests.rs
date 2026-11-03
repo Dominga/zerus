@@ -492,7 +492,33 @@ fn native_refused_frontend_keeps_the_original_launch_unspent() {
             assert!(router.pending.is_empty());
             drop(launch); // model capability only; no GUI process is started.
         }));
-        let capture = child.finish().unwrap();
+        let capture = child.finish();
+        // Close this model's database/receivers before its Windows directory.
+        // Unknown original-child cleanup keeps the fixture instead of deleting.
+        let Fixture {
+            _temp,
+            store,
+            outbox,
+            ..
+        } = f;
+        drop(router);
+        drop(grant);
+        drop(outbox);
+        drop(store);
+        let capture = match capture {
+            Ok(capture) => {
+                _temp.close().unwrap();
+                capture
+            }
+            Err(error) => {
+                let retained = _temp.keep();
+                panic!(
+                    "original peer cleanup unknown: {error}; model retained at {}",
+                    retained.display()
+                );
+            }
+        };
+        native_peer::assert_pipes_absent(std::slice::from_ref(&name));
         assert!(capture.natural);
         assert_eq!(capture.exit, 0);
         let done = native_peer::marker(&capture.output, native_peer::DONE).unwrap();

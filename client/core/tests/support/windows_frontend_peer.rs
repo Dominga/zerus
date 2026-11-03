@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use std::{
     env,
     ffi::{c_void, OsStr},
+    fs::File,
     io::{self, Write},
     mem::{self, size_of, size_of_val},
     os::windows::{
@@ -274,50 +275,6 @@ fn privilege(token: &OwnedHandle, name: &str) -> io::Result<(bool, bool)> {
         }))
 }
 
-struct Attributes {
-    storage: Vec<usize>,
-    initialized: bool,
-}
-impl Attributes {
-    fn new(handles: &[HANDLE]) -> io::Result<Self> {
-        let mut bytes = 0;
-        unsafe {
-            InitializeProcThreadAttributeList(ptr::null_mut(), 1, 0, &mut bytes);
-        }
-        let mut this = Self {
-            storage: vec![0; bytes.div_ceil(size_of::<usize>())],
-            initialized: false,
-        };
-        check("InitializeProcThreadAttributeList", unsafe {
-            InitializeProcThreadAttributeList(this.pointer(), 1, 0, &mut bytes)
-        })?;
-        this.initialized = true;
-        check("UpdateProcThreadAttribute", unsafe {
-            UpdateProcThreadAttribute(
-                this.pointer(),
-                0,
-                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
-                handles.as_ptr().cast(),
-                size_of_val(handles),
-                ptr::null_mut(),
-                ptr::null(),
-            )
-        })?;
-        Ok(this)
-    }
-    fn pointer(&mut self) -> LPPROC_THREAD_ATTRIBUTE_LIST {
-        self.storage.as_mut_ptr().cast()
-    }
-}
-impl Drop for Attributes {
-    fn drop(&mut self) {
-        if self.initialized {
-            unsafe {
-                DeleteProcThreadAttributeList(self.pointer());
-            }
-        }
-    }
-}
 fn process_birth(process: &OwnedHandle) -> io::Result<u64> {
     let mut times = [FILETIME {
         dwLowDateTime: 0,
@@ -343,6 +300,8 @@ struct Resources {
     job: OwnedHandle,
     stop: OwnedHandle,
     output: OwnedHandle,
+    output_verified: bool,
+    pid: u32,
 }
 pub struct Capture {
     pub natural: bool,
@@ -395,7 +354,38 @@ impl Cleanup {
     }
 }
 
-fn read_available(handle: &OwnedHandle, output: &mut Vec<u8>) -> io::Result<bool> {
+fn read_available(resources: &mut Resources, output: &mut Vec<u8>) -> io::Result<bool> {
+    let handle = &resources.output;
+    if !resources.output_verified {
+        let connected = unsafe { ConnectNamedPipe(handle.as_raw_handle(), ptr::null_mut()) };
+        let code = if connected != 0 {
+            ERROR_SUCCESS
+        } else {
+            unsafe { GetLastError() }
+        };
+        match code {
+            ERROR_PIPE_LISTENING | ERROR_PIPE_NOT_CONNECTED => return Ok(false),
+            ERROR_SUCCESS | ERROR_PIPE_CONNECTED | ERROR_NO_DATA => {}
+            other => {
+                return Err(context(
+                    "ConnectNamedPipe(capture)",
+                    io::Error::from_raw_os_error(other as i32),
+                ))
+            }
+        }
+        let mut client = 0;
+        check("GetNamedPipeClientProcessId(capture)", unsafe {
+            GetNamedPipeClientProcessId(handle.as_raw_handle(), &mut client)
+        })?;
+        if client != resources.pid
+            || unsafe { WaitForSingleObject(resources.process.as_raw_handle(), 0) } != WAIT_TIMEOUT
+        {
+            return Err(io::Error::other(
+                "capture is not from the original live child",
+            ));
+        }
+        resources.output_verified = true;
+    }
     let mut available = 0;
     if unsafe {
         PeekNamedPipe(
@@ -442,7 +432,7 @@ pub fn marker(output: &[u8], prefix: &str) -> Option<Value> {
             .and_then(|at| serde_json::from_str(&line[at + prefix.len()..]).ok())
     })
 }
-fn cleanup(resources: Resources, mut output: Vec<u8>) -> io::Result<Capture> {
+fn cleanup(mut resources: Resources, mut output: Vec<u8>) -> io::Result<Capture> {
     // All native calls and the physical wait stay off the caller deadline.
     let signaled = unsafe { SetEvent(resources.stop.as_raw_handle()) } != 0;
     let natural = signaled
@@ -475,7 +465,7 @@ fn cleanup(resources: Resources, mut output: Vec<u8>) -> io::Result<Capture> {
             GetExitCodeProcess(resources.process.as_raw_handle(), &mut exit)
         })?;
         let until = Instant::now() + Duration::from_secs(2);
-        while !read_available(&resources.output, &mut output)? {
+        while !read_available(&mut resources, &mut output)? {
             if Instant::now() >= until {
                 return Err(io::ErrorKind::TimedOut.into());
             }
@@ -515,30 +505,45 @@ impl Child {
             "D:P(A;;GA;;;{})S:(ML;;NW;;;LW)",
             sid_text(&own.user)?
         ))?;
-        let attributes = descriptor.attributes();
-        let (mut reader, mut writer) = (ptr::null_mut(), ptr::null_mut());
-        check("CreatePipe", unsafe {
-            CreatePipe(&mut reader, &mut writer, &attributes, 4096)
-        })?;
-        let reader = acquired("CreatePipe(read)", reader)?;
-        let writer = acquired("CreatePipe(write)", writer)?;
-        check("SetHandleInformation", unsafe {
-            SetHandleInformation(reader.as_raw_handle(), HANDLE_FLAG_INHERIT, 0)
-        })?;
+        // WithToken has no bInheritHandles switch. Do not pass it a HANDLE_LIST
+        // or copied parent standard handles. Both APIs use plain STARTUPINFO
+        // and the same private, non-inherited stop/capture objects instead.
+        let mut attributes = descriptor.attributes();
+        attributes.bInheritHandle = 0;
+        let stop_name = format!("Local\\ZerusNativePeerStop-{}", uuid::Uuid::new_v4());
         let stop = acquired("CreateEventW", unsafe {
-            CreateEventW(&attributes, 1, 0, ptr::null())
+            CreateEventW(&attributes, 1, 0, wide(&stop_name).as_ptr())
         })?;
-        let input = acquired("CreateFileW", unsafe {
-            CreateFileW(
-                wide("NUL").as_ptr(),
-                GENERIC_READ,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                &attributes,
-                OPEN_EXISTING,
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            return Err(io::Error::other(
+                "CreateEventW: private stop name already exists",
+            ));
+        }
+        let output_name = format!(
+            r"\\.\pipe\zerus-native-peer-output-{}",
+            uuid::Uuid::new_v4()
+        );
+        let reader = acquired("CreateNamedPipeW(capture)", unsafe {
+            CreateNamedPipeW(
+                wide(&output_name).as_ptr(),
+                PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                1,
+                4096,
+                4096,
                 0,
-                ptr::null_mut(),
+                &attributes,
             )
         })?;
+        // Start listening before the child exists; later reads validate the
+        // client PID against the SAME live original process handle before bytes.
+        let listening = unsafe { ConnectNamedPipe(reader.as_raw_handle(), ptr::null_mut()) };
+        if listening == 0 && unsafe { GetLastError() } != ERROR_PIPE_LISTENING {
+            return Err(context(
+                "ConnectNamedPipe(initial capture)",
+                io::Error::last_os_error(),
+            ));
+        }
         let job = acquired("CreateJobObjectW", unsafe {
             CreateJobObjectW(ptr::null(), ptr::null())
         })?;
@@ -552,19 +557,9 @@ impl Child {
                 size_of_val(&limits) as u32,
             )
         })?;
-        let inherited = [
-            input.as_raw_handle(),
-            writer.as_raw_handle(),
-            stop.as_raw_handle(),
-        ];
-        let mut list = Attributes::new(&inherited)?;
-        let mut startup: STARTUPINFOEXW = unsafe { mem::zeroed() };
-        startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
-        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-        startup.StartupInfo.hStdInput = input.as_raw_handle();
-        startup.StartupInfo.hStdOutput = writer.as_raw_handle();
-        startup.StartupInfo.hStdError = writer.as_raw_handle();
-        startup.lpAttributeList = list.pointer();
+        let mut startup: STARTUPINFOW = unsafe { mem::zeroed() };
+        startup.cb = size_of::<STARTUPINFOW>() as u32;
+        // NULL desktop: caller's own session/desktop, no GUI or profile load.
         let executable =
             env::current_exe().map_err(|error| context("GetModuleFileNameW/current_exe", error))?;
         let mut line = wide(format!(
@@ -582,10 +577,8 @@ impl Child {
             (CHILD.to_owned(), "v1".to_owned()),
             ("ZERUS_PEER_NAMES".into(), serde_json::to_string(names)?),
             ("ZERUS_PEER_MODE".into(), mode.to_owned()),
-            (
-                "ZERUS_PEER_STOP".into(),
-                (stop.as_raw_handle() as usize).to_string(),
-            ),
+            ("ZERUS_PEER_STOP".into(), stop_name),
+            ("ZERUS_PEER_OUTPUT".into(), output_name),
         ]);
         environment.sort_by_cached_key(|(name, _)| name.to_ascii_lowercase());
         let mut block = Vec::<u16>::new();
@@ -597,10 +590,7 @@ impl Child {
         let mut info: PROCESS_INFORMATION = unsafe { mem::zeroed() };
         let launcher = Launcher::current()?;
         println!("original native peer launcher={}", launcher.name());
-        let flags = CREATE_NO_WINDOW
-            | CREATE_SUSPENDED
-            | CREATE_UNICODE_ENVIRONMENT
-            | EXTENDED_STARTUPINFO_PRESENT;
+        let flags = CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT;
         if line.len() > 1024 {
             return Err(io::Error::other(
                 "CreateProcessWithTokenW command line exceeds 1024 UTF-16 units",
@@ -616,7 +606,7 @@ impl Child {
                     flags,
                     block.as_ptr().cast(),
                     ptr::null(),
-                    &startup.StartupInfo,
+                    &startup,
                     &mut info,
                 )
             },
@@ -627,11 +617,11 @@ impl Child {
                     line.as_mut_ptr(),
                     ptr::null(),
                     ptr::null(),
-                    1,
+                    0, // No ambient inheritable handle reaches this child.
                     flags,
                     block.as_ptr().cast(),
                     ptr::null(),
-                    &startup.StartupInfo,
+                    &startup,
                     &mut info,
                 )
             },
@@ -645,6 +635,8 @@ impl Child {
                 job,
                 stop,
                 output: reader,
+                output_verified: false,
+                pid: info.dwProcessId,
             }),
             cleanup,
             output: Vec::new(),
@@ -668,19 +660,42 @@ impl Child {
                 Ok(())
             }
         });
-        drop(writer);
-        drop(input);
         resumed?;
         let until = Instant::now() + Duration::from_secs(5);
         while marker(&child.output, READY).is_none() {
-            if read_available(&child.resources.as_ref().unwrap().output, &mut child.output)? {
+            if read_available(child.resources.as_mut().unwrap(), &mut child.output)? {
                 return Err(io::Error::other(format!(
                     "fixture exited before ready: {}",
                     String::from_utf8_lossy(&child.output)
                 )));
             }
+            if marker(&child.output, "ZERUS_PEER_ERROR ").is_some() {
+                return Err(io::Error::other(format!(
+                    "original child setup failed: {}",
+                    String::from_utf8_lossy(&child.output)
+                )));
+            }
+            if unsafe {
+                WaitForSingleObject(child.resources.as_ref().unwrap().process.as_raw_handle(), 0)
+            } == WAIT_OBJECT_0
+            {
+                let mut exit = 0;
+                check("GetExitCodeProcess(before READY)", unsafe {
+                    GetExitCodeProcess(
+                        child.resources.as_ref().unwrap().process.as_raw_handle(),
+                        &mut exit,
+                    )
+                })?;
+                return Err(io::Error::other(format!(
+                    "original child exited {exit} before READY: {}",
+                    String::from_utf8_lossy(&child.output)
+                )));
+            }
             if Instant::now() >= until {
-                return Err(io::ErrorKind::TimedOut.into());
+                return Err(io::Error::other(format!(
+                    "original child READY timed out: {}",
+                    String::from_utf8_lossy(&child.output)
+                )));
             }
             thread::sleep(Duration::from_millis(2));
         }
@@ -810,6 +825,45 @@ fn pipe(name: &str, mode: &str) -> io::Result<Pipe> {
 fn controlled_native_pipe_child() {
     assert_eq!(env::var(CHILD).as_deref(), Ok("v1"));
     assert!(env::args().any(|v| v == "--exact") && env::args().any(|v| v == entry()));
+    let capture_name = env::var("ZERUS_PEER_OUTPUT").unwrap();
+    assert!(capture_name.starts_with(r"\\.\pipe\zerus-native-peer-output-"));
+    let output = acquired("CreateFileW(private capture)", unsafe {
+        CreateFileW(
+            wide(capture_name).as_ptr(),
+            GENERIC_WRITE,
+            0,
+            ptr::null(),
+            OPEN_EXISTING,
+            0,
+            ptr::null_mut(),
+        )
+    })
+    .unwrap();
+    let mut output = File::from(output);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_child(&mut output)));
+    if let Err(error) = result {
+        let message = error
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| error.downcast_ref::<&str>().copied())
+            .unwrap_or("native child panic");
+        let _ = writeln!(output, "ZERUS_PEER_ERROR {}", json!({"error":message}));
+        let _ = output.flush();
+        // Keep the original live child observable long enough for its parent
+        // to authenticate and retain the diagnostic, then leave on owned stop.
+        if let Ok(name) = env::var("ZERUS_PEER_STOP") {
+            if let Ok(stop) = acquired("OpenEventW(error stop)", unsafe {
+                OpenEventW(SYNCHRONIZE, 0, wide(name).as_ptr())
+            }) {
+                unsafe {
+                    WaitForSingleObject(stop.as_raw_handle(), 3000);
+                }
+            }
+        }
+        std::panic::resume_unwind(error);
+    }
+}
+fn run_child(output: &mut File) {
     let names: Vec<String> = serde_json::from_str(&env::var("ZERUS_PEER_NAMES").unwrap()).unwrap();
     assert!((1..=2).contains(&names.len()));
     assert!(names.iter().all(|s| s.len() <= 128
@@ -817,26 +871,20 @@ fn controlled_native_pipe_child() {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.'))));
     let mode = env::var("ZERUS_PEER_MODE").unwrap();
     assert!(["reply", "busy", "denied"].contains(&mode.as_str()));
-    let stop = owned(
-        env::var("ZERUS_PEER_STOP")
-            .unwrap()
-            .parse::<usize>()
-            .unwrap() as HANDLE,
-    )
-    .unwrap();
-    let mut stop_flags = 0;
-    check("GetHandleInformation(inherited stop event)", unsafe {
-        GetHandleInformation(stop.as_raw_handle(), &mut stop_flags)
+    let stop_name = env::var("ZERUS_PEER_STOP").unwrap();
+    assert!(stop_name.starts_with("Local\\ZerusNativePeerStop-"));
+    let stop = acquired("OpenEventW(private stop)", unsafe {
+        OpenEventW(SYNCHRONIZE, 0, wide(stop_name).as_ptr())
     })
     .unwrap();
     assert_eq!(
         unsafe { WaitForSingleObject(stop.as_raw_handle(), 0) },
         WAIT_TIMEOUT,
-        "WaitForSingleObject: inherited stop event must be valid and initially unsignalled"
+        "private stop event must be valid and initially unsignalled"
     );
     let mut pipes: Vec<_> = names.iter().map(|n| pipe(n, &mode).unwrap()).collect();
-    println!("{READY}{{\"ready\":true}}");
-    io::stdout().flush().unwrap();
+    writeln!(output, "{READY}{{\"ready\":true}}").unwrap();
+    output.flush().unwrap();
     let until = Instant::now() + Duration::from_secs(30);
     let (mut queries, mut forwards, mut received_bytes) = (0, 0, 0usize);
     while unsafe { WaitForSingleObject(stop.as_raw_handle(), 0) } == WAIT_TIMEOUT {
@@ -941,9 +989,11 @@ fn controlled_native_pipe_child() {
         thread::sleep(Duration::from_millis(1));
     }
     drop(pipes);
-    println!(
+    writeln!(
+        output,
         "{DONE}{}",
         json!({"queries":queries,"forwards":forwards,"bytes":received_bytes,"closed":names.len()})
-    );
-    io::stdout().flush().unwrap();
+    )
+    .unwrap();
+    output.flush().unwrap();
 }

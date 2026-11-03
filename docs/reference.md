@@ -2583,7 +2583,10 @@ interruption or failure keeps it. A folder that Git no longer tracks but that
 still exists then appears in the repository review (and in a review targeted at
 that worktree, such as the cleanup after Terminate) as a **leftover**
 (`worktree-leftovers-v1`), with a fresh bounded listing of the remaining files,
-the retained branch and current processes or sessions. The cleanup after
+the retained branch and current processes or sessions. Size, manifest and deletion
+blockers share one no-follow walk, bounded by two seconds and 200,000 entries,
+including queued children. Unreadable or protected subtrees and exhausted bounds
+leave `size_complete` false and refuse deletion. The cleanup after
 Terminate keeps such a folder with "Git no longer tracks this folder, but files
 remain" instead of an unverified-folder error. A missing Git
 registration is never treated as proof of deletion, and the removal is never
@@ -2612,7 +2615,17 @@ changes. A filesystem whose mount cannot be identified is refused. The reviewed
 folder itself is part of the confirmed fingerprint (device, inode and mount): it
 is reopened through its parent without following links (folders above it need
 only search permission: Linux opens them as paths and macOS for search), and
-completion is confirmed through that parent. Only after those checks does deletion grant the
+completion is confirmed through that parent. The reviewed root stays open and
+its name is checked against that inode again immediately before final removal.
+This rejects an observable replacement and prevents reuse of its inode number.
+The check and removal are separate: neither [Linux `unlinkat`](https://man7.org/linux/man-pages/man2/unlink.2.html)
+nor [macOS `unlinkat`](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/vfs/vfs_syscalls.c)
+provides an expected-inode argument or directory removal through the open root
+itself. An empty directory swapped into the name between the check and removal
+can still be removed. No traversal enters that replacement; a nonempty
+replacement is refused by directory removal. Renaming the path into quarantine
+would instead move an unreviewed folder and cannot guarantee race-free
+restoration, so it does not supply the missing inode-bound primitive. Only after those checks does deletion grant the
 owner write access to their own folders inside the reviewed tree, which is what
 blocked Git; it never touches the branch. If it
 stops partway, the record stays with the reason and the deletion is never

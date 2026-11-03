@@ -17,7 +17,9 @@ HGS = Path(os.environ.get('HGS_TEST_BIN', Path(__file__).resolve().parents[1] / 
 @unittest.skipUnless(sys.platform.startswith(('linux', 'darwin')), 'Unix private replacement')
 class Upgrade(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix='desktop-upgrade-')
+        # Darwin's default temp root can exceed the native Unix socket bound.
+        self.temporary = tempfile.TemporaryDirectory(
+            prefix='desktop-upgrade-', dir='/tmp' if sys.platform == 'darwin' else None)
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
         for name in ('config', 'state', 'tmp', 'tmux', 'bin'):

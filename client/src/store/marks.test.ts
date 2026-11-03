@@ -82,6 +82,25 @@ const REPLY = replyKey("", "claude", "conv-1");
 
 beforeEach(() => vi.restoreAllMocks());
 
+describe("local source readiness", () => {
+  it("finishes a paused initial read before reloading the actual native model and bounds repeat requests", async () => {
+    const first = deferred<AttentionSnapshot>();
+    const ready = { marks: { [replyKey("", "claude", "conv-1")]: { review: true, acknowledged: "original" } }, replies: {} };
+    const port = fakePort(ready);
+    port.attentionMarks.mockImplementationOnce(() => first.promise);
+    const store = createMarks(port, memoryStorage([""]));
+    const initial = store.load();
+    const reload = store.reloadLocal();
+    expect(store.reloadLocal()).toBe(reload);
+    expect(port.attentionMarks).toHaveBeenCalledTimes(1);
+    first.resolve({ marks: {}, replies: {} });
+    await initial; await reload;
+    expect(port.attentionMarks.mock.calls.length).toBeLessThanOrEqual(3);
+    expect(store.writeOrder().marks).toEqual(Object.keys(ready.marks));
+    expect(port.updateAttentionMarks).not.toHaveBeenCalled();
+  });
+});
+
 describe("keys", () => {
   it("are Qt's: the reply key, else the name and created without a conversation", () => {
     expect(REPLY).toBe(JSON.stringify(["", "claude", "conv-1"]));

@@ -500,8 +500,33 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     return { review: mark.review === true, acknowledged: typeof mark.acknowledged === "string" ? mark.acknowledged : "" };
   }
 
+  let loading: Promise<void> | undefined;
+  function load(): Promise<void> {
+    if (loading) return loading;
+    const work = loadOriginal();
+    loading = work;
+    void work.finally(() => { if (loading === work) loading = undefined; }).catch(() => {});
+    return work;
+  }
+  let reloadFlight: Promise<void> | undefined, reloadAgain = false;
+  function reloadLocal(): Promise<void> {
+    reloadAgain = true;
+    if (reloadFlight) return reloadFlight;
+    const work = (async () => {
+      do {
+        reloadAgain = false;
+        // The first request may have observed paused/loading. Finish its
+        // flight, then read the real model; at most one reload is pending.
+        if (loading) await loading;
+        await load();
+      } while (reloadAgain);
+    })();
+    reloadFlight = work;
+    void work.finally(() => { if (reloadFlight === work) reloadFlight = undefined; }).catch(() => {});
+    return work;
+  }
   /** Loads the stored marks and the pending read marks; changes made meanwhile win and are saved then. */
-  async function load() {
+  async function loadOriginal() {
     const pendingLoad = loadPending();
     let stored: AttentionSnapshot | undefined;
     try { stored = await port.attentionMarks(); } catch { stored = undefined; }
@@ -818,6 +843,7 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     overlay,
     attach(rows: RowsPort) { target = rows; },
     load,
+    reloadLocal,
     loadPending,
     observe,
     markRead,
@@ -849,3 +875,4 @@ export const { overlay, markReadUnavailable, markRead, markReplyRead, markNeedsA
 /** Hands a batch the catalog just applied to the marks (session.ts). */
 export const observeMarks = marks.observe;
 void marks.load();
+desktopService.onLocalReadReady(() => { void marks.reloadLocal().catch(() => {}); });

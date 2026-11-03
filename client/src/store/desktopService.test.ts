@@ -9,6 +9,30 @@ export const serviceView = (patch: Partial<DesktopService> = {}): DesktopService
   automatic_approvals: null, details_available: false, code: "background_unready", ...patch,
 });
 describe("desktop service presentation", () => {
+  it("reloads local presentation only after the native owner is ready, once per ready boundary", () => {
+    const service = createDesktopService(), reload = vi.fn(); service.onLocalReadReady(reload);
+    const view = (code: string, paused = false) => serviceView({ retained_source_import: { required: false, complete: true, running: false, code: "retained_import_staged", phase: null,
+      local_read_capture: { code: code === "local_read_source_ready" ? "local_read_source_captured" : code, paused, capture_id: "original", view_ready: code === "local_read_source_ready" } } });
+    service.apply(view("local_read_source_captured")); expect(reload).not.toHaveBeenCalled();
+    service.apply(view("local_read_source_ready")); service.apply(view("local_read_source_ready")); expect(reload).toHaveBeenCalledTimes(1);
+    service.apply(view("local_read_source_writer_unavailable", true)); expect(reload).toHaveBeenCalledTimes(1);
+    service.apply(view("local_read_source_ready")); expect(reload).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows local read capture failure independently without granting transfer or masking creation capture", () => {
+    const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: null,
+      local_read_capture: { code: "local_read_source_unsupported", paused: true, capture_id: "original" },
+      creations_capture: { code: "creation_source_private_slot", paused: true, capture_id: null } };
+    const state = serviceView({ retained_source_import: report });
+    const before = structuredClone(state);
+    const detail = retainedSourceDetails(state)!;
+    expect(retainedSourceNotice(state)).toContain("Local read marks are paused");
+    expect(detail.localReads!.code).toBe("local_read_source_unsupported");
+    expect(detail.localReads!.next).toContain("does not replace");
+    expect(detail.capture!.reason).toContain("Session creation is paused");
+    expect(state).toEqual(before);
+  });
+
   it("reviews the actual migration reason and gives a read-only next step", () => {
     const report = { required: true, complete: false, running: false, code: "retained_import_qt_unavailable", phase: null };
     const state = serviceView({ retained_source_import: report, background: { fleet: { ready: true, code: "ready" } } });

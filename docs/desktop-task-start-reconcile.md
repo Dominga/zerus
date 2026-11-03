@@ -6,10 +6,12 @@ is definition data. It does not extend `BACKGROUND_V1`, confer general
 Operations permission or turn a notification Grant into execution consent.
 
 This first wire slice has no positive executor or advertised capability marker.
-The ordinary CLI request lane refuses `frontend_authentication_required`; an
-authenticated native request still receives `task_start_reconcile_unsupported`.
-No operation, attempt, custody, task call or source-store write follows either
-refusal. The actor and current lease/consent integration remain separate work.
+The ordinary CLI request lane refuses `frontend_authentication_required`.
+With a background Runtime, an authenticated native request receives
+`task_start_reconcile_unsupported`; a passive service retains its existing
+`desktop_background_unavailable` refusal. These refusals create no operation,
+attempt, custody, task call or source-store write. The actor and current
+lease/consent integration remain separate work.
 
 ## Original identity and bytes
 

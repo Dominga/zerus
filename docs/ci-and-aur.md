@@ -814,6 +814,13 @@ Reviewed 2.1.314 against 2.1.312: its unattended approval countdown says
 and "avoid blocking progress". Either exact advisory is outside question identity
 because it counts down and disappears on navigation; the command, warning and
 choices remain bound, and altered wording still refuses delivery.
+Claude 2.1.317 adds a Bash reliability check after approval: macOS's system
+Bash 3.2 refuses some compound commands with exit code 126. The native safety
+fixtures retain the variable-path rm warning and exact directory fence using
+`T=$PWD; test . -ef <fixture-work>`; the former `$(pwd)` and quoted-variable
+comparison form was refused. Timeout diagnostics retain bounded native tool
+results beside the screen so execution errors remain visible when Claude
+collapses a completed tool call.
 Claude offers a one-time default permission mode change; fixtures set
 `hasSeenAutoDefaultNudge` except the suite that answers that offer. OpenCode has
 a supported minimum of 2.0.32; CI tests its latest release on Linux and macOS.
@@ -953,6 +960,14 @@ signed-in account can use it. For Kimi this workflow currently discovers
 versions only. Its separate native and approval workflows qualify one latest
 Kimi release for affected PRs or manual runs. DeepSeek's latest-release keyless
 contract fixture runs in full Linux CLI CI.
+
+The Kimi approval gate covers CreateGoal in both regular and fullscreen mode.
+The fullscreen panel shows only the selected choice's description; inspection
+checks that visible text without navigating. An explicit answer verifies every
+choice's description through guarded navigation before submitting the requested
+option. Changed or clipped descriptions, a changed request or a layout transition
+refuse further input. Both modes retain native decision, permission-mode and
+single goal-creation checks.
 
 The Kimi native inventory includes launching with an initial message, waiting
 at folder trust without sending it, then delivering it exactly once through

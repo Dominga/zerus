@@ -40,6 +40,8 @@ mod desktop_service;
 mod display;
 #[cfg(feature = "live")]
 mod drops;
+#[cfg(any(target_os = "macos", test))]
+pub mod entry;
 mod exit_flush;
 #[cfg(feature = "live")]
 mod external_open;
@@ -297,7 +299,10 @@ pub fn run() {
     let mut native_ownership = None;
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     let instance = match identity.instance_name(identity::flag("ZERUS_CLIENT_SINGLE_INSTANCE")) {
-        None => None,
+        None => {
+            renderer::choose();
+            None
+        }
         Some(name) => {
             let activation = if opens_sessions {
                 instance::Activation::Sessions
@@ -325,7 +330,13 @@ pub fn run() {
                 any(target_os = "linux", target_os = "macos", windows)
             )))]
             let reply = None;
-            match instance::claim(&name, identity.launchd_label(), activation, reply) {
+            match instance::claim(
+                &name,
+                identity.launchd_label(),
+                activation,
+                reply,
+                renderer::choose,
+            ) {
                 instance::Claim::Claimed(claimed) => {
                     #[cfg(all(feature = "live", any(target_os = "linux", target_os = "macos")))]
                     {

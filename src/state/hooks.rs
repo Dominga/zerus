@@ -1378,6 +1378,8 @@ fn track(name: String, token: String, mut event: Value, started: &mut bool) -> R
     } else if sid != string(&record, "conversation_id") {
         return Ok(0);
     }
+    let resumed_clear_end = kind == "SessionEnd" && string(&event, "agent_id").is_empty()
+        && clear_context::ending_resume(&record);
     if kind == "SessionEnd" && string(&event, "agent_id").is_empty() {
         record["session_end"] = json!({"reason": string(&event, "reason"), "at": now(),
             "run_id": record["run_id"], "conversation_id": sid});
@@ -1393,6 +1395,12 @@ fn track(name: String, token: String, mut event: Value, started: &mut bool) -> R
     tasks::observe(&mut record, &event);
     processes::observe(&mut record, &event);
     journal::update_activity(&mut record, &event);
+    if resumed_clear_end {
+        // The real main hook ended this requested clear, not its supervised
+        // process. Keep the exact deferred-start fence, never fabricate Ready.
+        record["session_end"]["clear_request_id"] = record["clear_context_request"]["request_id"].clone();
+        record["session_end"]["clear_event_at"] = record["last_event_at"].clone();
+    }
     compact_context::observe(&mut record, &event);
     questions::observe(&mut record, &event);
     journal::log_event(&record, &event)?;

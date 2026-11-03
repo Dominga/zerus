@@ -9,6 +9,10 @@ import type { ActivityStore } from "./activity";
 export interface ActivitySource {
   /** The session shown; `id` is its row id (computer + "\n" + key). */
   target(): { id: string } | undefined;
+  /** Layout continuity only; target() remains the current run's routing identity. */
+  displayKey?(): string | undefined;
+  /** Retained transcript content during resume, never live action/read evidence. */
+  transcriptSummary?(): Record<string, unknown> | undefined;
   /** Oldest first. */
   events(): readonly ActivityEvent[];
   /** The fields the transcript reads besides the events (a live `state` value, an inspection's other fields). */

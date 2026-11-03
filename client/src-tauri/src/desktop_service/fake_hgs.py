@@ -273,6 +273,8 @@ def desktop_request():
             count = config['large']
             page.update(items=[row('row-' + str(i)) for i in range(offset, min(offset + 128, count))],
                         next_cursor=str(uuid.UUID(int=number + 100)) if offset + 128 < count else None)
+        if config.get('replace_projection') and number == 2 and (config.get('projection_publication_gate') or os.environ.get('ZERUS_TEST_SERVICE_PROJECTION_PUBLICATION_GATE') == '1'):
+            (root / 'replacement-page-selected').touch()
         print(json.dumps(page))
     elif op == 'catalog_changes':
         number = counter('delta-number')
@@ -558,8 +560,11 @@ elif args == ['desktop', 'watch', '--json']:
         wait(root / ('page-started' if config['replace_projection'] == 'early' else 'initial-complete'))
         if config['replace_projection'] == 'exhausted':
             wait(root / 'release-replacement-hint')
-        hint(1, '0', 'b' * 32)
+        # The next request must see the state announced by this hint.
         (root / 'projection-replaced').touch()
+        hint(1, '0', 'b' * 32)
+        if config.get('projection_publication_gate') or os.environ.get('ZERUS_TEST_SERVICE_PROJECTION_PUBLICATION_GATE') == '1':
+            wait(root / 'replacement-page-selected')
     if config.get('delta_live'):
         wait(root / 'send-delta')
         hint(1, '1')
@@ -601,6 +606,28 @@ elif args == ['desktop', 'watch', '--json']:
 elif args == ['desktop', 'request', '--json']:
     desktop_request()
 elif args == ['desktop', 'catalog-relay', '--json']:
+    # Optional fault injection and lifecycle evidence for this private relay.
+    delay = int(os.environ.get('ZERUS_TEST_SERVICE_RELAY_FINALIZE_DELAY_MS', config.get('relay_finalize_delay_ms', 0)))
+    assert 0 <= delay <= 2000
+    exit_number = counter('relay-number') if delay or os.environ.get('ZERUS_TEST_SERVICE_RELAY_EXIT_TRACE') == '1' else 0
+    target = int(os.environ.get('ZERUS_TEST_SERVICE_RELAY_FINALIZE_NUMBER', config.get('relay_finalize_number', 1)))
+    trace_exit = os.environ.get('ZERUS_TEST_SERVICE_RELAY_EXIT_TRACE') == '1'
+
+    def relay_event(event):
+        if trace_exit:
+            with (root / 'relay-lifecycle').open('a') as log:
+                log.write(json.dumps(dict(event=event, pid=os.getpid(), number=exit_number,
+                                          at=time.monotonic_ns())) + '\n')
+
+    def finalize_relay():
+        relay_event('finalize-start')
+        if exit_number == target:
+            time.sleep(delay / 1000)
+        relay_event('finalize-done')
+
+    if trace_exit or delay:
+        import atexit
+        atexit.register(finalize_relay)
     print(json.dumps({'abi': 'desktop-catalog-relay-v1', 'configuration': ('b' if config.get('relay_fault') == 'configuration' else 'a') * 64}), flush=True)
     for line in sys.stdin:
         value = json.loads(line)
@@ -626,5 +653,9 @@ elif args == ['desktop', 'catalog-relay', '--json']:
             desktop_request()
         response = json.loads(captured.getvalue())
         print(json.dumps({'abi': 'desktop-catalog-relay-v1', 'request_id': str(uuid.uuid4()) if fault == 'identity' else value['request_id'], 'value': response}), flush=True)
+    relay_event('stdin-eof')
+    # Every reply was flushed above. This private proxy has no shutdown work;
+    # don't put interpreter finalizers inside the real child's bounded join.
+    os._exit(0)
 else:
     raise SystemExit('Forbidden fallback CLI call')

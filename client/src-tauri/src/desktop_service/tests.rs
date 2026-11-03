@@ -85,7 +85,14 @@ impl Fixture {
         allowed: bool,
         responder: Option<Arc<zerus_client_core::desktop::Responder>>,
     ) -> (Arc<Service>, crate::pump::Pump) {
-        let pump = crate::pump::Pump::default();
+        self.start_with_pump(allowed, crate::pump::Pump::default(), responder)
+    }
+    fn start_with_pump(
+        &self,
+        allowed: bool,
+        pump: crate::pump::Pump,
+        responder: Option<Arc<zerus_client_core::desktop::Responder>>,
+    ) -> (Arc<Service>, crate::pump::Pump) {
         let (sink, rx) = std::sync::mpsc::sync_channel(256);
         let drain = pump.drain_service(rx, |_| {});
         let service = Service::start(
@@ -97,6 +104,7 @@ impl Fixture {
             responder,
             vec![],
         );
+        std::thread::sleep(injected_delay("ZERUS_TEST_SERVICE_START_RETURN_DELAY_MS"));
         (service, pump)
     }
 }
@@ -211,7 +219,7 @@ fn incompatible_cli_stays_unavailable_until_one_explicit_retry_without_fallback(
 fn dirty_walk_finishes_its_cursor_and_coalesces_one_refresh_without_deleting_rows() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
-        let fixture = Fixture::new(json!({"dirty_walk":true}));
+        let fixture = Fixture::new(json!({"dirty_walk":true,"relay_finalize_delay_ms":300}));
         let (service, pump) = fixture.start(true);
         pump.push(Change::Upsert {
             computer: ComputerId::local(),
@@ -682,7 +690,9 @@ fn full_projection_replacement_rebaselines_even_with_unchanged_native_generation
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         for stage in ["early", "late"] {
-            let fixture = Fixture::new(json!({"replace_projection":stage}));
+            let fixture = Fixture::new(
+                json!({"replace_projection":stage,"projection_publication_gate":true}),
+            );
             let (service, pump) = fixture.start(true);
             // Writing a hint to stdout is not evidence the client consumed it.
             // Retain the old cursor page until the replacement is bound under
@@ -732,7 +742,9 @@ fn full_projection_replacement_rebaselines_even_with_unchanged_native_generation
 fn projection_replacement_after_cursor_exhaustion_needs_no_close() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
-        let fixture = Fixture::new(json!({"replace_projection":"exhausted"}));
+        let fixture = Fixture::new(
+            json!({"replace_projection":"exhausted","projection_publication_gate":true}),
+        );
         let (service, pump) = fixture.start(true);
         let through = Revision::try_from("1".to_owned()).unwrap();
         eventually("old cursor consumed and walk finished before hint", || {
@@ -771,7 +783,9 @@ fn retention_gap_and_unknown_cursor_outcome_restart_from_a_fresh_baseline() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         for failure in ["gap", "unknown", "changed_through"] {
-            let fixture = Fixture::new(json!({"failure":failure}));
+            let fixture = Fixture::new(
+                json!({"failure":failure,"relay_finalize_delay_ms":300,"relay_finalize_number":2}),
+            );
             let (service, pump) = fixture.start(true);
             eventually("fresh baseline caught up", || {
                 pump.row("", "recovered").is_some() && pump.row("", "row").is_none()
@@ -926,8 +940,10 @@ fn stuck_view_callback_cannot_hold_the_quit_completion_past_its_deadline() {
 fn hint_driven_delta_walks_never_take_an_already_live_computer_offline() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
-        let fixture = Fixture::new(json!({"delta_live":true}));
-        let (service, pump) = fixture.start(true);
+        let fixture = Fixture::new(
+            json!({"delta_live":true,"relay_finalize_delay_ms":300,"relay_finalize_number":2}),
+        );
+        let pump = crate::pump::Pump::default();
         let statuses = Arc::new(Mutex::new(Vec::new()));
         let observe = statuses.clone();
         pump.tap(Box::new(move |change| {
@@ -937,6 +953,8 @@ fn hint_driven_delta_walks_never_take_an_already_live_computer_offline() {
                 }
             }
         }));
+        // Install the one-shot Live observer before startup can finish.
+        let (service, pump) = fixture.start_with_pump(true, pump, None);
         eventually("initial live baseline", || {
             statuses.lock().unwrap().contains(&ComputerStatus::Live)
         })
@@ -1113,7 +1131,8 @@ fn older_activity_and_changed_process_interval_retire_ids_but_refresh_reuses_dem
 fn detail_sequence_gap_recovers_only_its_route_and_keeps_catalog_and_processes_live() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
-        let fixture = Fixture::new(json!({"details":true,"detail_gap":true}));
+        let fixture =
+            Fixture::new(json!({"details":true,"detail_gap":true,"relay_finalize_delay_ms":300}));
         let (service, pump) = fixture.start(true);
         let seen = Arc::new(Mutex::new(Vec::new()));
         let observe = seen.clone();
@@ -1374,7 +1393,7 @@ fn service_source_roster_bootstraps_catalogs_independently_of_shared_counts() {
 fn count_failures_during_status_and_catalog_hints_keep_the_current_catalog_and_transport_live() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
-        let fixture = Fixture::new(json!({"counts_transition":true}));
+        let fixture = Fixture::new(json!({"counts_transition":true,"relay_finalize_delay_ms":300}));
         let (service, pump) = fixture.start(true);
         eventually("baseline applied", || {
             pump.row("", "row").is_some()
@@ -1471,7 +1490,7 @@ fn repeated_catalog_failure_retires_only_its_peer_until_manual_retry_or_a_new_sc
     tauri::async_runtime::block_on(async {
         for scope_change in [false, true] {
             let fixture = Fixture::new(json!({"peer_failure":true}));
-            let (service, pump) = fixture.start(true);
+            let pump = crate::pump::Pump::default();
             pump.push(Change::Upsert {
                 computer: ComputerId::from("broken"),
                 key: "cached".into(),
@@ -1484,6 +1503,8 @@ fn repeated_catalog_failure_retires_only_its_peer_until_manual_retry_or_a_new_sc
                     observed.lock().unwrap().push((computer.clone(), *status));
                 }
             }));
+            // Install the one-shot halt observer and cached row before startup.
+            let (service, pump) = fixture.start_with_pump(true, pump, None);
             eventually("only broken catalog exhausted its two walks", || {
                 statuses.lock().unwrap().contains(&(
                     ComputerId::from("broken"),

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createOverview, emptyFilter, noConsents, type Frame, type Manual } from "./worktree-overview-state";
+import { LEFTOVERS, createOverview, emptyFilter, noConsents, selectable, type Frame, type Manual, type OverviewRow } from "./worktree-overview-state";
 const tick = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
 const frame = (index = 0): Frame => ({ id: "opaque-overview", reading: false, processed: 1, total: 1, incomplete: 0, pending: 0, repositories: 1, partial: false, updated: 1000, page: { index, total: 600, groups: [], selected: 1, selected_ids: ["opaque-row"], candidates: 2, estimated_bytes: 10, partial: false } });
 const manual = (busy = false): Manual => ({ id: "opaque-review", revision: 4, rows: [], busy, cleaning: false, stopping: false, attempted: false, removed: 0, kept: 0, unknown: 0, required: noConsents() });
@@ -60,6 +60,33 @@ describe("bounded overview controller", () => {
     expect(requests.filter((r) => r.command === "worktree_manual_remove")).toEqual([{ command: "worktree_manual_remove", args: { id: "opaque-review", revision: 4, consents } }]);
     expect(state.batch()?.unknown).toBe(1); state.dispose();
     expect(requests.filter((r) => r.command === "worktree_manual_remove")).toHaveLength(1);
+  });
+  it("sends one leftover action per confirmation with only the displayed fingerprint and consent", async () => {
+    const requests: { command: string; args?: Record<string, unknown> }[] = [];
+    let release!: (value: unknown) => void;
+    const call = async <T,>(command: string, args?: Record<string, unknown>): Promise<T> => {
+      requests.push({ command, args });
+      if (command === "worktree_overview_open") return { id: "opaque-overview" } as T;
+      if (command === "worktree_overview_page") return frame() as T;
+      if (command === "worktree_leftover_delete") return await new Promise<unknown>((resolve) => { release = resolve; }) as T;
+      if (command === "worktree_leftover_keep") throw "The application did not answer.";
+      return undefined as T;
+    };
+    const state = createOverview(call, (e) => { throw Error(String(e)); }); await state.open();
+    const row: OverviewRow = { id: "opaque-left", path: "/srv/example/left", branch: "feature/left", kind: "leftover", machine: "workstation", computer: "", category: LEFTOVERS, state: "Partially removed", remains: "", size: "4 KiB", fresh: true, sessions: [],
+      leftover: { branch: "feature/left", branch_retained: true, bytes: 4096, complete: true, stopped: "", interrupted: false, reasons: [], sessions: [], processes: 0, fingerprint: "ab".repeat(32), consent: true, deletable: false, repository: true, reserved_at: null, outcome: null } };
+    expect(selectable(LEFTOVERS)).toBe(false); expect(selectable(4)).toBe(false); expect(selectable(3)).toBe(true);
+    const deleting = state.leftover(row, true); await tick();
+    // A second confirmation while the first runs starts nothing.
+    expect(await state.leftover(row, true)).toMatch(/busy/u);
+    release({ outcome: "unknown", detail: "Timed out." });
+    expect(await deleting).toEqual({ outcome: "unknown", detail: "Timed out." });
+    expect(requests.filter((r) => r.command.startsWith("worktree_leftover"))).toEqual([{ command: "worktree_leftover_delete", args: { id: "opaque-overview", row: "opaque-left", fingerprint: "ab".repeat(32), consent: true } }]);
+    // A reply that never came back is text: the dialog shows it as unknown.
+    expect(await state.leftover(row, null)).toBe("The application did not answer.");
+    expect(requests.filter((r) => r.command === "worktree_leftover_keep")).toEqual([{ command: "worktree_leftover_keep", args: { id: "opaque-overview", row: "opaque-left", fingerprint: "ab".repeat(32) } }]);
+    expect(requests.filter((r) => r.command.includes("remove") || r.command.includes("refresh"))).toEqual([]);
+    state.dispose();
   });
   it("closing during open disposes the eventual opaque handle without querying or mutating its rows", async () => {
     let release!: (value: { id: string }) => void; const requests: string[] = [];

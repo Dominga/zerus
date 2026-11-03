@@ -222,14 +222,53 @@ fn sweep_requires_the_original_handoff_and_has_a_fixed_per_pass_limit() {
     assert!(sweep_at(&f.location, &wrong, NOW).is_err());
     assert!(paths.iter().all(|p| p.exists()));
     let lock = f.location.handoff_lock().unwrap();
-    let first = sweep_at(&f.location, &lock, NOW).unwrap();
-    assert_eq!(first.removed, REMOVE);
+    // This checks the removal limit independently of real filesystem latency.
+    // The separate time budget can legitimately stop a production pass sooner.
+    let fixed = Instant::now();
+    let first = sweep_with_clock(&f.location, &lock, NOW, || fixed).unwrap();
+    assert_eq!(first.removed, 2, "{first:?}");
     assert!(first.incomplete);
     for _ in 0..3 {
-        let pass = sweep_at(&f.location, &lock, NOW).unwrap();
-        assert!(pass.removed <= REMOVE);
+        let pass = sweep_with_clock(&f.location, &lock, NOW, || fixed).unwrap();
+        assert!(pass.removed <= 2);
     }
     assert!(paths.iter().all(|p| !p.exists()));
+}
+#[test]
+fn sweep_time_budget_can_end_before_the_removal_limit() {
+    for expected in [0, 1, 2] {
+        let f = Fixture::new();
+        let mut paths = vec![];
+        for _ in 0..6 {
+            let (path, mut lease) = f.input(NOW - AGE - 1);
+            lease.retain();
+            drop(lease);
+            paths.push(path);
+        }
+        let lock = f.location.handoff_lock().unwrap();
+        let start = Instant::now();
+        let mut initial = true;
+        let pass = sweep_with_clock(&f.location, &lock, NOW, || {
+            if std::mem::take(&mut initial) {
+                return start;
+            }
+            if expected == 2 {
+                // Just before expiry the independent removal cap still applies.
+                start + Duration::from_millis(99)
+            } else if paths.iter().filter(|p| !p.exists()).count() >= expected {
+                // Equality at the deadline ends the pass, including after just
+                // one real removal. No sleep or changed production timeout.
+                start + Duration::from_millis(100)
+            } else {
+                start
+            }
+        })
+        .unwrap();
+        assert_eq!(pass.removed, expected, "{pass:?}");
+        assert_eq!(pass.kept, 0, "{pass:?}");
+        assert!(pass.incomplete);
+        assert_eq!(paths.iter().filter(|p| !p.exists()).count(), expected);
+    }
 }
 #[test]
 #[cfg(unix)]

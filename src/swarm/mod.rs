@@ -12,6 +12,8 @@ pub(crate) use session_project::validate_payload as validate_session_project;
 mod model;
 mod replica;
 mod service;
+/// The running executable and its replacement, for long-lived commands.
+pub(crate) use service::{Executable, Replacement};
 mod store;
 mod transport;
 

@@ -62,7 +62,7 @@ are worktree-specific.
   the original custody lock released. A lost result is read from the original
   CLI receipt and is never re-run.
 - **Storage.** The ledger has its own tables, `desktop_creation_worktrees`
-  and `desktop_creation_worktree_budget`, added at Store schema 22 by merge
+  and `desktop_creation_worktree_budget`, added at Store schema 23 by merge
   order. The bounds are the same as clone's: 4096 IDs, 16 MiB, 32 unsettled
   charges and one effect worker.
 - **Accounting.** Its undrained charges join `operation_undrained` and the
@@ -122,7 +122,15 @@ a pinned directory object.
   after the final identity checks therefore cannot redirect Git; the checks
   after the command then leave the result unconfirmed. macOS has no such
   descriptor link, so the owned path refuses there and the direct path keeps
-  serving it. The checkout forces `worktree.useRelativePaths=false`, so the
+  serving it. `worktree add` would start its own checkout child (`reset
+  --hard`) with an absolute `GIT_DIR`, so the owned path runs it with
+  `--no-checkout`, which creates only the branch, the metadata entry and the
+  gitfile. After pinning that entry, it runs the same checkout itself: `reset
+  --hard --no-recurse-submodules`, then the `post-checkout` hook through `git
+  hook run`. Both run with `GIT_DIR` and `GIT_COMMON_DIR` bound to the pinned
+  entry and common directory as `/proc/self/fd/N`, and every child Git starts
+  inherits them. This needs Git 2.36 or later; older Git is refused before any
+  effect. The checkout forces `worktree.useRelativePaths=false`, so the
   links Own checks are absolute. Because the path is `.`, Git names the
   linked-worktree metadata entry `-` (then `-1`, ...); nothing derives meaning
   from that name.
@@ -134,7 +142,7 @@ a pinned directory object.
   writes run inside the pinned common directory (`--git-dir=.`, so Git
   resolves the held object's own path), with no checkout or path indirection.
   Without one it writes nothing, so every repository passes the same six steps.
-- **Metadata entry.** Right after `worktree add`, the entry Git made is pinned
+- **Metadata entry.** Right after `worktree add --no-checkout`, the entry Git made is pinned
   by descriptor: named by the gitfile read through the pinned destination,
   opened through the pinned common directory's `worktrees`, and accepted only
   when its `gitdir` backlink, `HEAD` branch and `commondir` link, read through

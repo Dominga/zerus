@@ -27,6 +27,21 @@ use zerus_client_core::{
 };
 use zerus_desktop_ledger::reads;
 
+/// Root schema leaf: catalog rows carry the approval-phase flag that the
+/// automatic-approval scan visits first (zerus-5wmh.66.3.33).
+pub(super) const SCHEMA: i64 = 22;
+#[cfg(test)]
+pub(super) fn remove_approval_fixture(db: &Connection) {
+    // Rewind the later schema-23 creation worktree leaf too, never leaving it
+    // labelled older.
+    super::creation_worktree::remove_fixture(db);
+    db.execute_batch(
+        "DROP INDEX desktop_catalog_approval; DROP INDEX desktop_catalog_approval_pending;
+        ALTER TABLE desktop_catalog_rows DROP COLUMN approval;",
+    )
+    .unwrap();
+}
+
 pub(super) fn migrate(db: &Connection) -> Result<()> {
     state::migrate(db)?;
     db.execute_batch(
@@ -40,6 +55,12 @@ const APPROVALS: usize = 2;
 const SLOTS: usize = READS + APPROVALS;
 const RECENT: usize = 4096;
 const SCAN: Duration = Duration::from_secs(1);
+/// Approval-phase rows read per scan, before the one-page catalog walk.
+const INDEXED: usize = 16;
+/// Rows stored before schema 22 whose flag one scan derives, and the JSON
+/// bytes past the first of them, so one short transaction stays short.
+const BACKFILL: usize = 1024;
+const BACKFILL_BYTES: usize = 8 << 20;
 const COOLDOWN: Duration = Duration::from_secs(5);
 const UNKNOWN: &str = "Answer delivery could not be confirmed. Check Activity or Terminal.";
 
@@ -202,6 +223,11 @@ pub(super) struct Runtime {
     writer_token: Option<String>,
     stopping: bool,
     scan_at: Instant,
+    /// No row stored before schema 22 is left without its approval flag.
+    backfilled: bool,
+    /// Which discovery goes first this scan: the approval-phase index or the
+    /// catalog walk, in turn, so neither keeps both approval slots.
+    indexed_first: bool,
 }
 impl Runtime {
     /// No child, registration, service activation or journal constructor here.
@@ -260,6 +286,8 @@ impl Runtime {
             writer_token: None,
             stopping: false,
             scan_at: Instant::now(),
+            backfilled: false,
+            indexed_first: true,
         }
     }
 
@@ -394,18 +422,21 @@ impl Runtime {
             }
         }
     }
-    fn lease(&mut self, kind: Kind) -> Option<Arc<Lease>> {
+    /// A slot of `kind` is free now.
+    fn free(&mut self, kind: Kind) -> bool {
         self.leases.retain(|lease| lease.strong_count() > 0);
         let limit = if kind == Kind::Read { READS } else { APPROVALS };
-        if self.leases.len() >= SLOTS
-            || self
+        self.leases.len() < SLOTS
+            && self
                 .leases
                 .iter()
                 .filter_map(Weak::upgrade)
                 .filter(|lease| lease.kind == kind)
                 .count()
-                >= limit
-        {
+                < limit
+    }
+    fn lease(&mut self, kind: Kind) -> Option<Arc<Lease>> {
+        if !self.free(kind) {
             return None;
         }
         let lease = Arc::new(Lease { kind });
@@ -602,20 +633,79 @@ impl Runtime {
             if self.sources.observe_reads(store).is_err() {
                 self.read_error = Some("read_observation_unavailable");
             }
-            match self.sources.page(store) {
-                Ok(candidates) => {
-                    if self.policy.is_some_and(|p| p.enabled) && self.approval_error.is_none() {
-                        for candidate in candidates {
-                            self.inspect(store, candidate);
-                        }
-                    }
+            // Bounded, resumable: each scan derives one batch of old rows.
+            if !self.backfilled {
+                match zerus_desktop_catalog::approvals::backfill(&mut store.db, BACKFILL, BACKFILL_BYTES) {
+                    Ok(0) => self.backfilled = true,
+                    Ok(_) => (),
+                    Err(_) => self.read_error = Some("delivery_catalog_unavailable"),
                 }
-                Err(_) => self.read_error = Some("delivery_catalog_unavailable"),
+            }
+            // Sessions in an approval phase, whatever the catalog size, and
+            // the one-page catalog walk as the backstop, taking turns to go
+            // first. A turn passes only on a scan that could admit (a free
+            // approval slot): turns spent while slow inspections hold both
+            // slots would let every real admission fall to the same side.
+            // Eligibility is unchanged.
+            let open = self.free(Kind::Approval);
+            let indexed_first = self.indexed_first;
+            if open {
+                self.indexed_first = !indexed_first;
+            }
+            if indexed_first {
+                self.scan_indexed(store, open);
+                self.scan_page(store);
+            } else {
+                self.scan_page(store);
+                self.scan_indexed(store, false);
             }
         }
     }
 
-    fn inspect(&mut self, store: &Store, candidate: catalog::Candidate) {
+    fn approving(&self) -> bool {
+        self.policy.is_some_and(|p| p.enabled) && self.approval_error.is_none()
+    }
+
+    /// The approval-phase rows of this scan, in pass order. A pass moves past
+    /// a row only once it was inspected or found to need nothing; at the first
+    /// candidate without a free approval slot the scan stops, and the next one
+    /// starts there, so no row is skipped while both slots are busy.
+    fn scan_indexed(&mut self, store: &Store, leads: bool) {
+        if !self.approving() {
+            return;
+        }
+        match self.sources.approvals(store, INDEXED, leads) {
+            Ok(rows) => {
+                for row in rows {
+                    if let Some(candidate) = row.candidate.clone() {
+                        if !self.inspect(store, candidate) {
+                            break;
+                        }
+                    }
+                    self.sources.handled(&row);
+                }
+            }
+            Err(_) => self.read_error = Some("delivery_catalog_unavailable"),
+        }
+    }
+
+    fn scan_page(&mut self, store: &mut Store) {
+        match self.sources.page(store) {
+            Ok(candidates) => {
+                if self.approving() {
+                    for candidate in candidates {
+                        self.inspect(store, candidate);
+                    }
+                }
+            }
+            Err(_) => self.read_error = Some("delivery_catalog_unavailable"),
+        }
+    }
+
+    /// Starts the native inspection of `candidate` unless it needs none now
+    /// (inspected within the cooldown, already under way, or no longer the
+    /// current row). False only when no approval slot is free.
+    fn inspect(&mut self, store: &Store, candidate: catalog::Candidate) -> bool {
         let key = format!(
             "{:x}",
             Sha256::digest(
@@ -644,10 +734,10 @@ impl Runtime {
                 .any(|old| old.target.key == candidate.target.key)
             || !self.sources.same(store, &candidate).unwrap_or(false)
         {
-            return;
+            return true;
         }
         let Some(lease) = self.lease(Kind::Approval) else {
-            return;
+            return false;
         };
         if self.recent.len() == RECENT {
             self.recent.pop_front();
@@ -657,6 +747,7 @@ impl Runtime {
         let work = Work::Inspect(candidate.target.clone());
         let job = self.launch(Phase::Inspect(candidate), inv, work, lease);
         self.jobs.push(job);
+        true
     }
 
     fn finish(&mut self, store: &mut Store, job: &mut Job) -> Result<bool> {

@@ -539,13 +539,27 @@ mod tests {
         };
 
         // Baseline: all six steps, the checkout, tracking and ownership.
+        // The repository's post-checkout hook runs once in the checkout, as
+        // `worktree add` runs it.
         let calls = std::sync::Mutex::new(Vec::new());
         let repo = repository(&base.join("baseline"), true);
+        let hook = repo.join(".git/hooks/post-checkout");
+        std::fs::write(&hook, "#!/bin/sh\necho \"$1 $2 $3\" >> post-checkout.log\n").unwrap();
+        std::fs::set_permissions(
+            &hook,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
         let (destination, receipt) = owned_git_create(&repo, &id(), |step| {
             calls.lock().unwrap().push(step);
             Ok(())
         });
         assert_eq!(receipt["status"], "created", "{receipt}");
+        let head = receipt["head"].as_str().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(destination.join("post-checkout.log")).unwrap(),
+            format!("{} {head} 1\n", "0".repeat(head.len()))
+        );
         assert_eq!(
             *calls.lock().unwrap(),
             [
@@ -714,6 +728,45 @@ mod tests {
             "the branch is in the pinned repository"
         );
 
+        // The checkout's reset runs after `worktree add`, with GIT_DIR and
+        // GIT_COMMON_DIR bound to the pinned entry and common directory. A
+        // common directory or entry replaced in between receives nothing.
+        for (name, swap_common) in [("reset-common", true), ("reset-entry", false)] {
+            let repo = repository(&base.join(name), false);
+            let foreign = repository(&base.join(name).join("foreign"), false);
+            let (git, foreign_git) = (repo.join(".git"), foreign.join(".git"));
+            super::super::worktrees::BEFORE_OWNED_RESET.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    if swap_common {
+                        std::fs::rename(&git, git.with_file_name(".git-admitted")).unwrap();
+                        // A prepared foreign entry at the same name.
+                        std::fs::create_dir_all(foreign_git.join("worktrees/-")).unwrap();
+                        std::os::unix::fs::symlink(&foreign_git, &git).unwrap();
+                    } else {
+                        let entry = git.join("worktrees/-");
+                        std::fs::rename(&entry, git.join("worktrees/moved-entry")).unwrap();
+                        std::fs::create_dir(&entry).unwrap();
+                    }
+                }))
+            });
+            let (destination, receipt) = owned_git_create(&repo, &id(), |_| Ok(()));
+            assert_eq!(receipt["status"], "unconfirmed", "{name}: {receipt}");
+            let (written, untouched) = if swap_common {
+                (
+                    repo.join(".git-admitted/worktrees/-"),
+                    foreign.join(".git/worktrees/-"),
+                )
+            } else {
+                (repo.join(".git/worktrees/moved-entry"), repo.join(".git/worktrees/-"))
+            };
+            assert!(written.join("index").is_file(), "{name}: pinned entry");
+            assert!(
+                std::fs::read_dir(&untouched).unwrap().next().is_none(),
+                "{name}: the replacement receives no index or ORIG_HEAD"
+            );
+            assert!(destination.join(".git").is_file(), "{name}: the checkout is kept");
+        }
+
         // Checkout pins the metadata entry it just made; Own writes only
         // through that object. A replacement at the same path (even a full
         // copy of Git's links), a changed backlink or an existing owner file
@@ -827,7 +880,8 @@ mod tests {
         // writes still land in both pinned objects, never at the replaced paths.
         let result = super::super::repositories::owned_git_unverified_for_test(
             &pinned,
-            Some(&common),
+            &[&common],
+            Default::default(),
             &[
                 git_dir.as_str(),
                 "worktree",

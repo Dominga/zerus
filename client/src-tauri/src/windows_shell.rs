@@ -1,20 +1,25 @@
 //! Windows parity decisions shared by the native adapter and its unit tests.
 //! Qt: AppConfig::chooseHgs/restartArguments and SwarmWorkerSupervisor.
+#[cfg(any(feature = "live", test))]
 use serde_json::Value;
+#[cfg(any(feature = "live", test))]
 use std::path::{Path, PathBuf};
 
+#[cfg(any(feature = "live", test))]
 pub struct HgsChoice {
     pub path: PathBuf,
     pub refresh: bool,
     pub fallback: PathBuf,
 }
 
+#[cfg(any(feature = "live", test))]
 fn version(value: &str) -> Option<semver::Version> {
     semver::Version::parse(value).ok()
 }
 
 /// The session-host enabled marker is authoritative, not leftover staged files.
 /// An explicit CLI selector never stages or switches to another executable.
+#[cfg(any(feature = "live", test))]
 pub fn choose_hgs(
     status: &Value,
     bundled: &Path,
@@ -50,6 +55,7 @@ pub fn choose_hgs(
 }
 
 /// Value options are walked as pairs, so a value spelling --sessions survives.
+#[cfg(any(feature = "live", test))]
 pub fn restart_arguments(args: &[String]) -> Vec<String> {
     let valued = [
         "--hgs",
@@ -82,8 +88,10 @@ pub fn restart_arguments(args: &[String]) -> Vec<String> {
 }
 
 /// Windows tray clicks do not identify a message; Qt also routes only the latest.
+#[cfg(any(feature = "live", test))]
 #[derive(Default)]
 pub struct NoticeClicks(Option<String>);
+#[cfg(any(feature = "live", test))]
 impl NoticeClicks {
     pub fn raised(&mut self, token: String) {
         self.0 = Some(token);
@@ -98,6 +106,7 @@ impl NoticeClicks {
     }
 }
 
+#[cfg(any(feature = "live", test))]
 pub fn restart_delay(previous: u64, uptime: std::time::Duration) -> u64 {
     if previous == 0 || uptime.as_secs() >= 60 {
         1000
@@ -142,6 +151,7 @@ pub fn bring_to_front(window: &impl Foreground) -> Front {
 }
 
 /// Windows native strings are bounded in UTF-16 without splitting a surrogate.
+#[cfg(any(feature = "live", test))]
 pub fn wide_text<const N: usize>(text: &str) -> [u16; N] {
     let mut out = [0; N];
     let mut at = 0;
@@ -316,19 +326,16 @@ mod tests {
         ] {
             assert!(!adapter.contains(forbidden), "{forbidden}");
         }
-        for (source, file) in [
-            (include_str!("window_layer.rs"), "window_layer.rs"),
-            (include_str!("lifecycle.rs"), "lifecycle.rs"),
+        // Tauri's window focus is a disallowed method: Windows all-target
+        // Clippy fails on any call Windows can reach, however it is written
+        // (through a macro too); the Unix calls and the perf-only hooks allow
+        // it inside their gates.
+        let config = include_str!("../clippy.toml");
+        for path in [
+            "\"tauri::WebviewWindow::set_focus\"",
+            "\"tauri::Window::set_focus\"",
         ] {
-            for (at, _) in source.match_indices(".set_focus()") {
-                let before = &source[..at];
-                let gate = before.rfind("#[cfg(").map(|i| &before[i..]);
-                assert!(
-                    gate.is_some_and(|gate| gate.starts_with("#[cfg(not(windows))]")
-                        || gate.starts_with("#[cfg(target_os = \"macos\")]")),
-                    "{file}: set_focus reachable on Windows"
-                );
-            }
+            assert!(config.contains(path), "{path}");
         }
     }
     #[test]

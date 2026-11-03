@@ -1,0 +1,9 @@
+# Tauri's window focus calls Tao's, which on Windows falls back to a synthetic
+# Alt key press. The Windows presentation path uses
+# platform::windows::foreground instead. The Unix calls and the perf-only hooks
+# allow this lint inside their cfg(not(windows)) or perf gate, so Windows
+# all-target Clippy fails on any call Windows can reach.
+disallowed-methods = [
+    { path = "tauri::WebviewWindow::set_focus", reason = "Tao's focus falls back to a synthetic Alt on Windows; use platform::windows::foreground there, or allow it inside a cfg(not(windows)) or perf-only gate" },
+    { path = "tauri::Window::set_focus", reason = "Tao's focus falls back to a synthetic Alt on Windows; use platform::windows::foreground there, or allow it inside a cfg(not(windows)) or perf-only gate" },
+]

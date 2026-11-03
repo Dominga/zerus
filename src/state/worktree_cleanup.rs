@@ -3,7 +3,7 @@
 //! person reviewed. Force is limited to explicitly confirmed, content-fingerprinted
 //! uncommitted files. A short-lived manual process confirmation accepts incomplete
 //! access to process paths; active/locked/nested and other unknowns stay protected.
-use super::worktrees::{cache_file, canonical, error, git, list, GitError};
+use super::worktrees::{cache_file, canonical, error, git, git_holding, list, GitError};
 use super::*;
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
@@ -18,6 +18,21 @@ const WALK_TIME: Duration = Duration::from_secs(2);
 const MAX_IGNORED: usize = 20;
 const MAX_SAMPLES: usize = 5;
 const PROCESS_CONSENT_SECONDS: u64 = 300;
+/// Leftover rows in one reply, and their bytes: the rest stay recorded and
+/// the reply is marked partial, so many records never blank a bounded reply.
+const LEFTOVER_ROWS: usize = 32;
+const LEFTOVER_BYTES: usize = 1024 * 1024;
+
+fn admit_leftover(used: &mut usize, row: &Value) -> bool {
+    let size = serde_json::to_vec(row).map_or(usize::MAX, |bytes| bytes.len());
+    match used.checked_add(size).filter(|n| *n <= LEFTOVER_BYTES) {
+        Some(total) => {
+            *used = total;
+            true
+        }
+        None => false,
+    }
+}
 
 fn process_consent(row: &Value, common: &Path, issued: u64) -> String {
     let proof = fingerprint(json!({"scope":"manual-process-uncertainty-v2",
@@ -1001,21 +1016,34 @@ fn repository_lock(common: &Path) -> Result<std::fs::File> {
 /// retained branch and current occupants. Records whose folder is gone are
 /// resolved; a record whose worktree is still registered is resolved only when
 /// no removal holds the repository lock. Nothing here deletes or retries.
+/// At most `LEFTOVER_ROWS` rows within `LEFTOVER_BYTES`; `true` when more
+/// records remain unreviewed. A targeted review (`only`, as given and
+/// resolved) looks at that worktree's own record alone.
 fn leftovers(
     common: &Path,
     trees: &[Value],
     listing_partial: bool,
     context: &Context,
     total: Instant,
-) -> Result<Vec<Value>> {
+    only: Option<&(PathBuf, PathBuf)>,
+) -> Result<(Vec<Value>, bool)> {
     let mut rows = Vec::new();
+    let mut used = 0;
+    let mut cut = false;
     for record in super::worktree_maintenance::removals(common)? {
         let path = PathBuf::from(&record.path);
+        if only.is_some_and(|(raw, resolved)| &path != raw && &path != resolved) {
+            continue;
+        }
         let registered = trees.iter().any(|tree| tree["path"] == json!(path));
         let present = !matches!(fs::symlink_metadata(&path),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound);
         if !present && !registered {
             super::worktree_maintenance::forget_removal(&record.path)?;
+            continue;
+        }
+        if cut || rows.len() >= LEFTOVER_ROWS {
+            cut = true;
             continue;
         }
         if registered {
@@ -1037,9 +1065,14 @@ fn leftovers(
                 continue;
             }
         }
-        rows.push(leftover(&record, common, listing_partial, context, total));
+        let row = leftover(&record, common, listing_partial, context, total);
+        if admit_leftover(&mut used, &row) {
+            rows.push(row);
+        } else {
+            cut = true;
+        }
     }
-    Ok(rows)
+    Ok((rows, cut))
 }
 
 fn leftover(
@@ -1313,13 +1346,16 @@ pub(super) fn review(path: &Path, only: Option<&Path>, total: Instant) -> Value 
         let base: Vec<_> = context.bases.iter().map(|(name, _)| name.clone()).collect();
         let mut value = json!({"state":"ok","path":path,"common_dir":common,"base":base,
             "partial":partial || cut,"worktrees":rows,"machine":machine,"sampled_at":now()});
-        if only.is_none() {
-            match leftovers(&common, &trees, partial, &context, total) {
-                Ok(rows) => value["leftovers"] = json!(rows),
-                Err(detail) => {
-                    value["leftovers"] = json!([]);
-                    value["leftovers_unavailable"] = json!(detail);
-                }
+        // A targeted review reports only that worktree's leftover, so a
+        // removal that stopped partway is visible where it was asked about.
+        match leftovers(&common, &trees, partial, &context, total, wanted.as_ref()) {
+            Ok((rows, cut)) => {
+                value["leftovers"] = json!(rows);
+                value["leftovers_partial"] = json!(cut);
+            }
+            Err(detail) => {
+                value["leftovers"] = json!([]);
+                value["leftovers_unavailable"] = json!(detail);
             }
         }
         Ok::<_, GitError>(value)
@@ -1378,7 +1414,8 @@ fn orphan_row(
 }
 
 /// `hgs worktrees leftovers`: records whose repository is gone. Those whose
-/// folder is gone too are resolved first.
+/// folder is gone too are resolved first. Bounded like a review's leftovers;
+/// `partial` when more records remain.
 pub(super) fn leftovers_command(args: &[String]) -> Result<Value> {
     if !args.iter().all(|arg| arg == "--json") {
         return Err("usage: hgs worktrees leftovers [--json]".into());
@@ -1386,12 +1423,25 @@ pub(super) fn leftovers_command(args: &[String]) -> Result<Value> {
     let total = Instant::now() + Duration::from_secs(20);
     let records = super::worktree_maintenance::orphan_removals()?;
     let context = context(Path::new("/"), &[], step(total, 3));
-    let rows: Vec<_> = records
-        .iter()
-        .map(|record| orphan_row(record, &context, total))
-        .collect();
-    Ok(json!({"schema":1,"leftovers":rows,"sampled_at":now(),
-        "machine":crate::config::Config::load().map(|c| c.host().to_owned()).unwrap_or_default()}))
+    let mut rows = Vec::new();
+    let mut used = 0;
+    let mut partial = false;
+    for record in &records {
+        if rows.len() >= LEFTOVER_ROWS {
+            partial = true;
+            break;
+        }
+        let row = orphan_row(record, &context, total);
+        if !admit_leftover(&mut used, &row) {
+            partial = true;
+            break;
+        }
+        rows.push(row);
+    }
+    let machine = crate::config::Config::load()
+        .map(|c| c.host().to_owned())
+        .unwrap_or_default();
+    Ok(json!({"schema":1,"leftovers":rows,"partial":partial,"sampled_at":now(),"machine":machine}))
 }
 
 /// Explicit, guarded deletion of a leftover's remaining files. Requires the
@@ -1650,6 +1700,12 @@ fn delete_tree(root: &Path, expected: &RootIdentity, deadline: Instant) -> std::
         }
     }
     deletion::unlink(parent.as_raw_fd(), &name, libc::AT_REMOVEDIR)?;
+    #[cfg(test)]
+    AFTER_ROOT_UNLINK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook()
+        }
+    });
     match deletion::is_directory(parent.as_raw_fd(), &name) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Ok(_) => Err(Error::other(
@@ -1657,6 +1713,14 @@ fn delete_tree(root: &Path, expected: &RootIdentity, deadline: Instant) -> std::
         )),
         Err(e) => Err(e),
     }
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    /// Runs right after the reviewed root is unlinked, before its absence is
+    /// confirmed through the parent.
+    static AFTER_ROOT_UNLINK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(unix)]
@@ -1668,8 +1732,20 @@ mod deletion {
     use std::os::unix::ffi::OsStrExt;
     use std::path::{Component, Path};
 
-    pub(super) fn open(at: RawFd, name: &CStr) -> Result<OwnedFd> {
-        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    /// Ancestors are only looked up in, identified and unlinked from, which
+    /// needs search permission alone: Linux opens them as paths and macOS for
+    /// search, so an execute-only ancestor does not stop the deletion.
+    #[cfg(target_os = "linux")]
+    const ANCESTOR: libc::c_int = libc::O_PATH;
+    #[cfg(target_os = "macos")]
+    const ANCESTOR: libc::c_int = libc::O_SEARCH;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    const ANCESTOR: libc::c_int = libc::O_RDONLY;
+
+    fn open_as(at: RawFd, name: &CStr, access: libc::c_int) -> Result<OwnedFd> {
+        // O_DIRECTORY also refuses the link itself that O_PATH|O_NOFOLLOW
+        // would otherwise return.
+        let flags = access | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
         let fd = unsafe { libc::openat(at, name.as_ptr(), flags) };
         if fd < 0 {
             return Err(Error::last_os_error());
@@ -1677,15 +1753,20 @@ mod deletion {
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
 
+    /// A folder the deletion reads and changes.
+    pub(super) fn open(at: RawFd, name: &CStr) -> Result<OwnedFd> {
+        open_as(at, name, libc::O_RDONLY)
+    }
+
     /// Opens an absolute, canonical path one component at a time without
     /// following any link, so no component can redirect the result.
     pub(super) fn open_path(path: &Path) -> Result<OwnedFd> {
-        let mut fd = open(libc::AT_FDCWD, c"/")?;
+        let mut fd = open_as(libc::AT_FDCWD, c"/", ANCESTOR)?;
         for component in path.components() {
             match component {
                 Component::RootDir => {}
                 Component::Normal(name) => {
-                    fd = open(fd.as_raw_fd(), &CString::new(name.as_bytes())?)?;
+                    fd = open_as(fd.as_raw_fd(), &CString::new(name.as_bytes())?, ANCESTOR)?;
                 }
                 _ => return Err(Error::other("unexpected path component")),
             }
@@ -1827,8 +1908,15 @@ fn delete_tree(_path: &Path, _expected: &RootIdentity, _deadline: Instant) -> st
 
 /// "Keep folder, forget record": the leftover folder and its files stay as
 /// they are; only the private removal record goes. Bound under the repository
-/// lock to the fresh review the owner confirmed.
-pub(super) fn keep_folder_command(args: &[String]) -> Result<Value> {
+/// lock to the fresh review the owner confirmed. `true` once forgetting the
+/// record may have started: a later failure is not a refusal.
+pub(super) fn keep_folder_command(args: &[String]) -> (Result<Value>, bool) {
+    let mut attempted = false;
+    let result = keep_folder(args, &mut attempted);
+    (result, attempted)
+}
+
+fn keep_folder(args: &[String], attempted: &mut bool) -> Result<Value> {
     const USAGE: &str = "usage: hgs worktrees keep-folder --path FOLDER --common-dir DIR --fingerprint HASH [--request-id ID] [--json]";
     let mut options = BTreeMap::new();
     let mut i = 0;
@@ -1913,6 +2001,7 @@ pub(super) fn keep_folder_command(args: &[String]) -> Result<Value> {
     if row["fingerprint"] != expected {
         return Err("The leftover folder changed since the review. Review it again.".into());
     }
+    *attempted = true;
     super::worktree_maintenance::forget_removal(&record.path)?;
     Ok(json!({"status":"kept","path":path,"common_dir":common,
         "request_id":options.get("--request-id"),"machine":crate::config::Config::load()
@@ -1999,7 +2088,12 @@ fn remove(args: &[String], attempted: &mut bool, observed: &mut Option<Value>) -
     if crate::platform::canonical(text(actual)).ok().as_ref() != Some(&common) {
         return Err(changed.into());
     }
-    if target.exists() {
+    // An unreadable folder is not a missing one: its ownership is checked or
+    // the removal refused.
+    if target
+        .try_exists()
+        .map_err(|e| format!("Worktree folder: {e}"))?
+    {
         let own = git(
             target,
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -2033,7 +2127,11 @@ fn remove(args: &[String], attempted: &mut bool, observed: &mut Option<Value>) -
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    let lock = crate::platform::FileLock::held(guard);
+    // The removal's Git inherits this lock (`git_holding`), so it is released
+    // by closing, never by an explicit unlock: an unlock would free it for a
+    // Git that outlived this process, and a review could then resolve the
+    // record before Git deregisters the worktree.
+    let lock = guard;
     // One lock order: repository, then session writer. No lifecycle caller holds
     // the writer lock while entering cleanup. A new binding cannot race removal.
     let _state_lock = storage::writer_until(
@@ -2179,10 +2277,11 @@ fn remove(args: &[String], attempted: &mut bool, observed: &mut Option<Value>) -
     }
     command.extend(["--", &spelling]);
     *attempted = true;
-    let removed = git(
+    let removed = git_holding(
         &common,
         &command,
         Instant::now() + Duration::from_secs(if automatic { 3 } else { 300 }),
+        Some(&lock),
     );
     let _ = fs::remove_file(&cache);
     let settled = settle(&common, &path);
@@ -2462,6 +2561,56 @@ mod tests {
         // The reviewed folder itself is still deleted and confirmed.
         delete_tree(&real.join("leftover"), &identity, deadline()).unwrap();
         assert!(!real.join("leftover").exists());
+    }
+
+    /// zerus-ty94 #4: an ancestor the owner may only search (execute without
+    /// read) does not stop the deletion, and a link in the ancestor chain is
+    /// still never followed.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_search_only_ancestor_does_not_stop_the_deletion() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let base = tempfile::tempdir().unwrap();
+        let base_path = fs::canonicalize(base.path()).unwrap();
+        let gate = base_path.join("search-only");
+        let root = gate.join("parent/leftover");
+        fs::create_dir_all(root.join("build")).unwrap();
+        fs::write(root.join("build/file"), "reviewed").unwrap();
+        std::os::unix::fs::symlink(&gate, base_path.join("link")).unwrap();
+        let identity = root_identity(&root).unwrap();
+        fs::set_permissions(&gate, fs::Permissions::from_mode(0o100)).unwrap();
+        let linked = deletion::open_path(&base_path.join("link/parent"));
+        let result = delete_tree(&root, &identity, Instant::now() + Duration::from_secs(10));
+        fs::set_permissions(&gate, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(linked.is_err(), "a link in the ancestor chain was followed");
+        result.unwrap();
+        assert!(!root.exists() && gate.join("parent").is_dir());
+    }
+
+    /// Mutation R5: the deletion is confirmed only when the name is absent
+    /// through the parent, never because the unlink returned.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_reappears_after_the_root_is_unlinked_is_not_confirmed() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("leftover");
+        fs::create_dir_all(root.join("build")).unwrap();
+        fs::write(root.join("build/file"), "reviewed").unwrap();
+        let identity = root_identity(&root).unwrap();
+        let again = root.clone();
+        AFTER_ROOT_UNLINK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || fs::create_dir(&again).unwrap()))
+        });
+        let error =
+            delete_tree(&root, &identity, Instant::now() + Duration::from_secs(10)).unwrap_err();
+        assert!(
+            error.to_string().contains("could not be confirmed"),
+            "{error}"
+        );
+        assert!(root.is_dir() && !root.join("build").exists());
     }
 
     #[cfg(unix)]

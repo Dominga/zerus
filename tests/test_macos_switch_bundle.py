@@ -83,7 +83,14 @@ class SwitchBundle(unittest.TestCase):
 
     def test_native_entry_precedes_renderer_and_is_not_tied_to_gui_live_data(self):
         main = (ROOT / "client/src-tauri/src/main.rs").read_text()
-        self.assertLess(main.index("notification_host::run()"), main.index("renderer::choose()"))
+        # The authenticated callback is now passed to the entry dispatcher;
+        # renderer/instance setup lives behind the library's ordinary run().
+        dispatch = main.index("zerus_client_lib::entry::notification_host(")
+        gui = main.index("zerus_client_lib::run();")
+        self.assertLess(dispatch, gui)
+        headless = main[dispatch:gui]
+        self.assertIn("zerus_client_lib::notification_host::run,", headless)
+        self.assertIn("std::process::exit(status);", headless)
         manifest = (ROOT / "client/src-tauri/Cargo.toml").read_text()
         native = manifest.split('[target.\'cfg(target_os = "macos")\'.dependencies]', 1)[1].split('\n[', 1)[0]
         self.assertIn('zerus-client-core = { path = "../core", features = ["macos-native-peer"] }', native)

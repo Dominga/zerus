@@ -79,7 +79,8 @@ pub enum DeskInput {
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     ServiceClicked(Box<crate::desktop_service::activation::Delivery>),
     /// Public launch/instance navigation data, not callback/writer authority.
-    #[cfg(target_os = "linux")]
+    /// The Wayland activation token is Linux-only; Windows always passes None.
+    #[cfg(any(target_os = "linux", windows))]
     Navigate {
         target: zerus_client_core::desktop::activation::Target,
         activation: Option<String>,
@@ -754,12 +755,17 @@ impl DeskLoop {
                         service: Some(delivery),
                     });
                 }
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", windows))]
                 DeskInput::Navigate { target, activation }
                     if self.attention_completions && target.valid() =>
                 {
                     outcome.show = true;
-                    outcome.activation = activation;
+                    #[cfg(target_os = "linux")]
+                    {
+                        outcome.activation = activation;
+                    }
+                    #[cfg(windows)]
+                    let _ = activation;
                     self.click = Some(Click {
                         target: Map::new(),
                         deadline: cx.now + CLICK_WAIT,
@@ -783,7 +789,9 @@ impl DeskLoop {
                 }
                 DeskInput::Clicked(_) | DeskInput::Failed { .. } => {}
                 #[cfg(target_os = "linux")]
-                DeskInput::LinuxClicked { .. } | DeskInput::Navigate { .. } => {}
+                DeskInput::LinuxClicked { .. } => {}
+                #[cfg(any(target_os = "linux", windows))]
+                DeskInput::Navigate { .. } => {}
                 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                 DeskInput::ServiceClicked(_) => {}
             }
@@ -2261,7 +2269,7 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     #[test]
     fn startup_navigation_waits_for_exact_identity_and_never_creates_a_callback_receipt() {
         let dir = scratch("startup-navigation");
@@ -2280,6 +2288,7 @@ mod tests {
         );
         assert!(initial.show);
         assert!(initial.open.is_none());
+        #[cfg(target_os = "linux")]
         assert_eq!(initial.activation.as_deref(), Some("synthetic-wayland"));
         assert!(initial.completion.is_none());
         let mut row = asking("renamed/exact-target");

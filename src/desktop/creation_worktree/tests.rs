@@ -50,7 +50,7 @@ fn fixture() -> (tempfile::TempDir, Location, Store, String) {
 fn exact_previous_store_upgrade_adds_only_the_independent_worktree_leaf() {
     assert_eq!(
         SCHEMA - 1,
-        crate::desktop::catalog_read::SCHEMA,
+        crate::desktop::delivery::SCHEMA,
         "rebase this test onto the actual merge-order predecessor"
     );
     let (_temp, location, store, _) = fixture();

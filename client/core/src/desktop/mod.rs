@@ -25,8 +25,10 @@ pub mod pending_reads;
 pub mod producer;
 pub mod profile;
 pub mod relay;
+pub mod server_trust;
 pub mod service;
 pub mod startup;
+pub mod task_start_reconcile;
 pub mod ui_requests;
 
 #[cfg(unix)]

@@ -1551,6 +1551,78 @@ fn temporary_rpc_admission_pressure_retries_follow_without_halting_the_view() {
     });
 }
 #[test]
+fn service_catalog_completion_populates_the_tray_like_the_gui_with_device_attention() {
+    use zerus_client_core::menubar::{Desk, DeviceMarks, Entry, Face, OpenMode};
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({"details":true,"project_peer":true}));
+        let pump = crate::pump::Pump::default();
+        let desk = Arc::new(Mutex::new(Desk::default()));
+        let marks = DeviceMarks::new(
+            BTreeMap::from([(
+                zerus_client_core::marks::attention_key("", "codex", "codex/example/row", 0, ""),
+                zerus_client_core::marks::Mark {
+                    review: true,
+                    acknowledged: String::new(),
+                },
+            )]),
+            BTreeMap::new(),
+            vec![],
+        );
+        desk.lock().unwrap().set_marks(marks);
+        let tapped = desk.clone();
+        // Exactly the production tray path; no webview, native fleet, second
+        // row snapshot or shared-only aggregate count supplies the tray.
+        pump.tap(Box::new(move |change| {
+            if crate::desk::menu_bar_change(change) {
+                tapped.lock().unwrap().observe(change);
+            }
+        }));
+        let (service, pump) = fixture.start_with_pump(true, pump, None);
+        eventually("both GUI service catalogs are current", || {
+            pump.online("")
+                && pump.online("studio")
+                && pump.row("", "row").is_some()
+                && pump.row("studio", "row").is_some()
+        })
+        .await;
+        {
+            let mut desk = desk.lock().unwrap();
+            assert_eq!(desk.total(), 2);
+            assert_eq!(desk.attention(), 1, "the device's review mark is included");
+            assert_eq!(desk.face(), Face::counts(2, 1, false));
+            assert_eq!(desk.badge().as_deref(), Some("1"));
+            assert_eq!(
+                desk.tooltip()
+                    .iter()
+                    .map(|text| text.english())
+                    .collect::<Vec<_>>(),
+                [
+                    "1 needs attention, 2 sessions total",
+                    "1 here",
+                    "1 on studio"
+                ]
+            );
+            let menu = desk.menu(OpenMode::Automatic);
+            assert_eq!(
+                menu.iter()
+                    .filter(|entry| matches!(entry, Entry::Session { .. }))
+                    .count(),
+                2
+            );
+            assert!(!menu.iter().any(
+                |entry| matches!(entry,Entry::Label(text) if text.english().contains("polling"))
+            ));
+            assert!(desk.computers()[&ComputerId::from("studio")].fresh());
+            desk.set_marks(DeviceMarks::default());
+            assert_eq!(desk.face(), Face::counts(2, 0, false));
+            assert!(desk.badge().is_none());
+        }
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
 fn catalog_finish_wakes_consumers_after_publishing_the_live_mirror() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {

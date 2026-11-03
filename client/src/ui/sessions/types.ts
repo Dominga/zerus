@@ -226,6 +226,8 @@ export interface ActivityItem {
   local?: LocalItem;
   /** Codex question replies the message holds, shown as Question and Your answer blocks (ActivityView.cpp:347-363). */
   replies?: Reply[];
+  /** History a fork began from, shown read-only and muted. */
+  inherited?: boolean;
 }
 
 export type VoiceState =
@@ -235,6 +237,8 @@ export type VoiceState =
 export interface MediaMessage {
   id: string;
   kind: "media";
+  /** A recording a fork inherited: its source's, never played through the fork. */
+  inherited?: boolean;
   media: "voice" | "video";
   at: string;
   state: VoiceState;

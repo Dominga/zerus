@@ -196,7 +196,7 @@ export interface DesktopService {
   /** Native frozen-read transfer; completion is durable queueing, not host ACK. */
   pending_read_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; through: number; superseded: number; delivered: false };
   /** Best-effort Staged report only; its outcome never grants or gates service work. */
-  retained_source_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null; creations_capture?: { code: string; paused: boolean; capture_id: string | null }; creations_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null } };
+  retained_source_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null; creations_capture?: { code: string; paused: boolean; capture_id: string | null }; local_read_capture?: { code: string; paused: boolean; capture_id: string | null; view_ready?: boolean; view_revision?: string }; drafts_capture?: { code: string; writes: boolean; paused: boolean; capture_id: string | null; manifests: number }; local_reads_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null }; creations_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null } };
   notification_ownership?: NotificationOwnership;
   code: string;
 }
@@ -298,6 +298,9 @@ export interface ActivityEvent {
   voice?: Record<string, unknown>;
   /** Codex's question replies of a user event, parsed in Rust (R7's annotate_replies). */
   question_replies?: Reply[];
+  /** A fork's row from the session it began from (that session's journal name):
+   * read-only history before the fork (zerus-b4qk). */
+  inherited_from?: string;
   [field: string]: unknown;
 }
 
@@ -347,6 +350,8 @@ export interface Details {
   resume_message_can_send: boolean;
   fork_supported?: boolean;
   fork_reason?: string;
+  /** The conversation a fork came from; `null` when this is no fork, absent from an older hgs. */
+  fork_parent_id?: string | null;
   allowed_actions: string[] | null;
   action_reasons: Record<string, string>;
   /** The host can interrupt this turn (Stop). */

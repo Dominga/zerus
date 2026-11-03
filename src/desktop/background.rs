@@ -35,6 +35,8 @@ pub(super) struct Runtime {
     notifications: notification_service::Runtime,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     creation: super::creation_clone::Runtime,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    task_start: super::task_start_reconcile::Runtime,
 }
 
 /// The actor can replace only an already admitted background runtime after its
@@ -64,6 +66,8 @@ impl Runtime {
         let producer = broker.claim_internal()?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let creation = super::creation_clone::Runtime::new(config, epoch, owner.clone())?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let task_start = super::task_start_reconcile::Runtime::new(config, epoch, owner.clone())?;
         match fleet::Runtime::start(config, epoch) {
             Ok(fleet) => Ok(Self {
                 fleet,
@@ -82,6 +86,8 @@ impl Runtime {
                 notifications: notification_service::Runtime::new(config, &location, epoch, owner),
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 creation,
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                task_start,
             }),
             Err(error) => {
                 producer.close();
@@ -125,6 +131,8 @@ impl Runtime {
                 Ok(change) => {
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                     self.creation.observe(&event);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.task_start.observe(&event);
                     self.delivery.observe(store, &event);
                     self.maintenance.observe(store, &event);
                     if self.attention.enabled() {
@@ -145,6 +153,8 @@ impl Runtime {
                 Err(_) => {
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                     self.creation.reject(&event);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.task_start.reject(&event);
                     self.maintenance.reject(&event);
                     self.attention.reject_event(&event);
                     self.details.reject(&event, seq);
@@ -160,6 +170,8 @@ impl Runtime {
             .poll(store, &mut self.attention, &mut self.activations, seq);
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.creation.poll(store, self.notifications.handoff());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.task_start.poll(store, self.notifications.handoff());
         // Disabled discovery must not accumulate permanent edge/baseline rows.
         // Enabling resets the baseline before later observations may post.
         if !self.notifications.ready() && self.attention.retiring() {
@@ -201,6 +213,11 @@ impl Runtime {
         if authority.operation() == "creation_worktree" {
             return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"creation_worktree_unsupported"});
         }
+        // The launch actor is a separate leaf; until it lands no service
+        // advertises this kind, and an authenticated request is refused.
+        if authority.operation() == "creation_launch" {
+            return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"creation_launch_unsupported"});
+        }
         // A recognized native request is still not executing-kind admission.
         if authority.operation() == "task_start_reconcile" {
             return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"task_start_reconcile_unsupported"});
@@ -212,6 +229,17 @@ impl Runtime {
             return self.cache.frontend_request(store, authority);
         }
         self.maintenance.frontend_request(store, authority)
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn task_start_request(
+        &mut self,
+        store: &mut Store,
+        authority: super::ui_authority::Validated,
+        queue: Arc<Queue>,
+        seq: u64,
+    ) -> Result<()> {
+        self.task_start
+            .frontend(store, authority, self.notifications.handoff(), queue, seq)
     }
 
     pub fn details_open(&mut self, queue: &Arc<Queue>) -> Option<Value> {
@@ -238,6 +266,9 @@ impl Runtime {
             value["creation_clone_runtime"] = self.creation.status();
             value["lifecycle"]["background"]["operations"] =
                 value["creation_clone_runtime"].clone();
+            value["task_start_reconcile_runtime"] = self.task_start.status();
+            value["lifecycle"]["background"]["operations"]["task_start_reconcile"] =
+                self.task_start.status();
         }
         value["detail_subscriptions"] = self.details.status();
         value["attention_discovery"] = self.attention.status();
@@ -356,6 +387,8 @@ impl Runtime {
         self.swarm.request_stop();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.creation.request_stop();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.task_start.request_stop();
         if let Some(presence) = &self.presence {
             presence.request_stop();
         }
@@ -384,6 +417,8 @@ impl Runtime {
             .poll(store, &mut self.attention, &mut self.activations, &mut seq);
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.creation.poll(store, self.notifications.handoff());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.task_start.poll(store, self.notifications.handoff());
         if self.notifications.drained() {
             self.attention.request_stop();
         }
@@ -401,7 +436,7 @@ impl Runtime {
             && self.notifications.drained();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            self.drained = self.drained && self.creation.drained();
+            self.drained = self.drained && self.creation.drained() && self.task_start.drained();
         }
         #[cfg(windows)]
         {

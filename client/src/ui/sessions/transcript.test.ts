@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { buildTranscript, localFileAvailable, mergeLocal, createTranscriptProjection } from "./transcript";
 import type { ActivityEvent, EventAttachment, LocalMessage } from "../../types";
-import type { ActivityItem } from "./types";
+import type { ActivityItem, MediaMessage } from "./types";
+import { cardTarget, rowScope } from "./attachment-card";
 
 const local = (status: "sending" | "error" | "sent", uncertain = false, extra: Partial<LocalMessage> = {}): LocalMessage => ({
   id: `l-${status}-${uncertain}`, text: "hello", status, attachments: [], run_id: "r", conversation_id: "c",
@@ -238,5 +239,62 @@ describe("bounded message-window input", () => {
     expect(items).toHaveLength(100);
     expect(items[0]).toMatchObject({ id: "s41", body: "Reply 40" });
     expect(items.at(-1)).toMatchObject({ id: "s140", body: "Reply 139" });
+  });
+});
+
+// zerus-b4qk: a fork's Activity shows the history it began from, read-only.
+describe("inherited fork history", () => {
+  const ev = (seq: number, type: string, detail: string, inherited_from?: string): ActivityEvent =>
+    ({ seq, type, at: seq, detail, agent_id: "", ...(inherited_from ? { inherited_from } : {}) });
+  it("labels each source, marks its rows and shows where the fork begins", () => {
+    const items = buildTranscript([
+      ev(1, "UserPromptSubmit", "root request", "codex/p/root"),
+      ev(2, "PreToolUse", "ls", "codex/p/root"),
+      ev(3, "PostToolUse", "ls", "codex/p/root"),
+      ev(4, "Stop", "root reply", "codex/p/root"),
+      ev(5, "UserPromptSubmit", "first request", "codex/p/first"),
+      ev(6, "PreToolUse", "cat", "codex/p/first"),
+      ev(7, "PreToolUse", "rg"),
+      ev(8, "UserPromptSubmit", "own request"),
+      ev(9, "Stop", "own reply"),
+    ]) as ActivityItem[];
+    expect(items.map((i) => [i.kind, i.body, !!i.inherited])).toEqual([
+      ["context", "Inherited from codex/p/root: the history this fork began from", false],
+      ["user", "root request", true],
+      ["tools", "ls", true],
+      ["agent", "root reply", true],
+      ["context", "Inherited from codex/p/first: the history this fork began from", false],
+      ["user", "first request", true],
+      // Tool groups never cross a source or the fork point.
+      ["tool", "cat", true],
+      ["context", "Forked here: this session's own activity continues below", false],
+      ["tool", "rg", false],
+      ["user", "own request", false],
+      ["agent", "own reply", false],
+    ]);
+    // Never a local row's actions on an inherited row.
+    expect(items.filter((i) => i.inherited).every((i) => !i.local)).toBe(true);
+  });
+  // #1235 review R2: an inherited recording is the source's, muted and never
+  // played or opened through the fork.
+  it("an inherited voice message is a muted card with no file in the fork", () => {
+    const voice: ActivityEvent = { ...ev(1, "UserPromptSubmit", "spoken request", "codex/p/root"), source: "hgs_voice",
+      voice: { state: "submitted", audio: { request_id: "source-request", index: 0, duration_ms: 1200 } } };
+    const items = buildTranscript([voice, ev(2, "UserPromptSubmit", "own request")]);
+    const card = items.find((i) => i.kind === "media") as MediaMessage;
+    expect(card.inherited).toBe(true);
+    expect(card.file).toMatchObject({ request_id: "source-request" });
+    const scope = { computer: "studio", name: "codex/p/fork", conversation_id: "c-fork", archive_id: null };
+    expect(cardTarget(card.file!, rowScope(card, scope))).toBeUndefined();
+    expect(items.map((i) => [i.kind, !!(i as ActivityItem).inherited])).toEqual([["context", false], ["media", true], ["context", false], ["user", false]]);
+  });
+  it("a session that is not a fork has no inherited sections", () => {
+    const items = buildTranscript([ev(1, "UserPromptSubmit", "request"), ev(2, "Stop", "reply")]) as ActivityItem[];
+    expect(items.map((i) => i.kind)).toEqual(["user", "agent"]);
+    expect(items.some((i) => i.inherited)).toBe(false);
+  });
+  it("a fork with only inherited rows so far ends on them, marked", () => {
+    const items = buildTranscript([ev(1, "UserPromptSubmit", "request", "codex/p/root"), ev(2, "Stop", "reply", "codex/p/root")]) as ActivityItem[];
+    expect(items.map((i) => [i.kind, !!i.inherited])).toEqual([["context", false], ["user", true], ["agent", true]]);
   });
 });

@@ -1,4 +1,9 @@
 use super::*;
+#[test]
+fn task_start_reconcile_is_not_a_renderer_policy_operation() {
+    assert!(serde_json::from_value::<Operation>(json!("task_start_reconcile")).is_err());
+}
+
 fn approval(enabled: bool) -> Request {
     Request::AutomaticApprovals {
         request_id: uuid::Uuid::new_v4().to_string(),

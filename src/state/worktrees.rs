@@ -56,8 +56,43 @@ pub(super) fn error(state: &'static str, detail: impl Into<String>) -> GitError 
 }
 
 pub(super) fn git(cwd: &Path, args: &[&str], deadline: Instant) -> std::result::Result<Vec<u8>, GitError> {
-    if mobile_stopped() || Instant::now() >= deadline { return Err(error("timeout", "Git operation cancelled or timed out")); }
+    git_holding(cwd, args, deadline, None)
+}
+
+/// Like [`git`], and on Unix the Git process also holds `lock`: it inherits
+/// that one descriptor (an flock belongs to the open file description), so
+/// the lock stays taken until Git and anything it starts have exited, even if
+/// this process is killed first. Only this child inherits it; every other
+/// descriptor, and every other child, keeps close-on-exec.
+pub(super) fn git_holding(
+    cwd: &Path,
+    args: &[&str],
+    deadline: Instant,
+    lock: Option<&fs::File>,
+) -> std::result::Result<Vec<u8>, GitError> {
+    if mobile_stopped() || Instant::now() >= deadline {
+        return Err(error("timeout", "Git operation cancelled or timed out"));
+    }
     let mut command = Command::new("git");
+    #[cfg(unix)]
+    if let Some(lock) = lock {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+        let fd = lock.as_raw_fd();
+        // SAFETY: runs in the forked child just before exec and calls only
+        // fcntl, which is async-signal-safe.
+        unsafe {
+            command.pre_exec(move || {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = lock;
     command
         .args(["--no-optional-locks", "-c", "core.fsmonitor=false", "-C"])
         .arg(cwd)

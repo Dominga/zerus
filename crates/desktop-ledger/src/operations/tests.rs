@@ -104,6 +104,88 @@ fn commit_refusal(tx: Transaction<'_>) {
     tx.commit().unwrap();
 }
 
+fn assert_automatic_rollback(tx: Transaction<'_>, error: anyhow::Error) {
+    assert!(tx.is_autocommit());
+    assert!(error.is::<OuterTransactionRolledBack>());
+    assert!(error.to_string().contains("outer transaction rolled back"));
+    assert!(matches!(error.downcast_ref::<rusqlite::Error>(),
+        Some(rusqlite::Error::SqliteFailure(_, Some(message))) if message == "fixture automatic rollback"));
+    assert!(!format!("{error:#}").contains("no such savepoint"));
+    assert_eq!(
+        tx.query_row("SELECT count(*) FROM fixture_refusals", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0,
+        "the caller's earlier work rolled back too"
+    );
+    let second = protected_in(&tx, "hgs_test", || -> Result<()> {
+        panic!("an auto-rolled-back transaction must not reach another write")
+    })
+    .unwrap_err();
+    assert!(second.is::<OuterTransactionRolledBack>());
+    assert!(
+        tx.commit().is_err(),
+        "the outer commit cannot claim success"
+    );
+}
+
+#[test]
+fn admission_automatic_rollback_preserves_its_original_failure() {
+    let mut db = db();
+    db.execute_batch("CREATE TRIGGER refuse_admission AFTER INSERT ON desktop_operations BEGIN SELECT RAISE(ROLLBACK,'fixture automatic rollback'); END;").unwrap();
+    let f = fixture();
+    let binding: Binding = serde_json::from_value(f["binding"].clone()).unwrap();
+    let tx = refusal_transaction(&mut db);
+    let error = admit_in(
+        &tx,
+        &Admission {
+            admission_id: ADMISSION,
+            binding: &binding,
+            raw_record: f["raw_record"].as_str().unwrap().as_bytes(),
+            retained_input: f["retained_input"].as_str().unwrap().as_bytes(),
+            provenance: &Value::Null,
+            writer_epoch: WRITER,
+            service_epoch: SERVICE,
+        },
+    )
+    .unwrap_err();
+    assert_automatic_rollback(tx, error);
+    assert_eq!(totals(&db).unwrap().unsettled, 0);
+}
+
+#[test]
+fn reservation_automatic_rollback_preserves_its_original_failure() {
+    let mut db = db();
+    let original = put(&mut db, 0);
+    db.execute_batch("CREATE TRIGGER refuse_attempt AFTER INSERT ON desktop_operation_attempts BEGIN SELECT RAISE(ROLLBACK,'fixture automatic rollback'); END;").unwrap();
+    let tx = refusal_transaction(&mut db);
+    let error = reserve_in(&tx, &request(&original, 0)).err().unwrap();
+    assert_automatic_rollback(tx, error);
+    assert_eq!(totals(&db).unwrap().undrained, 0);
+}
+
+#[test]
+fn cleanup_failure_retains_the_body_error_and_reports_outer_rollback() {
+    let mut db = db();
+    let tx = refusal_transaction(&mut db);
+    let error = protected_in(&tx, "hgs_test", || -> Result<()> {
+        tx.execute_batch("RELEASE hgs_test")?;
+        anyhow::bail!("fixture body failure")
+    })
+    .unwrap_err();
+    assert!(error.is::<OuterTransactionRolledBack>());
+    assert_eq!(error.root_cause().to_string(), "fixture body failure");
+    assert!(format!("{error:#}").contains("operation savepoint cleanup failed"));
+    assert!(tx.is_autocommit());
+    assert!(tx.commit().is_err());
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM fixture_refusals", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
 #[test]
 fn admission_error_cannot_survive_a_callers_refusal_commit() {
     let mut db = db();

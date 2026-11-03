@@ -64,6 +64,7 @@ export function LeftoverDialog(props: { row: OverviewRow; mode: "keep" | "delete
     switch (value?.outcome) {
       case "deleted": return [tr("Files deleted"), tr("The remaining files were deleted. The branch is kept.")];
       case "forgotten": return [tr("Folder kept"), tr("Zerus no longer tracks this folder. Its files and the branch stay.")];
+      case "resolved": return [tr("Record already gone"), tr("Zerus no longer tracks this folder. Review again to see what remains.")];
       case "refused": return [tr("Nothing changed"), value.detail];
       case "unknown": return [tr("Result unknown"), value.detail, tr("An unknown result will not be retried.")];
       default: return [];

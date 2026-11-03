@@ -55,6 +55,14 @@ fn validate(p: &Policy) -> Result<()> {
     }
     Ok(())
 }
+/// Whether the private database exists. A failed check is an error, never an
+/// empty store: records that cannot be read must not read as absent.
+fn stored() -> Result<bool> {
+    directory()
+        .join("queue.sqlite3")
+        .try_exists()
+        .map_err(|e| format!("Worktree maintenance records are unavailable: {e}"))
+}
 fn database() -> Result<Connection> {
     private_dir(&directory())?;
     let path = directory().join("queue.sqlite3");
@@ -382,7 +390,7 @@ fn resolve_vanished(db: &Connection) -> Result<usize> {
 /// Records whose repository no longer exists, after resolving those whose
 /// folder is gone too. Bounded by `MAX_REMOVALS`.
 pub(super) fn orphan_removals() -> Result<Vec<Removal>> {
-    if !directory().join("queue.sqlite3").exists() {
+    if !stored()? {
         return Ok(Vec::new());
     }
     let db = database()?;
@@ -438,7 +446,7 @@ pub(super) fn settle_removal(removal: &Removal, partial: Option<&str>) -> Result
 /// One repository's records through its index; at most `MAX_REMOVALS` exist.
 /// Reading never creates the private database.
 pub(super) fn removals(common: &Path) -> Result<Vec<Removal>> {
-    if !directory().join("queue.sqlite3").exists() {
+    if !stored()? {
         return Ok(Vec::new());
     }
     let db = database()?;
@@ -470,7 +478,7 @@ pub(super) fn removals(common: &Path) -> Result<Vec<Removal>> {
 /// How many records one repository has, through its index and at most
 /// `MAX_REMOVALS`. Reading never creates the private database.
 pub(super) fn removal_count(common: &Path) -> Result<i64> {
-    if !directory().join("queue.sqlite3").exists() {
+    if !stored()? {
         return Ok(0);
     }
     database()?

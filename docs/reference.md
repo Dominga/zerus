@@ -2510,8 +2510,9 @@ the branch is kept, and shows the unchecked **Delete even if some running
 programs cannot be checked** box only when the review offered that acceptance.
 Each confirmation sends the fingerprint of the review on screen exactly once.
 The outcome stays on the row until a fresh review: **Files deleted**, **Folder
-kept**, **Nothing changed** with the reason, or **Result unknown** with **Review
-again**. Nothing is retried automatically. A row whose repository is gone shows
+kept**, **Record already gone** (another action may have resolved it, so the
+row asks for a fresh review instead of claiming the files stayed), **Nothing
+changed** with the reason, or **Result unknown** with **Review again**. Nothing is retried automatically. A row whose repository is gone shows
 **Repository missing** and offers Keep folder only.
 
 Integration evidence distinguishes ancestor commits, identical file trees and
@@ -2567,9 +2568,12 @@ halfway, for example on a readonly ignored folder: Git forgets the worktree whil
 some files remain. Before every `git worktree remove`, the owning computer
 reserves a private removal record. A confirmed outcome drops it, and an
 interruption or failure keeps it. A folder that Git no longer tracks but that
-still exists then appears in the repository review as a **leftover**
+still exists then appears in the repository review (and in a review targeted at
+that worktree, such as the cleanup after Terminate) as a **leftover**
 (`worktree-leftovers-v1`), with a fresh bounded listing of the remaining files,
-the retained branch and current processes or sessions. A missing Git
+the retained branch and current processes or sessions. The cleanup after
+Terminate keeps such a folder with "Git no longer tracks this folder, but files
+remain" instead of an unverified-folder error. A missing Git
 registration is never treated as proof of deletion, and the removal is never
 retried. **Keep folder, forget record** (`hgs worktrees keep-folder`) checks the
 reviewed leftover again under the repository lock and drops only its record;
@@ -2594,15 +2598,21 @@ the macOS filesystem ID and mount point), so a link, a mount or a same-device bi
 mount that appears after the review stops the deletion before anything in it
 changes. A filesystem whose mount cannot be identified is refused. The reviewed
 folder itself is part of the confirmed fingerprint (device, inode and mount): it
-is reopened through its parent without following links, and completion is
-confirmed through that parent. Only after those checks does deletion grant the
+is reopened through its parent without following links (folders above it need
+only search permission: Linux opens them as paths and macOS for search), and
+completion is confirmed through that parent. Only after those checks does deletion grant the
 owner write access to their own folders inside the reviewed tree, which is what
 blocked Git; it never touches the branch. If it
 stops partway, the record stays with the reason and the deletion is never
 retried; review the folder again. Deleting leftover files is available on Linux
 and macOS. A record resolves by itself once its
 folder is gone, or once a fresh worktree list taken under the repository lock shows
-that Git tracks the worktree again. A leftover whose repository is gone is listed
+that Git tracks the worktree again. On Linux and macOS the Git that removes a
+worktree inherits the repository lock (an flock belongs to the open file, and only
+that Git receives it), and hgs releases the lock by closing it, never by an explicit
+unlock. The lock therefore stays taken while that Git, or anything it started, still
+runs, even after hgs is killed, and no review resolves the record in that time. On
+Windows the lock ends with hgs. A leftover whose repository is gone is listed
 by `hgs worktrees leftovers` and can still be kept; a record whose repository and
 folder are both gone resolves. One review or listing reports at most 32 leftovers
 within 1 MiB and marks the rest with `leftovers_partial` (review) or `partial`
@@ -3867,19 +3877,21 @@ No reverse connection is created by default. Explicit peer setup uses
 | `--open-mode MODE` | Linux auto/tab/window/clipboard; macOS terminal/clipboard; Windows auto/tab/window/console/clipboard |
 | `--selftest` | Headless hgs connectivity check |
 | `--sessions` | Open the workspace; on Windows also the default |
-| `--desktop-target JSON` | Zerus Next on Linux: open the exact `computer`, `run` and `conversation`; implies `--sessions`. Navigation data only, with no notification or writer authority |
+| `--desktop-target JSON` | Zerus Next on Linux and Windows: open the exact `computer`, `run` and `conversation`; implies `--sessions`. Navigation data only, with no notification or writer authority |
 | `--background` | Start in the tray only; the default on Linux and macOS. Not together with `--sessions` |
 
 A single-instance socket forwards repeated launches to the running GUI: one that
 would open the workspace opens it there.
-The Linux target value is bounded to 8192 bytes and accepts only those three
+The target value is bounded to 8192 bytes and accepts only those three
 fields. It follows the exact run and conversation through a session rename and
 refuses an archived or replaced session. The service's selected-child launcher
 requires the separate environment-input capability and passes the same target
 as `ZERUS_CLIENT_DESKTOP_TARGET` in that child only, keeping the identifiers out
-of its command line. An ephemeral Wayland activation token also travels only in
-that child's environment. The new GUI consumes both values before starting its
+of its command line. On Linux, an ephemeral Wayland activation token also travels
+only in that child's environment. The new GUI consumes both values before starting its
 workers; forwarding navigation to an already running GUI carries no token.
+On Windows the per-user activation pipe forwards the target as a `target` line
+and the forwarding start exits successfully.
 Conflicting argument/environment targets and target/background starts refuse.
 On Linux and macOS, concurrent launches take turns on it, and a launch such as
 `hgs-tray --sessions` leaves it to the `hgs-tray` systemd or launchd service
@@ -4060,6 +4072,12 @@ app's workspace, unless with `--background`. After a main-thread watchdog abort,
 Windows Error Reporting restarts the app with the same settings in the background
 (`--background`, never `--sessions`): a window that opens by itself after a crash
 would be a surprise.
+When the desktop service receives a toast click and no Zerus window runs, it
+starts the installed `hgs-tray.exe` (the per-user installation or the copy next
+to the service's `hgs.exe`) for the exact session, after checking that its
+`--help` lists the desktop target environment marker. It starts the window
+outside the service's job when Windows allows that, so a service restart does
+not close it, and passes it the right to come to the front.
 
 **Updates.** The portable zip has no installer or self-update. Stable releases
 after 0.42.2 and nightly releases carry the same tested zip. A portable
@@ -4953,6 +4971,17 @@ choosers and status lines of sessions that already reported hooks. Followed
 summaries are re-read when their journal rows or catalog row change, at most
 every 500 ms, and otherwise every 2 s while the agent is busy and every 15 s
 while it is idle; DeepSeek and OpenCode every 2 s.
+
+The stream also checks every 5 s whether an update put another file at the path
+of the `hgs` it runs. That file must differ in device, inode, modification time
+or size, and be a regular executable file. A missing path, or a file not yet
+executable, does not count. When the next check finds the same file, the stream
+sends a fatal `error` with code `hgs_replaced` and exits 0. Without this check,
+a stream left running after a CLI-only update, or after a peer's update, would
+keep sending the old code's summaries (such as Clear's reason) while new
+commands run the new code. A client starts the new stream at once and keeps its
+rows. Only one such restart a minute skips the delay; another within that minute
+waits like any failure.
 
 A frame is at most 1 MiB including its newline. An event too large for a frame
 is cut with `"truncated": true`, and an oversized summary loses the oldest items

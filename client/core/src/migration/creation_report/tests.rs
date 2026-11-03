@@ -356,3 +356,34 @@ fn a_concurrent_save_waits_for_the_journal_lock_and_never_writes_without_it() {
     drop(held);
     assert_eq!(j.load().unwrap().unwrap().sha256, attempted.sha256);
 }
+
+#[test]
+fn only_lock_contention_is_waited_for() {
+    use std::io::{Error, ErrorKind};
+    // Another holder, on every platform.
+    assert!(contended_on(&Error::from(ErrorKind::WouldBlock), false));
+    assert!(contended_on(&Error::from(ErrorKind::WouldBlock), true));
+    // Windows: sharing and lock violations, and the first-ever creation race
+    // (ERROR_FILE_EXISTS) while another run creates the lock file.
+    for code in [32, 33, 80] {
+        assert!(
+            contended_on(&Error::from_raw_os_error(code), true),
+            "{code}"
+        );
+        // The same numbers mean something else on Unix: never waited for.
+        #[cfg(unix)]
+        assert!(
+            !contended_on(&Error::from_raw_os_error(code), false),
+            "{code}"
+        );
+    }
+    // Anything else fails closed at once.
+    for error in [
+        Error::from(ErrorKind::PermissionDenied),
+        Error::from(ErrorKind::NotFound),
+        Error::from_raw_os_error(5),
+    ] {
+        assert!(!contended_on(&error, true));
+        assert!(!contended_on(&error, false));
+    }
+}

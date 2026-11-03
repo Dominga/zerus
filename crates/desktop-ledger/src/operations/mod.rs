@@ -329,41 +329,81 @@ pub fn migrate(tx: &Transaction<'_>) -> Result<()> {
 // Each storage call is independently error-atomic, even when the actor records
 // a refusal and commits its surrounding transaction. Names are fixed internal
 // literals; custody nests a distinct reserve savepoint in its own savepoint.
+/// SQLite rolled back the entire outer transaction. The caller must abandon
+/// that Transaction: subsequent direct writes would otherwise autocommit.
+/// The returned anyhow error retains the original storage failure as its cause.
+#[derive(Debug)]
+pub struct OuterTransactionRolledBack;
+impl std::fmt::Display for OuterTransactionRolledBack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("operation outer transaction rolled back; abandon this transaction")
+    }
+}
+impl std::error::Error for OuterTransactionRolledBack {}
+
+fn outer_rollback(error: anyhow::Error) -> anyhow::Error {
+    if error.is::<OuterTransactionRolledBack>() {
+        error
+    } else {
+        error.context(OuterTransactionRolledBack)
+    }
+}
+
+fn transaction_error(tx: &Transaction<'_>, error: anyhow::Error) -> anyhow::Error {
+    if tx.is_autocommit() {
+        outer_rollback(error)
+    } else {
+        error
+    }
+}
+
 fn protected_in<T>(
     tx: &Transaction<'_>,
     name: &'static str,
     apply: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    if tx.is_autocommit() {
+        return Err(OuterTransactionRolledBack.into());
+    }
     ensure!(
-        tx.transaction_state(Some(rusqlite::DatabaseName::Main))?
+        tx.transaction_state(Some(rusqlite::DatabaseName::Main))
+            .map_err(|error| transaction_error(tx, error.into()))?
             == rusqlite::TransactionState::Write,
         "operation requires an acquired main write transaction"
     );
-    tx.execute_batch(&format!("SAVEPOINT {name}"))?;
+    tx.execute_batch(&format!("SAVEPOINT {name}"))
+        .map_err(|error| transaction_error(tx, error.into()))?;
     let outcome = apply();
     match outcome {
         Ok(value) => match tx.execute_batch(&format!("RELEASE {name}")) {
             Ok(()) => Ok(value),
-            Err(error) => {
-                rollback_call(tx, name)?;
-                Err(error.into())
-            }
+            Err(error) => Err(rollback_call(tx, name, error.into())),
         },
-        Err(error) => {
-            rollback_call(tx, name)?;
-            Err(error)
-        }
+        Err(error) => Err(rollback_call(tx, name, error)),
     }
 }
 
-fn rollback_call(tx: &Transaction<'_>, name: &'static str) -> Result<()> {
-    let result = tx.execute_batch(&format!("ROLLBACK TO {name}; RELEASE {name}"));
-    if result.is_err() && !tx.is_autocommit() {
-        // If savepoint cleanup itself failed, invalidate the outer transaction
-        // rather than leave partial work eligible for the caller's commit.
-        tx.execute_batch("ROLLBACK")?;
+fn rollback_call(
+    tx: &Transaction<'_>,
+    name: &'static str,
+    mut error: anyhow::Error,
+) -> anyhow::Error {
+    if tx.is_autocommit() {
+        // RAISE(ROLLBACK), interruption and some I/O failures remove every
+        // savepoint. Preserve that cause instead of replacing it with cleanup.
+        return outer_rollback(error);
     }
-    result.map_err(Into::into)
+    if let Err(cleanup) = tx.execute_batch(&format!("ROLLBACK TO {name}; RELEASE {name}")) {
+        error = error.context(format!("operation savepoint cleanup failed: {cleanup}"));
+        if !tx.is_autocommit() {
+            // Invalidate the outer transaction rather than leave partial work
+            // eligible for the caller's commit, retaining both failure causes.
+            if let Err(rollback) = tx.execute_batch("ROLLBACK") {
+                error = error.context(format!("outer transaction rollback failed: {rollback}"));
+            }
+        }
+    }
+    transaction_error(tx, error)
 }
 
 fn allowed(tx: &Connection, writer: &str, service: &str) -> Result<()> {
@@ -407,9 +447,11 @@ const ATTEMPT: &str = "seq,ticket,state,outcome_json,drained";
 /// Requires already verified explicit G2 Original and current actor guard.
 /// Exact duplicates coalesce without changing bodies or providing execution.
 pub fn admit(db: &mut Connection, request: &Admission<'_>) -> Result<Admitted> {
-    admission_fields(request)?;
+    let fields = admission_fields(request)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let original = admit_in(&tx, request)?;
+    let original = protected_in(&tx, "hgs_operation_admit", || {
+        admit_original(&tx, request, fields)
+    })?;
     tx.commit()?;
     Ok(original)
 }
@@ -418,7 +460,9 @@ pub fn admit(db: &mut Connection, request: &Admission<'_>) -> Result<Admitted> {
 /// native proof/current guard has been rechecked under its writer lock. Errors
 /// roll back this call's savepoint; success still requires the actor's commit.
 pub fn admit_in(tx: &Transaction<'_>, request: &Admission<'_>) -> Result<Admitted> {
-    protected_in(tx, "hgs_operation_admit", || admit_original(tx, request))
+    protected_in(tx, "hgs_operation_admit", || {
+        admit_original(tx, request, admission_fields(request)?)
+    })
 }
 
 fn admission_fields(request: &Admission<'_>) -> Result<(String, String, String, String)> {
@@ -443,8 +487,12 @@ fn admission_fields(request: &Admission<'_>) -> Result<(String, String, String, 
     Ok((operation_id, binding, provenance, binding_sha256))
 }
 
-fn admit_original(tx: &Transaction<'_>, request: &Admission<'_>) -> Result<Admitted> {
-    let (operation_id, binding, provenance, binding_sha256) = admission_fields(request)?;
+fn admit_original(
+    tx: &Transaction<'_>,
+    request: &Admission<'_>,
+    fields: (String, String, String, String),
+) -> Result<Admitted> {
+    let (operation_id, binding, provenance, binding_sha256) = fields;
     let key = &request.binding.key;
     let executor = &request.binding.executor;
     let prior_id: Option<String> = tx

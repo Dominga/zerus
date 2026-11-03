@@ -1,5 +1,6 @@
 //! SDK calls for the original service host, after native channel establishment.
 //! No Tauri window, durable ledger, discovery or transport is constructed here.
+use super::native_turn;
 use block2::RcBlock;
 use objc2::runtime::Bool;
 use objc2_foundation::NSError;
@@ -33,23 +34,29 @@ impl HostCenter {
 
 fn authorization_reply(reply: Callback, owner: Arc<File>) -> RcBlock<dyn Fn(Bool, *mut NSError)> {
     RcBlock::new(move |granted: Bool, error: *mut NSError| {
-        let _retained = &owner;
-        // complete is once-only, but both captures remain alive through ALL
-        // native block copies and call return, including after completion.
-        reply.complete(granted.as_bool() && error.is_null());
+        native_turn(|| {
+            let _retained = &owner;
+            // complete is once-only, but both captures remain alive through ALL
+            // native block copies and call return, including after completion.
+            reply.complete(granted.as_bool() && error.is_null());
+        });
     })
 }
 fn post_reply(reply: Callback, owner: Arc<File>) -> RcBlock<dyn Fn(*mut NSError)> {
     RcBlock::new(move |error: *mut NSError| {
-        let _retained = &owner;
-        reply.complete(error.is_null());
+        native_turn(|| {
+            let _retained = &owner;
+            reply.complete(error.is_null());
+        });
     })
 }
-impl Center for HostCenter {
-    fn authorize(&self, reply: Callback) {
-        let owner = self.owner.clone();
-        let seen = AtomicBool::new(false);
-        let settings = RcBlock::new(move |settings: NonNull<UNNotificationSettings>| {
+fn settings_reply(
+    reply: Callback,
+    owner: Arc<File>,
+) -> RcBlock<dyn Fn(NonNull<UNNotificationSettings>)> {
+    let seen = AtomicBool::new(false);
+    RcBlock::new(move |settings: NonNull<UNNotificationSettings>| {
+        native_turn(|| {
             // Native settings copies cannot issue several authorization calls.
             // Keep reply/owner captured even when this original was consumed.
             if seen.swap(true, Ordering::AcqRel) {
@@ -71,6 +78,11 @@ impl Center for HostCenter {
                 );
             }
         });
+    })
+}
+impl Center for HostCenter {
+    fn authorize(&self, reply: Callback) {
+        let settings = settings_reply(reply, self.owner.clone());
         UNUserNotificationCenter::currentNotificationCenter()
             .getNotificationSettingsWithCompletionHandler(&settings);
     }
@@ -98,6 +110,9 @@ mod tests {
         attention,
         desktop::notifications::{self as wire, macos::Host},
     };
+
+    #[path = "pool_tests.rs"]
+    mod pool_tests;
 
     fn command() -> wire::Command {
         let id = |n: u8| format!("00000000-0000-4000-8000-{n:012x}");

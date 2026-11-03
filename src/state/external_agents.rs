@@ -5,11 +5,12 @@ use std::io::{BufRead, BufReader};
 
 #[derive(Clone, Copy)]
 struct Caller {
+    pid: u32,
     provider: &'static str,
     headless: bool,
 }
 
-fn native_caller(argv: &[String]) -> Option<Caller> {
+fn native_caller(pid: u32, argv: &[String]) -> Option<Caller> {
     let executable = crate::platform::program_name(Path::new(argv.first()?))?;
     // macOS framework builds run python3 scripts as .../Python.app/Contents/MacOS/Python.
     let offset = if executable == "node" || executable.to_ascii_lowercase().starts_with("python") { 1 } else { 0 };
@@ -35,14 +36,14 @@ fn native_caller(argv: &[String]) -> Option<Caller> {
                 "--full-auto"].contains(&arg.as_str()) { break false; }
         } else { break ["exec", "e", "review", "app-server"].contains(&arg.as_str()); }
     };
-    Some(Caller { provider, headless })
+    Some(Caller { pid, provider, headless })
 }
 
 fn ancestry(root: u32, mut pid: u32, mut read: impl FnMut(u32) -> Option<(u32, Vec<String>)>) -> Option<Caller> {
     let mut caller = None;
     for _ in 0..64 {
         let (parent, argv) = read(pid)?;
-        if caller.is_none() { caller = native_caller(&argv); }
+        if caller.is_none() { caller = native_caller(pid, &argv); }
         if pid == root { return caller; }
         if parent == pid || parent <= 1 { return None; }
         pid = parent;
@@ -52,11 +53,14 @@ fn ancestry(root: u32, mut pid: u32, mut read: impl FnMut(u32) -> Option<(u32, V
 
 fn caller(record: &Value) -> Option<Caller> {
     if !process_alive(record) { return None; }
-    ancestry(record["pid"].as_u64()? as u32, crate::platform::parent_process_id(), crate::platform::parent_and_argv)
+    ancestry(u32::try_from(record["pid"].as_u64()?).ok()?, crate::platform::parent_process_id(), crate::platform::parent_and_argv)
 }
 
 pub(super) fn main_codex_hook(record: &Value) -> bool {
-    caller(record).is_some_and(|source| source.provider == "codex" && !source.headless)
+    // A nested interactive Codex may inherit the token and open files, but it
+    // cannot speak for the original supervised process's clear transition.
+    caller(record).is_some_and(|source| source.provider == "codex" && !source.headless
+        && record["pid"].as_u64() == Some(u64::from(source.pid)))
 }
 
 // An inherited HGS token is not proof that a new same-provider conversation
@@ -193,23 +197,27 @@ mod tests {
         let read = |pid| rows.iter().find(|(id, _)| *id == pid).map(|(_, (parent, argv))|
             (*parent, argv.iter().map(|arg| arg.to_string()).collect()));
         let child = ancestry(20, 50, read).unwrap();
+        assert_eq!(child.pid, 40);
         assert_eq!(child.provider, "codex");
         assert!(child.headless);
         assert!(ancestry(21, 50, read).is_none());
         assert!(ancestry(20, 51, read).is_none());
         let parent = ancestry(20, 20, read).unwrap();
+        assert_eq!(parent.pid, 20);
         assert_eq!(parent.provider, "claude");
         assert!(!parent.headless);
         let wrapper = |pid| Some((if pid == 20 { 1 } else { 20 },
             vec!["node".into(), "/opt/bin/codex.js".into(), "--".into(), "exec".into()]));
-        assert!(!ancestry(20, 30, wrapper).unwrap().headless);
+        let wrapped = ancestry(20, 30, wrapper).unwrap();
+        assert_eq!(wrapped.pid, 30);
+        assert!(!wrapped.headless);
         assert!(ancestry(20, 30, |pid| Some((pid, vec![]))).is_none());
         for (argv, headless) in [
             (vec!["codex", "-m", "exec"], false),
             (vec!["codex", "--no-daemon", "-c", "model=fixture", "exec", "--ephemeral"], true),
             (vec!["node", "/opt/codex.js", "resume", "exec"], false),
         ] {
-            assert_eq!(native_caller(&argv.into_iter().map(str::to_owned).collect::<Vec<_>>()).unwrap().headless, headless);
+            assert_eq!(native_caller(20, &argv.into_iter().map(str::to_owned).collect::<Vec<_>>()).unwrap().headless, headless);
         }
     }
 
@@ -218,7 +226,7 @@ mod tests {
         // macOS ps reports a python3 shebang script under the framework executable.
         let argv = ["/Library/Frameworks/Python.framework/Versions/3.13/Resources/Python.app/Contents/MacOS/Python",
             "/opt/bin/claude"].map(str::to_owned);
-        assert_eq!(native_caller(&argv).unwrap().provider, "claude");
+        assert_eq!(native_caller(20, &argv).unwrap().provider, "claude");
     }
 
     #[test]

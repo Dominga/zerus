@@ -255,6 +255,40 @@ impl Catalogs {
         Value::Object(self.snapshots.clone())
     }
 
+    /// Fill missing folders after a delayed cache load. In-memory replies win,
+    /// and retain their generation fences. If anything was invalidated during
+    /// the load, restored entries are stale: an opaque key cannot prove which
+    /// host/repository the invalidation affected. Only restored entries may be
+    /// dropped to fit the existing count/byte bounds.
+    pub fn restore_saved(&mut self, saved: Option<Value>) {
+        let mut restored = Self::new(&self.executable, saved).snapshots;
+        restored.retain(|key, _| !self.snapshots.contains_key(key));
+        if !self.generations.is_empty() {
+            for value in restored.values_mut() {
+                if let Some(object) = value.as_object_mut() {
+                    object.insert("stale".into(), Value::Bool(true));
+                }
+            }
+        }
+        let mut merged = restored.clone();
+        merged.extend(self.snapshots.clone());
+        while merged.len() > SNAPSHOTS
+            || Value::Object(merged.clone()).to_string().len() > SNAPSHOT_BYTES
+        {
+            let oldest = restored
+                .iter()
+                .min_by(|a, b| {
+                    let at = |value: &Value| value["sampled_at"].as_f64().unwrap_or(0.0);
+                    at(a.1).total_cmp(&at(b.1))
+                })
+                .map(|(key, _)| key.clone());
+            let Some(oldest) = oldest else { break };
+            restored.remove(&oldest);
+            merged.remove(&oldest);
+        }
+        self.snapshots = merged;
+    }
+
     fn key(&self, host: &str, path: &str) -> String {
         Sha256::digest(format!("{}\n{host}\n{path}", self.executable).as_bytes())
             .iter()
@@ -687,6 +721,94 @@ mod tests {
         assert_eq!(saved.as_object().unwrap().len(), SNAPSHOTS);
         assert!(catalogs.snapshot("", "/home/example/r5").is_none());
         assert!(catalogs.snapshot("", "/home/example/r6").is_some());
+    }
+
+    #[test]
+    fn delayed_saved_folders_fill_gaps_without_replacing_fresh_replies_or_their_generations() {
+        let mut old = Catalogs::new("hgs", None);
+        for path in ["/srv/fresh", "/srv/other"] {
+            let stamp = old.stamp("", path);
+            old.accept("", path, &stamp, ok(json!({"state":"ok","worktrees":[],"sampled_at":1000,"path":path,"source":"old"})), 1000.).unwrap();
+        }
+        let mut live = Catalogs::new("hgs", None);
+        let pending = live.stamp("", "/srv/pending");
+        live.invalidate("", "/srv/repo/.git");
+        let stamp = live.stamp("", "/srv/fresh");
+        let fresh = live.accept("", "/srv/fresh", &stamp, ok(json!({"state":"ok","worktrees":[],"sampled_at":1000,"path":"/srv/fresh","source":"fresh"})), 1000.).unwrap();
+        let generations = live.generations.clone();
+        live.restore_saved(Some(old.saved()));
+        assert_eq!(live.snapshot("", "/srv/fresh"), Some(&fresh));
+        assert_eq!(live.generations, generations);
+        assert_eq!(live.snapshot("", "/srv/other").unwrap()["source"], "old");
+        assert!(
+            live.fresh("", "/srv/other", 1001.).is_none(),
+            "late restored entries cannot undo an invalidation"
+        );
+        assert!(live.fresh("", "/srv/fresh", 1001.).is_some());
+        assert_eq!(
+            live.accept("", "/srv/pending", &pending, ok(catalog(1001.)), 1001.),
+            Err("Folder changed. Refresh its catalog.".into())
+        );
+    }
+
+    #[test]
+    fn delayed_restore_keeps_fresh_entries_within_both_cache_bounds() {
+        let mut old = Catalogs::new("hgs", None);
+        for i in 0..SNAPSHOTS {
+            let path = format!("/srv/old-{i}");
+            let stamp = old.stamp("", &path);
+            old.accept(
+                "",
+                &path,
+                &stamp,
+                ok(json!({"state":"ok","worktrees":[],"sampled_at":1000+i,"path":path})),
+                2000.,
+            )
+            .unwrap();
+        }
+        let mut live = Catalogs::new("hgs", None);
+        let stamp = live.stamp("", "/srv/fresh");
+        // Deliberately older than every saved timestamp: only restored entries
+        // may be evicted while the current reply remains in the cache.
+        let fresh = live
+            .accept(
+                "",
+                "/srv/fresh",
+                &stamp,
+                ok(json!({"state":"ok","worktrees":[],"sampled_at":1})),
+                2000.,
+            )
+            .unwrap();
+        live.restore_saved(Some(old.saved()));
+        assert_eq!(live.snapshots.len(), SNAPSHOTS);
+        assert_eq!(live.snapshot("", "/srv/fresh"), Some(&fresh));
+        assert!(live.snapshot("", "/srv/old-0").is_none());
+        assert!(live.snapshot("", "/srv/old-1").is_some());
+
+        let mut old = Catalogs::new("hgs", None);
+        let stamp = old.stamp("", "/srv/large");
+        old.accept(
+            "",
+            "/srv/large",
+            &stamp,
+            ok(json!({"state":"ok","worktrees":[],"sampled_at":9999,"payload":"x".repeat(6<<20)})),
+            2000.,
+        )
+        .unwrap();
+        let stamp = live.stamp("", "/srv/fresh");
+        let fresh = live
+            .accept(
+                "",
+                "/srv/fresh",
+                &stamp,
+                ok(json!({"state":"ok","worktrees":[],"sampled_at":1,"payload":"y".repeat(3<<20)})),
+                2000.,
+            )
+            .unwrap();
+        live.restore_saved(Some(old.saved()));
+        assert!(live.saved().to_string().len() <= SNAPSHOT_BYTES);
+        assert_eq!(live.snapshot("", "/srv/fresh"), Some(&fresh));
+        assert!(live.snapshot("", "/srv/large").is_none());
     }
 
     #[test]

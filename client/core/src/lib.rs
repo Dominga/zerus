@@ -56,6 +56,7 @@ mod pty;
 pub mod qt_lock;
 pub mod questions;
 pub mod quit_journal;
+pub mod quit_origin;
 pub mod readmarks;
 pub mod reads;
 pub mod readsync;

@@ -218,8 +218,18 @@ pub enum Server {
 /// The one check every Windows frontend endpoint uses before trusting a pipe
 /// server: forwarding, the service's absence probe and its launch decision.
 pub fn verify_server(pipe: &OwnedHandle, image: &PinnedImage) -> Server {
+    verify_peer(pipe, image, GetNamedPipeServerProcessId)
+}
+fn verify_client(pipe: &OwnedHandle, image: &PinnedImage) -> Server {
+    verify_peer(pipe, image, GetNamedPipeClientProcessId)
+}
+fn verify_peer(
+    pipe: &OwnedHandle,
+    image: &PinnedImage,
+    peer_pid: unsafe extern "system" fn(HANDLE, *mut u32) -> i32,
+) -> Server {
     let mut pid = 0;
-    if unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle(), &mut pid) } == 0 || pid == 0 {
+    if unsafe { peer_pid(pipe.as_raw_handle(), &mut pid) } == 0 || pid == 0 {
         return Server::Unknown;
     }
     let Ok(process) =
@@ -255,9 +265,7 @@ pub fn verify_server(pipe: &OwnedHandle, image: &PinnedImage) -> Server {
         image: Some(retained_image),
     };
     let mut again = 0;
-    if peer.current()
-        && unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle(), &mut again) } != 0
-        && again == pid
+    if peer.current() && unsafe { peer_pid(pipe.as_raw_handle(), &mut again) } != 0 && again == pid
     {
         Server::Verified(peer)
     } else {
@@ -288,6 +296,16 @@ pub fn verify_own_server_until(pipe: &OwnedHandle, until: Instant) -> Server {
             return Server::Unknown;
         };
         verify_server(pipe, &image)
+    })
+}
+/// Admit a control request only from this hgs build, user and session, with no
+/// lower integrity. The original client process and image pins accompany it.
+pub fn verify_own_client_until(pipe: &OwnedHandle, until: Instant) -> Server {
+    acquire_until(pipe, until, |pipe| {
+        let Ok(image) = PinnedImage::for_process(&own_process()) else {
+            return Server::Unknown;
+        };
+        verify_client(pipe, &image)
     })
 }
 fn verify_until(

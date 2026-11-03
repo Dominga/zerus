@@ -214,6 +214,8 @@ pub(super) struct Authorized {
     serial: u64,
     ownership_origin: Option<super::ownership::Origin>,
     notification: Option<zerus_client_core::desktop::notification_control::NativeControl>,
+    /// The verified frontend's own application identity (its hello).
+    application: String,
     #[cfg(windows)]
     windows: Option<Box<WindowsFreshness>>,
 }
@@ -223,6 +225,7 @@ pub(super) struct Authorized {
 struct Metadata {
     ownership: Option<super::ownership::Origin>,
     notification: Option<zerus_client_core::desktop::notification_control::NativeControl>,
+    application: String,
 }
 pub(super) struct Validated(Request, Freshness, Metadata);
 enum Freshness {
@@ -239,6 +242,11 @@ enum Freshness {
 impl Validated {
     pub fn id(&self) -> &str {
         self.0.id()
+    }
+    /// The verified frontend's application identity from its hello: which
+    /// build asked, never a permission by itself.
+    pub fn application(&self) -> &str {
+        &self.2.application
     }
     pub fn operation(&self) -> &'static str {
         self.0.operation()
@@ -277,6 +285,7 @@ impl Validated {
                     | Request::CacheMaintenance { .. }
                     | Request::CreationClone { .. }
                     | Request::CreationWorktree { .. }
+                    | Request::CreationLaunch { .. }
                     | Request::TaskStartReconcile { .. }
             ),
             "native controls require their typed boundary"
@@ -290,6 +299,16 @@ impl Validated {
         self.check()?;
         let Request::CreationClone { intent } = self.0 else {
             anyhow::bail!("not a creation clone");
+        };
+        Ok(*intent)
+    }
+    /// Only the launch actor calls this after BEGIN IMMEDIATE. Cached native
+    /// Service mode was bound to this exact original request during admission.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn creation_launch(self) -> Result<zerus_client_core::desktop::creation_launch::Intent> {
+        self.check()?;
+        let Request::CreationLaunch { intent } = self.0 else {
+            anyhow::bail!("not a creation launch");
         };
         Ok(*intent)
     }
@@ -307,7 +326,7 @@ impl Validated {
     }
     /// Only the per-kind actor may consume this after BEGIN IMMEDIATE, then
     /// recheck its actual current source/lease and freeze the original bytes.
-    #[allow(dead_code)] // The executing actor follows this closed refusal-only slice.
+    #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
     pub fn task_start_reconcile(
         self,
     ) -> Result<zerus_client_core::desktop::task_start_reconcile::Intent> {
@@ -316,6 +335,18 @@ impl Validated {
             anyhow::bail!("not a task Start reconciliation");
         };
         Ok(*intent)
+    }
+    /// Data for bounded native preparation, without consuming or extending the
+    /// original proof. The actor still consumes it after BEGIN IMMEDIATE.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn task_start_preview(
+        &self,
+    ) -> Result<&zerus_client_core::desktop::task_start_reconcile::Intent> {
+        self.check()?;
+        let Request::TaskStartReconcile { intent } = &self.0 else {
+            anyhow::bail!("not task Start")
+        };
+        Ok(intent)
     }
     pub fn ownership_parts(&self) -> Result<(Request, super::ownership::Origin)> {
         self.check()?;
@@ -361,6 +392,23 @@ impl Validated {
             Freshness::Fixture,
             Metadata::default(),
         )
+    }
+    /// A fixture from a frontend whose hello names `application`.
+    #[cfg(test)]
+    pub fn fixture_from(value: &Value, application: &str) -> Self {
+        let mut permit = Self::fixture(value);
+        permit.2.application = application.into();
+        permit
+    }
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    pub fn fixture_expiring(value: &Value, until: Instant) -> Self {
+        let mut permit = Self::fixture(value);
+        permit.1 = Freshness::Native {
+            caller: Process::read(std::process::id()).unwrap(),
+            frontend: Process::read(std::process::id()).unwrap(),
+            until,
+        };
+        permit
     }
 }
 /// A read-only activation receiver bound to the original authenticated child.
@@ -593,6 +641,7 @@ impl Authorized {
             Metadata {
                 ownership: self.ownership_origin,
                 notification: self.notification,
+                application: self.application,
             },
         ))
     }
@@ -672,6 +721,7 @@ pub(super) fn authenticate(location: &Scope, peer_pid: u32, value: &Value) -> Re
         serial: reply.request.serial,
         ownership_origin,
         notification: reply.request.notification,
+        application: reply.hello.application,
         #[cfg(windows)]
         windows: Some(Box::new(windows)),
     })
@@ -761,6 +811,14 @@ fn validate(
             "creation does not match the native service frontend"
         );
     }
+    if let Request::CreationLaunch { intent } = &envelope.request {
+        ensure!(
+            reply.request.ownership_mode
+                == Some(zerus_client_core::desktop::ownership::Mode::Service)
+                && intent.scope.configuration == configuration,
+            "creation does not match the native service frontend"
+        );
+    }
     if let Request::TaskStartReconcile { intent } = &envelope.request {
         ensure!(
             reply.request.ownership_mode
@@ -831,6 +889,7 @@ enum OrderedOperation {
     CacheMaintenance,
     CreationClone,
     CreationWorktree,
+    CreationLaunch,
     TaskStartReconcile,
     ActivationWait,
     AutomaticApprovals,
@@ -847,6 +906,7 @@ impl From<&Request> for OrderedOperation {
             Request::CacheMaintenance { .. } => Self::CacheMaintenance,
             Request::CreationClone { .. } => Self::CreationClone,
             Request::CreationWorktree { .. } => Self::CreationWorktree,
+            Request::CreationLaunch { .. } => Self::CreationLaunch,
             Request::TaskStartReconcile { .. } => Self::TaskStartReconcile,
             Request::ActivationWait { .. } => Self::ActivationWait,
             Request::AutomaticApprovals { .. } => Self::AutomaticApprovals,
@@ -1324,6 +1384,56 @@ mod tests {
         assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
     }
     #[test]
+    fn creation_launch_has_its_own_lane_and_never_passes_the_generic_boundary() {
+        use zerus_client_core::desktop::{
+            creation_launch::{Intent, Scope},
+            ownership::Mode,
+        };
+        let (mut envelope, caller, frontend, mut reply) = fixture();
+        let original = serde_json::json!({"id":id(80),"creation_schema":1,"created":1,"revision":6,
+            "cmd":"codex","tag":"example","host":"","state":"launching","auto":false,
+            "target":"/srv/repo","launch_id":id(2),"launch_dispatched":true,
+            "expected_machine":id(81)});
+        envelope.request = Request::CreationLaunch {
+            intent: Box::new(Intent {
+                scope: Scope {
+                    configuration: "a".repeat(64),
+                    service_epoch: id(91),
+                },
+                creation_id: id(80),
+                launch_id: id(2),
+                revision: 6,
+                original: original.to_string(),
+            }),
+        };
+        assert_eq!(
+            OrderedOperation::from(&envelope.request),
+            OrderedOperation::CreationLaunch
+        );
+        for other in [
+            OrderedOperation::CreationClone,
+            OrderedOperation::CreationWorktree,
+            OrderedOperation::TaskStartReconcile,
+        ] {
+            assert_ne!(OrderedOperation::CreationLaunch, other);
+        }
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Native);
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Service);
+        validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).unwrap();
+        // Only a future typed actor accessor may consume it.
+        assert!(Validated::fixture(&serde_json::json!(envelope.request))
+            .into_request()
+            .is_err());
+        if let Request::CreationLaunch { intent } = &mut envelope.request {
+            intent.scope.configuration = "b".repeat(64);
+        }
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+    }
+    #[test]
     fn task_start_reconcile_is_native_service_bound_and_excluded_from_generic_requests() {
         use zerus_client_core::desktop::{
             ownership::Mode,
@@ -1720,6 +1830,7 @@ mod tests {
             serial,
             ownership_origin: None,
             notification: None,
+            application: "com.hgdev.hgs-tray".into(),
         }
     }
 

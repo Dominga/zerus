@@ -504,6 +504,10 @@ impl Spawned {
     pub fn terminate(&self) {
         self.job.terminate();
     }
+    /// Independent of the original child's exit: descendants must drain too.
+    pub(crate) fn wait_tree(&self, timeout: Duration) -> io::Result<bool> {
+        self.job.0.wait_empty(timeout)
+    }
     /// `Child::wait_with_output`; the job ends with the call.
     pub fn wait_with_output(self) -> io::Result<Output> {
         let (child, _job) = self.into_parts();
@@ -581,6 +585,11 @@ fn resume(pid: u32) -> io::Result<()> {
 /// group, so a console Ctrl+C reaches it.
 pub fn spawn(command: &mut Command) -> io::Result<Spawned> {
     spawn_contained(command, 0)
+}
+/// A service helper has the same suspended/job admission as other children,
+/// without opening a console on the interactive desktop.
+pub(crate) fn spawn_hidden(command: &mut Command) -> io::Result<Spawned> {
+    spawn_contained(command, CREATE_NO_WINDOW)
 }
 /// `spawn` in a process group of its own: a console Ctrl+C for the caller does
 /// not reach it (`own_process_group`).
@@ -1604,7 +1613,9 @@ mod process {
     pub fn current_directories() -> std::result::Result<Vec<(u32, PathBuf, String)>, String> {
         Err("Running processes cannot be inspected on this computer".into())
     }
-    pub fn worktree_processes(_deadline: std::time::Instant) -> std::result::Result<crate::platform::WorktreeProcesses, String> {
+    pub fn worktree_processes(
+        _deadline: std::time::Instant,
+    ) -> std::result::Result<crate::platform::WorktreeProcesses, String> {
         current_directories().map(Into::into)
     }
     /// Windows cannot list another process's open files without a driver; it can
@@ -2634,7 +2645,10 @@ mod tests {
         assert!(metadata.is_dir());
         assert_eq!(file_identity(dir.path()), Some(identity));
         fs::write(dir.path().join("file"), b"x").unwrap();
-        assert_eq!(FileIdentity::at(dir.path()).unwrap().0.inode, identity.inode);
+        assert_eq!(
+            FileIdentity::at(dir.path()).unwrap().0.inode,
+            identity.inode
+        );
     }
 
     #[test]

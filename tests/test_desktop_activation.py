@@ -35,10 +35,22 @@ class Activation(unittest.TestCase):
         self.assertEqual(compiled.returncode, 0, compiled.stderr)
         self.frontend.chmod(0o700)
 
-    def begin(self, operation='activation_wait', wrong_birth=False, marked=False):
+    def begin(self, operation='activation_wait', wrong_birth=False, marked=False, task_reconcile=False):
         _, status = self.serve(background=True)
         attempt, request_id = str(uuid.uuid4()), str(uuid.uuid4())
         request = dict(op=operation, request_id=request_id)
+        if task_reconcile:
+            fixture=json.loads((Path(__file__).resolve().parents[1] / 'client/fixtures/desktop-operation-port-v1.json').read_text())
+            record=json.loads(fixture['raw_record'])
+            record['intent']['retained_input']=fixture['retained_input']
+            raw=json.dumps(record,ensure_ascii=False,sort_keys=True,separators=(',', ':'))
+            binding=fixture['binding']
+            binding['key']['configuration']=status['configuration']
+            binding['source_record_sha256']=hashlib.sha256(raw.encode()).hexdigest()
+            binding['ui_snapshot_sha256']=hashlib.sha256(raw.encode()).hexdigest()
+            intent=dict(scope=dict(configuration=status['configuration'],service_epoch=status['epoch']),
+                        reconcile_id=request_id,binding=binding,original=raw)
+            request=dict(op='task_start_reconcile',intent=intent)
         envelope = dict(abi='desktop-ui-request-v1', attempt=attempt, request=request)
         env = dict(self.env)
         if marked:
@@ -55,10 +67,12 @@ class Activation(unittest.TestCase):
                      instance_epoch=str(uuid.uuid4()), writer_epoch=None,
                      configuration=status['configuration'], live=True, replay=False)
         cached = dict(attempt=attempt, request_id=request_id,
-                      fingerprint=hashlib.sha256(json.dumps(request, separators=(',', ':')).encode()).hexdigest(),
+                      fingerprint=hashlib.sha256(json.dumps(request, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest(),
                       child_pid=native['pid'], child_birth='replaced' if wrong_birth else native['birth'], serial=1)
+        if task_reconcile:
+            cached['ownership_mode']='service'
         for value in (envelope, dict(hello=hello, request=cached)):
-            frontend.stdin.write(json.dumps(value, separators=(',', ':')) + '\n')
+            frontend.stdin.write(json.dumps(value, ensure_ascii=False, separators=(',', ':')) + '\n')
         frontend.stdin.write(f'desktop-ui-request-v1 {attempt}\n')
         frontend.stdin.flush()
         return frontend, request_id, status
@@ -116,6 +130,19 @@ class Activation(unittest.TestCase):
                                     code='frontend_authentication_refused'))
         self.assertIn('proofs=1 ', error)
         self.assertFalse(self.cli('desktop', 'status', '--json')['activation_transport']['waiting'])
+
+    def test_authenticated_task_reconciliation_without_its_current_lease_is_refused(self):
+        """Native request reaches its closed kind, but cached Service grants no effect."""
+        from contextlib import closing
+        import sqlite3
+        frontend,request,_=self.begin(task_reconcile=True)
+        reply,error=self.result(frontend)
+        self.assertEqual(reply,dict(request_id=request,accepted=False,durable=False,
+                                   code='task_start_reconcile_unavailable'))
+        self.assertIn('proofs=1 ',error)
+        with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
+            for table in ('desktop_operations','desktop_operation_attempts','desktop_operation_custody'):
+                self.assertEqual(db.execute('SELECT count(*) FROM '+table).fetchone()[0],0)
 
     def test_marked_native_frontend_cannot_admit_activation_reader(self):
         frontend, request, _ = self.begin(marked=True)

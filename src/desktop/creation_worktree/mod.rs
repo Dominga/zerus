@@ -21,6 +21,9 @@ pub(super) const SCHEMA: i64 = 23;
 /// tables drops their triggers and indexes.
 #[cfg(test)]
 pub(super) fn remove_fixture(db: &rusqlite::Connection) {
+    // Rewind the later schema-24 creation launch leaf too, never leaving it
+    // labelled older.
+    super::creation_launch::remove_fixture(db);
     db.execute_batch(
         "DROP TABLE desktop_creation_worktrees; DROP TABLE desktop_creation_worktree_budget;",
     )

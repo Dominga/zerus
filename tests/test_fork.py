@@ -95,7 +95,8 @@ class Forks(Base):
         self.assertIn('codex fork '+record['conversation_id'],output)
         self.assertEqual(set((self.root/'state').glob('*.json')),before)
         self.hgs('fork',source,'-d','--expected-run-id','stale',rc=1)
-        self.hgs('fork',source,'-n','one','-d',rc=1)
+        # A name in use is not a refusal: the dry run shows the free name.
+        self.assertIn('codex/p/one-2',self.hgs('fork',source,'-n','one','-d','--dry-run'))
         self.send_event(source,'UserPromptSubmit')
         self.hgs('fork',source,'-d',rc=1)
         self.assertEqual(set((self.root/'state').glob('*.json')),before)
@@ -105,6 +106,98 @@ class Forks(Base):
         self.hgs('fork',source,'-d');self.wait(lambda:self.binding('codex/p/one-fork').get('conversation_id'))
         self.hgs('fork',source,'-d');self.wait(lambda:self.binding('codex/p/one-fork-2').get('conversation_id'))
         self.assertNotEqual(self.binding('codex/p/one-fork')['conversation_id'],self.binding('codex/p/one-fork-2')['conversation_id'])
+
+    # zerus-ucck: a session name is a label. An archived session never blocks a
+    # fork or a new session from its name, and a name a live or saved session
+    # uses gets the first free -2, -3... instead of failing.
+    def test_archived_names_are_free_and_taken_names_get_a_suffix(self):
+        source=self.start('codex')
+        archived,_=self.saved_v1('codex',tag='one-fork')
+        self.hgs('archive',archived['name'])
+        self.hgs('fork',source,'-d');self.wait(lambda:self.binding('codex/p/one-fork').get('conversation_id'))
+        self.hgs('fork',source,'-n','one-fork','-d')
+        self.wait(lambda:self.binding('codex/p/one-fork-2').get('conversation_id'))
+        self.assertEqual(len(list((self.root/'state/archives').glob('*.json'))),1)
+        reused,_=self.saved_v1('claude',tag='reused')
+        self.hgs('archive',reused['name'])
+        self.assertEqual(self.binding(self.start('claude','reused'))['name'],'claude/p/reused')
+
+    def swarm(self,*args,request=None):
+        import subprocess
+        p=subprocess.run([str(test_pause.HGS),'swarm',*args],input=None if request is None else json.dumps(request),
+                         env=self.env,capture_output=True,text=True,timeout=20)
+        self.assertEqual(p.returncode,0,p.stdout+p.stderr);return json.loads(p.stdout)
+
+    def project_of(self,name,node):
+        import uuid
+        record=self.binding(name)
+        return self.swarm('session-project','--json',request={'request_id':str(uuid.uuid4()),'name':name,
+            'expected_run_id':record['run_id'],'expected_conversation_id':record['conversation_id'],
+            'expected_machine_id':node})['current_project_id']
+
+    # zerus-zjsj: a fork starts in its source session's project, live or
+    # archived, written by the catalog owner when the fork's binding exists.
+    def test_a_fork_starts_in_its_source_sessions_project(self):
+        source=self.start('codex')
+        saved,_=self.saved_v1('codex',tag='kept')
+        self.hgs('archive',saved['name'])
+        archive_id=json.loads(next((self.root/'state/archives').glob('*.json')).read_text())['archive_id']
+        loose=self.start('claude','loose')
+        node=self.swarm('hello')['node_id']
+        self.swarm('initialize',request={'projects':[dict(id='work',name='Work',color='#123456',folders=[],
+            sessions=[node+'\n'+source,node+'\narchive\n'+archive_id])]})
+        self.assertEqual(self.project_of(source,node),'work')
+        self.assertEqual(self.project_of(self.fork(source,'placed'),node),'work')
+        self.hgs('fork',saved['name'],'-n','from-archive','-d','--archive',archive_id)
+        self.wait(lambda:self.binding('codex/p/from-archive').get('conversation_id'))
+        self.assertEqual(self.project_of('codex/p/from-archive',node),'work')
+        # A source in the default project leaves its fork there too.
+        self.assertEqual(self.project_of(self.fork(loose,'loose-fork'),node),'ungrouped')
+
+    # zerus-b4qk: a fork's Activity shows its source's history up to the fork,
+    # marked as inherited, then its own; the source's later rows stay out.
+    def test_a_fork_shows_its_sources_history_up_to_the_fork(self):
+        import time
+        talk=lambda events:[(e['detail'],e.get('inherited_from')) for e in events
+                            if e['type'] in ('UserPromptSubmit','Stop')]
+        shown=lambda name:json.loads(self.hgs('inspect',name))
+        for agent in ['codex','claude']:
+            source=self.start(agent,f'{agent}-root')
+            self.send_event(source,'UserPromptSubmit',prompt='source request')
+            self.send_event(source,'Stop',last_assistant_message='source reply')
+            time.sleep(1.1)
+            fork=self.fork(source,f'{agent}-branch')
+            self.send_event(source,'UserPromptSubmit',prompt='source after the fork')
+            self.send_event(fork,'UserPromptSubmit',prompt='fork request')
+            inherited=[('source request',source),('source reply',source)]
+            data=shown(fork)
+            self.assertEqual(talk(data['events']),inherited+[('fork request',None)],agent)
+            self.assertEqual(talk(data['message_events']),inherited+[('fork request',None)],agent)
+            [[journal,conversation,seq]]=self.binding(fork)['fork_lineage']
+            self.assertEqual((journal,conversation),(source,self.binding(source)['conversation_id']))
+            # The source itself is unchanged and inherits nothing.
+            self.assertEqual(talk(shown(source)['events']),[('source request',None),('source reply',None),('source after the fork',None)])
+            # A fork of the fork reaches back through both.
+            self.send_event(fork,'Stop',last_assistant_message='fork reply')
+            time.sleep(1.1)
+            second=self.fork(fork,f'{agent}-twig')
+            self.send_event(second,'UserPromptSubmit',prompt='twig request')
+            self.assertEqual(talk(shown(second)['events']),
+                inherited+[('fork request',fork),('fork reply',fork),('twig request',None)],agent)
+            # A fork recorded before the lineage: its source's rows up to its creation.
+            path=self.root/'state'/(hashlib.sha256(fork.encode()).hexdigest()+'.json')
+            record=json.loads(path.read_text());record.pop('fork_lineage');path.write_text(json.dumps(record))
+            self.assertEqual(talk(shown(fork)['events']),inherited+[('fork request',None),('fork reply',None)],agent)
+            # Found once and saved under the state lock, so later reads do not search.
+            [[derived_journal,derived_conversation,derived]]=self.binding(fork)['fork_lineage']
+            self.assertEqual((derived_journal,derived_conversation),(source,conversation))
+            self.assertLessEqual(derived,seq)
+            self.assertEqual(talk(shown(fork)['events']),inherited+[('fork request',None),('fork reply',None)],agent)
+            self.assertEqual(self.binding(fork)['fork_lineage'],[[source,conversation,derived]])
+            # Search finds the source's words in the source, never again in its forks.
+            hits=json.loads(self.hgs('search','--query','source request'))['results']
+            self.assertIn(source,{h['name'] for h in hits},agent)
+            self.assertFalse({fork,second}&{h['name'] for h in hits},agent)
 
     def test_provider_returning_source_id_is_not_confirmed_as_a_fork(self):
         source=self.start('claude');(self.root/'broken-fork').touch()

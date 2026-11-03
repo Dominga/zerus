@@ -493,6 +493,84 @@ mod native {
     }
 
     #[test]
+    fn a_lost_grant_reply_is_looked_up_once_and_only_definitive_not_applied_admits_a_fresh_grant() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        tauri::async_runtime::block_on(async {
+            for definitive in [true, false] {
+                // The actual original child binds, loses its reply and exits.
+                let f = Fixture::new(
+                    Mode::Service,
+                    json!({"ready":true,"lost":true,"lost_once":true,"definitive":definitive}),
+                );
+                let (service, _) = f.service();
+                until("the original's reply is lost after its exit", || {
+                    f.calls("frontend-request").len() == 1 && f.calls("watch").len() == 1
+                })
+                .await;
+                let original = f.calls("frontend-request")[0]["value"]["request"].clone();
+                // Only an original with a verified exit is looked up at all.
+                until("the exact original is looked up", || {
+                    f.calls("ownership-result").len() == 1
+                })
+                .await;
+                let lookup = &f.calls("ownership-result")[0]["value"];
+                assert_eq!(lookup["original_request_id"], original["request_id"]);
+                assert_eq!(lookup["journal"], original["journal"]);
+                assert_eq!(lookup["revision"], original["revision"]);
+                if definitive {
+                    until("a fresh Grant after definitive not-applied", || {
+                        service
+                            .snapshot()
+                            .notification_ownership
+                            .as_ref()
+                            .is_some_and(|v| v["status"]["state"] == "service" && v["code"] == "")
+                    })
+                    .await;
+                    let calls = f.calls("frontend-request");
+                    assert_eq!(calls.len(), 2);
+                    let fresh = &calls[1]["value"]["request"];
+                    assert_eq!(fresh["action"], "grant");
+                    assert_ne!(fresh["request_id"], original["request_id"]);
+                } else {
+                    // Past the next two backoff steps: still fenced, one lookup.
+                    tokio::time::sleep(Duration::from_millis(3500)).await;
+                    assert_eq!(f.calls("frontend-request").len(), 1, "never resent");
+                    assert_eq!(f.calls("ownership-result").len(), 1);
+                    let view = service.snapshot().notification_ownership.unwrap();
+                    assert_eq!(view["pending"], true, "{view}");
+                    assert_eq!(view["code"], "ownership_unconfirmed", "{view}");
+                    assert_eq!(view["request_id"], original["request_id"], "{view}");
+                }
+                service.join().await.unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn only_a_verified_exit_and_unchanged_scope_let_not_applied_admit_a_grant() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        let f = Fixture::new(Mode::Service, json!({"lost":true,"missing":true}));
+        assert!(f.run(Some(Action::Grant)).pending);
+        assert!(f.owner.uncertain_grant().is_some());
+        f.owner.state().intent.as_mut().unwrap().exit_confirmed = false;
+        assert!(f.owner.uncertain_grant().is_none(), "ExitUnverified");
+        f.owner.state().intent.as_mut().unwrap().exit_confirmed = true;
+        // Missing but not definitive: still unknown and fenced.
+        assert!(f.run(None).pending);
+        assert!(!f.owner.retryable_grant());
+        f.config(json!({"missing":true,"definitive":true}));
+        let settled = f.run(None);
+        assert_eq!(settled.code, "ownership_not_applied");
+        assert!(f.owner.uncertain_grant().is_none());
+        assert!(f.owner.retryable_grant());
+        // A later status read that differs from the original's scope decides.
+        f.config(json!({"state":"revoked","rearm_required":true}));
+        f.run(None);
+        assert!(!f.owner.retryable_grant());
+        assert_eq!(f.calls("frontend-request").len(), 1);
+    }
+
+    #[test]
     fn connection_close_joins_a_long_grant_backoff_without_another_attempt() {
         let _process = crate::PROCESS_TREE.read().unwrap();
         tauri::async_runtime::block_on(async {

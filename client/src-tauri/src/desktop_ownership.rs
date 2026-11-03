@@ -42,6 +42,9 @@ struct Intent {
     exit_confirmed: bool,
     complete: bool,
     receipt: Option<Receipt>,
+    // A lookup after the verified original exit found no receipt at the
+    // original's unchanged journal revision. It never implies success.
+    not_applied: bool,
 }
 #[derive(Default)]
 struct State {
@@ -164,12 +167,24 @@ impl Controller {
         }
         unreachable!("the final bounded attempt returns its view")
     }
-    /// Only a complete original refusal, or capacity before an uncertain
+    /// Only a complete original refusal, a definitive not-applied lookup of an
+    /// original after its verified exit, or capacity before an uncertain
     /// original exists, can admit another fresh startup Grant.
     pub(crate) fn retryable_grant(&self) -> bool {
         let state = self.state();
         (!state.running && state.code == "ownership_transport_busy"
                     && state.intent.as_ref().is_none_or(|intent| intent.complete))
+                    || state.intent.as_ref().is_some_and(|intent| {
+                    // The status it was built from is still current: a fresh
+                    // read since then (revoked, changed scope) decides instead.
+                    intent.complete && intent.exit_confirmed && intent.not_applied
+                        && intent.receipt.is_none()
+                        && state.code == "ownership_not_applied"
+                        && matches!(&intent.request, Request::DesktopOwnership { action: Action::Grant, journal: Some(journal), revision, .. }
+                            if state.status.as_ref().is_some_and(|status| status.matches(&intent.configuration)
+                                && status.journal.as_ref() == Some(journal) && status.revision == *revision
+                                && !status.rearm_required))
+                })
                     || state.intent.as_ref().is_some_and(|intent| {
                     intent.complete && intent.exit_confirmed
                         && matches!(intent.request, Request::DesktopOwnership { action: Action::Grant, .. })
@@ -181,6 +196,28 @@ impl Controller {
                                         && matches!(code.as_str(), "ownership_drain_pending" | "ownership_resources_pending" | "ownership_transport_busy"))
                         })
                 })
+    }
+    /// The current Grant original is unknown after its child's verified exit.
+    /// Only a read-only lookup of that exact original may follow; an
+    /// unverified exit or a known pending receipt is never looked up here.
+    pub(crate) fn uncertain_grant(&self) -> Option<String> {
+        let state = self.state();
+        state
+            .intent
+            .as_ref()
+            .filter(|intent| {
+                !intent.complete
+                    && intent.exit_confirmed
+                    && intent.receipt.is_none()
+                    && matches!(
+                        intent.request,
+                        Request::DesktopOwnership {
+                            action: Action::Grant,
+                            ..
+                        }
+                    )
+            })
+            .map(|intent| intent.request.id().to_owned())
     }
     fn admit(
         self: &Arc<Self>,
@@ -434,6 +471,7 @@ impl Job {
             {
                 if let Some(intent) = &mut state.intent {
                     intent.complete = true;
+                    intent.not_applied = true;
                 }
                 state.code = "ownership_not_applied".into();
             } else {
@@ -494,6 +532,7 @@ impl Job {
             exit_confirmed: false,
             complete: false,
             receipt: None,
+            not_applied: false,
         });
         drop(state);
         if self.owner.mode == Mode::Service {

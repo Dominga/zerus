@@ -1645,12 +1645,23 @@ async fn recover_grant(
 ) {
     const DELAYS: [u64; 5] = [1, 2, 5, 10, 30];
     let mut step = 0;
+    // An original whose verified-exit result is unknown gets one read-only
+    // lookup of its exact identity. It is never resent; only a definitive
+    // not-applied result (or a matched transient refusal) admits a fresh Grant.
+    let mut looked_up = None::<String>;
+    let next = |looked_up: &Option<String>| {
+        if stop.load(Ordering::Acquire) || shared.stopped.load(Ordering::Acquire) {
+            return None;
+        }
+        match shared.ownership.uncertain_grant() {
+            Some(original) if looked_up.as_ref() != Some(&original) => Some(Some(original)),
+            Some(_) => None,
+            None => shared.ownership.retryable_grant().then_some(None),
+        }
+    };
     loop {
         let wake = cancelled.notified();
-        if stop.load(Ordering::Acquire)
-            || shared.stopped.load(Ordering::Acquire)
-            || !shared.ownership.retryable_grant()
-        {
+        if next(&looked_up).is_none() {
             return;
         }
         tokio::select! {
@@ -1658,23 +1669,24 @@ async fn recover_grant(
             _ = wake => return,
             _ = tokio::time::sleep(Duration::from_secs(DELAYS[step])) => (),
         }
-        if stop.load(Ordering::Acquire)
-            || shared.stopped.load(Ordering::Acquire)
-            || !shared.ownership.retryable_grant()
-        {
+        let Some(lookup) = next(&looked_up) else {
             return;
-        }
+        };
+        let (action, phase) = match lookup {
+            Some(original) => {
+                looked_up = Some(original);
+                (None, crate::desktop_ownership::Phase::Result)
+            }
+            None => (
+                Some(zerus_client_core::desktop::ownership::Action::Grant),
+                crate::desktop_ownership::Phase::RetryGrant,
+            ),
+        };
         shared
             .ownership
-            .request(
-                Some(zerus_client_core::desktop::ownership::Action::Grant),
-                Some(configuration.clone()),
-                Some(stop.clone()),
-            )
+            .request(action, Some(configuration.clone()), Some(stop.clone()))
             .await;
-        shared
-            .publish_ownership(crate::desktop_ownership::Phase::RetryGrant)
-            .await;
+        shared.publish_ownership(phase).await;
         step = (step + 1).min(DELAYS.len() - 1);
     }
 }

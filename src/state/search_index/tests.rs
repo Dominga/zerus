@@ -182,6 +182,146 @@ fn record_checkpoint_keeps_the_first_consumed_prefix_after_expired_slices() {
 }
 
 #[test]
+fn large_shell_job_bindings_stay_searchable_and_are_reverified() {
+    for archive in [false, true] {
+        let mut fixture = Fixture::new();
+        if archive {
+            fixture.identity.archive_id = uuid::Uuid::new_v4().to_string();
+            fixture.record["archive_id"] = json!(fixture.identity.archive_id);
+            fixture.record["archived_at"] = json!(42);
+            fs::create_dir(fixture.state.join("archives")).unwrap();
+            fixture.binding = fixture
+                .state
+                .join("archives")
+                .join(format!("{}.json", fixture.identity.archive_id));
+        }
+        fixture.record["shell_jobs"] =
+            json!({"old-command":{"command":"private-shell-command ".repeat(70_000)}});
+        fs::write(&fixture.binding, fixture.record.to_string()).unwrap();
+        assert!(fs::metadata(&fixture.binding).unwrap().len() > RECORD_BYTES as u64);
+        fixture.append(&Fixture::event(1, "public large binding needle", "final"));
+        let mut store = fixture.store();
+        fixture.consume_records(&mut store, 128, 1);
+        let page = store
+            .publish(
+                &fixture.state,
+                "needle",
+                50,
+                None,
+                &fixture.budget(128),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert_eq!(
+            page["results"].as_array().unwrap().len(),
+            1,
+            "{archive}: {page}"
+        );
+        assert!(page["proof"]["bytes"].as_u64().unwrap() <= (4 << 20));
+        assert!(store
+            .index
+            .query("private-shell-command", 50, None)
+            .unwrap()
+            .hits
+            .is_empty());
+
+        // A new input pass and publication each re-read metadata, even when
+        // the prior pass cached this large binding for its sweep/ingestion.
+        fixture.append(&Fixture::event(2, "another public needle", "final"));
+        fixture.consume_records(&mut store, 128, 1);
+        assert_eq!(store.index.query("needle", 50, None).unwrap().hits.len(), 2);
+        // Ingestion keeps it pending. A publication budget that cannot fit it
+        // even on a fresh page reports it unavailable without retiring it.
+        let mut small = fixture.budget(128);
+        small.bytes = RECORD_BYTES;
+        let deferred = store
+            .step(
+                &fixture.state,
+                std::slice::from_ref(&fixture.identity),
+                &small,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert!(deferred.stopped && deferred.errors.is_empty());
+        assert!(deferred.bytes <= small.bytes);
+        let deferred = store
+            .publish(
+                &fixture.state,
+                "needle",
+                50,
+                None,
+                &small,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert!(deferred["results"].as_array().unwrap().is_empty());
+        assert_eq!(deferred["unavailable_sessions"], 1);
+        assert!(deferred["next_cursor"].is_null());
+        let resumed = store
+            .publish(
+                &fixture.state,
+                "needle",
+                50,
+                None,
+                &fixture.budget(128),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert_eq!(resumed["results"].as_array().unwrap().len(), 2);
+        fixture.record["run_id"] = json!("replaced-run");
+        fs::write(&fixture.binding, fixture.record.to_string()).unwrap();
+        let page = store
+            .publish(
+                &fixture.state,
+                "needle",
+                50,
+                None,
+                &fixture.budget(128),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert!(page["results"].as_array().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn sweep_keeps_a_source_active_when_only_the_remaining_slice_is_too_small() {
+    let mut fixture = Fixture::new();
+    fixture.record["shell_jobs"] = json!({"command":"private-shell-command ".repeat(70_000)});
+    fs::write(&fixture.binding, fixture.record.to_string()).unwrap();
+    fixture.append(&Fixture::event(1, "public needle", "final"));
+    let mut store = fixture.store();
+    fixture.consume_records(&mut store, 128, 1);
+    store
+        .index
+        .connection()
+        .execute("DELETE FROM meta WHERE key='source_sweep'", [])
+        .unwrap();
+    let mut progress = Progress {
+        bytes: 3 << 20,
+        ..Progress::default()
+    };
+    store
+        .sweep(
+            &fixture.state,
+            &fixture.budget(128),
+            &mut progress,
+            &AtomicBool::new(false),
+            &mut metadata::Reader::default(),
+        )
+        .unwrap();
+    assert_eq!(progress.bytes, 3 << 20);
+    assert_eq!(progress.files, 1);
+    assert_eq!(store.index.query("needle", 50, None).unwrap().hits.len(), 1);
+    let active: bool = store
+        .index
+        .connection()
+        .query_row("SELECT active FROM sources", [], |row| row.get(0))
+        .unwrap();
+    assert!(active);
+}
+
+#[test]
 #[should_panic(expected = "fixture record checkpoint did not finish within 32 bounded slices")]
 fn record_checkpoint_does_not_retry_expired_slices_without_a_bound() {
     let fixture = Fixture::new();

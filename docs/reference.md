@@ -1828,6 +1828,9 @@ earlier message and its answer does not. Old
 context and prompt-cache values are hidden until the new conversation reports
 native usage. The saved native identity changes only on the real hook, and an
 unconfirmed command does not reset counters.
+A resumed Codex session can also confirm a Terminal clear when its main end
+precedes that hook; the end alone never confirms a reset. Zerus keeps the process
+and run and observes the real successor without replaying the clear or message.
 A stopped session offers **Start fresh…** instead, with the same confirmation, and
 keeps **Send** available: it offers **Resume and send** with the full saved context,
 **Resume, compact and send**, or **Start fresh and send**. Zerus Next names the
@@ -3470,6 +3473,13 @@ Recorded tool calls appear separately, with completed history collapsed. Equal
 command text does not prove that a tool record and OS tree are the same task.
 Rows expose owner, state, elapsed time and available folder/progress/output. OS
 trees show PID and child count; their stdout is not independently captured.
+Saved commands retain a UTF-8 preview of at most 512 bytes and a SHA-256 digest
+(`command_digest`); `command_truncated` identifies shortened previews. Processes
+and the CLI keep the preview in `command`. **Copy command** copies that displayed
+preview; command output and process identity/control are unchanged. Legacy full
+texts still load and are compacted on their next live or archive record write.
+For legacy jobs the digest covers the previously stored text, which older
+versions may already have clipped.
 The active count uses the maximum of confirmed tool records and OS trees, not
 the sum of overlapping sources. Unconfirmed records do not count as active.
 
@@ -4428,6 +4438,26 @@ restart. Recovery failure reports a component error and pauses admissions while
 the passive service keeps serving IPC. The ledger library has no native I/O,
 automatic-approval consent or read-mark authority. The current service exposes
 no reservation, native adapter or writer-takeover command yet.
+
+Schema 20 adds indexed attention retention. An enabled discovery turn examines
+at most 32 blocked, non-live mappings and compacts at most 256 KiB of mapping
+and baseline-intent data. Only mappings without any attempt record qualify;
+live mappings and all reserved, delivered, refused or unknown attempt identities
+stay intact. One transaction replaces each eligible mapping with its exact
+32-byte logical suppression hash, removes its unreferenced blocked baseline
+intent, and updates storage totals and the durable GC cursor. Interrupted
+compaction rolls back all of these changes together.
+
+Count or byte pressure defers the original discovery row while bounded GC
+advances; it does not permanently fail discovery or busy-loop the actor.
+Suppression hashes survive restart and prevent an old logical edge from posting
+again after rename, resume or Tracker history eviction. A hash hit remains
+blocked without recreating the discarded payload. These hashes are append-only,
+32 bytes each before SQLite overhead, with no time-based expiry. Owner-scoped
+reclamation requires proof that the owning conversation is absent from both its
+authoritative catalog and every restorable archive; that separate sweep is
+tracked in `zerus-n3qm`. Catalog absence or an offline source alone never proves
+that an edge cannot reappear.
 
 Schema 3 adds the indexed revocation command journal. Before a maintained Qt
 rollback or Qt installation starts its GUI, the installer must obtain a settled

@@ -88,7 +88,7 @@ mod sockets {
     use std::{
         fs,
         io::{Read, Write},
-        os::unix::net::UnixListener,
+        os::unix::net::{UnixListener, UnixStream},
         path::PathBuf,
         sync::{
             atomic::{AtomicUsize, Ordering},
@@ -98,6 +98,7 @@ mod sockets {
         time::Instant,
     };
     static NEXT: AtomicUsize = AtomicUsize::new(0);
+    const FIXTURE_WAIT: Duration = Duration::from_secs(10);
     struct Scratch(PathBuf);
     impl Scratch {
         fn new() -> Self {
@@ -115,8 +116,72 @@ mod sockets {
             let _ = fs::remove_dir_all(&self.0);
         }
     }
+    fn configure_fixture_stream(stream: &UnixStream) {
+        // Darwin inherits the listener's nonblocking flag. Only accept polls;
+        // the connected fixture uses its existing bounded blocking timeout.
+        stream.set_nonblocking(false).unwrap();
+        stream.set_read_timeout(Some(FIXTURE_WAIT)).unwrap();
+        stream.set_write_timeout(Some(FIXTURE_WAIT)).unwrap();
+    }
+    struct FixtureRead<'a> {
+        stream: &'a mut UnixStream,
+        until: Instant,
+        interrupt_once: bool,
+    }
+    impl Read for FixtureRead<'_> {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            let remaining = self.until.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "fixture challenge deadline expired",
+                ));
+            }
+            self.stream.set_read_timeout(Some(remaining))?;
+            if std::mem::take(&mut self.interrupt_once) {
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            self.stream.read(bytes)
+        }
+    }
+    fn read_challenge(reader: &mut impl Read, case: &str) {
+        let expected = query(NONCE).unwrap();
+        let mut bytes = Vec::with_capacity(expected.len());
+        let mut byte = [0];
+        let mut interruptions = 0;
+        let ended = loop {
+            match reader.read(&mut byte) {
+                Ok(0) => break "EOF",
+                Ok(_) => {
+                    assert!(
+                        bytes.len() < expected.len(),
+                        "{case}: challenge exceeded its {} byte bound",
+                        expected.len()
+                    );
+                    bytes.push(byte[0]);
+                    if byte[0] == b'\n' {
+                        break "newline";
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                    interruptions += 1;
+                }
+                Err(error) => panic!(
+                    "{case}: challenge read failed ({:?}, os={:?}) after {} bytes and {interruptions} Interrupted reads: {error}",
+                    error.kind(), error.raw_os_error(), bytes.len()
+                ),
+            }
+        };
+        assert_eq!(
+            bytes, expected,
+            "{case}: challenge ended at {ended} after {interruptions} Interrupted reads"
+        );
+    }
     fn peer(reply: Vec<u8>, silent: bool, slow: bool) -> Observation {
         measured_peer(reply, silent, slow, Duration::ZERO).0
+    }
+    fn peer_case(reply: Vec<u8>, case: &'static str, interrupt_once: bool) -> Observation {
+        measured_peer_with_read(reply, false, false, Duration::ZERO, case, interrupt_once).0
     }
     fn measured_peer(
         reply: Vec<u8>,
@@ -124,7 +189,16 @@ mod sockets {
         slow: bool,
         cleanup_delay: Duration,
     ) -> (Observation, Duration) {
-        const FIXTURE_WAIT: Duration = Duration::from_secs(10);
+        measured_peer_with_read(reply, silent, slow, cleanup_delay, "socket fixture", false)
+    }
+    fn measured_peer_with_read(
+        reply: Vec<u8>,
+        silent: bool,
+        slow: bool,
+        cleanup_delay: Duration,
+        case: &'static str,
+        interrupt_once: bool,
+    ) -> (Observation, Duration) {
         let root = Scratch::new();
         let path = root.0.join("s");
         let listener = UnixListener::bind(&path).unwrap();
@@ -142,18 +216,14 @@ mod sockets {
                     Err(error) => panic!("fixture accept: {error}"),
                 }
             };
-            stream.set_read_timeout(Some(FIXTURE_WAIT)).unwrap();
-            stream.set_write_timeout(Some(FIXTURE_WAIT)).unwrap();
+            configure_fixture_stream(&stream);
             assert!(same_user(&stream));
-            let mut bytes = Vec::new();
-            let mut b = [0];
-            while stream.read(&mut b).unwrap_or(0) == 1 {
-                bytes.push(b[0]);
-                if b[0] == b'\n' {
-                    break;
-                }
-            }
-            assert_eq!(bytes, query(NONCE).unwrap());
+            let mut reader = FixtureRead {
+                stream: &mut stream,
+                until,
+                interrupt_once,
+            };
+            read_challenge(&mut reader, case);
             if silent {
                 thread::sleep(Duration::from_millis(1100));
             } else if slow {
@@ -175,7 +245,9 @@ mod sockets {
         let elapsed = start.elapsed();
         completed
             .recv_timeout(FIXTURE_WAIT)
-            .expect("socket fixture did not finish");
+            .unwrap_or_else(|error| {
+                panic!("{case}: socket fixture did not finish: {error}; probe={result:?}, elapsed={elapsed:?}")
+            });
         task.join().unwrap();
         (result, elapsed)
     }
@@ -242,18 +314,110 @@ mod sockets {
         );
     }
     #[test]
+    fn an_inherited_nonblocking_fixture_stream_reads_the_deferred_exact_challenge() {
+        use std::os::fd::AsRawFd;
+        struct DeferredQuery<'a> {
+            reader: FixtureRead<'a>,
+            client: UnixStream,
+            unsent: bool,
+        }
+        impl Read for DeferredQuery<'_> {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                if std::mem::take(&mut self.unsent) {
+                    // SAFETY: the original accepted socket remains borrowed.
+                    let flags =
+                        unsafe { libc::fcntl(self.reader.stream.as_raw_fd(), libc::F_GETFL) };
+                    assert!(flags >= 0, "accepted fixture flags are readable");
+                    if flags & libc::O_NONBLOCK != 0 {
+                        // Model the peer reaching its first read before the
+                        // original client gets scheduled to send its query.
+                        let result = self.reader.read(bytes);
+                        self.client.write_all(&query(NONCE).unwrap())?;
+                        return result;
+                    }
+                    // A blocking read needs the client's deferred query to
+                    // proceed. No sleep or global scheduling change is used.
+                    self.client.write_all(&query(NONCE).unwrap())?;
+                }
+                self.reader.read(bytes)
+            }
+        }
+        let root = Scratch::new();
+        let path = root.0.join("s");
+        let listener = UnixListener::bind(&path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let client = UnixStream::connect(&path).unwrap();
+        let (mut stream, _) = listener.accept().unwrap();
+        assert!(same_user(&stream));
+        // Darwin inherits this flag; model it explicitly on every Unix host.
+        stream.set_nonblocking(true).unwrap();
+        configure_fixture_stream(&stream);
+        read_challenge(
+            &mut DeferredQuery {
+                reader: FixtureRead {
+                    stream: &mut stream,
+                    until: Instant::now() + FIXTURE_WAIT,
+                    interrupt_once: false,
+                },
+                client,
+                unsent: true,
+            },
+            "modeled inherited nonblocking flag",
+        );
+    }
+    #[test]
+    fn an_interrupted_fixture_read_preserves_the_exact_challenge_and_passive_reply() {
+        assert_eq!(
+            peer_case(b"{}\n{}\n".to_vec(), "injected Interrupted read", true),
+            Observation::LiveLegacyOrUnknown
+        );
+    }
+    #[test]
+    #[should_panic(expected = "genuine EOF: challenge ended at EOF")]
+    fn a_genuine_fixture_eof_still_refuses_the_missing_challenge() {
+        read_challenge(&mut std::io::empty(), "genuine EOF");
+    }
+    #[test]
+    #[should_panic(expected = "non-Interrupted error: challenge read failed (WouldBlock")]
+    fn a_non_interrupted_fixture_error_is_not_retried_or_normalized_to_eof() {
+        struct FailedRead(bool);
+        impl Read for FailedRead {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                assert!(!std::mem::replace(&mut self.0, true), "unexpected retry");
+                Err(std::io::ErrorKind::WouldBlock.into())
+            }
+        }
+        read_challenge(&mut FailedRead(false), "non-Interrupted error");
+    }
+    #[test]
+    #[should_panic(expected = "expired fixture deadline: challenge read failed (TimedOut")]
+    fn an_expired_fixture_deadline_still_refuses_the_challenge_read() {
+        let (mut stream, _peer) = UnixStream::pair().unwrap();
+        read_challenge(
+            &mut FixtureRead {
+                stream: &mut stream,
+                until: Instant::now(),
+                interrupt_once: false,
+            },
+            "expired fixture deadline",
+        );
+    }
+    #[test]
     fn stale_unsolicited_newer_and_oversized_replies_are_passive() {
         let mut wrong = hello();
         wrong.nonce = EPOCH.into();
         let mut bytes = serde_json::to_vec(&wrong).unwrap();
         bytes.push(b'\n');
-        assert_eq!(peer(bytes, false, false), Observation::LiveLegacyOrUnknown);
         assert_eq!(
-            peer(vec![b'x'; REPLY_BYTES + 1], false, false),
+            peer_case(bytes, "stale nonce reply", false),
             Observation::LiveLegacyOrUnknown
         );
         assert_eq!(
-            peer(b"{}\n{}\n".to_vec(), false, false),
+            peer_case(vec![b'x'; REPLY_BYTES + 1], "oversized reply", false),
+            Observation::LiveLegacyOrUnknown
+        );
+        assert_eq!(
+            peer_case(b"{}\n{}\n".to_vec(), "unsolicited extra reply", false),
             Observation::LiveLegacyOrUnknown
         );
     }

@@ -218,6 +218,7 @@ fn closed_raw_requests_and_foreign_configuration_never_prepare_or_execute() {
 #[test]
 fn schema_upgrades_exactly_from_real_creation_seventeen_without_a_placeholder() {
     let mut f = Fixture::new();
+    super::super::attention::remove_retention_fixture(&f.store.db);
     // Reconstruct the exact prior version by removing only this leaf's DDL;
     // the real creation17 and notification-controls16 tables remain unchanged.
     f.store.db.execute_batch("DROP TRIGGER desktop_cache_unknown_preserve; DROP TRIGGER desktop_cache_unknown_immutable;
@@ -276,6 +277,7 @@ fn schema_upgrades_exactly_from_real_creation_seventeen_without_a_placeholder() 
 #[test]
 fn effect_schema_upgrades_exactly_from_eighteen_and_rolls_back_partial_ddl() {
     let f = Fixture::new();
+    super::super::attention::remove_retention_fixture(&f.store.db);
     assert_eq!(super::super::cache_effects::SCHEMA, 19);
     f.store.db.execute_batch("DROP TRIGGER desktop_cache_effect_monotone; DROP TRIGGER desktop_cache_kept_original;
         ALTER TABLE desktop_cache_operations DROP COLUMN effect_started;
@@ -301,7 +303,7 @@ fn effect_schema_upgrades_exactly_from_eighteen_and_rolls_back_partial_ddl() {
             .db
             .query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
             .unwrap(),
-        19
+        super::super::store::SCHEMA
     );
     assert_eq!(store.operation_undrained().unwrap(), 0);
 }

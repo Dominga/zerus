@@ -144,6 +144,7 @@ fn projected() -> UpdateProjection {
 #[test]
 fn schema_twelve_is_singleton_and_migrates_an_existing_eleven() {
     let f = Fixture::new(no_io());
+    crate::desktop::cache_maintenance::remove_from_downgraded_fixture(&f.store.db);
     assert_eq!(
         f.store
             .db

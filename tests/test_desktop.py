@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import socket
 import sqlite3
 import subprocess
@@ -20,7 +21,28 @@ import unittest
 import uuid
 
 HGS = Path(os.environ.get('HGS_TEST_BIN', Path(__file__).resolve().parents[1] / 'target/debug/hgs')).resolve()
-CURRENT_SCHEMA = 17
+
+
+def current_store_schema():
+    """Read the selected Rust constant, including its standalone leaf alias."""
+    desktop = Path(__file__).resolve().parents[1] / 'src/desktop'
+
+    def expression(path):
+        match = re.search(r'\bconst\s+SCHEMA\s*:\s*i64\s*=\s*([^;]+);', path.read_text(encoding='utf-8'))
+        if match is None:
+            raise ValueError(f'No Store schema constant in {path.name}')
+        return match[1].strip()
+
+    selected = expression(desktop / 'store.rs')
+    if not selected.isdecimal():
+        leaf = re.fullmatch(r'super::([a-z][a-z_0-9]*)::SCHEMA', selected)
+        if leaf is None:
+            raise ValueError('Unsupported Store schema expression; update the fixture reader')
+        selected = expression(desktop / (leaf[1] + '.rs'))
+    return int(selected)
+
+
+SCHEMA = current_store_schema()
 
 
 class Desktop(unittest.TestCase):
@@ -373,6 +395,7 @@ finally:
         self.stop(process)
         database = self.desktop / 'state.sqlite3'
         with closing(sqlite3.connect(database)) as db, db:
+            self.remove_cache_schema(db)
             db.execute('DROP TABLE desktop_creation_clones')
             db.execute('DROP TABLE desktop_creation_clone_budget')
             db.execute('DROP TABLE desktop_notification_preferences_requests')
@@ -389,7 +412,7 @@ finally:
             self.assertEqual(db.execute("SELECT count(*) FROM sqlite_schema WHERE name='desktop_ownership_requests'").fetchone()[0], 0)
             db.execute('DROP TABLE desktop_ownership')
         _, service = self.serve()
-        self.assertEqual(service['schema'], CURRENT_SCHEMA)
+        self.assertEqual(service['schema'], SCHEMA)
         self.assertEqual(service['desktop_ownership']['state'], 'passive')
         self.assertFalse(service['writers_enabled'])
 
@@ -1125,7 +1148,7 @@ finally:
             db.execute('PRAGMA user_version=1')
         database.chmod(0o600)
         process, status = self.serve()
-        self.assertEqual(status['schema'], CURRENT_SCHEMA)
+        self.assertEqual(status['schema'], SCHEMA)
         self.assertEqual(status['generation'], 8)
         self.assertEqual(status['configuration'], configuration)
         self.assertTrue(status['effect_journal']['revoked'])
@@ -1135,13 +1158,21 @@ finally:
         self.assertFalse(status['read_queue']['recovery_error'])
         self.stop(process)
         with closing(sqlite3.connect(database)) as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], CURRENT_SCHEMA)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], SCHEMA)
             self.assertEqual(db.execute('SELECT rows,bytes FROM desktop_catalog_totals').fetchone(), (0, 0))
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_catalog_sources').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT configuration FROM service').fetchone()[0], configuration)
 
     @staticmethod
-    def remove_changes_schema(db):
+    def remove_cache_schema(db):
+        for trigger in ('desktop_cache_unknown_preserve', 'desktop_cache_unknown_immutable'):
+            db.execute(f'DROP TRIGGER {trigger}')
+        for table in ('desktop_cache_unknown', 'desktop_cache_files', 'desktop_cache_operations', 'desktop_cache_roots'):
+            db.execute(f'DROP TABLE {table}')
+
+    @classmethod
+    def remove_changes_schema(cls, db):
+        cls.remove_cache_schema(db)
         db.execute('DROP TABLE desktop_creation_clones')
         db.execute('DROP TABLE desktop_creation_clone_budget')
         db.execute('DROP TABLE desktop_notification_preferences_requests')
@@ -1154,7 +1185,7 @@ finally:
 
     @classmethod
     def remove_counts_and_delivery_schema(cls, db):
-        # Rewind every later layer, rather than leaving a current-schema database
+        # Rewind every later layer, rather than leaving a current database
         # labelled as an older version. Production migrations stay strict.
         cls.remove_changes_schema(db)
         db.execute('DROP TABLE desktop_maintenance')
@@ -1166,6 +1197,33 @@ finally:
         db.execute('ALTER TABLE desktop_catalog_rows DROP COLUMN shared_flags')
         for column in ('counts_ready', 'visible_sessions', 'attention_sessions'):
             db.execute(f'ALTER TABLE desktop_catalog_generations DROP COLUMN {column}')
+
+    def test_cache_leaf_migration_is_atomic_and_keeps_the_service_passive(self):
+        process, before = self.serve()
+        self.stop(process)
+        database = self.desktop / 'state.sqlite3'
+        previous = SCHEMA - 1
+        with closing(sqlite3.connect(database)) as db, db:
+            self.remove_cache_schema(db)
+            db.execute(f'PRAGMA user_version={previous}')
+            db.execute('CREATE TABLE desktop_cache_roots(fixture TEXT)')
+            db.execute("INSERT INTO desktop_cache_roots VALUES('retained')")
+        self.failed_serve()
+        with closing(sqlite3.connect(database)) as db, db:
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], previous)
+            self.assertEqual(db.execute('SELECT fixture FROM desktop_cache_roots').fetchone()[0], 'retained')
+            self.assertEqual(db.execute("SELECT count(*) FROM sqlite_schema WHERE name='desktop_cache_operations'").fetchone()[0], 0)
+            db.execute('DROP TABLE desktop_cache_roots')
+        process, status = self.serve()
+        self.assertEqual(status['schema'], SCHEMA)
+        self.assertEqual(status['configuration'], before['configuration'])
+        self.assertFalse(status['writers_enabled'])
+        self.assertFalse(status['automatic_approvals'])
+        self.assertEqual(status['operation_queue']['undrained'], 0)
+        self.stop(process)
+        with closing(sqlite3.connect(database)) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_cache_operations').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_cache_unknown').fetchone()[0], 0)
 
     def test_schema_five_metadata_is_charged_once_and_preserved(self):
         process, _ = self.serve()
@@ -1186,7 +1244,7 @@ finally:
             db.execute('PRAGMA user_version=5')
         for _ in range(2):
             process, status = self.serve()
-            self.assertEqual(status['schema'], CURRENT_SCHEMA)
+            self.assertEqual(status['schema'], SCHEMA)
             self.assertEqual(status['catalog_projection']['stored_bytes'], expected)
             self.assertEqual(status['catalog_projection']['stored_rows'], 0)
             self.stop(process)
@@ -1212,7 +1270,7 @@ finally:
             self.assertEqual(db.execute("SELECT count(*) FROM sqlite_schema WHERE name='desktop_operations'").fetchone()[0], 0)
             db.execute('DROP TABLE desktop_operation_totals')
         process, status = self.serve()
-        self.assertEqual(status['schema'], CURRENT_SCHEMA)
+        self.assertEqual(status['schema'], SCHEMA)
         self.assertEqual({key:status['operation_queue'][key] for key in ('unsettled','undrained','admissions_paused','recovery_error')}, dict(unsettled=0, undrained=0, admissions_paused=True, recovery_error=False))
         self.assertFalse(status['writers_enabled'])
         self.stop(process)
@@ -1235,7 +1293,7 @@ finally:
             self.assertEqual(db.execute("SELECT count(*) FROM sqlite_schema WHERE name LIKE 'desktop_custody_%'").fetchone()[0], 0)
             db.execute('DROP INDEX desktop_commands_pending')
         process, status = self.serve()
-        self.assertEqual(status['schema'], CURRENT_SCHEMA)
+        self.assertEqual(status['schema'], SCHEMA)
         self.assertEqual(status['operation_queue']['undrained'], 0)
         self.assertTrue(status['operation_queue']['admissions_paused'])
         self.assertFalse((self.desktop / 'operation-custody').exists())
@@ -1257,11 +1315,11 @@ finally:
             self.assertEqual(db.execute('SELECT fixture FROM desktop_producer_prepared').fetchone()[0], 'retained')
             db.execute('DROP TABLE desktop_producer_prepared')
         process, status = self.serve()
-        self.assertEqual(status['schema'], CURRENT_SCHEMA)
+        self.assertEqual(status['schema'], SCHEMA)
         self.assertFalse(status['writers_enabled'])
         self.stop(process)
         with closing(sqlite3.connect(database)) as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], CURRENT_SCHEMA)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], SCHEMA)
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_producer_prepared').fetchone()[0], 0)
 
     def test_schema_eleven_maintenance_migration_stays_passive(self):
@@ -1273,7 +1331,7 @@ finally:
             db.execute('DROP TABLE desktop_maintenance')
             db.execute('PRAGMA user_version=11')
         process, status = self.serve()
-        self.assertEqual(status['schema'], CURRENT_SCHEMA)
+        self.assertEqual(status['schema'], SCHEMA)
         self.assertEqual(status['generation'], old['generation'] + 1)
         self.assertEqual(status['configuration'], old['configuration'])
         self.assertFalse(status['writers_enabled'])
@@ -1396,7 +1454,7 @@ finally:
         self.assertTrue(result['checkpointed'])
         self.assertEqual(result['writer_epoch'], marker['writer_epoch'])
         marker['phase'] = 'revoked'
-        self.assertEqual(json.loads(path.read_text()), marker)
+        self.assertEqual(json.loads(path.read_text(encoding='utf-8')), marker)
         self.assertEqual(record.read_bytes(), before_record)
         query = dict(op='revoke_status', request_id=request_id)
         self.assertEqual(self.cli('desktop', 'request', '--json', data=query), result)

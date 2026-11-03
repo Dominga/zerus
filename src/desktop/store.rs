@@ -12,7 +12,7 @@ use zerus_desktop_migration::{canonical, configuration, HANDOFF_LOCK};
 #[path = "maintenance.rs"]
 pub(crate) mod maintenance;
 
-pub const SCHEMA: i64 = super::creation_clone::SCHEMA;
+pub const SCHEMA: i64 = super::cache_maintenance::SCHEMA;
 pub struct HandoffLock {
     _lock: platform::FileLock,
     root: PathBuf,
@@ -247,7 +247,13 @@ pub(super) fn operation_undrained(db: &Connection) -> Result<u64> {
     } else {
         0
     };
+    let cache = if version >= super::cache_maintenance::SCHEMA {
+        zerus_desktop_ledger::operations::cache::undrained(db)?
+    } else {
+        0
+    };
     task.checked_add(clones)
+        .and_then(|count| count.checked_add(cache))
         .context("operation resource total overflow")
 }
 
@@ -410,6 +416,17 @@ impl Store {
             tx.pragma_update(None, "user_version", super::creation_clone::SCHEMA)?;
             tx.commit()?;
         }
+        if version < super::cache_maintenance::SCHEMA {
+            let tx = db.transaction()?;
+            super::cache_maintenance::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", super::cache_maintenance::SCHEMA)?;
+            tx.commit()?;
+        }
+        // Opening Store follows acquisition of the real exclusive serve owner.
+        // Cache workers are in-process and retain it through all actual I/O.
+        let tx = db.transaction()?;
+        zerus_desktop_ledger::operations::cache::recover(&tx)?;
+        tx.commit()?;
         zerus_desktop_catalog::begin_service(&mut db, epoch)?;
         // No marker or previous policy re-enables a worker after restart.
         zerus_desktop_ledger::begin_service(&mut db, epoch)?;
@@ -498,6 +515,16 @@ impl Store {
                 "error":"operation_store_unavailable","recovery_error":self.operation_recovery_error || self.creation_recovery_error})
             }
         };
+        match super::cache_maintenance::undrained(self) {
+            Ok(count) => {
+                status["cache_undrained"] = count.into();
+            }
+            Err(_) => {
+                status["cache_undrained"] = serde_json::Value::Null;
+                status["undrained"] = serde_json::Value::Null;
+                status["error"] = "cache_store_unavailable".into();
+            }
+        }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             status["resource_custody"] = self.custody.status();

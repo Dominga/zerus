@@ -525,7 +525,7 @@ pub(crate) mod native {
                 .unwrap();
             service.join().await.unwrap();
             assert_eq!(enable["code"], "desktop_background_unavailable");
-            assert_eq!(disable["accepted"], true);
+            assert_eq!(disable["accepted"], true, "{disable}");
             assert_eq!(disable["durable"], true);
             assert_eq!(disable["enabled"], false);
             assert!(fixture.0.join("original-child-bound").exists());
@@ -1007,4 +1007,56 @@ fn non_durable_store_failures_and_unknown_maintenance_states_never_allow_replay(
         false
     )
     .is_none());
+}
+
+#[test]
+fn cache_is_native_only_and_a_recorded_preparation_is_not_effect_admission() {
+    use zerus_client_core::desktop::cache_maintenance::{self as wire, Command, Timing};
+    assert!(serde_json::from_value::<Operation>(json!("cache_maintenance")).is_err());
+    let prepare = uuid::Uuid::new_v4().to_string();
+    let operation = uuid::Uuid::new_v4().to_string();
+    let request = Request::CacheMaintenance {
+        request_id: prepare.clone(),
+        command: Box::new(Command::Prepare {
+            operation_id: operation.clone(),
+            configuration: "a".repeat(64),
+            root: "/srv/example/cache".into(),
+            limit: 1,
+            revision: 0,
+            timing: Timing::Immediate,
+            policy_change: true,
+        }),
+    };
+    let value = json!({"abi":wire::ABI,"request_id":prepare,"op":"cache_maintenance","accepted":false,"durable":true,
+        "pending":true,"configuration":"a".repeat(64),"preparation_id":prepare,"operation_id":operation,
+        "revision":1,"limit":1,"policy_saved":true,"phase":"prepared","binding_sha256":"b".repeat(64),"removed":0,"kept":0,"unknown":0,"drained":false});
+    // The native PACKET is complete. The admitted service effect is still none.
+    assert_eq!(
+        checked(&request, value.clone(), false),
+        Some((value.clone(), true))
+    );
+    let state = Frontend::default();
+    let Begin::Work(reservation) = state.begin(Operation::CacheMaintenance, Some(request.clone()))
+    else {
+        panic!("prepare");
+    };
+    reservation.finish(value, true);
+    let execute = Request::CacheMaintenance {
+        request_id: operation,
+        command: Box::new(Command::Execute {
+            configuration: "a".repeat(64),
+            preparation_id: prepare,
+            binding_sha256: "b".repeat(64),
+        }),
+    };
+    let Begin::Work(reservation) = state.begin(Operation::CacheMaintenance, Some(execute.clone()))
+    else {
+        panic!("fresh execute");
+    };
+    assert!(!reservation.lookup);
+    reservation.finish(unknown(&execute, "lost_original_reply"), false);
+    let Begin::Work(lookup) = state.begin(Operation::CacheMaintenance, Some(execute)) else {
+        panic!("lookup");
+    };
+    assert!(lookup.lookup); // original child/request is NEVER re-sent
 }

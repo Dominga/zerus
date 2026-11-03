@@ -45,6 +45,7 @@ fn exact_previous_store_upgrade_adds_only_the_independent_clone_leaf() {
         "rebase this test onto the actual merge-order predecessor"
     );
     let (_temp, location, store, _) = fixture();
+    crate::desktop::cache_maintenance::remove_from_downgraded_fixture(&store.db);
     store.db.execute_batch("DROP TABLE desktop_creation_clones; DROP TABLE desktop_creation_clone_budget; PRAGMA user_version=16;").unwrap();
     let before: i64 = store
         .db
@@ -70,7 +71,7 @@ fn exact_previous_store_upgrade_adds_only_the_independent_clone_leaf() {
             .db
             .query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
             .unwrap(),
-        SCHEMA
+        crate::desktop::store::SCHEMA
     );
     assert_eq!(
         store
@@ -81,7 +82,7 @@ fn exact_previous_store_upgrade_adds_only_the_independent_clone_leaf() {
                 |r| r.get(0)
             )
             .unwrap(),
-        before + 2
+        before + 2 + 4 // creation17 plus the independent cache18 tables.
     );
     assert_eq!(
         store
@@ -95,6 +96,88 @@ fn exact_previous_store_upgrade_adds_only_the_independent_clone_leaf() {
         task_sql
     );
     assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
+}
+
+#[test]
+fn shared_resource_total_counts_task_cache_and_creation_exactly_once() {
+    use zerus_desktop_ledger::operations::{self as task, cache};
+    let (_temp, location, mut store, epoch) = fixture();
+    let writer = uuid::Uuid::new_v4().to_string();
+    zerus_desktop_ledger::authorize(&mut store.db, &writer, &epoch).unwrap();
+    let source: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../client/fixtures/desktop-operation-port-v1.json"
+    ))
+    .unwrap();
+    let binding: task::Binding = serde_json::from_value(source["binding"].clone()).unwrap();
+    let admitted = task::admit(
+        &mut store.db,
+        &task::Admission {
+            admission_id: &uuid::Uuid::new_v4().to_string(),
+            binding: &binding,
+            raw_record: source["raw_record"].as_str().unwrap().as_bytes(),
+            retained_input: source["retained_input"].as_str().unwrap().as_bytes(),
+            provenance: &json!({"fixture":"original-resource-accounting"}),
+            writer_epoch: &writer,
+            service_epoch: &epoch,
+        },
+    )
+    .unwrap();
+    task::reserve(
+        &mut store.db,
+        &task::Reserve {
+            operation_id: admitted.operation_id,
+            attempt_id: uuid::Uuid::new_v4().to_string(),
+            revision: admitted.revision,
+            writer_epoch: writer.clone(),
+            service_epoch: epoch.clone(),
+            lease: uuid::Uuid::new_v4().to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(store.operation_undrained().unwrap(), 1);
+    let tx = store.db.transaction().unwrap();
+    cache::begin(
+        &tx,
+        &cache::Original {
+            preparation_id: uuid::Uuid::new_v4().to_string(),
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            configuration: location.configuration.clone(),
+            root: "/srv/example/cache".into(),
+            limit: 1,
+            defer_ms: 0,
+            policy_change: true,
+            revision: 0,
+            service_epoch: epoch.clone(),
+            writer_epoch: writer.clone(),
+            lease: uuid::Uuid::new_v4().to_string(),
+        },
+        &"f".repeat(64),
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    assert_eq!(store.operation_undrained().unwrap(), 2);
+    let tx = store.db.transaction().unwrap();
+    ledger::admit(&tx, &original(&location.configuration, &epoch), &writer, 1).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(task::totals(&store.db).unwrap().undrained, 1);
+    assert_eq!(cache::undrained(&store.db).unwrap(), 1);
+    assert_eq!(ledger::undrained(&store.db).unwrap(), 1);
+    assert_eq!(
+        crate::desktop::store::operation_undrained(&store.db).unwrap(),
+        3
+    );
+    assert_eq!(store.operation_undrained().unwrap(), 3);
+    assert_eq!(store.operation_status()["undrained"], 3);
+    assert_eq!(store.operation_status()["cache_undrained"], 1);
+    // Revoked policy alone cannot hide any original per-kind resource.
+    store
+        .db
+        .execute("UPDATE desktop_writer SET revoked=1 WHERE id=1", [])
+        .unwrap();
+    assert_eq!(
+        crate::desktop::store::writer_active(&location).unwrap(),
+        Some(true)
+    );
 }
 
 #[test]

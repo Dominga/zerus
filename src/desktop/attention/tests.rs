@@ -1189,6 +1189,7 @@ fn resume_removal_and_old_archived_rows_preserve_the_original_live_notice() {
 #[test]
 fn schema_fourteen_migrates_an_existing_thirteen_without_changing_prior_effects() {
     let f = Fixture::new();
+    crate::desktop::cache_maintenance::remove_from_downgraded_fixture(&f.store.db);
     let root = f.store.db.path().unwrap().to_owned();
     let count: i64 = f
         .store

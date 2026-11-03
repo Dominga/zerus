@@ -275,6 +275,7 @@ impl Validated {
                 self.0,
                 Request::DesktopOwnership { .. }
                     | Request::NotificationControl { .. }
+                    | Request::CacheMaintenance { .. }
                     | Request::CreationClone { .. }
             ),
             "native controls require their typed boundary"
@@ -307,6 +308,26 @@ impl Validated {
     }
     pub fn check_ownership(self) -> Result<()> {
         self.ownership_parts().map(|_| ())
+    }
+    pub fn cache_parts(
+        &self,
+    ) -> Result<(
+        String,
+        zerus_client_core::desktop::cache_maintenance::Command,
+    )> {
+        self.check()?;
+        let Request::CacheMaintenance {
+            request_id,
+            command,
+        } = &self.0
+        else {
+            anyhow::bail!("not cache maintenance");
+        };
+        ensure!(command.valid(request_id), "invalid cache maintenance");
+        Ok((request_id.clone(), *command.clone()))
+    }
+    pub fn check_cache(self) -> Result<()> {
+        self.cache_parts().map(|_| ())
     }
     #[cfg(test)]
     pub fn fixture(value: &Value) -> Self {
@@ -647,6 +668,24 @@ fn validate(
             "ownership mode does not match the native frontend"
         );
     }
+    if let Request::CacheMaintenance { command, .. } = &envelope.request {
+        let selected = match command.as_ref() {
+            zerus_client_core::desktop::cache_maintenance::Command::Prepare {
+                configuration,
+                ..
+            }
+            | zerus_client_core::desktop::cache_maintenance::Command::Execute {
+                configuration,
+                ..
+            } => configuration,
+        };
+        ensure!(
+            reply.request.ownership_mode
+                == Some(zerus_client_core::desktop::ownership::Mode::Service)
+                && selected == configuration,
+            "cache mode/configuration does not match the native frontend"
+        );
+    }
     if let Request::CreationClone { intent } = &envelope.request {
         ensure!(
             reply.request.ownership_mode
@@ -714,6 +753,7 @@ fn dev_number(version: &str) -> Option<u64> {
 // string allowlist that can silently reject an otherwise authenticated read.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum OrderedOperation {
+    CacheMaintenance,
     CreationClone,
     ActivationWait,
     AutomaticApprovals,
@@ -727,6 +767,7 @@ impl From<&Request> for OrderedOperation {
     fn from(request: &Request) -> Self {
         use zerus_client_core::desktop::notification_control::Command;
         match request {
+            Request::CacheMaintenance { .. } => Self::CacheMaintenance,
             Request::CreationClone { .. } => Self::CreationClone,
             Request::ActivationWait { .. } => Self::ActivationWait,
             Request::AutomaticApprovals { .. } => Self::AutomaticApprovals,
@@ -1247,6 +1288,42 @@ mod tests {
     }
 
     #[test]
+    fn cache_native_mode_and_selected_configuration_cannot_be_claimed_by_the_request() {
+        use zerus_client_core::desktop::{
+            cache_maintenance::{Command, Timing},
+            ownership::Mode,
+        };
+        let (mut request, caller, frontend, mut reply) = fixture();
+        request.request = Request::CacheMaintenance {
+            request_id: id(2),
+            command: Box::new(Command::Prepare {
+                operation_id: id(10),
+                configuration: "a".repeat(64),
+                root: "/srv/example/cache".into(),
+                limit: 1,
+                revision: 0,
+                timing: Timing::Immediate,
+                policy_change: true,
+            }),
+        };
+        reply.request.fingerprint = request.request.fingerprint();
+        for mode in [None, Some(Mode::Native), Some(Mode::Service)] {
+            reply.request.ownership_mode = mode;
+            assert_eq!(
+                validate(&request, &caller, &frontend, &reply, &"a".repeat(64)).is_ok(),
+                mode == Some(Mode::Service)
+            );
+        }
+        if let Request::CacheMaintenance { command, .. } = &mut request.request {
+            if let Command::Prepare { configuration, .. } = command.as_mut() {
+                *configuration = "b".repeat(64);
+            }
+        }
+        reply.request.fingerprint = request.request.fingerprint();
+        assert!(validate(&request, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+    }
+
+    #[test]
     fn ownership_requires_the_original_cached_native_mode_in_addition_to_child_proof() {
         use zerus_client_core::desktop::ownership::{Action, Mode};
         for action in [Action::Grant, Action::Rearm, Action::NativeTakeover] {
@@ -1525,6 +1602,58 @@ mod tests {
         order
             .observe(a, OrderedOperation::AutomaticApprovals, 5, now + WAIT)
             .unwrap();
+    }
+
+    #[test]
+    fn cache_prepare_and_execute_share_their_own_typed_ordering_lane() {
+        use zerus_client_core::desktop::cache_maintenance::Command;
+        let commands = [
+            Command::Prepare {
+                operation_id: id(91),
+                configuration: "a".repeat(64),
+                root: "/srv/example/cache".into(),
+                limit: 1,
+                revision: 0,
+                timing: zerus_client_core::desktop::cache_maintenance::Timing::Immediate,
+                policy_change: true,
+            },
+            Command::Execute {
+                configuration: "a".repeat(64),
+                preparation_id: id(92),
+                binding_sha256: "b".repeat(64),
+            },
+        ];
+        let mut order = Order::default();
+        let now = Instant::now();
+        let instance = (7, "100".into(), id(1));
+        for (serial, command) in (2..).zip(commands) {
+            let request = Request::CacheMaintenance {
+                request_id: id(serial),
+                command: Box::new(command),
+            };
+            let lane = OrderedOperation::from(&request);
+            assert_eq!(lane, OrderedOperation::CacheMaintenance);
+            order
+                .observe(instance.clone(), lane, serial as u64, now)
+                .unwrap();
+            assert!(order
+                .observe(instance.clone(), lane, (serial - 1) as u64, now)
+                .is_err());
+            assert!(Validated::fixture(&serde_json::to_value(request).unwrap())
+                .into_request()
+                .is_err());
+        }
+        // A high cache serial neither rejects an unrelated activation read nor
+        // lets its lower serial reset cache's original Prepare/Execute order.
+        order
+            .observe(instance.clone(), OrderedOperation::ActivationWait, 1, now)
+            .unwrap();
+        order
+            .observe(instance.clone(), OrderedOperation::CreationClone, 1, now)
+            .unwrap();
+        assert!(order
+            .observe(instance, OrderedOperation::CacheMaintenance, 2, now)
+            .is_err());
     }
 
     #[test]

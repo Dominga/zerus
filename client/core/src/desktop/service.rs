@@ -175,7 +175,9 @@ impl State {
             return Err("stale_service_generation");
         }
         let mut background = BTreeMap::new();
-        for name in COMPONENTS {
+        // Cache maintenance is independently configured; it must not make the
+        // existing five-component background readiness depend on cache policy.
+        for name in COMPONENTS.into_iter().chain(["cache_maintenance"]) {
             let component = &lifecycle["background"][name];
             let code = component["code"]
                 .as_str()

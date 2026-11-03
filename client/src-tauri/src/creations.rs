@@ -1278,22 +1278,29 @@ fn detached(hgs: &Path, invocation: &zerus_client_core::Invocation) -> Result<()
 pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> CreationHost {
     let clone_app = app.clone();
     let worktree_app = app.clone();
-    let service_worktree = crate::desktop_service::mode().then(|| {
-        Arc::new(
-            move |id: &str, operation: &Value, fresh: bool, wait: bool, shutdown: &AtomicBool| {
-                crate::desktop_service::creation_worktree::call(
-                    worktree_app
-                        .state::<crate::commands::AppState>()
-                        .desktop_service(),
-                    id,
-                    operation,
-                    fresh,
-                    wait,
-                    shutdown,
-                )
-            },
-        ) as ServiceClone
-    });
+    // The service's owned checkout binds Git through /proc/self/fd, so only
+    // Linux routes worktrees to it; macOS keeps the direct path.
+    let service_worktree =
+        (cfg!(target_os = "linux") && crate::desktop_service::mode()).then(|| {
+            Arc::new(
+                move |id: &str,
+                      operation: &Value,
+                      fresh: bool,
+                      wait: bool,
+                      shutdown: &AtomicBool| {
+                    crate::desktop_service::creation_worktree::call(
+                        worktree_app
+                            .state::<crate::commands::AppState>()
+                            .desktop_service(),
+                        id,
+                        operation,
+                        fresh,
+                        wait,
+                        shutdown,
+                    )
+                },
+            ) as ServiceClone
+        });
     let service_clone = crate::desktop_service::mode().then(|| {
         Arc::new(
             move |id: &str, operation: &Value, fresh: bool, wait: bool, shutdown: &AtomicBool| {

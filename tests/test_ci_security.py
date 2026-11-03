@@ -1049,6 +1049,37 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertLess(retired, relay.index('docker build --tag zerus-relay-contract'))
         self.assertIn('name: Enforce the 256 MiB runtime envelope', relay)
 
+    def test_native_linux_disk_checkpoints_only_observe_existing_checks(self):
+        native = job((ROOT / ".github/workflows/checks.yml").read_text(), "client-native-linux")
+        self.assertNotIn("ubuntu-disk.py prepare", native)
+        self.assertNotIn("ubuntu-disk.py relay-before-image", native)
+        self.assertNotIn("CARGO_PROFILE_DEV_DEBUG", native)
+        self.assertNotIn("CARGO_PROFILE_TEST_DEBUG", native)
+        phases = ("after-native-checkout", "after-native-dependencies",
+                  "after-native-cache-restore", "after-native-checks")
+        indices = [native.index(f"ubuntu-disk.py report {phase}") for phase in phases]
+        self.assertEqual(indices, sorted(indices))
+        self.assertLess(indices[0], native.index("sudo apt-get update"))
+        self.assertLess(native.index("rustup toolchain install"), indices[1])
+        self.assertLess(native.index("actions/cache/restore@"), indices[2])
+        self.assertLess(indices[2], native.index("bash scripts/ci/client-native.sh linux"))
+        self.assertIn("name: Disk usage after native checks\n        if: ${{ !cancelled() }}\n", native)
+        script = (ROOT / "scripts/ci/client-native.sh").read_text()
+        linux = script.split("    linux:all)\n", 1)[1].split("        ;;", 1)[0]
+        boundaries = (
+            ("presence_tests", "after-native-presence-tests"),
+            ("--manifest-path client/media/Cargo.toml --features video", "after-native-media-tests"),
+            ("--manifest-path client/src-tauri/Cargo.toml\n", "after-native-tauri-tests"),
+            ("--all-targets --features video -- -D warnings", "after-native-tauri-clippy"),
+            ("--all-targets --features linux-native-notify -- -D warnings", "before-native-core-test-linking"),
+            ("--features linux-native-notify linux_notify", "after-native-core-tests"),
+        )
+        for command, phase in boundaries:
+            with self.subTest(phase=phase):
+                self.assertLess(linux.index(command), linux.index(f"disk_checkpoint {phase}"))
+        self.assertLess(linux.index("disk_checkpoint before-native-core-test-linking"),
+                        linux.index("dbus-run-session -- cargo"))
+
     def test_historical_deepseek_lock_keeps_exact_registry_integrities(self):
         fixture = ROOT / "scripts/ci/dsh-fixture"
         manifest = json.loads((fixture / "package.json").read_text())

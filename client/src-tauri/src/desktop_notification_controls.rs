@@ -38,7 +38,7 @@ impl Source {
             .unwrap_or_else(PoisonError::into_inner)
             .refresh = Some(refresh);
     }
-    /// At most one queued main-thread enumeration, including across reconnects.
+    /// Coalesce main-thread enumerations within the current subscription.
     /// Its acknowledgement follows native observation, never mere scheduling.
     pub fn refresh(&self) -> Option<RefreshPending> {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
@@ -67,7 +67,11 @@ impl Source {
         }
     }
     pub(crate) fn subscribe(&self, id: String, sink: Sink) -> Subscription {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner).sink = Some((id.clone(), sink));
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        // An old callback may have read its windows before this connection.
+        // Its eventual completion cannot replace our first fresh observation.
+        state.refreshing = None;
+        state.sink = Some((id.clone(), sink));
         Subscription(Arc::downgrade(&self.0), id)
     }
 }
@@ -226,6 +230,59 @@ mod tests {
                 !failed.wait().await,
                 "a dropped callback is not an observation"
             );
+        });
+    }
+
+    #[test]
+    fn a_new_subscription_gets_a_new_check_after_the_old_callback_already_observed() {
+        tauri::async_runtime::block_on(async {
+            let source = Source::default();
+            let completions = Arc::new(Mutex::new(Vec::new()));
+            let held = completions.clone();
+            source.set_refresh(Arc::new(move |source, complete| {
+                let mut checks = held.lock().unwrap();
+                source.observe(if checks.is_empty() {
+                    FocusState::Foreground
+                } else {
+                    FocusState::Background
+                });
+                checks.push(complete); // Observation precedes delayed completion.
+            }));
+            let observations = Arc::new(Mutex::new(Vec::new()));
+            let first = observations.clone();
+            let old = source.subscribe(
+                "old".into(),
+                Arc::new(move |s| first.lock().unwrap().push((1, s))),
+            );
+            let old_check = source.refresh().unwrap();
+            let next = observations.clone();
+            let _new = source.subscribe(
+                "new".into(),
+                Arc::new(move |s| next.lock().unwrap().push((2, s))),
+            );
+            let new_check = source.refresh().unwrap();
+            let coalesced = source.refresh().unwrap();
+            assert_eq!(completions.lock().unwrap().len(), 2);
+            assert_eq!(
+                *observations.lock().unwrap(),
+                [(1, FocusState::Foreground), (2, FocusState::Background)]
+            );
+            drop(old);
+            source.observe(FocusState::Unknown);
+            assert_eq!(
+                observations.lock().unwrap().last(),
+                Some(&(2, FocusState::Unknown))
+            );
+            let mut complete = std::mem::take(&mut *completions.lock().unwrap()).into_iter();
+            complete.next().unwrap().send(true).unwrap();
+            assert!(old_check.wait().await);
+            assert!(
+                !*new_check.0.borrow(),
+                "old completion cannot acknowledge the new check"
+            );
+            complete.next().unwrap().send(true).unwrap();
+            assert!(new_check.wait().await);
+            assert!(coalesced.wait().await);
         });
     }
 

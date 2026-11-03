@@ -316,6 +316,19 @@ async fn actual_explicit_resume_rearms_only_when_revoked_and_then_activates_once
             assert_eq!(mutations(&running), vec!["grant"]);
         }
         running.service.ownership_rearm().await;
+        crate::desktop_service::tests::eventually(
+            "Resume reconnects read-only after its one mutation",
+            || {
+                running
+                    .source
+                    .calls()
+                    .iter()
+                    .filter(|call| call["args"] == json!(["desktop", "watch", "--json"]))
+                    .count()
+                    >= 2
+            },
+        )
+        .await;
         running.service.join().await.unwrap();
         assert_eq!(
             mutations(&running),

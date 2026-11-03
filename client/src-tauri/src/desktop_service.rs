@@ -95,6 +95,7 @@ fn ownership_display(
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Control {
     Retry(u64),
+    Reconnect(u64),
     Stop,
 }
 
@@ -665,7 +666,7 @@ impl Service {
         if self.shared.ownership.granted() {
             let _ = STARTUP_RECOVERY.compare_exchange(1, 2, Ordering::AcqRel, Ordering::Acquire);
             // Rearm already made its one explicit report attempt above.
-            self.retry_connection();
+            self.wake_connection(true);
         }
         view
     }
@@ -709,10 +710,13 @@ impl Service {
         self.retry_connection();
     }
     fn retry_connection(&self) {
+        self.wake_connection(false);
+    }
+    fn wake_connection(&self, read_only: bool) {
         if self.shared.stopped.load(Ordering::Acquire) {
             return;
         }
-        if !startup_recovery() {
+        if !read_only && !startup_recovery() {
             read_import::retry(self.shared.clone());
         }
         if let Some(cancel) = self
@@ -725,8 +729,14 @@ impl Service {
             cancel.store(true, Ordering::Release);
         }
         self.control.send_modify(|control| {
-            if let Control::Retry(n) = control {
-                *control = n.checked_add(1).map_or(Control::Stop, Control::Retry);
+            if let Control::Retry(n) | Control::Reconnect(n) = control {
+                *control = n.checked_add(1).map_or(Control::Stop, |next| {
+                    if read_only {
+                        Control::Reconnect(next)
+                    } else {
+                        Control::Retry(next)
+                    }
+                });
             }
         });
     }
@@ -1401,6 +1411,9 @@ async fn run(shared: Arc<Shared>, mut control: watch::Receiver<Control>) {
     let mut automatic = false;
     loop {
         let requested = *control.borrow_and_update();
+        if matches!(requested, Control::Reconnect(_)) {
+            automatic = true; // The explicit action already settled its one mutation.
+        }
         if requested == Control::Stop || shared.stopped.load(Ordering::Acquire) {
             break;
         }

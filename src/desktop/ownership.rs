@@ -400,9 +400,7 @@ fn apply_guarded(
     if (*action == Action::Rearm || replacing_image) && drain.take().unwrap()(store).is_err() {
         return refused(&request, old.status, "ownership_drain_pending");
     }
-    if *action != Action::NativeTakeover
-        && zerus_desktop_ledger::operations::totals(&store.db)?.undrained != 0
-    {
+    if *action != Action::NativeTakeover && store.operation_undrained()? != 0 {
         return refused(&request, old.status, "ownership_resources_pending");
     }
     ensure!(origin.current(), "ownership frontend image changed");
@@ -534,8 +532,7 @@ fn settle_locked(
         "takeover fence changed"
     );
     // A bounded wait is not a completed drain. The prepared receipt survives.
-    if drain(store).is_err() || zerus_desktop_ledger::operations::totals(&store.db)?.undrained != 0
-    {
+    if drain(store).is_err() || store.operation_undrained()? != 0 {
         return Ok(());
     }
     #[cfg(unix)]

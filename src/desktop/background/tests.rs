@@ -66,6 +66,9 @@ fn slow_replacement_keeps_draining_on_actor_turns_without_a_client_retry() {
             &epoch,
             owner.clone(),
         ),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        creation: crate::desktop::creation_clone::Runtime::new(&config, &epoch, owner.clone())
+            .unwrap(),
     };
     let (release, resume) = mpsc::sync_channel(1);
     runtime.notifications.block_selection_for_test(resume);

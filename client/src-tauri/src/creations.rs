@@ -31,6 +31,8 @@ fn interrupted(detail: &str) -> String {
 }
 
 type Job = Box<dyn FnOnce() + Send>;
+type ServiceClone =
+    Arc<dyn Fn(&str, &Value, bool, bool, &AtomicBool) -> creation::Answer + Send + Sync>;
 type JournalWriter = Arc<dyn Fn(&Path, &[u8]) -> bool + Send + Sync>;
 type LaunchSession = Arc<dyn Fn(&Value) -> Result<(), String> + Send + Sync>;
 type ReadBinding = Arc<dyn Fn(&ComputerId) -> Result<BindingListing, String> + Send + Sync>;
@@ -151,6 +153,7 @@ struct Services {
     ids: Arc<dyn Fn() -> String + Send + Sync>,
     write: JournalWriter,
     call: Arc<dyn Fn(&creation::Call) -> creation::Answer + Send + Sync>,
+    service_clone: Option<ServiceClone>,
     launch: LaunchSession,
     binding: ReadBinding,
     watch: WatchBinding,
@@ -273,6 +276,7 @@ impl CreationHost {
                     shutdown: quitting,
                     quitting: false,
                     loaded: false,
+                    fresh_creations: BTreeSet::new(),
                     #[cfg(all(test, unix))]
                     barrier: None,
                 };
@@ -511,6 +515,7 @@ struct Worker {
     shutdown: Arc<AtomicBool>,
     quitting: bool,
     loaded: bool,
+    fresh_creations: BTreeSet<String>,
     #[cfg(all(test, unix))]
     barrier: Option<SyncSender<()>>,
 }
@@ -529,6 +534,7 @@ impl Worker {
             self.quitting = true;
             self.queue.quit();
             self.pending.clear();
+            self.fresh_creations.clear();
         }
     }
 
@@ -536,6 +542,9 @@ impl Worker {
         self.stop_if_requested();
         match message {
             Input::Submit(plan, id, answer) => {
+                // Reserved task/import identities are not direct native Start
+                // consent for this creation leaf. They retain their own kind.
+                let direct = id.is_none();
                 let (result, effects) = if self.quitting || !self.loaded || !self.services.allowed {
                     (
                         Err(if self.quitting {
@@ -554,6 +563,11 @@ impl Worker {
                         None => self.queue.submit(plan),
                     }
                 };
+                if direct && self.services.service_clone.is_some() {
+                    if let Ok(id) = &result {
+                        self.fresh_creations.insert(id.clone());
+                    }
+                }
                 self.effects(effects);
                 let _ = answer.send(match result {
                     Ok(admitted) => Admission::Admitted { admitted },
@@ -653,6 +667,7 @@ impl Worker {
                     }
                 }
                 Effect::Removed { id } => {
+                    self.fresh_creations.remove(&id);
                     self.pending.remove(&id);
                     let mut cache = lock(&self.cache);
                     cache.operations.remove(&id);
@@ -667,12 +682,56 @@ impl Worker {
                     let shutdown = Arc::clone(&self.shutdown);
                     let services = Arc::clone(&self.services);
                     let done = self.done.clone();
+                    let clone_call = self.services.service_clone.as_ref().and_then(|sender| {
+                        let creation::Call::Repository {
+                            action, request_id, ..
+                        } = &call
+                        else {
+                            return None;
+                        };
+                        if !matches!(
+                            action,
+                            zerus_client_core::repository::Action::Clone
+                                | zerus_client_core::repository::Action::Status
+                        ) {
+                            return None;
+                        }
+                        let mut originals =
+                            self.queue.operations().iter().filter(|(_, value)| {
+                                value["clone_id"].as_str() == Some(request_id)
+                            });
+                        let original = originals
+                            .next()
+                            .map(|(id, value)| (id.clone(), value.clone()));
+                        if originals.next().is_some() {
+                            return Some(Err(()));
+                        }
+                        let Some((id, value)) = original else {
+                            return Some(Err(()));
+                        };
+                        let wait = *action == zerus_client_core::repository::Action::Clone;
+                        // Consume BEFORE scheduling any helper. Even a lost
+                        // response or later Resume never sends this ID again.
+                        let fresh = wait && self.fresh_creations.remove(&id);
+                        Some(Ok((sender.clone(), id, value, fresh, wait)))
+                    });
                     (self.services.spawn)(Box::new(move || {
                         if shutdown.load(Ordering::Acquire) {
                             return;
                         }
                         let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            (services.call)(&call)
+                            match clone_call {
+                                Some(Ok((sender, id, operation, fresh, wait))) => {
+                                    sender(&id, &operation, fresh, wait, &shutdown)
+                                }
+                                Some(Err(())) => creation::Answer {
+                                    ok: false,
+                                    data: Value::Null,
+                                    error: zerus_client_core::repository::UNCONFIRMED_OPERATION
+                                        .into(),
+                                },
+                                None => (services.call)(&call),
+                            }
                         }))
                         .unwrap_or_else(|_| creation::Answer {
                             ok: false,
@@ -1150,6 +1209,23 @@ fn detached(hgs: &Path, invocation: &zerus_client_core::Invocation) -> Result<()
 /// The app's host: settings, the one organization Controller, real guarded
 /// calls and the same terminal launcher Qt's New session uses.
 pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> CreationHost {
+    let clone_app = app.clone();
+    let service_clone = crate::desktop_service::mode().then(|| {
+        Arc::new(
+            move |id: &str, operation: &Value, fresh: bool, wait: bool, shutdown: &AtomicBool| {
+                crate::desktop_service::creation_clone::call(
+                    clone_app
+                        .state::<crate::commands::AppState>()
+                        .desktop_service(),
+                    id,
+                    operation,
+                    fresh,
+                    wait,
+                    shutdown,
+                )
+            },
+        ) as ServiceClone
+    });
     let hgs = zerus_client_core::default_hgs();
     let call_hgs = hgs.clone();
     let binding_hgs = hgs.clone();
@@ -1188,6 +1264,7 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
                 zerus_client_core::fsx::write_private_atomic(file, bytes, true).is_ok()
             }),
             call: Arc::new(move |call| creation::run_call(&call_hgs, call)),
+            service_clone,
             binding: Arc::new(move |computer| {
                 creation::binding_listing(
                     zerus_client_core::run_limited(
@@ -1429,6 +1506,7 @@ mod tests {
                     zerus_client_core::fsx::write_private_atomic(file, bytes, true).is_ok()
                 }),
                 call: Arc::new(move |step| creation::run_call(&call, step)),
+                service_clone: None,
                 launch: Arc::new(move |operation| detached(&launch, &launch_invocation(operation))),
                 binding: Arc::new(move |_| {
                     binding.reads.fetch_add(1, Ordering::SeqCst);
@@ -1677,6 +1755,125 @@ mod tests {
             .iter()
             .any(|placed| placed.create.is_some() && placed.add_folder.is_some()));
         drop(placements);
+        fake.stop(host);
+    }
+
+    fn repository_plan() -> Value {
+        let mut selected = choices();
+        selected.project.clear();
+        selected.repository = Some(launch::RepositoryChoice {
+            url: "https://example.invalid/repo.git".into(),
+            parent: "/srv".into(),
+            name: "repo".into(),
+            destination: "/srv/repo".into(),
+            new_project: true,
+            project_name: "Repository".into(),
+            ..Default::default()
+        });
+        serde_json::to_value(launch::plan(&selected)).unwrap()
+    }
+    fn service_clone_probe(fake: &Fake, calls: Arc<Mutex<Vec<bool>>>) -> Services {
+        let mut services = fake.services();
+        let journal = fake.dir.join("creations.json");
+        services.service_clone = Some(Arc::new(move |id, operation, fresh, _, _| {
+            // The exact reducer checkpoint is durable before the original
+            // service intent. Presentation/recovery never supplies fresh Start.
+            let saved: Value = serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+            if fresh {
+                assert_eq!(saved["operations"][id], *operation);
+            } else {
+                assert_eq!(saved["operations"][id]["clone_id"], operation["clone_id"]);
+            }
+            assert_eq!(
+                operation["repository_action"],
+                if fresh { "clone" } else { "status" }
+            );
+            lock(&calls).push(fresh);
+            creation::Answer {
+                ok: false,
+                data: Value::Null,
+                error: zerus_client_core::repository::UNCONFIRMED_OPERATION.into(),
+            }
+        }));
+        services
+    }
+    #[test]
+    fn service_clone_uses_only_direct_start_once_after_durable_checkpoint_and_checks_without_replay(
+    ) {
+        let fake = Fake::new();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let host = CreationHost::new(
+            fake.dir.join("creations.json"),
+            service_clone_probe(&fake, calls.clone()),
+        );
+        let id = admitted(&host, repository_plan());
+        state(&host, &id, "unknown");
+        assert_eq!(*lock(&calls), [true]);
+        host.action(id.clone(), CreationAction::Check).unwrap();
+        wait("service clone lookup", || lock(&calls).len() == 2);
+        state(&host, &id, "unknown");
+        assert_eq!(*lock(&calls), [true, false]);
+        assert!(!fake
+            .log()
+            .iter()
+            .any(|args| args.first().is_some_and(|v| v == "repository")
+                && args
+                    .get(1)
+                    .is_some_and(|v| matches!(v.as_str(), "clone" | "status"))));
+        fake.stop(host);
+        let host = CreationHost::new(
+            fake.dir.join("creations.json"),
+            service_clone_probe(&fake, calls.clone()),
+        );
+        state(&host, &id, "recover");
+        host.action(id.clone(), CreationAction::Resume).unwrap();
+        assert!(host.flush_journal_for_test());
+        assert_eq!(
+            lock(&calls).len(),
+            2,
+            "Resume cannot restart an unknown clone"
+        );
+        host.action(id.clone(), CreationAction::Check).unwrap();
+        wait("recovered service clone lookup", || lock(&calls).len() == 3);
+        state(&host, &id, "unknown");
+        assert_eq!(*lock(&calls), [true, false, false]);
+        fake.stop(host);
+    }
+    #[test]
+    fn task_reserved_creation_identity_cannot_authorize_a_fresh_service_clone() {
+        let fake = Fake::new();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut services = service_clone_probe(&fake, calls.clone());
+        // A reserved original still has a clone checkpoint, but never a native
+        // direct-Start capability. Its first service contact is read-only.
+        let journal = fake.dir.join("creations.json");
+        let captured = calls.clone();
+        services.service_clone = Some(Arc::new(move |id, operation, fresh, _, _| {
+            let saved: Value = serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+            assert_eq!(saved["operations"][id], *operation);
+            assert!(!fresh);
+            lock(&captured).push(fresh);
+            creation::Answer {
+                ok: false,
+                data: Value::Null,
+                error: zerus_client_core::repository::UNCONFIRMED_OPERATION.into(),
+            }
+        }));
+        let host = CreationHost::new(fake.dir.join("creations.json"), services);
+        let id = "88888888-8888-4888-8888-888888888888".to_owned();
+        assert!(matches!(
+            host.submit_reserved(repository_plan(), id.clone()).unwrap(),
+            Admission::Admitted { .. }
+        ));
+        state(&host, &id, "unknown");
+        assert_eq!(*lock(&calls), [false]);
+        assert!(!fake
+            .log()
+            .iter()
+            .any(|args| args.first().is_some_and(|v| v == "repository")
+                && args
+                    .get(1)
+                    .is_some_and(|v| matches!(v.as_str(), "clone" | "status"))));
         fake.stop(host);
     }
 

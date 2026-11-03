@@ -30,6 +30,8 @@ pub(super) struct Runtime {
     drained: bool,
     stopping: bool,
     notifications: notification_service::Runtime,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    creation: super::creation_clone::Runtime,
 }
 
 /// The actor can replace only an already admitted background runtime after its
@@ -57,6 +59,8 @@ impl Runtime {
         let delivery = delivery::Runtime::start(config, epoch)?;
         let maintenance = maintenance::Runtime::start(config, epoch)?;
         let producer = broker.claim_internal()?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let creation = super::creation_clone::Runtime::new(config, epoch, owner.clone())?;
         match fleet::Runtime::start(config, epoch) {
             Ok(fleet) => Ok(Self {
                 fleet,
@@ -70,6 +74,8 @@ impl Runtime {
                 drained: false,
                 stopping: false,
                 notifications: notification_service::Runtime::new(config, &location, epoch, owner),
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                creation,
             }),
             Err(error) => {
                 producer.close();
@@ -109,6 +115,8 @@ impl Runtime {
             consumed += 1;
             match broker.apply(store, &self.producer, &event.packet) {
                 Ok(change) => {
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.creation.observe(&event);
                     self.delivery.observe(store, &event);
                     self.maintenance.observe(store, &event);
                     if self.attention.enabled() {
@@ -127,6 +135,8 @@ impl Runtime {
                     }
                 }
                 Err(_) => {
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.creation.reject(&event);
                     self.maintenance.reject(&event);
                     self.attention.reject_event(&event);
                     self.details.reject(&event, seq);
@@ -139,6 +149,8 @@ impl Runtime {
         self.maintenance.poll(store);
         self.notifications
             .poll(store, &mut self.attention, &mut self.activations, seq);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.creation.poll(store, self.notifications.handoff());
         // Disabled discovery must not accumulate permanent edge/baseline rows.
         // Enabling resets the baseline before later observations may post.
         if !self.notifications.ready() && self.attention.retiring() {
@@ -167,6 +179,14 @@ impl Runtime {
         store: &mut Store,
         authority: super::ui_authority::Validated,
     ) -> Value {
+        if authority.operation() == "creation_clone" {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            return self
+                .creation
+                .frontend(store, authority, self.notifications.handoff());
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"creation_clone_unsupported"});
+        }
         if authority.operation() == "automatic_approvals" {
             return self.delivery.frontend_request(store, authority);
         }
@@ -187,6 +207,12 @@ impl Runtime {
     }
 
     pub fn decorate(&self, value: &mut Value) {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            value["creation_clone_runtime"] = self.creation.status();
+            value["lifecycle"]["background"]["operations"] =
+                value["creation_clone_runtime"].clone();
+        }
         value["detail_subscriptions"] = self.details.status();
         value["attention_discovery"] = self.attention.status();
         value["activation_transport"] = self.activations.status();
@@ -284,6 +310,8 @@ impl Runtime {
         self.maintenance.request_stop();
         self.attention.set_policy(attention::Policy::default());
         self.notifications.request_stop();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.creation.request_stop();
         if let Some(presence) = &self.presence {
             presence.request_stop();
         }
@@ -308,6 +336,8 @@ impl Runtime {
         let mut seq = 0;
         self.notifications
             .poll(store, &mut self.attention, &mut self.activations, &mut seq);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.creation.poll(store, self.notifications.handoff());
         if self.notifications.drained() {
             self.attention.request_stop();
         }
@@ -322,6 +352,10 @@ impl Runtime {
             && self.maintenance.drained()
             && self.attention.drained()
             && self.notifications.drained();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            self.drained = self.drained && self.creation.drained();
+        }
         Ok(self.drained)
     }
 }

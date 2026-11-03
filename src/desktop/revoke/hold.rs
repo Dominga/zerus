@@ -132,7 +132,7 @@ fn verify(location: &Location, id: &str, lock: &HandoffLock) -> Result<Value> {
         Declined("writer_epoch_changed")
     );
     ensure!(
-        zerus_desktop_ledger::operations::totals(&tx)?.undrained == 0,
+        crate::desktop::store::operation_undrained(&tx)? == 0,
         Declined("operation_resources_not_drained")
     );
     let result = receipt(location, &command, &saved)?;

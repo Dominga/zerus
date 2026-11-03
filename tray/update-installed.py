@@ -86,6 +86,7 @@ SNAPSHOTS = ((Path(INSTALL_PREFIX) / 'state/hgs/desktop-update') if INSTALL_PREF
              else (HOME / '.local/state/hgs/desktop-update'))
 CLI = (Path(INSTALL_PREFIX) / 'bin/hgs') if INSTALL_PREFIX else (HOME / '.local/bin/hgs')
 HELPER = (Path(INSTALL_PREFIX) / 'bin/hgs_state.py') if INSTALL_PREFIX else (HOME / '.local/bin/hgs_state.py')
+REFRESH_MAC_DESKTOP = None
 LABEL = 'com.hgdev.hgs-tray'
 PLIST = HOME / f'Library/LaunchAgents/{LABEL}.plist'
 UNIT = 'hgs-tray.service'
@@ -331,8 +332,29 @@ def quit_gui(pid, installed):
         raise UpdateError('Zerus started again during the update; nothing was replaced')
 
 
+def refresh_mac_desktop(installed):
+    """Refresh the owned backend from the just-verified installed bundle.
+
+    The source installer opts in. No caller-supplied script, mode, request ID,
+    or manager verb enters this hook; the maintained helper preserves selection.
+    Every updater recovery start runs this before starting its restored GUI too.
+    """
+    backend = installed / 'Contents/MacOS/hgs'
+    paired = backend.exists()
+    if not paired and (installed / 'Contents/Resources/zerus-local-pair.json').exists():
+        raise UpdateError('the installed paired desktop helper is missing; GUI kept stopped')
+    helper = Path(__file__).resolve().parent.parent / 'scripts/install-macos-desktop-service.py'
+    runner = REFRESH_MAC_DESKTOP
+    args = [sys.executable, helper, backend if paired else runner, '--restart']
+    if paired:
+        args += ['--runner-hgs', runner]
+    run(args)
+
+
 def start(installed):
     if MAC:
+        if REFRESH_MAC_DESKTOP:
+            refresh_mac_desktop(installed)
         domain = f'gui/{os.getuid()}'
         subprocess.run(['launchctl', 'bootout', f'{domain}/{LABEL}'], capture_output=True)
         deadline = time.monotonic() + 10
@@ -1124,6 +1146,10 @@ def update(built, installed, rollback=False):
                 done = True
                 raise UpdateError('the new GUI is installed, but Zerus started during the update; '
                                   'the replaced GUI was kept')
+            if MAC and REFRESH_MAC_DESKTOP:
+                # The installer skips its second refresh after this successful
+                # opt-in update, even when no GUI needed restarting here.
+                refresh_mac_desktop(installed)
             settled = settle(aside if aside.exists() else None, keep, progress)
             done = True
             say(f'installed {name} without starting it; {settled}')
@@ -1235,16 +1261,22 @@ def roll_back_installed(installed):
 
 
 def main():
+    global REFRESH_MAC_DESKTOP
     usage = __doc__.split('\n\n')[1]
     parser = argparse.ArgumentParser(usage=usage, add_help=False)
     parser.add_argument('--rollback', metavar='INSTALLED', type=Path)
     parser.add_argument('--installed-gui', metavar='INSTALLED', type=Path)
     parser.add_argument('--check', nargs=2, metavar=('BUILT', 'INSTALLED'), type=Path)
     parser.add_argument('--live', action='store_true')
+    parser.add_argument('--refresh-macos-desktop', metavar='RUNNER_HGS', type=Path)
     parser.add_argument('paths', nargs='*', type=Path)
     args = parser.parse_args()
     chosen = [option for option in (args.rollback, args.installed_gui, args.check) if option]
     try:
+        if args.refresh_macos_desktop:
+            if not MAC or args.check or args.installed_gui or not args.refresh_macos_desktop.is_absolute():
+                raise UpdateError('paired desktop refresh is only available for a macOS update or rollback')
+            REFRESH_MAC_DESKTOP = args.refresh_macos_desktop
         if args.live and not args.check:
             chosen = []
         elif args.installed_gui and len(chosen) == 1 and not args.paths:

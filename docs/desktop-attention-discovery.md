@@ -179,6 +179,17 @@ its original 30-second age for a newly authenticated receiver. Once a handoff is
 attempted, a disconnected/uncertain outcome is not replayed automatically; the
 next wait is a new read and another native click is a distinct event.
 
+On Windows the toast activation gives the service, not the frontend, a
+short-lived foreground right. After the handoff proof passes and before the
+reply carrying an `Open` is offered, the service calls `AllowSetForegroundWindow`
+for the authenticated canonical frontend's PID only. The retained original
+process handle keeps that PID bound to the same process. Idle replies and
+refused proofs lend nothing, and `ASFW_ANY` is never used. A refusal is
+best-effort and does not hold back the click: the frontend restores its window
+and uses its own fallback. Router status counts `foreground.lent` and
+`foreground.refused`. The reply wire is unchanged; Windows has no platform
+context.
+
 The service's `Router::closed_frontend` checks a fresh canonical instance
 observation made off actor. Absence alone cannot authorize a launch: the Linux
 mechanics force service mode and would also freeze/import the native read store.

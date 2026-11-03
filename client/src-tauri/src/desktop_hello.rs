@@ -1,11 +1,36 @@
 //! Background setup for the canonical instance's read-only delegation hello.
 //! The socket callback uses cached identity only; there is no probe-time child.
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 #[cfg(unix)]
 use zerus_client_core::desktop;
 use zerus_client_core::desktop::{Build, Responder};
 
-pub fn prepare(identity: &crate::identity::Identity) -> (crate::instance::Reply, Arc<Responder>) {
+/// The callback follows one native startup transition, never a wire request.
+/// Recovery installs a NEW responder/instance; existing evidence is immutable.
+pub(crate) struct Canonical(Arc<Mutex<Arc<Responder>>>);
+impl Canonical {
+    pub(crate) fn recover(
+        &self,
+        identity: &crate::identity::Identity,
+        _original: &crate::desktop_ownership::NativeRecovery,
+    ) -> Arc<Responder> {
+        crate::desktop_service::enter_startup_recovery();
+        let responder = responder(identity);
+        self.replace(responder)
+    }
+    fn replace(&self, responder: Arc<Responder>) -> Arc<Responder> {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = responder.clone();
+        responder
+    }
+    fn reply(&self, line: &[u8]) -> Option<Vec<u8>> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reply(line)
+    }
+}
+
+fn responder(identity: &crate::identity::Identity) -> Arc<Responder> {
     let info = crate::cli::build_info(&crate::cli::BUILD);
     let responder = Arc::new(Responder::new(
         identity.bundle_id.clone(),
@@ -26,7 +51,15 @@ pub fn prepare(identity: &crate::identity::Identity) -> (crate::instance::Reply,
         zerus_client_core::desktop::ownership::Mode::Native
     };
     responder.configure_ownership_mode_once(mode);
-    let cached = Arc::clone(&responder);
+    responder
+}
+
+pub(crate) fn prepare(
+    identity: &crate::identity::Identity,
+) -> (crate::instance::Reply, Arc<Responder>, Canonical) {
+    let responder = responder(identity);
+    let canonical = Canonical(Arc::new(Mutex::new(responder.clone())));
+    let cached = Canonical(canonical.0.clone());
     let reply: crate::instance::Reply = Arc::new(move |stream, line| {
         #[cfg(unix)]
         let same = desktop::same_user(stream);
@@ -34,13 +67,13 @@ pub fn prepare(identity: &crate::identity::Identity) -> (crate::instance::Reply,
         let same = crate::instance::same_user(stream);
         same.then(|| cached.reply(line)).flatten()
     });
-    (reply, responder)
+    (reply, responder, canonical)
 }
 
 /// Only the process that claimed the canonical socket calls this, before any
 /// writers or GUI actor exist. Replay and other bundle identities stay isolated.
 #[cfg(unix)]
-pub fn hold(
+pub(crate) fn hold(
     production: bool,
     responder: &Arc<Responder>,
 ) -> Result<
@@ -48,7 +81,7 @@ pub fn hold(
         Option<desktop::startup::Bootstrap>,
         Option<crate::desktop_ownership::NativeReady>,
     ),
-    desktop::startup::Refused,
+    HoldRefusal,
 > {
     if crate::desktop_service::mode() {
         // A consumer keeps its canonical identity but never claims GUI writer startup.
@@ -57,22 +90,23 @@ pub fn hold(
     if !production || std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|v| !v.is_empty()) {
         return Ok((None, None));
     }
-    let ownership = crate::desktop_ownership::native_takeover(
+    let ownership = crate::desktop_ownership::native_takeover_recoverable(
         zerus_client_core::default_hgs(),
         responder.clone(),
     )
-    .map_err(|_| desktop::startup::Refused::Unknown)?;
+    .map_err(HoldRefusal::Takeover)?;
     let mut held = desktop::startup::Bootstrap::begin(
         ownership.helper().map_err(|code| {
             crate::startup_error::record("native_takeover.helper", code);
-            desktop::startup::Refused::Unknown
+            HoldRefusal::Bootstrap
         })?,
         &uuid::Uuid::new_v4().to_string(),
         &[],
     )
     .inspect_err(|&error| {
         bootstrap_refusal("bootstrap.begin", error);
-    })?;
+    })
+    .map_err(|_| HoldRefusal::Bootstrap)?;
     match held.wait_ready() {
         Ok(()) => Ok((Some(held), Some(ownership))),
         Err(desktop::startup::Refused::Unsupported) => {
@@ -91,9 +125,15 @@ pub fn hold(
         }
         Err(error) => {
             bootstrap_refusal("bootstrap.ready", error);
-            Err(error)
+            Err(HoldRefusal::Bootstrap)
         }
     }
+}
+
+#[cfg(unix)]
+pub(crate) enum HoldRefusal {
+    Takeover(crate::desktop_ownership::NativeRecovery),
+    Bootstrap,
 }
 
 #[cfg(unix)]
@@ -135,4 +175,66 @@ pub fn finish(mut held: desktop::startup::Bootstrap, responder: Arc<Responder>) 
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zerus_client_core::desktop::{
+        ownership::{Action, Mode},
+        ui_requests::Request,
+    };
+
+    #[test]
+    fn canonical_recovery_uses_a_new_immutable_mode_and_never_reuses_native_evidence() {
+        fn responder(mode: Mode) -> Arc<Responder> {
+            let value = Arc::new(Responder::new(
+                "com.hgdev.hgs-tray".into(),
+                Build {
+                    version: "1.0.0".into(),
+                    source_commit: "a".repeat(40),
+                    source_dirty: Some(false),
+                },
+                uuid::Uuid::new_v4().to_string(),
+                true,
+                false,
+            ));
+            assert!(value.configure_ownership_mode_once(mode));
+            assert!(value.configure_once("a".repeat(64)));
+            value
+        }
+        fn request(action: Action) -> Request {
+            Request::DesktopOwnership {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                action,
+                journal: None,
+                revision: 0,
+            }
+        }
+        let native = responder(Mode::Native);
+        let canonical = Canonical(Arc::new(Mutex::new(native.clone())));
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let line = format!("desktop-delegation-v1 {nonce}");
+        let before = canonical.reply(line.as_bytes()).unwrap();
+        let consumer = canonical.replace(responder(Mode::Service));
+        let after = canonical.reply(line.as_bytes()).unwrap();
+        let before: serde_json::Value = serde_json::from_slice(&before).unwrap();
+        let after: serde_json::Value = serde_json::from_slice(&after).unwrap();
+        assert_ne!(before["instance_epoch"], after["instance_epoch"]);
+        let prior: serde_json::Value =
+            serde_json::from_slice(&native.reply(line.as_bytes()).unwrap()).unwrap();
+        assert_eq!(prior, before, "old original proof remains immutable");
+        assert!(native
+            .prepare_ui_request(uuid::Uuid::new_v4().to_string(), request(Action::Rearm))
+            .is_err());
+        assert!(consumer
+            .prepare_ui_request(
+                uuid::Uuid::new_v4().to_string(),
+                request(Action::NativeTakeover)
+            )
+            .is_err());
+        assert!(consumer
+            .prepare_ui_request(uuid::Uuid::new_v4().to_string(), request(Action::Rearm))
+            .is_ok());
+    }
 }

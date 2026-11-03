@@ -207,6 +207,11 @@ pub struct Startup {
         any(target_os = "linux", target_os = "macos", windows)
     ))]
     native_ownership: Option<desktop_ownership::NativeReady>,
+    #[cfg(all(
+        feature = "live",
+        any(target_os = "linux", target_os = "macos", windows)
+    ))]
+    native_recovery: Option<desktop_ownership::NativeRecovery>,
 }
 
 /// Parses Qt's command line and answers `--help`, `--version` and
@@ -309,6 +314,13 @@ pub fn run() {
         any(target_os = "linux", target_os = "macos", windows)
     ))]
     let mut native_ownership = None;
+    #[cfg(all(
+        feature = "live",
+        any(target_os = "linux", target_os = "macos", windows)
+    ))]
+    let mut native_recovery = None;
+    #[cfg(all(windows, feature = "live"))]
+    let mut canonical_recovery = None;
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     let instance = match identity.instance_name(identity::flag("ZERUS_CLIENT_SINGLE_INSTANCE")) {
         None => {
@@ -332,7 +344,8 @@ pub fn run() {
                 feature = "live",
                 any(target_os = "linux", target_os = "macos", windows)
             ))]
-            let (reply, responder) = desktop_hello::prepare(&identity);
+            #[cfg_attr(windows, allow(unused_mut))]
+            let (reply, mut responder, canonical) = desktop_hello::prepare(&identity);
             #[cfg(all(
                 feature = "live",
                 any(target_os = "linux", target_os = "macos", windows)
@@ -355,7 +368,17 @@ pub fn run() {
                     {
                         let settled = match desktop_hello::hold(identity.is_switch(), &responder) {
                             Ok(held) => held,
-                            Err(_) => {
+                            Err(desktop_hello::HoldRefusal::Takeover(failure)) => {
+                                startup_log::record(
+                                    "recovery",
+                                    "native_takeover_unconfirmed",
+                                    Some(failure.code),
+                                );
+                                responder = canonical.recover(&identity, &failure);
+                                native_recovery = Some(failure);
+                                (None, None)
+                            }
+                            Err(desktop_hello::HoldRefusal::Bootstrap) => {
                                 startup_log::record("failed", "desktop_startup_unconfirmed", None);
                                 eprintln!("zerus-client: desktop startup is unconfirmed; writers remain stopped");
                                 startup_error::show(context);
@@ -369,6 +392,7 @@ pub fn run() {
                     #[cfg(all(windows, feature = "live"))]
                     {
                         desktop_responder = Some(responder);
+                        canonical_recovery = Some(canonical);
                     }
                     Some(claimed)
                 }
@@ -393,16 +417,25 @@ pub fn run() {
         platform::windows::startup::prepare(&args, &identity.bundle_id);
         if identity.is_switch() && !replay && !desktop_service::mode() {
             if let Some(responder) = &desktop_responder {
-                native_ownership = match desktop_ownership::native_takeover(
+                native_ownership = match desktop_ownership::native_takeover_recoverable(
                     zerus_client_core::default_hgs(),
                     responder.clone(),
                 ) {
                     Ok(proof) => Some(proof),
-                    Err(code) => {
-                        startup_log::record("failed", "native_takeover_unconfirmed", Some(code));
-                        eprintln!("zerus-client: native ownership takeover is unconfirmed: {code}");
-                        startup_error::show(context);
-                        return;
+                    Err(failure) => {
+                        startup_log::record(
+                            "recovery",
+                            "native_takeover_unconfirmed",
+                            Some(failure.code),
+                        );
+                        desktop_responder = Some(
+                            canonical_recovery
+                                .as_ref()
+                                .expect("claimed canonical responder")
+                                .recover(&identity, &failure),
+                        );
+                        native_recovery = Some(failure);
+                        None
                     }
                 };
             }
@@ -427,7 +460,22 @@ pub fn run() {
         context,
         Startup {
             identity,
-            opens_sessions,
+            opens_sessions: opens_sessions || {
+                #[cfg(all(
+                    feature = "live",
+                    any(target_os = "linux", target_os = "macos", windows)
+                ))]
+                {
+                    native_recovery.is_some()
+                }
+                #[cfg(not(all(
+                    feature = "live",
+                    any(target_os = "linux", target_os = "macos", windows)
+                )))]
+                {
+                    false
+                }
+            },
             #[cfg(all(feature = "live", target_os = "linux"))]
             navigation: options.target,
             #[cfg(all(feature = "live", target_os = "linux"))]
@@ -446,6 +494,11 @@ pub fn run() {
                 any(target_os = "linux", target_os = "macos", windows)
             ))]
             native_ownership,
+            #[cfg(all(
+                feature = "live",
+                any(target_os = "linux", target_os = "macos", windows)
+            ))]
+            native_recovery,
         },
     );
 }
@@ -599,6 +652,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
             app.manage(identity);
             #[cfg(all(feature = "live", any(target_os = "linux", target_os = "macos", windows)))]
             if let Some(proof) = native_ownership { app.manage(proof); }
+            #[cfg(all(feature = "live", any(target_os = "linux", target_os = "macos", windows)))]
+            if let Some(recovery) = startup.native_recovery { app.manage(recovery); }
             #[cfg(feature = "live")]
             {
                 let dir = data_dir(app.handle());

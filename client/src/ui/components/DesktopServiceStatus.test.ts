@@ -28,6 +28,11 @@ describe("service status in the footer", () => {
     expect(serviceStatus(healthy({ notification_ownership: { ...rearm, pending: true } }))).toMatchObject({ healthy: false, retry: false, ownership: "check" });
     expect(serviceStatus(healthy({ code: "background_unready", notification_ownership: rearm }))).toMatchObject({ retry: true, ownership: "rearm" });
   });
+  it("offers explicit recovery even when a failed native start has no revocation marker", () => {
+    const recovery = { ...rearm, native_recovery: true, status: { ...rearm.status!, state: "passive" as const, rearm_required: false } };
+    expect(serviceStatus(healthy({ notification_ownership: recovery }))).toMatchObject({ healthy: false, ownership: "rearm" });
+    expect(serviceStatus(healthy({ notification_ownership: { ...recovery, pending: true } }))).toMatchObject({ ownership: "check" });
+  });
   it("keeps report review and saved-read recovery visible together", () => {
     const status = serviceStatus(healthy({ retained_source_import: { required: true, complete: false, running: false, code: "retained_import_qt_unavailable", phase: null },
       pending_read_import: { required: true, complete: false, running: false, through: 0, superseded: 0, delivered: false, code: "pending" } }));

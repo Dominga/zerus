@@ -299,11 +299,8 @@ impl Runtime {
         }
         self.notifications.publication_owner(store)
     }
-    pub fn revocation_epoch(&self, fallback: &str) -> String {
-        self.notifications
-            .writer_epoch()
-            .unwrap_or(fallback)
-            .to_owned()
+    pub fn captured_writer_epoch(&self) -> Option<String> {
+        self.notifications.writer_epoch().map(str::to_owned)
     }
 
     pub fn drained(&self) -> bool {

@@ -77,7 +77,12 @@ fn database() -> Result<Connection> {
     db.execute_batch("CREATE TABLE IF NOT EXISTS checkouts (
         path TEXT PRIMARY KEY, common_dir TEXT NOT NULL, owner TEXT NOT NULL,
         next_check REAL NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'pending', detail TEXT NOT NULL DEFAULT '');
-        CREATE INDEX IF NOT EXISTS due ON checkouts(next_check,path) WHERE status != 'unconfirmed';")
+        CREATE INDEX IF NOT EXISTS due ON checkouts(next_check,path) WHERE status != 'unconfirmed';
+        CREATE TABLE IF NOT EXISTS removals (
+        path TEXT PRIMARY KEY, common_dir TEXT NOT NULL, branch TEXT NOT NULL, head TEXT NOT NULL,
+        fingerprint TEXT NOT NULL, request_id TEXT NOT NULL, reserved_at REAL NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending','partial')), detail TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS removals_repository ON removals(common_dir,path);")
         .map_err(|e| e.to_string())?;
     Ok(db)
 }
@@ -182,7 +187,7 @@ impl Sweep {
             "--automatic".into(),
             "--periodic".into(),
         ];
-        let outcome = super::worktree_cleanup::remove_command(&args);
+        let (outcome, attempted) = super::worktree_cleanup::remove_with_outcome(&args);
         let value = match outcome {
             Ok(value) => {
                 db.execute("DELETE FROM checkouts WHERE path=?1", [&path])
@@ -190,7 +195,9 @@ impl Sweep {
                 value
             }
             Err(reason) => {
-                let status = if reason.starts_with("Removal could not be confirmed") {
+                // Once Git may have started, the outcome stays for manual review,
+                // whatever the message; it is never rescheduled as kept.
+                let status = if attempted || reason.starts_with("Removal could not be confirmed") {
                     "unconfirmed"
                 } else {
                     "kept"
@@ -271,6 +278,201 @@ pub(super) fn removed(path: &Path, result: &Value) -> Result<()> {
         &directory().join("last-result.json"),
         &format!("{result}\n"),
     )
+}
+
+/// Removal records. Every `git worktree remove` reserves one first, so a crash
+/// between Git's deregistration and its file deletion is covered. A confirmed
+/// outcome drops the record; a folder Git no longer tracks but that still
+/// exists keeps it as `partial` for a fresh manual review, and an interruption
+/// leaves it `pending`. Nothing automatic acts on these records, and a
+/// recorded removal is never replayed.
+pub(super) const MAX_REMOVALS: i64 = 512;
+
+#[derive(Clone, Debug, Serialize)]
+pub(super) struct Removal {
+    pub path: String,
+    pub common_dir: String,
+    pub branch: String,
+    pub head: String,
+    pub fingerprint: String,
+    pub request_id: String,
+    pub reserved_at: f64,
+    pub status: String,
+    pub detail: String,
+}
+
+fn upsert(db: &Connection, r: &Removal) -> Result<()> {
+    db.execute(
+        "INSERT OR REPLACE INTO removals VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        params![
+            r.path,
+            r.common_dir,
+            r.branch,
+            r.head,
+            r.fingerprint,
+            r.request_id,
+            r.reserved_at,
+            r.status,
+            r.detail
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Fails closed at the bound: unresolved leftovers must stay visible, so a new
+/// removal is refused rather than evicting an older record.
+pub(super) fn reserve_removal(removal: &Removal) -> Result<()> {
+    let mut db = database()?;
+    // Count and insert in one write transaction: concurrent removals in other
+    // repositories cannot exceed the bound together.
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let count = |tx: &Connection| -> Result<i64> {
+        tx.query_row(
+            "SELECT count(*) FROM removals WHERE path != ?1",
+            [&removal.path],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())
+    };
+    if count(&tx)? >= MAX_REMOVALS {
+        resolve_vanished(&tx)?;
+        if count(&tx)? >= MAX_REMOVALS {
+            return Err(format!(
+                "Worktree removal refused: {MAX_REMOVALS} earlier removals still need review. \
+                 Review their leftover folders (`hgs worktrees leftovers` lists those whose \
+                 repository is gone) and keep or clean them up first."
+            ));
+        }
+    }
+    upsert(&tx, removal)?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+fn gone(path: &str) -> bool {
+    fs::symlink_metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// A record whose repository and folder are both gone has nothing left to
+/// review; it must not hold the bound forever.
+fn resolve_vanished(db: &Connection) -> Result<usize> {
+    let mut statement = db
+        .prepare("SELECT path,common_dir FROM removals ORDER BY path LIMIT ?1")
+        .map_err(|e| e.to_string())?;
+    let vanished: Vec<String> = statement
+        .query_map([MAX_REMOVALS + 1], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|(path, common)| gone(common) && gone(path))
+        .map(|(path, _)| path)
+        .collect();
+    for path in &vanished {
+        db.execute("DELETE FROM removals WHERE path=?1", [path])
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(vanished.len())
+}
+
+/// Records whose repository no longer exists, after resolving those whose
+/// folder is gone too. Bounded by `MAX_REMOVALS`.
+pub(super) fn orphan_removals() -> Result<Vec<Removal>> {
+    if !directory().join("queue.sqlite3").exists() {
+        return Ok(Vec::new());
+    }
+    let db = database()?;
+    resolve_vanished(&db)?;
+    let mut statement = db
+        .prepare(
+            "SELECT path,common_dir,branch,head,fingerprint,request_id,reserved_at,status,detail
+            FROM removals ORDER BY path LIMIT ?1",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map([MAX_REMOVALS], |r| {
+            Ok(Removal {
+                path: r.get(0)?,
+                common_dir: r.get(1)?,
+                branch: r.get(2)?,
+                head: r.get(3)?,
+                fingerprint: r.get(4)?,
+                request_id: r.get(5)?,
+                reserved_at: r.get(6)?,
+                status: r.get(7)?,
+                detail: r.get(8)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows.into_iter().filter(|r| gone(&r.common_dir)).collect())
+}
+
+/// `None` drops the record after a confirmed outcome; `Some` keeps the folder
+/// Git no longer tracks for review. Written whole, so a concurrent review that
+/// dropped a pending record cannot lose a later partial outcome.
+pub(super) fn settle_removal(removal: &Removal, partial: Option<&str>) -> Result<()> {
+    let db = database()?;
+    match partial {
+        None => {
+            db.execute("DELETE FROM removals WHERE path=?1", [&removal.path])
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        }
+        Some(detail) => upsert(
+            &db,
+            &Removal {
+                status: "partial".into(),
+                detail: detail.chars().take(1024).collect(),
+                ..removal.clone()
+            },
+        ),
+    }
+}
+
+/// One repository's records through its index; at most `MAX_REMOVALS` exist.
+/// Reading never creates the private database.
+pub(super) fn removals(common: &Path) -> Result<Vec<Removal>> {
+    if !directory().join("queue.sqlite3").exists() {
+        return Ok(Vec::new());
+    }
+    let db = database()?;
+    let mut statement = db
+        .prepare(
+            "SELECT path,common_dir,branch,head,fingerprint,request_id,reserved_at,status,detail
+            FROM removals WHERE common_dir=?1 ORDER BY path LIMIT ?2",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map(params![common.to_string_lossy(), MAX_REMOVALS], |r| {
+            Ok(Removal {
+                path: r.get(0)?,
+                common_dir: r.get(1)?,
+                branch: r.get(2)?,
+                head: r.get(3)?,
+                fingerprint: r.get(4)?,
+                request_id: r.get(5)?,
+                reserved_at: r.get(6)?,
+                status: r.get(7)?,
+                detail: r.get(8)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<_>>()
+        .map_err(|e| e.to_string())
+}
+
+pub(super) fn forget_removal(path: &str) -> Result<bool> {
+    let db = database()?;
+    let changed = db
+        .execute("DELETE FROM removals WHERE path=?1", [path])
+        .map_err(|e| e.to_string())?;
+    Ok(changed == 1)
 }
 
 pub(super) fn worker() {

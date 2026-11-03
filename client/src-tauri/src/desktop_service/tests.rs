@@ -5,6 +5,7 @@ mod notification_receipts;
 mod readiness;
 mod restart;
 mod silent_watch;
+mod source_meta;
 
 pub(super) struct Fixture(pub(super) PathBuf, pub(super) Arc<AtomicBool>);
 

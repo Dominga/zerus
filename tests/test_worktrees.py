@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Catalogs and explicit worktree creation against isolated real Git repositories."""
 import concurrent.futures
+import contextlib
 import hashlib
 import json
 import os
@@ -465,6 +466,210 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         self.assertNotEqual(dry.returncode,0);self.assertTrue(clean.exists())
         relative=subprocess.run([str(HGS),'worktrees','remove','--path','clean','--common-dir',str(self.repo/'.git'),'--fingerprint',row['fingerprint'],'--json'],cwd=self.root,env=self.env,text=True,capture_output=True,timeout=30)
         self.assertNotEqual(relative.returncode,0);self.assertTrue(clean.exists())
+    # Partial removal (zerus-k403): Git deregisters a worktree before it deletes
+    # the files, so a readonly ignored folder can leave data Git no longer tracks.
+    def partial(self,name):
+        if os.geteuid()==0:self.skipTest('root ignores directory permissions')
+        tree=self.linked(name);readonly=tree/'target'/'readonly';readonly.mkdir(parents=True);(readonly/'out').write_text('build')
+        readonly.chmod(0o555);self.addCleanup(lambda:readonly.exists() and readonly.chmod(0o755))
+        self.age(tree);row=self.row(tree)
+        return tree,row,self.remove(tree,row['fingerprint'],extra=('--ignored-fingerprint',row['ignored_fingerprint']))
+    def leftover(self,path,data=None):
+        data=data or self.review();names={str(path),str(Path(path).resolve())}
+        return next((row for row in data.get('leftovers',[]) if row['path'] in names),None)
+    def keep(self,path,fingerprint):
+        return subprocess.run([str(HGS),'worktrees','keep-folder','--path',str(path),'--common-dir',str(self.repo/'.git'),'--fingerprint',fingerprint,
+            '--request-id','test-keep','--json'],env=self.env,text=True,capture_output=True,timeout=30)
+    def records(self):
+        import sqlite3
+        database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3'
+        if not database.exists():return []
+        with contextlib.closing(sqlite3.connect(database)) as db:return db.execute('SELECT path,status FROM removals ORDER BY path').fetchall()
+    def test_partial_removal_keeps_a_reviewable_leftover_and_never_replays(self):
+        tree,row,result=self.partial('partial')
+        self.assertNotEqual(result.returncode,0);self.assertIn('files remain',result.stderr)
+        self.assertEqual(json.loads(result.stdout)['status'],'unconfirmed')
+        self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
+        data=self.review();self.assertNotIn(str(tree.resolve()),[r['path'] for r in data['worktrees']])
+        left=self.leftover(tree,data);self.assertIsNotNone(left,data)
+        self.assertEqual((left['kind'],left['verdict']),('leftover','partially_removed'))
+        self.assertIn('partially_removed',codes(left['notes']))
+        self.assertEqual(left['removal']['status'],'partial');self.assertEqual(left['removal']['request_id'],'test-remove')
+        self.assertEqual(left['removal']['fingerprint'],row['fingerprint']);self.assertIn('Permission denied',left['removal']['detail'])
+        self.assertEqual(left['branch'],row['branch']);self.assertEqual(left['branch_head'],row['head']);self.assertTrue(left['branch_retained'])
+        self.assertTrue(left['size_complete']);self.assertGreater(left['size'],0);self.assertEqual(left['sessions'],[])
+        # Never replayed: the leftover is no longer one of the repository's worktrees.
+        again=self.remove(tree,row['fingerprint'],extra=('--ignored-fingerprint',row['ignored_fingerprint']))
+        self.assertNotEqual(again.returncode,0);self.assertEqual(json.loads(again.stdout)['status'],'kept')
+        self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
+        self.assertEqual(self.leftover(tree)['fingerprint'],left['fingerprint'])
+        self.assertEqual(self.records(),[(str(tree.resolve()),'partial')])
+    def test_keep_folder_forgets_only_the_record_after_a_fresh_bound_review(self):
+        tree,row,_=self.partial('kept');left=self.leftover(tree)
+        stale=self.keep(tree,'0'*64);self.assertNotEqual(stale.returncode,0);self.assertIn('changed since the review',stale.stderr)
+        (tree/'later.txt').write_text('new local file')
+        changed=self.keep(tree,left['fingerprint']);self.assertNotEqual(changed.returncode,0);self.assertIn('changed since the review',changed.stderr)
+        left=self.leftover(tree);kept=self.keep(tree,left['fingerprint']);self.assertEqual(kept.returncode,0,kept.stderr)
+        value=json.loads(kept.stdout);self.assertEqual((value['status'],value['request_id']),('kept','test-keep'))
+        self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build');self.assertTrue((tree/'later.txt').exists())
+        self.assertIsNone(self.leftover(tree));self.assertEqual(self.records(),[])
+        self.assertIn(row['branch'],self.git('-C',str(self.repo),'branch','--list',row['branch']))
+        again=self.keep(tree,left['fingerprint']);self.assertNotEqual(again.returncode,0);self.assertIn('No partial-removal record',again.stderr)
+    def test_an_interrupted_removal_stays_pending_for_review(self):
+        self.fake("if any(sys.argv[i:i+2]==['worktree','remove'] for i in range(len(sys.argv)-1)):\n import signal,subprocess\n subprocess.run(["+repr(GIT)+",*sys.argv[1:]])\n os.kill(os.getppid(),signal.SIGKILL);sys.exit(1)\nelse: os.execv("+repr(GIT)+",["+repr(GIT)+",*sys.argv[1:]])\n")
+        tree,row,result=self.partial('interrupted')
+        self.assertEqual(result.returncode,-9,result.stderr)
+        (self.home/'.local/bin/git').unlink()
+        left=self.leftover(tree);self.assertIsNotNone(left)
+        self.assertEqual(left['removal']['status'],'pending');self.assertEqual(left['verdict'],'partially_removed')
+        self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
+    def test_resolved_and_stale_records_drop_and_the_bound_fails_closed(self):
+        import sqlite3
+        tree,_,_=self.partial('resolved');self.assertEqual(len(self.records()),1)
+        (tree/'target'/'readonly').chmod(0o755);shutil.rmtree(tree)
+        self.assertIsNone(self.leftover(tree));self.assertEqual(self.records(),[])
+        # A pending record for a still-registered worktree adds nothing to its ordinary row.
+        live=self.linked('live');database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3'
+        with contextlib.closing(sqlite3.connect(database)) as db,db:
+            db.execute("INSERT INTO removals VALUES (?,?,?,?,?,?,?,?,?)",(str(live.resolve()),str((self.repo/'.git').resolve()),'feature/live','0'*40,'f'*64,'',1.0,'pending',''))
+        self.assertIsNone(self.leftover(live));self.assertEqual(self.records(),[])
+        # Records of a vanished repository whose folders still exist hold the bound.
+        orphans=self.root/'orphans';orphans.mkdir()
+        for n in range(512):(orphans/str(n)).mkdir()
+        with contextlib.closing(sqlite3.connect(database)) as db,db:
+            db.executemany("INSERT INTO removals VALUES (?,?,?,?,?,?,?,?,?)",[(str(orphans/str(n)),str(self.root/'gone-repository/.git'),'b','0'*40,'f'*64,'',1.0,'partial','') for n in range(512)])
+        self.age(live);row=self.row(live)
+        refused=self.remove(live,row['fingerprint']);self.assertNotEqual(refused.returncode,0)
+        self.assertIn('512 earlier removals still need review',refused.stderr);self.assertEqual(json.loads(refused.stdout)['status'],'kept')
+        self.assertTrue(live.exists());self.assertIn(str(live.resolve()),[r['path'] for r in self.review()['worktrees']])
+        # Once their folders are gone too, nothing is left to review: they resolve.
+        shutil.rmtree(orphans)
+        result=self.remove(live,self.row(live)['fingerprint']);self.assertEqual(result.returncode,0,result.stderr)
+        self.assertFalse(live.exists());self.assertEqual(self.records(),[])
+    def test_a_stale_listing_never_forgets_a_partial_record(self):
+        if os.geteuid()==0:self.skipTest('root ignores directory permissions')
+        tree=self.linked('race');readonly=tree/'target'/'readonly';readonly.mkdir(parents=True);(readonly/'out').write_text('build')
+        readonly.chmod(0o555);self.addCleanup(lambda:readonly.exists() and readonly.chmod(0o755))
+        self.age(tree);row=self.row(tree)
+        # Only the slow review's Git calls sleep, after its worktree list was taken.
+        self.fake("args=sys.argv[1:]\n"
+                  "if os.environ.get('REVIEW_SLOW') and 'symbolic-ref' in args: time.sleep(2.5)\n"
+                  "os.execv("+repr(GIT)+",["+repr(GIT)+",*args])\n")
+        slow=subprocess.Popen([str(HGS),'worktrees','review','--path',str(self.repo),'--json'],
+                              env=dict(self.env,REVIEW_SLOW='1'),stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        time.sleep(0.6)
+        result=self.remove(tree,row['fingerprint'],extra=('--ignored-fingerprint',row['ignored_fingerprint']))
+        self.assertIn('files remain',result.stderr);self.assertEqual([s for _,s in self.records()],['partial'])
+        out,_=slow.communicate(timeout=60);json.loads(out)
+        (self.home/'.local/bin/git').unlink()
+        self.assertEqual([s for _,s in self.records()],['partial'])
+        self.assertIsNotNone(self.leftover(tree),'the leftover folder exists but its record was forgotten')
+        self.assertEqual((readonly/'out').read_text(),'build')
+    def test_an_unreadable_list_after_git_keeps_the_record_pending(self):
+        marker=self.root/'removed-marker'
+        self.fake("args=sys.argv[1:]\n"
+                  "if any(args[i:i+2]==['worktree','remove'] for i in range(len(args)-1)):\n"
+                  " import subprocess\n r=subprocess.run(["+repr(GIT)+",*args]).returncode\n open("+repr(str(marker))+",'w').close();sys.exit(r)\n"
+                  "if os.path.exists("+repr(str(marker))+") and any(args[i:i+2]==['worktree','list'] for i in range(len(args)-1)):\n"
+                  " sys.stderr.write('fatal: synthetic unreadable list\\n');sys.exit(128)\n"
+                  "os.execv("+repr(GIT)+",["+repr(GIT)+",*args])\n")
+        tree,row,result=self.partial('unknown')
+        self.assertNotEqual(result.returncode,0,result.stderr);self.assertTrue(marker.exists())
+        self.assertIn('could not be confirmed',result.stderr)
+        (self.home/'.local/bin/git').unlink()
+        self.assertEqual([s for _,s in self.records()],['pending'])
+        left=self.leftover(tree);self.assertIsNotNone(left);self.assertEqual(left['removal']['status'],'pending')
+        self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
+    def test_unreadable_folder_metadata_after_git_is_never_taken_as_removal(self):
+        if os.geteuid()==0:self.skipTest('root ignores directory permissions')
+        box=self.root/'box';box.mkdir();tree=box/'tree'
+        self.git('-C',str(self.repo),'worktree','add','-qb','feature/boxed',str(tree))
+        readonly=tree/'target'/'readonly';readonly.mkdir(parents=True);(readonly/'out').write_text('build')
+        readonly.chmod(0o555);self.addCleanup(lambda:box.chmod(0o755) or (readonly.exists() and readonly.chmod(0o755)))
+        self.age(tree);row=self.row(tree)
+        # After Git ran, the folder's parent cannot be searched: its metadata is unreadable.
+        self.fake("args=sys.argv[1:]\n"
+                  "if any(args[i:i+2]==['worktree','remove'] for i in range(len(args)-1)):\n"
+                  " import subprocess\n r=subprocess.run(["+repr(GIT)+",*args]).returncode\n os.chmod("+repr(str(box))+",0o600);sys.exit(r)\n"
+                  "os.execv("+repr(GIT)+",["+repr(GIT)+",*args])\n")
+        result=self.remove(tree,row['fingerprint'],extra=('--ignored-fingerprint',row['ignored_fingerprint']))
+        box.chmod(0o755);(self.home/'.local/bin/git').unlink()
+        self.assertNotEqual(result.returncode,0);self.assertEqual(json.loads(result.stdout)['status'],'unconfirmed')
+        self.assertEqual(self.records(),[(str(tree.resolve()),'pending')])
+        left=self.leftover(tree);self.assertIsNotNone(left);self.assertEqual(left['removal']['status'],'pending')
+    def test_a_leftover_of_a_vanished_repository_stays_reachable(self):
+        tree,row,_=self.partial('orphaned');left=self.leftover(tree);common=left['common_dir']
+        shutil.rmtree(self.repo)
+        listed=subprocess.run([str(HGS),'worktrees','leftovers','--json'],env=self.env,text=True,capture_output=True,timeout=30)
+        self.assertEqual(listed.returncode,0,listed.stderr);rows=json.loads(listed.stdout)['leftovers']
+        self.assertEqual([r['path'] for r in rows],[str(tree.resolve())]);orphan=rows[0]
+        self.assertFalse(orphan['repository_available']);self.assertIsNone(orphan['branch_retained'])
+        keep=lambda fp:subprocess.run([str(HGS),'worktrees','keep-folder','--path',str(tree),'--common-dir',common,'--fingerprint',fp,'--json'],
+            env=self.env,text=True,capture_output=True,timeout=30)
+        self.assertIn('changed since the review',keep('0'*64).stderr)
+        kept=keep(orphan['fingerprint']);self.assertEqual(kept.returncode,0,kept.stderr);self.assertEqual(json.loads(kept.stdout)['status'],'kept')
+        self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build');self.assertEqual(self.records(),[])
+    def delete(self,path,fingerprint,confirm=True,extra=()):
+        return subprocess.run([str(HGS),'worktrees','delete-leftover','--path',str(path),'--common-dir',str(self.repo/'.git'),'--fingerprint',fingerprint,
+            *(['--confirm-delete'] if confirm else []),'--request-id','test-delete','--json',*extra],env=self.env,text=True,capture_output=True,timeout=60)
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux protected-process review')
+    def test_unrelated_hidden_process_churn_keeps_leftover_confirmations_valid(self):
+        def hidden():
+            child=subprocess.Popen([sys.executable,'-I','-c',
+                'import ctypes,time; assert ctypes.CDLL(None).prctl(4,0,0,0,0)==0; print("ready",flush=True); time.sleep(90)'],
+                cwd=self.root,stdout=subprocess.PIPE,text=True)
+            self.addCleanup(child.stdout.close);self.addCleanup(child.wait);self.addCleanup(lambda: child.poll() is None and child.kill())
+            self.assertEqual(child.stdout.readline().strip(),'ready')
+        kept,_,_=self.partial('kept-churn');deleted,_,_=self.partial('deleted-churn')
+        hidden();reviewed=self.review()
+        keep_row=self.leftover(kept,reviewed);delete_row=self.leftover(deleted,reviewed)
+        self.assertEqual(codes(delete_row['reasons']),['processes_unavailable']);self.assertTrue(delete_row['process_fingerprint'])
+        # An unrelated hidden process starts before the owner confirms.
+        hidden()
+        self.assertEqual(self.leftover(deleted)['fingerprint'],delete_row['fingerprint'])
+        kept_result=self.keep(kept,keep_row['fingerprint']);self.assertEqual(kept_result.returncode,0,kept_result.stderr)
+        result=self.delete(deleted,delete_row['fingerprint'],extra=('--process-fingerprint',delete_row['process_fingerprint']))
+        self.assertEqual(result.returncode,0,result.stderr);self.assertFalse(deleted.exists());self.assertTrue(kept.exists())
+    def test_deleting_a_leftover_needs_confirmation_and_a_fresh_review_and_keeps_the_branch(self):
+        tree,row,_=self.partial('deleted');outside=self.root/'outside';outside.mkdir();(outside/'keep.txt').write_text('outside')
+        (tree/'target'/'readonly').chmod(0o755);(tree/'target'/'readonly'/'link').symlink_to(outside,target_is_directory=True);(tree/'target'/'readonly').chmod(0o555)
+        left=self.leftover(tree);self.assertTrue(left['deletable'],left)
+        unconfirmed=self.delete(tree,left['fingerprint'],confirm=False);self.assertNotEqual(unconfirmed.returncode,0)
+        self.assertIn('--confirm-delete',unconfirmed.stderr);self.assertEqual(json.loads(unconfirmed.stdout)['status'],'kept')
+        stale=self.delete(tree,'0'*64);self.assertNotEqual(stale.returncode,0);self.assertIn('changed since the review',stale.stderr)
+        self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
+        deleted=self.delete(tree,left['fingerprint']);self.assertEqual(deleted.returncode,0,deleted.stderr)
+        value=json.loads(deleted.stdout);self.assertEqual((value['status'],value['request_id'],value['branch']),('deleted','test-delete',row['branch']))
+        self.assertFalse(tree.exists());self.assertEqual((outside/'keep.txt').read_text(),'outside')
+        self.assertEqual(self.records(),[]);self.assertIsNone(self.leftover(tree))
+        self.assertIn(row['branch'],self.git('-C',str(self.repo),'branch','--list',row['branch']))
+    def test_deleting_a_leftover_refuses_sessions_processes_and_nested_repositories(self):
+        tree,_,_=self.partial('occupied')
+        self.binding('codex/fixture/leftover',tree);left=self.leftover(tree)
+        self.assertFalse(left['deletable']);self.assertIn('sessions',codes(left['reasons']))
+        refused=self.delete(tree,left['fingerprint']);self.assertNotEqual(refused.returncode,0);self.assertIn('Archive them first',refused.stderr)
+        self.assertEqual(json.loads(refused.stdout)['status'],'kept')
+        for file in (self.root/'state').glob('*.json'):file.unlink()
+        sleeper=subprocess.Popen(['sleep','60'],cwd=tree);self.addCleanup(sleeper.wait);self.addCleanup(sleeper.kill)
+        left=self.leftover(tree);self.assertIn('processes',codes(left['reasons']))
+        self.assertNotEqual(self.delete(tree,left['fingerprint']).returncode,0)
+        sleeper.kill();sleeper.wait()
+        (tree/'target'/'readonly').chmod(0o755);nested=tree/'target'/'readonly'/'inner';nested.mkdir();self.git('init','-q',str(nested));(tree/'target'/'readonly').chmod(0o555)
+        left=self.leftover(tree);self.assertIn('nested_repository',codes(left['reasons']));self.assertFalse(left['deletable'])
+        self.assertNotEqual(self.delete(tree,left['fingerprint']).returncode,0)
+        self.assertTrue((nested/'.git').is_dir());self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
+    def test_a_stopped_deletion_keeps_its_record_and_is_never_retried(self):
+        tree,_,_=self.partial('stopped');left=self.leftover(tree)
+        parent=tree.parent;mode=parent.stat().st_mode;parent.chmod(0o555);self.addCleanup(lambda:parent.chmod(mode))
+        stopped=self.delete(tree,left['fingerprint']);parent.chmod(mode)
+        self.assertNotEqual(stopped.returncode,0);self.assertIn('Deleting the leftover stopped',stopped.stderr)
+        self.assertEqual(json.loads(stopped.stdout)['status'],'unconfirmed')
+        self.assertTrue(tree.exists());self.assertFalse((tree/'target').exists())
+        later=self.leftover(tree);self.assertIn('Deleting the leftover stopped',later['removal']['detail'])
+        self.assertEqual(later['removal']['status'],'partial');self.assertNotEqual(later['fingerprint'],left['fingerprint'])
+        self.assertNotEqual(self.delete(tree,left['fingerprint']).returncode,0);self.assertTrue(tree.exists())
+        finished=self.delete(tree,later['fingerprint']);self.assertEqual(finished.returncode,0,finished.stderr)
+        self.assertFalse(tree.exists());self.assertEqual(self.records(),[])
     def inspect(self,path,file=None,common=None):
         return subprocess.run([str(HGS),'worktrees','inspect','--path',str(path),'--common-dir',str(common or self.repo/'.git'),*(['--file',file] if file else []),'--json'],env=self.env,text=True,capture_output=True,timeout=30)
     def test_ignored_notes_are_not_candidates_and_require_exact_consent(self):

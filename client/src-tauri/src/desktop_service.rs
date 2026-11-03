@@ -59,9 +59,29 @@ pub(crate) mod retained_import;
 pub type Projection = Arc<dyn Fn(Option<&Value>) + Send + Sync>;
 
 /// Captured before startup exclusion and before any producer is constructed.
+// 0: configured startup; 1: consumer awaiting explicit recovery; 2: resumed consumer.
+static STARTUP_RECOVERY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
 pub fn mode() -> bool {
     static MODE: OnceLock<bool> = OnceLock::new();
-    *MODE.get_or_init(|| service::enabled(std::env::var(service::MODE_ENV).ok().as_deref()))
+    STARTUP_RECOVERY.load(Ordering::Acquire) != 0
+        || *MODE.get_or_init(|| service::enabled(std::env::var(service::MODE_ENV).ok().as_deref()))
+}
+
+/// Before any GUI producer exists, a failed native takeover can only move to
+/// the consumer. This never changes the manager environment or grants a writer.
+pub(crate) fn enter_startup_recovery() {
+    STARTUP_RECOVERY.store(1, Ordering::Release);
+}
+
+fn startup_recovery() -> bool {
+    STARTUP_RECOVERY.load(Ordering::Acquire) == 1
+}
+
+fn ownership_display(view: crate::desktop_ownership::View) -> Option<Value> {
+    let mut value = serde_json::to_value(view).ok()?;
+    value["native_recovery"] = json!(startup_recovery());
+    Some(value)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -596,6 +616,7 @@ impl Service {
             .publish_ownership(crate::desktop_ownership::Phase::Rearm)
             .await;
         if self.shared.ownership.granted() {
+            let _ = STARTUP_RECOVERY.compare_exchange(1, 2, Ordering::AcqRel, Ordering::Acquire);
             // Rearm already made its one explicit report attempt above.
             self.retry_connection();
         }
@@ -603,6 +624,9 @@ impl Service {
     }
     pub(crate) async fn ownership_result(&self) -> crate::desktop_ownership::View {
         let view = self.shared.ownership.request(None, None, None).await;
+        if self.shared.ownership.granted() {
+            let _ = STARTUP_RECOVERY.compare_exchange(1, 2, Ordering::AcqRel, Ordering::Acquire);
+        }
         self.shared
             .publish_ownership(crate::desktop_ownership::Phase::Result)
             .await;
@@ -618,8 +642,10 @@ impl Service {
             .clone()
     }
     pub fn retry(&self) {
-        if let Some(report) = &self.shared.retained_import {
-            report.request_retry();
+        if !startup_recovery() {
+            if let Some(report) = &self.shared.retained_import {
+                report.request_retry();
+            }
         }
         self.retry_connection();
     }
@@ -627,7 +653,9 @@ impl Service {
         if self.shared.stopped.load(Ordering::Acquire) {
             return;
         }
-        read_import::retry(self.shared.clone());
+        if !startup_recovery() {
+            read_import::retry(self.shared.clone());
+        }
         if let Some(cancel) = self
             .shared
             .cancellation
@@ -951,7 +979,7 @@ impl Shared {
         let view = tauri::async_runtime::spawn_blocking(move || owner.record_view(phase))
             .await
             .unwrap_or_else(|_| self.ownership.view());
-        let view = serde_json::to_value(view).ok();
+        let view = ownership_display(view);
         let mut current = self.snapshot.lock().unwrap_or_else(PoisonError::into_inner);
         current.notification_ownership = view;
         self.pump.service(current.clone());
@@ -973,7 +1001,7 @@ impl Shared {
             .notification_controls
             .view()
             .and_then(|v| serde_json::to_value(v).ok());
-        snapshot.notification_ownership = serde_json::to_value(self.ownership.view()).ok();
+        snapshot.notification_ownership = ownership_display(self.ownership.view());
         snapshot.pending_read_import = Some(
             self.read_import
                 .lock()
@@ -1408,7 +1436,7 @@ async fn connection(
     }
     *shared.relay.lock().unwrap_or_else(PoisonError::into_inner) = Some(relay.clone());
     let configuration = preflight(&shared, stop.clone()).await?;
-    if !automatic {
+    if !automatic && !startup_recovery() {
         let explicit = shared
             .retained_import
             .as_ref()
@@ -1423,8 +1451,8 @@ async fn connection(
         .await;
     }
     if shared.ownership_supported.load(Ordering::Acquire) {
-        if automatic {
-            // Reopening a read stream is never a new Grant/Rearm or replay of
+        if automatic || startup_recovery() {
+            // Recovery is read-only until the owner chooses Resume. Reopening a read stream is never a new Grant/Rearm or replay of
             // a retained migration, approval, send or other native intent.
             shared
                 .ownership
@@ -1500,7 +1528,7 @@ async fn connection(
             configuration.clone(),
         );
         tauri::async_runtime::spawn(async move {
-            if !automatic {
+            if !automatic && !startup_recovery() {
                 recover_grant(shared, configuration, stop, cancelled).await;
             }
         })
@@ -1532,6 +1560,7 @@ async fn connection(
                         shared.publish(state.snapshot().clone());
                         retained_import::creations::schedule_current(&shared);
                         if frame["t"] == "hello" && notification_worker.is_none()
+                            && !startup_recovery()
                             && shared.notification_supported.load(Ordering::Acquire)
                             && shared.notification_controls.enabled() {
                             if let Some(epoch) = state.snapshot().epoch.clone() {

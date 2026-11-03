@@ -94,6 +94,83 @@ impl Fixture {
 }
 
 #[test]
+fn uncaptured_notification_writer_revokes_the_durable_epoch_and_can_hold_the_same_receipt() {
+    let mut f = Fixture::new();
+    let service: String = f
+        .store
+        .db
+        .query_row("SELECT epoch FROM service WHERE id=1", [], |row| row.get(0))
+        .unwrap();
+    let writer = uuid::Uuid::new_v4().to_string();
+    zerus_desktop_ledger::authorize(&mut f.store.db, &writer, &service).unwrap();
+    // A restart revokes admission but preserves the original durable writer.
+    // No notification grant/host has been captured by this fresh Runtime.
+    zerus_desktop_ledger::begin_service(&mut f.store.db, &service).unwrap();
+    assert!(f.runtime.notifications.writer_epoch().is_none());
+    let id = uuid::Uuid::new_v4().to_string();
+    let captured = f.runtime.captured_writer_epoch();
+    let reply = crate::desktop::revoke::request_with_runtime(
+        &f.location,
+        &mut f.store,
+        &json!({"op":"revoke","request_id":id,"reason":"rollback"}),
+        &service,
+        captured.as_deref(),
+        None,
+        |store| f.runtime.drain(store, Duration::from_secs(2)),
+    );
+    assert!(
+        f.runtime.drained(),
+        "original resources must actually drain before assertion"
+    );
+    assert_eq!(reply["checkpointed"], true, "{reply}");
+    let held =
+        crate::desktop::revoke::hold::acquire_for_test(&f.location, &id).unwrap_or_else(|error| {
+            panic!("same original settled receipt must acquire its hold: {error:#}")
+        });
+    assert_eq!(reply["request_id"], id);
+    assert_eq!(reply["writer_epoch"], writer);
+    drop(held);
+}
+
+#[test]
+fn failed_notification_authorize_never_publishes_an_uncommitted_writer() {
+    let _serial = preparation::TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut f = Fixture::new();
+    assert!(ownership::grant(&f.store, &f.location.configuration)
+        .unwrap()
+        .is_some());
+    f.store.db.execute_batch("CREATE TRIGGER r9_authorize_failure BEFORE UPDATE OF epoch ON desktop_writer BEGIN SELECT RAISE(ABORT,'fixture authorize failure'); END;").unwrap();
+    let (release, blocked) = mpsc::channel();
+    let admission = f
+        .runtime
+        .notifications
+        .begin_blocked_for_test(&mut f.store, blocked);
+    let published = f.runtime.notifications.writer_epoch().map(str::to_owned);
+    let _ = release.send(());
+    f.runtime
+        .drain(&mut f.store, Duration::from_secs(2))
+        .unwrap();
+    assert!(
+        admission.is_err(),
+        "fixture must exercise failed ledger authorization"
+    );
+    assert!(
+        published.is_none(),
+        "a failed authorize is not a captured writer"
+    );
+    let epoch: Option<String> = f
+        .store
+        .db
+        .query_row("SELECT epoch FROM desktop_writer WHERE id=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(epoch.is_none());
+}
+
+#[test]
 fn slow_replacement_keeps_draining_on_actor_turns_without_a_client_retry() {
     let _serial = preparation::TEST_SERIAL
         .lock()

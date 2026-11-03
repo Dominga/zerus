@@ -488,15 +488,48 @@ function useRows(strip: boolean) {
   return { ref, rows, virtualizer, byId, keys, startOf, offsets, heights, heightOf: (id: string) => { const i = rows().findIndex((r) => r.id === id); return heights()[i] ?? 94; } };
 }
 
-/** Slides the full panel out from under the strip (transform only). */
+/** The panel slide in flight, and the timer that ends it. */
+let sliding: { animation: Animation; timer: number } | undefined;
+/** Every slide request takes the next number; a queued opening runs only
+ * while its number is still the latest (see slideOpenLater). */
+let slideRequest = 0;
+
+/**
+ * Slides the full panel out from under the strip (transform only). Like the
+ * row morph, the slide never ends by itself (zerus-attm): vblank-paced 144 Hz
+ * WebKitGTK presented the pre-slide layer for one frame when it did, a closed
+ * panel flashing back open. It holds its end until OPEN_MS + 40, then is
+ * cancelled with `done` (which hides a closed panel) in the same task. A new
+ * slide replaces the one in flight; that one's `done` is not run.
+ */
 function slide(el: HTMLElement | undefined, width: number, opening: boolean, done?: () => void) {
+  slideRequest++;
+  if (sliding) {
+    clearTimeout(sliding.timer);
+    sliding.animation.cancel();
+    sliding = undefined;
+  }
   if (!el || motionReduced()) { done?.(); return; }
-  const hidden = `translateX(${-(width - STRIP_WIDTH)}px)`;
-  const a = el.animate(
-    opening ? [{ transform: hidden, opacity: 0.6 }, { transform: "translateX(0)", opacity: 1 }] : [{ transform: "translateX(0)", opacity: 1 }, { transform: hidden, opacity: 0 }],
-    { duration: OPEN_MS, easing: OUT_CUBIC },
-  );
-  a.onfinish = () => done?.();
+  const hidden = { transform: `translateX(${-(width - STRIP_WIDTH)}px)`, opacity: opening ? 0.6 : 0 };
+  const shown = { transform: "translateX(0)", opacity: 1 };
+  const animation = opening ? hold(el, hidden, shown, 0, OPEN_MS, OUT_CUBIC) : hold(el, shown, hidden, 0, OPEN_MS, OUT_CUBIC);
+  const timer = window.setTimeout(() => {
+    if (sliding?.animation !== animation) return;
+    sliding = undefined;
+    animation.cancel();
+    done?.();
+  }, OPEN_MS + 40);
+  sliding = { animation, timer };
+}
+
+/**
+ * Opens the panel in the next frame, once it is shown. A newer slide request
+ * before then (a close in the same turn, say) supersedes it: it never runs,
+ * so it cannot cancel that close and leave the panel open (#1158 review).
+ */
+function slideOpenLater(el: () => HTMLElement | undefined, width: () => number) {
+  const request = ++slideRequest;
+  requestAnimationFrame(() => { if (request === slideRequest) slide(el(), width(), true); });
 }
 
 export function SessionList() {
@@ -537,13 +570,13 @@ export function SessionList() {
       setPeek(false);
       setStripMode(false);
       setPanelVisible(true);
-      requestAnimationFrame(() => slide(panel, sessionsWidth(), true));
+      slideOpenLater(() => panel, sessionsWidth);
     }
   };
   // Peek: the full panel lies over the conversation; the strip stays put.
   createEffect(on(peek, (open, was) => {
     if (!stripMode() || open === was) return;
-    if (open) { setPanelVisible(true); requestAnimationFrame(() => slide(panel, sessionsWidth(), true)); }
+    if (open) { setPanelVisible(true); slideOpenLater(() => panel, sessionsWidth); }
     else slide(panel, sessionsWidth(), false, () => { if (!peek() && stripMode()) setPanelVisible(false); });
   }, { defer: true }));
 

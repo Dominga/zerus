@@ -1588,12 +1588,18 @@ fn the_explicit_sessions_dock_width_wins_over_the_legacy_splitter() {
             family(&report, "sessions-width")["imported"],
             json!(["workspace/sessionsWidth"])
         );
-        if outcome.get("session-splitter").is_some() {
-            assert_eq!(
-                saved["g3_outcome"]["session-splitter"]["imported"],
-                json!([])
-            );
-        }
+        // No superseded "Imported earlier" splitter row, with or without an
+        // earlier outcome (probe PE).
+        let legacy = family(&report, "session-splitter");
+        assert_eq!(
+            (&legacy["imported"], &legacy["kept"]),
+            (&json!([]), &json!([])),
+            "{outcome}"
+        );
+        assert_eq!(
+            saved["g3_outcome"]["session-splitter"],
+            json!({"imported": [], "kept": []})
+        );
     }
     // The splitter recorded the person's own width (kept): never replaced,
     // even when it equals the splitter's value (probe PB).

@@ -59,6 +59,11 @@ fn uuid(value: &str) -> bool {
 // This stricter decoder is local to this bounded wire route. Generic outboxes
 // and imported opaque originals keep their existing decoders and bytes.
 struct Unique(Value);
+pub(crate) fn original_value(original: &str) -> Result<Value, &'static str> {
+    serde_json::from_str::<Unique>(original)
+        .map(|v| v.0)
+        .map_err(|_| "invalid_task_start_reconcile_original")
+}
 impl<'de> Deserialize<'de> for Unique {
     fn deserialize<D: serde::Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
         struct Visitor;
@@ -129,9 +134,8 @@ impl Intent {
         {
             return Err("invalid_task_start_reconcile_intent");
         }
-        let record: Unique = serde_json::from_str(&self.original)
-            .map_err(|_| "invalid_task_start_reconcile_original")?;
-        let input = record.0["intent"]["retained_input"]
+        let record = original_value(&self.original)?;
+        let input = record["intent"]["retained_input"]
             .as_str()
             .filter(|input| !input.is_empty())
             .ok_or("task_start_original_input_required")?;

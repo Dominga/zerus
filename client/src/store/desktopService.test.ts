@@ -93,6 +93,30 @@ describe("desktop service presentation", () => {
     expect(retainedSourceNotice(serviceView({ retained_source_import: { ...report, required: false } }))).toBe("");
     expect(retainedSourceNotice(serviceView({ retained_source_import: { ...report, required: false, complete: true, code: "retained_import_staged", creations_capture: { code: "creation_source_unavailable", paused: true, capture_id: null } } }))).toContain("Session creation is paused");
   });
+  it("shows refused draft saves first and a paused draft import until Retry", () => {
+    const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
+    const drafts = { code: "draft_capture_private_slot", writes: false, paused: true, capture_id: null, manifests: 0 };
+    const view = (patch = {}) => serviceView({ retained_source_import: { ...report, drafts_capture: { ...drafts, ...patch } } });
+    expect(retainedSourceNotice(view())).toContain("Drafts are not being saved");
+    const refused = retainedSourceDetails(view())!.drafts!;
+    expect(refused.code).toBe("draft_capture_private_slot");
+    expect(refused.next).toContain("records the earlier drafts before any draft is saved");
+    const paused = view({ code: "draft_capture_too_large", writes: true });
+    expect(retainedSourceNotice(paused)).toContain("Importing drafts from Qt is paused");
+    expect(retainedSourceDetails(paused)!.drafts!.next).toContain("never records them later");
+    // After Retry resumed the import, the banner goes, but the report keeps
+    // the not-captured outcome visibly incomplete; an unknown code too.
+    const resumed = view({ code: "draft_capture_too_large", writes: true, paused: false });
+    expect(retainedSourceNotice(resumed)).toBe("");
+    expect(retainedSourceDetails(resumed)!.drafts!.next).toContain("stays incomplete");
+    expect(retainedSourceDetails(view({ code: "draft_capture_future", writes: true, paused: false }))!.drafts!.code).toBe("draft_capture_future");
+    // A captured store, or one with no drafts, shows nothing.
+    for (const code of ["draft_capture_captured", "draft_capture_not_applicable"]) {
+      expect(retainedSourceNotice(view({ code, writes: true, paused: false }))).toBe("");
+      expect(retainedSourceDetails(view({ code, writes: true, paused: false }))).toBeUndefined();
+    }
+    expect(paused.connected).toBe(true);
+  });
   it("explains the archive and data-directory refusals without changing readiness", () => {
     const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
     const view = (code: string) => serviceView({ retained_source_import: { ...report, creations_capture: { code, paused: true, capture_id: null } } });

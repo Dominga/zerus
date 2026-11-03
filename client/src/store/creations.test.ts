@@ -173,6 +173,24 @@ describe("the cards", () => {
     t.dispose();
   });
 
+  it.each(["", "studio"])("never adopts another launch with the bound session's name (computer %s)", async (host) => {
+    const c = card("a", { host, launch_id: "current", launch_dispatched: true, state: "confirming" });
+    const t = setup([c]);
+    await t.started;
+    t.store.selectCreation(c.id);
+    const other = t.list(1, { name: "claude/sample/tag-a", launch_id: "retired", state: "running" }, host);
+    t.emit({ ...c, state: "bound", show_pending: false, bound_session: other.name });
+    expect(t.selectedKey()).toBe(creationRowId(c.id));
+    expect(t.store.creationCount()).toBe(1);
+    expect(t.revealed).not.toContain(other.key);
+    const current = t.list(2, { name: other.name, launch_id: "current", state: "running" }, host);
+    await flush();
+    expect(t.selectedKey()).toBe(current.key);
+    expect(t.store.creations()).toEqual([]);
+    expect(t.revealed).not.toContain(other.key);
+    t.dispose();
+  });
+
   it("come from the first read and the events, the events winning", async () => {
     const t = setup([card("a", { caption: "Queued" }), card("b"), card("gone"), card("old", { state: "bound" })]);
     // Before the read answers: a change of a, the removal of gone.

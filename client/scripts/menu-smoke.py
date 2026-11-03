@@ -25,7 +25,12 @@ parser.add_argument("--xvfb-child", action="store_true", help=argparse.SUPPRESS)
 parser.add_argument("--paint-column", type=int, metavar="X",
                     help="check the presented frames of a page that reports `morphs`: a 4 px column at X "
                          "through a magenta collapsing card must never grow again (row-collapse-smoke)")
+parser.add_argument("--paint-row", type=int, metavar="Y",
+                    help="check the presented frames of a page that reports `slides`: the right edge of a "
+                         "magenta panel on a 4 px row at Y must only move with each slide (panel-slide-smoke)")
 args = parser.parse_args()
+if args.paint_column is not None and args.paint_row is not None:
+    parser.error("choose one painted sample")
 if not args.url.startswith("http://127.0.0.1:"):
     parser.error("use the local Vite server")
 if args.real_display and (args.xvfb_child or args.probe_display):
@@ -40,9 +45,17 @@ if not args.real_display and not args.xvfb_child:
     command = ["xvfb-run", "-a", sys.executable, __file__, "--xvfb-child", "--url", args.url, "--title", args.title]
     if args.paint_column is not None:
         command += ["--paint-column", str(args.paint_column)]
+    if args.paint_row is not None:
+        command += ["--paint-row", str(args.paint_row)]
     if args.probe_display:
         command.append("--probe-display")
-    child = subprocess.Popen(command, env=env, start_new_session=True)
+    # Debian/Ubuntu xvfb-run runs its command with 2>&1. Hand the child this
+    # stderr as an inherited descriptor, so its reasons (a missing GTK stack,
+    # a refused display) stay on stderr and stdout carries only the result.
+    stderr_fd = os.dup(2)
+    env["ZERUS_MENU_STDERR_FD"] = str(stderr_fd)
+    child = subprocess.Popen(command, env=env, start_new_session=True, pass_fds=(stderr_fd,))
+    os.close(stderr_fd)
     try:
         raise SystemExit(child.wait(timeout=45))
     except subprocess.TimeoutExpired:
@@ -54,6 +67,12 @@ if not args.real_display and not args.xvfb_child:
             os.killpg(child.pid, signal.SIGKILL)
             child.wait(timeout=5)
         raise SystemExit("Private display regression exceeded its deadline")
+
+if args.xvfb_child and os.environ.get("ZERUS_MENU_STDERR_FD", "").isdigit():
+    # Restore the parent's stderr that xvfb-run merged into stdout (see above).
+    inherited = int(os.environ.pop("ZERUS_MENU_STDERR_FD"))
+    os.dup2(inherited, 2)
+    os.close(inherited)
 
 if not args.real_display:
     os.environ["GDK_BACKEND"] = "x11"
@@ -105,6 +124,41 @@ def painted_collapse(frames, morphs, height):
             failures.append(f"collapse {index}: only {len(shown)} painted frames were captured")
         if taller:
             failures.append(f"collapse {index}: {len(taller)} painted frames were taller after the collapse began")
+    return {"paint": cases, "paint_failures": failures}
+
+
+def painted_slide(frames, slides, width, stride):
+    """Each slide's painted panel (magenta at any opacity, on black) moves one
+    way only: a closing slide's right edge never grows back, an opening one's
+    never shrinks back, from its first move until the slide's window ends."""
+    def edge(data):
+        row = data[:stride]
+        right = 0
+        for x in range(width):
+            b, g, r = row[x * 4], row[x * 4 + 1], row[x * 4 + 2]
+            if r > 20 and b > 20 and g < 20:
+                right = x + 1
+        return right
+    cases, failures = [], []
+    for slide in slides:
+        start = slide["at"] / 1000
+        shown = [(t, edge(data)) for t, data in frames if start - 0.03 <= t <= start + 0.8]
+        opening, moved, extreme, back = slide["opening"], False, None, []
+        for t, right in shown:
+            if extreme is not None and right != extreme and (right > extreme) == opening:
+                moved = True
+            if moved and extreme is not None and ((right < extreme - 2) if opening else (right > extreme + 2)):
+                back.append({"ms": round((t - start) * 1000), "edge": right, "extreme": extreme})
+            extreme = right if extreme is None else (max(extreme, right) if opening else min(extreme, right))
+        edges = [right for _, right in shown]
+        cases.append({"slide": slide["name"], "painted_frames": len(shown), "from": edges[:1], "to": edges[-1:],
+                      "back": back[:5]})
+        if len(shown) < 5:
+            failures.append(f"{slide['name']}: only {len(shown)} painted frames were captured")
+        if not moved:
+            failures.append(f"{slide['name']}: the painted panel did not slide")
+        if back:
+            failures.append(f"{slide['name']}: {len(back)} painted frames went back against the slide")
     return {"paint": cases, "paint_failures": failures}
 
 
@@ -169,16 +223,22 @@ with tempfile.TemporaryDirectory(prefix="zerus-menu-") as scratch:
         return True
 
     # What WebKit hands GTK each frame, polled in-process: no screen capture.
-    painted, PAINT_HEIGHT = [], 800
-    if args.paint_column is not None:
+    painted, PAINT_HEIGHT, PAINT_WIDTH = [], 800, 1000
+    if args.paint_column is not None or args.paint_row is not None:
         import cairo
-        surface = cairo.ImageSurface(cairo.FORMAT_RGB24, 4, PAINT_HEIGHT)
+        if args.paint_column is not None:
+            surface = cairo.ImageSurface(cairo.FORMAT_RGB24, 4, PAINT_HEIGHT)
+        else:
+            surface = cairo.ImageSurface(cairo.FORMAT_RGB24, PAINT_WIDTH, 4)
 
         def poll_paint():
             cr = cairo.Context(surface)
             cr.set_source_rgb(0, 0, 0)
             cr.paint()
-            cr.translate(-args.paint_column, 0)
+            if args.paint_column is not None:
+                cr.translate(-args.paint_column, 0)
+            else:
+                cr.translate(0, -args.paint_row)
             view.draw(cr)
             surface.flush()
             data = bytes(surface.get_data())
@@ -197,6 +257,9 @@ with tempfile.TemporaryDirectory(prefix="zerus-menu-") as scratch:
     Gtk.main()
     if args.paint_column is not None:
         result = {**result, **painted_collapse(painted, result.get("morphs", []), PAINT_HEIGHT)}
+        result["failures"] = result.get("failures", []) + result.pop("paint_failures")
+    if args.paint_row is not None:
+        result = {**result, **painted_slide(painted, result.get("slides", []), PAINT_WIDTH, surface.get_stride())}
         result["failures"] = result.get("failures", []) + result.pop("paint_failures")
     print(json.dumps({**result, **display_info, "real_display": args.real_display,
                       "webkit": f"{WebKit2.get_major_version()}.{WebKit2.get_minor_version()}.{WebKit2.get_micro_version()}"}, indent=2))

@@ -221,6 +221,14 @@ not evidence that these two bugs should remain unfixed.
 - `0003-GTK3-arm-Wayland-frame-callback-before-GL-swap.patch`: GTK 3.24.52 GL
   end-paint arms the real surface callback before the buffer swap. It also
   applies to gtk-3-24 commit `4ef4903ed50e11bb13a34c5ea07523bd136370a4`.
+- [The companion frame-clock correction](../../../client/patches/0004-GDK-complete-paint-before-thaw.patch)
+  completes the paint phase before a backend freeze resumes. Otherwise a busy
+  producer can repeat paint after every thaw, starving layout and after-paint
+  while a resized window keeps its old child allocation. Apply it to the same
+  GTK source after patch 0003. The private-Xvfb regression is
+  `client/scripts/test-gtk-frame-clock.py`; the native Wayland resize and pacing
+  regression is `client/scripts/window-resize-smoke.py` with the `resize_fixture`
+  example. Both require an explicitly selected private build.
 - The WebKit patches apply with `git apply --check` to WebKit main commit
   `6740c3a3f01a5a450fa7698037385790dfa3aa87` as well as the verified 2.54.1
   source. Main has not been built in this task.

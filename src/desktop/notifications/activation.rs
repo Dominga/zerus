@@ -79,6 +79,8 @@ pub(in crate::desktop) struct Router {
     waiting: Option<Wait>,
     stopping: bool,
     overflow: u64,
+    /// Foreground rights lent to and refused for receivers of an Open.
+    foreground: (u64, u64),
 }
 impl Router {
     pub fn new(configuration: &str, epoch: &str) -> Self {
@@ -89,6 +91,7 @@ impl Router {
             waiting: None,
             stopping: false,
             overflow: 0,
+            foreground: (0, 0),
         }
     }
     pub fn offer(&mut self, store: &Store, outbox: &Outbox, value: Activation) -> Result<bool> {
@@ -160,6 +163,15 @@ impl Router {
             return;
         }
         let wait = self.waiting.take().unwrap();
+        // Best-effort, after the handoff proof and before the reply exists.
+        #[cfg(any(windows, test))]
+        if activation.is_some() {
+            if wait.peer.lend_foreground() {
+                self.foreground.0 = self.foreground.0.saturating_add(1);
+            } else {
+                self.foreground.1 = self.foreground.1.saturating_add(1);
+            }
+        }
         // No replay after an uncertain pipe handoff. The frontend may start its
         // next wait; another native click is a distinct event with its own ID.
         let reply = Reply {
@@ -276,7 +288,7 @@ impl Router {
         }
     }
     pub fn status(&self) -> Value {
-        json!({"abi":wire::ABI,"pending":self.pending.len(),"limit":wire::QUEUE,"waiting":self.waiting.is_some(),"stopping":self.stopping,"overflow":self.overflow,"durable":false})
+        json!({"abi":wire::ABI,"pending":self.pending.len(),"limit":wire::QUEUE,"waiting":self.waiting.is_some(),"stopping":self.stopping,"overflow":self.overflow,"foreground":{"lent":self.foreground.0,"refused":self.foreground.1},"durable":false})
     }
 }
 impl Drop for Router {

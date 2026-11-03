@@ -1560,6 +1560,15 @@ fn delete_leftover(args: &[String], attempted: &mut bool) -> Result<Value> {
     }
     let expected = RootIdentity::from_json(&row["root_identity"])
         .ok_or("The leftover folder cannot be identified. Review it again.")?;
+    // The confirmation is single-use even if deletion changes no files and
+    // recording its stopped outcome fails. Keep this in the existing record
+    // so older readers also see a changed fingerprint. Failure to reserve it
+    // refuses before any filesystem change.
+    let attempt = uuid::Uuid::new_v4();
+    let pending = format!(
+        "Deleting remaining files started: attempt {attempt}. Review the folder again if the outcome is unknown."
+    );
+    super::worktree_maintenance::settle_removal(&record, Some(&pending))?;
     *attempted = true;
     // Completion is confirmed through the parent's descriptor, never by path.
     match delete_tree(&path, &expected, Instant::now() + Duration::from_secs(300)) {
@@ -1571,7 +1580,10 @@ fn delete_leftover(args: &[String], attempted: &mut bool) -> Result<Value> {
         }
         Err(e) => {
             let detail = format!("Deleting the leftover stopped: {e}");
-            let _ = super::worktree_maintenance::settle_removal(&record, Some(&detail));
+            // Keep the unique reference before any possibly long error text:
+            // the bounded detail must never restore a previous confirmation.
+            let stored = format!("Deleting the leftover stopped: attempt {attempt}; {e}");
+            let _ = super::worktree_maintenance::settle_removal(&record, Some(&stored));
             Err(format!(
                 "{detail}\nSome files may remain; review the folder again. The deletion is never retried."
             ))

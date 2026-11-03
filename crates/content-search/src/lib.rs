@@ -11,6 +11,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
+mod parts;
+pub use parts::Part;
 
 pub const DOCUMENT_BYTES: usize = 128 << 10;
 pub const BATCH_BYTES: usize = 512 << 10;
@@ -132,6 +134,15 @@ pub struct Hit {
     pub message: Message,
     pub match_start: usize,
     pub match_end: usize,
+    /// The matching public window, when the original exceeds one document.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub part: Option<PartMatch>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PartMatch {
+    pub offset: usize,
+    pub total: usize,
 }
 #[derive(Debug, Serialize)]
 pub struct Page {
@@ -150,6 +161,8 @@ struct Cursor {
     upper: i64,
     at: f64,
     id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parts: Option<parts::Position>,
 }
 
 pub struct Index {
@@ -265,6 +278,13 @@ impl Index {
     }
 
     pub fn source_progress(&self, key: &str, complete: bool, unavailable: bool) -> Result<()> {
+        let complete = complete
+            && (!self.has_parts()?
+                || !self.db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM message_groups WHERE source=? AND state=0)",
+                    [key],
+                    |r| r.get::<_, bool>(0),
+                )?);
         let changed = self.db.execute(
             "UPDATE sources SET complete=?,unavailable=? WHERE id=? AND active=1",
             params![complete, unavailable, key],
@@ -298,6 +318,7 @@ impl Index {
             );
             encoded.push((message, body, grams));
         }
+        let has_parts = self.has_parts()?;
         let tx = self.db.savepoint()?;
         let active: Option<bool> = tx
             .query_row("SELECT active FROM sources WHERE id=?", [key], |r| r.get(0))
@@ -305,6 +326,13 @@ impl Index {
         ensure!(active == Some(true), "source is missing or retired");
         let mut inserted = 0;
         for (message, body, grams) in encoded {
+            if has_parts {
+                tx.execute(
+                    "UPDATE message_groups SET state=2,publication=0
+                    WHERE source=? AND message=? AND state<>2",
+                    params![key, message.id],
+                )?;
+            }
             let old: Option<(i64, String)> = tx
                 .query_row(
                     "SELECT id,body FROM messages WHERE source=? AND message=?",
@@ -349,24 +377,32 @@ impl Index {
             .query_row("SELECT active FROM sources WHERE id=?", [key], |r| r.get(0))
             .optional()?;
         ensure!(active == Some(false), "only a retired source can be purged");
-        Ok(self.db.execute(
+        let mut count = self.db.execute(
             "DELETE FROM messages WHERE id IN
             (SELECT id FROM messages WHERE source=? ORDER BY id LIMIT ?)",
             params![key, PURGE_ROWS],
-        )?)
+        )?;
+        if self.has_parts()? {
+            count += parts::purge(&self.db, Some(key), PURGE_ROWS - count)?;
+        }
+        Ok(count)
     }
 
     /// Eviction preserves the hard file cap and explicitly makes coverage
     /// incomplete. Freed pages are reused; the disposable file need not shrink.
     /// Like ingestion, it is a savepoint that can join a caller's open step.
     pub fn evict(&mut self) -> Result<usize> {
+        let has_parts = self.has_parts()?;
         let tx = self.db.savepoint()?;
         tx.execute("UPDATE totals SET evicted=1 WHERE id=1", [])?;
-        let deleted = tx.execute(
+        let mut deleted = tx.execute(
             "DELETE FROM messages WHERE id IN
             (SELECT id FROM messages ORDER BY id LIMIT ?)",
             [PURGE_ROWS],
         )?;
+        if has_parts {
+            deleted += parts::purge(&tx, None, PURGE_ROWS - deleted)?;
+        }
         tx.commit()?;
         Ok(deleted)
     }
@@ -413,17 +449,28 @@ impl Index {
             (2..=256).contains(&query.chars().count()) && (1..=200).contains(&limit),
             "invalid indexed search query or limit"
         );
-        let cursor = Cursor {
+        let cursor = self.cursor(hash(&serde_json::to_vec(&(query, limit))?))?;
+        Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&cursor)?))
+    }
+
+    fn cursor(&self, query: String) -> Result<Cursor> {
+        // Capture both insertion bounds in one SQLite read snapshot.
+        let _read = self
+            .db
+            .is_autocommit()
+            .then(|| self.db.unchecked_transaction())
+            .transpose()?;
+        Ok(Cursor {
             version: 1,
             database: self.identity.clone(),
-            query: hash(&serde_json::to_vec(&(query, limit))?),
+            query,
             upper: self
                 .db
                 .query_row("SELECT COALESCE(MAX(id),0) FROM messages", [], |r| r.get(0))?,
             at: f64::MAX,
             id: i64::MAX,
-        };
-        Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&cursor)?))
+            parts: self.parts_position()?,
+        })
     }
 
     pub fn query(&self, query: &str, limit: usize, cursor: Option<&str>) -> Result<Page> {
@@ -459,27 +506,22 @@ impl Index {
                         && decoded.upper >= 0
                         && decoded.id > 0
                         && decoded.at.is_finite()
-                        && decoded.at >= 0.0,
+                        && decoded.at >= 0.0
+                        && decoded.parts.as_ref().is_none_or(parts::Position::valid),
                     "stale or mismatched search cursor"
                 );
                 decoded
             }
-            None => Cursor {
-                version: 1,
-                database: self.identity.clone(),
-                query: fingerprint,
-                upper: self
-                    .db
-                    .query_row("SELECT COALESCE(MAX(id),0) FROM messages", [], |r| r.get(0))?,
-                at: f64::MAX,
-                id: i64::MAX,
-            },
+            None => self.cursor(fingerprint)?,
         };
         let folded = fold(query);
         let gram: String = folded.chars().take(2).collect();
         let pattern = RegexBuilder::new(&regex::escape(query))
             .case_insensitive(true)
             .build()?;
+        if position.parts.is_some() {
+            return self.query_parts(&gram, &pattern, position, take);
+        }
         let mut statement = self.db.prepare_cached(CANDIDATE_SQL)?;
         let mut rows = statement.query(params![gram, position.at, position.id, CANDIDATES + 1])?;
         let mut hits = Vec::new();
@@ -515,6 +557,7 @@ impl Index {
                         match_start: found.start(),
                         match_end: found.end(),
                         message,
+                        part: None,
                     });
                 }
             }

@@ -35,6 +35,7 @@ impl Fixture {
         fs::write(root.join("mode"), mode).unwrap();
         let report = Report::new(Inputs {
             creations: zerus_client_core::migration::preload::Capture::new(root.clone()),
+            local_reads: zerus_client_core::migration::preload::Capture::local_reads(root.clone()),
             data: root.clone(),
             settings: Settings::open(settings_path, None),
             qt: Some(QtStore::Ini(qt)),

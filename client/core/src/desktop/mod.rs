@@ -16,6 +16,7 @@ pub mod activation;
 pub mod approval_audit;
 pub mod cache_maintenance;
 pub mod creation_clone;
+pub mod creation_launch;
 pub mod creation_worktree;
 pub mod drain;
 pub mod notification_control;

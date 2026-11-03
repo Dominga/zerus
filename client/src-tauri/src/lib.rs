@@ -87,6 +87,7 @@ pub mod renderer;
 mod replay;
 #[cfg(feature = "live")]
 mod screens;
+mod selection_diagnostic;
 #[cfg(feature = "live")]
 mod session_files;
 #[cfg(feature = "live")]
@@ -741,7 +742,11 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(task_forms::TaskForms::default());
                 app.manage(task_start::TaskStarts::default());
                 app.manage(actions::ActivityReads::default());
-                app.manage(actions::Attention::new(dir.join(actions::attention_file(replay))));
+                let local_read_path = dir.join(actions::attention_file(replay));
+                app.manage(match app.state::<commands::AppState>().local_read_capture() {
+                    Some(capture) => actions::Attention::new_with_capture(local_read_path, Some(capture)),
+                    None => actions::Attention::new(local_read_path),
+                });
                 let pump = app.state::<commands::AppState>().pump();
                 app.manage(approvals::start(
                     pump.clone(),
@@ -1426,6 +1431,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::unfollow,
         commands::metrics,
         commands::perf_config,
+        commands::acceptance_selection,
         commands::save_perf,
         commands::perf_log,
         commands::smoke_log,
@@ -1771,6 +1777,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::tasks_follow,
         commands::metrics,
         commands::perf_config,
+        commands::acceptance_selection,
         commands::save_perf,
         commands::perf_log,
         commands::display_hz,

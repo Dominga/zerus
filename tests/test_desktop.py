@@ -218,6 +218,22 @@ finally:
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_operations').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_operation_attempts').fetchone()[0], 0)
 
+    def test_creation_launch_is_closed_and_not_yet_advertised(self):
+        self.serve()
+        status = self.cli('desktop', 'status', '--json')
+        scope = dict(configuration=status['configuration'], service_epoch=status['epoch'])
+        creation = str(uuid.uuid4())
+        original = dict(id=creation, creation_schema=1, created=1, revision=6, cmd='codex', tag='example',
+                        host='', state='launching', auto=False, target='/srv/repo', launch_id=creation,
+                        launch_dispatched=True, expected_machine='22222222-2222-4222-8222-222222222222')
+        intent = dict(scope=scope, creation_id=creation, launch_id=creation, revision=6,
+                      original=json.dumps(original, separators=(',', ':')))
+        refused = self.cli('desktop', 'request', '--json', data=dict(op='creation_launch', intent=intent))
+        self.assertFalse(refused['accepted'])
+        self.assertEqual(refused['code'], 'frontend_authentication_required')
+        help_text = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True).stdout
+        self.assertNotIn('desktop-creation-launch', help_text)
+
     @unittest.skipUnless(sys.platform.startswith('linux') or sys.platform == 'darwin', 'Unix registration mode')
     def test_registration_variant_is_read_only_and_service_reports_its_requested_mode(self):
         passive = self.cli('desktop', 'registration', '--json')
@@ -1276,6 +1292,10 @@ finally:
 
     @staticmethod
     def remove_catalog_reason_schema(db):
+        # Rewind the later schema-22 leaf too, never leaving it labelled older.
+        db.execute('DROP INDEX desktop_catalog_approval')
+        db.execute('DROP INDEX desktop_catalog_approval_pending')
+        db.execute('ALTER TABLE desktop_catalog_rows DROP COLUMN approval')
         db.execute('ALTER TABLE desktop_catalog_changes DROP COLUMN reason')
 
     @classmethod

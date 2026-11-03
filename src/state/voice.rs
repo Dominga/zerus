@@ -1269,6 +1269,7 @@ fn worker() -> Result<i32> {
     }
 }
 fn ensure_worker() -> Result<()> {
+    let executable = crate::self_exec::current().map_err(err)?;
     #[cfg(target_os = "linux")]
     if home()
         .join(".config/systemd/user/hgs-voice.service")
@@ -1285,7 +1286,7 @@ fn ensure_worker() -> Result<()> {
     if crate::status::locked(&worker_lock()) || service_worker::waiting(&standby_lock()) {
         return Ok(());
     }
-    let mut cmd = Command::new(std::env::current_exe().map_err(err)?);
+    let mut cmd = Command::new(executable);
     cmd.args(["voice", "worker"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1298,6 +1299,18 @@ fn ensure_worker() -> Result<()> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_image_refuses_before_service_activation() {
+        crate::self_exec::private_probe("state::voice::tests::service_activation_probe");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "run by test_image_refuses_before_service_activation"]
+    fn service_activation_probe() {
+        crate::self_exec::probe_child("state::voice::tests::service_activation_probe");
+        assert_eq!(ensure_worker().unwrap_err(), crate::self_exec::TEST_IMAGE);
+    }
     const ID: &str = "11111111-1111-4111-8111-111111111111";
     #[test]
     fn video_acceptance_keeps_one_durable_media_identity_and_audio_fallback() {

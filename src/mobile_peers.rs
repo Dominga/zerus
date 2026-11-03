@@ -852,7 +852,7 @@ fn transport(
     };
     let bytes = serde_json::to_vec(&envelope)?;
     ensure!(bytes.len() <= MAX_BYTES, "mobile request is too large");
-    let mut command = Command::new(std::env::current_exe()?);
+    let mut command = Command::new(crate::self_exec::current()?);
     command.args(["swarm", "__mobile-peer-transport", "--json"]);
     capture_control(command, &bytes, deadline, cap, CaptureMode::Supervisor)
 }
@@ -888,7 +888,7 @@ fn supervise() -> Result<i32> {
                 envelope.via.is_empty() && envelope.request.is_none(),
                 "invalid local identity transport"
             );
-            let mut command = Command::new(std::env::current_exe()?);
+            let mut command = Command::new(crate::self_exec::current()?);
             command.args(["swarm", "__mobile-peer-identity", "--json"]);
             (command, vec![], 4096)
         }

@@ -63,6 +63,11 @@ worker arguments such as `clone` as test filters instead of entering the CLI
 dispatcher; re-execution can therefore recurse. Unit images now refuse the
 worker entry globally, independent of any individual test's guard. Production
 also rejects nested worker contexts and a Git executable matching its own image.
+The same shared guard covers other production self-exec entry points, including
+detached voice/recovery and worktree/mobile transport helpers. Check it before
+service-manager activation as well as process creation. Reading an image identity
+or recording an installed CLI path is not self-exec and remains available to
+model tests; explicit exact-filter test subprocesses remain separate.
 
 Run compiled repository-worker tests and mutation probes on Linux through
 `python3 tests/bounded_process.py --seconds 60 --max-processes 32 -- TEST_BINARY FILTER`.

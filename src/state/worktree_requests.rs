@@ -144,6 +144,7 @@ pub(super) fn control(action: &str, args: &[String]) -> Result<Value> {
     Ok(value)
 }
 
+/// Runs in-process here: no self-exec to guard.
 #[cfg(not(unix))]
 pub(super) fn create(args: &[String]) -> Result<Value> {
     create_direct(args)
@@ -217,6 +218,7 @@ fn image_proof(identity: crate::platform::FileIdentity) -> String {
 pub(super) fn create(args: &[String]) -> Result<Value> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
+    crate::self_exec::ensure().map_err(|e| e.to_string())?;
     #[cfg(target_os = "linux")]
     let executable = PathBuf::from("/proc/self/exe");
     #[cfg(not(target_os = "linux"))]
@@ -277,4 +279,29 @@ pub(super) fn worker(args: &[String]) -> Result<i32> {
         .write_all(&bytes)
         .map_err(|e| e.to_string())?;
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_image_refuses_the_worker_wrapper_before_self_exec() {
+        crate::self_exec::private_probe("state::worktree_requests::tests::worker_wrapper_probe");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "run by test_image_refuses_the_worker_wrapper_before_self_exec"]
+    fn worker_wrapper_probe() {
+        crate::self_exec::probe_child("state::worktree_requests::tests::worker_wrapper_probe");
+        let id = "11111111-1111-4111-8111-111111111111";
+        let args = ["--receipt", "--request-id", id, "--json"].map(String::from);
+        assert_eq!(
+            super::create(&args).unwrap_err(),
+            crate::self_exec::TEST_IMAGE
+        );
+        assert!(
+            !super::folder().exists(),
+            "no request receipt store is touched"
+        );
+    }
 }

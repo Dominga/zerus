@@ -96,7 +96,7 @@ fn exchange(operation: &str, plan: &Value) -> Result<Value> {
     let invocation = invocation(operation, plan)?;
     // The selected service CLI may be a maintained copy or custom selector.
     // The implementation worker is always this original caller's own image.
-    let program = std::env::current_exe()?;
+    let program = crate::self_exec::current()?;
     let trace = trace::Trace::new();
     let environment = helper_environment(trace.path().unwrap_or(""))?;
     let environment: Vec<_> = environment

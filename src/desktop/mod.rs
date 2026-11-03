@@ -1026,6 +1026,19 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                             .is_some_and(|v| v["op"] == "creation_worktree_result")
                         {
                             creation_worktree::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "task_start_reconcile_result")
+                        {
+                            #[cfg(any(target_os = "linux", target_os = "macos"))]
+                            {
+                                task_start_reconcile::query(&store, hello.request.as_ref().unwrap())
+                            }
+                            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                            {
+                                json!({"read_only":true,"code":"task_start_result_unavailable"})
+                            }
                         } else if hello.request.as_ref().is_some_and(|v| {
                             matches!(
                                 v["op"].as_str(),

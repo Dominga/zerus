@@ -9,6 +9,12 @@ pub const PROFILE: &str = "task-start-reconcile-v1";
 /// The larger pure-policy/storage limits do not enlarge this wire boundary.
 pub const SOURCE_BYTES: usize = 32 << 10;
 
+mod result;
+pub use result::{
+    Attempt, Lookup, Outcome, Phase, Query, Receipt, Review, Ticket, Unknown, RESULT_ABI,
+    RESULT_BYTES,
+};
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Scope {

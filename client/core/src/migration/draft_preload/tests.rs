@@ -125,17 +125,20 @@ fn every_store_is_captured_once_and_reopens_after_restart_unchanged() {
             Root {
                 store: Store::Next,
                 root: 0,
-                present: true
+                present: true,
+                earlier_run: false,
             },
             Root {
                 store: Store::Dev,
                 root: 0,
-                present: false
+                present: false,
+                earlier_run: false,
             },
             Root {
                 store: Store::Qt,
                 root: 0,
-                present: true
+                present: true,
+                earlier_run: false,
             },
         ]
     );
@@ -251,7 +254,7 @@ fn a_crashed_attempt_that_saw_other_originals_fails_instead_of_replacing_them() 
         .iter()
         .map(|(a, b, c)| (*a, *b, c.as_path()))
         .collect();
-    let (index, _) = scan(&roots, &seed.capture_id).unwrap();
+    let (index, _) = scan(&roots, &seed.capture_id, None).unwrap();
     disk::create(
         &s.slot().join("index.json"),
         &serde_json::to_vec(&index).unwrap(),
@@ -487,4 +490,133 @@ fn the_capture_reads_the_same_sources_as_the_import() {
         vec![s.dev()],
         "a root inside Next is not a source"
     );
+}
+
+// review-q R1 on #1230: a capture never reports Next's store as captured
+// when an earlier run wrote it without capturing first, and every run of the
+// switch build captures first, in service mode or not.
+
+fn seed_without_outcome(s: &Scratch) -> Seed {
+    drop(disk::Parents::open(&s.slot(), true).unwrap());
+    let seed = Seed {
+        version: 1,
+        boundary: BOUNDARY.into(),
+        capture_id: uuid::Uuid::new_v4().to_string(),
+    };
+    create_json(&s.slot().join("identity.json"), &seed).unwrap();
+    seed
+}
+
+fn next_texts(s: &Scratch) -> Vec<String> {
+    let seed: Seed = read_json(&s.slot().join("identity.json")).unwrap().unwrap();
+    let snapshot = Snapshot::open(&s.slot(), &seed).unwrap();
+    snapshot
+        .index
+        .entries
+        .iter()
+        .filter(|entry| entry.store == Store::Next)
+        .map(|entry| {
+            let manifest: Value = serde_json::from_slice(snapshot.bytes(entry)).unwrap();
+            manifest["text"].as_str().unwrap_or_default().to_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn probe_a_an_import_by_an_uncaptured_run_is_never_reported_captured() {
+    let s = Scratch::new();
+    draft(&s.qt(), "codex/sample/k", "qt text", b"k", true);
+    // A run that did not capture first imported Qt's draft into Next.
+    let report = drafts::import_once(&s.next(), &sources(&s));
+    assert_eq!(report.imported, 1);
+    let (store, capture) = open(&s, Capture::for_store(s.data(), s.next(), &sources(&s)));
+    store.flush();
+    assert_eq!(capture.status().code, "draft_capture_next_earlier_run");
+    assert!(
+        next_texts(&s).is_empty(),
+        "the imported copy is no Next original"
+    );
+    let seed: Seed = read_json(&s.slot().join("identity.json")).unwrap().unwrap();
+    let snapshot = Snapshot::open(&s.slot(), &seed).unwrap();
+    let next = snapshot
+        .index
+        .roots
+        .iter()
+        .find(|r| r.store == Store::Next)
+        .unwrap();
+    assert!(next.earlier_run);
+    assert!(
+        snapshot.index.entries.iter().any(|e| e.store == Store::Qt),
+        "Qt's original is still recorded"
+    );
+    drop(store);
+    // Restarted: the outcome stays incomplete.
+    let (_store, again) = open(&s, Capture::for_store(s.data(), s.next(), &sources(&s)));
+    _store.flush();
+    assert_eq!(again.status().code, "draft_capture_next_earlier_run");
+}
+
+#[test]
+fn probe_a_fenced_every_switch_run_captures_before_its_import() {
+    let s = Scratch::new();
+    draft(&s.qt(), "codex/sample/k", "qt text", b"k", true);
+    // A switch-build run outside service mode still opens with the capture.
+    let capture = Capture::for_run(true, None, &s.data()).expect("switch runs capture");
+    assert!(Capture::for_run(false, None, &s.data()).is_none());
+    drop(capture);
+    let (store, capture) = open(&s, Capture::for_store(s.data(), s.next(), &sources(&s)));
+    wait(|done| store.import(sources(&s), done));
+    store.flush();
+    assert_eq!(loaded(&store, "codex/sample/k"), "qt text");
+    // Qt's draft is recorded; Next held nothing before its first job.
+    assert_eq!(capture.status().code, "draft_capture_captured");
+    assert!(next_texts(&s).is_empty());
+    drop(store);
+    // A later service-mode run reopens that receipt, not today's store.
+    let (_store, later) = open(&s, Capture::for_store(s.data(), s.next(), &sources(&s)));
+    _store.flush();
+    assert_eq!(later.status().code, "draft_capture_captured");
+    assert!(
+        next_texts(&s).is_empty(),
+        "the imported copy is no Next original"
+    );
+}
+
+#[test]
+fn probe_b_typing_by_an_uncaptured_run_after_a_crashed_capture_is_never_captured() {
+    let s = Scratch::new();
+    draft(&s.next(), "codex/sample/a", "before", b"abc", true);
+    seed_without_outcome(&s);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    // A run that did not capture first saves over Next's original.
+    let plain = drafts::DraftStore::open(s.next());
+    assert_eq!(
+        wait(|done| plain.save_durable("codex/sample/a", text("typed later"), done)),
+        Ok(())
+    );
+    drop(plain);
+    let (store, capture) = open(&s, Capture::for_store(s.data(), s.next(), &sources(&s)));
+    store.flush();
+    assert_eq!(capture.status().code, "draft_capture_next_earlier_run");
+    assert!(next_texts(&s).is_empty(), "typed later is no original");
+}
+
+#[test]
+fn probe_b_fenced_a_crashed_capture_is_redone_before_any_typing() {
+    let s = Scratch::new();
+    draft(&s.next(), "codex/sample/a", "before", b"abc", true);
+    seed_without_outcome(&s);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let (store, capture) = open(&s, Capture::for_store(s.data(), s.next(), &sources(&s)));
+    assert_eq!(
+        wait(|done| store.save_durable("codex/sample/a", text("typed later"), done)),
+        Ok(())
+    );
+    assert_eq!(capture.status().code, "draft_capture_captured");
+    assert_eq!(next_texts(&s), vec!["before".to_owned()]);
+    drop(store);
+    let (_store, later) = open(&s, Capture::for_store(s.data(), s.next(), &sources(&s)));
+    _store.flush();
+    assert_eq!(later.status().code, "draft_capture_captured");
+    assert_eq!(next_texts(&s), vec!["before".to_owned()]);
 }

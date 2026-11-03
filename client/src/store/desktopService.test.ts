@@ -110,6 +110,10 @@ describe("desktop service presentation", () => {
     expect(retainedSourceNotice(resumed)).toBe("");
     expect(retainedSourceDetails(resumed)!.drafts!.next).toContain("stays incomplete");
     expect(retainedSourceDetails(view({ code: "draft_capture_future", writes: true, paused: false }))!.drafts!.code).toBe("draft_capture_future");
+    // Qt's originals recorded, Next's own after an earlier run: incomplete.
+    const earlier = retainedSourceDetails(view({ code: "draft_capture_next_earlier_run", writes: true, paused: false }))!.drafts!;
+    expect(earlier.reason).toContain("Your Qt drafts were recorded");
+    expect(earlier.next).toContain("stays incomplete");
     // A captured store, or one with no drafts, shows nothing.
     for (const code of ["draft_capture_captured", "draft_capture_not_applicable"]) {
       expect(retainedSourceNotice(view({ code, writes: true, paused: false }))).toBe("");

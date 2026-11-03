@@ -16,6 +16,12 @@
 //! seed or the outcome cannot be persisted, the store refuses writes for the
 //! run, so nothing is overwritten without lineage.
 //!
+//! A capture never reports Next's store as captured when it shows an earlier
+//! run that wrote without capturing first: the one-time import marker, or
+//! changes after a seed that has no outcome. Its Qt and dev originals are
+//! still recorded; Next's family stays incomplete
+//! (`draft_capture_next_earlier_run`).
+//!
 //! Drafts differ from the attention-marks capture, whose not-captured outcome
 //! pauses file writes: once the failure is durable it is permanent, so
 //! refusing saves would protect nothing and would hold back what the user
@@ -36,6 +42,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use zerus_desktop_migration::{canonical_uuid, sha256};
 
@@ -120,6 +127,10 @@ pub struct Root {
     pub store: Store,
     pub root: u32,
     pub present: bool,
+    /// Next's store already shows an uncaptured earlier run (its one-time
+    /// import marker, or changes after a seed that has no outcome): none of
+    /// its entries is recorded under the before-first-job boundary.
+    pub earlier_run: bool,
 }
 
 /// The ordered container index: what the source hashes bind.
@@ -235,6 +246,22 @@ impl Capture {
         Self::new(data, next, qt, dev)
     }
 
+    /// The capture of the switch build's own store in `data` and of this
+    /// computer's Qt and dev stores, as its one-time import reads them.
+    pub fn native(data: &Path) -> Self {
+        let next = data.join(drafts::dir(false));
+        let sources = drafts::import_sources(&next, drafts::qt_root(), drafts::dev_roots());
+        Self::for_store(data.into(), next, &sources)
+    }
+
+    /// The capture a run's store opens with: every run of the switch build,
+    /// in service mode or not (the service's capture also reports status), so
+    /// no run of this build writes its store without capturing first. Other
+    /// identities and replay never capture.
+    pub fn for_run(switch: bool, service: Option<Arc<Self>>, data: &Path) -> Option<Arc<Self>> {
+        switch.then(|| service.unwrap_or_else(|| Arc::new(Self::native(data))))
+    }
+
     pub fn status(&self) -> Status {
         lock(&self.state).clone()
     }
@@ -322,8 +349,19 @@ impl Capture {
                 return refuse;
             }
         }
+        let mut resumed = None;
         let seed = match read_json::<Seed>(&slot.join("identity.json")) {
-            Ok(Some(seed)) if seed.valid() => seed,
+            Ok(Some(seed)) if seed.valid() => {
+                // A seed with no outcome: the attempt died inside its job.
+                // Anything in Next's store newer than the seed was written
+                // by a run that did not capture first.
+                resumed = Some(
+                    fs::metadata(slot.join("identity.json"))
+                        .and_then(|meta| meta.modified())
+                        .unwrap_or(UNIX_EPOCH),
+                );
+                seed
+            }
             Ok(Some(_)) | Err(_) => {
                 self.set("draft_capture_private_slot", None, 0);
                 return refuse;
@@ -364,7 +402,7 @@ impl Capture {
                 }
             };
         }
-        match self.capture(&slot, &seed) {
+        match self.capture(&slot, &seed, resumed) {
             Ok(index) => {
                 self.set(captured_code(&index), id, index.entries.len());
                 Gate {
@@ -404,8 +442,13 @@ impl Capture {
         roots
     }
 
-    fn capture(&self, slot: &Path, seed: &Seed) -> SourceResult<Index> {
-        let (index, container) = scan(&self.roots(), &seed.capture_id)?;
+    fn capture(
+        &self,
+        slot: &Path,
+        seed: &Seed,
+        resumed: Option<SystemTime>,
+    ) -> SourceResult<Index> {
+        let (index, container) = scan(&self.roots(), &seed.capture_id, resumed)?;
         let index_bytes = serde_json::to_vec(&index).map_err(|_| SourceError::InvalidMetadata)?;
         if index_bytes.len() > INDEX {
             return Err(SourceError::TooLarge);
@@ -423,7 +466,7 @@ impl Capture {
             )?)
         };
         // The roots again, after the copy: the same originals, or none.
-        let (again, _) = scan(&self.roots(), &seed.capture_id)?;
+        let (again, _) = scan(&self.roots(), &seed.capture_id, resumed)?;
         if again != index {
             return Err(SourceError::SourceChanged);
         }
@@ -455,7 +498,9 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 fn captured_code(index: &Index) -> &'static str {
-    if index.entries.is_empty() {
+    if index.roots.iter().any(|root| root.earlier_run) {
+        "draft_capture_next_earlier_run"
+    } else if index.entries.is_empty() {
         "draft_capture_not_applicable"
     } else {
         "draft_capture_captured"
@@ -550,7 +595,46 @@ fn manifest(path: &Path) -> SourceResult<Option<Vec<u8>>> {
 /// The entries of every root in a fixed order (root, then folder name), with
 /// the container of their exact bytes. Over any cap the whole capture is
 /// too large: never a complete prefix.
-fn scan(roots: &[(Store, u32, &Path)], capture_id: &str) -> SourceResult<(Index, Vec<u8>)> {
+/// Whether Next's store shows a run that wrote without capturing first: its
+/// one-time import marker, or (`resumed`: a seed with no outcome) anything in
+/// it modified after that seed. Bounded like the scan.
+fn earlier_run(root: &Path, resumed: Option<SystemTime>) -> SourceResult<bool> {
+    let marker = root.join(drafts::IMPORT_MARKER);
+    if fs::symlink_metadata(&marker).is_ok() {
+        return Ok(true);
+    }
+    let Some(seed) = resumed else {
+        return Ok(false);
+    };
+    let newer = |path: &Path| {
+        fs::symlink_metadata(path)
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .is_some_and(|modified| modified > seed)
+    };
+    if newer(root) {
+        return Ok(true);
+    }
+    for (scanned, entry) in fs::read_dir(root)
+        .map_err(|_| SourceError::SourceUnreadable)?
+        .enumerate()
+    {
+        if scanned >= MAX_SCAN {
+            return Err(SourceError::TooLarge);
+        }
+        let path = entry.map_err(|_| SourceError::SourceUnreadable)?.path();
+        if newer(&path) || newer(&path.join("draft.json")) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn scan(
+    roots: &[(Store, u32, &Path)],
+    capture_id: &str,
+    resumed: Option<SystemTime>,
+) -> SourceResult<(Index, Vec<u8>)> {
     let mut index = Index {
         version: 1,
         format: FORMAT.into(),
@@ -569,16 +653,22 @@ fn scan(roots: &[(Store, u32, &Path)], capture_id: &str) -> SourceResult<(Index,
                     store,
                     root: number,
                     present: false,
+                    earlier_run: false,
                 });
                 continue;
             }
             Err(_) => return Err(SourceError::SourceUnreadable),
         };
+        let earlier = store == Store::Next && earlier_run(root, resumed)?;
         index.roots.push(Root {
             store,
             root: number,
             present: true,
+            earlier_run: earlier,
         });
+        if earlier {
+            continue;
+        }
         let mut folders = Vec::new();
         for (scanned, entry) in listing.enumerate() {
             if scanned >= MAX_SCAN {

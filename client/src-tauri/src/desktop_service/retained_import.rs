@@ -35,20 +35,12 @@ impl Inputs {
         (identifier == crate::identity::SWITCH_ID && !replay).then(|| Self {
             creations: zerus_client_core::migration::preload::Capture::new(data.clone()),
             local_reads: zerus_client_core::migration::preload::Capture::local_reads(data.clone()),
-            drafts: Arc::new(drafts_capture(&data)),
+            drafts: Arc::new(zerus_client_core::migration::draft_preload::Capture::native(&data)),
             data,
             settings,
             qt: QtStore::here(),
         })
     }
-}
-/// The capture over the Next store's own folder and its one-time import's
-/// sources, as the switch build opens them.
-fn drafts_capture(data: &std::path::Path) -> zerus_client_core::migration::draft_preload::Capture {
-    use zerus_client_core::drafts;
-    let next = data.join(drafts::dir(false));
-    let sources = drafts::import_sources(&next, drafts::qt_root(), drafts::dev_roots());
-    zerus_client_core::migration::draft_preload::Capture::for_store(data.into(), next, &sources)
 }
 struct Captured {
     qt: CapturedQt,

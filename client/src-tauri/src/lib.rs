@@ -804,12 +804,15 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(terminal::Terminals::new(zerus_client_core::default_hgs(), allowed));
                 // A replay never touches the real drafts either.
                 let seeds_qt = app.state::<identity::Identity>().seeds_qt(replay);
-                // The switch build's service mode records Next's drafts first
-                // (G3, zerus-5wmh.66.5.2.1.2): that capture is the store's
-                // first job, before the import and any load or save.
-                let capture = seeds_qt
-                    .then(|| app.state::<commands::AppState>().draft_capture())
-                    .flatten();
+                // Every switch-build run records Next's drafts first (G3,
+                // zerus-5wmh.66.5.2.1.2), in service mode or not: the capture
+                // is the store's first job, before the import and any load
+                // or save. Only service mode publishes its status and Retry.
+                let capture = zerus_client_core::migration::draft_preload::Capture::for_run(
+                    seeds_qt,
+                    app.state::<commands::AppState>().draft_capture(),
+                    &dir,
+                );
                 let drafts = std::sync::Arc::new(match &capture {
                     Some(capture) => zerus_client_core::drafts::DraftStore::open_captured(
                         drafts_root(&dir, replay),

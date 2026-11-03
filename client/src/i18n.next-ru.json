@@ -654,6 +654,7 @@
   "Worktree details": "Подробности рабочего дерева",
   "Worktree panel closed.": "Панель рабочих деревьев закрыта.",
   "Yes": "Да",
+  "Your Qt drafts were recorded. Drafts already in Zerus could not be recorded, because an earlier run changed them first.": "Черновики Qt записаны. Черновики, уже имевшиеся в Zerus, записать не удалось: их изменил более ранний запуск.",
   "Your sessions remain available while the report is prepared.": "Сеансы остаются доступны во время подготовки отчёта.",
   "Zerus Next %1 (development build). Open About": "Zerus Next %1 (сборка для разработки). Открыть «О программе»",
   "Zerus could not confirm desktop ownership. Background work has not started. Close this message, then start Zerus again through its normal launcher. If the problem continues, check the desktop service.": "Zerus не удалось подтвердить передачу фоновых задач. Фоновая работа не запущена. Закройте это сообщение и запустите Zerus обычным способом. Если проблема сохраняется, проверьте службу рабочего стола.",

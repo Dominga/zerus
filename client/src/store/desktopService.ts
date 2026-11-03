@@ -94,7 +94,9 @@ export function retainedSourceDetails(state: DesktopService | undefined): Migrat
       ? tr("Drafts are not being saved because their earlier versions could not be recorded. Check the Zerus data folder, then retry.")
       : drafts.paused
         ? tr("Importing drafts from Qt is paused because the earlier drafts could not be recorded. New drafts are saved.")
-        : tr("The earlier drafts could not be recorded for the migration report. Drafts are saved and imported normally."),
+        : drafts.code === "draft_capture_next_earlier_run"
+          ? tr("Your Qt drafts were recorded. Drafts already in Zerus could not be recorded, because an earlier run changed them first.")
+          : tr("The earlier drafts could not be recorded for the migration report. Drafts are saved and imported normally."),
     next: !drafts.writes
       ? tr("Check that the Zerus data folder is available and owned by your user. Retry records the earlier drafts before any draft is saved.")
       : drafts.paused

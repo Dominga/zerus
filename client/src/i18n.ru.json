@@ -2908,6 +2908,7 @@
   "You (video)": "Вы (видео)",
   "You (voice)": "Вы (голос)",
   "You count as away after two minutes without keyboard or mouse input on every computer running Zerus, or while their screens are locked. Your computers and the phone share this choice.": "Zerus считает, что вас нет на месте, если на всех компьютерах с Zerus две минуты не было ввода с клавиатуры или мыши или их экраны заблокированы. Этот выбор общий для ваших компьютеров и телефона.",
+  "Your Qt drafts were recorded. Drafts already in Zerus could not be recorded, because an earlier run changed them first.": "Черновики Qt записаны. Черновики, уже имевшиеся в Zerus, записать не удалось: их изменил более ранний запуск.",
   "Your accounts across all machines. Choose an account to manage where it is available.": "Ваши учетные записи на всех машинах. Выберите учетную запись, чтобы указать, где она доступна.",
   "Your agent needs you. Open its terminal to respond.": "Ваш агент нуждается в вас. Откройте терминал, чтобы ответить.",
   "Your answer": "Ваш ответ",

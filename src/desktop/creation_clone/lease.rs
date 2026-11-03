@@ -18,14 +18,14 @@ use zerus_desktop_ledger::operations::Ticket;
 use zerus_watch_protocol::Body;
 
 #[derive(Clone, PartialEq, Eq)]
-pub(super) struct Machine {
+pub(in crate::desktop) struct Machine {
     generation: u64,
     stream: String,
     pub id: String,
 }
 impl Machine {
     #[cfg(test)]
-    pub(super) fn fixture(id: &str) -> Self {
+    pub(in crate::desktop) fn fixture(id: &str) -> Self {
         Self {
             generation: 1,
             stream: "actor-fixture".into(),
@@ -82,7 +82,7 @@ impl Machine {
     }
 }
 
-pub(super) struct Lease {
+pub(in crate::desktop) struct Lease {
     pub id: String,
     pub writer_epoch: String,
     pub scope: Scope,

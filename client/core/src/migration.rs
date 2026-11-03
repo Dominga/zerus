@@ -18,6 +18,7 @@ use zerus_desktop_migration::{
 };
 
 pub mod creation_report;
+pub mod draft_preload;
 pub mod families;
 pub mod journal;
 pub mod preload;

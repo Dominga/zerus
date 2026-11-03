@@ -702,6 +702,25 @@ fn a_missing_original_start_ack_never_unlinks_or_invents_an_unknown_fence() {
     );
     assert_eq!(f.store.operation_undrained().unwrap(), 1);
     assert!(root.join("report.txt").is_file());
+    // Keep the original sender connected across several 50 ms receive polls.
+    // A timeout must not manufacture a permit; Disconnected is a separate path.
+    let unanswered_until = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < unanswered_until {
+        assert_eq!(
+            fs::read(root.join("report.txt")).unwrap(),
+            b"cached original"
+        );
+        assert!(!f
+            .runtime
+            .job
+            .as_ref()
+            .unwrap()
+            .thread
+            .as_ref()
+            .unwrap()
+            .is_finished());
+        thread::sleep(Duration::from_millis(10));
+    }
     drop(reply); // Only the original private reply; no actor commit or permit.
     f.drain();
     let row = ledger::load(&f.store.db, &operation).unwrap().unwrap();
@@ -759,6 +778,64 @@ fn a_start_commit_write_failure_does_not_release_a_permit_or_unlink() {
         [ledger::FileState::Kept]
     );
     assert!(root.join("report.txt").is_file());
+}
+
+#[test]
+fn a_start_commit_veto_after_the_update_never_releases_a_permit() {
+    let mut f = Fixture::new();
+    let root = f.save();
+    let (prepare, operation) = f.prepare(&root, 0);
+    f.execute(&prepare, &operation);
+    let updates = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = Arc::clone(&updates);
+    f.store.db.update_hook(Some(
+        move |action: rusqlite::hooks::Action, _database: &str, table: &str, _row: i64| {
+            if action == rusqlite::hooks::Action::SQLITE_UPDATE
+                && table == "desktop_cache_operations"
+            {
+                observed.fetch_add(1, Ordering::AcqRel);
+            }
+        },
+    ));
+    let commits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = Arc::clone(&commits);
+    f.store.db.commit_hook(Some(move || {
+        observed.fetch_add(1, Ordering::AcqRel);
+        true // Roll back at commit, after start_effects completed its UPDATE.
+    }));
+    let until = Instant::now() + Duration::from_secs(3);
+    while !f.runtime.error {
+        f.runtime.poll(&mut f.store);
+        assert!(Instant::now() < until, "start commit veto was not observed");
+        thread::sleep(Duration::from_millis(1));
+    }
+    f.store.db.commit_hook(None::<fn() -> bool>);
+    f.store
+        .db
+        .update_hook(None::<fn(rusqlite::hooks::Action, &str, &str, i64)>);
+    assert_eq!(updates.load(Ordering::Acquire), 1);
+    assert_eq!(commits.load(Ordering::Acquire), 1);
+    assert!(
+        !ledger::load(&f.store.db, &operation)
+            .unwrap()
+            .unwrap()
+            .effect_started
+    );
+    assert!(root.join("report.txt").is_file());
+    // Removing the veto only permits settlement, never a replacement start ACK.
+    f.drain();
+    let row = ledger::load(&f.store.db, &operation).unwrap().unwrap();
+    assert_eq!(row.phase, ledger::Phase::Settled);
+    assert!(!row.effect_started);
+    assert_eq!(
+        row.receipt.as_ref().unwrap().files,
+        [ledger::FileState::Kept]
+    );
+    assert_eq!(row.receipt, row.kept_receipt);
+    assert_eq!(
+        fs::read(root.join("report.txt")).unwrap(),
+        b"cached original"
+    );
 }
 
 #[test]

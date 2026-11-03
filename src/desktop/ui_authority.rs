@@ -304,7 +304,7 @@ impl Validated {
     }
     /// Only the per-kind actor may consume this after BEGIN IMMEDIATE, then
     /// recheck its actual current source/lease and freeze the original bytes.
-    #[allow(dead_code)] // The executing actor follows this closed refusal-only slice.
+    #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
     pub fn task_start_reconcile(
         self,
     ) -> Result<zerus_client_core::desktop::task_start_reconcile::Intent> {
@@ -313,6 +313,18 @@ impl Validated {
             anyhow::bail!("not a task Start reconciliation");
         };
         Ok(*intent)
+    }
+    /// Data for bounded native preparation, without consuming or extending the
+    /// original proof. The actor still consumes it after BEGIN IMMEDIATE.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn task_start_preview(
+        &self,
+    ) -> Result<&zerus_client_core::desktop::task_start_reconcile::Intent> {
+        self.check()?;
+        let Request::TaskStartReconcile { intent } = &self.0 else {
+            anyhow::bail!("not task Start")
+        };
+        Ok(intent)
     }
     pub fn ownership_parts(&self) -> Result<(Request, super::ownership::Origin)> {
         self.check()?;
@@ -364,6 +376,16 @@ impl Validated {
     pub fn fixture_from(value: &Value, application: &str) -> Self {
         let mut permit = Self::fixture(value);
         permit.2.application = application.into();
+        permit
+    }
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    pub fn fixture_expiring(value: &Value, until: Instant) -> Self {
+        let mut permit = Self::fixture(value);
+        permit.1 = Freshness::Native {
+            caller: Process::read(std::process::id()).unwrap(),
+            frontend: Process::read(std::process::id()).unwrap(),
+            until,
+        };
         permit
     }
 }

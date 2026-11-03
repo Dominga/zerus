@@ -592,6 +592,10 @@ impl Store {
     pub fn creation_recovery_ok(&self) -> bool {
         !self.creation_recovery_error
     }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn operation_recovery_ok(&self) -> bool {
+        !self.operation_recovery_error && !self.creation_recovery_error
+    }
     pub fn recover_operation_custody(&mut self, location: &Location) {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         if self.custody.tick(location, &mut self.db).is_err() {

@@ -435,7 +435,10 @@ pub(super) struct ArchiveScopes {
 }
 impl ArchiveScopes {
     pub fn new() -> Self {
-        Self { folders: std::collections::BTreeMap::new(), deadline: std::time::Instant::now() + Duration::from_millis(250), incomplete: false }
+        let folders = std::collections::BTreeMap::new();
+        #[cfg(test)]
+        let folders = scope_fixture::prepared().unwrap_or(folders);
+        Self { folders, deadline: std::time::Instant::now() + Duration::from_millis(250), incomplete: false }
     }
     pub fn enrich(&mut self, hit: &mut Value) {
         let Some(row) = hit.get_mut("session").and_then(Value::as_object_mut) else { return; };
@@ -444,6 +447,56 @@ impl ArchiveScopes {
         let fields = self.folders.entry(cwd.clone()).or_insert_with(|| workspace::search_scopes(&cwd, self.deadline));
         if let Some(fields) = fields { row.extend(fields.as_object().unwrap().clone()); }
         else { self.incomplete = true; }
+    }
+}
+// Query fixtures prepare folder scopes independently of the index. Keep the
+// override thread-local and scoped so real Git startup latency cannot decide a
+// pagination assertion, or leak prepared metadata into another test.
+#[cfg(test)]
+pub(super) mod scope_fixture {
+    use super::*;
+    use std::cell::RefCell;
+    type Folders = std::collections::BTreeMap<String, Option<Value>>;
+    thread_local! {
+        static PREPARED: RefCell<Option<Folders>> = const { RefCell::new(None) };
+    }
+    pub(super) fn prepared() -> Option<Folders> {
+        PREPARED.with(|folders| folders.borrow().clone())
+    }
+    pub(in crate::state) fn with<R>(
+        cwd: &str,
+        fields: Option<Value>,
+        run: impl FnOnce() -> R,
+    ) -> R {
+        struct Restore(Option<Folders>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                PREPARED.with(|folders| *folders.borrow_mut() = self.0.take());
+            }
+        }
+        let folders = [(cwd.to_owned(), fields)].into_iter().collect();
+        let _restore = Restore(PREPARED.with(|slot| slot.replace(Some(folders))));
+        run()
+    }
+
+    #[test]
+    fn prepared_scopes_restore_after_unwinding_and_stay_on_the_current_thread() {
+        let cwd = "/srv/example/archive";
+        let fields = json!({"cwd_canonical":cwd,"git_root":""});
+        assert!(prepared().is_none());
+        with(cwd, Some(fields.clone()), || {
+            std::thread::spawn(|| assert!(prepared().is_none()))
+                .join()
+                .unwrap();
+            let panic = std::panic::catch_unwind(|| {
+                with("/srv/example/other", None, || {
+                    panic!("fixture cleanup control")
+                });
+            });
+            assert!(panic.is_err());
+            assert_eq!(prepared().unwrap()[cwd], Some(fields));
+        });
+        assert!(prepared().is_none());
     }
 }
 pub(super) fn enrich_archive_results(results: &mut [Value]) -> bool {

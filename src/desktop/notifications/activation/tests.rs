@@ -417,3 +417,108 @@ fn only_a_delivered_open_lends_foreground_to_its_exact_receiver() {
     assert_eq!(refusing.foreground.load(Ordering::SeqCst), 1);
     assert_eq!(router.status()["foreground"], json!({"lent":1,"refused":1}));
 }
+
+#[cfg(windows)]
+#[path = "../../../../client/core/tests/support/windows_frontend_peer.rs"]
+mod native_peer;
+
+#[cfg(windows)]
+#[test]
+#[ignore = "mandatory hosted native peer; CI invokes only this exact parent"]
+fn native_refused_frontend_keeps_the_original_launch_unspent() {
+    use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
+    use zerus_client_core::desktop::windows;
+    assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
+    assert_eq!(
+        std::env::var("RUNNER_ENVIRONMENT").as_deref(),
+        Ok("github-hosted")
+    );
+    let image = windows::image::PinnedImage::open(&std::env::current_exe().unwrap()).unwrap();
+    let image_id = image.id();
+    let own = windows::own_facts().unwrap();
+    for mode in ["reply", "denied", "busy"] {
+        let mut f = Fixture::new();
+        let (_, grant) = f.grant();
+        let mut router = f.router();
+        router.offer(&f.store, &f.outbox, f.value.clone()).unwrap();
+        let original = router.pending[0].id.clone();
+        let original_until = router.pending[0].until;
+        assert!(router.needs_frontend());
+        let name = windows::activation_name("hgs-tray", f._temp.path());
+        let child = native_peer::Child::start(true, mode, std::slice::from_ref(&name)).unwrap();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let facts = child.facts().unwrap();
+            assert_eq!(facts.user, own.user);
+            assert_eq!(facts.session, own.session);
+            assert_eq!(facts.integrity, 0x1000);
+            assert_eq!(facts.image, Some(image_id));
+            let observation = windows::probe_at(
+                &name,
+                &id(),
+                &"a".repeat(64),
+                Instant::now() + desktop::PROBE_WAIT,
+                &image,
+            );
+            assert!(matches!(observation, desktop::Observation::Unknown));
+            // This is a real pending delivered click and a valid model grant,
+            // not an empty queue masking a broken absence/Unknown distinction.
+            assert!(router
+                .closed_frontend(&f.store, &f.outbox, &observation, Some(&grant))
+                .unwrap()
+                .is_none());
+            assert_eq!(router.pending.len(), 1);
+            assert_eq!(router.pending[0].id, original);
+            assert_eq!(router.pending[0].until, original_until);
+            // Positive control: only genuine absence can consume that SAME
+            // original click and produce the capability the launcher requires.
+            let launch = router
+                .closed_frontend(
+                    &f.store,
+                    &f.outbox,
+                    &desktop::Observation::Absent,
+                    Some(&grant),
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(launch.open().activation_id, original);
+            assert!(router.pending.is_empty());
+            drop(launch); // model capability only; no GUI process is started.
+        }));
+        let capture = child.finish();
+        // Close this model's database/receivers before its Windows directory.
+        // Unknown original-child cleanup keeps the fixture instead of deleting.
+        let Fixture {
+            _temp,
+            store,
+            outbox,
+            ..
+        } = f;
+        drop(router);
+        drop(grant);
+        drop(outbox);
+        drop(store);
+        let capture = match capture {
+            Ok(capture) => {
+                _temp.close().unwrap();
+                capture
+            }
+            Err(error) => {
+                let retained = _temp.keep();
+                panic!(
+                    "original peer cleanup unknown: {error}; model retained at {}",
+                    retained.display()
+                );
+            }
+        };
+        native_peer::assert_pipes_absent(std::slice::from_ref(&name));
+        assert!(capture.natural);
+        assert_eq!(capture.exit, 0);
+        let done = native_peer::marker(&capture.output, native_peer::DONE).unwrap();
+        assert_eq!(done["bytes"], 0);
+        assert_eq!(done["forwards"], 0);
+        assert_eq!(done["closed"], 1);
+        if let Err(panic) = result {
+            resume_unwind(panic);
+        }
+    }
+}

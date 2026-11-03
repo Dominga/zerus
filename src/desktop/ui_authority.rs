@@ -293,6 +293,18 @@ impl Validated {
         };
         Ok(*intent)
     }
+    /// Only the worktree actor calls this after BEGIN IMMEDIATE. Cached native
+    /// Service mode was bound to this exact original request during admission.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn creation_worktree(
+        self,
+    ) -> Result<zerus_client_core::desktop::creation_worktree::Intent> {
+        self.check()?;
+        let Request::CreationWorktree { intent } = self.0 else {
+            anyhow::bail!("not a creation worktree");
+        };
+        Ok(*intent)
+    }
     pub fn ownership_parts(&self) -> Result<(Request, super::ownership::Origin)> {
         self.check()?;
         ensure!(

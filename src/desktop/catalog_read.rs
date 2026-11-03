@@ -16,6 +16,8 @@ pub const CHANGES_ABI: &str = "desktop-catalog-changes-v1";
 pub(super) const SCHEMA: i64 = 21;
 #[cfg(test)]
 pub(super) fn remove_reason_fixture(db: &rusqlite::Connection) {
+    // Rewind the later creation-worktree leaf too, never leaving it labelled older.
+    super::creation_worktree::remove_fixture(db);
     db.execute_batch("ALTER TABLE desktop_catalog_changes DROP COLUMN reason;")
         .unwrap();
 }

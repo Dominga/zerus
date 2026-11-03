@@ -228,7 +228,7 @@ fn schema_upgrades_exactly_from_real_creation_seventeen_without_a_placeholder() 
         .store
         .db
         .prepare(
-            "SELECT name,sql FROM sqlite_schema WHERE name LIKE 'desktop_creation_%' ORDER BY name",
+            "SELECT name,sql FROM sqlite_schema WHERE name LIKE 'desktop_creation_clone%' ORDER BY name",
         )
         .unwrap()
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
@@ -263,7 +263,7 @@ fn schema_upgrades_exactly_from_real_creation_seventeen_without_a_placeholder() 
     let creation_after: Vec<(String, String)> = store
         .db
         .prepare(
-            "SELECT name,sql FROM sqlite_schema WHERE name LIKE 'desktop_creation_%' ORDER BY name",
+            "SELECT name,sql FROM sqlite_schema WHERE name LIKE 'desktop_creation_clone%' ORDER BY name",
         )
         .unwrap()
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))

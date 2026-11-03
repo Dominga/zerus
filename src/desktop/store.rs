@@ -12,7 +12,7 @@ use zerus_desktop_migration::{canonical, configuration, HANDOFF_LOCK};
 #[path = "maintenance.rs"]
 pub(crate) mod maintenance;
 
-pub const SCHEMA: i64 = super::catalog_read::SCHEMA;
+pub const SCHEMA: i64 = super::creation_worktree::SCHEMA;
 pub struct HandoffLock {
     _lock: platform::FileLock,
     root: PathBuf,
@@ -252,8 +252,14 @@ pub(super) fn operation_undrained(db: &Connection) -> Result<u64> {
     } else {
         0
     };
+    let worktrees = if version >= super::creation_worktree::SCHEMA {
+        super::creation_worktree::undrained(db)?
+    } else {
+        0
+    };
     task.checked_add(clones)
         .and_then(|count| count.checked_add(cache))
+        .and_then(|count| count.checked_add(worktrees))
         .context("operation resource total overflow")
 }
 
@@ -269,6 +275,8 @@ pub struct Store {
     custody: super::custody::Recovery,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     creation_custody: super::creation_clone::Recovery,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    worktree_custody: super::creation_worktree::Recovery,
 }
 impl Store {
     pub fn open(location: &Location, epoch: &str) -> Result<Self> {
@@ -440,6 +448,12 @@ impl Store {
             tx.pragma_update(None, "user_version", super::catalog_read::SCHEMA)?;
             tx.commit()?;
         }
+        if version < super::creation_worktree::SCHEMA {
+            let tx = db.transaction()?;
+            super::creation_worktree::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", super::creation_worktree::SCHEMA)?;
+            tx.commit()?;
+        }
         // Opening Store follows acquisition of the real exclusive serve owner.
         // Cache workers are in-process and retain it through all actual I/O.
         let tx = db.transaction()?;
@@ -457,7 +471,9 @@ impl Store {
         .is_err();
         let operation_recovery_error =
             zerus_desktop_ledger::operations::recover_batch(&mut db, epoch).is_err();
-        let creation_recovery_error = super::creation_clone::startup(&mut db).is_err();
+        // Either creation kind failing recovery pauses creation admission.
+        let creation_recovery_error = super::creation_clone::startup(&mut db).is_err()
+            | super::creation_worktree::startup(&mut db).is_err();
         let tx = db.transaction()?;
         tx.execute(
             "UPDATE service SET generation=generation+1, epoch=?1 WHERE id=1",
@@ -480,6 +496,8 @@ impl Store {
             custody: super::custody::Recovery::default(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             creation_custody: super::creation_clone::Recovery::default(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            worktree_custody: super::creation_worktree::Recovery::default(),
         })
     }
     pub fn checkpoint(&self) -> Result<()> {
@@ -512,6 +530,7 @@ impl Store {
     }
     pub fn operation_status(&self) -> serde_json::Value {
         let clone = super::creation_clone::summary(&self.db);
+        let worktree = super::creation_worktree::summary(&self.db);
         let mut status = match zerus_desktop_ledger::operations::totals(&self.db).and_then(
             |totals| {
                 Ok((
@@ -520,12 +539,15 @@ impl Store {
                     clone
                         .as_ref()
                         .map_err(|_| anyhow::anyhow!("creation summary unavailable"))?,
+                    worktree
+                        .as_ref()
+                        .map_err(|_| anyhow::anyhow!("creation summary unavailable"))?,
                 ))
             },
         ) {
-            Ok((totals, undrained, clone)) => {
-                serde_json::json!({"unsettled":totals.unsettled+clone["unsettled"].as_u64().unwrap_or(0),"undrained":undrained,
-                "kinds":{"task_start_reconcile":{"unsettled":totals.unsettled,"undrained":totals.undrained},"creation_clone":clone},
+            Ok((totals, undrained, clone, worktree)) => {
+                serde_json::json!({"unsettled":totals.unsettled+clone["unsettled"].as_u64().unwrap_or(0)+worktree["unsettled"].as_u64().unwrap_or(0),"undrained":undrained,
+                "kinds":{"task_start_reconcile":{"unsettled":totals.unsettled,"undrained":totals.undrained},"creation_clone":clone,"creation_worktree":worktree},
                 "admissions_paused":true,"recovery_error":self.operation_recovery_error || self.creation_recovery_error})
             }
             Err(_) => {
@@ -566,13 +588,16 @@ impl Store {
             status["resource_custody"]["revoke_request_id"] = request.into();
             status["resource_custody"]["remediation"] = super::revoke::OPERATION_REMEDIATION.into();
         }
-        if clone
-            .as_ref()
-            .ok()
-            .is_some_and(|v| v["undrained"].as_u64().is_some_and(|n| n > 0))
-        {
+        let retained = |summary: &Result<serde_json::Value>| {
+            summary
+                .as_ref()
+                .ok()
+                .is_some_and(|v| v["undrained"].as_u64().is_some_and(|n| n > 0))
+        };
+        if retained(&clone) || retained(&worktree) {
             let task = status["resource_custody"].take();
             status["resource_custody"] = serde_json::json!({"state":"retained","creation_clone":clone.ok(),
+                "creation_worktree":worktree.ok(),
                 "task_start_reconcile":task,"remediation":super::revoke::OPERATION_REMEDIATION});
         }
         status
@@ -591,6 +616,10 @@ impl Store {
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         if self.creation_custody.tick(location, &mut self.db).is_err() {
+            self.creation_recovery_error = true;
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if self.worktree_custody.tick(location, &mut self.db).is_err() {
             self.creation_recovery_error = true;
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]

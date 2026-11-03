@@ -66,6 +66,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        Desktop ownership ABI: desktop-ownership-v1
        Notification controls ABI: desktop-notification-controls-v1
        Desktop creation clone ABI: desktop-creation-clone-v1
+       Desktop creation worktree ABI: desktop-creation-worktree-v1
        Desktop pending read import ABI: desktop-pending-reads-v1
        Desktop activation ABI: desktop-activation-v1
        Desktop maintenance ABI: desktop-maintenance-v1
@@ -415,9 +416,14 @@ pub(crate) fn usage() -> &'static str {
 /// Commands that only Unix dispatches: `notify` for the tray, and `clip` and
 /// `paste`, which tmux's C-v binding runs.
 const UNIX_ONLY_COMMANDS: [&str; 3] = ["notify", "clip", "paste"];
-/// Lines for Unix commands/input bindings or the POSIX creation-clone ABI.
+/// Lines for Unix commands/input bindings or the POSIX creation ABIs.
 fn unix_only_usage(line: &str) -> bool {
-    if line.trim() == zerus_client_core::desktop::creation_clone::HELP_MARKER {
+    if [
+        zerus_client_core::desktop::creation_clone::HELP_MARKER,
+        zerus_client_core::desktop::creation_worktree::HELP_MARKER,
+    ]
+    .contains(&line.trim())
+    {
         return true;
     }
     let mut words = line.split_whitespace();
@@ -2654,6 +2660,8 @@ mod tests {
         assert_eq!(usage_text(true), USAGE);
         let clone_marker = zerus_client_core::desktop::creation_clone::HELP_MARKER;
         assert!(USAGE.lines().any(|line| line.trim() == clone_marker));
+        let worktree_marker = zerus_client_core::desktop::creation_worktree::HELP_MARKER;
+        assert!(USAGE.lines().any(|line| line.trim() == worktree_marker));
         // Windows has no `hgs paste`, `hgs clip` or `hgs notify`, no Ctrl+V
         // that pulls a peer's image, and no POSIX creation-clone executor.
         // Its dry runs print the host's requests; every other line stays as is.
@@ -2661,6 +2669,7 @@ mod tests {
         assert!(!neutral.contains("tmux"), "{neutral}");
         assert!(!neutral.contains("Ctrl+V"), "{neutral}");
         assert!(!neutral.lines().any(|line| line.trim() == clone_marker));
+        assert!(!neutral.lines().any(|line| line.trim() == worktree_marker));
         assert_eq!(
             neutral,
             USAGE
@@ -2678,6 +2687,10 @@ mod tests {
                 )
                 .replace(
                     "       Desktop creation clone ABI: desktop-creation-clone-v1\n",
+                    ""
+                )
+                .replace(
+                    "       Desktop creation worktree ABI: desktop-creation-worktree-v1\n",
                     ""
                 )
                 .replace(

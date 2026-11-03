@@ -33,6 +33,8 @@ pub(super) struct Runtime {
     notifications: notification_service::Runtime,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     creation: super::creation_clone::Runtime,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    worktree: super::creation_worktree::Runtime,
 }
 
 /// The actor can replace only an already admitted background runtime after its
@@ -62,6 +64,8 @@ impl Runtime {
         let producer = broker.claim_internal()?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let creation = super::creation_clone::Runtime::new(config, epoch, owner.clone())?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let worktree = super::creation_worktree::Runtime::new(config, epoch, owner.clone())?;
         match fleet::Runtime::start(config, epoch) {
             Ok(fleet) => Ok(Self {
                 fleet,
@@ -78,6 +82,8 @@ impl Runtime {
                 notifications: notification_service::Runtime::new(config, &location, epoch, owner),
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 creation,
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                worktree,
             }),
             Err(error) => {
                 producer.close();
@@ -119,6 +125,8 @@ impl Runtime {
                 Ok(change) => {
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                     self.creation.observe(&event);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.worktree.observe(&event);
                     self.delivery.observe(store, &event);
                     self.maintenance.observe(store, &event);
                     if self.attention.enabled() {
@@ -139,6 +147,8 @@ impl Runtime {
                 Err(_) => {
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                     self.creation.reject(&event);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.worktree.reject(&event);
                     self.maintenance.reject(&event);
                     self.attention.reject_event(&event);
                     self.details.reject(&event, seq);
@@ -154,6 +164,8 @@ impl Runtime {
             .poll(store, &mut self.attention, &mut self.activations, seq);
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.creation.poll(store, self.notifications.handoff());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.worktree.poll(store, self.notifications.handoff());
         // Disabled discovery must not accumulate permanent edge/baseline rows.
         // Enabling resets the baseline before later observations may post.
         if !self.notifications.ready() && self.attention.retiring() {
@@ -190,9 +202,12 @@ impl Runtime {
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"creation_clone_unsupported"});
         }
-        // The worktree actor is a separate leaf; until it lands no service
-        // advertises this kind, and an authenticated request is refused.
         if authority.operation() == "creation_worktree" {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            return self
+                .worktree
+                .frontend(store, authority, self.notifications.handoff());
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"creation_worktree_unsupported"});
         }
         if authority.operation() == "automatic_approvals" {
@@ -221,6 +236,7 @@ impl Runtime {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             value["creation_clone_runtime"] = self.creation.status();
+            value["creation_worktree_runtime"] = self.worktree.status();
             value["lifecycle"]["background"]["operations"] =
                 value["creation_clone_runtime"].clone();
         }
@@ -326,6 +342,8 @@ impl Runtime {
         self.notifications.request_stop();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.creation.request_stop();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.worktree.request_stop();
         if let Some(presence) = &self.presence {
             presence.request_stop();
         }
@@ -354,6 +372,8 @@ impl Runtime {
             .poll(store, &mut self.attention, &mut self.activations, &mut seq);
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.creation.poll(store, self.notifications.handoff());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.worktree.poll(store, self.notifications.handoff());
         if self.notifications.drained() {
             self.attention.request_stop();
         }
@@ -371,7 +391,7 @@ impl Runtime {
             && self.notifications.drained();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            self.drained = self.drained && self.creation.drained();
+            self.drained = self.drained && self.creation.drained() && self.worktree.drained();
         }
         Ok(self.drained)
     }

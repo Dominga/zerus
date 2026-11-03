@@ -152,3 +152,6 @@ unsafe fn bounded(value: PCWSTR, cap: usize) -> ::windows::core::Result<String> 
     }
     Err(E_INVALIDARG.into())
 }
+
+#[cfg(test)]
+mod tests;

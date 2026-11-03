@@ -188,7 +188,7 @@ pub struct Startup {
     pub identity: identity::Identity,
     /// Started with `--sessions`, or a build that opens its window by default.
     pub opens_sessions: bool,
-    #[cfg(all(feature = "live", target_os = "linux"))]
+    #[cfg(all(feature = "live", any(target_os = "linux", windows)))]
     navigation: Option<zerus_client_core::desktop::activation::Target>,
     #[cfg(all(feature = "live", target_os = "linux"))]
     activation_token: Option<String>,
@@ -279,7 +279,7 @@ pub fn run() {
     startup_log::record("entered", "gui_entry", None);
     startup_log::install_panic_hook();
     let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
-    #[cfg(all(feature = "live", target_os = "linux"))]
+    #[cfg(all(feature = "live", any(target_os = "linux", windows)))]
     let options = {
         let mut options = options;
         if let Err(error) = cli::take_navigation_environment(&mut options) {
@@ -334,7 +334,7 @@ pub fn run() {
             } else {
                 instance::Activation::Show
             };
-            #[cfg(all(feature = "live", target_os = "linux"))]
+            #[cfg(all(feature = "live", any(target_os = "linux", windows)))]
             let activation = options
                 .target
                 .clone()
@@ -401,6 +401,18 @@ pub fn run() {
                 }
                 instance::Claim::Duplicate(_) => return,
                 instance::Claim::Failed(_) => {
+                    std::process::exit(3);
+                }
+                // Nothing was forwarded to that server; say so instead of exiting silently.
+                #[cfg(all(windows, feature = "live"))]
+                instance::Claim::Untrusted => {
+                    startup_error::record("instance.claim", "activation_pipe_untrusted");
+                    startup_error::show_untrusted_pipe(context);
+                    return;
+                }
+                #[cfg(all(windows, not(feature = "live")))]
+                instance::Claim::Untrusted => {
+                    eprintln!("zerus-client: the activation pipe belongs to an untrusted process");
                     std::process::exit(3);
                 }
             }
@@ -476,7 +488,7 @@ pub fn run() {
                     false
                 }
             },
-            #[cfg(all(feature = "live", target_os = "linux"))]
+            #[cfg(all(feature = "live", any(target_os = "linux", windows)))]
             navigation: options.target,
             #[cfg(all(feature = "live", target_os = "linux"))]
             activation_token,
@@ -522,7 +534,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
         any(target_os = "linux", target_os = "macos", windows)
     ))]
     let native_ownership = startup.native_ownership;
-    #[cfg(all(feature = "live", target_os = "linux"))]
+    #[cfg(all(feature = "live", any(target_os = "linux", windows)))]
     let navigation = startup.navigation;
     #[cfg(all(feature = "live", target_os = "linux"))]
     let activation_token = startup.activation_token;
@@ -1072,6 +1084,11 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                             })).map_err(std::io::Error::other)?;
                         }
                     }
+                    if let Some(target) = navigation {
+                        if let Some(sender) = desk::sender(app.handle()) {
+                            let _ = sender.send(desk::DeskInput::Navigate { target, activation: None });
+                        }
+                    }
                     if switch && !replay && !desktop_service::mode() {
                         match platform::windows::worker::Worker::start(zerus_client_core::default_hgs()) {
                             Ok(worker) => { app.manage(worker); }
@@ -1243,7 +1260,7 @@ fn forward_activations(
         .name("zerus-client-activations".into())
         .spawn(move || {
             for activation in activations {
-                #[cfg(all(feature = "live", target_os = "linux"))]
+                #[cfg(all(feature = "live", any(target_os = "linux", windows)))]
                 if let instance::Activation::Navigation(target) = activation {
                     if let Some(sender) = desk::sender(&app) {
                         let _ = sender.send(desk::DeskInput::Navigate {

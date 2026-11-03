@@ -314,7 +314,7 @@ fn add(db: &Connection, canonical: &str, mut row: Value, stream: &str) -> Result
         return Ok(());
     }
     let detail = string(&row, "detail").to_owned();
-    let native_match_hash = if stream != "attachment" && stream != "voice"
+    let native_match_hash = if stream != "attachment" && stream != "voice" && stream != "inherited"
         && ["UserPromptSubmit", "UserPromptQueued", "UserMessage", "TurnStarted"].contains(&string(&row, "type"))
     { Some(hash(&detail)) } else { None };
     if detail.len() > ROW_BYTES {
@@ -346,6 +346,7 @@ fn add(db: &Connection, canonical: &str, mut row: Value, stream: &str) -> Result
         "source_offset",
         "native_match_hash",
         "voice",
+        "inherited_from",
     ] {
         if let Some(v) = row.get(field) {
             public[field] = v.clone();
@@ -359,7 +360,15 @@ fn add(db: &Connection, canonical: &str, mut row: Value, stream: &str) -> Result
         row.as_object_mut().unwrap().remove("message_id");
     }
     let incoming = ["AgentMessage", "Stop"].contains(&string(&row, "type"));
-    let role = if incoming { "incoming" } else { "outgoing" };
+    // A fork's inherited rows are read-only history: never incoming (read
+    // marks) and never outgoing (voice and attachment matching).
+    let role = if stream == "inherited" {
+        "inherited"
+    } else if incoming {
+        "incoming"
+    } else {
+        "outgoing"
+    };
     let origin = original(&row, stream).ok_or("Public row lacks stable provenance")?;
     let existing: Option<String> = db
         .query_row("SELECT id FROM aliases WHERE original=?", [&origin], |r| {
@@ -407,7 +416,7 @@ fn add(db: &Connection, canonical: &str, mut row: Value, stream: &str) -> Result
     }
     let id = hash(&json!([canonical, origin]).to_string());
     let at = row["at"].as_f64().filter(|v| v.is_finite()).unwrap_or(0.);
-    let ordinal = if stream == "journal" {
+    let ordinal = if stream == "journal" || stream == "inherited" {
         format!("0:{:020}", row["seq"].as_i64().unwrap_or(0))
     } else if stream == "provider" {
         let offset = string(&row, "source_offset");
@@ -615,7 +624,9 @@ fn sources(db: &Connection, parent: &Value, r: &Request, native: &Value) -> Resu
                             {
                                 row["source_offset"] =
                                     json!(format!("{number}:{}", offset + consumed as u64));
-                                add(db, &canonical, row, "provider")?;
+                                if !fork_copy(parent, &row) {
+                                    add(db, &canonical, row, "provider")?;
+                                }
                             }
                         }
                     }
@@ -644,7 +655,9 @@ fn sources(db: &Connection, parent: &Value, r: &Request, native: &Value) -> Resu
             }
             if let Some((mut row, _)) = search::provider_event(string(native, "agent"), &value) {
                 row["source_offset"] = json!(format!("{number}:{position}"));
-                add(db, &canonical, row, "provider")?;
+                if !fork_copy(parent, &row) {
+                    add(db, &canonical, row, "provider")?;
+                }
             }
         }
         offset += consumed as u64;
@@ -735,6 +748,96 @@ fn journal(db: &Connection, parent: &Value, r: &Request) -> Result<bool> {
     }
     Ok(values.len() < 1000)
 }
+/// A row of a fork's own transcript dated before the fork was created: a
+/// copy of the history it began from, which [`inherited`] shows from the
+/// source instead (zerus-b4qk.1). Rows without a known time are kept.
+fn fork_copy(parent: &Value, row: &Value) -> bool {
+    let created = parent["created"].as_f64().unwrap_or(0.0);
+    !string(parent, "fork_parent_id").is_empty()
+        && created > 0.0
+        && row["at"]
+            .as_f64()
+            .is_some_and(|at| at > 0.0 && at < created)
+}
+
+/// A fork's source history (zerus-b4qk.1): each lineage source's main
+/// journal rows up to where the fork began, as rows of their own read-only
+/// stream marked `inherited_from`, at most 1000 per source and call. They
+/// sort before the fork's own rows, never count as incoming for read marks
+/// and never match voice or attachments. The first such rows an index that
+/// already has rows gains reset its epoch, so a reader that already reached
+/// the oldest row reads again. A child view inherits nothing.
+fn inherited(db: &Connection, parent: &Value, r: &Request) -> Result<bool> {
+    let path = root().join("events.sqlite3");
+    // DeepSeek and OpenCode forks carry their copied history natively.
+    if r.agent_id.is_some()
+        || string(parent, "fork_parent_id").is_empty()
+        || ["dsh", "opencode"].contains(&string(parent, "agent"))
+        || !path.exists()
+    {
+        return Ok(true);
+    }
+    let source = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| e.to_string())?;
+    let canonical = key(parent, r);
+    let mut complete = true;
+    for entry in journal::lineage(&source, parent) {
+        let (Some(name), Some(conversation), Some(last)) =
+            (entry[0].as_str(), entry[1].as_str(), entry[2].as_i64())
+        else {
+            continue;
+        };
+        let offset_key = format!(
+            "inherited:{}",
+            hash(&json!([name, conversation, last]).to_string())
+        );
+        let offset = get(db, &offset_key)?
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0);
+        let mut query = source
+            .prepare("SELECT seq,payload FROM events WHERE name=? AND conversation=? AND seq>? AND seq<=? ORDER BY seq LIMIT 1000")
+            .map_err(|e| e.to_string())?;
+        let rows = query
+            .query_map(params![name, conversation, offset, last], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        if offset == 0 && !rows.is_empty() && get(db, "inherited_added")?.is_none() {
+            let existing: bool = db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM messages WHERE stream!='inherited')",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            set(db, "inherited_added", "1")?;
+            if existing {
+                // Inherited rows never count as incoming, so the numbers stay.
+                set(db, "epoch", &uuid::Uuid::new_v4().to_string())?;
+                set(db, "order_reset", "inherited_backfill")?;
+            }
+        }
+        for (seq, text) in &rows {
+            let Ok(mut row) = serde_json::from_str::<Value>(text) else {
+                continue;
+            };
+            if !["", "main"].contains(&string(&row, "agent_id")) {
+                continue;
+            }
+            row["seq"] = json!(seq);
+            row["inherited_from"] = json!(name);
+            add(db, &canonical, row, "inherited")?;
+        }
+        if let Some((seq, _)) = rows.last() {
+            set(db, &offset_key, &seq.to_string())?;
+        }
+        complete &= rows.len() < 1000;
+    }
+    Ok(complete)
+}
+
 fn receipts(db: &Connection, parent: &Value, r: &Request) -> Result<bool> {
     let directory = attachments::history_directory(parent);
     let Ok(entries) = std::fs::read_dir(&directory) else {
@@ -1643,6 +1746,13 @@ fn public_row(db: &Connection, secret: &str, epoch: &str, complete: bool,
         "provider"
     });
     value.as_object_mut().unwrap().remove("native_match_hash");
+    // A fork's inherited row has its own type, keeping the original as
+    // `inherited_type`: an app that does not know it drops the row (as it
+    // drops any unknown type) instead of counting a source reply as unread.
+    if value.get("inherited_from").is_some() {
+        value["inherited_type"] = value["type"].take();
+        value["type"] = json!("Inherited");
+    }
     value["incoming_seq"] = if complete {
         json!(incoming)
     } else {
@@ -2086,6 +2196,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     } else {
         journal(&db, &parent, &request)?
     };
+    let inherited_complete = inherited(&db, &parent, &request)?;
+    status["inherited"] = json!(if inherited_complete {"complete"} else {"indexing"});
     let receipts_complete = receipts(&db, &parent, &request)?;
     let voice_after = get(&db,"voice_seq")?.and_then(|seq|seq.parse::<i64>().ok()).unwrap_or(0);
     let (voice_rows,voice_seq,voice_complete) = voice::history_page(&parent,request.agent_id.as_deref(),voice_after)?;
@@ -2094,7 +2206,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     }
     set(&db,"voice_seq",&voice_seq.to_string())?;
     status["voice"] = json!(if voice_complete {"complete"} else {"indexing"});
-    let source_complete = provider_complete && journal_complete && receipts_complete && voice_complete;
+    let source_complete = provider_complete && journal_complete && inherited_complete && receipts_complete && voice_complete;
     status["projection_upgrade"] = advance_projection_upgrade(&db, &key(&parent, &request), &native)?;
     let upgrade_scan_done = advance_reconcile_upgrade(&db)?;
     let mut voice_reconcile_complete = false;

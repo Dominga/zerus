@@ -199,6 +199,71 @@ class Forks(Base):
             self.assertIn(source,{h['name'] for h in hits},agent)
             self.assertFalse({fork,second}&{h['name'] for h in hits},agent)
 
+    # zerus-b4qk.1: the phone history (`hgs history`) of a fork shows its
+    # source's rows up to the fork, marked and never counted as unread.
+    def test_a_forks_phone_history_shows_its_source_up_to_the_fork(self):
+        import time,subprocess,uuid
+        def history(name):
+            record=self.binding(name)
+            for _ in range(12):
+                p=subprocess.run([str(test_pause.HGS),'history',name,'--json'],env=self.env,capture_output=True,text=True,timeout=20,
+                    input=json.dumps(dict(request_id=str(uuid.uuid4()),expected_run_id=record['run_id'],
+                                          expected_conversation_id=record['conversation_id'],limit=100)))
+                self.assertEqual(p.returncode,0,p.stdout+p.stderr)
+                page=json.loads(p.stdout)
+                if page['head']['complete']:
+                    return page
+            self.fail('history did not finish indexing: '+p.stdout)
+        talk=lambda page:[(e['detail'],e.get('inherited_from')) for e in page['events']]
+        source=self.start('claude','phone-root')
+        kinds=lambda page:[(e['type'],e.get('inherited_type')) for e in page['events'] if e.get('inherited_from')]
+        self.send_event(source,'UserPromptSubmit',prompt='source request')
+        self.send_event(source,'Stop',last_assistant_message='source reply')
+        time.sleep(1.1)
+        fork=self.fork(source,'phone-branch')
+        self.send_event(source,'UserPromptSubmit',prompt='source after the fork')
+        self.send_event(fork,'UserPromptSubmit',prompt='fork request')
+        before=history(fork)
+        self.send_event(fork,'Stop',last_assistant_message='fork reply')
+        page=history(fork)
+        self.assertEqual(talk(page),[('source request',source),('source reply',source),('fork request',None),('fork reply',None)])
+        # Their own type, so an app that does not know it drops them, never
+        # counting a source reply as unread; the original type stays.
+        self.assertEqual(kinds(page),[('Inherited','UserPromptSubmit'),('Inherited','Stop')])
+        # Inherited replies are never unread in the fork: only its own reply counts.
+        self.assertEqual(page['head']['total_incoming'],1)
+        self.assertEqual([e['incoming_seq'] for e in page['events'] if e['detail']=='source reply'],[None])
+        self.assertEqual(page['history_epoch'],before['history_epoch'])
+        # The source's own history is unchanged and inherits nothing.
+        self.assertEqual(talk(history(source)),[('source request',None),('source reply',None),('source after the fork',None)])
+        # A copy of the source history in the fork's own transcript (dated
+        # before the fork) is not shown again; the fork's own later line is.
+        transcript=Path(self.binding(fork)['transcript'])
+        line=lambda uuid_,at,text:json.dumps({"type":"assistant","uuid":uuid_,"timestamp":at,"sessionId":self.binding(fork)['conversation_id'],
+            "message":{"role":"assistant","content":[{"type":"text","text":text}]}})+"\n"
+        with transcript.open('a') as out:
+            out.write(line('copied','2001-01-01T00:00:00Z','copied source line'))
+            out.write(line('later',time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime(time.time()+5)),'later own line'))
+        details=[d for d,_ in talk(history(fork))]
+        self.assertNotIn('copied source line',details)
+        self.assertIn('later own line',details)
+        # An index that existed before its fork had a lineage gains the source
+        # rows later, with a new epoch so a reader that saw the oldest row reads again.
+        self.send_event(source,'Stop',last_assistant_message='source later reply')
+        late=self.fork(source,'phone-late')
+        path=self.root/'state'/(hashlib.sha256(late.encode()).hexdigest()+'.json')
+        record=json.loads(path.read_text());kept={k:record.pop(k) for k in ('fork_lineage','fork_source_name')}
+        path.write_text(json.dumps(record))
+        self.send_event(late,'UserPromptSubmit',prompt='late request')
+        first=history(late)
+        self.assertEqual(talk(first),[('late request',None)])
+        record=json.loads(path.read_text());record.update(kept);path.write_text(json.dumps(record))
+        second=history(late)
+        self.assertEqual(talk(second),[('source request',source),('source reply',source),('source after the fork',source),
+                                       ('source later reply',source),('late request',None)])
+        self.assertNotEqual(second['history_epoch'],first['history_epoch'])
+        self.assertEqual(second['source_status']['canonical_order_reset'],'inherited_backfill')
+
     def test_provider_returning_source_id_is_not_confirmed_as_a_fork(self):
         source=self.start('claude');(self.root/'broken-fork').touch()
         self.hgs('fork',source,'-n','broken','-d')

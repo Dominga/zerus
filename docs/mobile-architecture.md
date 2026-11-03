@@ -1185,6 +1185,10 @@ most 100 public rows. A bounded connector read can advance initial indexing
 locally for up to two seconds and 32 native reads, avoiding a network roundtrip
 per index chunk. Cursored reads execute once. A partial resident adapter is
 reported as partial rather than a completed conversation.
+A fork's pages also carry its sources' history up to the fork point as
+additive `Inherited` rows (`inherited_type`, `inherited_from`), never counted as
+incoming; older apps drop the unknown type. See the public history section of
+`services/mobile/README.md`.
 
 `last_seen_at` and event `created_at` use Unix epoch seconds. `last_seen_at`
 is the selected route's last accepted heartbeat (the gateway's own heartbeat for

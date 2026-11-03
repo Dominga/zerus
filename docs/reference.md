@@ -1977,6 +1977,8 @@ fork's own: they open no attachments, and search finds them only in their source
 A provider that copies the history into the fork's own transcript adds nothing
 twice, because the fork's messages dated before its creation are not shown. The
 source session is never changed. Rows the journal no longer keeps are not shown.
+The phone history (`hgs history`) shows the same inherited rows as additive
+`Inherited` rows that never count as unread; see `services/mobile/README.md`.
 
 Codex may defer `SessionStart` until the fork's first message. Activity enables
 Send once Zerus verifies that the supervised process owns an independent child

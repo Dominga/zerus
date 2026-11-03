@@ -643,7 +643,7 @@ fn activity_page(newest: bool) -> &'static str {
 /// conversation, last sequence number]`: what the fork recorded when it
 /// began, or for a fork recorded before that, what [`derived_lineage`] finds
 /// (which `inspect` saves once, so later reads do not search again).
-fn lineage(db: &Connection, record: &Value) -> Vec<Value> {
+pub(super) fn lineage(db: &Connection, record: &Value) -> Vec<Value> {
     match record["fork_lineage"].as_array() {
         Some(recorded) => recorded
             .iter()

@@ -94,6 +94,20 @@ impl Runtime {
     ) {
         self.preferences = preferences;
     }
+    /// Actor-only loan of this original owner, not a serialized role/lease or
+    /// a new writer grant. Its strong resource count also fences actual drain.
+    pub fn publication_owner(&self, store: &Store) -> Result<Option<Arc<preparation::Owner>>> {
+        if self.stopping || self.drained || self.recovering {
+            return Ok(None);
+        }
+        let Some(grant) = &self.grant else {
+            return Ok(None);
+        };
+        if !grant.current(store)? {
+            return Ok(None);
+        }
+        Ok(self.owner.clone())
+    }
     pub fn writer_epoch(&self) -> Option<&str> {
         self.grant.as_ref().map(ownership::Grant::writer_epoch)
     }
@@ -139,7 +153,7 @@ impl Runtime {
         // independent of read/approval readiness; failure to select a native
         // host cannot revoke their separately configured service work.
         ensure!(
-            zerus_desktop_ledger::operations::totals(&store.db)?.undrained == 0,
+            store.operation_undrained()? == 0,
             "original operation resources remain owned"
         );
         ensure!(

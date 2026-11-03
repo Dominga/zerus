@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The seven Kimi Bash, four CreateGoal and one ExitPlanMode approval contracts in a private Windows ConPTY host.
+"""The seven Kimi Bash, eight CreateGoal and one ExitPlanMode approval contracts in a private Windows ConPTY host.
 
 Only the sealed selected official latest win32-x64 image qualifies. No tmux, shared Kimi,
 user profile, real provider or relaxed screen predicate is used. A separate
@@ -126,7 +126,7 @@ class NativeWindowsKimiApprovals(approvals.ApprovalCases, approvals.GoalCases, a
         approvals.make_private_folders(self.env)
         (self.home / 'config.toml').write_text(
             approvals.model_config(self.server.server_port, self.goal_mode or 'default'))
-        (self.home / 'tui.toml').write_text('[upgrade]\nauto_install = false\n')
+        (self.home / 'tui.toml').write_text(approvals.tui_config(self._testMethodName))
         portable = self.root / 'portable'
         portable.mkdir()
         self.hgs_exe = portable / 'hgs.exe'

@@ -4351,9 +4351,10 @@ fleet runtime. The actor applies its watch packets and publishes catalog/count
 updates through the same endpoint. It keeps each original event's ingress permit
 through the database transaction; UI-supplied feed packets cannot enter the owned
 observation path. Failed frames invalidate their exact source until resnapshot.
-Plain `serve` and fresh registrations stay passive. On Linux, the maintained
+Plain `serve` and fresh registrations stay passive. On Linux and macOS, the maintained
 installer supports explicit `--mode background|passive` after the authenticated
-frontend handoff; see [desktop service mode selection](linux-distribution.md#select-the-desktop-service-mode).
+frontend handoff; see [Linux mode selection](linux-distribution.md#select-the-desktop-service-mode)
+and [Mac mode selection](macos-distribution.md#explicit-desktop-service-mode).
 Ordinary refreshes preserve the selected mode. Generic approval policy requests
 remain refused; ownership and each effect require their own authenticated grants.
 
@@ -4533,6 +4534,33 @@ cannot enable writers or approvals without the later live delegation, effect
 guards and revocation protocol. The kernel writes no takeover marker. See the
 exact [migration contract](desktop-migration.md).
 
+In service mode, Settings > Files > Apply saves the selected folder's cache
+limit in the service. Imported UI preferences remain display data until that
+explicit action. Refresh and download completion use the saved service policy;
+they never fall back to UI-owned deletion if the service is unavailable. A
+native request first prepares a bounded plan under the existing Qt folder lock.
+A fresh original frontend child must then admit that exact plan before the
+service reserves any removal. The original two-second native permit is never
+extended to cover slow filesystem preparation.
+
+One pass considers at most 16 files from an index of at most 1 MiB and 1024
+entries, and verifies at most 64 MiB of content. Edited, linked, replaced and
+unindexed files remain intact. Download completion admits fixed work with a
+65-second opening grace; the folder lock is released while waiting, and any
+change to its frozen index or files keeps the original copies. The admitted
+pass can finish after the UI closes. Revoke stops new effects and remains
+unsettled until the original worker physically joins. After the grace and exact
+reopen, the actor durably marks effect start before releasing the original
+worker into execution. A missing start reply cannot authorize unlink. An admitted
+reservation without a committed start mark can settle as Kept from its retained
+original receipt only after physical join or exclusive-owner restart; cache
+totals are never reconstructed. Older reservations without this evidence remain
+conservative. A lost result after the start mark is terminal unknown for that
+original file/content identity, including after a rename or an unrelated index
+edit. Another request ID cannot clear that fence.
+The read-only `cache_maintenance_result` request accepts the original request ID
+and returns its bounded receipt; it cannot prepare, retry or authorize work.
+
 `hgs desktop registration --json` previews the current platform's per-user
 passive registration and includes a `readiness` probe for that exact binary and
 configuration. Run its `argv` directly with the two supplied `HGS_CONFIG_DIR`
@@ -4545,10 +4573,16 @@ per-component readiness. Its epoch changes on service restart. The registration'
 installers; it is a requirement, not a claim that the environment is present.
 
 `lifecycle.mode` reports the running command's `passive` or `background`
-selection independently of worker admission. On Linux, `registration --json
+selection independently of worker admission. On Linux/macOS, `registration --json
 --background` renders the explicit background variant without installing it;
 `registration mode-check --json` checks the actual installer caller ancestry and
-foreground terminal or installed frontend, without granting service ownership.
+foreground terminal or installed frontend on Linux, macOS and Windows, without
+granting service ownership. Windows requires a retained installed frontend
+ancestor or an already attached visible foreground classic console; unverified
+Windows Terminal/ConPTY and headless callers are directed to Settings. This
+preflight does not enable Windows background registration or change a task.
+The [macOS ancestry boundary](macos-distribution.md) verifies Terminal's system
+login bridge and launchd PID 1; SSH through a foreign session process refuses.
 The maintained Linux helper's `status --json` reports the durable selected mode
 separately from the running mode and any pending restart/revoke transition.
 

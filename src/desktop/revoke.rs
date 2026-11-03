@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub(super) mod hold;
 
 pub(super) const OPERATION_REMEDIATION: &str = "Keep Qt stopped. Wait for the named helper, or stop only that helper yourself. Then restart only hgs-desktop through its service manager and retry the original revoke request. Reboot only as a last resort.";
@@ -206,7 +206,7 @@ fn execute_scoped(
     ensure!(record.state == "prepared", "invalid revoke state");
     step(drain(store), "drain_not_settled")?;
     ensure!(
-        zerus_desktop_ledger::operations::totals(&store.db)?.undrained == 0,
+        store.operation_undrained()? == 0,
         Declined("operation_resources_not_drained")
     );
     #[cfg(unix)]
@@ -330,7 +330,7 @@ fn query_scoped(
     );
     ensure!(record.state == "settled", Declined("revocation_pending"));
     ensure!(
-        zerus_desktop_ledger::operations::totals(&store.db)?.undrained == 0,
+        store.operation_undrained()? == 0,
         Declined("operation_resources_not_drained")
     );
     #[cfg(unix)]

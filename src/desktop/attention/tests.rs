@@ -63,8 +63,8 @@ fn policy_off_waits_for_original_post_and_withdrawal_resources_before_idle() {
     assert!(f.runtime.retiring());
     assert!(!ledger::current(&f.store.db, &intent, 1).unwrap());
     assert!(
-        f.host.try_next().is_err(),
-        "wait for the original post receipt/resources"
+        !f.outbox.operations_idle(),
+        "the original post resources remain charged after its receipt"
     );
     drop(post_hold);
     retire_ticks(&mut f, 2);
@@ -1189,13 +1189,14 @@ fn resume_removal_and_old_archived_rows_preserve_the_original_live_notice() {
 #[test]
 fn schema_fourteen_migrates_an_existing_thirteen_without_changing_prior_effects() {
     let f = Fixture::new();
+    crate::desktop::cache_maintenance::remove_from_downgraded_fixture(&f.store.db);
     let root = f.store.db.path().unwrap().to_owned();
     let count: i64 = f
         .store
         .db
         .query_row("SELECT count(*) FROM desktop_intents", [], |r| r.get(0))
         .unwrap();
-    f.store.db.execute_batch("DROP TABLE desktop_notification_preferences_requests; DROP TABLE desktop_notification_preferences; DROP TABLE desktop_ownership_requests; DROP TABLE desktop_ownership; DROP INDEX desktop_attention_changed_key; DROP INDEX desktop_attention_catalog_identity; DROP TABLE desktop_attention_edges; DROP TABLE desktop_attention_sessions; DROP TABLE desktop_attention_totals; PRAGMA user_version=13;").unwrap();
+    f.store.db.execute_batch("DROP TABLE desktop_creation_clones; DROP TABLE desktop_creation_clone_budget; DROP TABLE desktop_notification_preferences_requests; DROP TABLE desktop_notification_preferences; DROP TABLE desktop_ownership_requests; DROP TABLE desktop_ownership; DROP INDEX desktop_attention_changed_key; DROP INDEX desktop_attention_catalog_identity; DROP TABLE desktop_attention_edges; DROP TABLE desktop_attention_sessions; DROP TABLE desktop_attention_totals; PRAGMA user_version=13;").unwrap();
     let location = Location {
         root: std::path::Path::new(&root).parent().unwrap().to_owned(),
         configuration: "a".repeat(64),

@@ -343,13 +343,14 @@ fn restart_keeps_preferences_and_receipts_but_uses_fresh_scope_without_focus() {
 #[test]
 fn schema_fifteen_migration_is_atomic_and_creates_no_writer_permission() {
     let f = Fixture::new();
+    crate::desktop::cache_maintenance::remove_from_downgraded_fixture(&f.store.db);
     let location = Location {
         root: f._dir.path().canonicalize().unwrap().join("state/desktop"),
         configuration: f.runtime.scope.configuration.clone(),
     };
     drop(f.store);
     let db = Connection::open(location.root.join("state.sqlite3")).unwrap();
-    db.execute_batch("DROP TABLE desktop_notification_preferences_requests; DROP TABLE desktop_notification_preferences;
+    db.execute_batch("DROP TABLE desktop_creation_clones; DROP TABLE desktop_creation_clone_budget; DROP TABLE desktop_notification_preferences_requests; DROP TABLE desktop_notification_preferences;
         CREATE TABLE desktop_notification_preferences(fixture TEXT); INSERT INTO desktop_notification_preferences VALUES('retained'); PRAGMA user_version=15;").unwrap();
     assert!(Store::open(&location, &id()).is_err());
     assert_eq!(
@@ -375,7 +376,7 @@ fn schema_fifteen_migration_is_atomic_and_creates_no_writer_permission() {
             .db
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        16
+        crate::desktop::store::SCHEMA
     );
     assert_eq!(
         zerus_desktop_ledger::status(&store.db).unwrap()["revoked"],

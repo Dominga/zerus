@@ -289,6 +289,8 @@ pub(in crate::desktop) struct Runtime<H: Host = NativeHost> {
     retirement_until: Option<Instant>,
     drained: bool,
     error: Option<String>,
+    #[cfg(test)]
+    retirement_clock: Option<Instant>,
 }
 impl Runtime<NativeHost> {
     pub fn start(
@@ -379,7 +381,16 @@ impl<H: Host> Runtime<H> {
             retirement_until: None,
             drained: false,
             error: None,
+            #[cfg(test)]
+            retirement_clock: None,
         })
+    }
+    fn retirement_now(&self) -> Instant {
+        #[cfg(test)]
+        if let Some(now) = self.retirement_clock {
+            return now;
+        }
+        Instant::now()
     }
     pub fn poll(
         &mut self,
@@ -418,7 +429,7 @@ impl<H: Host> Runtime<H> {
             let failed = attention.failed() || self.outbox.error.is_some();
             let expired = self
                 .retirement_until
-                .is_some_and(|until| Instant::now() >= until);
+                .is_some_and(|until| self.retirement_now() >= until);
             if failed || expired {
                 self.error = Some(
                     if failed {
@@ -474,8 +485,9 @@ impl<H: Host> Runtime<H> {
     }
     pub fn request_stop(&mut self) {
         self.quiescing = true;
+        let now = self.retirement_now();
         self.retirement_until
-            .get_or_insert_with(|| Instant::now() + super::COMMAND_WAIT);
+            .get_or_insert_with(|| now + super::COMMAND_WAIT);
         self.outbox.retire();
     }
     fn stop_host(&mut self) {

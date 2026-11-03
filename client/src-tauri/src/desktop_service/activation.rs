@@ -9,10 +9,13 @@ use zerus_client_core::{
 
 const RETRY: Duration = Duration::from_secs(60);
 
+mod diagnostic;
+use diagnostic::Reason;
+
 #[derive(Debug, PartialEq)]
 enum ReadError {
     Permanent,
-    Retryable,
+    Retryable(Reason),
 }
 impl ReadError {
     fn preparation(error: std::io::Error) -> Self {
@@ -22,7 +25,7 @@ impl ReadError {
             }
             // Capacity and unknown registry errors do not establish a permanent
             // identity refusal. A retry is a fresh read, never a replay.
-            _ => Self::Retryable,
+            _ => Self::Retryable(Reason::Preparation),
         }
     }
 }
@@ -185,8 +188,11 @@ fn read(
         return Err(ReadError::Permanent);
     }
     let resources: Arc<dyn Send + Sync> = Arc::new((charge, registration.resources()));
-    let bytes = runner::run_owned(
-        relay.executable().map_err(|_| ReadError::Retryable)?,
+    let mut failure = None;
+    let bytes = runner::run_owned_observed(
+        relay
+            .executable()
+            .map_err(|_| ReadError::Retryable(Reason::Selection))?,
         &invocation(
             &["desktop", "frontend-request", "--json"],
             input,
@@ -201,14 +207,18 @@ fn read(
             Ok(child)
         },
         resources,
+        |error, stderr| failure = Some(Reason::runner(error, stderr)),
     )
-    .map_err(|_| ReadError::Retryable)?;
+    .map_err(|error| {
+        ReadError::Retryable(failure.unwrap_or_else(|| Reason::runner(&error, None)))
+    })?;
     if bytes.len() > zerus_watch_protocol::CONTROL_LINE_BYTES {
-        return Err(ReadError::Retryable);
+        return Err(ReadError::Retryable(Reason::OutputLimit));
     }
-    let reply: wire::Reply = serde_json::from_slice(&bytes).map_err(|_| ReadError::Retryable)?;
+    let reply: wire::Reply = serde_json::from_slice(&bytes)
+        .map_err(|_| ReadError::Retryable(Reason::reply(&bytes, &id)))?;
     if !reply.matches(&id, configuration, epoch) {
-        return Err(ReadError::Retryable);
+        return Err(ReadError::Retryable(Reason::ReplyIdentity));
     }
     // Wayland activation tokens belong only to Linux. A Mac delivery comes
     // from its native host and has no platform context; never interpret a
@@ -219,7 +229,7 @@ fn read(
         .as_ref()
         .is_some_and(|open| open.platform_context.is_some())
     {
-        return Err(ReadError::Retryable);
+        return Err(ReadError::Retryable(Reason::ForeignContext));
     }
     Ok(reply.activation)
 }
@@ -289,9 +299,16 @@ pub(super) async fn run(shared: Arc<Shared>, configuration: String, stop: Arc<At
                 }
                 return; // Only this reader stops; catalog/watch remain connected.
             }
-            _ => {
+            result => {
+                let reason = match result {
+                    Ok(Err(ReadError::Retryable(reason))) => reason,
+                    _ => Reason::WorkerJoin,
+                };
                 if !stop.load(Ordering::Acquire) && !shared.stopped.load(Ordering::Acquire) {
-                    eprintln!("zerus-client: desktop activation unavailable");
+                    eprintln!(
+                        "zerus-client: desktop activation unavailable: {}",
+                        reason.code()
+                    );
                 }
                 if !backoff(&shared, &stop).await {
                     return;

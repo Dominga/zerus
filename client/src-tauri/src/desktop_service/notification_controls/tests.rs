@@ -119,6 +119,202 @@ async fn stop(
     );
 }
 
+type HeldRefresh = Arc<Mutex<Option<(Source, tokio::sync::watch::Sender<bool>)>>>;
+fn hold_renewal_refreshes(source: &Source) -> (Arc<AtomicBool>, HeldRefresh) {
+    let blocked = Arc::new(AtomicBool::new(false));
+    let pending: HeldRefresh = Arc::default();
+    let (block, held) = (blocked.clone(), pending.clone());
+    source.set_refresh(Arc::new(move |source, complete| {
+        if block.load(Ordering::Acquire) {
+            assert!(held.lock().unwrap().replace((source, complete)).is_none());
+        } else {
+            source.observe(FocusState::Foreground);
+            complete.send(true).unwrap();
+        }
+    }));
+    (blocked, pending)
+}
+
+#[test]
+fn foreground_renewal_waits_for_a_fresh_hidden_window_observation() {
+    if !private_case("desktop_service::notification_controls::tests::foreground_renewal_waits_for_a_fresh_hidden_window_observation") { return; }
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({}));
+        let setup = fixture.setup();
+        let (blocked, pending) = hold_renewal_refreshes(&setup.source);
+        let owner = Controller::new(Some(setup));
+        let responder = service_responder();
+        let _cache = CacheServer::start(&fixture.0, responder.clone());
+        let session = fixture.connect(&owner, responder).await;
+        let worker = tauri::async_runtime::spawn(run(owner.clone(), session.clone()));
+        until("original Foreground observation delivered", || {
+            fixture
+                .lines("evidence")
+                .iter()
+                .any(|v| v["focus"]["state"] == "foreground")
+        })
+        .await;
+        let original = session.native.snapshot().unwrap();
+        blocked.store(true, Ordering::Release);
+        until("renewal queued a fresh native enumeration", || {
+            pending.lock().unwrap().is_some()
+        })
+        .await;
+        assert_eq!(
+            fixture.controls("focus").len(),
+            1,
+            "cached Foreground was not renewed before enumeration"
+        );
+        // The platform hid the window without a Focused(false) event. Only the
+        // fresh native enumeration discovers it; scheduling alone cannot clear it.
+        assert_eq!(session.native.snapshot().unwrap(), original);
+        let (source, complete) = pending.lock().unwrap().take().unwrap();
+        source.observe(crate::desktop_notification_controls::aggregate([Some(
+            false,
+        )]));
+        complete.send(true).unwrap();
+        until(
+            "fresh hidden window sends Background instead of another Foreground",
+            || {
+                fixture
+                    .lines("evidence")
+                    .iter()
+                    .any(|v| v["focus"]["state"] == "background")
+            },
+        )
+        .await;
+        assert_eq!(
+            session.native.snapshot().unwrap().state,
+            FocusState::Background
+        );
+        assert!(session.native.snapshot().unwrap().revision > original.revision);
+        assert_eq!(
+            fixture
+                .lines("evidence")
+                .iter()
+                .filter(|v| v["focus"]["state"] == "foreground")
+                .count(),
+            1
+        );
+        stop(&owner, &session, worker).await;
+    });
+}
+
+#[test]
+fn configure_status_and_lookup_do_not_wait_for_a_blocked_foreground_check() {
+    if !private_case("desktop_service::notification_controls::tests::configure_status_and_lookup_do_not_wait_for_a_blocked_foreground_check") {return}
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({"lose_configure":true}));
+        let setup = fixture.setup();
+        let (blocked, pending) = hold_renewal_refreshes(&setup.source);
+        let owner = Controller::new(Some(setup));
+        let responder = service_responder();
+        let _cache = CacheServer::start(&fixture.0, responder.clone());
+        let session = fixture.connect(&owner, responder).await;
+        let worker = tauri::async_runtime::spawn(run(owner.clone(), session.clone()));
+        until("initial status and Foreground", || {
+            owner.view().is_some_and(|v| v.status.is_some())
+                && !fixture.controls("focus").is_empty()
+        })
+        .await;
+        blocked.store(true, Ordering::Release);
+        until("renewal waiting for the main thread", || {
+            pending.lock().unwrap().is_some()
+        })
+        .await;
+        let statuses = || {
+            fixture
+                .lines("calls")
+                .iter()
+                .filter(|v| v["value"]["op"] == "notification_preferences_status")
+                .count()
+        };
+        let initial = statuses();
+        let original = owner.edit(true).unwrap().request_id.unwrap();
+        until("Configure runs while the callback stays blocked", || {
+            fixture.controls("configure").len() == 1
+                && owner.view().is_some_and(|v| v.pending && !v.running)
+        })
+        .await;
+        assert!(pending.lock().unwrap().is_some());
+        owner.check().unwrap();
+        until("lookup and status run without waiting for focus", || {
+            statuses() > initial
+                && fixture
+                    .lines("calls")
+                    .iter()
+                    .any(|v| v["value"]["op"] == "notification_preferences_result")
+        })
+        .await;
+        assert_eq!(fixture.controls("configure")[0]["request_id"], original);
+        assert_eq!(
+            fixture.controls("configure").len(),
+            1,
+            "unknown edits remain lookup-only"
+        );
+        assert_eq!(
+            fixture.controls("focus").len(),
+            1,
+            "no cached Foreground renewal"
+        );
+        assert!(pending.lock().unwrap().is_some());
+        stop(&owner, &session, worker).await;
+    });
+}
+
+#[test]
+fn native_loss_and_disconnect_do_not_wait_for_a_queued_renewal_enumeration() {
+    if !private_case("desktop_service::notification_controls::tests::native_loss_and_disconnect_do_not_wait_for_a_queued_renewal_enumeration") { return; }
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({}));
+        let setup = fixture.setup();
+        let (blocked, pending) = hold_renewal_refreshes(&setup.source);
+        let owner = Controller::new(Some(setup.clone()));
+        let responder = service_responder();
+        let _cache = CacheServer::start(&fixture.0, responder.clone());
+        let session = fixture.connect(&owner, responder).await;
+        let worker = tauri::async_runtime::spawn(run(owner.clone(), session.clone()));
+        until("original Foreground delivered", || {
+            fixture
+                .lines("evidence")
+                .iter()
+                .any(|v| v["focus"]["state"] == "foreground")
+        })
+        .await;
+        blocked.store(true, Ordering::Release);
+        until("renewal waits on main-thread work", || {
+            pending.lock().unwrap().is_some()
+        })
+        .await;
+        setup.source.observe(FocusState::Background);
+        until("native loss bypasses the blocked enumeration", || {
+            fixture
+                .lines("evidence")
+                .iter()
+                .any(|v| v["focus"]["state"] == "background")
+        })
+        .await;
+        assert!(pending.lock().unwrap().is_some());
+        setup.source.observe(FocusState::Foreground);
+        // The same pending enumeration is reused. Disconnect must join the
+        // worker without needing the main thread to execute that callback.
+        tokio::task::yield_now().await;
+        stop(&owner, &session, worker).await;
+        let (source, complete) = pending.lock().unwrap().take().unwrap();
+        source.observe(FocusState::Foreground);
+        complete.send(true).unwrap();
+        assert!(session.native.snapshot().is_none());
+        assert_eq!(
+            fixture
+                .lines("evidence")
+                .iter()
+                .filter(|v| v["focus"]["state"] == "foreground")
+                .count(),
+            1
+        );
+    });
+}
+
 #[test]
 fn current_preferences_win_and_unknown_edits_are_lookup_only_until_confirmed_negative() {
     if !private_case("desktop_service::notification_controls::tests::current_preferences_win_and_unknown_edits_are_lookup_only_until_confirmed_negative"){return;}

@@ -21,6 +21,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::identity::Platform;
 
+#[path = "instance_guard.rs"]
+mod canonical;
+
 /// The line a start sends to the running instance.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Activation {
@@ -613,8 +616,7 @@ pub fn forward(socket: &Path, activation: Activation) -> bool {
         return false;
     };
     let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
-    let _ = stream.write_all(&line);
-    true
+    stream.write_all(&line).is_ok()
 }
 
 struct UnixStart<'a> {
@@ -667,7 +669,11 @@ impl Start for UnixStart<'_> {
     }
 
     fn service(&mut self) -> Service {
-        self.label.map(launchd_now).unwrap_or_default()
+        if cfg!(target_os = "macos") {
+            self.label.map(launchd_now).unwrap_or_default()
+        } else {
+            Service::default()
+        }
     }
 
     fn claim(&mut self) -> io::Result<()> {
@@ -700,6 +706,9 @@ impl Start for UnixStart<'_> {
 pub struct Listening {
     socket: PathBuf,
     inode: u64,
+    // Stop both listeners before releasing lifetime exclusion.
+    _servers: Vec<Server>,
+    _canonical: Option<canonical::Guard>,
 }
 
 impl Drop for Listening {
@@ -730,7 +739,12 @@ impl InstanceState {
     /// replaced it. Tauri never drops its managed state, so this is the only
     /// place the file is removed.
     pub fn release(&self) {
-        drop(self.0.lock().unwrap_or_else(PoisonError::into_inner).take());
+        if let Some(mut listening) = self.0.lock().unwrap_or_else(PoisonError::into_inner).take() {
+            if let Some(guard) = listening._canonical.take() {
+                guard.retain_until_exit();
+            }
+            drop(listening);
+        }
     }
 }
 
@@ -743,21 +757,66 @@ pub fn claim(
     label: Option<&str>,
     activation: Activation,
     reply: Option<Reply>,
+    admitted: impl FnOnce(),
 ) -> Claim {
+    claim_in(
+        name,
+        label,
+        activation,
+        reply,
+        &canonical::directory(),
+        admitted,
+    )
+}
+
+fn claim_in(
+    name: &str,
+    label: Option<&str>,
+    activation: Activation,
+    reply: Option<Reply>,
+    directory: &Path,
+    admitted: impl FnOnce(),
+) -> Claim {
+    let guard = if name == "hgs-tray" {
+        match canonical_claim(directory, activation.clone()) {
+            Ok(Some(guard)) => Some(guard),
+            Ok(None) => return Claim::Forwarded,
+            Err(error) => return Claim::Failed(error.to_string()),
+        }
+    } else {
+        None
+    };
     let xdg_runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
     let runtime = runtime_dir(
         Platform::current(),
         &crate::identity::home_dir(),
         xdg_runtime.as_deref(),
     );
-    claim_with_reply(
+    claim_guarded(
         &paths(name, &temp_dir(), &runtime),
         label,
         activation,
         &LockInfo::own(),
         &Timing::default(),
         reply,
+        (guard, admitted),
     )
+}
+
+fn canonical_claim(
+    directory: &Path,
+    activation: Activation,
+) -> io::Result<Option<canonical::Guard>> {
+    if let Some(guard) = canonical::acquire(directory)? {
+        return Ok(Some(guard));
+    }
+    // A concurrent start may still be opening its listeners. Failure to focus
+    // is a clean duplicate exit, never permission to create another GUI.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !forward(&directory.join("gui.sock"), activation.clone()) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -771,6 +830,7 @@ pub fn claim_at(
     claim_with_reply(paths, label, activation, own, timing, None)
 }
 
+#[cfg(test)]
 fn claim_with_reply(
     paths: &Paths,
     label: Option<&str>,
@@ -779,6 +839,19 @@ fn claim_with_reply(
     timing: &Timing,
     reply: Option<Reply>,
 ) -> Claim {
+    claim_guarded(paths, label, activation, own, timing, reply, (None, || {}))
+}
+
+fn claim_guarded(
+    paths: &Paths,
+    label: Option<&str>,
+    activation: Activation,
+    own: &LockInfo,
+    timing: &Timing,
+    reply: Option<Reply>,
+    admission: (Option<canonical::Guard>, impl FnOnce()),
+) -> Claim {
+    let (mut guard, admitted) = admission;
     let mut effects = UnixStart {
         paths,
         own,
@@ -791,6 +864,9 @@ fn claim_with_reply(
         Outcome::Forwarded => Claim::Forwarded,
         Outcome::Failed(error) => Claim::Failed(error),
         Outcome::Claimed => {
+            // Renderer setup may write a crash marker and change environment.
+            // Only an admitted GUI does it, before listener/GTK threads exist.
+            admitted();
             let Some(listener) = effects.listener.take() else {
                 return Claim::Failed("the socket was not kept".to_owned());
             };
@@ -798,17 +874,39 @@ fn claim_with_reply(
                 .map(|metadata| metadata.ino())
                 .unwrap_or(0);
             let (sender, activations) = mpsc::sync_channel(32);
-            listen(
+            let mut servers = Vec::new();
+            if let Some(guard) = &mut guard {
+                let listener = match guard.bind() {
+                    Ok(listener) => listener,
+                    Err(error) => {
+                        let _ = fs::remove_file(&paths.socket);
+                        return Claim::Failed(error.to_string());
+                    }
+                };
+                let sender = sender.clone();
+                // The canonical endpoint carries public navigation only.
+                // Configuration-bound desktop Hello remains on Qt's socket.
+                servers.push(listen(
+                    listener,
+                    move |activation| {
+                        let _ = sender.try_send(activation);
+                    },
+                    None,
+                ));
+            }
+            servers.push(listen(
                 listener,
                 move |activation| {
                     let _ = sender.try_send(activation);
                 },
                 reply,
-            );
+            ));
             Claim::Claimed(Claimed {
                 listening: Listening {
                     socket: paths.socket.clone(),
                     inode,
+                    _servers: servers,
+                    _canonical: guard,
                 },
                 activations,
             })
@@ -819,6 +917,21 @@ fn claim_with_reply(
 /// How long one connection may take to send its line.
 const LINE_WAIT: Duration = Duration::from_secs(1);
 
+struct Server {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    wake: UnixStream,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        let _ = self.wake.shutdown(std::net::Shutdown::Write);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 /// Reads the first line of each connection (`main.cpp:424-433`). Qt acts only
 /// on a complete line (`canReadLine`); a connection gets at most 1 s in all
 /// and 64 bytes, so a silent or slow client cannot hold the next start back.
@@ -826,12 +939,48 @@ fn listen(
     listener: UnixListener,
     deliver: impl Fn(Activation) + Send + 'static,
     reply: Option<Reply>,
-) {
-    std::thread::Builder::new()
+) -> Server {
+    listener
+        .set_nonblocking(true)
+        .expect("instance listener is nonblocking");
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped = stop.clone();
+    let (wake, awakened) = UnixStream::pair().expect("instance wake socket");
+    let thread = std::thread::Builder::new()
         .name("zerus-client-instance".into())
         .spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { continue };
+            while !stopped.load(std::sync::atomic::Ordering::Acquire) {
+                // Sleep in the kernel until a launch arrives or Drop wakes
+                // shutdown. Two GUI endpoints must not add idle polling.
+                let mut ready = [
+                    libc::pollfd {
+                        fd: listener.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                    libc::pollfd {
+                        fd: awakened.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                ];
+                // SAFETY: both descriptors and the writable array outlive poll.
+                if unsafe { libc::poll(ready.as_mut_ptr(), ready.len() as libc::nfds_t, -1) } < 0 {
+                    if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return;
+                }
+                if ready[1].revents != 0 || stopped.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                let mut stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        continue;
+                    }
+                    Err(_) => return,
+                };
                 // BSD may inherit the listener file flags. Keep accepted I/O
                 // bounded by the explicit deadlines, as on Linux.
                 let _ = stream.set_nonblocking(false);
@@ -878,12 +1027,22 @@ fn listen(
             }
         })
         .expect("the instance thread starts");
+    Server {
+        stop,
+        wake,
+        thread: Some(thread),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+
+    mod canonical_tests {
+        use super::*;
+        include!("instance_tests.rs");
+    }
 
     /// A test's own folder, removed when the test ends (also on a panic).
     struct Scratch(PathBuf);

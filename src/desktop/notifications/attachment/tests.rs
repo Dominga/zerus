@@ -160,10 +160,15 @@ impl Fixture {
         intent
     }
     fn attach(&self, state: Arc<Mutex<State>>, owner: Arc<dyn Send + Sync>) -> Runtime<Fake> {
-        Runtime::with_factory(&self.store, self.session.clone(), owner, |_, endpoint| {
-            Ok(Fake { endpoint, state })
-        })
-        .unwrap()
+        let mut runtime =
+            Runtime::with_factory(&self.store, self.session.clone(), owner, |_, endpoint| {
+                Ok(Fake { endpoint, state })
+            })
+            .unwrap();
+        // Native lifecycle is driven by this fixture. Only explicit clock
+        // advances exercise retirement expiry; native command deadlines stay real.
+        runtime.retirement_clock = Some(Instant::now());
+        runtime
     }
 }
 
@@ -245,12 +250,15 @@ fn unready_cleanup_has_one_overall_deadline_that_repeated_stop_cannot_extend() {
     runtime.request_stop();
     let original = runtime.retirement_until.unwrap();
     for _ in 0..20 {
+        runtime.retirement_clock =
+            Some(runtime.retirement_clock.unwrap() + std::time::Duration::from_millis(1));
         runtime.request_stop();
         runtime.poll(&mut f.store, &mut attention);
         assert_eq!(runtime.retirement_until, Some(original));
     }
     assert!(!state.lock().unwrap().stopping);
-    runtime.retirement_until = Some(Instant::now()); // The SAME original timeout expires.
+    runtime.retirement_clock = Some(original); // The SAME original timeout expires.
+    assert_eq!(runtime.retirement_until, Some(original));
     runtime.poll(&mut f.store, &mut attention);
     assert!(state.lock().unwrap().stopping);
     assert_eq!(runtime.status()["error"], "notification_cleanup_deadline");
@@ -307,11 +315,71 @@ fn revoke_before_restore_finishes_keeps_cleanup_mappings_without_click_authority
     state.lock().unwrap().finish = true;
     state.lock().unwrap().joined = true;
     settle_cleanup(&mut f, &mut runtime, &mut attention);
+    assert!(runtime.fault().is_none(), "{}", runtime.status());
     assert_eq!(f.store.db.query_row("SELECT COUNT(*) FROM desktop_attempts a JOIN desktop_intents i ON i.id=a.intent_id WHERE json_extract(i.payload,'$.op')='withdraw'", [], |r| r.get::<_, i64>(0)).unwrap(), 18);
 }
 
 #[test]
-fn revoke_waits_for_begun_post_receipt_and_resources_before_exact_withdrawal() {
+fn expiry_after_the_first_withdrawal_batch_drains_without_replaying_remaining_posts() {
+    let mut f = Fixture::new();
+    for _ in 0..18 {
+        f.seed();
+    }
+    let state = Arc::new(Mutex::new(State {
+        restore: true,
+        finish: true,
+        ready: true,
+        joined: true,
+        ..State::default()
+    }));
+    let mut runtime = f.attach(state.clone(), Arc::new(()));
+    let now = Instant::now();
+    runtime.retirement_clock = Some(now);
+    let mut attention = attention::Runtime::new(&f.session.service_epoch);
+    ledger::revoke(&f.store.db, "manual_revoke").unwrap();
+    runtime.request_stop();
+    let original = runtime.retirement_until.unwrap();
+    assert_eq!(original, now + super::super::COMMAND_WAIT);
+    for _ in 0..16 {
+        runtime.poll(&mut f.store, &mut attention);
+        let mut completed = 0;
+        while let Ok(work) = runtime.host.endpoint.try_next() {
+            let dispatch = work.begin().expect("fresh fixture work must begin");
+            let Action::Withdraw { native_id, .. } = &dispatch.command().action else {
+                panic!("cleanup cannot post")
+            };
+            let native_id = native_id.clone();
+            dispatch.finish(Outcome::Delivered { native_id });
+            completed += 1;
+        }
+        if completed != 0 {
+            assert_eq!(completed, 8);
+            break;
+        }
+    }
+    let attempts = |f: &Fixture| {
+        f.store.db.query_row(
+        "SELECT COUNT(*) FROM desktop_attempts a JOIN desktop_intents i ON i.id=a.intent_id WHERE json_extract(i.payload,'$.op')='withdraw'", [], |r|r.get::<_, i64>(0)).unwrap()
+    };
+    assert_eq!(attempts(&f), 8);
+    // Advance exactly to the original deadline, never extend or replace it.
+    runtime.retirement_clock = Some(original);
+    runtime.request_stop();
+    assert_eq!(runtime.retirement_until, Some(original));
+    assert!(runtime.poll(&mut f.store, &mut attention).is_empty());
+    assert_eq!(runtime.fault(), Some("notification_cleanup_deadline"));
+    assert!(state.lock().unwrap().stopping);
+    assert!(runtime.drained());
+    for _ in 0..4 {
+        assert!(runtime.poll(&mut f.store, &mut attention).is_empty());
+    }
+    assert_eq!(attempts(&f), 8);
+    assert!(runtime.host.endpoint.try_next().is_err());
+    assert_eq!(f.store.db.query_row("SELECT COUNT(*) FROM desktop_attempts a JOIN desktop_intents i ON i.id=a.intent_id WHERE json_extract(i.payload,'$.op')='post'", [], |r|r.get::<_, i64>(0)).unwrap(),18);
+}
+
+#[test]
+fn revoke_uses_begun_post_receipt_but_keeps_resources_through_exact_withdrawal() {
     for delivered in [true, false] {
         let mut f = Fixture::new();
         let state = Arc::new(Mutex::new(State {
@@ -357,12 +425,7 @@ fn revoke_waits_for_begun_post_receipt_and_resources_before_exact_withdrawal() {
         for _ in 0..4 {
             runtime.poll(&mut f.store, &mut attention);
         }
-        assert!(runtime.host.endpoint.try_next().is_err());
         assert!(!state.lock().unwrap().stopping);
-        drop(hold);
-        for _ in 0..4 {
-            runtime.poll(&mut f.store, &mut attention);
-        }
         if delivered {
             let close = runtime.host.endpoint.try_next().unwrap().begin().unwrap();
             assert!(
@@ -374,6 +437,18 @@ fn revoke_waits_for_begun_post_receipt_and_resources_before_exact_withdrawal() {
                 runtime.host.endpoint.try_next().is_err(),
                 "unknown post is never replayed or guessed delivered"
             );
+        }
+        for _ in 0..4 {
+            runtime.poll(&mut f.store, &mut attention);
+        }
+        assert!(
+            !state.lock().unwrap().stopping,
+            "completed receipts do not release the original post resources"
+        );
+        assert!(!runtime.outbox.operations_idle());
+        drop(hold);
+        for _ in 0..4 {
+            runtime.poll(&mut f.store, &mut attention);
         }
         state.lock().unwrap().joined = true;
         settle_cleanup(&mut f, &mut runtime, &mut attention);

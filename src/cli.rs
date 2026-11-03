@@ -52,7 +52,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs desktop watch|request --json    private local desktop-v1 IPC
        hgs desktop feed --json             passive owner source data, no reader launch
        hgs desktop registration --json    preview this user's passive service definition
-       hgs desktop registration --json --background    preview Linux background definition
+       hgs desktop registration --json --background    preview Unix background definition
        hgs desktop registration mode-check --json   verify an interactive mode-switch caller
        hgs desktop revoke-hold --json --request-id UUID   retain original rollback exclusion until stdin EOF
        hgs desktop registration install|remove|status --json   Windows interactive-user logon task
@@ -65,9 +65,11 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        Desktop frontend request ABI: desktop-ui-request-v1
        Desktop ownership ABI: desktop-ownership-v1
        Notification controls ABI: desktop-notification-controls-v1
+       Desktop creation clone ABI: desktop-creation-clone-v1
        Desktop pending read import ABI: desktop-pending-reads-v1
        Desktop activation ABI: desktop-activation-v1
        Desktop maintenance ABI: desktop-maintenance-v1
+       Desktop cache maintenance ABI: desktop-cache-maintenance-v1
        Desktop startup ABI: desktop-startup-v1
        Desktop logon registration ABI: desktop-logon-task-v1
        Desktop Toast registration ABI: desktop-notification-registration-v1
@@ -407,9 +409,11 @@ pub(crate) fn usage() -> &'static str {
 /// Commands that only Unix dispatches: `notify` for the tray, and `clip` and
 /// `paste`, which tmux's C-v binding runs.
 const UNIX_ONLY_COMMANDS: [&str; 3] = ["notify", "clip", "paste"];
-/// Whether a usage line tells of what only Unix has: a command of
-/// `UNIX_ONLY_COMMANDS` or the Ctrl+V that runs `hgs paste`.
+/// Lines for Unix commands/input bindings or the POSIX creation-clone ABI.
 fn unix_only_usage(line: &str) -> bool {
+    if line.trim() == zerus_client_core::desktop::creation_clone::HELP_MARKER {
+        return true;
+    }
     let mut words = line.split_whitespace();
     match words.next() {
         Some("hgs") => words
@@ -2642,12 +2646,15 @@ mod tests {
     fn usage_names_tmux_only_where_it_hosts_the_sessions() {
         // Unix keeps tmux's text byte for byte, capability markers included.
         assert_eq!(usage_text(true), USAGE);
+        let clone_marker = zerus_client_core::desktop::creation_clone::HELP_MARKER;
+        assert!(USAGE.lines().any(|line| line.trim() == clone_marker));
         // Windows has no `hgs paste`, `hgs clip` or `hgs notify`, no Ctrl+V
-        // that pulls a peer's image, and its dry runs print the host's
-        // requests; every other line stays as it is.
+        // that pulls a peer's image, and no POSIX creation-clone executor.
+        // Its dry runs print the host's requests; every other line stays as is.
         let neutral = usage_text(false);
         assert!(!neutral.contains("tmux"), "{neutral}");
         assert!(!neutral.contains("Ctrl+V"), "{neutral}");
+        assert!(!neutral.lines().any(|line| line.trim() == clone_marker));
         assert_eq!(
             neutral,
             USAGE
@@ -2661,6 +2668,10 @@ mod tests {
                 )
                 .replace(
                     "       hgs notify [--bell] <session> [text]   event for the tray (no tray = no-op)\n",
+                    ""
+                )
+                .replace(
+                    "       Desktop creation clone ABI: desktop-creation-clone-v1\n",
                     ""
                 )
                 .replace(

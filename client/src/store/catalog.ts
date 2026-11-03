@@ -132,7 +132,7 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     reviewLater: false,
     attentionNeeded: typeof v.needs_attention === "boolean" ? v.needs_attention : undefined,
     childAttention: !!v.child_attention,
-    optionalQuestions: undefined,
+    optionalQuestions: typeof v.optional_question_count === "number" ? v.optional_question_count : undefined,
     updatedAt: typeof v.updated_at === "number" ? v.updated_at : undefined,
     turnStarted: typeof v.turn_started === "number" && v.turn_started > 0 ? v.turn_started : undefined,
     runId: optional(v.run_id),
@@ -207,6 +207,21 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
   // different batches).
   const replaced = new Map<string, { id: string; at: number }>();
   const replacedListeners = new Set<(oldId: string, newId: string) => void>();
+  // Current named rows, for an upsert/removal split in either arrival order.
+  const currentNames = new Map<string, Set<string>>();
+  const appearedAfter = new Map<string, { id: string; name: string }>();
+  const nameKey = (row: Session) => JSON.stringify([row.computer, row.name]);
+  const forgetCurrent = (id: string, row: Session | undefined) => {
+    if (!row) return;
+    const identity = nameKey(row), entries = currentNames.get(identity);
+    entries?.delete(id);
+    if (entries?.size === 0) currentNames.delete(identity);
+  };
+  const currentSuccessor = (id: string, row: Session): Session | undefined => {
+    const successor = appearedAfter.get(id), next = successor && catalog.rows[successor.id];
+    return next && successor.name === nameKey(row) && nameKey(next) === successor.name
+      && !next.archiveId && next.state !== "archived" ? next : undefined;
+  };
   /** The draft keys of the nonempty drafts (Rust's `draft_keys`): a row's `draft` mark. */
   let drafts = new Set<string>(), childDraftParents = new Set<string>();
   const drafted = (row: Pick<Session, "computer" | "name">) => {
@@ -214,12 +229,22 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
     return drafts.has(owner) || childDraftParents.has(owner);
   };
 
-  const put = (id: string, next: Session, fresh: string[]) => {
+  const put = (id: string, next: Session, fresh: string[], delta = true) => {
     next.draft = drafted(next);
+    if (delta && !catalog.rows[id] && !next.archiveId && next.state !== "archived") {
+      const identity = nameKey(next), previous = currentNames.get(identity);
+      if (previous?.size === 1) appearedAfter.set(previous.values().next().value!, { id, name: identity });
+    }
+    forgetCurrent(id, catalog.rows[id]);
     if (catalog.rows[id]) setCatalog("rows", id, reconcile(next));
     else {
       setCatalog("rows", id, next);
       fresh.push(id);
+    }
+    if (!next.archiveId && next.state !== "archived") {
+      const identity = nameKey(next), entries = currentNames.get(identity) ?? new Set<string>();
+      entries.add(id);
+      currentNames.set(identity, entries);
     }
   };
 
@@ -237,23 +262,43 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
       onMachines?.(b);
       const fresh: string[] = [];
       const gone = new Set<string>();
+      const upserted: Session[] = [];
+      const resumed = new Map<string, string>();
       for (const r of b.replaces) {
         const keep = new Set<string>();
+        const successors = new Map<string, Session | null>();
         for (const row of r.rows) {
           const id = rowId(r.computer, row.key);
           keep.add(id);
-          put(id, toSession(r.computer, row.key, row.row, marks), fresh);
+          const next = toSession(r.computer, row.key, row.row, marks);
+          put(id, next, fresh, false);
+          upserted.push(next);
+          if (next.runId && next.conversationId && !next.archiveId && next.state !== "archived") {
+            const identity = JSON.stringify([next.name, next.conversationId]);
+            successors.set(identity, successors.has(identity) ? null : next);
+          }
         }
-        for (const id of catalog.order) if (computerOf(id) === r.computer && !keep.has(id)) gone.add(id);
+        for (const id of catalog.order) if (computerOf(id) === r.computer && !keep.has(id)) {
+          gone.add(id);
+          const previous = catalog.rows[id];
+          // Coalescing into a full catalog loses the explicit removal reason.
+          // Carry selection only to a unique, known same-conversation run.
+          if (!previous?.runId || !previous.conversationId || previous.archiveId || previous.state === "archived") continue;
+          const next = successors.get(JSON.stringify([previous.name, previous.conversationId]));
+          if (next && next.runId !== previous.runId) resumed.set(id, next.key);
+        }
       }
       for (const k of b.removes) {
         const id = rowId(k.computer, k.key);
         const row = catalog.rows[id];
         if (!row) continue;
-        if (k.reason === "replaced") replaced.set(`${k.computer}\n${row.name}`, { id, at: Date.now() });
+        if (k.reason === "replaced") {
+          replaced.set(`${k.computer}\n${row.name}`, { id, at: Date.now() });
+          const next = currentSuccessor(id, row);
+          if (next) resumed.set(id, next.key);
+        }
         gone.add(id);
       }
-      const upserted: Session[] = [];
       for (const u of b.upserts) {
         const id = rowId(u.computer, u.key);
         const next = toSession(u.computer, u.key, u.row, marks);
@@ -262,6 +307,7 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
         upserted.push(next);
       }
       if (gone.size || fresh.length) {
+        for (const id of gone) { forgetCurrent(id, catalog.rows[id]); appearedAfter.delete(id); }
         setCatalog(produce((s) => {
           for (const id of gone) delete s.rows[id];
           const kept = gone.size ? s.order.filter((id) => !gone.has(id)) : s.order.slice();
@@ -269,6 +315,13 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
           for (const id of fresh) if (!seen.has(id) && !gone.has(id)) { kept.push(id); seen.add(id); }
           s.order = kept;
         }));
+      }
+      for (const [from, to] of resumed) {
+        const next = catalog.rows[to];
+        if (!next || !gone.has(from) || gone.has(to)) continue;
+        const identity = `${next.computer}\n${next.name}`;
+        if (replaced.get(identity)?.id === from) replaced.delete(identity);
+        for (const listener of replacedListeners) listener(from, to);
       }
       for (const next of upserted) inheritReplaced(next);
     });

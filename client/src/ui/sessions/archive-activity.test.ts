@@ -12,6 +12,8 @@ vi.hoisted(() => {
   vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }));
 });
 vi.mock("../../bridge", () => ({
+  // The session entry points also initialize the bounded creation-card store.
+  onCreations: vi.fn(async () => () => {}), creationsView: vi.fn(async () => []),
   inTauri: () => false,
   // The native workspace store, loaded by the session entry points.
   nativeUiOpen: vi.fn(), nativeUiRetire: vi.fn(async () => {}), nativeUiVisible: vi.fn(async () => {}),
@@ -211,8 +213,8 @@ describe("the app's archived Activity", () => {
     setSelectedKey("\nrun:run-live");
     expect(archiveActivity.target()).toBeUndefined();
     expect(archiveActivity.events()).toEqual([]);
-    expect(mocked.activityPort.follow).toHaveBeenCalledWith(expect.objectContaining({ key: "run:run-live" }));
     await flush();
+    expect(mocked.activityPort.follow).toHaveBeenCalledWith(expect.objectContaining({ key: "run:run-live" }));
     expect(mocked.composerOpen).toHaveBeenLastCalledWith({ computer: "", key: "run:run-live", name: "codex/example/live", archive_id: null });
     vi.advanceTimersByTime(10_000);
     expect(reads.length).toBe(2);

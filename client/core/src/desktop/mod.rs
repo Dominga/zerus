@@ -14,6 +14,8 @@ use zerus_desktop_migration::canonical_uuid;
 
 pub mod activation;
 pub mod approval_audit;
+pub mod cache_maintenance;
+pub mod creation_clone;
 pub mod drain;
 pub mod notification_control;
 pub mod notifications;

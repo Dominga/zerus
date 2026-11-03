@@ -17,6 +17,9 @@ use zerus_desktop_migration::{
     MAX_IMPORT_RECORD_BYTES, MAX_SNAPSHOT_BYTES, SOURCE, VERSION,
 };
 
+pub mod families;
+pub mod journal;
+pub mod preload;
 pub mod sources;
 pub mod transport;
 
@@ -81,6 +84,9 @@ impl SourceStream {
     /// Recheck the exact source after its decoder finishes. The caller uses
     /// the existing source reader under G1's current drain, checking path/file
     /// identity there too. An error or changed hash prevents a final manifest.
+    /// The explicitly versioned `preload` creation archive is historical: its
+    /// recheck validates the durable original snapshot, not today's mutable
+    /// journal, and provides no current-source completeness/drain claim.
     pub fn recheck(self, verify: impl FnOnce() -> SourceResult<String> + Send + 'static) -> Self {
         struct Checked<F> {
             chunks: Box<dyn Iterator<Item = SourceResult<Value>> + Send>,

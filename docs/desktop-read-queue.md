@@ -235,8 +235,17 @@ filters use their existing indexes. Detail requires the same journal identity
 and a positive entry ID. `Request::matches` validates the reply scope, shape and
 256 KiB bound before the client unwraps `result` for its existing journal UI.
 
-The service holds one original read-only connection and file identity. A changed
-journal, protection, schema or missing filter index refuses instead of adopting
+The service holds one original read-only connection and file identity. Its actor
+only validates and admits queries; all journal file and SQLite I/O runs on the
+original bounded client I/O thread. At most one audit query is admitted through
+response and transport cleanup. Concurrent requests receive
+`approval_audit_unavailable` instead of queuing more readers. The reader retains
+its journal token between requests, so paging and Detail keep the same scope.
+The original service owner lock stays held through actual reader and transport
+cleanup even if logical shutdown reaches its deadline; a timeout never proves
+drain. These reads add no listener, worker pool or per-session cache.
+
+A changed journal, protection, schema or missing filter index refuses instead of adopting
 old cursors or repairing the journal. A fresh first List can select the current
 journal. An absent journal is an empty read and creates no directory or database
 file. Opening an existing WAL journal read-only can create SQLite's `-wal` and

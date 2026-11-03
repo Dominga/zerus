@@ -17,6 +17,10 @@ const MAINTENANCE_UNAVAILABLE: &str =
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
+    #[serde(skip)] // Native Files controller only, never caller-chosen paths.
+    CacheMaintenance,
+    #[serde(skip)] // Native creation owner only; never generic policy dispatch or receipts.
+    CreationClone,
     #[serde(skip)] // Separate native notification controller, never generic policy JSON.
     NotificationControl,
     #[serde(skip)] // Separate native ownership controller, never a generic policy request.
@@ -31,6 +35,8 @@ pub enum Operation {
 impl Operation {
     fn of(request: &Request) -> Self {
         match request {
+            Request::CacheMaintenance { .. } => Self::CacheMaintenance,
+            Request::CreationClone { .. } => Self::CreationClone,
             Request::NotificationControl { .. } => Self::NotificationControl,
             Request::DesktopOwnership { .. } => Self::DesktopOwnership,
             Request::ImportPendingReads { .. } => Self::ImportPendingReads,
@@ -41,6 +47,8 @@ impl Operation {
     }
     fn name(self) -> &'static str {
         match self {
+            Self::CacheMaintenance => "cache_maintenance",
+            Self::CreationClone => "creation_clone",
             Self::NotificationControl => "notification_controls",
             Self::DesktopOwnership => "desktop_ownership",
             Self::ImportPendingReads => "import_pending_reads",
@@ -261,6 +269,10 @@ fn version_dev_number(version: &str) -> Option<u64> {
 }
 
 enum Input {
+    Cache {
+        id: String,
+        command: Box<zerus_client_core::desktop::cache_maintenance::Command>,
+    },
     ImportReads {
         id: String,
         page: Box<zerus_client_core::desktop::pending_reads::Page>,
@@ -279,6 +291,7 @@ enum Input {
 impl Input {
     fn operation(&self) -> Operation {
         match self {
+            Self::Cache { .. } => Operation::CacheMaintenance,
             Self::ImportReads { .. } => Operation::ImportPendingReads,
             Self::Approvals { .. } => Operation::AutomaticApprovals,
             Self::Maintenance { .. } => Operation::MaintenanceConfigure,
@@ -287,6 +300,15 @@ impl Input {
     }
     fn request(self) -> Result<Option<Request>, &'static str> {
         match self {
+            Self::Cache { id, command } => {
+                if !command.valid(&id) {
+                    return Err("invalid_cache_intent");
+                }
+                Ok(Some(Request::CacheMaintenance {
+                    request_id: id,
+                    command,
+                }))
+            }
             Self::ImportReads { id, page } => Ok(Some(Request::ImportPendingReads {
                 request_id: id,
                 page,
@@ -313,6 +335,8 @@ impl Input {
     }
     fn refusal(&self, code: &str) -> Value {
         match self {
+            Self::Cache { id, .. } => json!({"request_id":id,"op":"cache_maintenance",
+                "accepted":false,"durable":false,"pending":false,"code":code}),
             Self::ImportReads { id, .. } => json!({"request_id":id,"op":"import_pending_reads",
                 "accepted":false,"durable":false,"pending":false,"code":code}),
             Self::Approvals { id, enabled } => refused(
@@ -332,6 +356,23 @@ impl Input {
     }
 }
 impl Service {
+    pub(crate) async fn cache_intent(
+        self: &Arc<Self>,
+        id: String,
+        command: zerus_client_core::desktop::cache_maintenance::Command,
+    ) -> Result<Value, String> {
+        if !command.valid(&id) {
+            return Err("Invalid cache request identity.".into());
+        }
+        Ok(submit(
+            self.shared.clone(),
+            Input::Cache {
+                id,
+                command: Box::new(command),
+            },
+        )
+        .await)
+    }
     pub async fn automatic_approvals(
         self: &Arc<Self>,
         id: String,
@@ -490,6 +531,8 @@ fn help(
     if !marker(HELP)
         || (!lookup && !marker(ui_requests::HELP_MARKER))
         || (operation == Operation::MaintenanceConfigure && !marker(maintenance::HELP_MARKER))
+        || (operation == Operation::CacheMaintenance
+            && !marker(zerus_client_core::desktop::cache_maintenance::HELP_MARKER))
         || (operation == Operation::ImportPendingReads
             && !marker(zerus_client_core::desktop::pending_reads::HELP_MARKER))
     {
@@ -499,7 +542,10 @@ fn help(
 }
 /// Presentation gates only; never a native permission or a writer grant.
 fn submission_ready(snapshot: &Snapshot, request: &Request) -> bool {
-    if matches!(request, Request::NotificationControl { .. }) {
+    if matches!(
+        request,
+        Request::NotificationControl { .. } | Request::CreationClone { .. }
+    ) {
         return false;
     }
     if !snapshot.connected || snapshot.epoch.is_none() {
@@ -509,6 +555,9 @@ fn submission_ready(snapshot: &Snapshot, request: &Request) -> bool {
     // background component is degraded or absent. The store commits it there.
     if matches!(request, Request::AutomaticApprovals { enabled: false, .. }) {
         return true;
+    }
+    if matches!(request, Request::CacheMaintenance { .. }) {
+        return snapshot.component_ready("cache_maintenance");
     }
     snapshot.component_ready(if Operation::of(request) == Operation::AutomaticApprovals {
         "approvals"
@@ -641,7 +690,10 @@ fn lookup(
     request: &Request,
     resources: Arc<dyn Send + Sync>,
 ) -> Result<Receipt, &'static str> {
-    if matches!(request, Request::NotificationControl { .. }) {
+    if matches!(
+        request,
+        Request::NotificationControl { .. } | Request::CreationClone { .. }
+    ) {
         return Err("frontend_receipt_unconfirmed");
     }
     let id = uuid::Uuid::new_v4().to_string();
@@ -649,6 +701,8 @@ fn lookup(
         "delivery_result"
     } else if Operation::of(request) == Operation::ImportPendingReads {
         "pending_reads_import_result"
+    } else if Operation::of(request) == Operation::CacheMaintenance {
+        "cache_maintenance_result"
     } else {
         "maintenance_result"
     };
@@ -669,7 +723,10 @@ fn lookup(
     lookup_receipt(request, &id, value)
 }
 fn lookup_receipt(request: &Request, id: &str, value: Value) -> Result<Receipt, &'static str> {
-    if matches!(request, Request::NotificationControl { .. }) {
+    if matches!(
+        request,
+        Request::NotificationControl { .. } | Request::CreationClone { .. }
+    ) {
         return Err("frontend_receipt_unconfirmed");
     }
     if value["request_id"] != id || value["original_request_id"] != request.id() {
@@ -677,9 +734,11 @@ fn lookup_receipt(request: &Request, id: &str, value: Value) -> Result<Receipt, 
     }
     if matches!(
         Operation::of(request),
-        Operation::AutomaticApprovals | Operation::ImportPendingReads
+        Operation::AutomaticApprovals | Operation::ImportPendingReads | Operation::CacheMaintenance
     ) {
-        let expected = if Operation::of(request) == Operation::ImportPendingReads {
+        let expected = if Operation::of(request) == Operation::CacheMaintenance {
+            "cache_maintenance_result"
+        } else if Operation::of(request) == Operation::ImportPendingReads {
             "pending_reads_import_result"
         } else {
             "delivery_result"
@@ -688,7 +747,13 @@ fn lookup_receipt(request: &Request, id: &str, value: Value) -> Result<Receipt, 
             return Err("frontend_receipt_unconfirmed");
         }
         match value["found"].as_bool() {
-            Some(true) => Ok(Receipt::Present(value["result"].clone())),
+            Some(true) => {
+                let mut result = value["result"].clone();
+                if matches!(request, Request::CacheMaintenance { .. }) {
+                    result["request_id"] = json!(request.id());
+                }
+                Ok(Receipt::Present(result))
+            }
             Some(false) if value["result"].is_null() => Ok(Receipt::Absent),
             _ => Err("frontend_receipt_unconfirmed"),
         }
@@ -718,6 +783,7 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
         Request::DesktopOwnership { .. }
             | Request::ActivationWait { .. }
             | Request::NotificationControl { .. }
+            | Request::CreationClone { .. }
     ) {
         // Their separate consumers validate different receipts and completion rules.
         return None;
@@ -745,6 +811,16 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
         value["pending"] = json!(false);
         return Some((value, true));
     }
+    if let Request::CacheMaintenance { command, .. } = request {
+        zerus_client_core::desktop::cache_maintenance::Status::response(
+            &value,
+            request.id(),
+            command,
+        )?;
+        // This native packet is durable, while the fixed service work may
+        // remain pending. Its consumer queries only the ORIGINAL operation ID.
+        return Some((value, true));
+    }
     if value["accepted"] != true || value["durable"] != true {
         return None;
     }
@@ -765,7 +841,9 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
         }
         Request::DesktopOwnership { .. }
         | Request::ActivationWait { .. }
-        | Request::NotificationControl { .. } => return None,
+        | Request::CacheMaintenance { .. }
+        | Request::NotificationControl { .. }
+        | Request::CreationClone { .. } => return None,
         Request::AutomaticApprovals { enabled, .. } => {
             if value["op"] != "automatic_approvals" || value["enabled"] != *enabled {
                 return None;

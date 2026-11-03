@@ -144,6 +144,7 @@ fn projected() -> UpdateProjection {
 #[test]
 fn schema_twelve_is_singleton_and_migrates_an_existing_eleven() {
     let f = Fixture::new(no_io());
+    crate::desktop::cache_maintenance::remove_from_downgraded_fixture(&f.store.db);
     assert_eq!(
         f.store
             .db
@@ -154,7 +155,7 @@ fn schema_twelve_is_singleton_and_migrates_an_existing_eleven() {
     f.store
         .db
         .execute_batch(
-            "DROP TABLE desktop_notification_preferences_requests; DROP TABLE desktop_notification_preferences; DROP TABLE desktop_ownership_requests; DROP TABLE desktop_ownership; DROP INDEX desktop_attention_catalog_identity; DROP TABLE desktop_attention_edges; DROP TABLE desktop_attention_sessions; DROP TABLE desktop_attention_totals;
+            "DROP TABLE desktop_creation_clones; DROP TABLE desktop_creation_clone_budget; DROP TABLE desktop_notification_preferences_requests; DROP TABLE desktop_notification_preferences; DROP TABLE desktop_ownership_requests; DROP TABLE desktop_ownership; DROP INDEX desktop_attention_catalog_identity; DROP TABLE desktop_attention_edges; DROP TABLE desktop_attention_sessions; DROP TABLE desktop_attention_totals;
             DROP TABLE desktop_catalog_changes;
             DROP TABLE desktop_catalog_change_views; DROP TABLE desktop_catalog_change_totals;
             DROP TABLE desktop_maintenance; PRAGMA user_version=11",

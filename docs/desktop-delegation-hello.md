@@ -186,6 +186,12 @@ older setting from overtaking a newer one. A wire role, confirmation flag or
 nonce alone supplies no authority. Generic desktop requests cannot change this
 policy.
 
+Ordering lanes are mapped exhaustively from the closed native request type,
+including the read-only `ActivationWait` request. Activation reads have their own
+serial lane and pass the same original two-second admission check before a
+bounded receiver can be installed; ownership and policy requests cannot obsolete
+an unrelated read. Unknown wire operations are refused before native admission.
+
 On Windows this request uses the existing per-user activation pipe, preserving
 its name/home hash, lifetime lock, own-SID DACL and remote-client refusal. The
 query remains 59 bytes (64-byte listener limit), with one JSON reply of at most

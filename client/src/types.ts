@@ -72,6 +72,8 @@ export interface ViewRow {
   process_state?: string;
   /** `process_work.count`, -1 when unknown. */
   background?: number;
+  /** Listed optional-question count; null while unknown, retained by Rust for the same conversation. */
+  optional_question_count?: number | null;
   archive_id?: string | null;
   /** Native children by exact agent ID; never the hook-profile fallback. */
   subagents?: Record<string, Record<string, unknown>>;
@@ -190,6 +192,8 @@ export interface DesktopService {
   details_available: boolean;
   /** Native frozen-read transfer; completion is durable queueing, not host ACK. */
   pending_read_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; through: number; superseded: number; delivered: false };
+  /** Best-effort Staged report only; its outcome never grants or gates service work. */
+  retained_source_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null; creations_capture?: { code: string; paused: boolean; capture_id: string | null } };
   notification_ownership?: NotificationOwnership;
   code: string;
 }

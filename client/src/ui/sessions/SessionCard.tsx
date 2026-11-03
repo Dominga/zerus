@@ -3,6 +3,7 @@ import { tr, trNoop } from "../../i18n";
 import { AGENT_LABEL, Icon } from "../lib/icons";
 import { computerFresh, computerOffline } from "../../store/catalog";
 import { visibleUnreadReply } from "../../store/attention";
+import { optionalQuestionCount, optionalQuestionCountText } from "./optional-questions";
 import { now } from "../../store/ui";
 import { settings } from "../../store/settings";
 import { machineAppearance } from "../../store/machineAppearance";
@@ -247,6 +248,7 @@ export function SessionCard(props: {
 }) {
   const s = () => props.session;
   const kind = () => badgeKind(s());
+  const optionalCount = () => optionalQuestionCount(s(), computerFresh(s().computer));
   return (
     <div class="scard" classList={{ selected: props.selected, offline: statusOf(s()) === "offline", muted: !!s().muted }} data-emphasis={emphasis(s())}>
       <div class="sc-l1">
@@ -256,9 +258,9 @@ export function SessionCard(props: {
         <Show when={visibleUnreadReply(s(), computerFresh(s().computer)) && (s().status === "working" || s().status === "attention" || s().draft)}>
           <span class="sc-extra"><StatusBadge kind={s().muted ? "muted-unread" : "unread"} caption="" iconOnly /></span>
         </Show>
-        <Show when={s().optionalQuestions}>
-          <span class="qchip" classList={{ muted: !!s().muted }} title={tr(s().optionalQuestions === 1 ? "%1 optional question waiting\nThe agent can continue without an answer. Answer or skip it in Activity.\nClick to open." : "%1 optional questions waiting\nThe agent can continue without an answer. Answer or skip it in Activity.\nClick to open.", s().optionalQuestions!)}>
-            <Icon name="question" size={16} />{s().optionalQuestions! > 99 ? "99+" : s().optionalQuestions}
+        <Show when={optionalCount()}>
+          <span class="qchip" classList={{ muted: !!s().muted }} title={tr(optionalCount() === 1 ? "%1 optional question waiting\nThe agent can continue without an answer. Answer or skip it in Activity.\nClick to open." : "%1 optional questions waiting\nThe agent can continue without an answer. Answer or skip it in Activity.\nClick to open.", optionalCount())}>
+            <Icon name="question" size={16} />{optionalQuestionCountText(optionalCount())}
           </span>
         </Show>
         <span class="grow" />

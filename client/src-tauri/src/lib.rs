@@ -40,6 +40,8 @@ mod desktop_service;
 mod display;
 #[cfg(feature = "live")]
 mod drops;
+#[cfg(any(target_os = "macos", test))]
+pub mod entry;
 mod exit_flush;
 #[cfg(feature = "live")]
 mod external_open;
@@ -297,7 +299,10 @@ pub fn run() {
     let mut native_ownership = None;
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     let instance = match identity.instance_name(identity::flag("ZERUS_CLIENT_SINGLE_INSTANCE")) {
-        None => None,
+        None => {
+            renderer::choose();
+            None
+        }
         Some(name) => {
             let activation = if opens_sessions {
                 instance::Activation::Sessions
@@ -325,7 +330,13 @@ pub fn run() {
                 any(target_os = "linux", target_os = "macos", windows)
             )))]
             let reply = None;
-            match instance::claim(&name, identity.launchd_label(), activation, reply) {
+            match instance::claim(
+                &name,
+                identity.launchd_label(),
+                activation,
+                reply,
+                renderer::choose,
+            ) {
                 instance::Claim::Claimed(claimed) => {
                     #[cfg(all(feature = "live", any(target_os = "linux", target_os = "macos")))]
                     {
@@ -585,14 +596,23 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 if desktop_service::mode() {
                     let source=desktop_notification_controls::Source::default();
                     let handle=app.handle().clone();
-                    source.set_refresh(std::sync::Arc::new(move|source| {
+                    source.set_refresh(std::sync::Arc::new(move|source,complete| {
                         let app=handle.clone();
-                        let _=handle.run_on_main_thread(move||desktop_notification_controls::observe_windows(&app,&source));
+                        let _=handle.run_on_main_thread(move|| {
+                            desktop_notification_controls::observe_windows(&app,&source);
+                            let _=complete.send(true);
+                        });
                     }));
                     app.state::<commands::AppState>().register_notification_controls(desktop_notification_controls::Setup {
                         source:source.clone(),settings:app.state::<settings::Store>().0.clone()
                     });
                     app.manage(source);
+                    if let Some(inputs) = desktop_service::retained_import::Inputs::native(
+                        &app.state::<identity::Identity>().bundle_id, replay, dir.clone(),
+                        app.state::<settings::Store>().0.clone(),
+                    ) {
+                        app.state::<commands::AppState>().set_retained_import_source(inputs);
+                    }
                 }
                 app.manage(speech_settings::SpeechPage::default());
                 app.manage(termination_cleanup::TerminationCleanup::default());

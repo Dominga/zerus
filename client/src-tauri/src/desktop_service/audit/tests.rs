@@ -30,11 +30,42 @@ fn audit_calls(fixture: &Fixture) -> usize {
 fn abi_probe_reuses_only_the_original_connection_and_helper_image() {
     use std::io::Write;
     let _process = crate::PROCESS_TREE.read().unwrap();
-    tauri::async_runtime::block_on(async {
-        let fixture = Fixture::new(json!({}));
-        replace_helper(&fixture); // Never modify the shared source fixture's symlink target.
-        let (service, _) = fixture.start(true);
+    let fixture = Fixture::new(json!({"audit_first_watch_hold":true}));
+    replace_helper(&fixture); // Never modify the shared source fixture's symlink target.
+    let greeted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = greeted.clone();
+    let pump = crate::pump::Pump::default();
+    let (sink, rx) = std::sync::mpsc::sync_channel(256);
+    let drain = pump.drain_service(rx, |_| {});
+    let service = Service::start(
+        fixture.0.join("hgs"),
+        pump,
+        sink,
+        true,
+        drain,
+        None,
+        vec![Arc::new(move |frame| {
+            if frame.is_some_and(|frame| frame["t"] == "hello") {
+                observed.fetch_add(1, Ordering::AcqRel);
+            }
+        })],
+    );
+    let checks = async {
         eventually("connected", || service.snapshot().connected).await;
+        eventually("original watch startup held", || {
+            fixture.0.join("audit-first-watch-held").exists()
+        })
+        .await;
+        assert_eq!(greeted.load(Ordering::Acquire), 0);
+        let original = Read::new(Some(service.clone())).unwrap();
+        assert!(original.current());
+        // Preflight has published connected, but only the original watch's
+        // observed hello establishes the connection that Retry must replace.
+        std::fs::write(fixture.0.join("audit-first-watch-release"), []).unwrap();
+        eventually("original watch greeted", || {
+            greeted.load(Ordering::Acquire) == 1 && original.current()
+        })
+        .await;
         let scope = first(service.clone()).await.unwrap().scope;
         detail(Some(service.clone()), 53, scope).await.unwrap();
         assert_eq!(
@@ -43,6 +74,7 @@ fn abi_probe_reuses_only_the_original_connection_and_helper_image() {
             "one connection probe plus one audit probe"
         );
         service.retry();
+        assert!(!original.current());
         eventually("same-epoch new original watch", || {
             fixture
                 .calls()
@@ -50,9 +82,15 @@ fn abi_probe_reuses_only_the_original_connection_and_helper_image() {
                 .filter(|call| call["args"] == json!(["desktop", "watch", "--json"]))
                 .count()
                 == 2
+                && greeted.load(Ordering::Acquire) == 2
                 && service.snapshot().connected
         })
         .await;
+        let replacement = Read::new(Some(service.clone())).unwrap();
+        assert_eq!(original.epoch, replacement.epoch);
+        assert_eq!(original.generation, replacement.generation);
+        assert!(!Arc::ptr_eq(&original.stop, &replacement.stop));
+        assert!(!Arc::ptr_eq(&original.routing, &replacement.routing));
         let scope = first(service.clone()).await.unwrap().scope;
         detail(Some(service.clone()), 53, scope).await.unwrap();
         assert_eq!(
@@ -89,9 +127,25 @@ fn abi_probe_reuses_only_the_original_connection_and_helper_image() {
         );
         assert_eq!(audit_calls(&fixture), queries);
         assert!(service.snapshot().connected);
-        service.join().await.unwrap();
-        assert!(service.shared.audit_help.is_empty());
-    });
+    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tauri::async_runtime::block_on(checks)
+    }));
+    // Even a failed fixture assertion must join its original watch and helpers.
+    tauri::async_runtime::block_on(service.join()).unwrap();
+    assert!(service.shared.audit_help.is_empty());
+    eprintln!(
+        "audit fixture joined: {} logged watches, {} greetings",
+        fixture
+            .calls()
+            .iter()
+            .filter(|call| call["args"] == json!(["desktop", "watch", "--json"]))
+            .count(),
+        greeted.load(Ordering::Acquire)
+    );
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[test]

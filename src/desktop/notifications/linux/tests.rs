@@ -862,10 +862,15 @@ fn actual_early_close_keeps_original_dispatch_charge_and_never_resurrects() {
     let held = h.outbox.pending[0].shared.clone();
     server.called.recv_timeout(WAIT).unwrap();
     until(|| h.outbox.event_count.load(Ordering::Acquire) > 0);
-    h.outbox.poll(&mut h.store, Instant::now());
-    assert_eq!(h.state(&request), "reserved");
-    drop(held);
     h.settle(&request, "delivered");
+    assert!(
+        !h.outbox.operations_idle(),
+        "original resources remain charged"
+    );
+    assert!(h.mappings().is_empty());
+    drop(held);
+    h.outbox.poll(&mut h.store, Instant::now());
+    assert!(h.outbox.operations_idle());
     assert!(h.mappings().is_empty());
     h.stop(&mut runtime);
 }
@@ -1069,7 +1074,9 @@ fn root_service_grant_attaches_original_host_posts_and_routes_click_then_release
         notifications::{activation, attachment, preparation, service},
         ownership, ui_authority,
     };
-    let _prepare = preparation::TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _prepare = preparation::TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let _attach = attachment::TEST_SERIAL.lock().unwrap();
     let bus = bus::Bus::new();
     let server = Server::new(&bus);
@@ -1136,6 +1143,43 @@ fn root_service_grant_attaches_original_host_posts_and_routes_click_then_release
         runtime.ready()
     });
     assert!(location.handoff_lock().is_err());
+    let report = crate::desktop::import_evidence::publish_fixture_for_test(&location).unwrap();
+    assert_eq!(report["code"], "handoff_busy");
+    assert_eq!(report["this_attempt_not_committed"], true);
+    assert!(!location
+        .root
+        .join("imports")
+        .join("11111111-1111-4111-8111-111111111111")
+        .exists());
+    runtime.poll(&mut h.store, &mut attention, &mut router, &mut seq);
+    assert!(
+        runtime.ready(),
+        "a deferred Staged report leaves the live host ready"
+    );
+    let publication = crate::desktop::import_evidence::held::pending_for_test(
+        &location,
+        runtime
+            .publication_owner(&h.store)
+            .unwrap()
+            .expect("original current granted owner"),
+    );
+    assert!(publication.owned.join("record-v1.json").is_file());
+    let report = publication.finish_connected();
+    assert_eq!(report["published"], true);
+    h.store.db.execute_batch("SAVEPOINT unavailable_owner; ALTER TABLE desktop_ownership RENAME TO unavailable_ownership;").unwrap();
+    assert!(
+        runtime.publication_owner(&h.store).is_err(),
+        "a failed original-grant query remains unknown, never a known ownerless refusal"
+    );
+    h.store
+        .db
+        .execute_batch("ROLLBACK TO unavailable_owner; RELEASE unavailable_owner;")
+        .unwrap();
+    runtime.poll(&mut h.store, &mut attention, &mut router, &mut seq);
+    assert!(
+        runtime.ready(),
+        "admitted report does not stop the granted runtime"
+    );
     let action = command(session()).action;
     let intent = ledger::put_intent(
         &mut h.store.db,
@@ -1194,8 +1238,34 @@ fn root_service_grant_attaches_original_host_posts_and_routes_click_then_release
     assert_eq!(click.post_request_id, request);
     assert_eq!(click.target.conversation, "conversation-1");
     assert!(click.platform_context.is_some());
+    let mut publication = crate::desktop::import_evidence::held::pending_for_test(
+        &location,
+        runtime
+            .publication_owner(&h.store)
+            .unwrap()
+            .expect("same still-current granted owner"),
+    );
+    let published_id = publication.import_id.clone();
     ownership::invalidate(&h.store.db).unwrap();
     ledger::revoke(&h.store.db, "fixture_revoke").unwrap();
+    publication.disconnect();
+    runtime.poll(&mut h.store, &mut attention, &mut router, &mut seq);
+    assert!(
+        runtime.publication_owner(&h.store).unwrap().is_none(),
+        "revoke refuses new publication jobs"
+    );
+    assert!(
+        !runtime.drained(),
+        "the SAME original owner is still charged by the admitted worker"
+    );
+    assert!(location.handoff_lock().is_err());
+    assert!(
+        publication.owned.join("record-v1.json").is_file(),
+        "caller disconnect never deletes the admitted input"
+    );
+    publication.finish();
+    assert_eq!(crate::desktop::import_evidence::status(&location, &published_id).unwrap()["record_present"], true,
+        "the original admitted finalization can finish while revoke waits; its lost reply is lookup-only");
     until(|| {
         runtime.poll(&mut h.store, &mut attention, &mut router, &mut seq);
         runtime.drained()

@@ -814,6 +814,13 @@ Reviewed 2.1.314 against 2.1.312: its unattended approval countdown says
 and "avoid blocking progress". Either exact advisory is outside question identity
 because it counts down and disappears on navigation; the command, warning and
 choices remain bound, and altered wording still refuses delivery.
+Claude 2.1.317 adds a Bash reliability check after approval: macOS's system
+Bash 3.2 refuses some compound commands with exit code 126. The native safety
+fixtures retain the variable-path rm warning and exact directory fence using
+`T=$PWD; test . -ef <fixture-work>`; the former `$(pwd)` and quoted-variable
+comparison form was refused. Timeout diagnostics retain bounded native tool
+results beside the screen so execution errors remain visible when Claude
+collapses a completed tool call.
 Claude offers a one-time default permission mode change; fixtures set
 `hasSeenAutoDefaultNudge` except the suite that answers that offer. OpenCode has
 a supported minimum of 2.0.32; CI tests its latest release on Linux and macOS.

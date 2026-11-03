@@ -794,7 +794,9 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                             "error",
                             json!({"code":"incompatible_configuration"}),
                         )
-                    } else if upgrade.requested() && hello.op != "status" {
+                    } else if upgrade.requested()
+                        && !upgrade::allowed_during_retirement(&hello.op, hello.request.as_ref())
+                    {
                         frame(
                             &epoch,
                             seq,
@@ -1232,7 +1234,12 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
         }
     }
     let deadline = Instant::now() + TIMEOUT + Duration::from_secs(1);
-    while active.load(Ordering::SeqCst) != 0 && (replaced || Instant::now() < deadline) {
+    while upgrade::connections_pending(
+        active.load(Ordering::SeqCst),
+        replaced,
+        Instant::now() < deadline,
+        platform::shutdown_signal() != 0,
+    ) {
         thread::sleep(Duration::from_millis(10));
     }
     let drained = if replaced {
@@ -1259,7 +1266,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
         // the original kernel owner through any independent finalizer/audit
         // loan even if the actor ended on an unrelated listener/store error.
         drop(background.take());
-        while !upgrade.restart_ready(&owner) && platform::shutdown_signal() == 0 {
+        while !upgrade::owner_loans_released(&owner) && platform::shutdown_signal() == 0 {
             thread::sleep(Duration::from_millis(10));
         }
     }

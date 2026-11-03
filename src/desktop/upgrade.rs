@@ -8,6 +8,34 @@ use std::{
 
 pub(super) const CHECK: Duration = Duration::from_secs(5);
 
+pub(super) fn owner_loans_released(owner: &Arc<crate::platform::FileLock>) -> bool {
+    Arc::strong_count(owner) == 1
+}
+
+pub(super) fn connections_pending(
+    active: usize,
+    replacing: bool,
+    before_deadline: bool,
+    shutdown: bool,
+) -> bool {
+    active != 0
+        && if replacing {
+            !shutdown
+        } else {
+            before_deadline
+        }
+}
+
+/// These routes only observe or reduce authority. The original handlers still
+/// validate their scope, UUID, receipt and physical drain; this adds no grant.
+pub(super) fn allowed_during_retirement(op: &str, request: Option<&Value>) -> bool {
+    (matches!(op, "status" | "ownership_status") && request.is_none())
+        || (op == "request"
+            && request.is_some_and(|request| {
+                matches!(request["op"].as_str(), Some("revoke" | "revoke_status"))
+            }))
+}
+
 #[derive(Default)]
 struct Stable<T> {
     candidate: Option<T>,
@@ -25,6 +53,7 @@ pub(super) struct Upgrade {
     executable: Option<Executable>,
     stable: Stable<Replacement>,
     next: Instant,
+    supervised: bool,
 }
 impl Upgrade {
     pub fn new() -> Self {
@@ -35,6 +64,7 @@ impl Upgrade {
                 requested: false,
             },
             next: Instant::now(),
+            supervised: cfg!(any(target_os = "linux", target_os = "macos")),
         }
     }
     pub fn poll(&mut self, now: Instant) -> bool {
@@ -51,10 +81,10 @@ impl Upgrade {
     pub fn supervised(&self) -> bool {
         // The maintained Linux/macOS registrations restart on a nonzero exit.
         // Windows task instances have no equivalent automatic restart contract.
-        cfg!(any(target_os = "linux", target_os = "macos"))
+        self.supervised
     }
     pub fn restart_ready(&self, owner: &Arc<crate::platform::FileLock>) -> bool {
-        self.requested() && self.supervised() && Arc::strong_count(owner) == 1
+        self.requested() && self.supervised() && owner_loans_released(owner)
     }
     pub fn decorate(&self, value: &mut Value) {
         if self.requested() {
@@ -68,6 +98,65 @@ impl Upgrade {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unsupervised_reader_finishes_owner_cleanup_without_becoming_restartable() {
+        let file = tempfile::tempfile().unwrap();
+        let owner = Arc::new(crate::platform::FileLock::exclusive(file).unwrap());
+        let mut upgrade = Upgrade::new();
+        upgrade.supervised = false;
+        upgrade.stable.requested = true;
+        let original = owner.clone();
+        assert!(!owner_loans_released(&owner));
+        assert!(!upgrade.restart_ready(&owner));
+        drop(original);
+        assert!(owner_loans_released(&owner));
+        assert!(!upgrade.restart_ready(&owner));
+    }
+
+    #[test]
+    fn a_later_shutdown_ends_the_replacement_connection_wait() {
+        assert!(connections_pending(1, true, false, false));
+        assert!(!connections_pending(1, true, false, true));
+        assert!(!connections_pending(1, true, true, true));
+        assert!(!connections_pending(0, true, false, false));
+        // Ordinary shutdown retains its existing bounded connection cleanup.
+        assert!(connections_pending(1, false, true, true));
+        assert!(!connections_pending(1, false, false, false));
+    }
+
+    #[test]
+    fn recovery_and_original_revoke_routes_remain_available_without_positive_admission() {
+        for op in ["status", "ownership_status"] {
+            assert!(allowed_during_retirement(op, None));
+            assert!(!allowed_during_retirement(op, Some(&json!({}))));
+        }
+        for op in ["revoke", "revoke_status"] {
+            assert!(allowed_during_retirement(
+                "request",
+                Some(&json!({"op":op}))
+            ));
+        }
+        for op in [
+            "ping",
+            "automatic_approvals",
+            "read_intent",
+            "desktop_ownership",
+            "cache_maintenance",
+        ] {
+            assert!(!allowed_during_retirement(
+                "request",
+                Some(&json!({"op":op}))
+            ));
+        }
+        for op in ["watch", "feed", "frontend_request", "request", "unknown"] {
+            assert!(!allowed_during_retirement(op, None));
+        }
+        assert!(!allowed_during_retirement(
+            "frontend_request",
+            Some(&json!({"op":"revoke"}))
+        ));
+    }
     #[test]
     fn only_two_consecutive_ready_observations_retire_and_retirement_is_sticky() {
         let mut stable = Stable::<u32>::default();

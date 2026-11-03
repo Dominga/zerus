@@ -13,8 +13,10 @@ resnapshot, retains its stale catalog, and reconnects with bounded backoff. It
 does not repeat startup Grant, report publication, Resume or an effect request.
 
 The service stops new effect/producer/audit/finalizer admission on replacement.
-Existing watch subscribers receive `hgs_replaced`; new watch/command connections
-are refused while status remains available. `desktop status --json` reports
+Existing watch subscribers receive `hgs_replaced`; new watch subscriptions and
+positive effect requests are refused while status and ownership status remain available. The maintained
+original revoke/revoke-status channel also stays available, using its unchanged
+scope, receipt and drain checks. `desktop status --json` reports
 `executable_upgrade` with `new_admission: false`. Original background workers and
 serve-owner loans keep their real resource charges and keep being drained. No
 deadline, returned outcome, absent PID or replacement binary releases a charge.
@@ -33,9 +35,12 @@ there stops admission, drains existing work and reports
 `manual_refresh_required`, but keeps the original
 service alive for the maintained explicit registration/instance transition. It
 does not adopt another task, call RunEx or replay manager operations.
+If the actor itself fails, final cleanup waits only for actual owner loans;
+supervisor support never makes that loan wait permanent. A later shutdown signal
+also ends a replacement connection wait, preserving explicit termination.
 
 An unresponsive original SDK callback or worker can keep retirement pending.
-Status stays readable while its actual owner is retained. This is not a successful
+Status stays readable during normal actor retirement while the actual owner is retained. This is not a successful
 upgrade, permission to launch a second host, or permission to kill a native agent.
 Use the existing resource-custody diagnostics and maintained recovery process.
 Unknown notification/operation outcomes stay Unknown across any eventual restart.

@@ -53,8 +53,9 @@ class Upgrade(unittest.TestCase):
             child.communicate(timeout=5)
             self.fail('original private desktop child did not stop')
 
-    def serve(self, selected):
-        child = subprocess.Popen([str(selected), 'desktop', 'serve'], env=self.env,
+    def serve(self, selected, background=False):
+        args = [str(selected), 'desktop', 'serve'] + (['--background'] if background else [])
+        child = subprocess.Popen(args, env=self.env,
                                  stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.addCleanup(self.stop, child)
         until = time.monotonic() + 10
@@ -98,6 +99,49 @@ class Upgrade(unittest.TestCase):
         replacement, current = self.serve(self.selected)
         self.assertNotEqual(current['epoch'], original['epoch'])
         self.assertFalse(current['writers_enabled'])
+        self.no_operations()
+        self.assertIsNone(replacement.poll())
+
+    def test_background_runtime_drains_original_readers_before_replacement_exit(self):
+        import fcntl
+
+        # Same private executable traps as test_desktop.py. No real peer,
+        # manager, terminal, display or user session is available to this source.
+        fake = self.root / '.local/bin'
+        fake.mkdir(parents=True)
+        for name in ('ssh', 'tmux', 'systemctl', 'launchctl', 'schtasks'):
+            program = fake / name
+            program.write_text('#!/bin/sh\nexit 99\n')
+            program.chmod(0o700)
+        for key in ('DISPLAY', 'WAYLAND_DISPLAY', 'XDG_SESSION_ID', 'XDG_SESSION_TYPE'):
+            self.env.pop(key, None)
+        self.env.update(PATH=str(fake) + ':/usr/bin:/bin',
+                        XDG_RUNTIME_DIR=str(self.root / 'tmp'),
+                        DBUS_SESSION_BUS_ADDRESS='unix:path=' + str(self.root / 'tmp/no-bus'))
+        child, original = self.serve(self.selected, background=True)
+        self.assertEqual(original['lifecycle']['mode'], 'background')
+        self.assertIn('background_runtime', original)
+        self.assertTrue(original['writers_enabled'])
+        until = time.monotonic() + 10
+        while time.monotonic() < until:
+            current = self.status()
+            if current['background_runtime']['transport_ready']:
+                break
+            time.sleep(.02)
+        self.assertTrue(current['background_runtime']['transport_ready'], current)
+        self.assertEqual(current['background_runtime']['workers'], 1)
+        self.replace()
+        output, error = child.communicate(timeout=15)
+        self.assertEqual(output, b'')
+        self.assertEqual(child.returncode, 1, error)
+        self.assertIn(b'hgs_replaced', error)
+        self.no_operations()
+        with (self.root / 'state/desktop/owner.lock').open('r+b') as owner:
+            fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(owner, fcntl.LOCK_UN)
+        replacement, current = self.serve(self.selected, background=True)
+        self.assertNotEqual(current['epoch'], original['epoch'])
+        self.assertTrue(current['writers_enabled'])
         self.no_operations()
         self.assertIsNone(replacement.poll())
 

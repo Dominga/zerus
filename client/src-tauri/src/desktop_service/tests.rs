@@ -3,7 +3,7 @@ use std::{fs, path::Path, time::Instant};
 
 mod silent_watch;
 
-pub(super) struct Fixture(pub(super) PathBuf);
+pub(super) struct Fixture(pub(super) PathBuf, pub(super) Arc<AtomicBool>);
 
 struct ReleaseView(std::sync::mpsc::Sender<()>);
 impl Drop for ReleaseView {
@@ -68,7 +68,7 @@ impl Fixture {
         )
         .unwrap();
         fs::write(root.join("fixture.json"), config.to_string()).unwrap();
-        Self(root)
+        Self(root, Arc::new(AtomicBool::new(false)))
     }
     pub(super) fn calls(&self) -> Vec<Value> {
         fs::read_to_string(self.0.join("calls"))
@@ -110,6 +110,13 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        if self.1.load(Ordering::Acquire) {
+            eprintln!(
+                "private service fixture retained for unconfirmed child: {}",
+                self.0.display()
+            );
+            return;
+        }
         let _ = fs::remove_dir_all(&self.0);
     }
 }
@@ -120,7 +127,7 @@ fn a_long_temp_parent_still_gets_a_private_bindable_socket_root() {
     let outer = Fixture::new(json!({}));
     let long_parent = outer.0.join("a".repeat(100));
     fs::create_dir(&long_parent).unwrap();
-    let root = Fixture(private_root(&long_parent));
+    let root = Fixture(private_root(&long_parent), Arc::new(AtomicBool::new(false)));
     assert!(!root.0.starts_with(&long_parent));
     assert_eq!(
         fs::metadata(&root.0).unwrap().permissions().mode() & 0o777,

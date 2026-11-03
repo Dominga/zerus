@@ -132,16 +132,59 @@ fn unsupported_or_mismatched_clone_results_never_advance_the_native_host() {
     if !private_case("desktop_service::creation_clone::tests::unsupported_or_mismatched_clone_results_never_advance_the_native_host") {return}
     tauri::async_runtime::block_on(async {
         for (config, writes) in [
-            (json!({"clone_no_abi":true}), 0),
+            (json!({"clone_help_fail":true}), 0),
             (json!({"clone_wrong_identity":true}), 1),
         ] {
-            let f = fixture(config);
+            let f = fixture(json!({}));
             let (service, _cache) = connected(&f).await;
+            std::fs::write(f.0.join("fixture.json"), config.to_string()).unwrap();
             let (id, value) = operation();
-            assert!(!answer(service.clone(), id, value, true).await.ok);
+            let result = answer(service.clone(), id, value, true).await;
+            assert!(!result.ok);
+            assert_eq!(
+                result.error,
+                zerus_client_core::repository::UNCONFIRMED_OPERATION
+            );
             assert_eq!(calls(&f).len(), writes);
             service.join().await.unwrap();
         }
+    });
+}
+
+#[test]
+fn missing_marker_definitively_refuses_only_a_fresh_unsent_clone() {
+    if !private_case("desktop_service::creation_clone::tests::missing_marker_definitively_refuses_only_a_fresh_unsent_clone") {return}
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({"clone_no_abi":true}));
+        let (service, _cache) = connected(&f).await;
+        for windows in [false, true] {
+            let (id, mut value) = operation();
+            if windows {
+                value["parent"] = json!(r"C:\Work");
+                value["target"] = json!(r"C:\Work\repo");
+                assert!(
+                    wire::Plan::from_operation(&id, &value).is_none(),
+                    "the missing-marker refusal precedes POSIX admission validation"
+                );
+            }
+            let refused = answer(service.clone(), id.clone(), value.clone(), true).await;
+            assert!(
+                refused.ok,
+                "a definite pre-send result, not a lost exchange"
+            );
+            assert_eq!(refused.data["status"], "failed");
+            assert_eq!(refused.data["request_id"], value["clone_id"]);
+            assert_eq!(refused.data["path"], value["target"]);
+            assert_eq!(refused.data["detail"], UNAVAILABLE);
+            let recovery = answer(service.clone(), id, value, false).await;
+            assert!(!recovery.ok);
+            assert_eq!(
+                recovery.error,
+                zerus_client_core::repository::UNCONFIRMED_OPERATION
+            );
+        }
+        assert!(calls(&f).is_empty(), "neither mutation nor lookup was sent");
+        service.join().await.unwrap();
     });
 }
 #[test]

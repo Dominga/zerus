@@ -637,6 +637,54 @@ mod actor {
         assert_eq!(value.receipt.unwrap(), before);
     }
     #[test]
+    fn actor_step_checks_a_revoked_writer_without_worker_cancellation() {
+        use std::sync::atomic::AtomicBool;
+        let ready = Arc::new(AtomicBool::new(false));
+        let resume = Arc::new(AtomicBool::new(false));
+        let refused = Arc::new(AtomicBool::new(false));
+        let (started, release, stopped) = (ready.clone(), resume.clone(), refused.clone());
+        let mut f = Fixture::new(move |_, control| {
+            (control.before)(Step::Reserve)?;
+            (control.before)(Step::Create)?;
+            started.store(true, Ordering::Release);
+            let until = Instant::now() + Duration::from_secs(8);
+            while !release.load(Ordering::Acquire) {
+                assert!(Instant::now() < until, "actor fixture was not released");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            assert!(!control.cancelled.load(Ordering::Acquire));
+            let result = (control.before)(Step::Clone);
+            assert!(!control.cancelled.load(Ordering::Acquire));
+            stopped.store(result.is_err(), Ordering::Release);
+            result?;
+            Err("revoked actor incorrectly admitted Clone".into())
+        });
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        f.until("worker before Clone", |_| ready.load(Ordering::Acquire));
+        assert_eq!(f.row(&original).next_step, 2);
+        f.store
+            .db
+            .execute("UPDATE desktop_writer SET revoked=1 WHERE id=1", [])
+            .unwrap();
+        resume.store(true, Ordering::Release);
+        let until = Instant::now() + Duration::from_secs(8);
+        while !refused.load(Ordering::Acquire) {
+            assert!(Instant::now() < until, "actor accepted a revoked step");
+            // Deliberately omit refresh: its cancellation must not hide a
+            // missing check in the actual BEGIN IMMEDIATE step transaction.
+            f.runtime
+                .fixture_poll_steps_without_refresh(&mut f.store)
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(f.row(&original).next_step, 2);
+        f.until("revoked step original drain", |f| {
+            f.row(&original).receipt.drained
+        });
+        assert_eq!(f.row(&original).receipt.phase, Phase::Unknown);
+    }
+    #[test]
     fn effect_steps_are_monotone_and_cannot_skip_or_repeat_a_reservation() {
         let mut f = Fixture::new(|_, control| {
             assert!(

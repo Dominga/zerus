@@ -572,6 +572,11 @@ impl Runtime {
             "drained":self.drained(),"admitted":self.admitted.len(),"working":self.work.is_some(),"undrained":self.charges})
     }
     #[cfg(test)]
+    pub(super) fn fixture_poll_steps_without_refresh(&mut self, store: &mut Store) -> Result<()> {
+        // Isolate the actor's per-step check from refresh's worker cancellation.
+        self.poll_inner(store)
+    }
+    #[cfg(test)]
     pub(super) fn fixture_executor(&mut self, machine: &str, executor: Executor) {
         self.machine = Some(Machine::fixture(machine));
         self.executor = Some(executor);

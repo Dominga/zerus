@@ -12,6 +12,9 @@ use zerus_client_core::{
     run, Invocation,
 };
 
+pub(crate) const UNAVAILABLE: &str =
+    zerus_client_core::source!("Repository cloning is not available from this desktop service.");
+
 struct Read {
     service: Arc<Service>,
     scope: wire::Scope,
@@ -182,7 +185,7 @@ impl Read {
         }
         Ok(result)
     }
-    fn supported(self: &Arc<Self>) -> Result<(), String> {
+    fn supported(self: &Arc<Self>) -> Result<bool, String> {
         let bytes = self.exchange(None, Value::Null, true, None)?;
         let help = std::str::from_utf8(&bytes).map_err(|_| creation::READ_FAILED)?;
         for marker in [
@@ -190,10 +193,10 @@ impl Read {
             zerus_client_core::desktop::ui_requests::HELP_MARKER,
         ] {
             if !help.lines().any(|line| line.trim() == marker) {
-                return Err(creation::READ_FAILED.into());
+                return Ok(false);
             }
         }
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -209,8 +212,26 @@ pub(crate) fn call(
 ) -> creation::Answer {
     let result = (|| -> Result<Value, String> {
         let read = Read::new(service)?;
+        if !creation::valid_operation(id, operation) {
+            return Err(creation::READ_FAILED.into());
+        }
+        if !read.supported()? {
+            // This exact fresh intent has not reached frontend-request. An
+            // older CLI cannot establish the outcome of an existing original.
+            if fresh {
+                let clone = operation["clone_id"]
+                    .as_str()
+                    .ok_or(creation::READ_FAILED)?;
+                if !creation::canonical_uuid(clone) {
+                    return Err(creation::READ_FAILED.into());
+                }
+                let target = operation["target"].as_str().ok_or(creation::READ_FAILED)?;
+                return Ok(json!({"status":"failed", "request_id":clone,
+                    "path":target, "detail":UNAVAILABLE}));
+            }
+            return Err(creation::READ_FAILED.into());
+        }
         let plan = wire::Plan::from_operation(id, operation).ok_or(creation::READ_FAILED)?;
-        read.supported()?;
         if fresh {
             let until = Instant::now() + RPC_WAIT;
             let charge = loop {

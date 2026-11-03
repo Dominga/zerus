@@ -593,7 +593,9 @@ pub(super) fn start(
     let instance = unsafe {
         selected.RunEx(
             &VARIANT::default(),
-            TASK_RUN_USE_SESSION_ID.0,
+            // The user parameter is the already-verified SID, not an account
+            // name. Keep both its type and the exact interactive session explicit.
+            TASK_RUN_USE_SESSION_ID.0 | TASK_RUN_USER_SID.0,
             session as i32,
             &BSTR::from(plan.sid.as_str()),
         )

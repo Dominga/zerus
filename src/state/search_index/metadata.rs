@@ -1,5 +1,6 @@
 //! Saved session records can contain large private shell-job histories. Keep
-//! their raw I/O charged, but retain only the metadata used by history search.
+//! their raw I/O charged, but retain only the fields used by history search.
+//! Public snapshot text shares that raw bound, not the smaller metadata bound.
 use super::*;
 use crate::platform::FileIdentity;
 use serde::de::{IgnoredAny, MapAccess, Visitor};
@@ -95,7 +96,13 @@ impl Reader {
         }
         let Metadata(record) = serde_json::from_slice(&bytes)
             .map_err(|_| "Session metadata is incomplete or invalid")?;
-        if serde_json::to_vec(&record)
+        let bounded_fields: BTreeMap<_, _> = record
+            .as_object()
+            .expect("Metadata deserializes an object")
+            .iter()
+            .filter(|(key, _)| !matches!(key.as_str(), "prompt" | "last_message"))
+            .collect();
+        if serde_json::to_vec(&bounded_fields)
             .map_err(|e| e.to_string())?
             .len()
             > RECORD_BYTES
@@ -138,16 +145,69 @@ impl<'de> Deserialize<'de> for Metadata {
             ) -> std::result::Result<Metadata, M::Error> {
                 let mut fields = serde_json::Map::new();
                 while let Some(key) = map.next_key::<String>()? {
-                    if key == "shell_jobs" {
-                        map.next_value::<IgnoredAny>()?;
+                    if needed(&key) {
+                        let mut value = map.next_value::<Value>()?;
+                        match key.as_str() {
+                            "legacy_shadow" => retain(&mut value, &["name", "run_id"]),
+                            "session_clear" => {
+                                retain(&mut value, &["conversation_id", "previous_conversation_id"])
+                            }
+                            "subagents" => {
+                                if let Some(children) = value.as_object_mut() {
+                                    for child in children.values_mut() {
+                                        retain(child, &["description"]);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        fields.insert(key, value);
                     } else {
-                        fields.insert(key, map.next_value()?);
+                        map.next_value::<IgnoredAny>()?;
                     }
                 }
                 Ok(Metadata(Value::Object(fields)))
             }
         }
         deserializer.deserialize_map(Fields)
+    }
+}
+
+fn needed(key: &str) -> bool {
+    matches!(
+        key,
+        "version"
+            | "name"
+            | "run_id"
+            | "conversation_id"
+            | "archive_id"
+            | "agent"
+            | "backend"
+            | "cwd"
+            | "archived_at"
+            | "transcript"
+            | "journal_name"
+            | "prompt"
+            | "last_message"
+            | "turn_started"
+            | "last_event_at"
+            | "updated"
+            | "created"
+            | "agent_home"
+            | "launch_dir"
+            | "account_id"
+            | "cleared_conversations"
+            | "session_clear"
+            | "rename_shadow"
+            | "rename_target"
+            | "legacy_shadow"
+            | "subagents"
+    )
+}
+
+fn retain(value: &mut Value, fields: &[&str]) {
+    if let Some(object) = value.as_object_mut() {
+        object.retain(|key, _| fields.contains(&key.as_str()));
     }
 }
 
@@ -248,7 +308,7 @@ mod tests {
         assert_eq!(progress.bytes, 0);
         fs::write(
             &path,
-            json!({"prompt":"x".repeat(RECORD_BYTES + 1),"shell_jobs":{}}).to_string(),
+            json!({"name":"x".repeat(RECORD_BYTES + 1),"shell_jobs":{}}).to_string(),
         )
         .unwrap();
         assert!(reader
@@ -260,6 +320,85 @@ mod tests {
                 .read(&path, &mut Progress::default(), &budget(), 0)
                 .is_err());
         }
+    }
+
+    #[test]
+    fn large_public_snapshots_are_preserved_with_the_original_raw_budgets() {
+        let temp = tempfile::tempdir().unwrap();
+        for (index, (prompt, reply)) in [
+            (RECORD_BYTES + 1, 0),
+            (0, RECORD_BYTES + 1),
+            (600 << 10, 600 << 10),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let path = temp.path().join(format!("{index}.json"));
+            let record = json!({"version":1,"run_id":"first",
+                "prompt":"x".repeat(prompt),"last_message":"y".repeat(reply)});
+            let bytes = serde_json::to_vec(&record).unwrap();
+            assert!(bytes.len() > RECORD_BYTES);
+            fs::write(&path, &bytes).unwrap();
+            let mut reader = Reader::default();
+            let mut progress = Progress::default();
+            assert_eq!(
+                reader.read(&path, &mut progress, &budget(), 512).unwrap(),
+                Record::Ready(record.clone())
+            );
+            assert_eq!(progress.bytes, bytes.len());
+            assert_eq!(progress.files, 1);
+
+            let mut short = budget();
+            short.bytes = bytes.len();
+            assert_eq!(
+                Reader::default()
+                    .read(&path, &mut Progress::default(), &short, 0)
+                    .unwrap(),
+                Record::OverBudget
+            );
+            let mut progress = Progress {
+                bytes: budget().bytes - bytes.len(),
+                ..Default::default()
+            };
+            let charged = progress.bytes;
+            assert_eq!(
+                Reader::default()
+                    .read(&path, &mut progress, &budget(), 0)
+                    .unwrap(),
+                Record::Deferred
+            );
+            assert_eq!(progress.bytes, charged);
+        }
+    }
+
+    #[test]
+    fn projection_retains_search_identity_and_filters_without_unrelated_payloads() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("binding.json");
+        let expected = json!({"version":1,"name":"codex/example/search", "run_id":"run",
+            "conversation_id":"conversation", "agent":"kimi", "agent_home":"/fixture/kimi",
+            "launch_dir":"/fixture", "account_id":"fixture-account", "journal_name":"earlier-name",
+            "cleared_conversations":["earlier"],
+            "session_clear":{"conversation_id":"conversation","previous_conversation_id":"earlier"},
+            "rename_shadow":true,"rename_target":"codex/example/renamed",
+            "legacy_shadow":{"name":"codex/example/search","run_id":"run"},
+            "subagents":{"child":{"description":"Public child label"}}});
+        let mut record = expected.clone();
+        record["future_private"] = json!("unrelated private payload ".repeat(50_000));
+        record["legacy_shadow"]["private_payload"] = json!("private legacy payload");
+        record["session_clear"]["private_payload"] = json!("private control payload");
+        record["subagents"]["child"]["private_payload"] = json!("private child payload");
+        let bytes = serde_json::to_vec(&record).unwrap();
+        assert!(bytes.len() > RECORD_BYTES);
+        fs::write(&path, &bytes).unwrap();
+        let mut progress = Progress::default();
+        assert_eq!(
+            Reader::default()
+                .read(&path, &mut progress, &budget(), 0)
+                .unwrap(),
+            Record::Ready(expected)
+        );
+        assert_eq!(progress.bytes, bytes.len());
     }
 
     #[cfg(windows)]

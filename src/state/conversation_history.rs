@@ -1409,7 +1409,9 @@ pub(super) fn inspected_voice_messages(record: &Value, detail: &Value, agent: Op
     let events: Vec<_> = detail["message_events"].as_array().into_iter().flatten()
         .chain(detail["events"].as_array().into_iter().flatten())
         .filter(|event| ["UserPromptSubmit","UserPromptQueued","UserMessage","TurnStarted"].contains(&string(event,"type"))
-            && ["","main"].contains(&string(event,"agent_id")))
+            && ["","main"].contains(&string(event,"agent_id"))
+            // A fork's inherited rows belong to its source (zerus-b4qk).
+            && event.get("inherited_from").is_none())
         .collect();
     let mut candidates = Vec::new();
     for (index,row) in voices.iter().enumerate() {

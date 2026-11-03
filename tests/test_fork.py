@@ -154,6 +154,45 @@ class Forks(Base):
         # A source in the default project leaves its fork there too.
         self.assertEqual(self.project_of(self.fork(loose,'loose-fork'),node),'ungrouped')
 
+    # zerus-b4qk: a fork's Activity shows its source's history up to the fork,
+    # marked as inherited, then its own; the source's later rows stay out.
+    def test_a_fork_shows_its_sources_history_up_to_the_fork(self):
+        import time
+        talk=lambda events:[(e['detail'],e.get('inherited_from')) for e in events
+                            if e['type'] in ('UserPromptSubmit','Stop')]
+        shown=lambda name:json.loads(self.hgs('inspect',name))
+        for agent in ['codex','claude']:
+            source=self.start(agent,f'{agent}-root')
+            self.send_event(source,'UserPromptSubmit',prompt='source request')
+            self.send_event(source,'Stop',last_assistant_message='source reply')
+            time.sleep(1.1)
+            fork=self.fork(source,f'{agent}-branch')
+            self.send_event(source,'UserPromptSubmit',prompt='source after the fork')
+            self.send_event(fork,'UserPromptSubmit',prompt='fork request')
+            inherited=[('source request',source),('source reply',source)]
+            data=shown(fork)
+            self.assertEqual(talk(data['events']),inherited+[('fork request',None)],agent)
+            self.assertEqual(talk(data['message_events']),inherited+[('fork request',None)],agent)
+            [[journal,conversation,seq]]=self.binding(fork)['fork_lineage']
+            self.assertEqual((journal,conversation),(source,self.binding(source)['conversation_id']))
+            # The source itself is unchanged and inherits nothing.
+            self.assertEqual(talk(shown(source)['events']),[('source request',None),('source reply',None),('source after the fork',None)])
+            # A fork of the fork reaches back through both.
+            self.send_event(fork,'Stop',last_assistant_message='fork reply')
+            time.sleep(1.1)
+            second=self.fork(fork,f'{agent}-twig')
+            self.send_event(second,'UserPromptSubmit',prompt='twig request')
+            self.assertEqual(talk(shown(second)['events']),
+                inherited+[('fork request',fork),('fork reply',fork),('twig request',None)],agent)
+            # A fork recorded before the lineage: its source's rows up to its creation.
+            path=self.root/'state'/(hashlib.sha256(fork.encode()).hexdigest()+'.json')
+            record=json.loads(path.read_text());record.pop('fork_lineage');path.write_text(json.dumps(record))
+            self.assertEqual(talk(shown(fork)['events']),inherited+[('fork request',None),('fork reply',None)],agent)
+            # Search finds the source's words in the source, never again in its forks.
+            hits=json.loads(self.hgs('search','--query','source request'))['results']
+            self.assertIn(source,{h['name'] for h in hits},agent)
+            self.assertFalse({fork,second}&{h['name'] for h in hits},agent)
+
     def test_provider_returning_source_id_is_not_confirmed_as_a_fork(self):
         source=self.start('claude');(self.root/'broken-fork').touch()
         self.hgs('fork',source,'-n','broken','-d')

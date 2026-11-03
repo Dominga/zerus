@@ -17,7 +17,7 @@ import { previews } from "../../store/attachments";
 import { mediaPlayback, retainedMediaId, setRetainedMediaId } from "../../store/mediaPlayback";
 import { pageHidden } from "../../store/visibility";
 import { recordingBlob } from "./voice-playback";
-import { cardTarget, createOpen, readCards } from "./attachment-card";
+import { cardTarget, createOpen, readCards, rowScope } from "./attachment-card";
 import { createStore, reconcile } from "solid-js/store";
 import { Icon } from "../lib/icons";
 import { selected, toast, contentScale, subagentOpen, setSubagentOpen, setMenu, setDetailTab, type MenuEntry } from "../../store/ui";
@@ -632,10 +632,10 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?:
   const it = props.item;
   if (it.kind === "media") return <MediaCard item={it} scope={props.scope} sourceId={props.sourceId} postersEnabled={props.postersEnabled} expanded={props.expanded} onExpanded={props.onExpanded} />;
   if (it.kind === "context") return <div class="act-label eyebrow" id={`item-${it.id}`}>{it.body}</div>;
-  if (it.kind === "thinking") return <div class="act-thinking" id={`item-${it.id}`}><span class="eyebrow">{tr("Thinking")}</span><p>{it.body}</p></div>;
+  if (it.kind === "thinking") return <div class="act-thinking" id={`item-${it.id}`} classList={{ inherited: !!it.inherited }}><span class="eyebrow">{tr("Thinking")}</span><p>{it.body}</p></div>;
   if (it.kind === "report")
     return (
-      <div class="act-notice" id={`item-${it.id}`} classList={{ open: open() }}>
+      <div class="act-notice" id={`item-${it.id}`} classList={{ open: open(), inherited: !!it.inherited }}>
         <div class="row"><Icon name="bot" size={13} /><b>{it.title}</b><Show when={it.sender}><span class="muted">{tr("from %1", it.sender!)}</span></Show><span class="grow" /><span class="act-time">{it.at}</span></div>
         <button class="link" onClick={toggleOpen}>{open() ? tr("▾ Hide report") : tr("▸ Show report")}</button>
         <Show when={open()}><p class="act-notice-body">{it.body}</p></Show>
@@ -643,7 +643,7 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?:
     );
   return (
     <Show when={it.kind !== "tools" && it.kind !== "tool"} fallback={
-      <div class="act-tools" id={`item-${it.id}`} classList={{ open: open(), warn: !!it.warn }}>
+      <div class="act-tools" id={`item-${it.id}`} classList={{ open: open(), warn: !!it.warn, inherited: !!it.inherited }}>
         <button class="act-tools-head" onClick={toggleOpen} aria-expanded={open()}>
           <Icon name="chevron-right" size={12} class="chev" />
           <b>{it.title}</b>
@@ -656,7 +656,7 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?:
         </Show>
       </div>
     }>
-      <article class={`act-msg k-${it.kind}`} id={`item-${it.id}`}>
+      <article class={`act-msg k-${it.kind}`} id={`item-${it.id}`} classList={{ inherited: !!it.inherited }}>
         <header>
           <b>{it.label ?? (it.kind === "user" ? tr("You") : it.kind === "agent" ? tr("Agent") : it.sender ?? "Zerus")}</b>
           {/* A local row's stamp stands in for the time and the receipt (ActivityView.cpp:1053-1055). */}
@@ -667,7 +667,8 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?:
           <span class="grow" />
           <Show when={it.kind === "agent"}><button class="icon-btn small act-copy" title={tr("Copy as Markdown")} onClick={() => copyText(it.body ?? "", tr("The reply is on the clipboard"))}><Icon name="copy" size={12} /></button></Show>
         </header>
-        <EchoBody item={it} scope={props.scope} />
+        {/* A fork's inherited row belongs to its source: never this session's attachments. */}
+        <EchoBody item={it} scope={rowScope(it, props.scope)} />
       </article>
     </Show>
   );

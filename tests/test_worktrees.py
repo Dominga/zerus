@@ -609,6 +609,48 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         live=self.linked('still-live');data=self.review(worktree=live)
         self.assertEqual([row['path'] for row in data['worktrees']],[str(live.resolve())]);self.assertEqual(data['leftovers'],[])
         self.assertEqual(len(self.records()),2)
+    def volumes(self):
+        import sqlite3
+        database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3'
+        with contextlib.closing(sqlite3.connect(database)) as db:return db.execute('SELECT path,folder,repository FROM removal_volumes ORDER BY path').fetchall()
+    # zerus-ty94 #5: a reservation records which filesystem held the folder
+    # and the repository; a missing path counts as gone only there.
+    @unittest.skipUnless(sys.platform in ('linux','darwin'),'volume identities exist on Linux and macOS')
+    def test_a_vanished_record_resolves_only_on_its_recorded_filesystem(self):
+        import sqlite3
+        tree,_,_=self.partial('volume-witness')
+        [(path,folder,repository)]=self.volumes()
+        self.assertEqual(path,str(tree.resolve()))
+        if not folder:self.skipTest('this filesystem has no identity (zero fsid)')
+        self.assertTrue(folder.startswith(('linux:','macos:')));self.assertEqual(folder,repository)
+        database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3';gone_repository=str(self.root/'gone-repository/.git')
+        cases={'older-cli':None,'unrecorded':('',''),'same':(folder,folder),'foreign':('linux:1:00000000000000ff','linux:1:00000000000000ff')}
+        with contextlib.closing(sqlite3.connect(database)) as db,db:
+            for name,volume in cases.items():
+                db.execute("INSERT INTO removals VALUES (?,?,?,?,?,?,?,?,?)",(str(self.root/name),gone_repository,'b','0'*40,'f'*64,'',1.0,'partial',''))
+                if volume:db.execute("INSERT INTO removal_volumes VALUES (?,?,?)",(str(self.root/name),*volume))
+        listed=subprocess.run([str(HGS),'worktrees','leftovers','--json'],env=self.env,text=True,capture_output=True,timeout=60)
+        self.assertEqual(listed.returncode,0,listed.stderr)
+        paths=[path for path,_ in self.records()]
+        # Gone for good: today's check for an older CLI's record, and a missing
+        # folder and repository whose filesystem is still there.
+        self.assertNotIn(str(self.root/'older-cli'),paths);self.assertNotIn(str(self.root/'same'),paths)
+        # Uncertain, never gone: an unrecorded or another filesystem.
+        self.assertIn(str(self.root/'unrecorded'),paths);self.assertIn(str(self.root/'foreign'),paths)
+        self.assertEqual(sorted(p for p,_,_ in self.volumes()),sorted([str(tree.resolve()),str(self.root/'unrecorded'),str(self.root/'foreign')]))
+        # The record a live removal settled keeps its volume row with it.
+        shutil.rmtree(tree,ignore_errors=True)
+        if tree.exists():(tree/'target'/'readonly').chmod(0o755);shutil.rmtree(tree)
+        self.assertIsNone(self.leftover(tree));self.assertNotIn(str(tree.resolve()),[p for p,_,_ in self.volumes()])
+    # #1206 review: the targeted filter matches whole paths, never a prefix,
+    # and resolves a linked target to its record.
+    def test_a_targeted_review_matches_whole_paths_and_resolved_links(self):
+        pre,_,_=self.partial('pre');self.partial('pre-x')
+        data=self.review(worktree=pre)
+        self.assertEqual([row['path'] for row in data['leftovers']],[str(pre.resolve())])
+        link=self.root/'link-to-pre';os.symlink(pre,link)
+        data=self.review(worktree=link)
+        self.assertEqual([row['path'] for row in data['leftovers']],[str(pre.resolve())])
     def test_an_interrupted_removal_stays_pending_for_review(self):
         self.fake("if any(sys.argv[i:i+2]==['worktree','remove'] for i in range(len(sys.argv)-1)):\n import signal,subprocess\n subprocess.run(["+repr(GIT)+",*sys.argv[1:]])\n os.kill(os.getppid(),signal.SIGKILL);sys.exit(1)\nelse: os.execv("+repr(GIT)+",["+repr(GIT)+",*sys.argv[1:]])\n")
         tree,row,result=self.partial('interrupted')
@@ -891,6 +933,67 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         left=self.leftover(tree);self.assertIn('nested_repository',codes(left['reasons']));self.assertFalse(left['deletable'])
         self.assertNotEqual(self.delete(tree,left['fingerprint']).returncode,0)
         self.assertTrue((nested/'.git').is_dir());self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
+    def test_leftover_deletion_refuses_an_incomplete_saved_binding_inventory(self):
+        for failure in ('unreadable-file','malformed-record','unreadable-directory'):
+            with self.subTest(failure=failure):
+                tree,row,_=self.partial('binding-'+failure)
+                name='codex/protected-'+failure;self.binding(name,tree)
+                known=self.root/'state'/(hashlib.sha256(name.encode()).hexdigest()+'.json')
+                self.assertIn('sessions',codes(self.leftover(tree)['reasons']))
+                unrelated='codex/unrelated-'+failure;self.binding(unrelated,self.root)
+                bad=self.root/'state'/(hashlib.sha256(unrelated.encode()).hexdigest()+'.json')
+                original=bad.read_text()
+                directory=self.root/'state'/'bindings';directory.mkdir(exist_ok=True)
+                if failure=='unreadable-file':bad.chmod(0)
+                elif failure=='malformed-record':bad.write_text('{invalid')
+                else:directory.chmod(0)
+                try:
+                    current=self.leftover(tree)
+                    # Use the fresh proof: refusal cannot rely on an old one
+                    # becoming stale, nor on the known record being unreadable.
+                    result=self.delete(tree,current['fingerprint'])
+                    self.assertNotEqual(result.returncode,0,result.stdout)
+                    self.assertIn('Saved sessions could not be checked',result.stderr)
+                    self.assertEqual(tuple(json.loads(result.stdout)[key] for key in ('operation','outcome_version','status')),('worktree_leftover_delete',1,'kept'))
+                    self.assertFalse(current['deletable'])
+                    self.assertIn('sessions_unavailable',codes(current['reasons']))
+                    self.assertFalse(current.get('process_fingerprint'))
+                    self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
+                    self.assertIn(row['branch'],self.git('-C',str(self.repo),'branch','--list',row['branch']))
+                finally:
+                    bad.chmod(0o600);bad.write_text(original);directory.chmod(0o700)
+                # A repaired inventory still protects the real saved reference.
+                repaired=self.leftover(tree)
+                self.assertIn('sessions',codes(repaired['reasons']));self.assertFalse(repaired['deletable'])
+                known.unlink();bad.unlink()
+                ready=self.leftover(tree);self.assertTrue(ready['deletable'])
+                allowed=self.delete(tree,ready['fingerprint']);self.assertEqual(allowed.returncode,0,allowed.stderr)
+                self.assertFalse(tree.exists())
+
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux protected-process review')
+    def test_process_only_consent_never_overrides_an_unreadable_binding_inventory(self):
+        tree,_,_=self.partial('binding-consent')
+        child=subprocess.Popen([sys.executable,'-I','-c',
+            'import ctypes,time; assert ctypes.CDLL(None).prctl(4,0,0,0,0)==0; print("ready",flush=True); time.sleep(90)'],
+            cwd=self.root,stdout=subprocess.PIPE,text=True)
+        self.addCleanup(child.stdout.close);self.addCleanup(child.wait);self.addCleanup(lambda:child.poll() is None and child.kill())
+        self.assertEqual(child.stdout.readline().strip(),'ready')
+        before=self.leftover(tree)
+        self.assertEqual(codes(before['reasons']),['processes_unavailable'])
+        self.assertTrue(before['process_fingerprint'])
+        name='codex/unreadable-consent';self.binding(name,self.root)
+        bad=self.root/'state'/(hashlib.sha256(name.encode()).hexdigest()+'.json');bad.chmod(0)
+        try:
+            current=self.leftover(tree)
+            result=self.delete(tree,current['fingerprint'],extra=('--process-fingerprint',before['process_fingerprint']))
+            self.assertNotEqual(result.returncode,0,result.stdout)
+            self.assertEqual(tuple(json.loads(result.stdout)[key] for key in ('operation','outcome_version','status')),('worktree_leftover_delete',1,'kept'))
+            self.assertIn('sessions_unavailable',codes(current['reasons']))
+            self.assertIn('processes_unavailable',codes(current['reasons']))
+            self.assertFalse(current.get('process_fingerprint'))
+            self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
+        finally:bad.chmod(0o600)
+
     def test_a_stopped_deletion_keeps_its_record_and_is_never_retried(self):
         tree,_,_=self.partial('stopped');left=self.leftover(tree)
         parent=tree.parent;mode=parent.stat().st_mode;parent.chmod(0o555);self.addCleanup(lambda:parent.chmod(mode))

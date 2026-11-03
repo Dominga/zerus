@@ -101,6 +101,15 @@ impl AppState {
             .map(|inputs| inputs.local_reads.clone())
     }
 
+    pub(crate) fn draft_capture(
+        &self,
+    ) -> Option<Arc<zerus_client_core::migration::draft_preload::Capture>> {
+        self.live
+            .retained_import_source
+            .get()
+            .map(|inputs| inputs.drafts.clone())
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     pub fn set_desktop_responder(&self, responder: Arc<zerus_client_core::desktop::Responder>) {
         let _ = self.live.desktop_responder.set(responder);

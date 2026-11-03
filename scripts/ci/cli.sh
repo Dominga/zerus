@@ -21,6 +21,21 @@ PY
 if [ "$phase" != remaining ]; then
 cargo test --locked 2>&1 | tee artifacts/test-results/rust.log
 cargo build --locked
+# These exact, one-shot tests use the separately built CLI for metadata
+# reconciliation. Never run the libtest image as an hgs helper or run the
+# private crash leaf on its own.
+for native_case in \
+    real_cli_recover_only_reconciles_the_original_receipt_and_never_falls_back_to_terminal_input \
+    real_cli_original_child_kill_and_revoke_never_release_input_or_replay_after_reopen; do
+    HGS_TEST_BIN="$PWD/target/debug/hgs" cargo test --locked --bin hgs \
+        "desktop::task_start_reconcile::tests::$native_case" \
+        -- --ignored --exact --test-threads=1
+done
+if [ "$(uname -s)" = Linux ]; then
+    HGS_TEST_BIN="$PWD/target/debug/hgs" cargo test --locked --bin hgs \
+        desktop::task_start_reconcile::tests::real_cli_actor_sigkill_keeps_original_custody_and_restart_never_reconstructs_consent \
+        -- --ignored --exact --test-threads=1
+fi
 # The native stand-in agent of tests/test_fake_agent.py, tests/test_backend_contract.py
 # and later terminal suites.
 cargo build --locked --example fake_agent

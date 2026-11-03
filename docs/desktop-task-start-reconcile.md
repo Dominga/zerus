@@ -161,3 +161,29 @@ changed/malformed query or stored binding returns
 `task_start_result_unavailable`. The native caller still needs its offered-unknown
 journal and retained selected-service resources. No per-kind capability marker
 is advertised until both that caller and this query are callable.
+
+## Native checkpoint capture
+
+On Unix, `task_start::capture::Captured` reads the native selected draft store's
+fixed task-start record and reservation marker. Project/task identity derives
+the basenames; a renderer cannot select a source path or supply retained input.
+The managed data alias resolves once to its retained canonical directory;
+retargeting the selected alias refuses instead of adopting another source.
+Private task-start directories and both single-link regular files are opened
+relative to retained handles with `O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC` together.
+FIFO, symlink, shared, missing and oversized sources refuse before reading.
+
+The complete exact record is limited to 32 KiB. Capture separately binds raw
+bytes, the existing UI snapshot, unchanged retained input and original delivery
+ID. It rejects duplicate JSON fields, including in retained input. It preserves
+opaque fields and whitespace instead of serializing a plan into new call bytes.
+The retained file objects, sizes, ownership, permissions and modification/change
+versions are checked again before constructing the fixed data Intent. An
+identical-byte replacement is still a different source. A frozen `Version` is
+metadata for the future native journal; decoding it grants no file authority.
+
+Capture creates or repairs nothing, submits nothing and cannot settle or release
+an outbox. Its Scope is data: the eventual native caller must separately retain
+and recheck the actual selected Service and the complete unchanged control-frame
+limit. A durable offered-unknown journal, native offer and exact result-to-outbox
+CAS remain separate caller work. The per-kind capability marker stays absent.

@@ -185,6 +185,15 @@ impl Fixture {
         Arc<Service>,
         crate::desktop_service::frontend::tests::native::CacheServer,
     ) {
+        self.service_with_config(json!({}))
+    }
+    fn service_with_config(
+        &self,
+        extra: Value,
+    ) -> (
+        Arc<Service>,
+        crate::desktop_service::frontend::tests::native::CacheServer,
+    ) {
         use crate::desktop_service::frontend::tests::native::{responder, CacheServer};
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         fs::remove_file(self.root.join("hgs")).unwrap();
@@ -198,11 +207,13 @@ impl Fixture {
         ] {
             std::os::unix::fs::symlink(source.join(path), self.root.join(leaf)).unwrap();
         }
-        fs::write(
-            self.root.join("fixture.json"),
-            json!({"ready":true,"state":"identity_changed","retained_import_abi":true}).to_string(),
-        )
-        .unwrap();
+        let mut config =
+            json!({"ready":true,"state":"identity_changed","retained_import_abi":true});
+        config
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        fs::write(self.root.join("fixture.json"), config.to_string()).unwrap();
         let responder = responder();
         assert!(responder
             .configure_ownership_mode_once(zerus_client_core::desktop::ownership::Mode::Service));
@@ -231,6 +242,135 @@ impl Fixture {
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn automatic_reconnect_preserves_authority_and_import_until_one_explicit_retry() {
+    use crate::desktop_service::tests::eventually;
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let f = Fixture::new("success");
+        let (service, _cache) = f.service_with_config(json!({
+            "restart_watch":true,"refuse":"ownership_resources_pending"
+        }));
+        let baseline = || {
+            service
+                .shared
+                .dirty
+                .lock()
+                .unwrap()
+                .progress
+                .contains_key("")
+        };
+        let mutations = || {
+            f.calls()
+                .iter()
+                .filter(|call| {
+                    matches!(
+                        call["value"]["request"]["action"].as_str(),
+                        Some("grant" | "rearm")
+                    )
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let imports = || fs::read_to_string(f.root.join("import-calls")).unwrap_or_default();
+        eventually(
+            "initial native report and bounded Grant refusals settle",
+            || baseline() && service.shared.ownership.retryable_grant(),
+        )
+        .await;
+        assert_eq!(f.attempts(), 1);
+        assert_eq!(
+            service.snapshot().retained_source_import.unwrap()["phase"],
+            "published"
+        );
+
+        // The absent socket is observed only after the old connection's workers
+        // join, giving an exact boundary for counting automatic-side requests.
+        let mut config: Value =
+            serde_json::from_slice(&fs::read(f.root.join("fixture.json")).unwrap()).unwrap();
+        config["produced_status"] = json!({"running":false});
+        fs::write(f.root.join("fixture.json"), config.to_string()).unwrap();
+        fs::write(f.root.join("restart-watch"), []).unwrap();
+        eventually("absent service remains reconnecting", || {
+            f.root.join("produced-status-read").exists()
+                && service.snapshot().code == "service_unavailable"
+                && service.snapshot().reconnecting
+        })
+        .await;
+        let before = mutations();
+        let before_imports = imports();
+        assert!(
+            !before.is_empty(),
+            "the ownership fixture must actually exercise Grant"
+        );
+        assert!(
+            !before_imports.is_empty(),
+            "the retained import must actually run initially"
+        );
+        config.as_object_mut().unwrap().remove("produced_status");
+        fs::write(f.root.join("fixture.json"), config.to_string()).unwrap();
+        eventually("automatic connection reaches the second watch", || {
+            f.root.join("second-watch-held").exists()
+        })
+        .await;
+        fs::write(f.root.join("release-second-watch"), []).unwrap();
+        eventually("automatic connection has a fresh catalog", || {
+            baseline() && service.snapshot().connected
+        })
+        .await;
+        assert!(
+            service.shared.ownership.retryable_grant(),
+            "known refusal must keep an accidental recover_grant worker observable"
+        );
+        // recover_grant's first retry is at one second. Keep this connection
+        // alive past that deadline as well as checking its startup path.
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        assert_eq!(
+            mutations(),
+            before,
+            "automatic reconnect must not Grant or Rearm"
+        );
+        assert_eq!(
+            imports(),
+            before_imports,
+            "automatic reconnect must not re-enter retained import, including lookup"
+        );
+
+        config.as_object_mut().unwrap().remove("refuse");
+        fs::write(f.root.join("fixture.json"), config.to_string()).unwrap();
+        service.retry();
+        eventually("explicit Retry makes one Grant and opens its watch", || {
+            service.shared.ownership.granted()
+                && baseline()
+                && f.calls()
+                    .iter()
+                    .filter(|call| call["args"] == json!(["desktop", "watch", "--json"]))
+                    .count()
+                    == 3
+        })
+        .await;
+        let after = mutations();
+        assert_eq!(
+            after.len(),
+            before.len() + 1,
+            "exactly one new Grant belongs to explicit Retry"
+        );
+        assert_eq!(after.last().unwrap()["value"]["request"]["action"], "grant");
+        assert_eq!(
+            f.attempts(),
+            1,
+            "explicit Retry only checks the completed import"
+        );
+        assert_ne!(
+            imports(),
+            before_imports,
+            "explicit Retry retains its original import lookup path"
+        );
+        service.join().await.unwrap();
+    });
 }
 
 #[cfg(target_os = "linux")]

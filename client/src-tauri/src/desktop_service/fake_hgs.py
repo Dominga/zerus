@@ -54,6 +54,7 @@ def counter(name):
 
 def status():
     if config.get('produced_status') is not None:
+        (root / 'produced-status-read').touch()
         return config['produced_status']
     online = not config.get('offline', False)
     catalog_online = online and not config.get('coverage_offline', False)

@@ -74,7 +74,26 @@ fn reconnect_refollows_every_topic_and_keeps_projects_while_metadata_is_warming(
             uuid::Uuid::new_v4().to_string(),
         )
         .unwrap();
+        let mut config: Value =
+            serde_json::from_slice(&fs::read(fixture.0.join("fixture.json")).unwrap()).unwrap();
+        config["produced_status"] = json!({"running":false});
+        fs::write(fixture.0.join("fixture.json"), config.to_string()).unwrap();
         fs::write(fixture.0.join("restart-watch"), []).unwrap();
+        eventually(
+            "socket gap is transient and retains the stale project",
+            || {
+                fixture.0.join("produced-status-read").exists()
+                    && !service.snapshot().connected
+                    && service.snapshot().reconnecting
+                    && service.snapshot().code == "service_unavailable"
+                    && !pump.online("")
+            },
+        )
+        .await;
+        assert!(grouped());
+        assert_eq!(watch_calls(&fixture.calls()), 1);
+        config.as_object_mut().unwrap().remove("produced_status");
+        fs::write(fixture.0.join("fixture.json"), config.to_string()).unwrap();
         eventually("automatic replacement watch held before greeting", || {
             fixture.0.join("second-watch-held").exists()
         })

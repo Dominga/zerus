@@ -2495,6 +2495,25 @@ After complete success the dialog closes and the overview shows the result.
 Partial results and errors remain open; uncertain replies are not replayed. **Stop after this folder**
 lets the current operation finish and leaves the remaining folders untouched.
 
+Folders a removal left behind (see partial removal below) appear first, in a
+separate **Partially removed** group shown only when there are any. A repository
+with partial-removal records is reviewed even when no linked worktree remains,
+and each computer's vanished-repository leftovers come from one bounded
+`hgs worktrees leftovers` call; there is no per-row call. These rows never join a
+cleanup selection. The panel shows the remaining size (a lower bound when the
+listing was incomplete), whether the branch is kept, moved or unchecked, why the
+removal stopped, and the sessions and programs that use the folder. It offers no
+file browsing. **Keep folder…** asks for a simple confirmation and forgets only
+the record. **Delete remaining files…** opens an explicit confirmation whose
+default focus is Cancel: it states that the files cannot be restored and that
+the branch is kept, and shows the unchecked **Delete even if some running
+programs cannot be checked** box only when the review offered that acceptance.
+Each confirmation sends the fingerprint of the review on screen exactly once.
+The outcome stays on the row until a fresh review: **Files deleted**, **Folder
+kept**, **Nothing changed** with the reason, or **Result unknown** with **Review
+again**. Nothing is retried automatically. A row whose repository is gone shows
+**Repository missing** and offers Keep folder only.
+
 Integration evidence distinguishes ancestor commits, identical file trees and
 cherry-pick-equivalent patches. Equivalent content is useful when reviewing
 squash/cherry-pick workflows, but only Git ancestry permits optional branch

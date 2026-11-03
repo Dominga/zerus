@@ -70,7 +70,7 @@ import json,sys,time
 from pathlib import Path
 root=Path(__file__).resolve().parent.parent;args=sys.argv[1:]
 with (root/'calls.jsonl').open('a') as f:f.write(json.dumps(args)+'\\n')
-if args==['--help']:print('guarded-create-v1');sys.exit(0)
+if args==['--help']:print('guarded-create-v1 worktree-leftovers-v1 worktree-leftover-delete-v1');sys.exit(0)
 guarded=args[:2]==['--expect-machine','11111111-1111-4111-8111-111111111111']
 if guarded:args=args[2:]
 def arg(key):return args[args.index(key)+1]
@@ -80,6 +80,14 @@ def row(tag):
  if tag=='ignored':value.update({'verdict':'review','ignored_count':1,'ignored_bytes':12288,'ignored_fingerprint':'ignored-proof','ignored':[{'path':'target/','bytes':12288,'complete':True}]})
  if tag=='blocked':value.update({'verdict':'blocked','reasons':[{'code':'processes','message':'A running program uses this folder.'}]})
  return value
+def leftover(tag,repository):
+ path=str(root/tag);common=str(root/('repo' if repository else 'gone')/'.git')
+ value={'path':path,'kind':'leftover','verdict':'partially_removed','common_dir':common,'branch':'feature/'+tag,'branch_retained':True if repository else None,'size':8192,'size_complete':False,'sessions':[],'process_count':0,'reasons':[{'code':'processes_unavailable','message':'Zerus cannot check whether some running programs use this folder.'}],'deletable':False,'fingerprint':('ab' if repository else 'cd')*32,'removal':{'path':path,'status':'partial','reserved_at':time.time()-60,'detail':'Permission denied'}}
+ if repository:value['process_fingerprint']='v2:1:proof'
+ else:value['repository_available']=False
+ return value
+left=(root/'overview-ui').exists() and not (root/'removed-left-over').exists()
+gone=(root/'overview-ui').exists() and not (root/'kept-gone-left').exists()
 if (root/'swarm-native').exists():
  state=json.loads((root/'swarm-state.json').read_text());peer='22222222-2222-4222-8222-222222222222'
  if args==['machine','ls']:
@@ -111,13 +119,29 @@ if (root/'swarm-native').exists():
 if args and args[0]=='worktrees' and (len(args)<2 or args[1].startswith('--')):
  path=arg('--path');assert Path(path).is_relative_to(root)
  tags=[t for t in ('clean','ignored','missing','unknown',*extra()) if not (root/('removed-'+t)).exists()]
- value={'state':'ok','path':path,'selected_root':str(root/'repo'),'common_dir':str(root/'repo/.git'),'sampled_at':time.time(),'worktrees':[{'path':str(root/'repo'),'kind':'main','available':True,'branch':'main'},*[row(t) for t in tags]]}
+ value={'state':'ok','path':path,'selected_root':str(root/'repo'),'common_dir':str(root/'repo/.git'),'sampled_at':time.time(),'worktrees':[{'path':str(root/'repo'),'kind':'main','available':True,'branch':'main'},*[row(t) for t in tags]],'leftovers':int(left)}
  print(json.dumps(value));sys.exit(0)
 if args[:2]==['worktrees','review']:
  assert guarded and arg('--path')==str(root/'repo/.git')
  tags=[t for t in ('clean','ignored','unknown','changed','missing','blocked',*extra()) if not (root/('removed-'+t)).exists()]
  if '--worktree' in args:tags=[t for t in tags if str(root/'repo'/t)==arg('--worktree')]
- print(json.dumps({'state':'ok','common_dir':str(root/'repo/.git'),'worktrees':[row(t) for t in tags]}));sys.exit(0)
+ value={'state':'ok','common_dir':str(root/'repo/.git'),'worktrees':[row(t) for t in tags]}
+ if '--worktree' not in args:value.update({'leftovers':[leftover('left-over',True)] if left else [],'leftovers_partial':False})
+ print(json.dumps(value));sys.exit(0)
+if args[:2]==['worktrees','leftovers']:
+ assert guarded
+ print(json.dumps({'schema':1,'leftovers':[leftover('gone-left',False)] if gone else [],'partial':False}));sys.exit(0)
+if args[:2]==['worktrees','delete-leftover']:
+ assert guarded and arg('--path')==str(root/'left-over') and arg('--common-dir')==str(root/'repo/.git')
+ assert '--confirm-delete' in args and arg('--fingerprint')=='ab'*32 and arg('--process-fingerprint')=='v2:1:proof'
+ assert left,'leftover deletion replayed'
+ (root/'removed-left-over').touch()
+ print(json.dumps({'status':'deleted','path':arg('--path'),'common_dir':arg('--common-dir'),'request_id':arg('--request-id'),'branch':'feature/left-over'}));sys.exit(0)
+if args[:2]==['worktrees','keep-folder']:
+ assert guarded and arg('--path')==str(root/'gone-left') and arg('--common-dir')==str(root/'gone/.git') and arg('--fingerprint')=='cd'*32
+ assert gone,'keep-folder replayed'
+ (root/'kept-gone-left').touch()
+ print(json.dumps({'status':'kept','path':arg('--path'),'common_dir':arg('--common-dir'),'request_id':arg('--request-id')}));sys.exit(0)
 if args[:2]==['worktrees','inspect']:
  assert guarded and arg('--common-dir')==str(root/'repo/.git')
  path=arg('--path');assert Path(path).is_relative_to(root/'repo')
@@ -174,7 +198,7 @@ with (root/'app.log').open('wb') as log:
     try:
         while time.monotonic()<deadline:
             output=(root/'app.log').read_text()
-            for stage in (('CONFLICTS','CHOICE','CONFIRM','CANCEL','VALUES','PAGERS','MINIMUM','RESOLVE_HELD') if conflicts_mode else ('PRESELECTED','COMPUTERS','FILTERED','LOADING','MAP','UNINITIALIZED','FAILED','SAME','CONNECTED') if swarm_ui else ('PROJECTS','OPEN','PREVIEW','JOIN','CONFLICT_REVIEW','RESOLVE_HELD') if swarm_native else ('SHELL',) if shell_badge else ('PANEL','REVIEW','CONFIRMATION','REMOVING','OUTCOMES','RECOUNT','UNKNOWN_REOPEN','OVERVIEW','PAGER','MANUAL_REVIEW','INSPECTION','MANUAL_OUTCOMES')):
+            for stage in (('CONFLICTS','CHOICE','CONFIRM','CANCEL','VALUES','PAGERS','MINIMUM','RESOLVE_HELD') if conflicts_mode else ('PRESELECTED','COMPUTERS','FILTERED','LOADING','MAP','UNINITIALIZED','FAILED','SAME','CONNECTED') if swarm_ui else ('PROJECTS','OPEN','PREVIEW','JOIN','CONFLICT_REVIEW','RESOLVE_HELD') if swarm_native else ('SHELL',) if shell_badge else ('PANEL','REVIEW','CONFIRMATION','REMOVING','OUTCOMES','RECOUNT','UNKNOWN_REOPEN','OVERVIEW','LEFTOVER_CONFIRM','LEFTOVERS','PAGER','MANUAL_REVIEW','INSPECTION','MANUAL_OUTCOMES')):
                 if prefix+stage in output and stage not in stages:
                     stages.add(stage);time.sleep(.35);subprocess.run(['/usr/bin/import','-window','root',str(root/(stage.lower()+'.png'))],check=True,env=env)
             if conflicts_mode and prefix+'RESIZE_MINIMUM' in output and not resized:
@@ -226,8 +250,17 @@ with (root/'app.log').open('wb') as log:
         assert len([a for a in effects if a[a.index('--path')+1].endswith('/unknown')])==1,'unknown replayed'
         assert all((root/'repo'/tag/'fixture.txt').is_file() for tag in ('clean','ignored','unknown','changed','blocked'))
         assert not any('create' in a or 'start' in a or 'session-action' in a for a in calls),'opening/inspection created work'
+        if overview_ui:
+            # One guarded call per confirmed leftover action, never replayed; the
+            # vanished-repository listing stays one call per computer per read.
+            leftover_effects=[a for a in calls if 'delete-leftover' in a or 'keep-folder' in a]
+            assert [a[2:4] for a in leftover_effects]==[['worktrees','delete-leftover'],['worktrees','keep-folder']],leftover_effects
+            assert all(a[:2]==['--expect-machine',MACHINE] for a in leftover_effects)
+            assert 'LEFTOVER_CONFIRM' in stages and 'LEFTOVERS' in stages,'leftover stages missing'
+            reads=[a for a in calls if a[2:4]==['worktrees','review'] and '--worktree' not in a]
+            assert 0<len([a for a in calls if a[2:4]==['worktrees','leftovers']])<=len(reads),calls
         if native or overview_ui:
-            print('PASS native overview opaque selection, guarded manual review/removal, terminal unknown across refresh/reopen, unchanged synthetic files, no creation')
+            print('PASS native overview opaque selection, guarded manual review/removal, terminal unknown across refresh/reopen, unchanged synthetic files, no creation'+(', leftover delete/keep once each' if overview_ui else ''))
             raise SystemExit(0)
         print('PASS Worktrees menu/copy/New session without creation; focused missing review; explicit ignored/branch consent; exact guarded fake removal; kept and unknown outcomes; no replay; real Escape/focus; fixture files unchanged')
     finally:

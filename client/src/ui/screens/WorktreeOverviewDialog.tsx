@@ -7,7 +7,8 @@ import type { Project } from "../../types";
 import { CleanupInspection, type InspectionRow } from "./WorktreeCleanup";
 import { WorktreeReadLane } from "./worktree-read-lane";
 import type { Inspection } from "../../store/terminationCleanup";
-import { CATEGORIES, PAGE, LIMIT, createOverview, emptyFilter, noConsents, type Filter, type Overview, type OverviewRow } from "./worktree-overview-state";
+import { CATEGORIES, LEFTOVERS, PAGE, LIMIT, createOverview, emptyFilter, noConsents, selectable, type Filter, type Overview, type OverviewRow } from "./worktree-overview-state";
+import { LeftoverDialog, LeftoverPanel } from "./WorktreeLeftover";
 import "../styles/worktree-overview.css";
 import { tr } from "../../i18n";
 const leaf = (p: string) => p.split(/[\\/]/u).filter(Boolean).at(-1) ?? p;
@@ -19,6 +20,7 @@ export default function WorktreeOverviewDialog(props: { projects: Project[]; all
   const state = createOverview();
   const [filter, setFilter] = createSignal<Filter>(emptyFilter());
   const [focused, setFocused] = createSignal<OverviewRow>();
+  const [leftover, setLeftover] = createSignal<{ row: OverviewRow; mode: "keep" | "delete" }>();
   const [inspectionGeneration, setInspectionGeneration] = createSignal(0);
   const lane = new WorktreeReadLane<Inspection>();
   const view = state.frame;
@@ -36,9 +38,9 @@ export default function WorktreeOverviewDialog(props: { projects: Project[]; all
   const click = (event: MouseEvent, row: OverviewRow) => {
     if (busy()) return;
     setFocused(row);
-    if (row.category === 4) { void state.select([], true); return; }
+    if (!selectable(row.category)) { void state.select([], true); return; }
     const ids = rows().map((r) => r.id), a = anchor ? ids.indexOf(anchor) : -1, b = ids.indexOf(row.id);
-    if (event.shiftKey && a >= 0) void state.select(rows().slice(Math.min(a, b), Math.max(a, b) + 1).filter((r) => r.category !== 4).map((r) => r.id), true);
+    if (event.shiftKey && a >= 0) void state.select(rows().slice(Math.min(a, b), Math.max(a, b) + 1).filter((r) => selectable(r.category)).map((r) => r.id), true);
     else void state.select([row.id], !(event.ctrlKey || event.metaKey));
     anchor = row.id;
   };
@@ -77,7 +79,7 @@ export default function WorktreeOverviewDialog(props: { projects: Project[]; all
           <div ref={filters} class="su-popover wto-filters" popover="auto" role="dialog" aria-label={tr("Filters")}>
             <div class="form-row"><label for="wto-project">{tr("Project")}</label><select id="wto-project" class="field" value={filter().project} onChange={(e) => change({ project: e.currentTarget.value })}><option value="">{tr("All projects")}</option><For each={props.projects}>{(p) => <option value={p.id}>{p.name}</option>}</For></select></div>
             <div class="form-row"><label for="wto-computer">{tr("Computer")}</label><select id="wto-computer" class="field" value={filter().computer} onChange={(e) => change({ computer: e.currentTarget.value })}><option value="">{tr("All computers")}</option><For each={machines()}>{(m) => <option value={m}>{m}</option>}</For></select></div>
-            <div class="form-row"><label for="wto-state">{tr("State")}</label><select id="wto-state" class="field" aria-label={tr("Worktree state")} value={filter().category ?? -1} onChange={(e) => change({ category: +e.currentTarget.value < 0 ? null : +e.currentTarget.value })}><option value="-1">{tr("All states")}</option><For each={CATEGORIES.slice(0, 4)}>{(name, i) => <option value={i()}>{tr(name)}</option>}</For></select></div>
+            <div class="form-row"><label for="wto-state">{tr("State")}</label><select id="wto-state" class="field" aria-label={tr("Worktree state")} value={filter().category ?? -1} onChange={(e) => change({ category: +e.currentTarget.value < 0 ? null : +e.currentTarget.value })}><option value="-1">{tr("All states")}</option><For each={CATEGORIES.slice(0, 4)}>{(name, i) => <option value={i()}>{tr(name)}</option>}</For><option value={LEFTOVERS}>{tr(CATEGORIES[LEFTOVERS])}</option></select></div>
             <label class="check"><input type="checkbox" checked={filter().show_main} onChange={(e) => change({ show_main: e.currentTarget.checked })} />{tr("Show main checkouts and ordinary folders")}</label>
           </div>
           <select class="field wto-sort" aria-label={tr("Sort worktrees")} value={filter().sort} onChange={(e) => change({ sort: e.currentTarget.value as Filter["sort"] })}><option value="size">{tr("Largest first")}</option><option value="activity">{tr("Oldest activity first")}</option><option value="name">{tr("Folder name")}</option></select>
@@ -88,17 +90,18 @@ export default function WorktreeOverviewDialog(props: { projects: Project[]; all
           <div class="wto-row wto-headrow" role="row"><span role="columnheader" /><span role="columnheader">{tr("Worktree / branch")}</span><span role="columnheader">{tr("What remains")}</span><span role="columnheader">{tr("Size")}</span><span role="columnheader">{tr("Computer")}</span></div>
           <Show when={view()?.total === 0 && !view()?.reading}><div class="empty"><Icon name="folder-git-2" size={22} /><p>{tr("Add a project folder to see its worktrees.")}</p></div></Show>
           <For each={groups().map((g) => g.category)}>{(category) => { const group = () => groups().find((g) => g.category === category)!; return <><div class="wto-group" role="row">{group().name} ({number(group().total)})</div><For each={group().rows.map((r) => r.id)}>{(id) => { const row = () => byId().get(id)!; return <div class="wto-row" data-row={row().id} tabindex="0" role="row" aria-selected={selected(row().id)} classList={{ on: selected(row().id), focus: focused()?.id === row().id, stale: !row().fresh }} onClick={(e) => click(e, row())}>
-              <span role="gridcell"><input type="checkbox" aria-label={`Select ${leaf(row().path)}`} checked={selected(row().id)} disabled={row().category === 4 || busy()} onClick={(e) => { e.preventDefault(); e.stopPropagation(); if (!busy()) { setFocused(row()); anchor = row().id; void state.select([row().id], false); } }} /></span>
+              <span role="gridcell"><input type="checkbox" aria-label={`Select ${leaf(row().path)}`} checked={selected(row().id)} disabled={!selectable(row().category) || busy()} onClick={(e) => { e.preventDefault(); e.stopPropagation(); if (!busy()) { setFocused(row()); anchor = row().id; void state.select([row().id], false); } }} /></span>
               <span role="gridcell" class="col"><span class="ell"><b>{leaf(row().path)}</b></span><span class="mono dim ell">{row().branch || "—"}</span></span>
-              <span role="gridcell" class="ell" classList={{ warn: row().category === 1 || row().category === 3, muted: row().category === 4 }} title={row().remains}><Show when={row().state && row().state !== "Ready" && row().state !== row().remains}><span class="wto-state">{row().state}</span> </Show>{row().remains}<Show when={row().category === 0 && row().fresh}><span class="wto-suffix">{tr("Will recheck before cleanup")}</span></Show><Show when={!row().fresh && row().state !== "Result unknown"}><span class="wto-suffix">{tr("Offline snapshot")}</span></Show></span>
+              <span role="gridcell" class="ell" classList={{ warn: row().category === 1 || row().category === 3 || row().category === LEFTOVERS, muted: row().category === 4 }} title={row().remains}><Show when={row().state && row().state !== "Ready" && row().state !== row().remains}><span class="wto-state">{row().state}</span> </Show>{row().remains}<Show when={row().category === 0 && row().fresh}><span class="wto-suffix">{tr("Will recheck before cleanup")}</span></Show><Show when={!row().fresh && row().state !== "Result unknown"}><span class="wto-suffix">{tr("Offline snapshot")}</span></Show></span>
               <span role="gridcell" class="tabular">{row().size}</span><span role="gridcell"><MachineLabel alias={row().machine} class="mbadge" /></span>
             </div>; }}</For></>; }}</For>
         </div><Show when={(view()?.page.total ?? 0) > PAGE}><div class="row wto-pager"><span class="muted tabular">{tr("%1–%2 of %3 worktrees", number((view()?.page.index ?? 0) * PAGE + 1), number(Math.min(((view()?.page.index ?? 0) + 1) * PAGE, view()?.page.total ?? 0)), number(view()?.page.total ?? 0))}</span><span class="grow" /><button class="btn small" aria-label={tr("Previous page of worktrees")} disabled={busy() || !view()?.page.index} onClick={(e) => void page((view()?.page.index ?? 0) - 1, e.currentTarget)}><Icon name="chevron-left" size={14} />{tr("Previous")}</button><button class="btn small" aria-label={tr("Next page of worktrees")} disabled={busy() || (view()?.page.index ?? 0) + 1 >= totalPages()} onClick={(e) => void page((view()?.page.index ?? 0) + 1, e.currentTarget)}>{tr("Next")}<Icon name="chevron-right" size={14} /></button></div></Show></div>
-          <Show when={focused()?.id ? `${focused()!.id}:${inspectionGeneration()}` : undefined} keyed fallback={<section class="su-insp"><div class="empty"><Icon name="folder-git-2" size={22} /><p>{tr("Select a worktree")}</p></div></section>}>{(_key) => <CleanupInspection row={inspection()!} panel enabled={!view()?.reading} close={props.close} read={(id, file = "", offset = 0) => lane.read(() => state.inspect(id, file, offset))} />}</Show>
+          <Show when={focused()?.leftover ? focused() : undefined} keyed fallback={<Show when={focused()?.id ? `${focused()!.id}:${inspectionGeneration()}` : undefined} keyed fallback={<section class="su-insp"><div class="empty"><Icon name="folder-git-2" size={22} /><p>{tr("Select a worktree")}</p></div></section>}>{(_key) => <CleanupInspection row={inspection()!} panel enabled={!view()?.reading} close={props.close} read={(id, file = "", offset = 0) => lane.read(() => state.inspect(id, file, offset))} />}</Show>}>{(row) => <LeftoverPanel row={row} busy={reading()} keep={() => setLeftover({ row, mode: "keep" })} remove={() => setLeftover({ row, mode: "delete" })} review={() => void refresh()} />}</Show>
         </div>
       </div>
       <div class="dlg-foot"><button class="btn" disabled={!focused()} onClick={() => void copy(focused()!.path)}><Icon name="copy" size={13} />{tr("Copy path")}</button><button class="btn" disabled={reading() || !view()?.page.candidates || (view()?.page.candidates ?? 0) > LIMIT} title={(view()?.page.candidates ?? 0) > LIMIT ? tr("More than 64 cleanup candidates. Filter by project or computer first.") : undefined} onClick={() => void state.candidates()}>{tr("Select candidates")}</button><span class="grow" /><button class="btn primary" disabled={reading() || !view()?.page.selected || (view()?.page.selected ?? 0) > LIMIT} title={(view()?.page.selected ?? 0) > LIMIT ? tr("Select at most 64 worktrees for one cleanup.") : undefined} onClick={() => void state.review()}>{view()?.page.selected ? tr("Review cleanup (%1)…", number(view()!.page.selected)) : tr("Review cleanup…")}</button><button class="btn" onClick={props.close}>{tr("Close")}</button></div>
     </dialog>
+    <Show when={leftover()} keyed>{(action) => <LeftoverDialog row={action.row} mode={action.mode} state={state} close={(review) => { setLeftover(undefined); if (review) void refresh(); }} />}</Show>
     <Show when={state.batch()?.id} keyed>{(_key) => <ManualDialog state={state} close={() => { void state.closeBatch().then(() => setInspectionGeneration((n) => n + 1)); }} />}</Show>
   </>;
 }

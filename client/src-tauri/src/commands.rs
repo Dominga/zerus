@@ -171,7 +171,7 @@ impl AppState {
 }
 
 #[cfg(feature = "live")]
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) use live::Live as TestLive;
 
 #[cfg(feature = "live")]

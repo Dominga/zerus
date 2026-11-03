@@ -282,7 +282,7 @@ impl Pump {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn drain_service(
         &self,
         changes: Receiver<crate::desktop_service::Data>,

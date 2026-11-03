@@ -2631,11 +2631,15 @@ point. A missing path is gone only when the nearest existing folder above it is 
 that same filesystem. A volume that is unmounted, replaced by another one at the
 same place, or that cannot be identified (for example a zero filesystem ID, as on
 some tmpfs and network filesystems) leaves the record uncertain: it stays visible
-and can be kept by hand, and it never resolves by itself. On btrfs the device is a
-per-subvolume number that can change across remounts; such records also stay
-uncertain until kept. A block-level clone of a filesystem shares its ID, but
-mounted at the same place it normally has another device, so it is not taken for
-the original. Records written by an older CLI have no volume row and keep the plain
+and can be kept by hand, and it never resolves by itself. So does a folder or
+repository that was already missing when its removal was reserved, since no
+filesystem could be recorded for it. On btrfs the device is a per-subvolume number that can change
+across remounts and reboots; such records also stay uncertain until kept. A
+block-level clone of a filesystem shares its ID, but mounted at the same place it
+normally has another device, so it is not taken for the original. A bind mount
+whose source is on the same filesystem as the folder above it is the exception:
+once it is unmounted, the missing path is on that same filesystem and counts as
+gone. Records written by an older CLI have no volume row and keep the plain
 missing-path check, as does every record on Windows. One review or listing reports at most 32 leftovers
 within 1 MiB and marks the rest with `leftovers_partial` (review) or `partial`
 (listing); they stay recorded for a later review. The folder catalog

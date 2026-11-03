@@ -630,9 +630,12 @@ mod tests {
         // Something is there, even a dangling link: never gone.
         fs::create_dir(&folder).unwrap();
         assert!(!vanished(&text(&folder), None));
-        let link = base.join("link");
-        std::os::unix::fs::symlink(base.join("nowhere"), &link).unwrap();
-        assert!(!vanished(&text(&link), Some("")));
+        #[cfg(unix)]
+        {
+            let link = base.join("link");
+            std::os::unix::fs::symlink(base.join("nowhere"), &link).unwrap();
+            assert!(!vanished(&text(&link), Some("")));
+        }
         fs::remove_dir(&folder).unwrap();
         // A record from an older CLI keeps the plain missing check; one whose
         // volume could not be recorded, or another filesystem's, is uncertain.
@@ -640,7 +643,13 @@ mod tests {
         assert!(!vanished(&text(&folder), Some("")));
         assert!(!vanished(&text(&folder), Some("linux:1:00000000000000ff")));
         let Some(here) = volume(&base) else {
-            eprintln!("skipped: this filesystem has no identity (zero fsid)");
+            // Every macOS filesystem has an identity: the log must prove it ran.
+            assert!(
+                !cfg!(target_os = "macos"),
+                "no macOS volume identity for {}",
+                base.display()
+            );
+            eprintln!("skipped: no volume identity here (Windows, or a zero Linux fsid)");
             return;
         };
         assert!(vanished(&text(&folder), Some(&here)));

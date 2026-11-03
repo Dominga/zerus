@@ -494,3 +494,68 @@ fn an_unsupported_location_records_nothing_and_an_unknown_one_refuses() {
         Some(NOT_RECORDED)
     );
 }
+
+/// review-n P2 on #1237 R4: a committed original counts only with each
+/// part's recorded stamp, by a private no-follow stat (no hashing). Damage
+/// that keeps the length, a replacement and a second link all refuse, and
+/// no cached copy is removed.
+#[test]
+fn a_damaged_replaced_or_linked_original_refuses_and_unlinks_nothing() {
+    for damage in ["in place", "replaced", "linked"] {
+        let folder = Folder::new();
+        folder.plain("first.txt", b"first", 90_000);
+        assert_eq!(ON.trim(&folder.0, 0, NOW).error, None);
+        let (canonical, object, birth) = super::folder(&folder.0).unwrap();
+        let slot = slot(&canonical, &object, birth.as_deref());
+        let original = slot.join("original.bin");
+        let length = fs::metadata(&original).unwrap().len() as usize;
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        match damage {
+            "in place" => fs::write(&original, vec![b' '; length]).unwrap(),
+            "replaced" => {
+                let other = slot.join("other.bin");
+                fs::copy(&original, &other).unwrap();
+                fs::rename(&other, &original).unwrap();
+            }
+            _ => fs::hard_link(&original, slot.join("second-link")).unwrap(),
+        }
+        // Nine cached bytes over a one-byte limit: a trim would remove them.
+        folder.plain("old.txt", b"old cache", 90_000);
+        let usage = ON.trim(&folder.0, 1, NOW);
+        assert_eq!(usage.error.as_deref(), Some(NOT_RECORDED), "{damage}");
+        assert_eq!(
+            fs::read(folder.0.join("old.txt")).unwrap(),
+            b"old cache",
+            "{damage}"
+        );
+        assert_eq!(evidence(&folder.0), Evidence::Unreadable, "{damage}");
+    }
+}
+
+/// review-n on #1237 R4: an original over 16 MiB (the Windows reader's
+/// largest read) is kept in parts, each created and read with its size.
+#[test]
+fn an_original_over_one_part_is_kept_in_exact_parts() {
+    let folder = Folder::new();
+    let files: Vec<Value> = (0..200_000)
+        .map(|n| json!({"name": format!("f{n:06}.txt"), "bytes": 1, "saved": 0, "sha256": "0".repeat(64)}))
+        .collect();
+    let index = serde_json::to_vec(&json!({"version": 1, "files": files})).unwrap();
+    assert!(
+        index.len() > PART && index.len() <= ORIGINAL,
+        "{}",
+        index.len()
+    );
+    fs::write(folder.0.join(INDEX), &index).unwrap();
+    assert_eq!(ON.trim(&folder.0, 0, NOW).error, None);
+    let receipt = folder.receipt();
+    assert_eq!(receipt.bytes, index.len() as u64);
+    assert_eq!(receipt.more.len(), 1);
+    let (canonical, object, birth) = super::folder(&folder.0).unwrap();
+    let slot = slot(&canonical, &object, birth.as_deref());
+    assert_eq!(
+        fs::metadata(slot.join("original.bin")).unwrap().len() as usize,
+        PART
+    );
+    assert_eq!(folder.original(), Some(index));
+}

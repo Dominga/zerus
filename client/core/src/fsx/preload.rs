@@ -184,6 +184,32 @@ fn parent(path: &Path) -> io::Result<Parents> {
 pub(crate) fn read(path: &Path, limit: usize) -> io::Result<Option<(Vec<u8>, Stamp)>> {
     read_with(path, limit, false, true)
 }
+/// The stamp of a private leaf without reading its bytes: opened without
+/// following links and checked like a read (one link, owner only). `None`:
+/// no such leaf.
+pub(crate) fn stat(path: &Path) -> io::Result<Option<Stamp>> {
+    let parents = parent(path)?;
+    #[cfg(unix)]
+    let opened = {
+        use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt};
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+    };
+    #[cfg(windows)]
+    let opened = super::windows::preload_stat_file(path);
+    #[cfg(not(any(unix, windows)))]
+    let opened: io::Result<File> = Err(io::ErrorKind::Unsupported.into());
+    let file = match opened {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let actual = stamp(&file)?;
+    parents.recheck()?;
+    Ok(Some(actual))
+}
 pub(crate) fn durable(path: &Path, limit: usize) -> io::Result<Option<(Vec<u8>, Stamp)>> {
     read_with(path, limit, true, true)
 }

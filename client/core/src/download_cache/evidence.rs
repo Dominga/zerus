@@ -39,6 +39,26 @@ pub const DIR: &str = ".zerus-files-preload-v1";
 pub const MAX_SLOTS: usize = 16;
 const META: usize = 64 << 10;
 const ORIGINAL: usize = super::MAX_INDEX_BYTES as usize;
+/// The largest leaf the private reader accepts on every platform (Windows
+/// refuses larger read limits): the original is kept in parts this size.
+const PART: usize = 16 << 20;
+
+/// The original's leaf for part `n`.
+fn part(n: usize) -> String {
+    if n == 0 {
+        "original.bin".into()
+    } else {
+        format!("original-{n}.bin")
+    }
+}
+
+/// The exact size of each part of a `bytes`-long original.
+fn part_sizes(bytes: u64) -> Vec<usize> {
+    let bytes = bytes as usize;
+    (0..bytes.div_ceil(PART))
+        .map(|n| PART.min(bytes - n * PART))
+        .collect()
+}
 
 /// A change refused because the folder's original index could not be
 /// recorded first. Nothing in the folder was changed.
@@ -78,7 +98,11 @@ pub struct Original {
     pub sha256: Option<String>,
     /// The index file's object, size and times as loaded.
     pub identity: Option<String>,
+    /// The first part's stamp (`original.bin`).
     stamp: Option<Stamp>,
+    /// The further parts' stamps (`original-1.bin`, ...).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    more: Vec<Stamp>,
 }
 
 impl Seed {
@@ -116,26 +140,28 @@ impl Original {
                         && self.sha256.is_none()
                         && self.identity.is_none()
                         && self.stamp.is_none()
+                        && self.more.is_empty()
                 }
                 Index::Present => {
                     self.bytes > 0
                         && self.bytes <= ORIGINAL as u64
                         && self.sha256.as_deref().is_some_and(digest)
                         && self.stamp.is_some()
+                        && self.more.len() + 1 == part_sizes(self.bytes).len()
                 }
             }
     }
 
-    /// `original.bin` as the receipt describes it, by a bounded stat only:
-    /// absent for an absent index, else a regular file of the recorded size.
+    /// The original's parts as the receipt describes them, by a private
+    /// no-follow stat only (no read, no hash): each part's recorded stamp
+    /// (object, size and modification time) on a single-link owner-only
+    /// file, and no part beyond them; none for an absent index.
     fn leaf_matches(&self, slot: &Path) -> bool {
-        let leaf = fs::symlink_metadata(slot.join("original.bin"));
-        match self.index {
-            Index::Absent => leaf.is_err_and(|error| error.kind() == io::ErrorKind::NotFound),
-            Index::Present => {
-                leaf.is_ok_and(|meta| meta.file_type().is_file() && meta.len() == self.bytes)
-            }
-        }
+        let expected: Vec<&Stamp> = self.stamp.iter().chain(&self.more).collect();
+        let matches = expected.iter().enumerate().all(|(n, stamp)| {
+            disk::stat(&slot.join(part(n))).is_ok_and(|actual| actual.as_ref() == Some(*stamp))
+        });
+        matches && disk::stat(&slot.join(part(expected.len()))).is_ok_and(|extra| extra.is_none())
     }
 }
 
@@ -374,22 +400,30 @@ impl Pending {
         });
         // No receipt, so no change followed any earlier attempt: its leftover
         // copy is replaced by this load's version.
-        remove(&slot.join("original.bin"))?;
-        let (kind, bytes, sha256, stamp) = match &self.index {
-            None => (Index::Absent, 0, None, None),
+        for n in 0..ORIGINAL.div_ceil(PART) {
+            remove(&slot.join(part(n)))?;
+        }
+        let (kind, bytes, sha256, stamps) = match &self.index {
+            None => (Index::Absent, 0, None, Vec::new()),
             Some(index) => {
                 if index.len() > ORIGINAL {
                     return Err(refused());
                 }
-                let stamp = disk::create(&slot.join("original.bin"), index)?;
+                // Each part created and read back with its own exact size.
+                let mut stamps = Vec::new();
+                for (n, bytes) in index.chunks(PART).enumerate() {
+                    stamps.push(disk::create(&slot.join(part(n)), bytes)?);
+                }
                 (
                     Index::Present,
                     index.len() as u64,
                     Some(hex(&Sha256::digest(index))),
-                    Some(stamp),
+                    stamps,
                 )
             }
         };
+        let mut stamps = stamps.into_iter();
+        let (stamp, more) = (stamps.next(), stamps.collect());
         publish(
             &slot,
             "receipt.json",
@@ -404,6 +438,7 @@ impl Pending {
                 sha256,
                 identity: self.identity.clone(),
                 stamp,
+                more,
             },
         )
     }
@@ -524,19 +559,32 @@ impl Snapshot {
         if !receipt.valid(&seed) {
             return Err(refused());
         }
-        let index = match (
-            receipt.index,
-            disk::read(&slot.join("original.bin"), ORIGINAL)?,
-        ) {
-            (Index::Absent, None) => None,
-            (Index::Present, Some((bytes, stamp)))
-                if receipt.stamp.as_ref() == Some(&stamp)
-                    && bytes.len() as u64 == receipt.bytes
-                    && receipt.sha256.as_deref() == Some(hex(&Sha256::digest(&bytes)).as_str()) =>
-            {
+        let index = match receipt.index {
+            Index::Absent => {
+                if disk::stat(&slot.join(part(0)))?.is_some() {
+                    return Err(refused());
+                }
+                None
+            }
+            Index::Present => {
+                // Each part read with its own exact size, against its stamp.
+                let expected = receipt.stamp.iter().chain(&receipt.more);
+                let mut bytes = Vec::new();
+                for (n, (stamp, size)) in expected.zip(part_sizes(receipt.bytes)).enumerate() {
+                    let (data, actual) =
+                        disk::read(&slot.join(part(n)), size)?.ok_or_else(refused)?;
+                    if &actual != stamp || data.len() != size {
+                        return Err(refused());
+                    }
+                    bytes.extend_from_slice(&data);
+                }
+                if bytes.len() as u64 != receipt.bytes
+                    || receipt.sha256.as_deref() != Some(hex(&Sha256::digest(&bytes)).as_str())
+                {
+                    return Err(refused());
+                }
                 Some(bytes)
             }
-            _ => return Err(refused()),
         };
         Ok(Self { receipt, index })
     }

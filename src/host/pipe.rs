@@ -304,7 +304,7 @@ impl PipeStream {
     }
 
     /// The server process's ID, once its token shows this process's user.
-    fn verify_server(&self) -> Result<u32, ConnectError> {
+    pub(crate) fn verify_server(&self) -> Result<u32, ConnectError> {
         let unverified = |error: io::Error| {
             ConnectError::Refused(format!("cannot verify the session host: {error}"))
         };

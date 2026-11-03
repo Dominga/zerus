@@ -162,6 +162,11 @@ impl Original {
     pub fn current(&self) -> bool {
         self.check_current().is_ok()
     }
+    /// Physical exit of this retained process handle. A failed currentness
+    /// check (including unreadable metadata) does not establish process exit.
+    pub fn exited(&self) -> bool {
+        unsafe { WaitForSingleObject(self.process.as_raw_handle(), 0) == WAIT_OBJECT_0 }
+    }
     fn check_current(&self) -> io::Result<()> {
         let wait = unsafe { WaitForSingleObject(self.process.as_raw_handle(), 0) };
         require(wait == WAIT_TIMEOUT).map_err(|e| context("original process is not live", e))?;
@@ -794,6 +799,27 @@ mod tests {
         assert!(proof
             .validate(Instant::now() + Duration::from_secs(2))
             .is_err());
+    }
+    #[test]
+    fn original_exit_is_not_inferred_from_a_failed_identity_check() {
+        let mut child = child();
+        let mut original = Original::open(child.0.id()).unwrap();
+        assert!(original.current());
+        assert!(!original.exited());
+        original.image.push_str(".changed");
+        assert!(!original.current());
+        assert!(!original.exited(), "identity refusal is not process exit");
+        child.0.stdin.take().unwrap().write_all(b"exit\n").unwrap();
+        let until = Instant::now() + Duration::from_secs(2);
+        while child.0.try_wait().unwrap().is_none() {
+            assert!(
+                Instant::now() < until,
+                "original private child did not exit"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        child.0.wait().unwrap();
+        assert!(original.exited());
     }
     #[test]
     fn native_agent_parent_fixture() {

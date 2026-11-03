@@ -4365,6 +4365,10 @@ Plain `serve` and fresh registrations stay passive. On Linux and macOS, the main
 installer supports explicit `--mode background|passive` after the authenticated
 frontend handoff; see [Linux mode selection](linux-distribution.md#select-the-desktop-service-mode)
 and [Mac mode selection](macos-distribution.md#explicit-desktop-service-mode).
+The Windows native route uses explicit `registration install --mode
+background|passive --json`; see [Windows mode selection](desktop-windows-mode.md)
+for caller admission, passive bootstrap, retained task-instance custody and
+unknown-result handling.
 Ordinary refreshes preserve the selected mode. Generic approval policy requests
 remain refused; ownership and each effect require their own authenticated grants.
 
@@ -4603,14 +4607,15 @@ per-component readiness. Its epoch changes on service restart. The registration'
 installers; it is a requirement, not a claim that the environment is present.
 
 `lifecycle.mode` reports the running command's `passive` or `background`
-selection independently of worker admission. On Linux/macOS, `registration --json
+selection independently of worker admission. On all three desktop platforms, `registration --json
 --background` renders the explicit background variant without installing it;
 `registration mode-check --json` checks the actual installer caller ancestry and
 foreground terminal or installed frontend on Linux, macOS and Windows, without
 granting service ownership. Windows requires a retained installed frontend
 ancestor or an already attached visible foreground classic console; unverified
 Windows Terminal/ConPTY and headless callers are directed to Settings. This
-preflight does not enable Windows background registration or change a task.
+preflight changes no task; explicit Windows task changes use the separately
+guarded [mode transition](desktop-windows-mode.md).
 The [macOS ancestry boundary](macos-distribution.md) verifies Terminal's system
 login bridge and launchd PID 1; SSH through a foreign session process refuses.
 The maintained Linux helper's `status --json` reports the durable selected mode

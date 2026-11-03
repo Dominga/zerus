@@ -15,6 +15,7 @@
 }
 
 @layer base {
+  html { background: var(--z-color-page); }
   :root {
     /* Derived scale: Qt sizes are relative to the application font. */
     --fs-base: calc(var(--z-font-base) * var(--content-scale, 1));

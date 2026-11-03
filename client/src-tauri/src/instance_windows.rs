@@ -1,6 +1,8 @@
 //! Per-user Windows activation, matching Qt's `sessions\n` / `show\n` pipe.
 //! The private exclusive file is the lifetime lock; a foreign pipe cannot
 //! grant ownership. Only the current SID can access a pipe we create.
+#[cfg(not(feature = "live"))]
+use crate::platform::windows::{own_integrity, token_integrity};
 use crate::platform::windows::{own_sid, owned, token_sid, wide, Security};
 #[cfg(not(feature = "live"))]
 use sha2::{Digest, Sha256};
@@ -135,6 +137,9 @@ pub enum Claim {
     Forwarded,
     Duplicate(&'static str),
     Failed(String),
+    /// Another user's or a lower-integrity process owns the activation pipe.
+    /// Nothing was written to it; the start must say so visibly.
+    Untrusted,
 }
 pub struct InstanceState(pub Mutex<Option<Listening>>);
 impl InstanceState {
@@ -195,12 +200,52 @@ pub(crate) fn same_user(pipe: &OwnedHandle) -> bool {
         .is_some_and(|(peer, own)| peer == own)
 }
 
-fn same_user_server(pipe: &OwnedHandle, sid: &str) -> io::Result<u32> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Forward {
+    Forwarded,
+    /// No owner answered, or the exchange failed: a later attempt may succeed.
+    Unavailable,
+    /// The pipe's server is another user's or runs at a lower integrity level:
+    /// a sandboxed same-user process can pre-create the predictable name.
+    Untrusted,
+}
+/// A verified pipe server, with its original process handle held until the
+/// activation has been written.
+struct Trusted {
+    pid: u32,
+    #[cfg(feature = "live")]
+    _peer: zerus_client_core::desktop::windows::Peer,
+    #[cfg(not(feature = "live"))]
+    _process: OwnedHandle,
+}
+/// The one shared check (desktop::windows::verify_server): same user and
+/// logon session, integrity no lower than ours, and this process's own image.
+/// FIRST_PIPE_INSTANCE and the user-only DACL protect pipes this process
+/// creates, not a pre-existing one it opens. Anything but a verified server
+/// is Untrusted: no byte or foreground right reaches it.
+#[cfg(feature = "live")]
+fn trusted_server(pipe: &OwnedHandle, _sid: &str) -> Result<Trusted, Forward> {
+    use zerus_client_core::desktop::windows::{own_facts, verify_server, Server};
+    let image = own_facts()
+        .and_then(|own| own.image)
+        .ok_or(Forward::Untrusted)?;
+    match verify_server(pipe, image) {
+        Server::Verified(peer) => Ok(Trusted {
+            pid: peer.pid,
+            _peer: peer,
+        }),
+        Server::Refused(_) | Server::Unknown => Err(Forward::Untrusted),
+    }
+}
+/// Builds without the desktop core keep the user and integrity part.
+#[cfg(not(feature = "live"))]
+fn trusted_server(pipe: &OwnedHandle, sid: &str) -> Result<Trusted, Forward> {
     let mut pid = 0;
     if unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle(), &mut pid) } == 0 {
-        return Err(io::Error::last_os_error());
+        return Err(Forward::Unavailable);
     }
-    let process = owned(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) })?;
+    let process = owned(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) })
+        .map_err(|_| Forward::Untrusted)?;
     let mut token = std::ptr::null_mut();
     if unsafe {
         OpenProcessToken(
@@ -210,22 +255,27 @@ fn same_user_server(pipe: &OwnedHandle, sid: &str) -> io::Result<u32> {
         )
     } == 0
     {
-        return Err(io::Error::last_os_error());
+        return Err(Forward::Untrusted);
     }
-    if token_sid(&owned(token)?)? != sid {
-        return Err(io::Error::other(
-            "Activation pipe belongs to a different Windows user",
-        ));
+    let token = owned(token).map_err(|_| Forward::Untrusted)?;
+    let own = own_integrity().map_err(|_| Forward::Untrusted)?;
+    match (token_sid(&token), token_integrity(&token)) {
+        (Ok(user), Ok(level)) if user == sid && level >= own => Ok(Trusted {
+            pid,
+            _process: process,
+        }),
+        _ => Err(Forward::Untrusted),
     }
-    Ok(pid)
 }
 
-fn forward(name: &str, activation: &Activation) -> bool {
+fn forward(name: &str, activation: &Activation) -> Forward {
     let bytes = activation.line();
     if bytes.is_empty() {
-        return false;
+        return Forward::Unavailable;
     }
-    let Ok(sid) = own_sid() else { return false };
+    let Ok(sid) = own_sid() else {
+        return Forward::Unavailable;
+    };
     let pipe = wide(&format!(r"\\.\pipe\{name}"));
     let end = Instant::now() + Duration::from_millis(200);
     loop {
@@ -241,9 +291,12 @@ fn forward(name: &str, activation: &Activation) -> bool {
             )
         };
         if let Ok(handle) = owned(handle) {
-            let Ok(pid) = same_user_server(&handle, &sid) else {
-                return false;
+            // Checked before any byte or foreground right reaches the server.
+            let server = match trusted_server(&handle, &sid) {
+                Ok(server) => server,
+                Err(refused) => return refused,
             };
+            let pid = server.pid;
             if activation.opens_window() {
                 unsafe {
                     AllowSetForegroundWindow(pid);
@@ -259,7 +312,7 @@ fn forward(name: &str, activation: &Activation) -> bool {
                 )
             } == 0
             {
-                return false;
+                return Forward::Unavailable;
             }
             // A nonblocking write may accept part of a long target line.
             let end = Instant::now() + Duration::from_millis(200);
@@ -276,20 +329,20 @@ fn forward(name: &str, activation: &Activation) -> bool {
                     )
                 } == 0
                 {
-                    return false;
+                    return Forward::Unavailable;
                 }
                 sent += written as usize;
                 if sent < bytes.len() {
                     if Instant::now() >= end {
-                        return false;
+                        return Forward::Unavailable;
                     }
                     std::thread::sleep(Duration::from_millis(5));
                 }
             }
-            return true;
+            return Forward::Forwarded;
         }
         if Instant::now() >= end {
-            return false;
+            return Forward::Unavailable;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -472,6 +525,7 @@ fn claim_inner(
             Ok(CanonicalClaim::Owner(guard)) => Some(guard),
             Ok(CanonicalClaim::Forwarded) => return Claim::Forwarded,
             Ok(CanonicalClaim::Busy) => return Claim::Duplicate("canonical_owner_unresponsive"),
+            Ok(CanonicalClaim::Untrusted) => return Claim::Untrusted,
             Err(error) => return Claim::Failed(error.to_string()),
         }
     } else {
@@ -493,6 +547,7 @@ enum CanonicalClaim {
     Owner(Canonical),
     Forwarded,
     Busy,
+    Untrusted,
 }
 fn canonical_claim_observed(
     pipe: String,
@@ -505,8 +560,10 @@ fn canonical_claim_observed(
             return Ok(CanonicalClaim::Owner(guard));
         }
         busy();
-        if forward(&pipe, activation) {
-            return Ok(CanonicalClaim::Forwarded);
+        match forward(&pipe, activation) {
+            Forward::Forwarded => return Ok(CanonicalClaim::Forwarded),
+            Forward::Untrusted => return Ok(CanonicalClaim::Untrusted),
+            Forward::Unavailable => {}
         }
         if Instant::now() >= deadline {
             return Ok(CanonicalClaim::Busy);
@@ -536,8 +593,10 @@ fn claim_guarded(
     admitted: impl FnOnce(),
 ) -> Claim {
     // Also recognizes an already-running Qt GUI using this activation protocol.
-    if forward(name, &activation) {
-        return Claim::Forwarded;
+    match forward(name, &activation) {
+        Forward::Forwarded => return Claim::Forwarded,
+        Forward::Untrusted => return Claim::Untrusted,
+        Forward::Unavailable => {}
     }
     if let Err(e) = std::fs::create_dir_all(directory) {
         return Claim::Failed(e.to_string());
@@ -552,10 +611,10 @@ fn claim_guarded(
     {
         Ok(lock) => lock,
         Err(e) if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) => {
-            return if forward(name, &activation) {
-                Claim::Forwarded
-            } else {
-                Claim::Duplicate("profile_owner_unresponsive")
+            return match forward(name, &activation) {
+                Forward::Forwarded => Claim::Forwarded,
+                Forward::Untrusted => Claim::Untrusted,
+                Forward::Unavailable => Claim::Duplicate("profile_owner_unresponsive"),
             };
         }
         Err(e) => return Claim::Failed(e.to_string()),
@@ -962,7 +1021,7 @@ mod tests {
                 Instant::now() + Duration::from_secs(2)
             )
             .is_none());
-            assert!(forward(&name, &Activation::Sessions));
+            assert_eq!(forward(&name, &Activation::Sessions), Forward::Forwarded);
             assert_eq!(
                 claimed
                     .activations
@@ -1084,13 +1143,13 @@ mod tests {
         let pipe = create_pipe(&name, &Security::user_only().unwrap()).unwrap();
         // No listener exists yet: forward must have written AND closed its
         // handle before the first ConnectNamedPipe call can possibly happen.
-        assert!(forward(&name, &Activation::Show));
+        assert_eq!(forward(&name, &Activation::Show), Forward::Forwarded);
         let (sender, receiver) = mpsc::sync_channel(32);
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
         let thread = std::thread::spawn(move || listen(pipe, stopped, sender, None));
         let first = receiver.recv_timeout(Duration::from_secs(2));
-        let forwarded = forward(&name, &Activation::Sessions);
+        let forwarded = forward(&name, &Activation::Sessions) == Forward::Forwarded;
         let second = receiver.recv_timeout(Duration::from_secs(2));
         stop.store(true, Ordering::Release);
         thread.join().unwrap();

@@ -403,6 +403,18 @@ pub fn run() {
                 instance::Claim::Failed(_) => {
                     std::process::exit(3);
                 }
+                // Nothing was forwarded to that server; say so instead of exiting silently.
+                #[cfg(all(windows, feature = "live"))]
+                instance::Claim::Untrusted => {
+                    startup_error::record("instance.claim", "activation_pipe_untrusted");
+                    startup_error::show_untrusted_pipe(context);
+                    return;
+                }
+                #[cfg(all(windows, not(feature = "live")))]
+                instance::Claim::Untrusted => {
+                    eprintln!("zerus-client: the activation pipe belongs to an untrusted process");
+                    std::process::exit(3);
+                }
             }
         }
     };

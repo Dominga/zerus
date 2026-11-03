@@ -105,6 +105,10 @@ fn launch_fixture() {
             return;
         }
         Claim::Failed(error) => panic!("fixture GUI owner: {error}"),
+        Claim::Untrusted => {
+            fs::write(root.join(format!("{scope}.untrusted")), b"refused").unwrap();
+            return;
+        }
     };
     fs::write(root.join(format!("{scope}.ready")), b"owner").unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);

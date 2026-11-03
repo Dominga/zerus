@@ -471,6 +471,35 @@ fn kimi_report(me: Option<&Value>, usage: Option<&Value>) -> Value {
     result
 }
 
+// Track the actual grant, not signature(): a new login to the same user keeps
+// the catalog signature. Never expose credential bytes in diagnostics.
+pub(super) fn kimi_login_grant(home: &Path) -> Option<String> {
+    let environment = kimi_environment(home);
+    let auth = read_json(&home.join(&environment.credentials));
+    let token = auth["access_token"].as_str().filter(|token| !token.is_empty())?;
+    let mut digest = Sha256::new();
+    digest.update(environment.credentials.as_bytes());
+    digest.update(token.as_bytes());
+    Some(format!("{:x}", digest.finalize()))
+}
+
+// Windows Kimi can abort in libuv after saving a successful device login.
+// An old account, a quota answer, or cancellation must never turn that failed
+// command into success. The caller supplies a forced, fresh identity probe.
+pub(super) fn kimi_login_recovered(
+    code: i32,
+    before: Option<&str>,
+    after: Option<&str>,
+    report: &Value,
+) -> bool {
+    code == 3
+        && after.is_some()
+        && before != after
+        && report["auth_status"] == "signed_in"
+        && report["status"] != "signed_out"
+        && report["status"] != "expired"
+}
+
 fn kimi(home: &Path) -> Value {
     let mut result =
         json!({"identity":{},"windows":[],"source":"Kimi Code","status":"unavailable"});
@@ -849,9 +878,12 @@ oauth_host = "https://auth.kimi.ai"
         fs::write(&scoped, json!({"access_token":token("user-a",1_000)}).to_string()).unwrap();
         fs::write(home.join("credentials/kimi-code.json"), r#"{"access_token":"old-default"}"#).unwrap();
         let first = signature(home, "kimi");
-        fs::write(&scoped, json!({"access_token":token("user-a",1_900)}).to_string()).unwrap();
+        let first_grant = kimi_login_grant(home).unwrap();
         fs::write(home.join("credentials/kimi-code.json"), r#"{"access_token":"changed-default"}"#).unwrap();
+        assert_eq!(kimi_login_grant(home).as_deref(), Some(first_grant.as_str()));
+        fs::write(&scoped, json!({"access_token":token("user-a",1_900)}).to_string()).unwrap();
         assert_eq!(signature(home, "kimi"), first);
+        assert_ne!(kimi_login_grant(home).as_deref(), Some(first_grant.as_str()));
         fs::write(&scoped, json!({"access_token":token("user-b",1_900)}).to_string()).unwrap();
         assert_ne!(signature(home, "kimi"), first);
 
@@ -909,6 +941,41 @@ oauth_host = "https://auth.kimi.ai"
         let quota = json!({"usages":{"limit_5h":{"used_ratio":0.25,"reset_time":null}}});
         let both = kimi_report(Some(&me), Some(&quota));
         assert_eq!((both["auth_status"].as_str(),both["status"].as_str()), (Some("signed_in"),Some("ok")));
+    }
+
+    #[test]
+    fn kimi_login_abort_needs_a_new_grant_and_fresh_verified_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        fs::create_dir(home.join("credentials")).unwrap();
+        assert_eq!(kimi_login_grant(home), None);
+        let path = home.join("credentials/kimi-code.json");
+        for invalid in ["not json", "{}", r#"{"access_token":""}"#] {
+            fs::write(&path, invalid).unwrap();
+            assert_eq!(kimi_login_grant(home), None);
+        }
+        fs::write(&path, r#"{"access_token":"old-grant"}"#).unwrap();
+        let before = kimi_login_grant(home).unwrap();
+        fs::write(&path, r#"{"access_token":"new-grant"}"#).unwrap();
+        let after = kimi_login_grant(home).unwrap();
+        let me = json!({"user_id":"fixture-user","user_level_name":"Free"});
+        let verified = kimi_report(Some(&me), None);
+        let quota_only = kimi_report(None, Some(&json!({"usages":{"limit_5h":{"used_ratio":0.25}}})));
+        for (code, old, new, report, recovered) in [
+            (3, Some(before.as_str()), Some(after.as_str()), &verified, true),
+            (3, None, Some(after.as_str()), &verified, true),
+            (3, Some(before.as_str()), Some(before.as_str()), &verified, false),
+            (3, Some(before.as_str()), None, &verified, false),
+            (130, Some(before.as_str()), Some(after.as_str()), &verified, false),
+            (1, Some(before.as_str()), Some(after.as_str()), &verified, false),
+            (0, Some(before.as_str()), Some(after.as_str()), &verified, false),
+            (3, Some(before.as_str()), Some(after.as_str()), &quota_only, false),
+            (3, Some(before.as_str()), Some(after.as_str()), &json!({"status":"unavailable","identity":{"email":"cached@example.invalid"}}), false),
+            (3, Some(before.as_str()), Some(after.as_str()), &json!({"status":"expired"}), false),
+        ] {
+            assert_eq!(kimi_login_recovered(code, old, new, report), recovered,
+                "code={code}, report={report}");
+        }
     }
 
     #[test]

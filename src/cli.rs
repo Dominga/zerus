@@ -173,6 +173,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] worktrees leftovers [--json]   partial-removal leftovers whose repository is gone
        Worktree leftover ABI: worktree-leftovers-v1 (review "leftovers" after a partial removal, catalog "leftovers" count)
        Worktree leftover deletion ABI: worktree-leftover-delete-v1
+       Worktree leftover keep ABI: worktree-leftover-keep-v1 (request-bound keep-folder outcome)
        Mobile worktree ABI: worktrees-v1 (catalog/create/verified project placement)
        hgs [@host] repository check|clone --url URL --parent PATH --name NAME --json
        hgs [@host] repository status --request-id UUID --json

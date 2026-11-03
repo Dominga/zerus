@@ -1003,7 +1003,11 @@ async fn leftover_action(
             detail: "The action could not be confirmed. Review again.".into(),
         });
     };
-    let (settled, computer, common) = done?;
+    // Every refusal of `act` comes before anything ran: nothing changed.
+    let (settled, computer, common) = match done {
+        Ok(done) => done,
+        Err(detail) => return Ok(leftover::Settled::Refused { detail }),
+    };
     let _ = app.emit(
         "worktrees-overview-changed",
         serde_json::json!({"id":changed}),
@@ -1612,7 +1616,8 @@ mod tests {
             Some(zerus_client_core::Exit::Code {
                 code: 0,
                 stdout: match at {
-                    None => b"guarded-create-v1 worktree-leftovers-v1".to_vec(),
+                    None => b"guarded-create-v1 worktree-leftovers-v1 worktree-leftover-keep-v1"
+                        .to_vec(),
                     Some(at) => {
                         json!({"status":"kept","path":"/srv/gone/w","request_id":inv.args[at + 1]})
                             .to_string()

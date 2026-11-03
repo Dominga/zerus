@@ -15,6 +15,8 @@ use std::time::Duration;
 pub const LEFTOVERS_MARKER: &str = "worktree-leftovers-v1";
 /// The help token of a CLI that can delete a reviewed leftover's files.
 pub const DELETE_MARKER: &str = "worktree-leftover-delete-v1";
+/// The help token of a CLI whose keep-folder reports a request-bound outcome.
+pub const KEEP_MARKER: &str = "worktree-leftover-keep-v1";
 /// The most leftover rows the client takes from one reply. The CLI sends at
 /// most 32 and marks the rest partial.
 pub const ROWS: usize = 64;
@@ -343,32 +345,43 @@ fn detail(host: &str, text: &str, fallback: &str) -> String {
     }
 }
 
-/// Keep folder's outcome. A missing record after the command finished means
-/// the record is already gone, which is what Keep folder asks for.
+/// Keep folder's outcome. Only the CLI's request-bound refusal, given before
+/// the record was touched, is "nothing changed"; its missing-record refusal
+/// means the record is already gone, which is what Keep folder asks for. An
+/// unreachable computer, a crash or any other reply is unknown.
 pub fn kept(exit: Exit, host: &str, request_id: &str, leftover: &Leftover) -> Settled {
     let (finished, code, data, stderr) = reply(exit);
-    if finished
-        && code == 0
-        && text(&data, "status") == "kept"
-        && text(&data, "request_id") == request_id
-        && text(&data, "path") == leftover.path
-    {
+    let identity = text(&data, "request_id") == request_id && text(&data, "path") == leftover.path;
+    if finished && code == 0 && identity && text(&data, "status") == "kept" {
         return Settled::Forgotten;
     }
-    if finished && code != 0 && stderr.contains("No partial-removal record exists") {
-        return Settled::Forgotten;
-    }
-    // Keep folder changes nothing but the record, as its last step; a
-    // finished refusal left the record and every file as they were.
-    if finished && code != 0 && !stderr.trim().is_empty() {
+    let verified = finished
+        && code != 0
+        && identity
+        && text(&data, "common_dir") == leftover.common_dir
+        && text(&data, "operation") == "worktree_leftover_keep"
+        && data["outcome_version"] == 1;
+    if verified && text(&data, "status") == "kept" {
+        let reason = text(&data, "detail");
+        if reason.starts_with("No partial-removal record exists") {
+            return Settled::Forgotten;
+        }
         return Settled::Refused {
-            detail: detail(host, &stderr, ""),
+            detail: detail(
+                host,
+                reason,
+                "The folder and its record were left as they were.",
+            ),
         };
     }
     Settled::Unknown {
         detail: detail(
             host,
-            &stderr,
+            if verified {
+                text(&data, "detail")
+            } else {
+                &stderr
+            },
             "Keeping the folder could not be confirmed. Review again.",
         ),
     }
@@ -595,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn keep_outcomes_treat_a_missing_record_as_forgotten() {
+    fn keep_outcomes_are_refused_only_on_the_request_bound_refusal() {
         let parsed = leftover(&row(), true).unwrap();
         let done = json!({"status":"kept","path":"/srv/example/w","request_id":"r1"});
         assert_eq!(
@@ -606,25 +619,17 @@ mod tests {
             kept(exit(0, done, ""), "", "r2", &parsed),
             Settled::Unknown { .. }
         ));
+        let outcome = |status: &str, detail: &str| {
+            json!({"operation":"worktree_leftover_keep","outcome_version":1,"status":status,
+                "path":"/srv/example/w","common_dir":"/srv/example/.git","request_id":"r1",
+                "detail":detail})
+        };
         assert_eq!(
             kept(
                 exit(
                     1,
-                    Value::Null,
-                    "No partial-removal record exists for this folder."
-                ),
-                "",
-                "r1",
-                &parsed
-            ),
-            Settled::Forgotten
-        );
-        assert_eq!(
-            kept(
-                exit(
-                    1,
-                    Value::Null,
-                    "The leftover folder changed since the review."
+                    outcome("kept", "The leftover folder changed since the review."),
+                    "x"
                 ),
                 "",
                 "r1",
@@ -634,10 +639,58 @@ mod tests {
                 detail: "The leftover folder changed since the review.".into()
             }
         );
+        // The record is already gone: what Keep folder asks for.
+        assert_eq!(
+            kept(
+                exit(
+                    1,
+                    outcome("kept", "No partial-removal record exists for this folder."),
+                    "x"
+                ),
+                "",
+                "r1",
+                &parsed
+            ),
+            Settled::Forgotten
+        );
         assert!(matches!(
-            kept(Exit::TimedOut, "", "r1", &parsed),
+            kept(
+                exit(1, outcome("unconfirmed", "database is locked"), "x"),
+                "",
+                "r1",
+                &parsed
+            ),
             Settled::Unknown { .. }
         ));
+        // Another request's or repository's refusal proves nothing.
+        let mut other = outcome("kept", "changed");
+        other["common_dir"] = json!("/srv/other/.git");
+        assert!(matches!(
+            kept(exit(1, other, "x"), "", "r1", &parsed),
+            Settled::Unknown { .. }
+        ));
+        // A dropped link (hgs maps SSH 255 to 3), a crash or an older CLI's
+        // plain error never reads as "nothing changed".
+        for lost in [
+            exit(3, Value::Null, "hgs: example-peer unreachable"),
+            exit(101, Value::Null, "thread 'main' panicked"),
+            exit(
+                1,
+                Value::Null,
+                "No partial-removal record exists for this folder.",
+            ),
+            exit(
+                1,
+                Value::Null,
+                "The leftover folder changed since the review.",
+            ),
+            Exit::TimedOut,
+        ] {
+            assert!(matches!(
+                kept(lost, "", "r1", &parsed),
+                Settled::Unknown { .. }
+            ));
+        }
     }
 
     #[test]

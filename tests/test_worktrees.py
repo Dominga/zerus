@@ -507,6 +507,11 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
     def test_keep_folder_forgets_only_the_record_after_a_fresh_bound_review(self):
         tree,row,_=self.partial('kept');left=self.leftover(tree)
         stale=self.keep(tree,'0'*64);self.assertNotEqual(stale.returncode,0);self.assertIn('changed since the review',stale.stderr)
+        # A refusal before the record is touched is a request-bound outcome.
+        refused=json.loads(stale.stdout)
+        self.assertEqual((refused['operation'],refused['outcome_version'],refused['status'],refused['request_id'],refused['path']),
+            ('worktree_leftover_keep',1,'kept','test-keep',str(tree)))
+        self.assertIn('changed since the review',refused['detail']);self.assertEqual(len(self.records()),1)
         (tree/'later.txt').write_text('new local file')
         changed=self.keep(tree,left['fingerprint']);self.assertNotEqual(changed.returncode,0);self.assertIn('changed since the review',changed.stderr)
         left=self.leftover(tree);kept=self.keep(tree,left['fingerprint']);self.assertEqual(kept.returncode,0,kept.stderr)
@@ -515,6 +520,8 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         self.assertIsNone(self.leftover(tree));self.assertEqual(self.records(),[])
         self.assertIn(row['branch'],self.git('-C',str(self.repo),'branch','--list',row['branch']))
         again=self.keep(tree,left['fingerprint']);self.assertNotEqual(again.returncode,0);self.assertIn('No partial-removal record',again.stderr)
+        absent=json.loads(again.stdout);self.assertEqual((absent['status'],absent['operation']),('kept','worktree_leftover_keep'))
+        self.assertIn('No partial-removal record',absent['detail'])
     def test_an_interrupted_removal_stays_pending_for_review(self):
         self.fake("if any(sys.argv[i:i+2]==['worktree','remove'] for i in range(len(sys.argv)-1)):\n import signal,subprocess\n subprocess.run(["+repr(GIT)+",*sys.argv[1:]])\n os.kill(os.getppid(),signal.SIGKILL);sys.exit(1)\nelse: os.execv("+repr(GIT)+",["+repr(GIT)+",*sys.argv[1:]])\n")
         tree,row,result=self.partial('interrupted')
@@ -631,6 +638,24 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         shutil.rmtree(extra)
         data=self.review();self.assertEqual([r['path'] for r in data['leftovers']],[str(tree.resolve())])
         self.assertFalse(data['leftovers_partial']);self.assertEqual(self.catalog()['leftovers'],1)
+    def test_leftover_rows_stay_within_their_byte_bound(self):
+        import sqlite3
+        tree,_,_=self.partial('large');database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3'
+        common=str((self.repo/'.git').resolve());extra=self.root/'large-details';gone=self.root/'large-gone'
+        for n in range(20):(extra/str(n)).mkdir(parents=True);(gone/str(n)).mkdir(parents=True)
+        # Twenty rows of about 100 KB each: the 32-row bound alone admits all of them.
+        with contextlib.closing(sqlite3.connect(database)) as db,db:
+            db.executemany("INSERT INTO removals VALUES (?,?,?,?,?,?,?,?,?)",
+                [(str(extra/str(n)),common,'b','0'*40,'f'*64,'',1.0,'partial','x'*100_000) for n in range(20)]
+                +[(str(gone/str(n)),str(self.root/'gone-repository/.git'),'b','0'*40,'f'*64,'',1.0,'partial','x'*100_000) for n in range(20)])
+        data=self.review();rows=data['leftovers']
+        self.assertTrue(data['leftovers_partial']);self.assertLess(len(rows),21);self.assertGreater(len(rows),1)
+        self.assertLessEqual(len(json.dumps(rows,separators=(',',':')).encode()),1024*1024)
+        listed=subprocess.run([str(HGS),'worktrees','leftovers','--json'],env=self.env,text=True,capture_output=True,timeout=60)
+        self.assertEqual(listed.returncode,0,listed.stderr);value=json.loads(listed.stdout)
+        self.assertTrue(value['partial']);self.assertLess(len(value['leftovers']),20)
+        self.assertLessEqual(len(json.dumps(value['leftovers'],separators=(',',':')).encode()),1024*1024)
+        self.assertEqual(len(self.records()),41)
     def delete(self,path,fingerprint,confirm=True,extra=()):
         return subprocess.run([str(HGS),'worktrees','delete-leftover','--path',str(path),'--common-dir',str(self.repo/'.git'),'--fingerprint',fingerprint,
             *(['--confirm-delete'] if confirm else []),'--request-id','test-delete','--json',*extra],env=self.env,text=True,capture_output=True,timeout=60)

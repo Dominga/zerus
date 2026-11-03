@@ -1872,8 +1872,15 @@ fn delete_tree(_path: &Path, _expected: &RootIdentity, _deadline: Instant) -> st
 
 /// "Keep folder, forget record": the leftover folder and its files stay as
 /// they are; only the private removal record goes. Bound under the repository
-/// lock to the fresh review the owner confirmed.
-pub(super) fn keep_folder_command(args: &[String]) -> Result<Value> {
+/// lock to the fresh review the owner confirmed. `true` once forgetting the
+/// record may have started: a later failure is not a refusal.
+pub(super) fn keep_folder_command(args: &[String]) -> (Result<Value>, bool) {
+    let mut attempted = false;
+    let result = keep_folder(args, &mut attempted);
+    (result, attempted)
+}
+
+fn keep_folder(args: &[String], attempted: &mut bool) -> Result<Value> {
     const USAGE: &str = "usage: hgs worktrees keep-folder --path FOLDER --common-dir DIR --fingerprint HASH [--request-id ID] [--json]";
     let mut options = BTreeMap::new();
     let mut i = 0;
@@ -1958,6 +1965,7 @@ pub(super) fn keep_folder_command(args: &[String]) -> Result<Value> {
     if row["fingerprint"] != expected {
         return Err("The leftover folder changed since the review. Review it again.".into());
     }
+    *attempted = true;
     super::worktree_maintenance::forget_removal(&record.path)?;
     Ok(json!({"status":"kept","path":path,"common_dir":common,
         "request_id":options.get("--request-id"),"machine":crate::config::Config::load()

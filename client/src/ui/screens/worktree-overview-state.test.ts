@@ -69,7 +69,7 @@ describe("bounded overview controller", () => {
       if (command === "worktree_overview_open") return { id: "opaque-overview" } as T;
       if (command === "worktree_overview_page") return frame() as T;
       if (command === "worktree_leftover_delete") return await new Promise<unknown>((resolve) => { release = resolve; }) as T;
-      if (command === "worktree_leftover_keep") throw "This folder changed since it was shown. Review it again.";
+      if (command === "worktree_leftover_keep") throw "The application did not answer.";
       return undefined as T;
     };
     const state = createOverview(call, (e) => { throw Error(String(e)); }); await state.open();
@@ -82,8 +82,8 @@ describe("bounded overview controller", () => {
     release({ outcome: "unknown", detail: "Timed out." });
     expect(await deleting).toEqual({ outcome: "unknown", detail: "Timed out." });
     expect(requests.filter((r) => r.command.startsWith("worktree_leftover"))).toEqual([{ command: "worktree_leftover_delete", args: { id: "opaque-overview", row: "opaque-left", fingerprint: "ab".repeat(32), consent: true } }]);
-    // A refusal before anything ran comes back as text, not as an outcome.
-    expect(await state.leftover(row, null)).toBe("This folder changed since it was shown. Review it again.");
+    // A reply that never came back is text: the dialog shows it as unknown.
+    expect(await state.leftover(row, null)).toBe("The application did not answer.");
     expect(requests.filter((r) => r.command === "worktree_leftover_keep")).toEqual([{ command: "worktree_leftover_keep", args: { id: "opaque-overview", row: "opaque-left", fingerprint: "ab".repeat(32) } }]);
     expect(requests.filter((r) => r.command.includes("remove") || r.command.includes("refresh"))).toEqual([]);
     state.dispose();

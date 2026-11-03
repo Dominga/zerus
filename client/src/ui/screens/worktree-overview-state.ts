@@ -76,8 +76,9 @@ export function createOverview(call: Call = invoke, warn = (e: unknown) => toast
     async closeBatch() { if (closed || working() || batch()?.busy) return; await action(async () => { const key = batch()!.id; await call("worktree_manual_stop", { id: key, close: true }); if (!closed && batch()?.id === key) setBatch(undefined); }); if (!closed) { await call("worktree_overview_refresh", { id }).catch(warn); setGeneration((n) => n + 1); await pull(); } },
     /** One explicit leftover action on the displayed row: Keep folder without
      * consent, Delete remaining files with it. The native side checks the
-     * displayed fingerprint and runs the call once; a string is why nothing
-     * started (or a lost reply), never a reason to try again by itself. */
+     * displayed fingerprint and runs the call once; its refusals before
+     * anything ran arrive as `refused`. A string is a reply that never came
+     * back, shown as unknown and never a reason to try again by itself. */
     async leftover(row: OverviewRow, consent: boolean | null): Promise<Settled | string> {
       const item = row.leftover;
       if (closed || working() || !item) return "Worktrees are busy. Try again after the current action finishes.";

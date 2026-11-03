@@ -357,7 +357,23 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             "create" => create(&args[1..])?,
             "status" | "cancel" => super::worktree_requests::control(action, &args[1..])?,
             "review" => super::worktree_cleanup::review_command(&args[1..])?,
-            "keep-folder" => super::worktree_cleanup::keep_folder_command(&args[1..])?,
+            "keep-folder" => {
+                let (result, attempted) = super::worktree_cleanup::keep_folder_command(&args[1..]);
+                if let Err(detail) = &result {
+                    if args.iter().any(|s| s == "--json") {
+                        let option =
+                            |key| args.windows(2).find(|w| w[0] == key).map(|w| w[1].as_str());
+                        println!(
+                            "{}",
+                            json!({"operation":"worktree_leftover_keep","outcome_version":1,
+                            "status":if attempted {"unconfirmed"} else {"kept"},
+                            "path":option("--path"),"common_dir":option("--common-dir"),
+                            "request_id":option("--request-id"),"detail":detail})
+                        );
+                    }
+                }
+                result?
+            }
             "leftovers" => super::worktree_cleanup::leftovers_command(&args[1..])?,
             "delete-leftover" => {
                 let (result, attempted) =

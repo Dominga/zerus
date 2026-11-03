@@ -57,11 +57,15 @@ pub(crate) fn listing(
     leftover::listing(exit, computer)
 }
 
-fn update(computer: &str) -> String {
+fn update(computer: &str, action: Action) -> String {
+    let what = match action {
+        Action::Keep => "keep leftover folders",
+        Action::Delete { .. } => "delete leftover files",
+    };
     if computer.is_empty() {
-        "Update hgs on this computer to delete leftover files.".into()
+        format!("Update hgs on this computer to {what}.")
     } else {
-        format!("Update hgs on {computer} to delete leftover files.")
+        format!("Update hgs on {computer} to {what}.")
     }
 }
 
@@ -80,7 +84,7 @@ pub(crate) fn act(
     let (mut inv, marker) = match action {
         Action::Keep => (
             leftover::keep_invocation(&host, item, &request),
-            leftover::LEFTOVERS_MARKER,
+            leftover::KEEP_MARKER,
         ),
         Action::Delete { consent } => (
             leftover::delete_invocation(&host, item, &request, consent),
@@ -92,7 +96,7 @@ pub(crate) fn act(
         Err(detail) => return leftover::Settled::Refused { detail },
         Ok(help) if !leftover::has_marker(&help, marker) => {
             return leftover::Settled::Refused {
-                detail: update(computer),
+                detail: update(computer, action),
             }
         }
         Ok(_) => {}
@@ -152,7 +156,8 @@ mod tests {
         let at = inv.args.iter().position(|a| a == "--request-id").unwrap();
         inv.args[at + 1].clone()
     }
-    const CURRENT: &str = "guarded-create-v1\nworktree-leftovers-v1\nworktree-leftover-delete-v1\n";
+    const CURRENT: &str =
+        "guarded-create-v1\nworktree-leftovers-v1\nworktree-leftover-delete-v1\nworktree-leftover-keep-v1\n";
 
     #[test]
     fn delete_runs_once_on_the_verified_computer_with_consent_only_when_offered() {
@@ -222,6 +227,18 @@ mod tests {
             );
             assert_eq!(log.lock().unwrap().len(), 1);
         }
+        // A CLI that lists leftovers but has no request-bound keep outcome
+        // never runs Keep folder: its plain errors could not be classified.
+        let (run, log) = fake("guarded-create-v1 worktree-leftovers-v1", |_| {
+            panic!("must not run")
+        });
+        assert_eq!(
+            act(&*run, "example-peer", MACHINE, &item(false), Action::Keep),
+            leftover::Settled::Refused {
+                detail: "Update hgs on example-peer to keep leftover folders.".into()
+            }
+        );
+        assert_eq!(log.lock().unwrap().len(), 1);
         let (run, log) = fake("guarded-create-v1", |_| panic!("must not run"));
         assert_eq!(listing(&*run, "", MACHINE).unwrap(), (Vec::new(), false));
         assert!(matches!(

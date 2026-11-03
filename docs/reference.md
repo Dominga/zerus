@@ -2573,7 +2573,11 @@ the retained branch and current processes or sessions. A missing Git
 registration is never treated as proof of deletion, and the removal is never
 retried. **Keep folder, forget record** (`hgs worktrees keep-folder`) checks the
 reviewed leftover again under the repository lock and drops only its record;
-the folder, its files and the branch stay. **Delete remaining files**
+the folder, its files and the branch stay. With `--json`, a failure prints a
+request-bound outcome (`worktree-leftover-keep-v1`): `kept` before the record is
+touched, `unconfirmed` once forgetting it may have started. A client reports
+**Nothing changed** only for `kept`; an unreachable computer, a crash or any
+other reply is **Result unknown**. **Delete remaining files**
 (`hgs worktrees delete-leftover`, `worktree-leftover-delete-v1`) needs an
 explicit confirmation and the fingerprint of the fresh review the owner saw. It
 checks everything again under the repository and session locks and refuses

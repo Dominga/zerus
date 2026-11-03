@@ -70,7 +70,7 @@ import json,sys,time
 from pathlib import Path
 root=Path(__file__).resolve().parent.parent;args=sys.argv[1:]
 with (root/'calls.jsonl').open('a') as f:f.write(json.dumps(args)+'\\n')
-if args==['--help']:print('guarded-create-v1 worktree-leftovers-v1 worktree-leftover-delete-v1');sys.exit(0)
+if args==['--help']:print('guarded-create-v1 worktree-leftovers-v1 worktree-leftover-delete-v1 worktree-leftover-keep-v1');sys.exit(0)
 guarded=args[:2]==['--expect-machine','11111111-1111-4111-8111-111111111111']
 if guarded:args=args[2:]
 def arg(key):return args[args.index(key)+1]

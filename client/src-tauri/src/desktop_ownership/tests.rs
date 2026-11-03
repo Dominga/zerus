@@ -712,17 +712,23 @@ mod native {
         let current = r.owner.state().status.clone().unwrap();
         let mut moved = current.clone();
         moved.revision += 1;
+        // Bound to the refusal receipt's own authority scope.
+        let scope = Basis {
+            configuration: current.configuration.clone(),
+            journal: current.journal.clone(),
+            revision: current.revision,
+        };
         for (code, status, expected) in [
             (
                 "ownership_drain_pending",
                 Some(&current),
-                Some(Reason::Refused),
+                Some(Reason::Refused(scope.clone())),
             ),
-            ("", Some(&current), Some(Reason::Refused)),
+            ("", Some(&current), Some(Reason::Refused(scope.clone()))),
             (
                 "ownership_transport_busy",
                 Some(&current),
-                Some(Reason::Refused),
+                Some(Reason::Refused(scope.clone())),
             ),
             ("ownership_changed", Some(&current), None),
             ("ownership_drain_pending", Some(&moved), None),
@@ -759,6 +765,60 @@ mod native {
             state.code = "ownership_transport_busy".into();
             assert_eq!(Controller::grant_reason(&state), None);
         }
+    }
+
+    #[test]
+    fn a_transient_refusal_retry_is_fenced_when_the_authority_scope_moves() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        tauri::async_runtime::block_on(async {
+            for (journal, revision) in [
+                ("00000000-0000-4000-8000-000000000005", 4),
+                ("00000000-0000-4000-8000-000000000007", 3),
+            ] {
+                // Startup's three bounded drain refusals, all at revision 3.
+                let f = Fixture::new(
+                    Mode::Service,
+                    json!({"ready":true,"refuse":"ownership_drain_pending","refuse_count":3}),
+                );
+                let (entered, paused) = std::sync::mpsc::channel();
+                let (resume, released) = tokio::sync::oneshot::channel();
+                crate::desktop_service::recovery_pause::arm(f.root.join("hgs"), entered, released);
+                let (service, _) = f.service();
+                let held = std::sync::atomic::AtomicBool::new(false);
+                until("recovery paused before its fresh retry", || {
+                    held.fetch_or(paused.try_recv().is_ok(), Ordering::AcqRel)
+                        || held.load(Ordering::Acquire)
+                })
+                .await;
+                assert_eq!(f.calls("frontend-request").len(), 3);
+                // The authority scope moves without any Check; the drain
+                // refusal is gone too.
+                f.config(json!({"ready":true}));
+                fs::write(
+                    f.root.join("current.json"),
+                    status_at(journal, revision).to_string(),
+                )
+                .unwrap();
+                resume.send(()).unwrap();
+                until("the fresh read fences the refusal retry", || {
+                    service
+                        .snapshot()
+                        .notification_ownership
+                        .is_some_and(|v| v["code"] == "ownership_changed")
+                })
+                .await;
+                tokio::time::sleep(Duration::from_millis(2500)).await;
+                assert_eq!(
+                    f.calls("frontend-request").len(),
+                    3,
+                    "no Grant at the moved {journal}/{revision}"
+                );
+                let view = service.snapshot().notification_ownership.unwrap();
+                assert_eq!(view["status"]["revision"], revision, "{view}");
+                assert_eq!(view["status"]["journal"], journal, "{view}");
+                service.join().await.unwrap();
+            }
+        });
     }
 
     #[test]

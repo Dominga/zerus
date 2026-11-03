@@ -51,13 +51,13 @@ struct Intent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Basis {
     configuration: String,
-    journal: String,
+    journal: Option<String>,
     revision: u64,
 }
 impl Basis {
     fn holds(&self, status: &Status) -> bool {
         status.matches(&self.configuration)
-            && status.journal.as_deref() == Some(self.journal.as_str())
+            && status.journal == self.journal
             && status.revision == self.revision
             && !status.rearm_required
     }
@@ -66,7 +66,7 @@ impl Basis {
 #[derive(Debug, PartialEq, Eq)]
 enum Reason {
     Capacity,
-    Refused,
+    Refused(Basis),
     NotApplied(Basis),
 }
 #[derive(Default)]
@@ -216,20 +216,28 @@ impl Controller {
                 .is_some_and(|status| !basis.holds(status));
             return (!contradicted).then_some(Reason::NotApplied(basis));
         }
-        let refused = state.intent.as_ref().is_some_and(|intent| {
-                    intent.complete && intent.exit_confirmed
-                        && matches!(intent.request, Request::DesktopOwnership { action: Action::Grant, .. })
-                        && intent.receipt.as_ref().is_some_and(|receipt| {
-                            !receipt.accepted && !receipt.durable
-                                && state.status.as_ref() == Some(&receipt.current)
-                                && matches!(&receipt.outcome, Outcome::Refused { code }
-                                    if (state.code.is_empty() || state.code == *code
-                                        || state.code == "ownership_transport_busy")
-                                        && matches!(code.as_str(), "ownership_drain_pending" | "ownership_resources_pending" | "ownership_transport_busy"))
-                        })
-                });
-        if refused {
-            return Some(Reason::Refused);
+        // A transient refusal is bound to its own receipt's authority scope:
+        // the authority refuses drain/resources before it moves a revision.
+        let refused = state.intent.as_ref().and_then(|intent| {
+            let receipt = intent.receipt.as_ref()?;
+            let transient = intent.complete
+                && intent.exit_confirmed
+                && matches!(intent.request, Request::DesktopOwnership { action: Action::Grant, .. })
+                && !receipt.accepted
+                && !receipt.durable
+                && state.status.as_ref() == Some(&receipt.current)
+                && matches!(&receipt.outcome, Outcome::Refused { code }
+                    if (state.code.is_empty() || state.code == *code
+                        || state.code == "ownership_transport_busy")
+                        && matches!(code.as_str(), "ownership_drain_pending" | "ownership_resources_pending" | "ownership_transport_busy"));
+            transient.then(|| Basis {
+                configuration: receipt.current.configuration.clone(),
+                journal: receipt.current.journal.clone(),
+                revision: receipt.current.revision,
+            })
+        });
+        if let Some(basis) = refused {
+            return Some(Reason::Refused(basis));
         }
         (!state.running && state.code == "ownership_transport_busy" && state.intent.is_none())
             .then_some(Reason::Capacity)
@@ -251,7 +259,7 @@ impl Controller {
         (intent.complete && intent.exit_confirmed && intent.not_applied && intent.receipt.is_none())
             .then(|| Basis {
                 configuration: intent.configuration.clone(),
-                journal: journal.clone(),
+                journal: Some(journal.clone()),
                 revision: *revision,
             })
     }
@@ -270,8 +278,8 @@ impl Controller {
             Some(configuration),
             Some(cancel),
             |state| match Self::grant_reason(state)? {
-                Reason::NotApplied(basis) => Some(Some(basis)),
-                Reason::Refused | Reason::Capacity => Some(None),
+                Reason::NotApplied(basis) | Reason::Refused(basis) => Some(Some(basis)),
+                Reason::Capacity => Some(None),
             },
         ) else {
             return self.view();

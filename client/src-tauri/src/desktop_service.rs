@@ -1708,19 +1708,20 @@ pub(crate) mod recovery_pause {
     };
     use tokio::sync::oneshot;
     type Hook = (PathBuf, mpsc::Sender<()>, oneshot::Receiver<()>);
-    static HOOK: Mutex<Option<Hook>> = Mutex::new(None);
+    // One hook per service executable, so concurrent tests never clobber.
+    static HOOKS: Mutex<Vec<Hook>> = Mutex::new(Vec::new());
     // Armed only by the Unix ownership tests.
     #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn arm(hgs: PathBuf, entered: mpsc::Sender<()>, resume: oneshot::Receiver<()>) {
-        *HOOK.lock().unwrap() = Some((hgs, entered, resume));
+        HOOKS.lock().unwrap().push((hgs, entered, resume));
     }
     pub(super) async fn reached(hgs: &Path) {
         let hook = {
-            let mut hook = HOOK.lock().unwrap();
-            if hook.as_ref().is_none_or(|(armed, ..)| armed != hgs) {
+            let mut hooks = HOOKS.lock().unwrap();
+            let Some(at) = hooks.iter().position(|(armed, ..)| armed == hgs) else {
                 return;
-            }
-            hook.take().unwrap()
+            };
+            hooks.swap_remove(at)
         };
         let (_, entered, resume) = hook;
         let _ = entered.send(());

@@ -46,7 +46,9 @@ fn drain_events(
         }
         if pending.is_none() {
             let value = match events.try_recv() {
-                Ok(Candidate::Clicked(request)) => mappings.clicked(&request).map(Event::Clicked),
+                Ok(Candidate::Clicked(request)) => mappings
+                    .click(&request, std::time::Instant::now())
+                    .map(Event::Clicked),
                 Ok(Candidate::Closed(request)) => mappings.closed(&request).map(|value| {
                     native.retire(&request);
                     Event::Closed(value)

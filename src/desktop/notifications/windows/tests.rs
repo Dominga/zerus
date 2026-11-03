@@ -418,3 +418,51 @@ fn original_actor_dispatch_settles_only_its_durable_attempt() {
     actor.poll(&mut store, Instant::now());
     assert!(actor.operation_drained());
 }
+#[test]
+fn one_click_reported_by_both_native_paths_reaches_the_actor_once() {
+    use std::time::Duration;
+    let mut model = ready();
+    let mut native = Fake::default();
+    let first = post(&model.session, 1);
+    let second = post(&model.session, 2);
+    for command in [&first, &second] {
+        assert!(matches!(
+            model.execute(command, &mut native, || None),
+            Outcome::Delivered { .. }
+        ));
+    }
+    let now = Instant::now();
+    let id = &first.binding.request_id;
+    assert_eq!(model.click(id, now), Some(activation(&first)));
+    // The Activated delegate and the COM activator report the same click.
+    assert!(model.click(id, now + Duration::from_millis(300)).is_none());
+    // Another delivered toast is a distinct click inside the same window.
+    assert_eq!(
+        model.click(&second.binding.request_id, now + Duration::from_millis(400)),
+        Some(activation(&second))
+    );
+    // An unknown request neither passes nor occupies the window.
+    let unknown = uuid();
+    assert!(model.click(&unknown, now).is_none());
+    assert!(!model.recent.iter().any(|(value, _)| value == &unknown));
+    // A later click on a still-delivered mapping is a new native event.
+    assert_eq!(
+        model.click(id, now + CLICK_COALESCE + Duration::from_millis(1)),
+        Some(activation(&first))
+    );
+    // Memory stays bounded by the callback queue size.
+    for _ in 0..super::super::EVENTS * 2 {
+        let command = post(&model.session, model.last_seq + 1);
+        assert!(matches!(
+            model.execute(&command, &mut native, || None),
+            Outcome::Delivered { .. }
+        ));
+        model.click(&command.binding.request_id, now);
+    }
+    assert_eq!(model.recent.len(), super::super::EVENTS);
+    // Stopping still refuses clicks before cleanup.
+    model.request_stop();
+    assert!(model
+        .click(&second.binding.request_id, now + CLICK_COALESCE * 2)
+        .is_none());
+}

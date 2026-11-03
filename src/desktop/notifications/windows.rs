@@ -2,9 +2,9 @@
 //! native callbacks can select an existing delivered mapping, never create one.
 use super::{wire, Dispatch};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use wire::{
     Action, Activation, Command, NativeId, Outcome, Platform, Refusal, Session, Uncertainty,
 };
@@ -29,6 +29,9 @@ pub(in crate::desktop) fn cold_entry() -> i32 {
 /// Tag and group limits are UTF-16 limits in the native Toast API. Our values
 /// are fixed ASCII, while restored values must be accepted without truncation.
 const ID_UNITS: usize = 16;
+/// One user click can arrive through both the in-process Activated delegate and
+/// the registered COM activator. Within this window it is forwarded once.
+const CLICK_COALESCE: Duration = Duration::from_secs(5);
 
 trait Native {
     /// No posting/withdrawal effect is allowed during preparation. Registration
@@ -55,6 +58,8 @@ struct Mappings {
     last_seq: i64,
     delivered: BTreeMap<String, Activation>,
     native: BTreeMap<(String, String), String>,
+    /// Recently forwarded clicks, bounded by the callback queue size.
+    recent: VecDeque<(String, Instant)>,
 }
 
 fn key(native_id: &NativeId) -> Option<(String, String)> {
@@ -92,6 +97,7 @@ impl Mappings {
             last_seq: 0,
             delivered: BTreeMap::new(),
             native: BTreeMap::new(),
+            recent: VecDeque::new(),
         })
     }
 
@@ -137,6 +143,22 @@ impl Mappings {
             return None;
         }
         self.delivered.get(request_id).cloned()
+    }
+
+    /// A native click for a known delivered mapping, forwarded at most once per
+    /// coalescing window. Unknown requests never occupy the bounded window.
+    fn click(&mut self, request_id: &str, now: Instant) -> Option<Activation> {
+        let value = self.clicked(request_id)?;
+        self.recent
+            .retain(|(_, at)| now.saturating_duration_since(*at) < CLICK_COALESCE);
+        if self.recent.iter().any(|(id, _)| id == request_id) {
+            return None;
+        }
+        if self.recent.len() >= super::EVENTS {
+            self.recent.pop_front();
+        }
+        self.recent.push_back((request_id.into(), now));
+        Some(value)
     }
 
     fn closed(&mut self, request_id: &str) -> Option<Activation> {

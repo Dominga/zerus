@@ -468,3 +468,36 @@ fn a_restored_click_is_refused_after_the_native_user_or_registration_changes() {
     assert_eq!(actor.status()["callbacks"], 0);
     assert_eq!(native.posts.load(Ordering::Acquire), 0);
 }
+#[test]
+fn a_click_reported_by_delegate_and_activator_is_one_actor_callback() {
+    let scope = session();
+    let (actor, endpoint) = Outbox::new(scope.clone()).unwrap();
+    let original = activation(&post(&scope, 1));
+    let mut mappings = Mappings::new(scope).unwrap();
+    mappings.restore(original.clone());
+    mappings.finish_restoration();
+    let (slot, _) = Slot::new(thread::current(), Arc::new(()));
+    let mut native = Fake {
+        posts: Arc::new(AtomicUsize::new(0)),
+        close: Arc::new(AtomicBool::new(true)),
+        slot,
+        release: None,
+        entered: None,
+        close_event: None,
+        callback_allowed: true,
+    };
+    let (send, receive) = mpsc::sync_channel(2);
+    send.send(Candidate::Clicked(original.request_id.clone()))
+        .unwrap();
+    send.send(Candidate::Clicked(original.request_id)).unwrap();
+    let mut pending = None;
+    assert!(drain_events(
+        &receive,
+        &mut pending,
+        &mut mappings,
+        &endpoint,
+        &mut native
+    ));
+    assert!(pending.is_none());
+    assert_eq!(actor.status()["callbacks"], 1);
+}

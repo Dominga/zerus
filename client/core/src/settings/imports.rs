@@ -19,11 +19,14 @@ const FAMILIES: &[&str] = &[
     "session-splitter",
     "project-folder-splitter",
     "inspector-panel",
+    // Report only: which NO_CONSUMER keys the Qt store had. Imports nothing.
+    "no-consumer",
 ];
 
 /// Qt preferences Next has nothing to apply to: child-row expansion is per
 /// window, the sessions panel does not collapse, branches are always kept,
-/// and the event stream is not a choice. Reported by name, never imported.
+/// and the event stream is not a choice. Reported by name through the
+/// report-only `no-consumer` family, never imported.
 const NO_CONSUMER: &[&str] = &[
     "workspace/expandedSessions",
     "workspace/sessionsCollapsed",
@@ -35,8 +38,6 @@ const NO_CONSUMER: &[&str] = &[
 /// extension next to the handled journal (older clients keep it untouched);
 /// key names only.
 const OUTCOME: &str = "g3_outcome";
-/// The Qt keys of [`NO_CONSUMER`] the last import found.
-const UNUSED: &str = "g3_unused";
 
 /// Qt's inspector tabs in their QTabWidget order (SessionsWindow.cpp:1375-1439),
 /// which Next's side panel keeps.
@@ -283,6 +284,7 @@ fn matches(family: &str, key: &str) -> bool {
         "window-geometry" => key == "sessions/geometry",
         "session-splitter" => key == "workspace/splitter",
         "project-folder-splitter" => key == "workspace/projectFolderSplit",
+        "no-consumer" => NO_CONSUMER.contains(&key),
         "inspector-panel" => matches!(
             key,
             "workspace/inspectorVisible" | "workspace/inspectorWidth" | "workspace/inspectorTab"
@@ -362,7 +364,7 @@ fn project_vivid(
     value: &QtValue,
     contents: &Contents,
     handled_keys: &BTreeSet<String>,
-) -> Result<Map<String, Value>, &'static str> {
+) -> Result<(Map<String, Value>, bool), &'static str> {
     let bytes = match value {
         QtValue::Bytes(bytes) => bytes.as_slice(),
         QtValue::Text(text) => text.as_bytes(),
@@ -374,6 +376,8 @@ fn project_vivid(
         .ok_or("invalid project fill source")?;
     let mut ids = BTreeSet::new();
     let mut values = Map::new();
+    // Whether a project's Qt fill kept the Next value already there.
+    let mut kept = false;
     for project in projects {
         let id = project["id"]
             .as_str()
@@ -394,6 +398,7 @@ fn project_vivid(
         let key = format!("projects/vivid/{id}");
         // Presence is decisive: explicit Next false is never an empty default.
         if contents.values.contains_key(&key) || handled_keys.contains(&key) {
+            kept |= project.get("vivid").is_some();
             continue;
         }
         if let Some(vivid) = project.get("vivid") {
@@ -403,7 +408,7 @@ fn project_vivid(
             );
         }
     }
-    Ok(values)
+    Ok((values, kept))
 }
 
 /// A Qt key the family imports: Next has no value for it and the original
@@ -434,6 +439,9 @@ pub(super) fn report(contents: &Contents) -> Value {
     };
     let mut families = Vec::new();
     for family in FAMILIES {
+        if *family == "no-consumer" {
+            continue;
+        }
         if let Some(record) = journal.families.get(*family) {
             let known = &outcome[*family];
             families.push(
@@ -445,10 +453,11 @@ pub(super) fn report(contents: &Contents) -> Value {
                 "reason": waiting["reason"].as_str().unwrap_or(""), "keys": names(&waiting["keys"]).unwrap_or_default()}));
         }
     }
-    let unused = contents
-        .extra
-        .get(UNUSED)
-        .and_then(names)
+    // The no-consumer family's handled record names the keys the Qt store had.
+    let unused = journal
+        .families
+        .get("no-consumer")
+        .map(|record| record.keys.clone())
         .unwrap_or_default()
         .into_iter()
         .filter(|key| NO_CONSUMER.contains(&key.as_str()))
@@ -480,17 +489,6 @@ pub(super) fn apply(
         .map(str::to_owned)
         .collect();
     let mut dirty = false;
-    if let Some(snapshot) = snapshot {
-        let unused: Vec<&str> = NO_CONSUMER
-            .iter()
-            .copied()
-            .filter(|key| snapshot.values.contains_key(*key))
-            .collect();
-        if contents.extra.get(UNUSED) != Some(&json!(unused)) {
-            contents.extra.insert(UNUSED.into(), json!(unused));
-            dirty = true;
-        }
-    }
     for family in FAMILIES {
         if journal.families.contains_key(*family) {
             continue;
@@ -502,12 +500,18 @@ pub(super) fn apply(
             .take(MAX_KEYS + 1)
             .collect();
         let mut candidate = contents.clone();
+        let mut vivid_kept = false;
         let converted: Result<Map<String, Value>, _> = if entries.len() > MAX_KEYS {
             Err("family exceeds its key limit")
+        } else if *family == "no-consumer" {
+            Ok(Map::new())
         } else if *family == "project-vivid" {
             match entries.first() {
                 Some((key, value)) if !handled_keys.contains(*key) => {
-                    project_vivid(value, contents, &handled_keys)
+                    project_vivid(value, contents, &handled_keys).map(|(values, kept)| {
+                        vivid_kept = kept;
+                        values
+                    })
                 }
                 _ => Ok(Map::new()),
             }
@@ -526,13 +530,8 @@ pub(super) fn apply(
             .iter()
             .take(MAX_KEYS)
             .map(|(key, _)| key.as_str())
-            .partition(|key| {
-                if *family == "project-vivid" {
-                    !handled_keys.contains(*key)
-                } else {
-                    candidate_key(contents, &handled_keys, key)
-                }
-            });
+            .filter(|_| *family != "project-vivid")
+            .partition(|key| candidate_key(contents, &handled_keys, key));
         let mut record = json!({
             "version": VERSION, "family": family, "schema": 1,
             "source": snapshot.map_or("none", |s| s.source),
@@ -558,27 +557,35 @@ pub(super) fn apply(
                 continue;
             }
         };
-        let imported = if *family == "project-vivid" && values.is_empty() {
-            vec![]
+        // The project fill is one Qt key for many projects: imported when some
+        // project's fill imported, kept when some project kept a Next value.
+        let (imported, kept) = if *family == "project-vivid" {
+            let key = entries.first().map(|(key, _)| key.as_str());
+            (
+                key.filter(|_| !values.is_empty()).into_iter().collect(),
+                key.filter(|_| vivid_kept).into_iter().collect(),
+            )
         } else {
-            imported
+            (imported, kept)
         };
         for (key, value) in values {
             candidate.values.entry(key).or_insert(value);
         }
-        let mut outcome = candidate
-            .extra
-            .get(OUTCOME)
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-        outcome.insert(
-            (*family).into(),
-            json!({"imported": imported, "kept": kept}),
-        );
-        candidate
-            .extra
-            .insert(OUTCOME.into(), Value::Object(outcome));
+        if *family != "no-consumer" {
+            let mut outcome = candidate
+                .extra
+                .get(OUTCOME)
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            outcome.insert(
+                (*family).into(),
+                json!({"imported": imported, "kept": kept}),
+            );
+            candidate
+                .extra
+                .insert(OUTCOME.into(), Value::Object(outcome));
+        }
         journal
             .families
             .insert((*family).into(), serde_json::from_value(record).unwrap());

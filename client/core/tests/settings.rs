@@ -1432,6 +1432,10 @@ fn the_preference_report_names_keys_and_never_values() {
         assert!(!text.contains(value), "{value} in {text}");
     }
     drop(settings);
+    // A family that waits records no outcome; it is reported from its quarantine.
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(saved["g3_outcome"].get("session-splitter").is_none());
+    assert!(saved["g3_outcome"].get("no-consumer").is_none());
     // The same after a restart, from the saved journal.
     let restarted = Settings::open(path, Some(QtStore::Ini(qt)));
     assert_eq!(
@@ -1439,4 +1443,36 @@ fn the_preference_report_names_keys_and_never_values() {
         report["families"]
     );
     assert!(restarted.flush_within(FLUSH));
+}
+
+/// #1243 review Q4: an install whose earlier families were all handled
+/// before the report existed still gains the "Not imported" keys, once,
+/// through the report-only no-consumer family.
+#[test]
+fn unused_qt_keys_are_reported_after_every_other_family_was_handled() {
+    let scratch = Scratch::new("preference-report-upgrade");
+    let qt = scratch.0.join("qt.ini");
+    fs::write(
+        &qt,
+        b"[workspace]\nexpandedSessions=row\nsessionsCollapsed=true\n",
+    )
+    .unwrap();
+    let path = scratch.0.join("settings.json");
+    legacy_switch(&path, json!({}));
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    // As saved by a build without the report: every other family handled.
+    let mut saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    saved["g3"]["families"]
+        .as_object_mut()
+        .unwrap()
+        .remove("no-consumer");
+    fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let upgraded = Settings::open(path, Some(QtStore::Ini(qt)));
+    assert!(upgraded.flush_within(FLUSH));
+    assert_eq!(
+        upgraded.preference_report()["unused"],
+        json!(["workspace/expandedSessions", "workspace/sessionsCollapsed"])
+    );
 }

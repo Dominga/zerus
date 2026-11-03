@@ -237,17 +237,25 @@ pub(crate) fn finish_service_exit_with_deadline(
         finish.lock().unwrap_or_else(PoisonError::into_inner).take()
     }
     let finish = Arc::new(Mutex::new(Some(finish)));
-    // The join task drops `joined` when it ends, which wakes the deadline early.
+    // The join task takes `finish`, then drops `joined`, which wakes the
+    // deadline early. A join that unwound instead leaves `finish` to the thread.
     let (joined, ended) = std::sync::mpsc::channel::<()>();
     let expire = finish.clone();
     let deadline = std::thread::Builder::new()
         .name("zerus-quit-deadline".into())
         .spawn(move || {
-            if ended.recv_timeout(wait) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
-                if let Some(finish) = take(&expire) {
-                    eprintln!("zerus-client: service shutdown exceeded the quit deadline");
-                    finish();
-                }
+            let expired =
+                ended.recv_timeout(wait) == Err(std::sync::mpsc::RecvTimeoutError::Timeout);
+            if let Some(finish) = take(&expire) {
+                eprintln!(
+                    "zerus-client: service shutdown {}",
+                    if expired {
+                        "exceeded the quit deadline"
+                    } else {
+                        "ended without a result"
+                    }
+                );
+                finish();
             }
         });
     // Without that thread, keep the runtime deadline rather than none at all.
@@ -260,8 +268,9 @@ pub(crate) fn finish_service_exit_with_deadline(
             Some(wait) => tokio::time::timeout(wait, service.join()).await,
             None => Ok(service.join().await),
         };
+        let owned = take(&finish);
         drop(joined);
-        if let Some(finish) = take(&finish) {
+        if let Some(finish) = owned {
             match result {
                 Ok(Ok(())) => (),
                 Ok(Err(error)) => eprintln!("zerus-client: service shutdown: {error}"),

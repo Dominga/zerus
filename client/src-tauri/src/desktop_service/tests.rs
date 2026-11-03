@@ -689,9 +689,12 @@ fn exit_waits_for_the_owned_proxy_and_blocked_view_callback_before_finishing() {
         eventually("view callback entered", || observed.try_recv().is_ok()).await;
         let finished = Arc::new(AtomicBool::new(false));
         let ended = finished.clone();
-        crate::exit_flush::finish_service_exit(service, move || {
-            ended.store(true, Ordering::Release)
-        });
+        // A long deadline: only the completed join may finish this quit.
+        crate::exit_flush::finish_service_exit_with_deadline(
+            service,
+            move || ended.store(true, Ordering::Release),
+            Duration::from_secs(120),
+        );
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert!(!finished.load(Ordering::Acquire));
         drop(release);

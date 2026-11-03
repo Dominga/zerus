@@ -481,19 +481,13 @@ pub enum Observation {
     },
 }
 /// A session name as the launch records hold it: two or three parts, each
-/// under the shared naming rule of new sessions, rename and fork (nonempty,
-/// no `:` or `.`, no surrounding whitespace, no control characters). Internal
-/// spaces are valid, as in a launch's own `tag`.
+/// passing the shared `tag_problem` rule of a launch's own tag, new sessions,
+/// rename and fork. Internal spaces are valid.
 pub fn session_name(value: &str) -> bool {
     let parts: Vec<_> = value.split('/').collect();
     value.len() <= NAME_BYTES
         && (2..=3).contains(&parts.len())
-        && parts.iter().all(|part| {
-            !part.is_empty()
-                && !part.contains([':', '.'])
-                && part.trim() == *part
-                && !part.chars().any(char::is_control)
-        })
+        && parts.iter().all(|part| tag_problem(part).is_none())
 }
 impl Observation {
     pub fn valid(&self) -> bool {

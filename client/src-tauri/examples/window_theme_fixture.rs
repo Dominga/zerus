@@ -37,7 +37,7 @@ fn main() {
     assert!(matches!(route.as_str(), "lifecycle" | "window-layer"));
     let theme = args.next().expect("dark or light");
     let background = match theme.as_str() {
-        "dark" | "system-dark" => [22u8, 27, 33],
+        "dark" | "system-dark" | "stalled" => [22u8, 27, 33],
         "light" | "system-light" => [245, 247, 249],
         _ => panic!("dark or light"),
     };
@@ -73,6 +73,7 @@ fn main() {
                 const rgb = getComputedStyle(document.documentElement).backgroundColor.match(/\d+/g).slice(0,3).map(Number);
                 window.__TAURI_INTERNALS__.invoke('window_theme', {{generation:{generation:?}, revision:1, background:rgb}});
             }}, 700), {{once:true}});"#);
+            let script = if theme == "stalled" { String::new() } else { script };
             eprintln!("fixture building webview");
             let window = tauri::WebviewWindowBuilder::new(app, MAIN_WINDOW, tauri::WebviewUrl::App("index.html".into()))
                 .title(format!("Zerus theme fixture ({theme})"))

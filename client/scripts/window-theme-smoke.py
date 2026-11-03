@@ -76,7 +76,7 @@ def main():
         assert 0 < len(address) < 8193 and address.endswith(b'\n')
         env['DBUS_SESSION_BUS_ADDRESS'] = address.decode().strip()
         for route, theme in ((route, theme) for route in ('lifecycle', 'window-layer')
-                             for theme in ('dark', 'light', 'system-dark', 'system-light')):
+                             for theme in ('dark', 'light', 'system-dark', 'system-light', 'stalled')):
             unlocked()
             case = route + '-' + theme
             target = output / case
@@ -94,7 +94,11 @@ def main():
             assert child.returncode == 0, f'{case}: fixture failed, see {case}.log'
             result = json.loads((target / 'result.json').read_text())
             assert len(result['frames']) == 30
-            assert result['frames'][0]['ms'] >= 600, 'Window mapped before delayed theme readiness'
+            first = result['frames'][0]['ms']
+            if theme == 'stalled':
+                assert 1900 <= first < 3500, 'Native show deadline did not release stalled JavaScript'
+            else:
+                assert first >= 600, 'Window mapped before delayed theme readiness'
             assert all(all(abs(actual - expected) <= 1 for actual, expected in zip(frame['rgb'], result['expected']))
                        for frame in result['frames']), f'{case}: wrong color in first visible frames'
             print(json.dumps({'route': route, 'theme': theme, 'frames': 30, 'first_visible_ms': result['frames'][0]['ms'],

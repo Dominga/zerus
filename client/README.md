@@ -184,14 +184,17 @@ RUSTUP_TOOLCHAIN=1.99.1 npx tauri dev
 ```
 
 The main window remains hidden until the saved theme and local skin library have
-been applied. Its first presentation uses the resolved page color for the native
+been applied, with a native two-second deadline for a requested show even when
+JavaScript never starts. The frontend handshake also settles after 800 ms if
+local inputs hang, and setter errors release the pending show. Its first
+presentation uses the resolved page color for the native
 window and webview, including system appearance and imported skins. Readiness
 never opens a background start or cancels an explicit hide. Later theme changes
 update the native surfaces without reopening a hidden window.
 
 The `window_theme_fixture` example and `scripts/window-theme-smoke.py` check the
 first painted client pixels of a synthetic window in dark, light and both system
-appearances. Build the example with `--features tauri/custom-protocol` after
+appearances, plus a page that never sends the handshake. Build the example with `--features tauri/custom-protocol` after
 `npm run build`, using a private Cargo target directory. Run the script only in an
 authorized Arch display window under `flock -w 1800 /tmp/zerus-arch-display.lock`;
 pass `--fixture` and a fresh `--output` directory, and `--webkit-prefix` when using

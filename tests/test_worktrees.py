@@ -609,9 +609,27 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         self.assertIn('changed since the review',keep('0'*64).stderr)
         kept=keep(orphan['fingerprint']);self.assertEqual(kept.returncode,0,kept.stderr);self.assertEqual(json.loads(kept.stdout)['status'],'kept')
         self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build');self.assertEqual(self.records(),[])
-    def delete(self,path,fingerprint,confirm=True):
+    def delete(self,path,fingerprint,confirm=True,extra=()):
         return subprocess.run([str(HGS),'worktrees','delete-leftover','--path',str(path),'--common-dir',str(self.repo/'.git'),'--fingerprint',fingerprint,
-            *(['--confirm-delete'] if confirm else []),'--request-id','test-delete','--json'],env=self.env,text=True,capture_output=True,timeout=60)
+            *(['--confirm-delete'] if confirm else []),'--request-id','test-delete','--json',*extra],env=self.env,text=True,capture_output=True,timeout=60)
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux protected-process review')
+    def test_unrelated_hidden_process_churn_keeps_leftover_confirmations_valid(self):
+        def hidden():
+            child=subprocess.Popen([sys.executable,'-I','-c',
+                'import ctypes,time; assert ctypes.CDLL(None).prctl(4,0,0,0,0)==0; print("ready",flush=True); time.sleep(90)'],
+                cwd=self.root,stdout=subprocess.PIPE,text=True)
+            self.addCleanup(child.stdout.close);self.addCleanup(child.wait);self.addCleanup(lambda: child.poll() is None and child.kill())
+            self.assertEqual(child.stdout.readline().strip(),'ready')
+        kept,_,_=self.partial('kept-churn');deleted,_,_=self.partial('deleted-churn')
+        hidden();reviewed=self.review()
+        keep_row=self.leftover(kept,reviewed);delete_row=self.leftover(deleted,reviewed)
+        self.assertEqual(codes(delete_row['reasons']),['processes_unavailable']);self.assertTrue(delete_row['process_fingerprint'])
+        # An unrelated hidden process starts before the owner confirms.
+        hidden()
+        self.assertEqual(self.leftover(deleted)['fingerprint'],delete_row['fingerprint'])
+        kept_result=self.keep(kept,keep_row['fingerprint']);self.assertEqual(kept_result.returncode,0,kept_result.stderr)
+        result=self.delete(deleted,delete_row['fingerprint'],extra=('--process-fingerprint',delete_row['process_fingerprint']))
+        self.assertEqual(result.returncode,0,result.stderr);self.assertFalse(deleted.exists());self.assertTrue(kept.exists())
     def test_deleting_a_leftover_needs_confirmation_and_a_fresh_review_and_keeps_the_branch(self):
         tree,row,_=self.partial('deleted');outside=self.root/'outside';outside.mkdir();(outside/'keep.txt').write_text('outside')
         (tree/'target'/'readonly').chmod(0o755);(tree/'target'/'readonly'/'link').symlink_to(outside,target_is_directory=True);(tree/'target'/'readonly').chmod(0o555)

@@ -2564,12 +2564,17 @@ incomplete listing. The narrow manual exception for programs whose folders
 cannot be read works as it does for worktree removal: it is bound to the exact
 leftover path and its fresh-review fingerprint and expires after five minutes,
 the known-use, session, ownership and file protections still apply, and
-automatic cleanup never uses it. Deletion never follows links and never crosses
-into another filesystem: each folder is opened without following links and
-checked through its open descriptor, so a link or mount that appears after the
-review stops the deletion. It grants the owner write access only to their own
-folders inside the reviewed tree, which is what blocked Git, and never touches
-the branch. If it
+automatic cleanup never uses it. Deletion never follows links and never leaves
+the reviewed mount. Each folder is opened without following links and checked
+through its open descriptor for owner, device and mount (the Linux mount ID, or
+the macOS filesystem ID and mount point), so a link, a mount or a same-device bind
+mount that appears after the review stops the deletion before anything in it
+changes. A filesystem whose mount cannot be identified is refused. The reviewed
+folder itself is part of the confirmed fingerprint (device, inode and mount): it
+is reopened through its parent without following links, and completion is
+confirmed through that parent. Only after those checks does deletion grant the
+owner write access to their own folders inside the reviewed tree, which is what
+blocked Git; it never touches the branch. If it
 stops partway, the record stays with the reason and the deletion is never
 retried; review the folder again. Deleting leftover files is available on Linux
 and macOS. A record resolves by itself once its

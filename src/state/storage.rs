@@ -132,8 +132,14 @@ pub(super) fn read(name: &str) -> Result<Value> {
 
 pub(super) fn write(record: &mut Value) -> Result<()> {
     record["updated"] = json!(now());
-    atomic(&record_path(string(record, "name")), &format!("{record}\n"))?;
+    atomic_record(&record_path(string(record, "name")), record)?;
     rename::mirror_legacy(record)
+}
+
+/// Every saved live/archive record write also migrates legacy command text.
+pub(super) fn atomic_record(path: &Path, record: &mut Value) -> Result<()> {
+    processes::compact(record);
+    atomic(path, &format!("{record}\n"))
 }
 
 /// Names are mutable; provider hooks and already-running supervisors retain

@@ -62,11 +62,30 @@ partial frame, timeout, unexpected exit or unknown result. Retain the original
 rollback UUID. A missing/older CLI marker stays unavailable; do not replace this
 physical hold with a status Boolean or clear a retained revoke.
 
+The same Root primitive is available on Windows. Its caller check retains the
+original native process/ancestor handles and rejects agent ancestry. A selected
+installed frontend ancestor can call it without a console; the checking CLI is
+never its own frontend. The terminal route requires an already attached real
+console input buffer, a visible console window that is the foreground window,
+and a bounded console process list containing the original caller and retained
+parent. It never attaches or allocates a console or changes foreground focus.
+Unverifiable Windows Terminal/ConPTY and invisible/headless topologies refuse
+with Settings guidance. In particular, Microsoft's
+[GetConsoleWindow documentation](https://learn.microsoft.com/en-us/windows/console/getconsolewindow)
+describes a pseudoconsole HWND as undisplayed message-queue plumbing, so it
+cannot satisfy the visible foreground check. The native caller/status JSON is
+data, not a grant.
+
+Windows database checks use private single-link non-reparse file handles and
+volume/file-index identity. Verification handles and SQLite close before Ready.
+Windows COM/delegate resources retain the actual handoff/Owner lifetime; a
+fabricated host-lock file or readiness Boolean cannot replace their drain.
+
 The Root command is a primitive for maintained mode helpers. Their installer
 lock, selected/running mode record, original pending UUID, exact owned unit/plist
 checks and manager-result handling remain independently required. It changes no
-notification, writer, approval or rearm policy. Windows mode switching is a
-separate native integration.
+notification, writer, approval or rearm policy. Windows task registration remains
+passive; its explicit update/start/stop mode integration is a separate slice.
 
 The Linux installer retains this child across its entire passive transition,
 including manager results and IPC readiness. Initial marker failure occurs

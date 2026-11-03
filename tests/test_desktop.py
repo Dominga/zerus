@@ -92,7 +92,7 @@ finally:
             os.close(master)
             os.close(slave)
 
-    @unittest.skipUnless(sys.platform.startswith(('linux', 'darwin')), 'Unix rollback hold')
+    @unittest.skipUnless(sys.platform.startswith(('linux', 'darwin', 'win32')), 'Native rollback hold')
     def test_rollback_hold_agent_refusal_is_structured_and_creates_no_state(self):
         selected = dict(self.env, HGS_SESSION='private-agent-fixture')
         result = subprocess.run([str(HGS), 'desktop', 'revoke-hold', '--json', '--request-id', str(uuid.uuid4())],

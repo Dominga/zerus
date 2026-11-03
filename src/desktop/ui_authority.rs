@@ -20,6 +20,9 @@ mod linux_manager;
 mod macos_ancestry;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) mod registration;
+#[cfg(windows)]
+#[path = "ui_authority/registration_windows.rs"]
+pub(super) mod registration;
 
 #[cfg(any(all(not(windows), not(target_os = "macos")), test))]
 use std::collections::BTreeSet;

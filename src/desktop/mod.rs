@@ -179,14 +179,16 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                 Ok(())
             }
             ["revoke-hold", "--json", "--request-id", id] => {
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                 {
                     revoke::hold::cli(config, &location, id)
                 }
-                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
                 {
                     let _ = id;
-                    anyhow::bail!("desktop revoke hold is supported on Linux and macOS only")
+                    anyhow::bail!(
+                        "desktop revoke hold is supported on Linux, macOS and Windows only"
+                    )
                 }
             }
             ["registration", "--json", "--background"] => {
@@ -198,7 +200,7 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                 Ok(())
             }
             ["registration", "mode-check", "--json"] => {
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                 {
                     let scope = ui_authority::Scope::new(config, &location);
                     let source = ui_authority::registration::caller(&scope)?;
@@ -208,9 +210,9 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                     );
                     Ok(())
                 }
-                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
                 anyhow::bail!(
-                    "desktop registration mode checks are supported on Linux and macOS only"
+                    "desktop registration mode checks are supported on Linux, macOS and Windows only"
                 )
             }
             ["registration", operation @ ("install" | "remove" | "status"), "--json"] => {

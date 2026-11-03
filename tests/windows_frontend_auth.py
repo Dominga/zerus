@@ -72,6 +72,57 @@ class WindowsFrontend(unittest.TestCase):
         self.assertFalse((self.root / 'unexpected-tool').exists())
         return results[0]
 
+    def mode_check(self, image=None):
+        self.control.write_text(json.dumps(dict(case='mode_check', cli=str(kernel.HGS))), encoding='utf-8')
+        output = subprocess.run([str(image or self.frontend), '--exact',
+                                 'instance::tests::evidence::native_frontend_request_fixture', '--nocapture'],
+                                env=dict(self.env, HGS_FRONTEND_TEST_CONTROL=str(self.control)),
+                                capture_output=True, text=True, timeout=15,
+                                creationflags=subprocess.CREATE_NO_WINDOW)
+        self.assertEqual(output.returncode, 0, (output.stdout + output.stderr)[-8000:])
+        results = [json.loads(line.removeprefix('MODE_CALLER_RESULT ')) for line in output.stdout.splitlines()
+                   if line.startswith('MODE_CALLER_RESULT ')]
+        self.assertEqual(len(results), 1, output.stdout[-4096:])
+        self.assertFalse(self.desktop.exists(), 'mode admission is read-only')
+        return results[0]
+
+    def test_mode_caller_accepts_the_actual_retained_installed_frontend_without_a_console(self):
+        result = self.mode_check()
+        self.assertEqual(result['code'], 0, result)
+        value = json.loads(result['stdout'])
+        self.assertTrue(value['admitted'])
+        self.assertEqual(value['source'], 'installed_frontend')
+
+    def test_mode_caller_still_refuses_the_real_marked_ancestor_when_the_child_is_clean(self):
+        key = 'HGS_RUN_ID'
+        previous = os.environ.get(key)
+        os.environ[key] = 'native-mode-parent-fixture'
+        try:
+            result = self.mode_check()
+            self.assertNotEqual(result['code'], 0)
+            self.assertIn('agent-descended', result['stderr'])
+        finally:
+            if previous is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous
+
+    def test_mode_caller_refuses_an_agent_named_frontend_image(self):
+        agent = self.frontend.with_name('codex.exe')
+        shutil.copy2(self.frontend, agent)
+        result = self.mode_check(agent)
+        self.assertNotEqual(result['code'], 0)
+        self.assertIn('agent-descended', result['stderr'])
+
+    def test_checking_cli_cannot_be_its_own_frontend_and_cannot_manufacture_a_console(self):
+        shutil.copy2(kernel.HGS, self.frontend)
+        result = subprocess.run([str(self.frontend), 'desktop', 'registration', 'mode-check', '--json'],
+                                env=self.env, capture_output=True, text=True, timeout=8,
+                                creationflags=subprocess.CREATE_NO_WINDOW)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Settings', result.stderr)
+        self.assertFalse(self.desktop.exists())
+
     def test_real_canonical_frontend_and_original_child_disable_commits_in_passive_service(self):
         receipt = self.invoke()
         self.assertIs(receipt['accepted'], True)

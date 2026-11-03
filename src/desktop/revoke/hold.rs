@@ -1,11 +1,10 @@
 //! A physical rollback exclusion, not a serializable ownership capability.
-//! The original child holds the same handoff flock across service replacement.
+//! The original child holds the same handoff lock across service replacement.
 use super::*;
 use crate::{config::Config, desktop::ui_authority, platform};
 use rusqlite::{Connection, OpenFlags};
 use std::{
     io::{self, Read, Write},
-    os::unix::fs::MetadataExt,
     time::{Duration, Instant},
 };
 
@@ -18,11 +17,38 @@ struct Held {
     receipt: Value,
 }
 
-fn database(location: &Location) -> Result<Connection> {
+fn database_file(path: &std::path::Path) -> Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    platform::no_follow(&mut options);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        platform::refuse_link(&mut options).share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    }
+    #[cfg(windows)]
+    platform::never_block(&mut options);
+    let file = options.open(path)?;
+    ensure!(
+        platform::verify_private_file(&file)?,
+        "unsafe rollback database"
+    );
+    Ok(file)
+}
+
+fn database(location: &Location) -> Result<(Connection, std::fs::File)> {
     location.check_existing()?;
     super::super::store::database_files(location)?;
     let path = location.root.join("state.sqlite3");
-    let before = std::fs::symlink_metadata(&path)?;
+    let file = database_file(&path)?;
+    let before = platform::FileIdentity::of(&file)?;
+    #[cfg(windows)]
+    ensure!(
+        before.inode != 0,
+        "rollback database object identity unavailable"
+    );
     let db = Connection::open_with_flags(
         &path,
         OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -31,17 +57,17 @@ fn database(location: &Location) -> Result<Connection> {
     )?;
     db.busy_timeout(Duration::from_millis(250))?;
     db.execute_batch("PRAGMA query_only=ON; PRAGMA trusted_schema=OFF; PRAGMA cache_size=-512;")?;
-    let after = std::fs::symlink_metadata(&path)?;
+    let after = platform::FileIdentity::of(&database_file(&path)?)?;
     ensure!(
-        before.dev() == after.dev() && before.ino() == after.ino(),
+        before.device == after.device && before.inode == after.inode,
         "rollback database changed"
     );
-    Ok(db)
+    Ok((db, file))
 }
 
 fn verify(location: &Location, id: &str, lock: &HandoffLock) -> Result<Value> {
     lock.verify(location)?;
-    let mut db = database(location)?;
+    let (mut db, verification_file) = database(location)?;
     let tx = db.transaction()?;
     let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     ensure!(
@@ -111,6 +137,10 @@ fn verify(location: &Location, id: &str, lock: &HandoffLock) -> Result<Value> {
     );
     let result = receipt(location, &command, &saved)?;
     tx.commit()?;
+    // In particular, do not retain a Windows verification handle or SQLite
+    // connection into Ready: the passive replacement must be able to write.
+    drop(db);
+    drop(verification_file);
     Ok(result)
 }
 
@@ -130,9 +160,15 @@ fn acquire(location: &Location, id: &str, until: Instant) -> Result<Held> {
     };
     // This lock can outlive the service on Mac; its acquisition is independent
     // physical proof that the original native host/callback owner is gone.
+    #[cfg(unix)]
     let native = location
         .notification_host_exclusion()
         .context(Declined("notification_host_not_drained"))?;
+    // Windows COM/delegate work retains the actual Owner/handoff resource in
+    // process. The acquired original handoff lock proves that resource drained;
+    // there is no independent Mac-style native-host process lock to invent.
+    #[cfg(windows)]
+    let native = None;
     let receipt = verify(location, id, &lock)?;
     Ok(Held {
         lock,
@@ -179,8 +215,14 @@ fn serve(held: Held, input: &mut impl Read, output: &mut impl Write) -> Result<(
 pub(in crate::desktop) fn cli(config: &Config, location: &Location, id: &str) -> Result<()> {
     let scope = ui_authority::Scope::new(config, location);
     let held = (|| {
+        #[cfg(windows)]
+        let caller = ui_authority::registration::Caller::capture(&scope)?;
+        #[cfg(unix)]
         ui_authority::registration::caller(&scope)?;
         let held = acquire(location, id, Instant::now() + ACQUIRE)?;
+        #[cfg(windows)]
+        caller.check(&scope)?;
+        #[cfg(unix)]
         ui_authority::registration::caller(&scope)?;
         held.lock.verify(location)?;
         Ok::<_, anyhow::Error>(held)
@@ -212,9 +254,40 @@ mod tests {
     use super::*;
     use std::{
         io::{BufRead, BufReader},
-        net::Shutdown,
-        os::unix::net::UnixStream,
+        net::{Shutdown, TcpListener, TcpStream},
     };
+
+    fn streams() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let client =
+            TcpStream::connect_timeout(&listener.local_addr().unwrap(), Duration::from_secs(2))
+                .unwrap();
+        let until = Instant::now() + Duration::from_secs(2);
+        let child = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < until =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("private hold stream accept failed: {error}"),
+            }
+        };
+        // BSD can inherit O_NONBLOCK from the listener; both sides use the
+        // same explicitly blocking, bounded protocol reads on every platform.
+        for stream in [&client, &child] {
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+        }
+        (client, child)
+    }
 
     struct Fixture {
         _temp: tempfile::TempDir,
@@ -270,10 +343,7 @@ mod tests {
     fn original_flock_survives_actor_restart_and_releases_only_on_original_eof_and_join() {
         let f = Fixture::new();
         let held = f.hold().unwrap();
-        let (client, mut child) = UnixStream::pair().unwrap();
-        client
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
+        let (client, mut child) = streams();
         let mut output = child.try_clone().unwrap();
         let worker = std::thread::spawn(move || serve(held, &mut child, &mut output));
         let mut reader = BufReader::new(client);
@@ -322,18 +392,23 @@ mod tests {
     #[test]
     fn malformed_receipt_wrong_configuration_and_active_native_resource_refuse() {
         let mut f = Fixture::new();
-        use std::os::unix::fs::OpenOptionsExt;
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(f.location.root.join("notification-host.lock"))
-            .unwrap();
-        fs2::FileExt::try_lock_exclusive(&file).unwrap();
+        let original_native_owner = f.location.handoff_lock().unwrap();
         assert!(f.hold().is_err());
-        fs2::FileExt::unlock(&file).unwrap();
-        drop(file);
+        drop(original_native_owner);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(f.location.root.join("notification-host.lock"))
+                .unwrap();
+            fs2::FileExt::try_lock_exclusive(&file).unwrap();
+            assert!(f.hold().is_err());
+            fs2::FileExt::unlock(&file).unwrap();
+        }
         assert!(f.hold().is_ok());
         f.store
             .db
@@ -345,6 +420,27 @@ mod tests {
         assert!(f.hold().is_err());
         f.location.configuration = "b".repeat(64);
         assert!(f.hold().is_err());
+    }
+
+    #[test]
+    fn a_linked_database_is_refused_through_the_actual_verification_handle() {
+        let f = Fixture::new();
+        let alias = f.location.root.join("database-alias");
+        std::fs::hard_link(f.location.root.join("state.sqlite3"), &alias).unwrap();
+        assert!(f.hold().is_err());
+        std::fs::remove_file(alias).unwrap();
+        assert!(f.hold().is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verification_open_refuses_a_symlink_to_an_otherwise_valid_database() {
+        let f = Fixture::new();
+        let path = f.location.root.join("state.sqlite3");
+        assert!(database_file(&path).is_ok());
+        let alias = f.location.root.join("database-symlink");
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        assert!(database_file(&alias).is_err());
     }
 
     #[test]

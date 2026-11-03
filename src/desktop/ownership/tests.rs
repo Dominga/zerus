@@ -1,7 +1,7 @@
 use super::*;
 use std::cell::Cell;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[test]
 fn held_original_rollback_excludes_a_real_rearm_and_refuses_when_rearm_already_won() {
     let mut f = Fixture::new();

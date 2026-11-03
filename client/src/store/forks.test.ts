@@ -208,6 +208,45 @@ describe("Fork session", () => {
       dispose();
     });
   });
+  // zerus-zjsj: a Codex fork may have no conversation ID until its first
+  // message. Its bridged fork parent identifies it at once.
+  it("adopts a fork before its first message by its bridged fork parent", async () => {
+    await createRoot(async (dispose) => {
+      const t = setup(), parent = bridged.fork_before_first_message.fork_parent_id;
+      const source = row({ conversationId: parent });
+      t.setRows([source]);
+      const inspect = vi.fn(async (r: ActionRow) => (r.key === source.key ? { ...details(), conversation_id: parent }
+        : r.key === "new" ? bridged.fork_before_first_message : bridged.not_a_fork) as Details);
+      const forks = createForks({ ...t.deps, inspect });
+      await forks.submit(snapshotOf(source), { ...details(), conversation_id: parent }, "review-fork", t.controller.signal, t.confirm, t.dispatched);
+      const quiet = row({ key: "quiet", name: "codex/example/review-fork", runId: "q", conversationId: "" });
+      const fork = row({ key: "new", name: "codex/example/review-fork-2", runId: "fork-run", conversationId: "" });
+      t.setRows([source, quiet, fork]); await ticks();
+      expect(t.select).toHaveBeenCalledExactlyOnceWith(fork);
+      expect(t.place).toHaveBeenCalledExactlyOnceWith(fork, "project", undefined);
+      expect(forks.busy()).toBe(false);
+      dispose();
+    });
+  });
+  it("waits for an older hgs's exact-name fork to get its conversation", async () => {
+    await createRoot(async (dispose) => {
+      const t = setup();
+      await t.submit("review-fork");
+      t.inspect.mockImplementation(async () => bridged.older_hgs as Details);
+      const early = row({ key: "new", name: "codex/example/review-fork", runId: "new", conversationId: "" });
+      t.setRows([t.source, early]); await ticks();
+      expect(t.select).not.toHaveBeenCalled();
+      const inspected = t.inspect.mock.calls.length;
+      // Without its own conversation it is not inspected again on every change.
+      t.setRows([t.source, { ...early }]); await ticks();
+      expect(t.inspect).toHaveBeenCalledTimes(inspected);
+      const ready = { ...early, conversationId: "new-conversation" };
+      t.setRows([t.source, ready]); await ticks();
+      expect(t.select).toHaveBeenCalledExactlyOnceWith(ready);
+      expect(t.forks.busy()).toBe(false);
+      dispose();
+    });
+  });
   it.each(["run", "conversation", "offline", "busy", "closed"])("refuses %s changes while its inspection is pending", async (change) => {
     await createRoot(async (dispose) => {
       const t = setup(); let resolve!: (d: ReturnType<typeof details>) => void;

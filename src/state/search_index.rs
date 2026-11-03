@@ -11,7 +11,9 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
-use zerus_content_search::{Index, Message, Role, Target, DEFAULT_FILE_BYTES, DOCUMENT_BYTES};
+use zerus_content_search::{
+    Index, Message, Part, Role, Target, DEFAULT_FILE_BYTES, DOCUMENT_BYTES,
+};
 mod catalog;
 mod metadata;
 mod query;
@@ -23,6 +25,8 @@ const ABI: &str = "content-search-index-v1";
 const INPUT_BYTES: usize = 64 << 10;
 const RECORD_BYTES: usize = 1 << 20;
 const READ_BYTES: usize = 2 << 20;
+const PART_BYTES: usize = 16 << 10;
+const PART_OVERLAP: usize = 255;
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -108,6 +112,7 @@ struct Cursor {
     seq: i64,
     skipping: bool,
     incomplete: bool,
+    chunk_version: u8,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -332,6 +337,11 @@ impl Store {
                 .map_err(|_| "Invalid source cursor; dispose and rebuild the search index")?,
             None => Cursor::default(),
         };
+        // Old capped writers advanced past oversized public messages. Rewind
+        // only after transcript identity verification (or when none was saved).
+        if cursor.chunk_version == 0 && !cursor.incomplete {
+            cursor.chunk_version = 1;
+        }
         let before = cursor.clone();
         let mut unavailable = false;
         let result = self.transcript(&record, &key, &mut cursor, budget, progress, cancel);
@@ -354,6 +364,11 @@ impl Store {
         if !active {
             progress.targets += 1;
             return Ok(Flow::Next);
+        }
+        if cursor.chunk_version == 0 && cursor.stamp.is_none() {
+            cursor.seq = 0;
+            cursor.incomplete = false;
+            cursor.chunk_version = 1;
         }
         // A missing or unsupported provider never hides its recorded journal.
         let journal_complete =
@@ -381,9 +396,13 @@ impl Store {
             if !text.is_empty() {
                 let event =
                     json!({"type":kind,"source":"snapshot","at":record[time],"detail":text});
-                if self.put(&key, event, role, &mut cursor, progress).is_err() {
-                    unavailable = true;
-                    snapshots_complete = false;
+                match self.put(&key, event, role, budget, progress, cancel) {
+                    Ok(Flow::Next) => (),
+                    Ok(Flow::Stop) => snapshots_complete = false,
+                    Err(_) => {
+                        unavailable = true;
+                        snapshots_complete = false;
+                    }
                 }
             }
         }
@@ -458,28 +477,25 @@ impl Store {
     fn put(
         &mut self,
         key: &str,
-        mut event: Value,
+        event: Value,
         role: &str,
-        cursor: &mut Cursor,
+        budget: &Budget,
         progress: &mut Progress,
-    ) -> Result<()> {
-        progress.records += 1;
+        cancel: &AtomicBool,
+    ) -> Result<Flow> {
         let text = string(&event, "detail");
         if text.is_empty() {
-            return Ok(());
-        }
-        if text.len() > DOCUMENT_BYTES {
-            cursor.incomplete = true;
-            return Ok(());
+            progress.records += 1;
+            return Ok(Flow::Next);
         }
         let id = if string(&event, "message_id").is_empty() {
             format!("indexed-{:x}", Sha256::digest(format!("{key}:{event}")))
         } else {
             string(&event, "message_id").to_owned()
         };
-        // Only these typed public fields reach the persistent copy.
-        event["message_id"] = json!(id);
-        let message = Message {
+        // Only these typed public fields reach the persistent copy. IDs and
+        // fingerprints describe the original, never an individual window.
+        let mut message = Message {
             id,
             at: event["at"]
                 .as_f64()
@@ -494,18 +510,71 @@ impl Store {
             kind: string(&event, "type").to_owned(),
             source: string(&event, "source").to_owned(),
             seq: event["seq"].as_u64().unwrap_or(0),
-            text: string(&event, "detail").to_owned(),
+            text: text.to_owned(),
         };
-        if let Err(error) = self.index.ingest(key, &[message]) {
-            // SQLITE_FULL must not advance this source's input cursor. Eviction
-            // is separately bounded and visible; a later step retries the input.
-            if matches!(error.downcast_ref::<rusqlite::Error>(),Some(rusqlite::Error::SqliteFailure(code,_)) if code.code==rusqlite::ErrorCode::DiskFull)
-            {
-                let _ = self.index.evict();
+        let result = if text.len() <= DOCUMENT_BYTES {
+            self.index.ingest(key, &[message]).map(|inserted| {
+                // Snapshots are revisited every slice. An unchanged prompt
+                // must not starve the following reply under a one-record cap.
+                if inserted > 0 || event["source"] != "snapshot" {
+                    progress.records += 1;
+                }
+                Flow::Next
+            })
+        } else {
+            let fingerprint = format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&(1, key, &message)).map_err(|e| e.to_string())?)
+            );
+            let mut offset = self
+                .index
+                .part_offset(key, &message.id, &fingerprint, text.len())
+                .map_err(|e| e.to_string())?
+                .unwrap_or(0);
+            if offset == text.len() && event["source"] != "snapshot" {
+                progress.records += 1;
             }
-            return Err(error.to_string());
+            let mut result = Ok(Flow::Next);
+            while offset < text.len() {
+                if cancel.load(Ordering::Relaxed)
+                    || Instant::now() >= budget.deadline
+                    || progress.records >= budget.records
+                {
+                    result = Ok(Flow::Stop);
+                    break;
+                }
+                let (end, next) = part_window(text, offset)?;
+                message.text = text[offset..end].to_owned();
+                if let Err(error) = self.index.ingest_part(
+                    key,
+                    &message,
+                    Part {
+                        fingerprint: &fingerprint,
+                        start: offset,
+                        next,
+                        total: text.len(),
+                    },
+                ) {
+                    result = Err(error);
+                    break;
+                }
+                progress.records += 1;
+                offset = next;
+            }
+            result
+        };
+        match result {
+            Ok(flow) => Ok(flow),
+            Err(error) => {
+                // A failed part keeps its source/input cursor. Eviction is
+                // separately bounded and invalidates affected part receipts.
+                if matches!(error.downcast_ref::<rusqlite::Error>(),Some(rusqlite::Error::SqliteFailure(code,_)) if code.code==rusqlite::ErrorCode::DiskFull)
+                {
+                    let _ = self.index.evict();
+                }
+                Err(error.to_string())
+            }
         }
-        Ok(())
     }
 
     fn transcript(
@@ -580,6 +649,15 @@ impl Store {
                 "Transcript changed identity; index source retired, use legacy search".into(),
             );
         }
+        if cursor.chunk_version == 0 {
+            // The old cursor's file/head/tail were checked above before any
+            // rewind. Replaced input never acquires a fresh identity here.
+            cursor.offset = 0;
+            cursor.seq = 0;
+            cursor.skipping = false;
+            cursor.incomplete = false;
+            cursor.chunk_version = 1;
+        }
         file.seek(SeekFrom::Start(cursor.offset))
             .map_err(|e| e.to_string())?;
         // Reserve the final fingerprint read before committing an input cursor.
@@ -633,7 +711,9 @@ impl Store {
                     if let Some((event, role)) =
                         search::provider_event(string(record, "agent"), &value)
                     {
-                        self.put(key, event, role, cursor, progress)?;
+                        if self.put(key, event, role, budget, progress, cancel)? == Flow::Stop {
+                            break;
+                        }
                     } else {
                         progress.records += 1;
                     }
@@ -748,7 +828,9 @@ impl Store {
                 let role = search::journal_role(&event);
                 event["seq"] = json!(seq);
                 event["source"] = json!("journal");
-                self.put(key, event, role, cursor, progress)?;
+                if self.put(key, event, role, budget, progress, cancel)? == Flow::Stop {
+                    return Ok(false);
+                }
             } else {
                 cursor.incomplete = true;
                 progress.records += 1;
@@ -813,6 +895,26 @@ impl Store {
                     |r| r.get(0),
                 )
                 .map_err(|e| e.to_string())?;
+            let parts: bool = self
+                .index
+                .connection()
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='message_parts')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let remains = remains
+                || (parts
+                    && self
+                        .index
+                        .connection()
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM message_parts WHERE source=?1 LIMIT 1) OR EXISTS(SELECT 1 FROM message_groups WHERE source=?1 LIMIT 1)",
+                            [&key],
+                            |row| row.get::<_, bool>(0),
+                        )
+                        .map_err(|e| e.to_string())?);
             if !remains {
                 self.index
                     .connection()
@@ -884,6 +986,27 @@ impl Store {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+}
+
+fn part_window(text: &str, start: usize) -> Result<(usize, usize)> {
+    if start >= text.len() || !text.is_char_boundary(start) {
+        return Err("Invalid public-message continuation".into());
+    }
+    let mut end = (start + PART_BYTES).min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let next = if end == text.len() {
+        end
+    } else {
+        text[start..end]
+            .char_indices()
+            .rev()
+            .nth(PART_OVERLAP - 1)
+            .map(|(offset, _)| start + offset)
+            .ok_or("Public-message window is too small")?
+    };
+    Ok((end, next))
 }
 
 fn record_target(record: &Value) -> Target {

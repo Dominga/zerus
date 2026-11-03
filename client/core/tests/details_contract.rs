@@ -8,9 +8,9 @@ use zerus_client_core::actions::{Exit, Target};
 use zerus_client_core::details::parse_details;
 
 /// An `hgs inspect` answer for a candidate row of a pending fork.
-fn inspection(fields: Value) -> Value {
+fn inspection(conversation: &str, fields: Value) -> Value {
     let mut value = json!({
-        "name": "codex/example/review-fork", "run_id": "fork-run", "conversation_id": "fork-conversation",
+        "name": "codex/example/review-fork", "run_id": "fork-run", "conversation_id": conversation,
         "phase": "idle", "fork_supported": false, "fork_reason": "Wait for a completed reply before forking",
         "allowed_actions": ["terminate"], "action_reasons": {}, "events": [], "cwd": "/srv/example",
     });
@@ -21,14 +21,14 @@ fn inspection(fields: Value) -> Value {
     value
 }
 
-fn bridged(fields: Value) -> Value {
+fn bridged_as(conversation: &str, fields: Value) -> Value {
     let target = Target {
         computer: "studio".into(),
         name: "codex/example/review-fork".into(),
         run_id: "fork-run".into(),
-        conversation_id: "fork-conversation".into(),
+        conversation_id: conversation.into(),
     };
-    let stdout = serde_json::to_vec(&inspection(fields)).unwrap();
+    let stdout = serde_json::to_vec(&inspection(conversation, fields)).unwrap();
     let exit = Exit::Code {
         code: 0,
         stdout,
@@ -38,9 +38,16 @@ fn bridged(fields: Value) -> Value {
     serde_json::to_value(parse_details(&target, exit)).unwrap()
 }
 
+fn bridged(fields: Value) -> Value {
+    bridged_as("fork-conversation", fields)
+}
+
 fn fixture() -> Value {
+    let parent = json!({"fork_parent_id": "source-conversation", "fork_source_name": "codex/example/review"});
     json!({
-        "fork": bridged(json!({"fork_parent_id": "source-conversation", "fork_source_name": "codex/example/review"})),
+        // A Codex fork may have no conversation ID until its first message.
+        "fork_before_first_message": bridged_as("", parent.clone()),
+        "fork": bridged(parent),
         "not_a_fork": bridged(json!({"fork_parent_id": null, "fork_source_name": null})),
         "older_hgs": bridged(json!({})),
     })

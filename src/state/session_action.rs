@@ -9,6 +9,9 @@ use std::cell::{Cell, RefCell};
 mod status;
 pub(super) use status::dispatch as status_dispatch;
 pub(crate) use status::machine as status_machine;
+pub(crate) use status::observe_original;
+
+const INPUT_LIMIT: usize = 8192;
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -409,21 +412,33 @@ where
     Ok(answer)
 }
 
-fn request_input(args: &[String], command: &str) -> Result<Request> {
+fn input_bytes(args: &[String], command: &str) -> Result<Vec<u8>> {
     if args.len() != 2 || args[1] != "--json" {
         return Err(format!("usage: hgs {command} <session> --json"));
     }
     let mut bytes = Vec::new();
     io::stdin()
-        .take(8193)
+        .take((INPUT_LIMIT + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
-    if bytes.len() > 8192 {
+    if bytes.len() > INPUT_LIMIT {
         return Err("Action request is too large".into());
     }
-    let request: Request = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    validate(&request, &args[0])?;
+    Ok(bytes)
+}
+
+fn decode_request(bytes: &[u8], name: &str) -> Result<Request> {
+    if bytes.len() > INPUT_LIMIT {
+        return Err("Action request is too large".into());
+    }
+    let request: Request = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    validate(&request, name)?;
     Ok(request)
+}
+
+fn request_input(args: &[String], command: &str) -> Result<Request> {
+    let bytes = input_bytes(args, command)?;
+    decode_request(&bytes, &args[0])
 }
 
 fn request_hash(request: &Request, name: &str) -> String {

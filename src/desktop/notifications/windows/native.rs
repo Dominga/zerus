@@ -406,7 +406,7 @@ impl Native for Backend {
                 .Activated(&TypedEventHandler::<ToastNotification, IInspectable>::new(
                     move |_, _| {
                         let _held = &held;
-                        sink.send(Candidate::Clicked(id.clone()));
+                        sink.delegate_click(id.clone());
                         Ok(())
                     },
                 ))

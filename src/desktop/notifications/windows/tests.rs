@@ -436,6 +436,7 @@ fn one_click_reported_by_both_native_paths_reaches_the_actor_once() {
     assert_eq!(model.click(id, now), Some(activation(&first)));
     // The Activated delegate and the COM activator report the same click.
     assert!(model.click(id, now + Duration::from_millis(300)).is_none());
+    assert_eq!(model.coalesced, 1);
     // Another delivered toast is a distinct click inside the same window.
     assert_eq!(
         model.click(&second.binding.request_id, now + Duration::from_millis(400)),

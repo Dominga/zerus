@@ -216,6 +216,10 @@ fn root_host_retains_restore_progress_and_waits_for_worker_and_callback_drain() 
     assert!(host.ready().unwrap());
     assert!(slot.accepting_activations());
     assert_eq!(host.status()["mappings"], 16);
+    assert_eq!(
+        host.status()["clicks"],
+        serde_json::json!({"activator":0,"delegate":0,"coalesced":0})
+    );
     assert_eq!(posts.load(Ordering::Acquire), 0);
 
     let delegate = slot.hold().unwrap();

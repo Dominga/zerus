@@ -60,6 +60,8 @@ struct Mappings {
     native: BTreeMap<(String, String), String>,
     /// Recently forwarded clicks, bounded by the callback queue size.
     recent: VecDeque<(String, Instant)>,
+    /// Second reports of one click that were not forwarded. Diagnostic only.
+    coalesced: u64,
 }
 
 fn key(native_id: &NativeId) -> Option<(String, String)> {
@@ -98,6 +100,7 @@ impl Mappings {
             delivered: BTreeMap::new(),
             native: BTreeMap::new(),
             recent: VecDeque::new(),
+            coalesced: 0,
         })
     }
 
@@ -152,6 +155,7 @@ impl Mappings {
         self.recent
             .retain(|(_, at)| now.saturating_duration_since(*at) < CLICK_COALESCE);
         if self.recent.iter().any(|(id, _)| id == request_id) {
+            self.coalesced = self.coalesced.saturating_add(1);
             return None;
         }
         if self.recent.len() >= super::EVENTS {

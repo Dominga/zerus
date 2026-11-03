@@ -91,7 +91,9 @@ faults remain unavailable, and no registry repair occurs here. One user click
 can arrive through both the toast's Activated delegate and the registered COM
 activator. The worker forwards a delivered mapping's click at most once per
 five-second window. That window holds at most 32 recent clicks, the callback
-queue size, and unknown requests never enter it.
+queue size, and unknown requests never enter it. Runtime status reports
+forwarded clicks per native path (`clicks.activator`, `clicks.delegate`) and
+`clicks.coalesced`, so acceptance can show which path a real click used.
 
 Before allowing discovery effects, attachment restores at most sixteen indexed
 candidates per turn, then waits for the platform's original restoration

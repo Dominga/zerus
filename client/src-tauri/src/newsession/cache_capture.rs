@@ -114,6 +114,7 @@ impl NewSession {
     fn cache_job(&self) {
         let cache = self.0.capture.as_ref().unwrap();
         let mut live = lock(&cache.state).live.take();
+        let mut write_started = false;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             if lock(&cache.state).closed {
                 return Ok(());
@@ -150,8 +151,10 @@ impl NewSession {
             if dirty {
                 let saved = lock(&self.0.catalogs).saved();
                 if lock(&cache.state).closed {
+                    lock(&cache.state).dirty = true;
                     return Ok(());
                 }
+                write_started = true;
                 live.as_mut()
                     .ok_or(SourceError::SourceUnreadable)?
                     .write(&saved)?;
@@ -160,13 +163,18 @@ impl NewSession {
         }));
         match result {
             Ok(Err(error)) => {
-                lock(&cache.state).dirty = true;
+                if write_started {
+                    lock(&cache.state).dirty = true;
+                }
                 if !cache.source.status().paused {
                     cache.source.worktree_paused(error);
                 }
             }
             Err(_) => {
-                lock(&cache.state).broken = true;
+                let mut state = lock(&cache.state);
+                state.broken = true;
+                state.dirty |= write_started;
+                drop(state);
                 cache.source.worktree_owner_unavailable();
             }
             Ok(Ok(())) => (),

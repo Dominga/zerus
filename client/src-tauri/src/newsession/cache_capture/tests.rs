@@ -259,3 +259,30 @@ fn closing_before_the_queued_job_does_no_source_io_and_spawn_failure_has_no_fall
     assert_eq!(f.bytes(), raw());
     assert!(!f.root.join("worktree-cache-preload-v1").exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn an_initial_capture_failure_does_not_invent_a_dirty_empty_cache_or_rewrite_on_retry() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let slot = f.root.join("worktree-cache-preload-v1");
+    fs::create_dir(&slot).unwrap();
+    fs::set_permissions(&slot, fs::Permissions::from_mode(0o755)).unwrap();
+    f.run();
+    assert!(f.capture.status().paused);
+    assert!(!lock(&f.session.0.capture.as_ref().unwrap().state).dirty);
+    assert_eq!(f.bytes(), raw());
+    // Repair the PRIVATE archive folder only, never chmod the source.
+    fs::set_permissions(&slot, fs::Permissions::from_mode(0o700)).unwrap();
+    f.capture.request_retry();
+    f.run();
+    assert!(!f.capture.status().paused);
+    assert_eq!(f.archive(), raw());
+    assert_eq!(
+        f.bytes(),
+        raw(),
+        "Retry must not save a fabricated dirty model"
+    );
+    assert!(!lock(&f.session.0.capture.as_ref().unwrap().state).dirty);
+    assert!(lock(&f.jobs).is_empty());
+}

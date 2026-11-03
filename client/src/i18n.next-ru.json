@@ -394,6 +394,8 @@
   "Selected sessions": "Выбранные сессии",
   "Session archived": "Сессия архивирована",
   "Session closed": "Сессия закрыта",
+  "Session creation is paused while its original journal is preserved.": "Создание сессий приостановлено до сохранения исходного журнала.",
+  "Session creation is paused while its original journal is preserved. Review migration status or retry.": "Создание сессий приостановлено до сохранения исходного журнала. Проверьте состояние миграции или повторите попытку.",
   "Session host: %1%2": "Хост сессий: %1%2",
   "Session list width": "Ширина списка сессий",
   "Session restored": "Сессия восстановлена",

@@ -19,6 +19,7 @@ describe("desktop service presentation", () => {
     expect(retainedSourceNotice(serviceView({ retained_source_import: { ...report, complete: true, code: "retained_import_result_unavailable", phase: "published" } }))).toContain("needs review");
     expect(retainedSourceNotice(serviceView({ retained_source_import: { ...report, complete: true, code: "retained_import_staged", phase: "published" } }))).toBe("");
     expect(retainedSourceNotice(serviceView({ retained_source_import: { ...report, required: false } }))).toBe("");
+    expect(retainedSourceNotice(serviceView({ retained_source_import: { ...report, required: false, complete: true, code: "retained_import_staged", creations_capture: { code: "creation_source_unavailable", paused: true, capture_id: null } } }))).toContain("Session creation is paused");
   });
   it("shows blocked read transfer and its existing Retry path until durable completion", () => {
     expect(pendingReadNotice(undefined)).toBe("");

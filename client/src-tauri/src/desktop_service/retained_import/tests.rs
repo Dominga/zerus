@@ -34,6 +34,7 @@ impl Fixture {
         zerus_client_core::fsx::write_private_durable(&qt, b"[workspace]\nlanguage=en\n").unwrap();
         fs::write(root.join("mode"), mode).unwrap();
         let report = Report::new(Inputs {
+            creations: zerus_client_core::migration::preload::Capture::new(root.clone()),
             data: root.clone(),
             settings: Settings::open(settings_path, None),
             qt: Some(QtStore::Ini(qt)),
@@ -379,4 +380,23 @@ fn an_unknown_report_or_later_lookup_failure_never_blocks_a_new_connection() {
             service.join().await.unwrap();
         }
     });
+}
+
+#[test]
+fn paused_creation_capture_is_visible_beside_a_successful_independent_qt_report() {
+    let f = Fixture::new("success");
+    zerus_client_core::fsx::write_private_durable(
+        &f.root.join("creations.json"),
+        br#"{"schema":999,"operations":{}}"#,
+    )
+    .unwrap();
+    assert!(f.report.inputs.creations.prepare().is_err());
+    assert!(f.run(false).is_ok());
+    let status = f.report.status();
+    assert_eq!(status["creations_capture"]["paused"], true);
+    assert_eq!(
+        status["creations_capture"]["code"],
+        "creation_source_unsupported"
+    );
+    assert_eq!(status["complete"], true);
 }

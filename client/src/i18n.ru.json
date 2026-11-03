@@ -2144,6 +2144,8 @@
   "Session cleared": "Сессия очищена",
   "Session closed": "Сессия закрыта",
   "Session closed normally": "Сессия закрыта нормально",
+  "Session creation is paused while its original journal is preserved.": "Создание сессий приостановлено до сохранения исходного журнала.",
+  "Session creation is paused while its original journal is preserved. Review migration status or retry.": "Создание сессий приостановлено до сохранения исходного журнала. Проверьте состояние миграции или повторите попытку.",
   "Session creation progress": "Прогресс создания сессии",
   "Session creation status": "Статус создания сессии",
   "Session details": "Детали сессии",

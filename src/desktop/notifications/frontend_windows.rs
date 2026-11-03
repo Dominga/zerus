@@ -4,7 +4,6 @@
 //! its absence-bound Launch.
 use super::activation::Launch;
 use crate::host::spawn as host;
-use crate::platform::FileIdentity;
 use anyhow::{ensure, Context, Result};
 use std::{
     ffi::c_void,
@@ -17,7 +16,10 @@ use std::{
     },
     path::{Path, PathBuf},
     ptr,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
     time::{Duration, Instant},
 };
 use windows_sys::Win32::{
@@ -25,19 +27,19 @@ use windows_sys::Win32::{
         SetHandleInformation, ERROR_ACCESS_DENIED, HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0,
     },
     Storage::FileSystem::{
-        GetFinalPathNameByHandleW, ReadFile, FILE_ATTRIBUTE_REPARSE_POINT,
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, VOLUME_NAME_DOS,
+        FileIdInfo, GetFileInformationByHandleEx, GetFinalPathNameByHandleW, ReadFile,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_ID_INFO, FILE_NAME_NORMALIZED, FILE_SHARE_READ, FILE_SHARE_WRITE, VOLUME_NAME_DOS,
     },
     System::{
         Pipes::{CreatePipe, PeekNamedPipe},
         Threading::{
             CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-            InitializeProcThreadAttributeList, QueryFullProcessImageNameW, ResumeThread,
-            TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW,
-            CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
-            LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROCESS_NAME_WIN32,
-            PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
+            InitializeProcThreadAttributeList, QueryFullProcessImageNameW,
+            UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED,
+            CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST,
+            PROCESS_INFORMATION, PROCESS_NAME_WIN32, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+            STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
         },
     },
     UI::WindowsAndMessaging::AllowSetForegroundWindow,
@@ -47,12 +49,33 @@ use zerus_client_core::desktop::activation as wire;
 const START: Duration = Duration::from_secs(10);
 const IMAGE: &str = "hgs-tray.exe";
 const HELP_BYTES: usize = 64 * 1024;
+const CLEANUP_WAIT: Duration = Duration::from_secs(5);
+
+/// Full volume/file identity, including filesystems with 128-bit file IDs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ImageId(u64, [u8; 16]);
+fn file_identity(file: &impl AsRawHandle) -> io::Result<ImageId> {
+    let mut info: FILE_ID_INFO = unsafe { mem::zeroed() };
+    // SAFETY: the held file handle and a writable information block of its size.
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileIdInfo,
+            (&mut info as *mut FILE_ID_INFO).cast(),
+            mem::size_of_val(&info) as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(ImageId(info.VolumeSerialNumber, info.FileId.Identifier))
+}
 
 /// A plain file held with read access and read-only sharing: nobody can write,
 /// rename or delete it while this handle is open.
 struct Pinned {
     file: File,
-    identity: FileIdentity,
+    identity: ImageId,
     bytes: u64,
 }
 impl Pinned {
@@ -62,7 +85,8 @@ impl Pinned {
             .share_mode(FILE_SHARE_READ)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
             .open(path)?;
-        let (identity, metadata) = FileIdentity::with_metadata(&file)?;
+        let identity = file_identity(&file)?;
+        let metadata = file.metadata()?;
         ensure!(
             metadata.is_file() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0,
             "frontend file is not a plain file"
@@ -74,7 +98,8 @@ impl Pinned {
         })
     }
     fn check(&self) -> Result<()> {
-        let (identity, metadata) = FileIdentity::with_metadata(&self.file)?;
+        let identity = file_identity(&self.file)?;
+        let metadata = self.file.metadata()?;
         ensure!(
             identity == self.identity && metadata.len() == self.bytes,
             "installed frontend changed"
@@ -120,8 +145,28 @@ fn final_path(file: &File) -> Result<PathBuf> {
         .context("frontend is not on a local volume")?;
     Ok(PathBuf::from(local))
 }
-fn same_path(left: &Path, right: &Path) -> bool {
-    left.to_string_lossy().to_lowercase() == right.to_string_lossy().to_lowercase()
+/// Resolve from the held file, pin its normalized ancestors, then prove that
+/// this path still reaches that file. Original junction aliases are never used
+/// as child arguments or working directories.
+fn pin_path(pinned: &Pinned) -> Result<(PathBuf, Vec<File>)> {
+    let entry = final_path(&pinned.file)?;
+    let mut folders = entry.ancestors().skip(1).collect::<Vec<_>>();
+    folders.reverse();
+    let folders = folders
+        .into_iter()
+        .map(pin_folder)
+        .collect::<Result<Vec<_>>>()?;
+    check_path(pinned, &entry)?;
+    Ok((entry, folders))
+}
+fn check_path(pinned: &Pinned, path: &Path) -> Result<()> {
+    pinned.check()?;
+    ensure!(final_path(&pinned.file)? == path, "frontend path changed");
+    ensure!(
+        Pinned::open(path)?.identity == pinned.identity,
+        "frontend path rebound"
+    );
+    Ok(())
 }
 
 /// Non-Clone/non-serde. Only select() binds the running service image and an
@@ -152,7 +197,7 @@ impl SelectedFrontend {
             "frontend selection must be absolute"
         );
         let pinned = Pinned::open(image)?;
-        let entry = final_path(&pinned.file)?;
+        let (entry, mut folders) = pin_path(&pinned)?;
         ensure!(
             entry
                 .file_name()
@@ -160,20 +205,12 @@ impl SelectedFrontend {
                 .is_some_and(|name| name.eq_ignore_ascii_case(IMAGE)),
             "unrecognized frontend image"
         );
-        // Top-down, then confirm no folder was renamed before its pin held.
-        let mut folders = entry.ancestors().skip(1).collect::<Vec<_>>();
-        folders.reverse();
-        let folders = folders
-            .into_iter()
-            .map(pin_folder)
-            .collect::<Result<Vec<_>>>()?;
-        ensure!(
-            final_path(&pinned.file)? == entry,
-            "frontend path changed during selection"
-        );
+        let cli = Pinned::open(cli)?;
+        let (cli_path, cli_folders) = pin_path(&cli)?;
+        folders.extend(cli_folders);
         let result = Self {
-            cli: Pinned::open(cli)?,
-            cli_path: cli.to_owned(),
+            cli,
+            cli_path,
             image: pinned,
             entry,
             _folders: folders,
@@ -200,13 +237,8 @@ impl SelectedFrontend {
         self.entry.parent().expect("a file path has a folder")
     }
     pub fn revalidate(&self) -> Result<()> {
-        self.cli.check()?;
-        self.image.check()?;
-        ensure!(
-            final_path(&self.image.file)? == self.entry,
-            "installed frontend moved"
-        );
-        Ok(())
+        check_path(&self.cli, &self.cli_path)?;
+        check_path(&self.image, &self.entry)
     }
     pub fn revalidate_for_launch(&self, launch: &Launch) -> Result<()> {
         ensure!(
@@ -222,6 +254,15 @@ impl SelectedFrontend {
 }
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+// There is at most one admitted launch. Publish uncertain rejected-start
+// cleanup while its original worker retains all resources and polls that child.
+static CLEANUP_UNKNOWN: Mutex<Option<String>> = Mutex::new(None);
+pub(in crate::desktop) fn cleanup_unknown() -> Option<String> {
+    CLEANUP_UNKNOWN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
 struct Admission;
 impl Drop for Admission {
     fn drop(&mut self) {
@@ -236,6 +277,7 @@ pub(in crate::desktop) struct OwnedFrontend {
     admission: Option<Admission>,
     launch: Option<Launch>,
     child: Option<host::Child>,
+    rejected: Option<(SelectedFrontend, String)>,
     error: bool,
     exit: Option<u32>,
 }
@@ -261,6 +303,7 @@ impl OwnedFrontend {
         }
         selected.revalidate_for_launch(&launch)?;
         let help = match captured(
+            &selected.image,
             selected.image(),
             &[entry.clone(), "--help".into()],
             &environment,
@@ -269,10 +312,8 @@ impl OwnedFrontend {
         )? {
             Help::Exited(0, stdout) => stdout,
             Help::Exited(..) => anyhow::bail!("frontend help failed"),
-            Help::Unconfirmed => {
-                // An unconfirmed help child keeps this admission and click.
-                mem::forget((admission, launch));
-                anyhow::bail!("frontend help child exit unconfirmed");
+            Help::Unconfirmed(child, error) => {
+                return Ok(Self::rejected(selected, admission, launch, child, error));
             }
         };
         let help = std::str::from_utf8(&help).context("invalid frontend help")?;
@@ -293,7 +334,18 @@ impl OwnedFrontend {
         ];
         selected.revalidate_for_launch(&launch)?;
         ensure!(Instant::now() < until, "frontend launch deadline passed");
-        let child = start(selected.image(), &argv, &environment, selected.directory())?;
+        let child = match start(
+            &selected.image,
+            selected.image(),
+            &argv,
+            &environment,
+            selected.directory(),
+        )? {
+            Started::Running(child) => child,
+            Started::Unconfirmed(child, error) => {
+                return Ok(Self::rejected(selected, admission, launch, child, error));
+            }
+        };
         launch.release_preparation();
         // The GUI runs the verified image; its update must not stay blocked.
         drop(selected);
@@ -301,9 +353,41 @@ impl OwnedFrontend {
             admission: Some(admission),
             launch: Some(launch),
             child: Some(child),
+            rejected: None,
             error: false,
             exit: None,
         })
+    }
+    fn rejected(
+        selected: SelectedFrontend,
+        admission: Admission,
+        launch: Launch,
+        child: host::Child,
+        error: anyhow::Error,
+    ) -> Self {
+        let error: String = format!("frontend cleanup unknown: {error:#}")
+            .chars()
+            .take(256)
+            .collect();
+        *CLEANUP_UNKNOWN.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.clone());
+        Self {
+            admission: Some(admission),
+            launch: Some(launch),
+            child: Some(child),
+            rejected: Some((selected, error)),
+            error: true,
+            exit: None,
+        }
+    }
+    /// Only a successfully resumed GUI is independent of service ownership.
+    pub fn detachable(&self) -> bool {
+        self.rejected.is_none()
+    }
+    pub fn result(&self) -> Result<()> {
+        if let Some((_, error)) = &self.rejected {
+            anyhow::bail!("frontend start rejected; original child exit confirmed: {error}");
+        }
+        Ok(())
     }
     /// Call off actor. Never adopts another PID or kills the GUI on stop.
     pub fn poll(&mut self) {
@@ -314,6 +398,12 @@ impl OwnedFrontend {
             Ok(Some(code)) => {
                 self.exit = Some(code);
                 self.child.take();
+                if self.rejected.is_some() {
+                    *CLEANUP_UNKNOWN.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    if let Some(launch) = &mut self.launch {
+                        launch.release_preparation();
+                    }
+                }
             }
             Ok(None) => (),
             Err(_) => self.error = true,
@@ -334,7 +424,12 @@ impl Drop for OwnedFrontend {
         // The GUI may outlive the service. Dropping a live/unknown handle does
         // not terminate it or claim that its admission drained.
         if let Some(child) = self.child.take() {
-            mem::forget((child, self.admission.take(), self.launch.take()));
+            mem::forget((
+                child,
+                self.admission.take(),
+                self.launch.take(),
+                self.rejected.take(),
+            ));
         }
     }
 }
@@ -371,30 +466,48 @@ fn process_image(process: HANDLE) -> io::Result<PathBuf> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "process image is not Unicode"))
 }
 /// A suspended child runs only after its image is the expected pinned file.
-fn verified(process: HANDLE, thread: HANDLE, expected: &Path) -> io::Result<()> {
-    let image = process_image(process);
-    if !image
-        .as_deref()
-        .is_ok_and(|image| same_path(image, expected))
-    {
-        // SAFETY: the suspended child never ran; end it.
-        unsafe {
-            TerminateProcess(process, 1);
-        }
+fn verified(child: &host::Child, expected: &Pinned) -> io::Result<()> {
+    let image = process_image(child.process.as_raw_handle())?;
+    // Open the reported path while the selected file/ancestors remain pinned.
+    // Hard links, 8.3 names and ordinary case aliases resolve by file identity;
+    // distinct files in a case-sensitive directory never compare equal.
+    let actual = Pinned::open(&image).map_err(io::Error::other)?;
+    if actual.identity != expected.identity {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "frontend child is not the pinned image",
         ));
     }
-    // SAFETY: the child's first thread, created suspended.
-    if unsafe { ResumeThread(thread) } == u32::MAX {
-        let error = io::Error::last_os_error();
-        unsafe {
-            TerminateProcess(process, 1);
-        }
-        return Err(error);
+    child.resume()
+}
+
+#[derive(Debug)]
+enum Started {
+    Running(host::Child),
+    Unconfirmed(host::Child, anyhow::Error),
+}
+/// Termination is a request. Only a signaled original process handle releases
+/// custody, even if the request failed. Unknown waits keep that SAME child.
+fn reject(child: host::Child, error: anyhow::Error) -> Result<Started> {
+    reject_with(
+        child,
+        error,
+        |child| child.terminate(1),
+        |child| child.wait(CLEANUP_WAIT),
+    )
+}
+fn reject_with(
+    child: host::Child,
+    error: anyhow::Error,
+    terminate: impl FnOnce(&host::Child) -> io::Result<()>,
+    wait: impl FnOnce(&host::Child) -> io::Result<Option<u32>>,
+) -> Result<Started> {
+    let termination = terminate(&child);
+    match wait(&child) {
+        Ok(Some(_)) => Err(error),
+        outcome => Ok(Started::Unconfirmed(child, error.context(format!(
+            "original child physical exit unconfirmed (termination={termination:?}, wait={outcome:?})")))),
     }
-    Ok(())
 }
 
 /// The GUI: suspended, verified, then resumed. It inherits no handle of the
@@ -402,11 +515,12 @@ fn verified(process: HANDLE, thread: HANDLE, expected: &Path) -> io::Result<()> 
 /// outside the service's kill-on-close job. A job that refuses breakaway fails
 /// the whole CreateProcess, so the in-job retry cannot duplicate a GUI.
 fn start(
+    expected: &Pinned,
     application: &Path,
     argv: &[String],
     environment: &host::Environment,
     directory: &Path,
-) -> Result<host::Child> {
+) -> Result<Started> {
     let command = |breakaway_from_job| host::Command {
         application,
         argv,
@@ -425,28 +539,27 @@ fn start(
         }
         result => result?,
     };
-    verified(
-        child.process.as_raw_handle(),
-        child.thread.as_raw_handle(),
-        application,
-    )?;
+    if let Err(error) = verified(&child, expected) {
+        return reject(child, error.into());
+    }
     // The service holds the foreground right only right after a toast
     // activation. Best effort: the GUI still flashes when it cannot use it.
     // SAFETY: plain process ID of the original child.
     unsafe {
         AllowSetForegroundWindow(child.pid);
     }
-    Ok(child)
+    Ok(Started::Running(child))
 }
 
 enum Help {
     Exited(u32, Vec<u8>),
     /// The child could not be proven to have exited.
-    Unconfirmed,
+    Unconfirmed(host::Child, anyhow::Error),
 }
 /// A short helper child whose only inherited handle is its stdout pipe, named
 /// in PROC_THREAD_ATTRIBUTE_HANDLE_LIST. Reading ends at its exit, not at EOF.
 fn captured(
+    expected: &Pinned,
     application: &Path,
     argv: &[String],
     environment: &host::Environment,
@@ -533,13 +646,17 @@ fn captured(
     drop(list);
     ensure!(created != 0, "{error}");
     // SAFETY: CreateProcessW opened both handles for this child.
-    let (process, thread) = unsafe {
-        (
-            OwnedHandle::from_raw_handle(information.hProcess),
-            OwnedHandle::from_raw_handle(information.hThread),
-        )
+    let child = host::Child {
+        process: unsafe { OwnedHandle::from_raw_handle(information.hProcess) },
+        thread: unsafe { OwnedHandle::from_raw_handle(information.hThread) },
+        pid: information.dwProcessId,
     };
-    verified(process.as_raw_handle(), thread.as_raw_handle(), application)?;
+    if let Err(error) = verified(&child, expected) {
+        return match reject(child, error.into())? {
+            Started::Unconfirmed(child, error) => Ok(Help::Unconfirmed(child, error)),
+            Started::Running(_) => unreachable!(),
+        };
+    }
     let mut stdout = Vec::new();
     let drain = |stdout: &mut Vec<u8>| -> bool {
         loop {
@@ -583,25 +700,21 @@ fn captured(
     loop {
         let within = drain(&mut stdout);
         // SAFETY: the open process handle.
-        if unsafe { WaitForSingleObject(process.as_raw_handle(), 0) } == WAIT_OBJECT_0 {
+        if unsafe { WaitForSingleObject(child.process.as_raw_handle(), 0) } == WAIT_OBJECT_0 {
             drain(&mut stdout);
             let mut code = 0;
             // SAFETY: the exited child's process handle and a writable code.
-            unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) };
+            ensure!(
+                unsafe { GetExitCodeProcess(child.process.as_raw_handle(), &mut code) } != 0,
+                "frontend help exit code unavailable"
+            );
             ensure!(stdout.len() <= HELP_BYTES, "frontend help too large");
             return Ok(Help::Exited(code, stdout));
         }
         if !within || Instant::now() >= until {
-            // SAFETY: the open process handle of this helper child.
-            unsafe {
-                TerminateProcess(process.as_raw_handle(), 1);
-            }
-            let exited =
-                unsafe { WaitForSingleObject(process.as_raw_handle(), 5_000) } == WAIT_OBJECT_0;
-            return if exited {
-                Err(anyhow::anyhow!("frontend help did not finish"))
-            } else {
-                Ok(Help::Unconfirmed)
+            return match reject(child, anyhow::anyhow!("frontend help did not finish"))? {
+                Started::Unconfirmed(child, error) => Ok(Help::Unconfirmed(child, error)),
+                Started::Running(_) => unreachable!(),
             };
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -702,6 +815,19 @@ mod tests {
     fn argv(entry: &str, script: &str) -> Vec<String> {
         [entry, "/d", "/c", script].map(str::to_owned).to_vec()
     }
+    fn assert_same_file(left: &Path, right: &Path) {
+        let open = |path| {
+            OpenOptions::new()
+                .read(true)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(path)
+                .unwrap()
+        };
+        assert_eq!(
+            file_identity(&open(left)).unwrap(),
+            file_identity(&open(right)).unwrap()
+        );
+    }
 
     #[test]
     fn selection_refuses_other_names_and_relative_paths() {
@@ -739,6 +865,335 @@ mod tests {
         fs::rename(&app, root.0.join("moved")).unwrap();
     }
 
+    // Native directory junction, confined to this fixture. No shell, elevation,
+    // symlink privilege or global filesystem configuration is needed.
+    fn junction(link: &Path, target: &Path) {
+        fs::create_dir(link).unwrap();
+        let substitute: Vec<u16> = format!(r"\??\{}", target.display())
+            .encode_utf16()
+            .collect();
+        let print: Vec<u16> = target.as_os_str().encode_wide().collect();
+        let mut data = Vec::new();
+        data.extend_from_slice(&0xA0000003u32.to_le_bytes()); // IO_REPARSE_TAG_MOUNT_POINT
+        data.extend_from_slice(
+            &((8 + (substitute.len() + print.len() + 2) * 2) as u16).to_le_bytes(),
+        );
+        for value in [
+            0,
+            0,
+            (substitute.len() * 2) as u16,
+            ((substitute.len() + 1) * 2) as u16,
+            (print.len() * 2) as u16,
+        ] {
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in substitute
+            .into_iter()
+            .chain(Some(0))
+            .chain(print)
+            .chain(Some(0))
+        {
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+        let file = OpenOptions::new()
+            .write(true)
+            .share_mode(0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(link)
+            .unwrap();
+        let mut used = 0;
+        // SAFETY: the private empty directory and complete mount-point buffer.
+        assert_ne!(
+            unsafe {
+                windows_sys::Win32::System::IO::DeviceIoControl(
+                    file.as_raw_handle(),
+                    589988,
+                    data.as_ptr().cast(),
+                    data.len() as u32,
+                    ptr::null_mut(),
+                    0,
+                    &mut used,
+                    ptr::null_mut(),
+                )
+            },
+            0,
+            "{}",
+            io::Error::last_os_error()
+        );
+    }
+
+    #[test]
+    fn cli_in_a_disjoint_junction_directory_uses_its_pinned_final_path() {
+        let root = folder();
+        let (cli, image) = installed(&root.0);
+        let real = root.0.join("cli-real");
+        let other = root.0.join("cli-other");
+        fs::create_dir(&real).unwrap();
+        fs::create_dir(&other).unwrap();
+        let real_cli = real.join("hgs.exe");
+        fs::rename(&cli, &real_cli).unwrap();
+        fs::copy(&real_cli, other.join("hgs.exe")).unwrap();
+        let alias = root.0.join("cli-alias");
+        junction(&alias, &real);
+        let selected =
+            SelectedFrontend::capture(&alias.join("hgs.exe"), &image, "c".into()).unwrap();
+        assert_eq!(selected.service_image(), real_cli);
+        assert!(fs::rename(&real, root.0.join("moved-cli")).is_err());
+        assert!(fs::write(&real_cli, b"replacement").is_err());
+        // Rebinding the original alias must not rebind the GUI's --hgs argument.
+        fs::remove_dir(&alias).unwrap();
+        junction(&alias, &other);
+        selected.revalidate().unwrap();
+        assert_eq!(selected.service_image(), real_cli);
+        assert_ne!(
+            file_identity(&File::open(alias.join("hgs.exe")).unwrap()).unwrap(),
+            selected.cli.identity
+        );
+        assert_eq!(
+            file_identity(&File::open(selected.service_image()).unwrap()).unwrap(),
+            selected.cli.identity
+        );
+        fs::remove_dir(alias).unwrap();
+    }
+
+    fn suspended(application: &Path, directory: &Path) -> host::Child {
+        host::spawn(&host::Command {
+            application,
+            argv: &argv("fixture.exe", "echo ran> ran.txt"),
+            environment: &environment(),
+            directory: Some(directory),
+            flags: host::Flags {
+                suspended: true,
+                no_window: true,
+                new_process_group: true,
+                breakaway_from_job: false,
+            },
+        })
+        .unwrap()
+    }
+
+    /// Always end this exact private fixture process on an assertion failure.
+    struct EmergencyExit(OwnedHandle);
+    impl EmergencyExit {
+        fn new(child: &host::Child) -> Self {
+            Self(child.process.try_clone().unwrap())
+        }
+        fn end(&self, code: u32) {
+            use windows_sys::Win32::System::Threading::TerminateProcess;
+            // SAFETY: a duplicate of this fixture child's original handle.
+            unsafe {
+                assert_ne!(TerminateProcess(self.0.as_raw_handle(), code), 0);
+                assert_eq!(
+                    WaitForSingleObject(self.0.as_raw_handle(), 5_000),
+                    WAIT_OBJECT_0
+                );
+            }
+        }
+    }
+    impl Drop for EmergencyExit {
+        fn drop(&mut self) {
+            use windows_sys::Win32::System::Threading::TerminateProcess;
+            // SAFETY: a duplicate of the original private child's process handle.
+            unsafe {
+                if WaitForSingleObject(self.0.as_raw_handle(), 0) != WAIT_OBJECT_0 {
+                    TerminateProcess(self.0.as_raw_handle(), 99);
+                    assert_eq!(
+                        WaitForSingleObject(self.0.as_raw_handle(), 5_000),
+                        WAIT_OBJECT_0,
+                        "private fixture child cleanup unknown"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn image_identity_accepts_hard_link_and_case_aliases() {
+        let root = folder();
+        let (cli, image) = installed(&root.0);
+        let alias = image.with_file_name("frontend-alias.exe");
+        fs::hard_link(&image, &alias).unwrap();
+        let selected = SelectedFrontend::capture(&cli, &image, "c".into()).unwrap();
+        for path in [alias, image.with_file_name("HGS-TRAY.EXE")] {
+            let child = suspended(&path, selected.directory());
+            let _cleanup = EmergencyExit::new(&child);
+            verified(&child, &selected.image).unwrap();
+            assert_eq!(child.wait(Duration::from_secs(5)).unwrap(), Some(0));
+        }
+    }
+
+    #[test]
+    fn case_sensitive_distinct_images_are_never_equal() {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileCaseSensitiveInfo, SetFileInformationByHandle, FILE_CASE_SENSITIVE_INFO,
+        };
+        let root = folder();
+        let directory = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&root.0)
+            .unwrap();
+        // FILE_CS_FLAG_CASE_SENSITIVE_DIR; no host-wide setting is changed.
+        let flags = FILE_CASE_SENSITIVE_INFO { Flags: 1 };
+        // SAFETY: change only this private, empty fixture directory.
+        assert_ne!(
+            unsafe {
+                SetFileInformationByHandle(
+                    directory.as_raw_handle(),
+                    FileCaseSensitiveInfo,
+                    (&flags as *const FILE_CASE_SENSITIVE_INFO).cast(),
+                    mem::size_of_val(&flags) as u32,
+                )
+            },
+            0,
+            "native case-sensitive control unavailable: {}",
+            io::Error::last_os_error()
+        );
+        drop(directory);
+        let image = root.0.join(IMAGE);
+        let other = root.0.join("HGS-TRAY.EXE");
+        fs::copy(system("cmd.exe"), &image).unwrap();
+        fs::copy(system("cmd.exe"), &other).unwrap();
+        let expected = Pinned::open(&image).unwrap();
+        assert_ne!(expected.identity, Pinned::open(&other).unwrap().identity);
+        let child = suspended(&other, &root.0);
+        let _cleanup = EmergencyExit::new(&child);
+        let error = verified(&child, &expected).unwrap_err();
+        assert!(reject(child, error.into()).is_err());
+        assert!(!root.0.join("ran.txt").exists());
+    }
+
+    fn launch_fixture() -> Launch {
+        let target = wire::Target {
+            computer: "peer.example".into(),
+            run: "original-run".into(),
+            conversation: "original-conversation".into(),
+        };
+        let token = zerus_client_core::attention::encode_token(
+            serde_json::json!({
+            "host":target.computer, "run":target.run, "conversation":target.conversation,
+            "notice":"fixture" })
+            .as_object()
+            .unwrap(),
+        );
+        Launch::fixture(
+            wire::Open {
+                activation_id: uuid::Uuid::new_v4().to_string(),
+                post_request_id: uuid::Uuid::new_v4().to_string(),
+                target,
+                token,
+                platform_context: None,
+            },
+            "c".into(),
+        )
+    }
+    fn runtime_fixture(root: &Path) -> super::super::closed::Runtime {
+        let config = crate::config::Config {
+            home: root.to_str().unwrap().into(),
+            dir: root.join("config"),
+            state: root.join("state"),
+            selves: vec![],
+            peers: vec![],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: Default::default(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        let location = crate::desktop::store::Location {
+            root: config.state.join("desktop"),
+            configuration: "c".into(),
+        };
+        super::super::closed::Runtime::new(&config, &location)
+    }
+
+    #[test]
+    fn failed_and_delayed_termination_retain_original_child_admission_and_owner() {
+        use std::sync::Arc;
+        let root = folder();
+        if !isolated("desktop::notifications::frontend::tests::failed_and_delayed_termination_retain_original_child_admission_and_owner", &root.0) { return; }
+        for fault in 0..3 {
+            let case = folder();
+            let (cli, image) = installed(&case.0);
+            let selected = SelectedFrontend::capture(&cli, &image, "c".into()).unwrap();
+            let child = suspended(selected.image(), selected.directory());
+            let cleanup = EmergencyExit::new(&child);
+            let original = child.process.as_raw_handle();
+            let Started::Unconfirmed(child, error) = reject_with(
+                child,
+                anyhow::anyhow!("rejected fixture"),
+                |_| {
+                    if fault == 0 {
+                        Err(io::ErrorKind::PermissionDenied.into())
+                    } else {
+                        Ok(())
+                    }
+                },
+                |child| {
+                    if fault == 2 {
+                        Err(io::ErrorKind::Other.into())
+                    } else {
+                        child.wait(Duration::ZERO)
+                    }
+                },
+            )
+            .unwrap() else {
+                panic!("no physical exit was observed")
+            };
+            assert_eq!(child.process.as_raw_handle(), original);
+            assert_eq!(child.wait(Duration::ZERO).unwrap(), None);
+            assert!(!ACTIVE.swap(true, Ordering::AcqRel));
+            let resources = Arc::new(());
+            let mut launch = launch_fixture();
+            launch.bind_preparation(resources.clone(), Arc::new(AtomicBool::new(false)));
+            let mut owned = OwnedFrontend::rejected(selected, Admission, launch, child, error);
+            assert!(!owned.detachable());
+            owned.poll();
+            assert!(!owned.exited());
+            assert!(ACTIVE.load(Ordering::Acquire));
+            assert!(cleanup_unknown().is_some());
+            assert_eq!(Arc::strong_count(&resources), 2);
+            let competing = OwnedFrontend::launch(
+                SelectedFrontend::capture(&cli, &image, "c".into()).unwrap(),
+                launch_fixture(),
+            );
+            match competing {
+                Err(error) => assert!(error.to_string().contains("frontend launch still owned")),
+                Ok(_) => panic!("unknown cleanup admitted a second frontend"),
+            }
+            assert!(fs::write(&cli, b"replacement").is_err());
+            assert!(fs::rename(image.parent().unwrap(), case.0.join("moved")).is_err());
+            let mut runtime = runtime_fixture(&case.0);
+            runtime.observe_for_test(owned);
+            runtime.stop();
+            assert!(
+                !runtime.drained(),
+                "rejected-start cleanup cannot detach on stop"
+            );
+            assert!(runtime.status()["cleanup_unknown"].is_string());
+            assert_eq!(runtime.status()["gui_observer_retained"], false);
+            assert_eq!(runtime.status()["gui_exit_is_not_required"], false);
+            assert_eq!(Arc::strong_count(&resources), 2);
+            // The observer still owns the original handle; this duplicate
+            // requests physical termination without looking up a PID.
+            cleanup.end(7);
+            let until = Instant::now() + CLEANUP_WAIT;
+            while !runtime.drained() {
+                assert!(Instant::now() < until, "rejected child did not drain");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(cleanup_unknown().is_none());
+            assert_eq!(Arc::strong_count(&resources), 1);
+            assert!(runtime.status()["error"]
+                .as_str()
+                .unwrap()
+                .contains("exit confirmed"));
+            assert!(!ACTIVE.load(Ordering::Acquire));
+            fs::write(&cli, b"released").unwrap();
+        }
+    }
+
     #[test]
     fn children_start_in_the_image_folder_and_only_as_the_pinned_image() {
         let root = folder();
@@ -747,6 +1202,7 @@ mod tests {
         let entry = text(selected.image()).unwrap();
         let until = Instant::now() + Duration::from_secs(10);
         let Help::Exited(0, out) = captured(
+            &selected.image,
             selected.image(),
             &argv(&entry, "cd"),
             &environment(),
@@ -757,17 +1213,20 @@ mod tests {
             panic!("help child")
         };
         let reported = String::from_utf8_lossy(&out);
-        assert!(same_path(Path::new(reported.trim()), selected.directory()));
-        let child = start(
+        assert_same_file(Path::new(reported.trim()), selected.directory());
+        let Started::Running(child) = start(
+            &selected.image,
             selected.image(),
             &argv(&entry, "cd > cwd.txt"),
             &environment(),
             selected.directory(),
         )
-        .unwrap();
+        .unwrap() else {
+            panic!("GUI start rejected")
+        };
         assert_eq!(child.wait(Duration::from_secs(10)).unwrap(), Some(0));
         let written = fs::read_to_string(selected.directory().join("cwd.txt")).unwrap();
-        assert!(same_path(Path::new(written.trim()), selected.directory()));
+        assert_same_file(Path::new(written.trim()), selected.directory());
         // Another image never runs: it is ended while still suspended.
         let other = system("cmd.exe");
         let child = host::spawn(&host::Command {
@@ -783,13 +1242,69 @@ mod tests {
             },
         })
         .unwrap();
-        assert!(verified(
-            child.process.as_raw_handle(),
-            child.thread.as_raw_handle(),
-            selected.image()
-        )
-        .is_err());
-        assert_eq!(child.wait(Duration::from_secs(5)).unwrap(), Some(1));
+        let error = verified(&child, &selected.image).unwrap_err();
+        assert!(reject(child, error.into()).is_err());
+        assert!(!selected.directory().join("ran.txt").exists());
+    }
+
+    #[test]
+    fn both_launch_paths_reject_a_different_pinned_image_before_running() {
+        let root = folder();
+        let (cli, image) = installed(&root.0);
+        let selected = SelectedFrontend::capture(&cli, &image, "c".into()).unwrap();
+        let wrong = Pinned::open(&cli).unwrap();
+        let arguments = argv(&text(selected.image()).unwrap(), "echo ran> ran.txt");
+        match start(
+            &wrong,
+            selected.image(),
+            &arguments,
+            &environment(),
+            selected.directory(),
+        ) {
+            Err(error) => assert!(error.to_string().contains("not the pinned image")),
+            Ok(Started::Unconfirmed(child, error)) => {
+                let cleanup = EmergencyExit::new(&child);
+                cleanup.end(99);
+                panic!("rejected GUI cleanup was not confirmed: {error:#}");
+            }
+            Ok(Started::Running(child)) => {
+                let _cleanup = EmergencyExit::new(&child);
+                panic!("wrong GUI was resumed");
+            }
+        }
+        match captured(
+            &wrong,
+            selected.image(),
+            &arguments,
+            &environment(),
+            selected.directory(),
+            Instant::now() + START,
+        ) {
+            Err(error) => assert!(error.to_string().contains("not the pinned image")),
+            Ok(Help::Unconfirmed(child, error)) => {
+                let cleanup = EmergencyExit::new(&child);
+                cleanup.end(99);
+                panic!("rejected help cleanup was not confirmed: {error:#}");
+            }
+            Ok(Help::Exited(..)) => panic!("wrong help image was resumed"),
+        }
+        assert!(!selected.directory().join("ran.txt").exists());
+    }
+
+    #[test]
+    fn resume_failure_keeps_the_child_until_confirmed_termination() {
+        let root = folder();
+        let (cli, image) = installed(&root.0);
+        let selected = SelectedFrontend::capture(&cli, &image, "c".into()).unwrap();
+        let mut child = suspended(selected.image(), selected.directory());
+        let _cleanup = EmergencyExit::new(&child);
+        // A process handle is deliberately the wrong object type for ResumeThread.
+        // Keep the original thread object alive too until the rejection drains.
+        let original_thread = mem::replace(&mut child.thread, child.process.try_clone().unwrap());
+        let error = verified(&child, &selected.image).unwrap_err();
+        assert_eq!(child.wait(Duration::ZERO).unwrap(), None);
+        assert!(reject(child, error.into()).is_err());
+        drop(original_thread);
         assert!(!selected.directory().join("ran.txt").exists());
     }
 
@@ -847,20 +1362,25 @@ mod tests {
         let selected = SelectedFrontend::capture(&cli, &image, "c".into()).unwrap();
         let entry = text(selected.image()).unwrap();
         let script = "ping -n 4 127.0.0.1 >nul";
-        let gui = start(
+        let Started::Running(gui) = start(
+            &selected.image,
             selected.image(),
             &argv(&entry, script),
             &environment(),
             selected.directory(),
         )
-        .unwrap();
+        .unwrap() else {
+            panic!("GUI start rejected")
+        };
         let (image_path, directory, help_argv) = (
             selected.image().to_owned(),
             selected.directory().to_owned(),
             argv(&entry, script),
         );
         let help = std::thread::spawn(move || {
+            let expected = Pinned::open(&image_path).unwrap();
             captured(
+                &expected,
                 &image_path,
                 &help_argv,
                 &environment(),
@@ -925,6 +1445,7 @@ mod tests {
         let selected = SelectedFrontend::capture(&cli, &image, "c".into()).unwrap();
         let entry = text(selected.image()).unwrap();
         let Help::Exited(0, out) = captured(
+            &selected.image,
             selected.image(),
             &argv(&entry, "cd"),
             &environment(),
@@ -934,17 +1455,20 @@ mod tests {
         .unwrap() else {
             panic!("child loaded something from the unrelated folder")
         };
-        assert!(same_path(
+        assert_same_file(
             Path::new(String::from_utf8_lossy(&out).trim()),
-            selected.directory()
-        ));
-        let child = start(
+            selected.directory(),
+        );
+        let Started::Running(child) = start(
+            &selected.image,
             selected.image(),
             &argv(&entry, "cd > cwd.txt"),
             &environment(),
             selected.directory(),
         )
-        .unwrap();
+        .unwrap() else {
+            panic!("GUI start rejected")
+        };
         assert_eq!(child.wait(Duration::from_secs(10)).unwrap(), Some(0));
         assert!(!std::env::current_dir().unwrap().join("cwd.txt").exists());
     }

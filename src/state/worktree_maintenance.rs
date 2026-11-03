@@ -348,6 +348,9 @@ pub(super) fn reserve_removal(removal: &Removal) -> Result<()> {
     if count(&tx)? >= MAX_REMOVALS {
         resolve_vanished(&tx)?;
         if count(&tx)? >= MAX_REMOVALS {
+            // Resolving a vanished record is independent of admitting this
+            // removal. A capacity refusal must not resurrect those records.
+            tx.commit().map_err(|e| e.to_string())?;
             return Err(format!(
                 "Worktree removal refused: {MAX_REMOVALS} earlier removals still need review. \
                  Review their leftover folders (`hgs worktrees leftovers` lists those whose \

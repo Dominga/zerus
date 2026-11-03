@@ -27,16 +27,18 @@ mod tasks;
 mod watch;
 
 fn main() {
+    #[cfg(windows)]
+    let entered = std::time::Instant::now();
+    zerus_client_core::quit_origin::capture_process_entry();
     // A creation launch child keeps the desktop actor's custody lock for its
-    // own lifetime only: marked close-on-exec before anything else starts.
+    // own lifetime only: marked close-on-exec before anything else starts;
+    // after the pure raw-input capture, which reads the unmodified
+    // environment and starts nothing.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     if let Err(error) = desktop::creation_launch::adopt_custody() {
         eprintln!("hgs: {error}");
         std::process::exit(2);
     }
-    #[cfg(windows)]
-    let entered = std::time::Instant::now();
-    zerus_client_core::quit_origin::capture_process_entry();
     // COM cold activation cannot load config, create jobs or acquire ownership.
     #[cfg(windows)]
     if let Some(code) = desktop::windows_notification_activation(std::env::args().nth(1).as_deref())

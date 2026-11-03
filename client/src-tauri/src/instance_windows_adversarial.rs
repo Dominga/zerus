@@ -101,7 +101,8 @@ fn native_lower_integrity_server_never_forwards_or_claims_a_gui() {
             if low {
                 assert!(foreground.calls().is_empty());
             } else {
-                assert_eq!(foreground.calls(), vec![child.pid; 4]);
+                // Show forwards data only; Sessions lends foreground once per pipe.
+                assert_eq!(foreground.calls(), vec![child.pid; 2]);
             }
             if mode == "reply" {
                 assert!(!root.exists(), "forward/refusal precedes owner allocation");

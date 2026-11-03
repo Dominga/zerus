@@ -48,9 +48,15 @@ fn owned(handle: HANDLE) -> io::Result<OwnedHandle> {
         Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
     }
 }
-fn check(ok: i32) -> io::Result<()> {
+fn context(operation: &str, error: io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("{operation}: {error}"))
+}
+fn acquired(operation: &str, handle: HANDLE) -> io::Result<OwnedHandle> {
+    owned(handle).map_err(|error| context(operation, error))
+}
+fn check(operation: &str, ok: i32) -> io::Result<()> {
     if ok == 0 {
-        Err(io::Error::last_os_error())
+        Err(context(operation, io::Error::last_os_error()))
     } else {
         Ok(())
     }
@@ -59,14 +65,17 @@ struct Descriptor(*mut c_void);
 impl Descriptor {
     fn new(sddl: &str) -> io::Result<Self> {
         let mut descriptor = ptr::null_mut();
-        check(unsafe {
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                wide(sddl).as_ptr(),
-                SDDL_REVISION_1,
-                &mut descriptor,
-                ptr::null_mut(),
-            )
-        })?;
+        check(
+            "ConvertStringSecurityDescriptorToSecurityDescriptorW",
+            unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    wide(sddl).as_ptr(),
+                    SDDL_REVISION_1,
+                    &mut descriptor,
+                    ptr::null_mut(),
+                )
+            },
+        )?;
         Ok(Self(descriptor))
     }
     fn attributes(&self) -> SECURITY_ATTRIBUTES {
@@ -86,13 +95,15 @@ impl Drop for Descriptor {
 }
 pub fn sid_text(sid: &[u8]) -> io::Result<String> {
     let mut text = ptr::null_mut();
-    check(unsafe { ConvertSidToStringSidW(sid.as_ptr().cast_mut().cast(), &mut text) })?;
+    check("ConvertSidToStringSidW", unsafe {
+        ConvertSidToStringSidW(sid.as_ptr().cast_mut().cast(), &mut text)
+    })?;
     let mut n = 0;
     while n < 256 && unsafe { *text.add(n) } != 0 {
         n += 1;
     }
     let result = String::from_utf16(unsafe { std::slice::from_raw_parts(text, n) })
-        .map_err(|_| io::ErrorKind::InvalidData.into());
+        .map_err(|_| io::Error::other("ConvertSidToStringSidW: invalid UTF-16 output"));
     unsafe {
         LocalFree(text.cast());
     }
@@ -101,16 +112,16 @@ pub fn sid_text(sid: &[u8]) -> io::Result<String> {
 
 fn token(low: bool) -> io::Result<OwnedHandle> {
     let mut current = ptr::null_mut();
-    check(unsafe {
+    check("OpenProcessToken", unsafe {
         OpenProcessToken(
             GetCurrentProcess(),
             TOKEN_DUPLICATE | TOKEN_QUERY,
             &mut current,
         )
     })?;
-    let current = owned(current)?;
+    let current = acquired("OpenProcessToken", current)?;
     let mut duplicate = ptr::null_mut();
-    check(unsafe {
+    check("DuplicateTokenEx", unsafe {
         DuplicateTokenEx(
             current.as_raw_handle(),
             TOKEN_ALL_ACCESS,
@@ -120,11 +131,12 @@ fn token(low: bool) -> io::Result<OwnedHandle> {
             &mut duplicate,
         )
     })?;
-    let duplicate = owned(duplicate)?;
-    // A restricted version of our own primary token needs no assign-primary
-    // privilege. Both controls lose privileges identically; only Low changes IL.
+    let duplicate = acquired("DuplicateTokenEx", duplicate)?;
+    // A restricted own token removes only the assign-primary requirement,
+    // not the quota requirement of CreateProcessAsUserW. Select the API from
+    // the CALLER's actual privileges below; both IL controls use that same API.
     let mut restricted = ptr::null_mut();
-    check(unsafe {
+    check("CreateRestrictedToken", unsafe {
         CreateRestrictedToken(
             duplicate.as_raw_handle(),
             DISABLE_MAX_PRIVILEGE,
@@ -137,17 +149,19 @@ fn token(low: bool) -> io::Result<OwnedHandle> {
             &mut restricted,
         )
     })?;
-    let restricted = owned(restricted)?;
+    let restricted = acquired("CreateRestrictedToken", restricted)?;
     if low {
         let mut sid = ptr::null_mut();
-        check(unsafe { ConvertStringSidToSidW(wide("S-1-16-4096").as_ptr(), &mut sid) })?;
+        check("ConvertStringSidToSidW", unsafe {
+            ConvertStringSidToSidW(wide("S-1-16-4096").as_ptr(), &mut sid)
+        })?;
         let label = TOKEN_MANDATORY_LABEL {
             Label: SID_AND_ATTRIBUTES {
                 Sid: sid,
                 Attributes: INTEGRITY_GROUP,
             },
         };
-        let result = check(unsafe {
+        let result = check("SetTokenInformation", unsafe {
             SetTokenInformation(
                 restricted.as_raw_handle(),
                 TokenIntegrityLevel,
@@ -161,6 +175,103 @@ fn token(low: bool) -> io::Result<OwnedHandle> {
         result?;
     }
     Ok(restricted)
+}
+
+#[derive(Clone, Copy)]
+enum Launcher {
+    WithToken,
+    AsUser,
+}
+impl Launcher {
+    fn name(self) -> &'static str {
+        match self {
+            Self::WithToken => "CreateProcessWithTokenW",
+            Self::AsUser => "CreateProcessAsUserW",
+        }
+    }
+    fn current() -> io::Result<Self> {
+        let mut handle = ptr::null_mut();
+        check("OpenProcessToken(launcher)", unsafe {
+            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut handle)
+        })?;
+        let token = acquired("OpenProcessToken(launcher)", handle)?;
+        let quota = privilege(&token, "SeIncreaseQuotaPrivilege")?;
+        let impersonate = privilege(&token, "SeImpersonatePrivilege")?;
+        println!("native caller privileges quota={quota:?} impersonate={impersonate:?}");
+        // WithToken uses the already-enabled impersonation privilege and needs
+        // no quota privilege or profile load. No privilege is added/enabled here.
+        if impersonate.1 {
+            Ok(Self::WithToken)
+        } else if quota.0 {
+            Ok(Self::AsUser)
+        } else {
+            Err(io::Error::other("Select process launcher: neither enabled SeImpersonatePrivilege nor present SeIncreaseQuotaPrivilege; refusing without launch"))
+        }
+    }
+}
+fn privilege(token: &OwnedHandle, name: &str) -> io::Result<(bool, bool)> {
+    let mut expected: LUID = unsafe { mem::zeroed() };
+    check("LookupPrivilegeValueW", unsafe {
+        LookupPrivilegeValueW(ptr::null(), wide(name).as_ptr(), &mut expected)
+    })?;
+    let mut bytes = 0;
+    unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenPrivileges,
+            ptr::null_mut(),
+            0,
+            &mut bytes,
+        );
+    }
+    if bytes == 0 {
+        return Err(context(
+            "GetTokenInformation(TokenPrivileges,size)",
+            io::Error::last_os_error(),
+        ));
+    }
+    if bytes < mem::size_of::<TOKEN_PRIVILEGES>() as u32 || bytes > 65536 {
+        return Err(io::Error::other(
+            "GetTokenInformation(TokenPrivileges): invalid native size",
+        ));
+    }
+    let mut buffer = vec![0u64; (bytes as usize).div_ceil(8)];
+    check("GetTokenInformation(TokenPrivileges)", unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenPrivileges,
+            buffer.as_mut_ptr().cast(),
+            bytes,
+            &mut bytes,
+        )
+    })?;
+    let count = unsafe { (*(buffer.as_ptr().cast::<TOKEN_PRIVILEGES>())).PrivilegeCount } as usize;
+    let offset = mem::offset_of!(TOKEN_PRIVILEGES, Privileges);
+    if count > 128 || offset + count * mem::size_of::<LUID_AND_ATTRIBUTES>() > bytes as usize {
+        return Err(io::Error::other(
+            "GetTokenInformation(TokenPrivileges): invalid native count",
+        ));
+    }
+    let entries = unsafe {
+        std::slice::from_raw_parts(
+            buffer
+                .as_ptr()
+                .cast::<u8>()
+                .add(offset)
+                .cast::<LUID_AND_ATTRIBUTES>(),
+            count,
+        )
+    };
+    Ok(entries
+        .iter()
+        .find(|entry| {
+            entry.Luid.LowPart == expected.LowPart
+                && entry.Luid.HighPart == expected.HighPart
+                && entry.Attributes & SE_PRIVILEGE_REMOVED == 0
+        })
+        .map_or((false, false), |entry| {
+            (true, entry.Attributes & SE_PRIVILEGE_ENABLED != 0)
+        }))
 }
 
 struct Attributes {
@@ -177,9 +288,11 @@ impl Attributes {
             storage: vec![0; bytes.div_ceil(size_of::<usize>())],
             initialized: false,
         };
-        check(unsafe { InitializeProcThreadAttributeList(this.pointer(), 1, 0, &mut bytes) })?;
+        check("InitializeProcThreadAttributeList", unsafe {
+            InitializeProcThreadAttributeList(this.pointer(), 1, 0, &mut bytes)
+        })?;
         this.initialized = true;
-        check(unsafe {
+        check("UpdateProcThreadAttribute", unsafe {
             UpdateProcThreadAttribute(
                 this.pointer(),
                 0,
@@ -210,7 +323,7 @@ fn process_birth(process: &OwnedHandle) -> io::Result<u64> {
         dwLowDateTime: 0,
         dwHighDateTime: 0,
     }; 4];
-    check(unsafe {
+    check("GetProcessTimes", unsafe {
         GetProcessTimes(
             process.as_raw_handle(),
             &mut times[0],
@@ -221,7 +334,7 @@ fn process_birth(process: &OwnedHandle) -> io::Result<u64> {
     })?;
     let birth = (u64::from(times[0].dwHighDateTime) << 32) | u64::from(times[0].dwLowDateTime);
     if birth == 0 {
-        return Err(io::ErrorKind::InvalidData.into());
+        return Err(io::Error::other("GetProcessTimes: zero creation time"));
     }
     Ok(birth)
 }
@@ -298,12 +411,15 @@ fn read_available(handle: &OwnedHandle, output: &mut Vec<u8>) -> io::Result<bool
         if unsafe { GetLastError() } == ERROR_BROKEN_PIPE {
             return Ok(true);
         }
-        return Err(io::Error::last_os_error());
+        return Err(context(
+            "PeekNamedPipe(capture)",
+            io::Error::last_os_error(),
+        ));
     }
     if available != 0 {
         let mut bytes = [0u8; 2048];
         let mut count = 0;
-        check(unsafe {
+        check("ReadFile", unsafe {
             ReadFile(
                 handle.as_raw_handle(),
                 bytes.as_mut_ptr(),
@@ -345,14 +461,19 @@ fn cleanup(resources: Resources, mut output: Vec<u8>) -> io::Result<Capture> {
         if unsafe { WaitForSingleObject(resources.process.as_raw_handle(), INFINITE) }
             != WAIT_OBJECT_0
         {
-            let error = io::Error::last_os_error();
+            let error = context(
+                "WaitForSingleObject(original process)",
+                io::Error::last_os_error(),
+            );
             mem::forget(resources);
             return Err(error);
         }
     }
     let result = (|| {
         let mut exit = 0;
-        check(unsafe { GetExitCodeProcess(resources.process.as_raw_handle(), &mut exit) })?;
+        check("GetExitCodeProcess", unsafe {
+            GetExitCodeProcess(resources.process.as_raw_handle(), &mut exit)
+        })?;
         let until = Instant::now() + Duration::from_secs(2);
         while !read_available(&resources.output, &mut output)? {
             if Instant::now() >= until {
@@ -387,20 +508,27 @@ impl Child {
         })?
     }
     fn start_original(low: bool, mode: &str, names: &[String]) -> io::Result<Self> {
-        let cleanup = Cleanup::new()?;
-        let own = windows::own_facts().ok_or(io::ErrorKind::PermissionDenied)?;
+        let cleanup = Cleanup::new().map_err(|error| context("spawn cleanup worker", error))?;
+        let own = windows::own_facts()
+            .ok_or_else(|| io::Error::other("windows::own_facts: native identity unavailable"))?;
         let descriptor = Descriptor::new(&format!(
             "D:P(A;;GA;;;{})S:(ML;;NW;;;LW)",
             sid_text(&own.user)?
         ))?;
         let attributes = descriptor.attributes();
         let (mut reader, mut writer) = (ptr::null_mut(), ptr::null_mut());
-        check(unsafe { CreatePipe(&mut reader, &mut writer, &attributes, 4096) })?;
-        let reader = owned(reader)?;
-        let writer = owned(writer)?;
-        check(unsafe { SetHandleInformation(reader.as_raw_handle(), HANDLE_FLAG_INHERIT, 0) })?;
-        let stop = owned(unsafe { CreateEventW(&attributes, 1, 0, ptr::null()) })?;
-        let input = owned(unsafe {
+        check("CreatePipe", unsafe {
+            CreatePipe(&mut reader, &mut writer, &attributes, 4096)
+        })?;
+        let reader = acquired("CreatePipe(read)", reader)?;
+        let writer = acquired("CreatePipe(write)", writer)?;
+        check("SetHandleInformation", unsafe {
+            SetHandleInformation(reader.as_raw_handle(), HANDLE_FLAG_INHERIT, 0)
+        })?;
+        let stop = acquired("CreateEventW", unsafe {
+            CreateEventW(&attributes, 1, 0, ptr::null())
+        })?;
+        let input = acquired("CreateFileW", unsafe {
             CreateFileW(
                 wide("NUL").as_ptr(),
                 GENERIC_READ,
@@ -411,10 +539,12 @@ impl Child {
                 ptr::null_mut(),
             )
         })?;
-        let job = owned(unsafe { CreateJobObjectW(ptr::null(), ptr::null()) })?;
+        let job = acquired("CreateJobObjectW", unsafe {
+            CreateJobObjectW(ptr::null(), ptr::null())
+        })?;
         let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { mem::zeroed() };
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        check(unsafe {
+        check("SetInformationJobObject", unsafe {
             SetInformationJobObject(
                 job.as_raw_handle(),
                 JobObjectExtendedLimitInformation,
@@ -435,7 +565,8 @@ impl Child {
         startup.StartupInfo.hStdOutput = writer.as_raw_handle();
         startup.StartupInfo.hStdError = writer.as_raw_handle();
         startup.lpAttributeList = list.pointer();
-        let executable = env::current_exe()?;
+        let executable =
+            env::current_exe().map_err(|error| context("GetModuleFileNameW/current_exe", error))?;
         let mut line = wide(format!(
             "\"{}\" --ignored --exact {} --nocapture --test-threads=1",
             executable.display(),
@@ -464,26 +595,50 @@ impl Child {
         block.push(0);
         let token = token(low)?;
         let mut info: PROCESS_INFORMATION = unsafe { mem::zeroed() };
-        check(unsafe {
-            CreateProcessAsUserW(
-                token.as_raw_handle(),
-                wide(&executable).as_ptr(),
-                line.as_mut_ptr(),
-                ptr::null(),
-                ptr::null(),
-                1,
-                CREATE_NO_WINDOW
-                    | CREATE_SUSPENDED
-                    | CREATE_UNICODE_ENVIRONMENT
-                    | EXTENDED_STARTUPINFO_PRESENT,
-                block.as_ptr().cast(),
-                ptr::null(),
-                &startup.StartupInfo,
-                &mut info,
-            )
-        })?;
-        let process = owned(info.hProcess)?;
-        let thread = owned(info.hThread)?;
+        let launcher = Launcher::current()?;
+        println!("original native peer launcher={}", launcher.name());
+        let flags = CREATE_NO_WINDOW
+            | CREATE_SUSPENDED
+            | CREATE_UNICODE_ENVIRONMENT
+            | EXTENDED_STARTUPINFO_PRESENT;
+        if line.len() > 1024 {
+            return Err(io::Error::other(
+                "CreateProcessWithTokenW command line exceeds 1024 UTF-16 units",
+            ));
+        }
+        let ok = match launcher {
+            Launcher::WithToken => unsafe {
+                CreateProcessWithTokenW(
+                    token.as_raw_handle(),
+                    0,
+                    wide(&executable).as_ptr(),
+                    line.as_mut_ptr(),
+                    flags,
+                    block.as_ptr().cast(),
+                    ptr::null(),
+                    &startup.StartupInfo,
+                    &mut info,
+                )
+            },
+            Launcher::AsUser => unsafe {
+                CreateProcessAsUserW(
+                    token.as_raw_handle(),
+                    wide(&executable).as_ptr(),
+                    line.as_mut_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    1,
+                    flags,
+                    block.as_ptr().cast(),
+                    ptr::null(),
+                    &startup.StartupInfo,
+                    &mut info,
+                )
+            },
+        };
+        check(launcher.name(), ok)?;
+        let process = acquired(launcher.name(), info.hProcess)?;
+        let thread = acquired(launcher.name(), info.hThread)?;
         let mut child = Self {
             resources: Some(Resources {
                 process,
@@ -497,7 +652,7 @@ impl Child {
             birth: 0,
         };
         let resources = child.resources.as_ref().unwrap();
-        let assigned = check(unsafe {
+        let assigned = check("AssignProcessToJobObject", unsafe {
             AssignProcessToJobObject(
                 resources.job.as_raw_handle(),
                 resources.process.as_raw_handle(),
@@ -508,7 +663,7 @@ impl Child {
         let resumed = created.and_then(|birth| {
             child.birth = birth;
             if unsafe { ResumeThread(thread.as_raw_handle()) } == u32::MAX {
-                Err(io::Error::last_os_error())
+                Err(context("ResumeThread", io::Error::last_os_error()))
             } else {
                 Ok(())
             }
@@ -593,7 +748,7 @@ pub fn assert_pipes_absent(names: &[String]) {
     }
 }
 fn pipe(name: &str, mode: &str) -> io::Result<Pipe> {
-    let handle = owned(unsafe {
+    let handle = acquired("CreateNamedPipeW", unsafe {
         CreateNamedPipeW(
             wide(format!(r"\\.\pipe\{name}")).as_ptr(),
             PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE | WRITE_DAC,
@@ -609,7 +764,7 @@ fn pipe(name: &str, mode: &str) -> io::Result<Pipe> {
         ConnectNamedPipe(handle.as_raw_handle(), ptr::null_mut());
     }
     let busy = if mode == "busy" {
-        Some(client(name)?)
+        Some(client(name).map_err(|error| context("CreateFileW(busy control)", error))?)
     } else {
         None
     };
@@ -621,7 +776,7 @@ fn pipe(name: &str, mode: &str) -> io::Result<Pipe> {
         )?;
         let denied = Descriptor::new(&format!("D:P(D;;GA;;;{sid})"))?;
         let (mut present, mut defaulted, mut acl) = (0, 0, ptr::null_mut());
-        check(unsafe {
+        check("GetSecurityDescriptorDacl", unsafe {
             GetSecurityDescriptorDacl(denied.0, &mut present, &mut acl, &mut defaulted)
         })?;
         let code = unsafe {
@@ -636,7 +791,10 @@ fn pipe(name: &str, mode: &str) -> io::Result<Pipe> {
             )
         };
         if code != ERROR_SUCCESS {
-            return Err(io::Error::from_raw_os_error(code as i32));
+            return Err(context(
+                "SetSecurityInfo",
+                io::Error::from_raw_os_error(code as i32),
+            ));
         }
     }
     Ok(Pipe {
@@ -666,6 +824,16 @@ fn controlled_native_pipe_child() {
             .unwrap() as HANDLE,
     )
     .unwrap();
+    let mut stop_flags = 0;
+    check("GetHandleInformation(inherited stop event)", unsafe {
+        GetHandleInformation(stop.as_raw_handle(), &mut stop_flags)
+    })
+    .unwrap();
+    assert_eq!(
+        unsafe { WaitForSingleObject(stop.as_raw_handle(), 0) },
+        WAIT_TIMEOUT,
+        "WaitForSingleObject: inherited stop event must be valid and initially unsignalled"
+    );
     let mut pipes: Vec<_> = names.iter().map(|n| pipe(n, &mode).unwrap()).collect();
     println!("{READY}{{\"ready\":true}}");
     io::stdout().flush().unwrap();
@@ -689,7 +857,7 @@ fn controlled_native_pipe_child() {
                     match code {
                         ERROR_PIPE_CONNECTED | ERROR_NO_DATA => pipe.connected = true,
                         ERROR_PIPE_LISTENING => {}
-                        other => panic!("owned pipe connect failed: {other}"),
+                        other => panic!("ConnectNamedPipe(owned control): {other}"),
                     }
                     continue;
                 }
@@ -717,7 +885,7 @@ fn controlled_native_pipe_child() {
                             pipe.input.clear();
                             continue;
                         }
-                        other => panic!("owned pipe read failed: {other}"),
+                        other => panic!("ReadFile(owned control): {other}"),
                     }
                 }
                 if count == 0 {
@@ -752,7 +920,7 @@ fn controlled_native_pipe_child() {
                         let mut reply = serde_json::to_vec(&hello).unwrap();
                         reply.push(b'\n');
                         let mut written = 0;
-                        check(unsafe {
+                        check("WriteFile", unsafe {
                             WriteFile(
                                 pipe.handle.as_raw_handle(),
                                 reply.as_ptr(),

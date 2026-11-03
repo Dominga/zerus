@@ -347,6 +347,8 @@ export interface Details {
   resume_message_can_send: boolean;
   fork_supported?: boolean;
   fork_reason?: string;
+  /** The conversation a fork came from; `null` when this is no fork, absent from an older hgs. */
+  fork_parent_id?: string | null;
   allowed_actions: string[] | null;
   action_reasons: Record<string, string>;
   /** The host can interrupt this turn (Stop). */

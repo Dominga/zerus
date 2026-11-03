@@ -2543,6 +2543,25 @@ unknown** and never enables another removal in that operation. Files can still b
 inspected. The CLI preserves nonzero failure exits and stderr while adding a
 request-bound JSON outcome for clients that request `--json`.
 
+Git stops tracking a worktree before it deletes the files, so a removal can fail
+halfway, for example on a readonly ignored folder: Git forgets the worktree while
+some files remain. Before every `git worktree remove`, the owning computer
+reserves a private removal record. A confirmed outcome drops it, and an
+interruption or failure keeps it. A folder that Git no longer tracks but that
+still exists then appears in the repository review as a **leftover**
+(`worktree-leftovers-v1`), with a fresh bounded listing of the remaining files,
+the retained branch and current processes or sessions. A missing Git
+registration is never treated as proof of deletion, and the removal is never
+retried. **Keep folder, forget record** (`hgs worktrees keep-folder`) checks the
+reviewed leftover again under the repository lock and drops only its record;
+the folder, its files and the branch stay. A record resolves by itself once its
+folder is gone, or once a fresh worktree list taken under the repository lock shows
+that Git tracks the worktree again. A leftover whose repository is gone is listed
+by `hgs worktrees leftovers` and can still be kept; a record whose repository and
+folder are both gone resolves. At most 512 unresolved records
+are kept per computer; at that bound new removals are refused with a visible
+reason, and no record is evicted. Automatic cleanup never acts on these records.
+
 Confirmation lists the folders, the ignored data deleted with them (such as build
 output) and any branches that will be deleted. Each removal then repeats the
 review under the repository lock used by creation, compares the reviewed

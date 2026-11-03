@@ -620,3 +620,199 @@ fn probe_b_fenced_a_crashed_capture_is_redone_before_any_typing() {
     assert_eq!(later.status().code, "draft_capture_captured");
     assert_eq!(next_texts(&s), vec!["before".to_owned()]);
 }
+
+// Windows CI on #1230: the private reader refuses read limits above 16 MiB,
+// so every capture there failed at its own leaf reads. The container is kept
+// in parts of at most 16 MiB, each read with its exact size.
+
+#[test]
+fn a_container_over_one_part_is_kept_in_exact_parts_and_reopens() {
+    let s = Scratch::new();
+    // Seventeen near-1 MiB manifests: past one part, within every cap.
+    let body = vec![b'x'; MANIFEST - 64];
+    for n in 0..17 {
+        let folder = s
+            .next()
+            .join(sha256(format!("codex/sample/{n}").as_bytes()));
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("draft.json"), &body).unwrap();
+    }
+    let capture = s.capture();
+    assert_eq!(
+        capture.prepare(),
+        Gate {
+            writes: true,
+            import: true
+        }
+    );
+    assert_eq!(capture.status().code, "draft_capture_captured");
+    let first = fs::metadata(s.slot().join("original.bin")).unwrap().len();
+    let second = fs::metadata(s.slot().join("original-1.bin")).unwrap().len();
+    assert_eq!(first as usize, PART);
+    assert_eq!(first + second, 17 * body.len() as u64);
+    assert!(!s.slot().join("original-2.bin").exists());
+    // Restarted: the receipt reopens and every entry is exact.
+    let again = s.capture();
+    assert_eq!(
+        again.prepare(),
+        Gate {
+            writes: true,
+            import: true
+        }
+    );
+    let seed: Seed = read_json(&s.slot().join("identity.json")).unwrap().unwrap();
+    let snapshot = Snapshot::open(&s.slot(), &seed).unwrap();
+    assert_eq!(snapshot.index.entries.len(), 17);
+    for entry in &snapshot.index.entries {
+        assert_eq!(snapshot.bytes(entry), body.as_slice());
+    }
+}
+
+#[test]
+fn a_single_part_receipt_keeps_its_earlier_format() {
+    let s = Scratch::new();
+    draft(&s.next(), "codex/sample/a", "text", b"abc", true);
+    assert!(s.capture().prepare().import);
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(s.slot().join("receipt.json")).unwrap()).unwrap();
+    assert!(receipt.get("more").is_none(), "{receipt}");
+    assert!(!s.slot().join("original-1.bin").exists());
+}
+
+fn failed_v1(s: &Scratch, reason: &str) {
+    let seed = seed_without_outcome(s);
+    // The defective attempt's own leftovers.
+    fs::write(s.slot().join("index.json"), b"{}").unwrap();
+    let failed = Failed {
+        version: 1,
+        capture_id: seed.capture_id,
+        reason: reason.into(),
+    };
+    create_json(&s.slot().join("failed.json"), &failed).unwrap();
+}
+
+fn on_windows(value: bool) {
+    WINDOWS.with(|windows| windows.set(value));
+}
+
+#[test]
+fn only_a_windows_v1_unreadable_failure_is_superseded() {
+    let failed = |version, reason: &str| Failed {
+        version,
+        capture_id: uuid::Uuid::new_v4().to_string(),
+        reason: reason.into(),
+    };
+    assert!(superseded(&failed(1, "unreadable"), true));
+    assert!(!superseded(&failed(1, "unreadable"), false));
+    assert!(!superseded(&failed(1, "too_large"), true));
+    assert!(!superseded(&failed(1, "changed"), true));
+    assert!(!superseded(&failed(2, "unreadable"), true));
+}
+
+#[test]
+fn the_windows_limit_failure_is_captured_again_and_kept_for_review() {
+    let s = Scratch::new();
+    draft(&s.next(), "codex/sample/a", "before", b"abc", true);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    failed_v1(&s, "unreadable");
+    on_windows(true);
+    let capture = s.capture();
+    let gate = capture.prepare();
+    on_windows(false);
+    assert_eq!(
+        gate,
+        Gate {
+            writes: true,
+            import: true
+        }
+    );
+    assert_eq!(capture.status().code, "draft_capture_captured");
+    assert_eq!(next_texts(&s), vec!["before".to_owned()]);
+    let kept = s.slot().join("superseded-v1");
+    assert!(kept.join("failed.json").exists() && kept.join("index.json").exists());
+    assert!(!s.slot().join("failed.json").exists());
+}
+
+#[test]
+fn drafts_typed_after_the_windows_limit_failure_are_never_called_captured() {
+    let s = Scratch::new();
+    draft(&s.next(), "codex/sample/a", "before", b"abc", true);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    failed_v1(&s, "unreadable");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    // Typing continued after that recorded failure.
+    let plain = drafts::DraftStore::open(s.next());
+    assert_eq!(
+        wait(|done| plain.save_durable("codex/sample/a", text("typed later"), done)),
+        Ok(())
+    );
+    drop(plain);
+    on_windows(true);
+    let capture = s.capture();
+    let gate = capture.prepare();
+    on_windows(false);
+    assert!(gate.writes && gate.import);
+    assert_eq!(capture.status().code, "draft_capture_next_earlier_run");
+    assert!(next_texts(&s).is_empty());
+}
+
+#[test]
+fn every_other_failure_stays_permanent() {
+    for (windows, version, reason) in [
+        (false, 1, "unreadable"),
+        (true, 1, "too_large"),
+        (true, 2, "unreadable"),
+    ] {
+        let s = Scratch::new();
+        draft(&s.next(), "codex/sample/a", "before", b"abc", true);
+        let seed = seed_without_outcome(&s);
+        let failed = Failed {
+            version,
+            capture_id: seed.capture_id,
+            reason: reason.into(),
+        };
+        create_json(&s.slot().join("failed.json"), &failed).unwrap();
+        on_windows(windows);
+        let capture = s.capture();
+        let gate = capture.prepare();
+        on_windows(false);
+        assert_eq!(
+            gate,
+            Gate {
+                writes: true,
+                import: false
+            },
+            "{windows} {version} {reason}"
+        );
+        assert!(s.slot().join("failed.json").exists());
+        assert!(!s.slot().join("receipt.json").exists());
+        assert!(!s.slot().join("superseded-v1").exists());
+    }
+}
+
+#[test]
+fn a_failure_written_now_is_never_superseded_on_windows() {
+    let s = Scratch::new();
+    // Next's root is a plain file: its listing fails, so the capture does.
+    fs::write(s.next(), b"").unwrap();
+    let capture = s.capture();
+    assert!(!capture.prepare().import);
+    assert_eq!(capture.status().code, "draft_capture_unreadable");
+    let failed: Failed = read_json(&s.slot().join("failed.json")).unwrap().unwrap();
+    assert_eq!(failed.version, 2);
+    on_windows(true);
+    let again = s.capture();
+    let gate = again.prepare();
+    on_windows(false);
+    assert_eq!(
+        gate,
+        Gate {
+            writes: true,
+            import: false
+        }
+    );
+    assert!(
+        !s.slot().join("superseded-v1").exists(),
+        "a version 2 failure stays"
+    );
+}

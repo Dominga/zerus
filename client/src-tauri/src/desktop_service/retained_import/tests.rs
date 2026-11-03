@@ -74,6 +74,39 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn ordinary_owned_qt_permissions_publish_a_report_without_changing_the_source() {
+    use std::os::unix::fs::MetadataExt;
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    let f = Fixture::new("success");
+    let path = f.root.join("qt.ini");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    let before = fs::metadata(&path).unwrap();
+    let original = fs::read(&path).unwrap();
+    assert_eq!(f.run(false), Ok(()));
+    assert_eq!(f.report.status()["phase"], "published");
+    assert_eq!(f.attempts(), 1);
+    let after = fs::metadata(&path).unwrap();
+    assert_eq!(
+        (
+            before.dev(),
+            before.ino(),
+            before.mode(),
+            before.uid(),
+            before.nlink()
+        ),
+        (
+            after.dev(),
+            after.ino(),
+            after.mode(),
+            after.uid(),
+            after.nlink()
+        )
+    );
+    assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+    assert_eq!(fs::read(&path).unwrap(), original);
+}
+
+#[test]
 fn native_report_publishes_once_and_later_starts_only_inspect_the_original_id() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     let f = Fixture::new("success");

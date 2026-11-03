@@ -16,6 +16,13 @@ disk_checkpoint() {
 
 core_tests() {
     presence_tests
+    if [ "$platform" = windows ]; then
+        # Explicit hosted parent only; never run the owned child entry as a suite.
+        cargo +1.99.1 test --locked --manifest-path client/core/Cargo.toml \
+            --test windows_frontend_server -- \
+            --ignored --exact hosted_same_user_frontend_impostors_are_unknown \
+            --nocapture --test-threads=1
+    fi
     cargo +1.99.1 test --locked --manifest-path client/core/Cargo.toml --no-fail-fast
     if [ "$platform" = macos ]; then
         cargo +1.99.1 clippy --locked --manifest-path client/core/Cargo.toml \

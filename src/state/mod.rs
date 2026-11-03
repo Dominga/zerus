@@ -90,6 +90,9 @@ mod usage;
 mod workspace;
 mod git_status;
 pub(crate) mod repositories;
+mod launch_observation;
+#[allow(unused_imports)] // Used by the launch actor slice.
+pub(crate) use launch_observation::observe as observe_launch;
 mod worktrees;
 mod worktree_requests;
 mod worktree_cleanup;

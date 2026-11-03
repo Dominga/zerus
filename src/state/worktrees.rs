@@ -536,9 +536,9 @@ thread_local! {
     /// Runs after the checkout's final identity checks, just before Git
     /// starts: the window where only a descriptor-bound Git is safe.
     pub(super) static BEFORE_OWNED_CHECKOUT: Hook = const { std::cell::RefCell::new(None) };
-    /// Runs after the reset's final identity checks, just before Git starts:
-    /// the second window where only descriptor-bound Git is safe.
-    pub(super) static BEFORE_OWNED_RESET: Hook = const { std::cell::RefCell::new(None) };
+    /// Runs after the tree checkout's final identity checks, just before Git
+    /// starts: the second window where only descriptor-bound Git is safe.
+    pub(super) static BEFORE_OWNED_TREE: Hook = const { std::cell::RefCell::new(None) };
 }
 #[cfg(all(test, unix))]
 fn hook(slot: &'static std::thread::LocalKey<Hook>) {
@@ -577,29 +577,34 @@ fn owned_metadata(
     Ok(entry)
 }
 
-/// Whether `git version` output names a Git with `git hook run` (2.36).
+/// Whether `git version` output names a Git whose `worktree add
+/// --no-checkout` starts no child through an absolute Git directory: from
+/// 2.44 it creates the new worktree's HEAD in-process (2.36-2.43 run `git
+/// symbolic-ref` with the gitfile's real path). It also has `git hook run`.
 #[cfg(unix)]
-fn runs_hooks(version: &str) -> bool {
+fn owns_checkouts(version: &str) -> bool {
     let mut parts = version
         .strip_prefix("git version ")
         .unwrap_or("")
         .split(|c: char| !c.is_ascii_digit())
         .map(|part| part.parse::<u32>().ok());
-    matches!((parts.next(), parts.next()), (Some(Some(major)), Some(Some(minor))) if (major, minor) >= (2, 36))
+    matches!((parts.next(), parts.next()), (Some(Some(major)), Some(Some(minor))) if (major, minor) >= (2, 44))
 }
 #[cfg(all(test, unix))]
 #[test]
-fn only_git_with_hook_run_owns_a_checkout() {
+fn only_git_that_adds_worktrees_in_process_owns_a_checkout() {
     for (version, runs) in [
         ("git version 2.56.0", true),
-        ("git version 2.36.0", true),
+        ("git version 2.44.0", true),
+        ("git version 2.43.7", false),
+        ("git version 2.36.0", false),
         ("git version 3.0.1 (Apple Git-200)", true),
         ("git version 2.35.8", false),
         ("git version 2.9.5", false),
         ("git version unknown", false),
         ("", false),
     ] {
-        assert_eq!(runs_hooks(version), runs, "{version}");
+        assert_eq!(owns_checkouts(version), runs, "{version}");
     }
 }
 
@@ -727,11 +732,12 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
         Some(_) => Some(super::repositories::directory::Directory::open(&common)?),
         None => None,
     };
-    // The owned checkout runs Git's post-checkout hook through `git hook run`
-    // (Git 2.36). Older Git is refused here, before any effect.
+    // Before Git 2.44, `worktree add --no-checkout` still starts a child
+    // through the gitfile's absolute real path; older Git is refused here,
+    // before any effect.
     #[cfg(unix)]
-    if owned.is_some() && !runs_hooks(&read(&["version"])?) {
-        return Err("Owned worktree creation needs Git 2.36 or later.".into());
+    if owned.is_some() && !owns_checkouts(&read(&["version"])?) {
+        return Err("Owned worktree creation needs Git 2.44 or later.".into());
     }
     let branch = required("--branch")?;
     if branch.starts_with('-') {
@@ -872,16 +878,28 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
             // Pin the metadata entry `worktree add` just made, by descriptor;
             // the checkout and Own write only through this pinned object.
             let entry = owned_metadata(pinned, common_pin, branch)?;
-            // The checkout `worktree add` itself runs (reset --hard, then the
-            // post-checkout hook), with GIT_DIR and GIT_COMMON_DIR bound to the
-            // pinned entry and common directory, inherited by every child.
+            // The checkout `worktree add` itself would run, with GIT_DIR and
+            // GIT_COMMON_DIR bound to the pinned entry and common directory.
+            // Git's files ref backend ignores that binding for a linked
+            // worktree (it re-reads the entry's `commondir` and takes its real
+            // path), so the tree is read with `read-tree`, which updates no
+            // ref: only the index (through the entry) and the work tree. The
+            // new branch already names `head`, which HEAD follows.
             let bind = super::repositories::Bind {
                 git_dir: Some(entry.descriptor()),
                 common_dir: Some(common_pin.descriptor()),
             };
             let zero = "0".repeat(head.len());
             for args in [
-                &["--work-tree=.", "reset", "--hard", "--no-recurse-submodules", "--quiet"][..],
+                &[
+                    "--work-tree=.",
+                    "read-tree",
+                    "--reset",
+                    "-u",
+                    "--no-recurse-submodules",
+                    "--quiet",
+                    head.as_str(),
+                ][..],
                 &[
                     "--work-tree=.",
                     "hook",
@@ -898,8 +916,8 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
                 common_pin.verify()?;
                 pinned.verify()?;
                 #[cfg(test)]
-                if args.contains(&"reset") {
-                    hook(&BEFORE_OWNED_RESET);
+                if args.contains(&"read-tree") {
+                    hook(&BEFORE_OWNED_TREE);
                 }
                 owned.git_sharing(pinned, &[common_pin, &entry], bind, args, left())?;
             }

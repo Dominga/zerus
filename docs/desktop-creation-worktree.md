@@ -74,12 +74,20 @@ a pinned directory object.
   serving it. `worktree add` would start its own checkout child (`reset
   --hard`) with an absolute `GIT_DIR`, so the owned path runs it with
   `--no-checkout`, which creates only the branch, the metadata entry and the
-  gitfile. After pinning that entry, it runs the same checkout itself: `reset
-  --hard --no-recurse-submodules`, then the `post-checkout` hook through `git
-  hook run`. Both run with `GIT_DIR` and `GIT_COMMON_DIR` bound to the pinned
-  entry and common directory as `/proc/self/fd/N`, and every child Git starts
-  inherits them. This needs Git 2.36 or later; older Git is refused before any
-  effect. The checkout forces `worktree.useRelativePaths=false`, so the
+  gitfile. After pinning that entry, it checks the tree out itself: `read-tree
+  --reset -u --no-recurse-submodules <head>`, then the `post-checkout` hook
+  through `git hook run`. Both run with `GIT_DIR` and `GIT_COMMON_DIR` bound to
+  the pinned entry and common directory as `/proc/self/fd/N`. The binding
+  does not cover refs: for a linked worktree, Git's files ref backend re-reads
+  the entry's `commondir` and resolves its real path at startup, so a swap
+  during a command could redirect a ref write. The checkout therefore updates
+  no ref (unlike `reset --hard`); `read-tree` writes only the index, through
+  the entry, and the work tree. Hooks and filters are the repository's own
+  code: Git commands they start inherit the binding but resolve refs the same
+  way, so a ref-writing hook is not bound. This needs Git 2.44 or later, the
+  first whose `worktree add` creates the new HEAD in-process (2.36 to 2.43
+  still run `git symbolic-ref` through the gitfile's real path); older Git is
+  refused before any effect. The checkout forces `worktree.useRelativePaths=false`, so the
   links Own checks are absolute. Because the path is `.`, Git names the
   linked-worktree metadata entry `-` (then `-1`, ...); nothing derives meaning
   from that name.

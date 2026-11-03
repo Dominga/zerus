@@ -57,5 +57,25 @@ Transport tests use the real native cache and original Child binding against a
 private fake service. Existing repository CLI tests exercise actual Git in
 private profiles. These controls are separate evidence; they do not establish
 installed canonical frontend authority or full creation lifecycle acceptance.
+
+Repository workers must never re-execute a unit-test image. Libtest interprets
+worker arguments such as `clone` as test filters instead of entering the CLI
+dispatcher; re-execution can therefore recurse. Unit images now refuse the
+worker entry globally, independent of any individual test's guard. Production
+also rejects nested worker contexts and a Git executable matching its own image.
+
+Run compiled repository-worker tests and mutation probes on Linux through
+`python3 tests/bounded_process.py --seconds 60 --max-processes 32 -- TEST_BINARY FILTER`.
+Compile separately. This private subreaper retains kernel pidfds for its own
+descendants, including new sessions and orphaned grandchildren, freezes parents
+before cleanup, kills and reaps the original subtree, and fails on timeout or
+process-budget overflow. It never selects processes by name, path or shared
+process group. CLI fixtures additionally require actual CLI help, so a libtest
+image cannot be selected as `HGS_TEST_BIN`. An interrupted test's parent exiting
+is not evidence that its descendants were cleaned up.
+Temporary signal permission failures retain the original pidfd and are retried
+within the same cleanup deadline. If cleanup remains unconfirmed, the fixture
+fails with a bounded PID/birth record; permission denial never counts as exit.
+
 Worktree creation, placement, launch and remote creation remain separate leaves
 of the creation migration. The desktop-service switch remains default-off.

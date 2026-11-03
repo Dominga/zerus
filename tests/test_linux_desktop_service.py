@@ -216,6 +216,39 @@ class LinuxDesktopService(unittest.TestCase):
         self.instance().install(refresh=True)
         self.assertEqual(self.instance().activation_result(request), result)
 
+    def test_real_helper_cutover_keeps_process_only_unit_and_exact_manager_scope(self):
+        # Drive the production Installer through both mode transitions. Only
+        # native caller/Grant/hold and manager replies are private fixtures;
+        # the helper writes the actual unit path and selects its manager argv.
+        self.instance().install()
+        self.manager.calls.clear()
+        result = self.instance("background").install(activation_id=str(uuid.uuid4()))
+        self.assertEqual(result["phase"], "settled")
+        for mode in ("background", "passive"):
+            if mode == "passive":
+                self.instance(mode).install()
+            self.assertEqual(self.instance().status()["selected_mode"], mode)
+            definition = self.destination.read_text()
+            self.assertIn("\nKillMode=process\n", definition)
+            self.assertNotIn("KillMode=control-group", definition)
+        manager = [args for args, _ in self.manager.calls if args[0] == "systemctl"]
+        self.assertEqual(sum(args[2] == "restart" for args in manager), 2)
+        for args in manager:
+            self.assertEqual(args[:2], ["systemctl", "--user"])
+            if args[2] == "show":
+                self.assertEqual(args[3:], [installer.UNIT,
+                    "--property=LoadState,ActiveState,MainPID,FragmentPath,DropInPaths", "--no-pager"])
+            elif args[2] in ("enable", "start", "restart"):
+                self.assertEqual(args[3:], [installer.UNIT])
+            elif args[2] == "daemon-reload":
+                self.assertEqual(len(args), 3)
+            elif args[2] == "import-environment":
+                self.assertEqual(args[3:], sorted(installer.graphics(self.env)))
+            else:
+                self.fail(f"cutover used an unexpected manager operation: {args}")
+        self.assertFalse(any(Path(args[0]).name in ("kill", "pkill", "killall", "tmux", "dsh")
+                             for args, _ in self.manager.calls))
+
     def test_activation_lost_manager_reply_is_unknown_and_never_reoffered(self):
         self.instance().install()
         request = str(uuid.uuid4())

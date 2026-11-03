@@ -1037,6 +1037,24 @@ def passive_before_qt(installed, configuration, status):
     helper = Path(__file__).resolve().parent.parent / 'scripts' / (
         'install-macos-desktop-service.py' if MAC else 'install-linux-desktop-service.py')
     backend = installed / 'Contents/MacOS/hgs' if MAC and (installed / 'Contents/MacOS/hgs').exists() else CLI
+    query = ([sys.executable, str(helper), str(backend), '--status', '--json'] if MAC else
+             [sys.executable, str(helper), 'status', '--hgs', str(CLI), '--json'])
+    try:
+        result = subprocess.run(query, capture_output=True, text=True, timeout=REVOKE_SECONDS)
+        registration = json.loads(result.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        raise UpdateError(f'desktop registration is unconfirmed; keep Qt stopped and inspect the maintained helper: {error}') from None
+    if (result.returncode != 0 or not isinstance(registration, dict)
+            or registration.get('schema') != 1 or registration.get('operation') != 'status'
+            or registration.get('configuration') != configuration
+            or type(registration.get('registered')) is not bool):
+        raise UpdateError('desktop registration is unconfirmed; keep Qt stopped and inspect the maintained helper')
+    # The CLI's lifecycle ABI also describes an unavailable service. Only the
+    # helper can establish an existing owned registration; Qt never creates one.
+    if registration['registered'] is False:
+        return
+    if registration.get('selected_mode') not in ('passive', 'background'):
+        raise UpdateError('desktop registration mode is unavailable; keep Qt stopped')
     args = ([sys.executable, str(helper), str(backend), '--mode', 'passive', '--json'] if MAC else
             [sys.executable, str(helper), 'install', '--hgs', str(CLI), '--mode', 'passive', '--json'])
     try:
@@ -1054,7 +1072,14 @@ def passive_before_qt(installed, configuration, status):
 @contextmanager
 def qt_revoke_journal(configuration, before_offer):
     """Private metadata and exclusion, never a native execution permission."""
-    directory = SNAPSHOTS / '.qt-revoke'
+    directory = SNAPSHOTS.with_name('desktop-qt-revoke')
+    # Keep draft snapshots separate. If an earlier updater left an original in
+    # its old location, keep that exact journal rather than offering a new UUID.
+    legacy = SNAPSHOTS / '.qt-revoke'
+    if os.path.lexists(legacy):
+        if os.path.lexists(directory):
+            raise UpdateError('two Qt revoke journals require review; keep Qt stopped without another offer')
+        directory = legacy
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     meta = directory.lstat()
     if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != os.getuid() or stat.S_IMODE(meta.st_mode) != 0o700:

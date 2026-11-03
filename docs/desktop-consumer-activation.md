@@ -51,6 +51,9 @@ within the existing 64 KiB registration-record bound.
 
 Use the existing updater/installer rollback. Before a current desktop service
 can be replaced by Qt, the updater asks the maintained helper to select passive.
+The helper's read-only status must confirm an existing managed registration;
+the CLI's lifecycle ABI alone does not establish one. An unregistered host keeps
+the plain revoke-only Qt path, without creating or enabling a desktop service.
 That helper retains its original revoke UUID and original EOF hold across the
 service transition and verified passive readiness. A refusal keeps Qt stopped.
 The updater then reserves its own original final revoke UUID durably before
@@ -60,8 +63,13 @@ mode helper while that result is unknown. The current-scope Root receipt must
 confirm revocation and drain before Qt can proceed. An unknown result keeps the
 current GUI/rollback copy available and prints the exact original request for
 review. No raw manager stop, native-agent signal or replay is introduced.
+The final-revoke journal lives beside the draft-snapshot directory. An interrupted
+original at the older snapshot location stays on that same lookup-only path;
+finding both locations requires review before any new offer.
 
 Cutover and rollback preserve accounts, catalogs, drafts, native agents, tmux
 servers and DeepSeek hosts. Component tests use private manager/transport
-fixtures and original child objects. Installed Linux/macOS delivery, activation,
-presence and device acceptance remain separate release evidence.
+fixtures and original child objects. The real Linux helper's mode-transition
+test checks its written unit's `KillMode=process` and exact manager-call scope;
+this does not qualify installed agent survival. Installed Linux/macOS delivery,
+activation, presence and device acceptance remain separate release evidence.

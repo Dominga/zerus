@@ -2,11 +2,7 @@
 //! Native helper caller/Grant and manager policy are tested in the Python
 //! helper suite; this fixture does not manufacture a native auth positive.
 use super::*;
-use std::{
-    fs,
-    os::unix::fs::PermissionsExt,
-    process::{Child, Command},
-};
+use std::{fs, os::unix::fs::PermissionsExt};
 
 const CONFIG: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 struct Fixture {
@@ -49,29 +45,6 @@ impl Drop for Fixture {
         fs::remove_dir_all(&self.root).unwrap();
     }
 }
-struct Agent(Child);
-impl Agent {
-    fn start() -> Self {
-        Self(
-            Command::new("python3")
-                .args(["-c", "import time; time.sleep(120)"])
-                .spawn()
-                .unwrap(),
-        )
-    }
-    fn current(&mut self) {
-        assert!(self.0.try_wait().unwrap().is_none());
-    }
-}
-impl Drop for Agent {
-    fn drop(&mut self) {
-        if self.0.try_wait().unwrap().is_none() {
-            self.0.kill().unwrap();
-        }
-        self.0.wait().unwrap();
-    }
-}
-
 #[test]
 fn maintained_cli_links_pin_the_same_original_target() {
     let f = Fixture::new();
@@ -116,12 +89,9 @@ async fn selection_provenance_is_explicit_and_read_only_reconnect_never_activate
 }
 
 #[tokio::test]
-async fn original_activation_settles_and_live_fixture_agents_survive_cutover_and_reconnect() {
+async fn original_activation_settles_and_reconnect_never_repeats_the_helper() {
     let f = Fixture::new();
     let owner = Controller::new();
-    let mut agent = Agent::start();
-    let mut host = Agent::start();
-    let original_ids = (agent.0.id(), host.0.id());
     owner.activate(f.cli.clone(), CONFIG.into()).await;
     assert!(!owner.pending());
     assert_eq!(owner.view().code, "");
@@ -135,9 +105,6 @@ async fn original_activation_settles_and_live_fixture_agents_survive_cutover_and
         1,
         "reconnection/already active must not repeat the helper transition"
     );
-    agent.current();
-    host.current();
-    assert_eq!((agent.0.id(), host.0.id()), original_ids);
 }
 
 #[tokio::test]

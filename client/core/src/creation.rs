@@ -2205,11 +2205,11 @@ impl Creations {
         self.finish()
     }
 
-    /// The launch never left this client: after a definitive capability
-    /// probe, the selected desktop service does not offer it. The unused launch
-    /// ID is retired into the history and a new one reserved; the operation
-    /// fails, so only a separate explicit Resume starts the agent. Nothing is
-    /// launched with the replacement ID automatically.
+    /// The launch never left this client: it had no fresh consent, or it
+    /// stopped before its admission request was written. The unused launch ID
+    /// is retired into the history and a new one reserved; the operation
+    /// fails and stays resumable, so an explicit Continue setup starts the
+    /// agent. Nothing is launched with the replacement ID automatically.
     pub fn launch_unsent(&mut self, launch: &str, error: &str) -> Vec<Effect> {
         let Some(id) = self.for_launch(launch) else {
             return Vec::new();

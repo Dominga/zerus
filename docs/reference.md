@@ -4435,6 +4435,26 @@ the passive service keeps serving IPC. The ledger library has no native I/O,
 automatic-approval consent or read-mark authority. The current service exposes
 no reservation, native adapter or writer-takeover command yet.
 
+Schema 20 adds indexed attention retention. An enabled discovery turn examines
+at most 32 blocked, non-live mappings and compacts at most 256 KiB of mapping
+and baseline-intent data. Only mappings without any attempt record qualify;
+live mappings and all reserved, delivered, refused or unknown attempt identities
+stay intact. One transaction replaces each eligible mapping with its exact
+32-byte logical suppression hash, removes its unreferenced blocked baseline
+intent, and updates storage totals and the durable GC cursor. Interrupted
+compaction rolls back all of these changes together.
+
+Count or byte pressure defers the original discovery row while bounded GC
+advances; it does not permanently fail discovery or busy-loop the actor.
+Suppression hashes survive restart and prevent an old logical edge from posting
+again after rename, resume or Tracker history eviction. A hash hit remains
+blocked without recreating the discarded payload. These hashes are append-only,
+32 bytes each before SQLite overhead, with no time-based expiry. Owner-scoped
+reclamation requires proof that the owning conversation is absent from both its
+authoritative catalog and every restorable archive; that separate sweep is
+tracked in `zerus-n3qm`. Catalog absence or an offline source alone never proves
+that an edge cannot reappear.
+
 Schema 3 adds the indexed revocation command journal. Before a maintained Qt
 rollback or Qt installation starts its GUI, the installer must obtain a settled
 receipt from this exact configuration:

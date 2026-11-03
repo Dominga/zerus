@@ -679,6 +679,7 @@ mod tests;
 /// migration silently accept a partial/pre-existing table set.
 #[cfg(test)]
 pub(super) fn remove_from_downgraded_fixture(db: &rusqlite::Connection) {
+    super::attention::remove_retention_fixture(db);
     db.execute_batch("DROP TRIGGER desktop_cache_unknown_preserve; DROP TRIGGER desktop_cache_unknown_immutable;
         DROP TABLE desktop_cache_unknown; DROP TABLE desktop_cache_files; DROP TABLE desktop_cache_operations;
         DROP TABLE desktop_cache_roots;").unwrap();

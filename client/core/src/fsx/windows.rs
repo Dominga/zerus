@@ -238,9 +238,13 @@ impl Parents {
                 // local checkpoint into an unbounded remote-drive open.
                 return Err(refused("local checkpoint drive required"));
             }
+            // Attribute/security-only opens do not enter Windows share-access
+            // checks. Directory data access makes the missing SHARE_DELETE
+            // protect this ancestor's name; we never enumerate its contents.
+            // MS-FSA 2.1.5.1.2.2 (sharing checks for stream/directory opens).
             let open = || {
                 OpenOptions::new()
-                    .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES)
+                    .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY)
                     .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
                     .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
                     .open(&current)

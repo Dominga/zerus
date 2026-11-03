@@ -122,6 +122,50 @@ fn native_checkpoint_pins_leaf_and_ancestor_until_the_original_receipt_drops() {
     std::fs::rename(&renamed, &t.0).unwrap();
 }
 #[test]
+fn native_checkpoint_ancestor_pins_are_not_masked_by_its_exclusive_leaf() {
+    let t = Temp::new();
+    let spare = Temp::new();
+    spare.write(b"placeholder");
+    let folders = [t.0.clone(), t.0.join("outer"), t.0.join("outer/hgdev")];
+    let path = folders.last().unwrap().join("marks.json");
+    drop(publish(&path, b"[]", None).unwrap());
+    let mut marks = ReadMarks::load(path.clone());
+    let checkpoint = marks.checkpoint().unwrap();
+    assert_eq!(marks.checkpoint_bytes(&checkpoint).unwrap(), b"[]");
+    // Keep this ACTUAL checkpoint's original Parents, releasing only its
+    // exclusive child handle. A busy child must not mask broken ancestor pins.
+    // The fixture no longer calls checkpoint_bytes on this deliberately altered
+    // native receipt; no production constructor or permission is introduced.
+    let leaf = std::mem::replace(
+        &mut checkpoint.original.lock().unwrap().file,
+        std::fs::File::open(spare.path()).unwrap(),
+    );
+    drop(leaf);
+    // No leaf lock remains: the exact source can now be opened exclusively.
+    drop(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap(),
+    );
+    for folder in &folders {
+        assert!(std::fs::rename(folder, folder.with_extension("moved")).is_err());
+    }
+    let created = path.parent().unwrap().join("ordinary-file.txt");
+    std::fs::write(&created, b"creation inside a pinned folder is allowed").unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"[]");
+    drop(checkpoint);
+    // All fixture-owned ancestors are movable once the SAME receipt drops.
+    // This also excludes ACL/path refusal as a false positive in the loop.
+    for folder in &folders {
+        let moved = folder.with_extension("moved");
+        std::fs::rename(folder, &moved).unwrap();
+        std::fs::rename(&moved, folder).unwrap();
+    }
+}
+#[test]
 fn native_busy_file_refuses_without_mutation_and_can_retry_after_original_close() {
     let t = Temp::new();
     t.write(b"[ ]");

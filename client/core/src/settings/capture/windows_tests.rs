@@ -87,7 +87,12 @@ fn native_settings_capture_keeps_exact_bytes_and_original_writer_lease() {
 fn native_qt_capture_keeps_parent_pins_but_no_leaf_handle_between_reads() {
     let scratch = Scratch::new();
     let data = b"[workspace]\nlanguage=en\n[future]\nopaque=7\n";
-    let path = scratch.write("hgs-tray.ini", data);
+    let path = scratch.write("outer/hgdev/hgs-tray.ini", data);
+    let folders = [
+        scratch.0.clone(),
+        scratch.0.join("outer"),
+        scratch.0.join("outer/hgdev"),
+    ];
     let store = QtStore::Ini(path.clone());
     let stop = AtomicBool::new(false);
     let captured = store
@@ -113,11 +118,29 @@ fn native_qt_capture_keeps_parent_pins_but_no_leaf_handle_between_reads() {
         .open(&path)
         .unwrap();
     drop(exclusive);
-    assert!(fs::rename(&scratch.0, scratch.0.with_extension("moved")).is_err());
+    // Every fixture-owned ancestor is an actual member of the pinned chain:
+    // scratch, outer and the final hgdev source folder. Do not rename system,
+    // profile or temp ancestors outside this fixture, which are also opened.
+    for folder in &folders {
+        assert!(fs::rename(folder, folder.with_extension("moved")).is_err());
+    }
+    let created = path.parent().unwrap().join("created-during-capture.txt");
+    fs::write(&created, b"ordinary creation remains available").unwrap();
+    assert_eq!(
+        fs::read(&created).unwrap(),
+        b"ordinary creation remains available"
+    );
     stop.store(true, Ordering::Release);
     assert!(captured.recheck(Arc::new(()), &stop).is_err());
     drop(captured);
     assert_eq!(fs::read(&path).unwrap(), data);
+    // The same renames succeed after the original parent handles drop,
+    // excluding an ACL or unrelated path error as the reason for refusal.
+    for folder in &folders {
+        let moved = folder.with_extension("moved");
+        qt_replace(folder, &moved);
+        qt_replace(&moved, folder);
+    }
     fs::rename(&path, path.with_extension("kept")).unwrap();
 }
 #[test]

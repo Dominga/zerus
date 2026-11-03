@@ -165,7 +165,17 @@ not proof that Qt or the whole desktop drained. Every helper, writer and pipe
 retains its original resources through actual completion. Shutdown reports
 unconfirmed work rather than declaring an outstanding resource group drained.
 On Windows source captures require local disk paths, pinned no-reparse
-ancestors, private ACL and single-link checks. The foreign Qt INI is read-only
+ancestors, private ACL and single-link checks. The parent chain includes the
+local drive root, each intervening directory and the final source folder.
+Each opens with `FILE_LIST_DIRECTORY`, attributes/security reads and read/write
+sharing without delete sharing. Directory data access is needed for the
+[Windows sharing check](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fsa/8c0e3f4f-0729-49f4-a14d-7f7add593819);
+attributes-only handles do not prevent renames. No directory enumeration occurs.
+An ancestor that does not permit this read access refuses capture; permissions
+are never repaired. Native tests rename only their owned scratch/outer/hgdev
+folders, not the system/profile/temp ancestors outside those fixtures.
+
+The foreign Qt INI is read-only
 with read/write/delete sharing during each bounded read, then its leaf handle
 closes. Only its parent pins, original volume serial/file index, size, last-write
 time and hash remain during report publication and receipt waits. Recheck opens

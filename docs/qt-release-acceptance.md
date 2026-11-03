@@ -343,6 +343,27 @@ not shared-read delivery or acknowledgement, notification suppression,
 current-source completeness, ownership or permission to act. Installed import
 and upgrade acceptance remain pending.
 
+The native NewSession owner also preserves `worktree-snapshots.json` in a fixed
+`worktree-cache-preload-v1` slot before its first service-mode load or file write.
+The exact historical original and capture ID remain unchanged after later cache
+writes. Both the original and today's restarted file pass the existing strict
+64-record/8 MiB cache decoder before the pruning model runs (raw reads stay
+bounded to 16 MiB). Opaque cache hashes never prove current checkout ownership.
+Only this legacy cache's read accepts an owned, single-link 0644 Unix source;
+group/other writes, links and changed canonical identities refuse capture.
+The source is never chmodded. Archive/metadata and replacement cache files stay
+private (0600); Windows native ACL/reparse checks are unchanged. The existing
+local-disk and ancestor-list requirements still apply; a redirected UNC source
+remains unavailable.
+
+A failure pauses only cache file persistence. Fresh folder queries and separately
+authorized session creation remain available; dirty in-memory cache data stays
+bounded and unsaved until an explicit same-owner Retry passes its original
+source checks. Quit refuses late model installation and new cache writes.
+Review shows `worktree_cache_capture` separately from drafts, local read marks
+and published reports. This is component/source coverage: config-bound Staged
+publication is a later slice, and no installed acceptance row is promoted.
+
 ## macOS
 
 For a coordinator-approved private click fixture, opt in to actual GUI selection

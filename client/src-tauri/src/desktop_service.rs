@@ -1694,12 +1694,23 @@ async fn recover_grant(
 ) {
     const DELAYS: [u64; 5] = [1, 2, 5, 10, 30];
     let mut step = 0;
+    // An original whose verified-exit result is unknown gets one read-only
+    // lookup of its exact identity. It is never resent; only a definitive
+    // not-applied result (or a matched transient refusal) admits a fresh Grant.
+    let mut looked_up = None::<String>;
+    let next = |looked_up: &Option<String>| {
+        if stop.load(Ordering::Acquire) || shared.stopped.load(Ordering::Acquire) {
+            return None;
+        }
+        match shared.ownership.uncertain_grant() {
+            Some(original) if looked_up.as_ref() != Some(&original) => Some(Some(original)),
+            Some(_) => None,
+            None => shared.ownership.retryable_grant().then_some(None),
+        }
+    };
     loop {
         let wake = cancelled.notified();
-        if stop.load(Ordering::Acquire)
-            || shared.stopped.load(Ordering::Acquire)
-            || !shared.ownership.retryable_grant()
-        {
+        if next(&looked_up).is_none() {
             return;
         }
         tokio::select! {
@@ -1707,24 +1718,63 @@ async fn recover_grant(
             _ = wake => return,
             _ = tokio::time::sleep(Duration::from_secs(DELAYS[step])) => (),
         }
-        if stop.load(Ordering::Acquire)
-            || shared.stopped.load(Ordering::Acquire)
-            || !shared.ownership.retryable_grant()
-        {
+        let Some(lookup) = next(&looked_up) else {
             return;
-        }
-        shared
-            .ownership
-            .request(
-                Some(zerus_client_core::desktop::ownership::Action::Grant),
-                Some(configuration.clone()),
-                Some(stop.clone()),
-            )
-            .await;
-        shared
-            .publish_ownership(crate::desktop_ownership::Phase::RetryGrant)
-            .await;
+        };
+        let phase = match lookup {
+            Some(original) => {
+                looked_up = Some(original);
+                shared
+                    .ownership
+                    .request(None, Some(configuration.clone()), Some(stop.clone()))
+                    .await;
+                crate::desktop_ownership::Phase::Result
+            }
+            None => {
+                #[cfg(test)]
+                recovery_pause::reached(&shared.hgs).await;
+                shared
+                    .ownership
+                    .recovery_grant(configuration.clone(), stop.clone())
+                    .await;
+                crate::desktop_ownership::Phase::RetryGrant
+            }
+        };
+        shared.publish_ownership(phase).await;
         step = (step + 1).min(DELAYS.len() - 1);
+    }
+}
+
+/// Test seam: hold one service's recovery after it chose a fresh Grant step
+/// and before admission, so a concurrent Check can land in that window. It
+/// awaits rather than blocks: a blocked worker can stall the runtime's timers.
+#[cfg(test)]
+pub(crate) mod recovery_pause {
+    use std::{
+        path::{Path, PathBuf},
+        sync::{mpsc, Mutex},
+        time::Duration,
+    };
+    use tokio::sync::oneshot;
+    type Hook = (PathBuf, mpsc::Sender<()>, oneshot::Receiver<()>);
+    // One hook per service executable, so concurrent tests never clobber.
+    static HOOKS: Mutex<Vec<Hook>> = Mutex::new(Vec::new());
+    // Armed only by the Unix ownership tests.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn arm(hgs: PathBuf, entered: mpsc::Sender<()>, resume: oneshot::Receiver<()>) {
+        HOOKS.lock().unwrap().push((hgs, entered, resume));
+    }
+    pub(super) async fn reached(hgs: &Path) {
+        let hook = {
+            let mut hooks = HOOKS.lock().unwrap();
+            let Some(at) = hooks.iter().position(|(armed, ..)| armed == hgs) else {
+                return;
+            };
+            hooks.swap_remove(at)
+        };
+        let (_, entered, resume) = hook;
+        let _ = entered.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(30), resume).await;
     }
 }
 

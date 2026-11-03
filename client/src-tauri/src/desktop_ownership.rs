@@ -42,6 +42,32 @@ struct Intent {
     exit_confirmed: bool,
     complete: bool,
     receipt: Option<Receipt>,
+    // A lookup after the verified original exit found no receipt at the
+    // original's unchanged journal revision. It never implies success.
+    not_applied: bool,
+}
+/// The exact status that justified a definitive not-applied lookup. A fresh
+/// recovery Grant is reserved only while the authority still reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Basis {
+    configuration: String,
+    journal: Option<String>,
+    revision: u64,
+}
+impl Basis {
+    fn holds(&self, status: &Status) -> bool {
+        status.matches(&self.configuration)
+            && status.journal == self.journal
+            && status.revision == self.revision
+            && !status.rearm_required
+    }
+}
+/// Why recovery may send a fresh Grant, captured under the admission lock.
+#[derive(Debug, PartialEq, Eq)]
+enum Reason {
+    Capacity,
+    Refused(Basis),
+    NotApplied(Basis),
 }
 #[derive(Default)]
 struct State {
@@ -143,13 +169,18 @@ impl Controller {
         cancel: Arc<AtomicBool>,
     ) -> View {
         for attempt in 0..=GRANT_RETRIES {
-            let view = self
-                .request(
+            // Later attempts are retries: the same bound admission as recovery.
+            let view = if attempt == 0 {
+                self.request(
                     Some(Action::Grant),
                     Some(configuration.clone()),
                     Some(cancel.clone()),
                 )
-                .await;
+                .await
+            } else {
+                self.recovery_grant(configuration.clone(), cancel.clone())
+                    .await
+            };
             let retryable = self.retryable_grant();
             if !retryable || attempt == GRANT_RETRIES {
                 return view;
@@ -164,29 +195,137 @@ impl Controller {
         }
         unreachable!("the final bounded attempt returns its view")
     }
-    /// Only a complete original refusal, or capacity before an uncertain
-    /// original exists, can admit another fresh startup Grant.
+    /// Only a complete original refusal, a definitive not-applied lookup of an
+    /// original after its verified exit, or capacity before any original
+    /// exists, can admit another fresh startup Grant.
     pub(crate) fn retryable_grant(&self) -> bool {
+        Self::grant_reason(&self.state()).is_some()
+    }
+    /// The whole retry decision table, evaluated under the admission lock:
+    /// - a retained not-applied basis decides alone, whatever the last local
+    ///   diagnostic code (a transport-busy Check cannot mask it): a Grant
+    ///   bound to that basis while no newer status contradicts it, else none;
+    /// - a matched transient refusal of the current original;
+    /// - capacity only at a cold start, before any original exists.
+    ///   Nothing else, and never an unbound Grant that replaces a basis.
+    fn grant_reason(state: &State) -> Option<Reason> {
+        if let Some(basis) = Self::not_applied_basis(state) {
+            let contradicted = state
+                .status
+                .as_ref()
+                .is_some_and(|status| !basis.holds(status));
+            return (!contradicted).then_some(Reason::NotApplied(basis));
+        }
+        // A transient refusal is bound to its own receipt's authority scope:
+        // the authority refuses drain/resources before it moves a revision.
+        let refused = state.intent.as_ref().and_then(|intent| {
+            let receipt = intent.receipt.as_ref()?;
+            let transient = intent.complete
+                && intent.exit_confirmed
+                && matches!(intent.request, Request::DesktopOwnership { action: Action::Grant, .. })
+                && !receipt.accepted
+                && !receipt.durable
+                && state.status.as_ref() == Some(&receipt.current)
+                && matches!(&receipt.outcome, Outcome::Refused { code }
+                    if (state.code.is_empty() || state.code == *code
+                        || state.code == "ownership_transport_busy")
+                        && matches!(code.as_str(), "ownership_drain_pending" | "ownership_resources_pending" | "ownership_transport_busy"));
+            transient.then(|| Basis {
+                configuration: receipt.current.configuration.clone(),
+                journal: receipt.current.journal.clone(),
+                revision: receipt.current.revision,
+            })
+        });
+        if let Some(basis) = refused {
+            return Some(Reason::Refused(basis));
+        }
+        (!state.running && state.code == "ownership_transport_busy" && state.intent.is_none())
+            .then_some(Reason::Capacity)
+    }
+    /// A complete Grant original found definitively not applied after its
+    /// verified exit. It is a durable property of that original, independent
+    /// of later diagnostic codes; only a new intent replaces it.
+    fn not_applied_basis(state: &State) -> Option<Basis> {
+        let intent = state.intent.as_ref()?;
+        let Request::DesktopOwnership {
+            action: Action::Grant,
+            journal: Some(journal),
+            revision,
+            ..
+        } = &intent.request
+        else {
+            return None;
+        };
+        (intent.complete && intent.exit_confirmed && intent.not_applied && intent.receipt.is_none())
+            .then(|| Basis {
+                configuration: intent.configuration.clone(),
+                journal: Some(journal.clone()),
+                revision: *revision,
+            })
+    }
+    /// Recovery's next Grant. After a definitive not-applied lookup it stays
+    /// bound to that original status: the job compares its fresh authority
+    /// read before reserving any new intent, and a change is fenced.
+    pub(crate) async fn recovery_grant(
+        self: &Arc<Self>,
+        configuration: String,
+        cancel: Arc<AtomicBool>,
+    ) -> View {
+        // Revalidate the reason and capture its basis under the same state
+        // lock that marks this job running. A vanished allowance refuses.
+        let Some(job) = self.admit_with(
+            Some(Action::Grant),
+            Some(configuration),
+            Some(cancel),
+            |state| match Self::grant_reason(state)? {
+                Reason::NotApplied(basis) | Reason::Refused(basis) => Some(Some(basis)),
+                Reason::Capacity => Some(None),
+            },
+        ) else {
+            return self.view();
+        };
+        let owner = self.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || job.run()).await;
+        owner.view()
+    }
+    /// The current Grant original is unknown after its child's verified exit.
+    /// Only a read-only lookup of that exact original may follow; an
+    /// unverified exit or a known pending receipt is never looked up here.
+    pub(crate) fn uncertain_grant(&self) -> Option<String> {
         let state = self.state();
-        (!state.running && state.code == "ownership_transport_busy"
-                    && state.intent.as_ref().is_none_or(|intent| intent.complete))
-                    || state.intent.as_ref().is_some_and(|intent| {
-                    intent.complete && intent.exit_confirmed
-                        && matches!(intent.request, Request::DesktopOwnership { action: Action::Grant, .. })
-                        && intent.receipt.as_ref().is_some_and(|receipt| {
-                            !receipt.accepted && !receipt.durable
-                                && state.status.as_ref() == Some(&receipt.current)
-                                && matches!(&receipt.outcome, Outcome::Refused { code }
-                                    if (state.code.is_empty() || state.code == *code)
-                                        && matches!(code.as_str(), "ownership_drain_pending" | "ownership_resources_pending" | "ownership_transport_busy"))
-                        })
-                })
+        state
+            .intent
+            .as_ref()
+            .filter(|intent| {
+                !intent.complete
+                    && intent.exit_confirmed
+                    && intent.receipt.is_none()
+                    && matches!(
+                        intent.request,
+                        Request::DesktopOwnership {
+                            action: Action::Grant,
+                            ..
+                        }
+                    )
+            })
+            .map(|intent| intent.request.id().to_owned())
     }
     fn admit(
         self: &Arc<Self>,
         action: Option<Action>,
         configuration: Option<String>,
         cancel: Option<Arc<AtomicBool>>,
+    ) -> Option<Job> {
+        self.admit_with(action, configuration, cancel, |_| Some(None))
+    }
+    /// `allowed` runs under the state lock before `running` is set; `None`
+    /// refuses, `Some(basis)` binds the job to that basis.
+    fn admit_with(
+        self: &Arc<Self>,
+        action: Option<Action>,
+        configuration: Option<String>,
+        cancel: Option<Arc<AtomicBool>>,
+        allowed: impl FnOnce(&State) -> Option<Option<Basis>>,
     ) -> Option<Job> {
         if self.stop.load(Ordering::Acquire) {
             return None;
@@ -206,6 +345,7 @@ impl Controller {
         if state.running {
             return None;
         }
+        let basis = allowed(&state)?;
         state.running = true;
         drop(state);
         Some(Job {
@@ -216,6 +356,7 @@ impl Controller {
             resources: Arc::new(charge),
             deadline: None,
             refresh_absent_native: false,
+            basis,
         })
     }
     pub(crate) fn granted(&self) -> bool {
@@ -236,6 +377,7 @@ struct Job {
     resources: Arc<dyn Send + Sync>,
     deadline: Option<Instant>,
     refresh_absent_native: bool,
+    basis: Option<Basis>,
 }
 impl Drop for Job {
     fn drop(&mut self) {
@@ -434,6 +576,7 @@ impl Job {
             {
                 if let Some(intent) = &mut state.intent {
                     intent.complete = true;
+                    intent.not_applied = true;
                 }
                 state.code = "ownership_not_applied".into();
             } else {
@@ -466,6 +609,15 @@ impl Job {
             _ => (),
         }
         self.owner.state().status = Some(status.clone());
+        if self
+            .basis
+            .as_ref()
+            .is_some_and(|basis| !basis.holds(&status))
+        {
+            // The definitive negative no longer describes the authority.
+            self.owner.state().code = "ownership_changed".into();
+            return Ok(());
+        }
         let Some(action) = self.action else {
             self.owner.state().code.clear();
             return Ok(());
@@ -494,6 +646,7 @@ impl Job {
             exit_confirmed: false,
             complete: false,
             receipt: None,
+            not_applied: false,
         });
         drop(state);
         if self.owner.mode == Mode::Service {

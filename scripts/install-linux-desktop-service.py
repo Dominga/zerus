@@ -308,6 +308,8 @@ class Installer:
                         "invalid desktop registration record; kept")
                 require(record.get("mode", "passive") in ("passive", "background"),
                         "invalid desktop registration mode; kept")
+                require(record.get("mode_selection", "retained") in ("default", "explicit", "retained"),
+                        "invalid desktop mode selection provenance; kept")
                 transition = record.get("transition")
                 if transition is not None:
                     require(isinstance(transition, dict) and set(transition) == {"target", "request_id"}
@@ -366,6 +368,7 @@ class Installer:
         return {"schema": 1, "operation": "status", "configuration": self.configuration,
                 "label": UNIT, "registered": previous is not None,
                 "selected_mode": previous.get("mode", "passive") if previous else "passive",
+                "mode_selection": previous.get("mode_selection", "retained") if previous else None,
                 "running_mode": lifecycle.get("mode"), "ipc_ready": lifecycle.get("ipc_ready", False),
                 "pending_restart": previous.get("pending_restart", False) if previous else False,
                 "last_revoke_request_id": previous.get("last_revoke_request_id") if previous else None,
@@ -499,7 +502,10 @@ class Installer:
             changed = previous is None or previous.get("binary_sha256") != self.binary or previous.get("definition_sha256") != digest(self.definition)
             record = {"schema": 1, "configuration": self.configuration, "definition_sha256": digest(self.definition),
                       "binary_sha256": self.binary, "pending_restart": bool(active and (changed or previous.get("pending_restart", False))),
-                      "session": previous.get("session") if previous else None, "mode": self.mode}
+                      "session": previous.get("session") if previous else None, "mode": self.mode,
+                      # Routing provenance only; native caller/current Grant checks remain independent.
+                      "mode_selection": "explicit" if explicit else (
+                          previous.get("mode_selection", "retained") if previous else "default")}
             if transition is not None:
                 record["transition"] = transition
             last_revoke = transition["request_id"] if transition else (previous or {}).get("last_revoke_request_id")

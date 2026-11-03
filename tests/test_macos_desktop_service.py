@@ -210,6 +210,35 @@ class MacDesktopService(unittest.TestCase):
         self.install(mode="background")
         self.assertEqual(self.command.mutations(), [])
 
+    def test_default_and_explicit_selection_provenance_survives_updates(self):
+        self.install()
+        self.assertEqual(self.install(status_only=True)["mode_selection"], "default")
+        self.install()
+        self.assertEqual(self.install(status_only=True)["mode_selection"], "default")
+        self.install(mode="passive")
+        self.assertEqual(self.install(status_only=True)["mode_selection"], "explicit")
+        self.install()
+        self.assertEqual(self.install(status_only=True)["mode_selection"], "explicit")
+
+    def test_missing_or_unknown_provenance_never_becomes_a_default_selection(self):
+        self.install()
+        record = json.loads(self.mode_record().read_bytes())
+        record.pop("mode_selection")
+        self.mode_record().write_text(json.dumps(record))
+        original = self.mode_record().read_bytes()
+        self.assertEqual(self.install(status_only=True)["mode_selection"], "retained")
+        self.assertEqual(self.mode_record().read_bytes(), original)
+        self.install()
+        self.assertEqual(self.install(status_only=True)["mode_selection"], "retained")
+        record["mode_selection"] = "automatic"
+        self.mode_record().write_text(json.dumps(record))
+        original = self.mode_record().read_bytes()
+        self.command.calls.clear()
+        with self.assertRaisesRegex(installer.Refusal, "provenance"):
+            self.install(status_only=True)
+        self.assertEqual(self.mode_record().read_bytes(), original)
+        self.assertEqual(self.command.mutations(), [])
+
     def test_mode_preserves_paired_backend_runner_and_cli_refresh_selection(self):
         runner = self.root / "stable-hgs"; runner.write_text("runner"); runner.chmod(0o755)
         self.install(runner_hgs=runner)
@@ -571,6 +600,7 @@ class MacDesktopService(unittest.TestCase):
         self.assertEqual(self.command.destination.read_bytes(), original)
         target = self.root / "foreign-mode-record"
         target.write_text("kept")
+        self.mode_record().unlink()
         self.mode_record().symlink_to(target)
         self.command.calls.clear()
         with self.assertRaises(installer.Refusal):
@@ -745,6 +775,8 @@ class MacDesktopService(unittest.TestCase):
         old = prefix + "<key>ProcessType</key><string>Background</string></dict>" + suffix
         for remove in (False, True):
             with self.subTest(remove=remove):
+                # This case models an older installation with no mode metadata.
+                self.mode_record().unlink(missing_ok=True)
                 path = self.existing(old); self.command.loaded = True
                 self.assertEqual(self.install(remove=remove), "removed" if remove else "ready")
                 self.assertEqual(path.exists(), not remove)

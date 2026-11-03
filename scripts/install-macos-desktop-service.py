@@ -262,6 +262,8 @@ class ModeTransition:
                     and isinstance(record.get("definition_sha256"), str)
                     and re.fullmatch(r"[0-9a-f]{64}", record["definition_sha256"]),
                     "Invalid or foreign desktop mode record; kept.")
+            require(record.get("mode_selection", "retained") in ("default", "explicit", "retained"),
+                    "Invalid desktop mode selection provenance; kept.")
             transition = record.get("transition")
             if transition is not None:
                 require(isinstance(transition, dict) and set(transition) == {"target", "request_id"}
@@ -274,7 +276,7 @@ class ModeTransition:
                     "Invalid cancelled rollback ID; kept.")
             require(previous is not None and (hashlib.sha256(previous[0]).hexdigest() == record.get("definition_sha256")
                     or (record["pending_restart"] and previous[0] == content)),
-                    "Desktop definition changed outside the owned transition; kept.")
+                    "Custom desktop environment or definition changed outside the owned transition; kept.")
             self.record = record
 
     @staticmethod
@@ -344,7 +346,8 @@ class ModeTransition:
                 raise Refusal(f"{error} Inspect status; cancel-rollback --request-id {original} "
                               "requires a verified current Service grant before a new mode choice.") from error
             record["last_revoke_request_id"] = original
-        record.update(selected_mode=self.mode, pending_restart=bool(record["pending_restart"] or old_mode != self.mode))
+        record.update(selected_mode=self.mode, mode_selection="explicit",
+                      pending_restart=bool(record["pending_restart"] or old_mode != self.mode))
         self.record = record
         self.persist(record)
 
@@ -378,6 +381,11 @@ class ModeTransition:
     def finish(self):
         self.fence()
         self.close(validate=True)
+        if self.record is None:
+            # Only a newly installed definition has known default provenance.
+            # Older unrecorded selections stay retained, never silently resumed.
+            self.record = {"schema": 1, "configuration": self.value["configuration"],
+                           "mode_selection": "default" if self.original_definition is None else "retained"}
         if self.record is not None:
             self.record.update(selected_mode=self.value.get("mode", "passive"), pending_restart=False,
                 definition_sha256=hashlib.sha256(self.content).hexdigest(), transition=None)
@@ -427,6 +435,7 @@ class ModeTransition:
         record = self.record or {}
         return {"schema": 1, "operation": "status", "configuration": self.value["configuration"], "label": LABEL,
                 "registered": old_definition is not None, "selected_mode": record.get("selected_mode", mode),
+                "mode_selection": record.get("mode_selection", "retained") if old_definition is not None else None,
                 "running_mode": lifecycle.get("mode"), "ipc_ready": lifecycle.get("ipc_ready", False),
                 "pending_restart": record.get("pending_restart", False), "transition": record.get("transition"),
                 "last_revoke_request_id": record.get("last_revoke_request_id"),

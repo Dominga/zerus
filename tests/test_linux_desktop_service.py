@@ -510,6 +510,34 @@ class LinuxDesktopService(unittest.TestCase):
         self.assertEqual(instance.record_path.read_bytes(), original)
         self.assertEqual(self.manager.actions(), ["show"])
 
+    def test_default_and_explicit_selection_provenance_survives_updates(self):
+        self.instance().install()
+        self.assertEqual(self.instance().status()["mode_selection"], "default")
+        self.instance().install(refresh=True)
+        self.assertEqual(self.instance().status()["mode_selection"], "default")
+        self.instance("passive").install()
+        self.assertEqual(self.instance().status()["mode_selection"], "explicit")
+        self.instance().install(refresh=True)
+        self.assertEqual(self.instance().status()["mode_selection"], "explicit")
+
+    def test_missing_or_unknown_provenance_never_becomes_a_default_selection(self):
+        self.instance().install()
+        instance = self.instance()
+        record = instance.ownership()
+        record.pop("mode_selection")
+        instance.save(record)
+        original = instance.record_path.read_bytes()
+        self.assertEqual(instance.status()["mode_selection"], "retained")
+        self.assertEqual(instance.record_path.read_bytes(), original)
+        instance.install(refresh=True)
+        self.assertEqual(instance.status()["mode_selection"], "retained")
+        record["mode_selection"] = "automatic"
+        instance.save(record)
+        original = instance.record_path.read_bytes()
+        with self.assertRaisesRegex(installer.Refusal, "provenance"):
+            instance.status()
+        self.assertEqual(instance.record_path.read_bytes(), original)
+
     def test_a_waiting_upgrade_cannot_flip_a_newly_selected_background_mode(self):
         self.instance().install()
         waiting = self.instance()

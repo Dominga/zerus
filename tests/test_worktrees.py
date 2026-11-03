@@ -522,6 +522,19 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         again=self.keep(tree,left['fingerprint']);self.assertNotEqual(again.returncode,0);self.assertIn('No partial-removal record',again.stderr)
         absent=json.loads(again.stdout);self.assertEqual((absent['status'],absent['operation']),('kept','worktree_leftover_keep'))
         self.assertIn('No partial-removal record',absent['detail'])
+    def test_keep_folder_reports_a_failure_after_forgetting_started_as_unconfirmed(self):
+        import sqlite3
+        tree,_,_=self.partial('forget-fails');left=self.leftover(tree)
+        database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3'
+        # Reads still work; only forgetting the record fails, after every check passed.
+        with contextlib.closing(sqlite3.connect(database)) as db,db:
+            db.execute("CREATE TRIGGER synthetic_forget_failure BEFORE DELETE ON removals BEGIN SELECT RAISE(ABORT,'synthetic forget failure'); END")
+        result=self.keep(tree,left['fingerprint']);self.assertNotEqual(result.returncode,0)
+        outcome=json.loads(result.stdout)
+        self.assertEqual((outcome['operation'],outcome['status'],outcome['request_id']),('worktree_leftover_keep','unconfirmed','test-keep'))
+        self.assertIn('synthetic forget failure',outcome['detail'])
+        self.assertEqual(self.records(),[(str(tree.resolve()),'partial')])
+        self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
     def test_an_interrupted_removal_stays_pending_for_review(self):
         self.fake("if any(sys.argv[i:i+2]==['worktree','remove'] for i in range(len(sys.argv)-1)):\n import signal,subprocess\n subprocess.run(["+repr(GIT)+",*sys.argv[1:]])\n os.kill(os.getppid(),signal.SIGKILL);sys.exit(1)\nelse: os.execv("+repr(GIT)+",["+repr(GIT)+",*sys.argv[1:]])\n")
         tree,row,result=self.partial('interrupted')

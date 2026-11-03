@@ -312,6 +312,9 @@ pub enum Settled {
     Deleted,
     /// The folder stays and only its record was forgotten.
     Forgotten,
+    /// The record was already gone, perhaps resolved by another action; what
+    /// remains is known only after a fresh review.
+    Resolved,
     /// A verified refusal before anything changed.
     Refused { detail: String },
     /// Anything else; never retried.
@@ -364,7 +367,7 @@ pub fn kept(exit: Exit, host: &str, request_id: &str, leftover: &Leftover) -> Se
     if verified && text(&data, "status") == "kept" {
         let reason = text(&data, "detail");
         if reason.starts_with("No partial-removal record exists") {
-            return Settled::Forgotten;
+            return Settled::Resolved;
         }
         return Settled::Refused {
             detail: detail(
@@ -651,7 +654,7 @@ mod tests {
                 "r1",
                 &parsed
             ),
-            Settled::Forgotten
+            Settled::Resolved
         );
         assert!(matches!(
             kept(

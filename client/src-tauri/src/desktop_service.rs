@@ -1672,20 +1672,23 @@ async fn recover_grant(
         let Some(lookup) = next(&looked_up) else {
             return;
         };
-        let (action, phase) = match lookup {
+        let phase = match lookup {
             Some(original) => {
                 looked_up = Some(original);
-                (None, crate::desktop_ownership::Phase::Result)
+                shared
+                    .ownership
+                    .request(None, Some(configuration.clone()), Some(stop.clone()))
+                    .await;
+                crate::desktop_ownership::Phase::Result
             }
-            None => (
-                Some(zerus_client_core::desktop::ownership::Action::Grant),
-                crate::desktop_ownership::Phase::RetryGrant,
-            ),
+            None => {
+                shared
+                    .ownership
+                    .recovery_grant(configuration.clone(), stop.clone())
+                    .await;
+                crate::desktop_ownership::Phase::RetryGrant
+            }
         };
-        shared
-            .ownership
-            .request(action, Some(configuration.clone()), Some(stop.clone()))
-            .await;
         shared.publish_ownership(phase).await;
         step = (step + 1).min(DELAYS.len() - 1);
     }

@@ -547,6 +547,60 @@ mod native {
     }
 
     #[test]
+    fn an_authority_change_after_a_definitive_negative_fences_the_recovery_grant() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        tauri::async_runtime::block_on(async {
+            for (journal, revision) in [
+                ("00000000-0000-4000-8000-000000000005", 4),
+                ("00000000-0000-4000-8000-000000000007", 3),
+            ] {
+                let f = Fixture::new(
+                    Mode::Service,
+                    json!({"ready":true,"lost":true,"lost_once":true,"definitive":true}),
+                );
+                let (service, _) = f.service();
+                let code = || {
+                    service
+                        .snapshot()
+                        .notification_ownership
+                        .map(|v| v["code"].clone())
+                };
+                until("a definitive not-applied for the lost original", || {
+                    f.calls("ownership-result").len() == 1
+                        && code() == Some(json!("ownership_not_applied"))
+                })
+                .await;
+                // The authority moves on before recovery's next step; no
+                // explicit status read happens here.
+                fs::write(
+                    f.root.join("current.json"),
+                    json!({"abi":"desktop-ownership-v1","configuration":"a".repeat(64),
+                        "journal":journal,"revision":revision,"state":"passive",
+                        "rearm_required":false,"request_id":null,"owner_epoch":null,
+                        "identity_current":false})
+                    .to_string(),
+                )
+                .unwrap();
+                until("the fresh authority read fences recovery", || {
+                    code() == Some(json!("ownership_changed"))
+                })
+                .await;
+                tokio::time::sleep(Duration::from_millis(2500)).await;
+                assert_eq!(
+                    f.calls("frontend-request").len(),
+                    1,
+                    "no Grant at the changed {journal}/{revision}"
+                );
+                let view = service.snapshot().notification_ownership.unwrap();
+                assert_eq!(view["code"], "ownership_changed", "{view}");
+                assert_eq!(view["status"]["revision"], revision, "{view}");
+                assert_eq!(view["status"]["journal"], journal, "{view}");
+                service.join().await.unwrap();
+            }
+        });
+    }
+
+    #[test]
     fn only_a_verified_exit_and_unchanged_scope_let_not_applied_admit_a_grant() {
         let _process = crate::PROCESS_TREE.read().unwrap();
         let f = Fixture::new(Mode::Service, json!({"lost":true,"missing":true}));

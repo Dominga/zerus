@@ -46,6 +46,22 @@ struct Intent {
     // original's unchanged journal revision. It never implies success.
     not_applied: bool,
 }
+/// The exact status that justified a definitive not-applied lookup. A fresh
+/// recovery Grant is reserved only while the authority still reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Basis {
+    configuration: String,
+    journal: String,
+    revision: u64,
+}
+impl Basis {
+    fn holds(&self, status: &Status) -> bool {
+        status.matches(&self.configuration)
+            && status.journal.as_deref() == Some(self.journal.as_str())
+            && status.revision == self.revision
+            && !status.rearm_required
+    }
+}
 #[derive(Default)]
 struct State {
     status: Option<Status>,
@@ -174,17 +190,7 @@ impl Controller {
         let state = self.state();
         (!state.running && state.code == "ownership_transport_busy"
                     && state.intent.as_ref().is_none_or(|intent| intent.complete))
-                    || state.intent.as_ref().is_some_and(|intent| {
-                    // The status it was built from is still current: a fresh
-                    // read since then (revoked, changed scope) decides instead.
-                    intent.complete && intent.exit_confirmed && intent.not_applied
-                        && intent.receipt.is_none()
-                        && state.code == "ownership_not_applied"
-                        && matches!(&intent.request, Request::DesktopOwnership { action: Action::Grant, journal: Some(journal), revision, .. }
-                            if state.status.as_ref().is_some_and(|status| status.matches(&intent.configuration)
-                                && status.journal.as_ref() == Some(journal) && status.revision == *revision
-                                && !status.rearm_required))
-                })
+                    || Self::not_applied_basis(&state).is_some()
                     || state.intent.as_ref().is_some_and(|intent| {
                     intent.complete && intent.exit_confirmed
                         && matches!(intent.request, Request::DesktopOwnership { action: Action::Grant, .. })
@@ -196,6 +202,54 @@ impl Controller {
                                         && matches!(code.as_str(), "ownership_drain_pending" | "ownership_resources_pending" | "ownership_transport_busy"))
                         })
                 })
+    }
+    /// A complete Grant original found definitively not applied after its
+    /// verified exit, while the cached status still equals the one it was
+    /// built from. Any later read (revoked, changed scope) decides instead.
+    fn not_applied_basis(state: &State) -> Option<Basis> {
+        let intent = state.intent.as_ref()?;
+        let Request::DesktopOwnership {
+            action: Action::Grant,
+            journal: Some(journal),
+            revision,
+            ..
+        } = &intent.request
+        else {
+            return None;
+        };
+        let basis = Basis {
+            configuration: intent.configuration.clone(),
+            journal: journal.clone(),
+            revision: *revision,
+        };
+        (intent.complete
+            && intent.exit_confirmed
+            && intent.not_applied
+            && intent.receipt.is_none()
+            && state.code == "ownership_not_applied"
+            && state
+                .status
+                .as_ref()
+                .is_some_and(|status| basis.holds(status)))
+        .then_some(basis)
+    }
+    /// Recovery's next Grant. After a definitive not-applied lookup it stays
+    /// bound to that original status: the job compares its fresh authority
+    /// read before reserving any new intent, and a change is fenced.
+    pub(crate) async fn recovery_grant(
+        self: &Arc<Self>,
+        configuration: String,
+        cancel: Arc<AtomicBool>,
+    ) -> View {
+        let basis = Self::not_applied_basis(&self.state());
+        let Some(mut job) = self.admit(Some(Action::Grant), Some(configuration), Some(cancel))
+        else {
+            return self.view();
+        };
+        job.basis = basis;
+        let owner = self.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || job.run()).await;
+        owner.view()
     }
     /// The current Grant original is unknown after its child's verified exit.
     /// Only a read-only lookup of that exact original may follow; an
@@ -253,6 +307,7 @@ impl Controller {
             resources: Arc::new(charge),
             deadline: None,
             refresh_absent_native: false,
+            basis: None,
         })
     }
     pub(crate) fn granted(&self) -> bool {
@@ -273,6 +328,7 @@ struct Job {
     resources: Arc<dyn Send + Sync>,
     deadline: Option<Instant>,
     refresh_absent_native: bool,
+    basis: Option<Basis>,
 }
 impl Drop for Job {
     fn drop(&mut self) {
@@ -504,6 +560,15 @@ impl Job {
             _ => (),
         }
         self.owner.state().status = Some(status.clone());
+        if self
+            .basis
+            .as_ref()
+            .is_some_and(|basis| !basis.holds(&status))
+        {
+            // The definitive negative no longer describes the authority.
+            self.owner.state().code = "ownership_changed".into();
+            return Ok(());
+        }
         let Some(action) = self.action else {
             self.owner.state().code.clear();
             return Ok(());

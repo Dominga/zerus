@@ -211,6 +211,12 @@ export const ownershipActions = createOwnershipActions(
 export function ownershipNotice(view: NotificationOwnership | undefined): string {
   if (!view) return "";
   if (view.pending) return tr("Background access is unconfirmed. Check the result before making another change.");
+  if (view.activation?.pending) return tr("Background activation is unconfirmed. Check the original result before making another change.");
+  if (view.activation?.needs_resume) {
+    if (["activation_helper_unavailable", "activation_helper_update_required", "activation_helper_changed"].includes(view.activation.code))
+      return tr("Background activation is unavailable. Update Zerus and its desktop service, then Resume to check again.");
+    return tr("Background work is paused. Resume to activate the service explicitly.");
+  }
   if (view.native_recovery) return tr("Background service is not ready. Some actions are unavailable.");
   if (view.status?.rearm_required) return tr("Background access was revoked. Resume it to let the service work while Zerus is closed.");
   if (view.code || view.status?.state !== "service" || !view.status.identity_current)
@@ -238,8 +244,9 @@ export function serviceStatus(state: DesktopService | undefined) {
     notice = tr("Activity, processes and project tasks are unavailable with this background service connection.");
   }
   const pending = pendingReadNotice(state), retained = retainedSourceNotice(state), owner = ownershipNotice(state.notification_ownership);
-  const ownership = state.notification_ownership?.pending ? "check"
-    : state.notification_ownership?.native_recovery || state.notification_ownership?.status?.rearm_required ? "rearm" : undefined;
+  const ownership = state.notification_ownership?.pending || state.notification_ownership?.activation?.pending ? "check"
+    : state.notification_ownership?.native_recovery || state.notification_ownership?.status?.rearm_required
+      || state.notification_ownership?.activation?.needs_resume ? "rearm" : undefined;
   if (!notice) {
     if (pending) label = state.pending_read_import?.running ? tr("Transferring read marks") : tr("Read marks need attention");
     else if (retained) label = tr("Migration report");

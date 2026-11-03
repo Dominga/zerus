@@ -43,6 +43,8 @@ def main():
                                ROOT / "scripts/install-mobile-connector-service.py"),
                               (destination / "usr/lib/zerus/install-linux-desktop-service.py",
                                ROOT / "scripts/install-linux-desktop-service.py"),
+                              (destination / "usr/lib/zerus/desktop-service-activation.py",
+                               ROOT / "scripts/desktop-service-activation.py"),
                               (destination / "usr/lib/zerus/desktop-revoke-hold.py",
                                ROOT / "scripts/desktop-revoke-hold.py")):
         install(source, installed, 0o755)

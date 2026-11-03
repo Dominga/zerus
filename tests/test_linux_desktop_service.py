@@ -190,6 +190,69 @@ class LinuxDesktopService(unittest.TestCase):
         return installer.Installer(str(self.hgs), self.env, self.manager.run, mode=mode,
                                    hold_factory=self.manager.hold)
 
+    def test_default_activation_rechecks_explicit_passive_under_the_registration_lock(self):
+        self.instance().install()
+        original_status = self.instance().status()
+        self.assertEqual(original_status["mode_selection"], "default")
+        # Owner selection wins after the GUI read but before activation.
+        self.instance("passive").install()
+        self.manager.calls.clear()
+        with self.assertRaisesRegex(installer.Refusal, "Resume"):
+            self.instance("background").install(activation_id=str(uuid.uuid4()), default_only=True)
+        self.assertFalse(set(self.manager.actions()) - {"show"})
+        self.assertEqual(self.instance().status()["selected_mode"], "passive")
+        self.assertIsNone(self.instance().status()["activation_pending"])
+
+    def test_activation_settles_only_its_original_and_lookup_never_restarts(self):
+        self.instance().install()
+        request = str(uuid.uuid4())
+        result = self.instance("background").install(activation_id=request)
+        self.assertEqual((result["abi"], result["request_id"], result["phase"]),
+                         (installer._activation.ABI, request, "settled"))
+        self.assertEqual(result["result"], {"ok": True, "code": "ready"})
+        self.manager.calls.clear()
+        self.assertEqual(self.instance("background").install(activation_id=request), result)
+        self.assertFalse(set(self.manager.actions()) - {"show"})
+        self.instance().install(refresh=True)
+        self.assertEqual(self.instance().activation_result(request), result)
+
+    def test_activation_lost_manager_reply_is_unknown_and_never_reoffered(self):
+        self.instance().install()
+        request = str(uuid.uuid4())
+        def lose_reply():
+            raise installer.Refusal("original manager reply lost")
+        self.manager.after_action = ("restart", lose_reply)
+        with self.assertRaisesRegex(installer.Refusal, "reply lost"):
+            self.instance("background").install(activation_id=request)
+        self.manager.calls.clear()
+        result = self.instance("background").install(activation_id=request)
+        self.assertEqual((result["phase"], result["result"]), ("unknown", None))
+        self.assertFalse(set(self.manager.actions()) - {"show"})
+        with self.assertRaisesRegex(installer._activation.Refusal, "original_pending"):
+            self.instance("background").install(activation_id=str(uuid.uuid4()))
+        self.assertFalse(set(self.manager.actions()) - {"show"})
+
+    def test_activation_original_grant_and_cli_stay_pinned_across_manager_effects(self):
+        for replacement in ("grant", "cli"):
+            with self.subTest(replacement=replacement):
+                # Restore a private passive installation for each independent attempt.
+                if self.destination.exists():
+                    self.destination.unlink()
+                    self.instance().record_path.unlink()
+                self.manager.active = False
+                self.manager.lifecycle["mode"] = "passive"
+                self.instance().install()
+                request = str(uuid.uuid4())
+                def change():
+                    if replacement == "grant":
+                        self.manager.rearm()
+                    else:
+                        self.hgs.write_bytes(b"changed original CLI")
+                self.manager.after_action = ("restart", change)
+                with self.assertRaises((installer.Refusal, installer._activation.Refusal)):
+                    self.instance("background").install(activation_id=request)
+                self.assertEqual(self.instance().activation_result(request)["phase"], "unknown")
+
     def test_rearm_after_receipt_cannot_win_during_the_held_manager_transition(self):
         self.instance().install()
         self.instance("background").install()

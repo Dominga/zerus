@@ -6,8 +6,11 @@ checks. A restarted helper can only look up an existing attempt; it cannot
 reconstruct the original in-memory completion object or repeat that attempt.
 """
 import copy
+import hashlib
 import json
+import os
 import re
+import stat
 import uuid
 
 ABI = "desktop-service-activation-v1"
@@ -34,6 +37,42 @@ def canonical_uuid(value):
 
 def digest(value):
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+class Image:
+    """Bounded digest plus the same retained file, not caller or Grant proof."""
+    def __init__(self, path):
+        self.path = path
+        self.file = open(path, "rb")
+        try:
+            before = os.fstat(self.file.fileno())
+            require(stat.S_ISREG(before.st_mode) and before.st_size <= 512 * 1024 * 1024,
+                    "activation_image_unavailable")
+            self.identity = self.stamp(before)
+            checksum = hashlib.sha256()
+            remaining = before.st_size
+            while remaining:
+                chunk = self.file.read(min(1024 * 1024, remaining))
+                require(chunk, "activation_image_changed")
+                checksum.update(chunk)
+                remaining -= len(chunk)
+            require(not self.file.read(1), "activation_image_changed")
+            self.check()
+            self.digest = checksum.hexdigest()
+        except BaseException:
+            self.file.close()
+            raise
+
+    @staticmethod
+    def stamp(info):
+        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    def check(self):
+        require(self.stamp(os.fstat(self.file.fileno())) == self.identity
+                == self.stamp(os.stat(self.path)), "activation_image_changed")
+
+    def close(self):
+        self.file.close()
 
 
 def binding(configuration, binary, definition, grant):
@@ -77,6 +116,12 @@ def checked_entries(record):
                     "activation_history_unavailable")
     require(len(json.dumps(entries, indent=2).encode()) <= BYTES, "activation_history_unavailable")
     return entries
+
+
+def pending(record):
+    """Recover only an original ID for lookup, never its live execution object."""
+    return next((request for request, entry in reversed(list(checked_entries(record).items()))
+                 if entry["phase"] == "unknown"), None)
 
 
 class Attempt:

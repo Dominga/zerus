@@ -313,6 +313,7 @@ class TrayUpdate(unittest.TestCase):
             helper = self.root / 'scripts/install-linux-desktop-service.py'
             helper.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(REPO / 'scripts/desktop-revoke-hold.py', helper.with_name('desktop-revoke-hold.py'))
+            shutil.copy2(REPO / 'scripts/desktop-service-activation.py', helper.with_name('desktop-service-activation.py'))
             self.script(helper, f'#!{sys.executable}\nimport json, os, pathlib, sys\n'
                         'with (pathlib.Path(os.environ["TRAY_FIXTURE"]) / "desktop-service.calls").open("a") as log:\n'
                         '    log.write(json.dumps(sys.argv[1:]) + "\\n")\n'

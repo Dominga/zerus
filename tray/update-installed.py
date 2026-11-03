@@ -59,6 +59,7 @@ HGS_TRAY_QUIT_TIMEOUT and HGS_TRAY_START_TIMEOUT (seconds, default 35) bound the
 waits for the old GUI to quit and the new one to start.
 """
 import argparse
+from contextlib import contextmanager
 import datetime
 import errno
 import hashlib
@@ -70,6 +71,7 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -995,7 +997,7 @@ def legacy_desktop_state_absent():
                       'cannot check desktop revocation; keep Qt stopped and upgrade or repair hgs')
 
 
-def revoke_configuration():
+def revoke_configuration(with_status=False):
     """The selected CLI's supported, read-only configuration, never an approximation."""
     try:
         help_result = subprocess.run([CLI, '--help'], capture_output=True, text=True, timeout=10)
@@ -1019,7 +1021,95 @@ def revoke_configuration():
         raise UpdateError(f'cannot read the desktop configuration; keep Qt stopped: {error}')
     if status.returncode != 0 or not isinstance(result, dict) or not result.get('configuration'):
         raise UpdateError('the selected hgs did not report a canonical desktop configuration; keep Qt stopped')
-    return result['configuration']
+    return (result['configuration'], result) if with_status else result['configuration']
+
+
+def passive_before_qt(installed, configuration, status):
+    """Use the maintained helper, never raw manager verbs, to retain passive.
+
+    Legacy CLI/no-service paths keep their existing revoke-only behavior.
+    A current service must select passive before a future update can restart
+    it. The helper owns the SAME rollback UUID/hold through physical readiness.
+    """
+    lifecycle = status.get('lifecycle')
+    if not isinstance(lifecycle, dict) or lifecycle.get('abi') != 'desktop-lifecycle-v1':
+        return
+    helper = Path(__file__).resolve().parent.parent / 'scripts' / (
+        'install-macos-desktop-service.py' if MAC else 'install-linux-desktop-service.py')
+    backend = installed / 'Contents/MacOS/hgs' if MAC and (installed / 'Contents/MacOS/hgs').exists() else CLI
+    args = ([sys.executable, str(helper), str(backend), '--mode', 'passive', '--json'] if MAC else
+            [sys.executable, str(helper), 'install', '--hgs', str(CLI), '--mode', 'passive', '--json'])
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=REVOKE_SECONDS)
+        receipt = json.loads(result.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        raise UpdateError(f'passive rollback is unconfirmed; keep Qt stopped and inspect the maintained helper: {error}') from None
+    if (result.returncode != 0 or not isinstance(receipt, dict) or receipt.get('configuration') != configuration
+            or receipt.get('ok') is not True or receipt.get('selected_mode') != 'passive'
+            or receipt.get('running_mode') != 'passive' or receipt.get('ipc_ready') is not True
+            or receipt.get('pending_restart') is not False or receipt.get('transition') is not None):
+        raise UpdateError('passive rollback is not settled; keep Qt stopped and inspect the SAME helper transition; do not Rearm')
+
+
+@contextmanager
+def qt_revoke_journal(configuration, before_offer):
+    """Private metadata and exclusion, never a native execution permission."""
+    directory = SNAPSHOTS / '.qt-revoke'
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    meta = directory.lstat()
+    if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != os.getuid() or stat.S_IMODE(meta.st_mode) != 0o700:
+        raise UpdateError('the Qt revoke journal is not a private owned directory; keep Qt stopped')
+    flags = os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    import fcntl
+    fd = os.open(directory / 'original.lock', os.O_CREAT | os.O_RDWR | flags, 0o600)
+    try:
+        meta = os.fstat(fd)
+        if not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid() or meta.st_nlink != 1 or stat.S_IMODE(meta.st_mode) != 0o600:
+            raise UpdateError('the Qt revoke journal lock is not private; keep Qt stopped')
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        path = directory / 'original.json'
+        previous = None
+        try:
+            source = os.open(path, os.O_RDONLY | flags)
+        except FileNotFoundError:
+            pass
+        else:
+            with os.fdopen(source, 'rb') as original:
+                meta = os.fstat(original.fileno())
+                if not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid() or meta.st_nlink != 1 or stat.S_IMODE(meta.st_mode) != 0o600 or meta.st_size > 8192:
+                    raise UpdateError('the original Qt revoke record is unavailable; keep Qt stopped')
+                previous = json.loads(original.read(8193))
+            if (not isinstance(previous, dict) or set(previous) != {'schema', 'configuration', 'request_id', 'phase'}
+                    or previous.get('schema') != 1 or previous.get('configuration') != configuration
+                    or previous.get('phase') not in ('unknown', 'settled')
+                    or not isinstance(previous.get('request_id'), str)
+                    or str(uuid.UUID(previous['request_id'])) != previous['request_id']):
+                raise UpdateError('the original Qt revoke scope changed; keep Qt stopped and inspect that original')
+        def save(value):
+            out, temporary = tempfile.mkstemp(prefix='.original-', dir=directory)
+            try:
+                with os.fdopen(out, 'w') as target:
+                    json.dump(value, target); target.write('\n'); target.flush(); os.fsync(target.fileno())
+                os.replace(temporary, path)
+                parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+                try:
+                    os.fsync(parent)
+                finally:
+                    os.close(parent)
+            finally:
+                Path(temporary).unlink(missing_ok=True)
+        fresh = previous is None or previous['phase'] == 'settled'
+        if fresh:
+            # An uncertain original bypasses even this maintained helper:
+            # only lookup runs after an updater restart.
+            before_offer()
+        record = ({'schema': 1, 'configuration': configuration, 'request_id': str(uuid.uuid4()), 'phase': 'unknown'}
+                  if fresh else previous)
+        if fresh:
+            save(record)  # Before offering the original command, including lost replies/crashes.
+        yield record, fresh, save
+    finally:
+        os.close(fd)
 
 
 def revocation_refusal(request_id, receipt=None):
@@ -1042,15 +1132,24 @@ def revocation_refusal(request_id, receipt=None):
             'Reboot only as a last resort.')
 
 
-def revoke_before_qt():
+def revoke_before_qt(installed):
     """Revoke migrated writers before any Qt start, with one retained request ID."""
-    configuration = revoke_configuration()
-    if configuration is None:
+    scope = revoke_configuration(with_status=True)
+    if scope is None:
         return
-    request_id = str(uuid.uuid4())
+    configuration, status = scope
+    try:
+        with qt_revoke_journal(configuration, lambda: passive_before_qt(installed, configuration, status)) as (record, fresh, save):
+            _revoke_before_qt(configuration, record['request_id'], fresh)
+            save(dict(record, phase='settled'))
+    except (OSError, ValueError, TypeError) as error:
+        raise UpdateError(f'cannot retain or read the original Qt rollback; keep Qt stopped: {error}') from None
+
+
+def _revoke_before_qt(configuration, request_id, fresh):
     args = [CLI, 'desktop', 'revoke', '--json', '--request-id', request_id, '--reason', 'rollback']
     try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=REVOKE_SECONDS)
+        result = subprocess.run(args, capture_output=True, text=True, timeout=REVOKE_SECONDS) if fresh else None
     except (OSError, subprocess.TimeoutExpired):
         result = None
     if result is not None and result.returncode == 0:
@@ -1090,7 +1189,7 @@ def update(built, installed, rollback=False):
         if refusal:
             raise UpdateError(refusal + ' Nothing was replaced.')
     if new_kind == 'qt':
-        revoke_before_qt()
+        revoke_before_qt(installed)
     switching = MAC and old_kind == 'qt' and new_kind == 'tauri'
     # Qt's settings follow the direction of the change: leaving the client for
     # Qt checks them before Qt runs again and writes its own (and can still

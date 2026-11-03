@@ -33,6 +33,10 @@ _hold = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_hold)
 Refusal = _hold.Refusal
 
+_spec = importlib.util.spec_from_file_location("desktop_service_activation", Path(__file__).with_name("desktop-service-activation.py"))
+_activation = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_activation)
+
 
 def require(condition, message):
     if not condition:
@@ -251,6 +255,10 @@ class ModeTransition:
         self.path = destination.with_name("." + LABEL + ".zerus-registration.json")
         self.original_definition = previous
         self.record = None
+        self.activation = None
+        self.activation_journal = None
+        self.activation_binding = None
+        self.activation_image = None
         old = read_definition(self.path)
         self.record_identity = old
         if old is not None:
@@ -264,6 +272,7 @@ class ModeTransition:
                     "Invalid or foreign desktop mode record; kept.")
             require(record.get("mode_selection", "retained") in ("default", "explicit", "retained"),
                     "Invalid desktop mode selection provenance; kept.")
+            _activation.checked_entries(record)
             transition = record.get("transition")
             if transition is not None:
                 require(isinstance(transition, dict) and set(transition) == {"target", "request_id"}
@@ -309,6 +318,31 @@ class ModeTransition:
                 and all(self.valid_uuid(value.get(k)) for k in ("journal", "request_id", "owner_epoch"))
                 and type(value.get("revision")) is int and 0 < value["revision"] < 2 ** 53,
                 "Complete authenticated frontend Grant/Rearm first; this installer never clears retained revoke.")
+        if self.activation_binding is not None:
+            require(_activation.binding(self.value["configuration"], self.activation_image.digest,
+                                       hashlib.sha256(self.content).hexdigest(), value) == self.activation_binding,
+                    "Original activation Grant changed; check its original result.")
+        return value
+
+    def activation_result(self, request_id):
+        return _activation.Journal(lambda: self.record, lambda _: None).lookup(request_id, self.value["configuration"])
+
+    def begin_activation(self, request_id):
+        require(self.record is not None, "Register the passive backend before activation.")
+        self.caller()
+        self.activation_image = _activation.Image(self.binary)
+        grant = self.grant()
+        self.activation_binding = _activation.binding(self.value["configuration"], self.activation_image.digest,
+                                                       hashlib.sha256(self.content).hexdigest(), grant)
+        def persist(record):
+            self.persist(record)
+            self.record = record
+        self.activation_journal = _activation.Journal(lambda: self.record, persist)
+        self.activation = self.activation_journal.reserve(request_id, self.activation_binding)
+
+    def enter_activation_effect(self):
+        if self.activation is not None and not self.activation.effect_started:
+            self.activation_journal.enter_effect(self.activation)
 
     def prepare(self, previous, old_mode):
         record = self.record
@@ -367,6 +401,8 @@ class ModeTransition:
 
     def revalidate(self):
         self.fence()
+        if self.activation_image is not None:
+            self.activation_image.check()
         if self.mode is not None:
             self.caller()
             if self.mode == "background":
@@ -436,6 +472,7 @@ class ModeTransition:
         return {"schema": 1, "operation": "status", "configuration": self.value["configuration"], "label": LABEL,
                 "registered": old_definition is not None, "selected_mode": record.get("selected_mode", mode),
                 "mode_selection": record.get("mode_selection", "retained") if old_definition is not None else None,
+                "activation_pending": _activation.pending(record) if record else None,
                 "running_mode": lifecycle.get("mode"), "ipc_ready": lifecycle.get("ipc_ready", False),
                 "pending_restart": record.get("pending_restart", False), "transition": record.get("transition"),
                 "last_revoke_request_id": record.get("last_revoke_request_id"),
@@ -463,28 +500,40 @@ def registration_lock(home):
 
 def install(binary, home, source, restart=False, check_only=False, remove=False,
             command=run, clock=time.monotonic, sleep=time.sleep, runner_hgs=None, refresh_runner=False,
-            mode=None, status_only=False, cancel_rollback=None, hold_factory=None):
+            mode=None, status_only=False, cancel_rollback=None, hold_factory=None,
+            activation_id=None, activation_status=False, default_only=False):
+    require(not default_only or (activation_id is not None and not activation_status),
+            "Default-only requires the original activation install.")
+    require(activation_id is None or (_activation.canonical_uuid(activation_id)
+            and ((mode == "background" and not (restart or check_only or remove or refresh_runner or status_only
+                                                or cancel_rollback or activation_status))
+                 or (activation_status and mode is None and not (restart or check_only or remove or refresh_runner
+                                                                 or status_only or cancel_rollback)))),
+            "Activation accepts only background selection or original-ID lookup.")
+    require(not activation_status or activation_id is not None, "Activation lookup requires its original UUID.")
     args = dict(restart=restart, check_only=check_only, remove=remove, command=command, clock=clock,
                 sleep=sleep, runner_hgs=runner_hgs, refresh_runner=refresh_runner, mode=mode, status_only=status_only,
-                cancel_rollback=cancel_rollback, hold_factory=hold_factory)
+                cancel_rollback=cancel_rollback, hold_factory=hold_factory,
+                activation_id=activation_id, activation_status=activation_status, default_only=default_only)
     if cancel_rollback is not None:
         require(mode is None and not (restart or check_only or remove or refresh_runner or status_only),
                 "Rollback cancellation cannot select a mode or perform another action.")
         _install(binary, home, source, **dict(args, check_only=True))
         with registration_lock(home):
             return _install(binary, home, source, **args)
-    if check_only or status_only or (remove and not os.path.lexists(home / "Library/LaunchAgents" / (LABEL + ".plist"))):
+    if check_only or status_only or activation_status or (remove and not os.path.lexists(home / "Library/LaunchAgents" / (LABEL + ".plist"))):
         return _install(binary, home, source, **args)
     # Validate scope, existing definitions and paired selection before creating
     # directories/lock files. Repeat the full preflight under the lock.
-    _install(binary, home, source, **dict(args, check_only=True, mode=None))
+    _install(binary, home, source, **dict(args, check_only=True, mode=None, activation_id=None))
     with registration_lock(home):
         return _install(binary, home, source, **args)
 
 
 def _install(binary, home, source, restart=False, check_only=False, remove=False,
              command=run, clock=time.monotonic, sleep=time.sleep, runner_hgs=None, refresh_runner=False,
-             mode=None, status_only=False, cancel_rollback=None, hold_factory=None):
+             mode=None, status_only=False, cancel_rollback=None, hold_factory=None,
+             activation_id=None, activation_status=False, default_only=False):
     require(mode in (None, "passive", "background") and (mode is None or not (remove or refresh_runner or status_only or check_only)),
             "Explicit mode selection cannot be combined with remove/check/status/runner refresh.")
     require(home.is_absolute(), "Desktop service HOME must be absolute.")
@@ -559,6 +608,13 @@ def _install(binary, home, source, restart=False, check_only=False, remove=False
     if cancel_rollback is not None:
         return transition.cancel(cancel_rollback, check=check_only)
     try:
+        if activation_id is not None:
+            original = transition.activation_result(activation_id)
+            if activation_status or original["phase"] != "missing":
+                return original  # Never reconstruct execution/completion from a retained entry.
+            require(not default_only or (transition.record.get("mode_selection", "retained") == "default"
+                    and transition.record.get("selected_mode") == "passive"),
+                    "Explicit or retained selection needs the owner's Resume action; kept.")
         domain = f"gui/{os.getuid()}"
         target = domain + "/" + LABEL
         def launchctl(*args):
@@ -591,6 +647,9 @@ def _install(binary, home, source, restart=False, check_only=False, remove=False
                         "Custom desktop environment kept; review before changing mode.")
                 expected["EnvironmentVariables"] = old_environment
             require(previous_definition == expected, "Custom desktop definition kept; update/reconcile it before changing mode.")
+        if activation_id is not None:
+            transition.begin_activation(activation_id)
+            transition.enter_activation_effect()  # Before mode metadata, definition or manager changes.
         transition.prepare(previous, old_mode)
         pending_restart = bool(transition.record and transition.record["pending_restart"])
         transition.revalidate()
@@ -650,6 +709,10 @@ def _install(binary, home, source, restart=False, check_only=False, remove=False
                         require(receipt["ipc_ready"] is True and receipt["running_mode"] == desired_mode,
                                 "Desktop readiness changed before completion; retain its pending transition.")
                         transition.finish()
+                        if transition.activation is not None:
+                            transition.revalidate()
+                            transition.activation_journal.finish(transition.activation, ready=True)
+                            return transition.activation_result(activation_id)
                         receipt.update(pending_restart=False, transition=None)
                         receipt.update(operation="install", ok=True, message="ready")
                         return receipt
@@ -658,11 +721,15 @@ def _install(binary, home, source, restart=False, check_only=False, remove=False
             require(clock() < deadline, "Desktop IPC did not become ready; inspect hgs desktop status --json.")
             sleep(0.2)
     finally:
-        transition.close(validate=False)
+        try:
+            transition.close(validate=False)
+        finally:
+            if transition.activation_image is not None:
+                transition.activation_image.close()
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, epilog="Desktop service activation ABI: " + _activation.ABI)
     parser.add_argument("binary", type=Path)
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--check-only", action="store_true")
@@ -674,6 +741,9 @@ def main():
     group.add_argument("--status", action="store_true", help="read selected/running mode without manager mutations")
     group.add_argument("--cancel-rollback", action="store_true", help="cancel only the original pending registration record")
     parser.add_argument("--request-id", help="with --cancel-rollback: the original pending rollback UUID")
+    parser.add_argument("--activation-id", help="original UUID for --mode background; never reused to execute again")
+    parser.add_argument("--default-only", action="store_true", help="require newly installed implicit passive under the registration lock")
+    group.add_argument("--activation-status", action="store_true", help="read only the original --activation-id result")
     parser.add_argument("--json", action="store_true", help="configuration-scoped native Settings receipt")
     parser.add_argument("--config-dir", type=Path)
     parser.add_argument("--state-dir", type=Path)
@@ -692,7 +762,8 @@ def main():
                 source[name] = str(path)
         state = install(args.binary, Path.home(), source, args.restart, args.check_only, args.remove,
                         runner_hgs=args.runner_hgs, refresh_runner=args.refresh_runner,
-                        mode=args.mode, status_only=args.status, cancel_rollback=args.request_id)
+                        mode=args.mode, status_only=args.status, cancel_rollback=args.request_id,
+                        activation_id=args.activation_id, activation_status=args.activation_status, default_only=args.default_only)
         if isinstance(state, dict):
             print(json.dumps(state))
         elif args.json:
@@ -707,7 +778,7 @@ def main():
         else:
             print(f"Desktop service registration: {state}.")
         return 0
-    except (Refusal, OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as error:
+    except (Refusal, _activation.Refusal, OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as error:
         if args.json:
             record = None
             try:

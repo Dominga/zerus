@@ -208,14 +208,20 @@ save them.
 | `android-gradle-v1-` | Android | Month, hash of the Gradle wrapper properties and `*.gradle.kts` | Exact key missed; tests and lint passed | Monthly restart; about 700 MB (`~/.gradle/caches` and `wrapper`) |
 | `arch-ccache-v1-`, `arch-package-ccache-v1-`, `mac-desktop-ccache-v1-` | Arch desktop, Arch package, macOS | Architecture (macOS), run ID | Build passed with ccache misses | `CCACHE_MAXSIZE` 150, 100 and 100 MB |
 
-Quick and relay checks reclaim only unused Android, .NET, Haskell and CodeQL installations on disposable hosted Ubuntu runners. Disk checkpoints record free bytes and build-directory sizes. Quick shares one Cargo target across its crates; the new cache family avoids restoring the former duplicated debug and incremental trees. Relay removes its completed host Cargo targets before Docker compiles the deployment image; the remaining memory-envelope checks run that image. PostgreSQL containers and volumes, Cargo registries and the Python test environment stay available. Runner classes and the repository cache limit are unchanged.
+Quick, relay and Linux native-client checks reclaim only unused Android, .NET, Haskell and CodeQL installations on disposable hosted Ubuntu runners. Disk checkpoints record free bytes and build-directory sizes. Quick shares one Cargo target across its crates; the new cache family avoids restoring the former duplicated debug and incremental trees. Relay removes its completed host Cargo targets before Docker compiles the deployment image; the remaining memory-envelope checks run that image. PostgreSQL containers and volumes, Cargo registries and the Python test environment stay available. Runner classes and the repository cache limit are unchanged.
 
 The hosted Linux native-client job reports disk use after checkout, dependency
 installation and cache restore, between its existing build phases, and after
-checks even when they fail. Reports include sizes for `target/client-native` and the Cargo
-registry/Git caches. This job has reporting permission only; tool and target
-cleanup remain restricted to Quick and relay. Local native-check script runs
-skip these checkpoints.
+checks even when they fail. Reports include sizes for `target/client-native` and
+the Cargo registry/Git caches. After its fixed unused-tool cleanup, this job
+requires a fresh measurement of at least 24 GiB free before installing dependencies
+or compiling. A healthy run used 17.7 GiB from checkout to the end of its checks,
+8.7 GiB of it in the core test links, and the cleanup reclaimed 18.1 GiB; the
+remainder covers parallel link temporaries and growth. A refusal fails the job
+before any build with a run annotation naming the required and actual free bytes,
+instead of a linker crash on a full disk. Quick and relay do not use this minimum.
+Host build-target retirement remains relay-only. Local native-check script runs
+skip the hosted checkpoints and preparation.
 
 The Windows real-agent job restores the `windows-cli-` family of the Windows
 desktop job for its release build and never saves it, so two jobs cannot race to

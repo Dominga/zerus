@@ -5,7 +5,7 @@
 //   npx vite --port <free port> --strictPort, then
 //   python3 scripts/menu-smoke.py --title "Zerus list flicker regression" \
 //     --url http://127.0.0.1:<port>/scripts/list-flicker-smoke.html
-// headless (GDK_BACKEND=x11 under xvfb-run) or with --real-display under
+// in its own private Xvfb by default, or with --real-display under
 // flock -w 1800 /tmp/zerus-arch-display.lock.
 import { render } from "solid-js/web";
 import { SessionList } from "../ui/sessions/SessionList";

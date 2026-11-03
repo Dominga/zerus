@@ -190,3 +190,35 @@ export function ownershipNotice(view: NotificationOwnership | undefined): string
     return tr("Background access is unavailable. Retry to check the service.");
   return "";
 }
+
+/** Compact footer presentation; full reasons stay in its accessible tooltip. */
+export function serviceStatus(state: DesktopService | undefined) {
+  if (!state) return;
+  let notice = "", label = tr("Background service");
+  if (!state.connected) {
+    label = tr("Background service unavailable");
+    notice = state.reconnecting
+      ? tr("Background service unavailable. Reconnecting automatically; showing last known sessions.")
+      : tr("Background service unavailable. Retry to reconnect.");
+  } else if (state.code === "explicit_handoff_required") {
+    label = tr("Background handoff required");
+    notice = tr("Background service is waiting for an explicit handoff.");
+  } else if (state.code || !["fleet", "presence", "reads", "attention", "approvals"].every((name) => state.background[name]?.ready)) {
+    label = tr("Background service not ready");
+    notice = tr("Background service is not ready. Some actions are unavailable.");
+  } else if (!state.details_available) {
+    label = tr("Service views unavailable");
+    notice = tr("Activity, processes and project tasks are unavailable with this background service connection.");
+  }
+  const pending = pendingReadNotice(state), retained = retainedSourceNotice(state), owner = ownershipNotice(state.notification_ownership);
+  const ownership = state.notification_ownership?.pending ? "check"
+    : state.notification_ownership?.status?.rearm_required ? "rearm" : undefined;
+  if (!notice) {
+    if (pending) label = state.pending_read_import?.running ? tr("Transferring read marks") : tr("Read marks need attention");
+    else if (retained) label = tr("Migration report");
+    else if (owner) label = ownership === "check" ? tr("Background access unconfirmed") : ownership === "rearm" ? tr("Background access paused") : tr("Background access unavailable");
+  }
+  const reasons = [notice, pending, retained, owner].filter(Boolean);
+  return { label, details: reasons.join("\n") || tr("Background service connected"), healthy: !reasons.length,
+    retry: !!(notice || pending || retained || (owner && !ownership)), review: !!retained, ownership };
+}

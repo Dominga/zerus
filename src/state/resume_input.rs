@@ -71,6 +71,15 @@ fn fork_directory(record: &Value) -> Result<PathBuf> {
 }
 
 pub(super) fn pending(record: &Value) -> bool {
+    pending_binding(record)
+        && ((record.get("session_end").is_none()
+            && record["last_event_at"].as_f64().unwrap_or(0.0) == 0.0)
+            || clear_context::ended_resume(record))
+}
+
+/// Binding shape only, never process/composer verification or input permission.
+/// A real clear SessionStart may finish an older run's unmarked SessionEnd.
+pub(super) fn pending_binding(record: &Value) -> bool {
     record["agent"] == "codex"
         && record["run_identity_version"] == 1
         && record["startup_kind"] == "resume"
@@ -79,8 +88,6 @@ pub(super) fn pending(record: &Value) -> bool {
         && record["expected_id"] == record["conversation_id"]
         && string(record, "requested_id").is_empty()
         && string(record, "error").is_empty()
-        && record.get("session_end").is_none()
-        && record["last_event_at"].as_f64().unwrap_or(0.0) == 0.0
         && ["", "unknown"].contains(&string(record, "activity"))
         && ["", "unknown"].contains(&string(record, "phase"))
 }

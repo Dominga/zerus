@@ -102,6 +102,18 @@ fn codex_reset_panel(screen: &str, cwd: &str) -> bool {
     codex_reset_panel_below(screen, cwd, &home())
 }
 
+// Codex 0.166 rate_limits.rs emits these fixed warnings on a fresh /clear
+// surface too. They are display only; the owned process/empty composer checks
+// below still decide whether that surface can confirm the original clear.
+fn codex_usage_notice(row: &str) -> bool {
+    static NOTICE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    NOTICE.get_or_init(|| regex::Regex::new(concat!(
+        r"^⚠ (?:Heads up, you have less than (?:5|10|25|50)% of your (?:5h|weekly) limit left\. Run /status for a breakdown\.",
+        r"|(?:5h|weekly) limit: (?:[0-9]|[1-9][0-9]|100)% left · resets at (?:[1-9]|1[0-2]):[0-5][0-9] [AP]M",
+        r"(?: on (?:[1-9]|[12][0-9]|3[01]) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec))? · /status)$"
+    )).expect("fixed native usage notice")).is_match(row)
+}
+
 // Codex prints the folder below the home as `~/…`, or as `~\…` on Windows,
 // where its drive path and that form compare without case (`shown_path`).
 fn codex_reset_panel_below(screen: &str, cwd: &str, home: &Path) -> bool {
@@ -120,7 +132,8 @@ fn codex_reset_panel_below(screen: &str, cwd: &str, home: &Path) -> bool {
     let placeholder = |text: &str| text.is_empty() || text.strip_prefix(' ')
         .is_some_and(|text| ["Ask Codex to do anything", "Ask a follow-up question"].contains(&text));
     if !input::codex_prompt(input).map(str::trim_end).is_some_and(placeholder) { return false; }
-    let mut rows: Vec<_> = lines[..composer].iter().map(|line| line.trim()).filter(|line| !line.is_empty()).collect();
+    let mut rows: Vec<_> = lines[..composer].iter().map(|line| line.trim())
+        .filter(|line| !line.is_empty() && !codex_usage_notice(line)).collect();
     // The released idle screen can include its settled decorative logo. Match
     // the complete known pose; arbitrary braille, prose and partial frames do
     // not confirm a reset. A replay remains unconfirmed until it settles.
@@ -188,6 +201,42 @@ pub(super) fn observe_terminal(record: &mut Value) -> Result<bool> {
     }
     write(record)?;
     Ok(true)
+}
+
+fn matching_resume_request(record: &Value) -> bool {
+    let request = &record["clear_context_request"];
+    uuid::Uuid::parse_str(string(request, "request_id")).is_ok()
+        && request["conversation_id"] == record["conversation_id"]
+        && request["at"].as_f64().is_some_and(|at| at > 0.0)
+        && (request.get("run_id").is_none() || request["run_id"] == record["run_id"])
+}
+
+/// Capture only the real main SessionEnd of an already requested, verified
+/// pending resume. A generic end cannot reopen any input or clear path.
+pub(super) fn ending_resume(record: &Value) -> bool {
+    resume_clearable(record) && matching_resume_request(record)
+}
+
+/// SessionEnd can precede Codex's deferred clear SessionStart. Only its exact
+/// hook-time request/run/conversation marker preserves that pending resume;
+/// any newer native event, work or changed binding keeps the ordinary refusal.
+/// The first submitted input still awaits that real start, as on any resume.
+pub(super) fn ended_resume(record: &Value) -> bool {
+    let end = &record["session_end"];
+    ended_request(record)
+        && end["clear_request_id"] == record["clear_context_request"]["request_id"]
+        && end["clear_event_at"].as_f64().is_some_and(|at| at > 0.0)
+        && end["clear_event_at"] == record["last_event_at"]
+}
+
+fn ended_request(record: &Value) -> bool {
+    let end = &record["session_end"];
+    matching_resume_request(record)
+        && !string(record, "run_id").is_empty()
+        && end["run_id"] == record["run_id"]
+        && end["conversation_id"] == record["conversation_id"]
+        && end["at"].as_f64().is_some_and(|at| at >= record["clear_context_request"]["at"].as_f64().unwrap_or(f64::INFINITY))
+        && !telemetry::work_remains(record)
 }
 
 pub(super) fn event(record: &Value) -> Option<Value> {
@@ -434,13 +483,17 @@ pub(super) fn failed(record: &Value, live: bool) -> bool {
 /// confirms the resume when it was requested or observed for the expected
 /// conversation, or the exact supervised Codex still holds its rollout open.
 pub(super) fn resumed_start(record: &Value, event: &Value) -> bool {
+    // The trusted real hook can settle an old binary's pending clear too. This
+    // fallback is never used by readiness/input or terminal-only confirmation.
+    let pending = resume_input::pending(record)
+        || (resume_input::pending_binding(record) && ended_request(record));
     if !string(record,"restore_archive_id").is_empty() {
-        return string(event,"source") == "clear" && resume_input::pending(record)
+        return string(event,"source") == "clear" && pending
             && restore_request(record).is_some_and(|request| archive::restore_source(record)
                 .is_ok_and(|archived| archived["run_id"] == request["restore_archive_run_id"]));
     }
     string(event,"source") == "clear"
-        && resume_input::pending(record)
+        && pending
         && (awaiting_start(record) || record["clear_context_request"]["conversation_id"] == record["conversation_id"]
             || resume_input::owned(record).is_ok())
 }
@@ -537,7 +590,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let path=absolute_root()?.join("clear_receipts").join(format!("{uuid}.json"));
     if path.exists() {return Err("This clear was already attempted. Check Terminal before trying again".into());}
     recovery::cancel_for_input(name)?;
-    record["clear_context_request"]=json!({"request_id":request.request_id,"conversation_id":request.expected_conversation_id,"at":now()});
+    record["clear_context_request"]=json!({"request_id":request.request_id,"run_id":request.expected_run_id,
+        "conversation_id":request.expected_conversation_id,"at":now()});
     if resuming && !string(&record,"restore_archive_id").is_empty() {
         let archived = archive::restore_source(&record)?;
         record["clear_context_request"]["run_id"] = record["run_id"].clone();
@@ -829,6 +883,52 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         // Compaction, like `available`, needs the confirmed conversation; a
         // resume needs its exact live process, absent here.
         assert!(!available(&pending,true));assert!(!resumed(&pending,true));assert!(!resumed(&pending,false));
+    }
+    #[test] fn only_the_requested_resumed_clear_can_survive_its_exact_main_end() {
+        let mut record=json!({"agent":"codex","run_identity_version":1,"startup_kind":"resume","supervisor":{},
+            "run_id":"run","conversation_id":"old","expected_id":"old","activity":"unknown","phase":"unknown","last_event_at":0,
+            "clear_context_request":{"request_id":"11111111-1111-4111-8111-111111111111","run_id":"run","conversation_id":"old","at":1.0}});
+        assert!(ending_resume(&record));
+        record["session_end"]=json!({"run_id":"run","conversation_id":"old","at":2.0});
+        record["last_event_at"]=json!(2.1);
+        assert!(!resume_input::pending(&record));
+        assert!(resumed_start(&record,&json!({"source":"clear"})));
+        assert!(!resumed_start(&record,&json!({"source":"resume"})));
+        record["session_end"]["clear_request_id"]=record["clear_context_request"]["request_id"].clone();
+        record["session_end"]["clear_event_at"]=record["last_event_at"].clone();
+        assert!(resume_input::pending(&record));
+        assert!(resumed_start(&record,&json!({"source":"clear"})));
+        assert!(!resumed_start(&record,&json!({"source":"resume"})));
+        let mut sent=record.clone();sent["input_pending_at"]=json!(3.0);
+        assert!(resume_input::pending(&sent));assert!(!resume_clearable(&sent));
+        assert!(resumed_start(&sent,&json!({"source":"clear"})));
+        for (key,value) in [("run_id",json!("other")),("conversation_id",json!("other")),("at",json!(0.5)),
+            ("clear_request_id",json!("other")),("clear_event_at",json!(1.5))] {
+            let mut changed=record.clone();changed["session_end"][key]=value;
+            assert!(!resume_input::pending(&changed),"end {key}");
+        }
+        for (key,value) in [("last_event_at",json!(3.0)),
+            ("active_tools",json!({"a":{"name":"Bash","started":2.0}})),("expected_id",json!("other")),
+            ("activity",json!("busy")),("startup_kind",json!("new")),("agent",json!("claude"))] {
+            let mut changed=record.clone();changed[key]=value;
+            assert!(!resume_input::pending(&changed),"record {key}");
+        }
+        for (key,value) in [("run_id",json!("stale")),("conversation_id",json!("other")),("at",json!(3.0)),
+            ("request_id",json!("22222222-2222-4222-8222-222222222222"))] {
+            let mut changed=record.clone();changed["clear_context_request"][key]=value;
+            assert!(!resume_input::pending(&changed),"request {key}");
+        }
+    }
+    #[test] fn reset_panel_accepts_only_the_fixed_native_usage_notices() {
+        let warning="⚠ Heads up, you have less than 10% of your weekly limit left. Run /status for a breakdown.";
+        let footer="⚠ weekly limit: 10% left · resets at 11:22 PM on 7 Nov · /status";
+        let screen=format!(">_ OpenAI Codex (v0.166.0)\n/fixture\npermissions: default\n\n{warning}\n\n{footer}\n\n› Ask Codex to do anything\n\nGPT-6.1-Sol default · /fixture\n? for shortcuts");
+        assert!(codex_reset_panel(&screen,"/fixture"));
+        for changed in [screen.replace(warning,"⚠ An unknown warning"),screen.replace("10% left","101% left"),
+            screen.replace("11:22 PM","13:22 PM"),screen.replace("Run /status for a breakdown.","Approve this command."),
+            screen.replace("› Ask Codex to do anything","› my draft"),format!("Previous conversation\n{screen}")] {
+            assert!(!codex_reset_panel(&changed,"/fixture"),"{changed}");
+        }
     }
     #[test] fn fresh_starts_continue_the_activity_timeline_like_a_clear() {
         let previous=json!({"run_id":"old-run","conversation_id":"second","cleared_conversations":["first"],"journal_name":"anchor"});

@@ -34,6 +34,9 @@ fn main() {
         eprintln!("hgs: {error}");
         std::process::exit(2);
     }
+    #[cfg(windows)]
+    let entered = std::time::Instant::now();
+    zerus_client_core::quit_origin::capture_process_entry();
     // COM cold activation cannot load config, create jobs or acquire ownership.
     #[cfg(windows)]
     if let Some(code) = desktop::windows_notification_activation(std::env::args().nth(1).as_deref())
@@ -58,7 +61,11 @@ fn main() {
         let args: Vec<String> = std::env::args().skip(2).collect();
         std::process::exit(host::run(&args));
     }
-    let code = match cli::dispatch(std::env::args().skip(1).collect()) {
+    #[cfg(windows)]
+    let result = cli::dispatch_at(std::env::args().skip(1).collect(), entered);
+    #[cfg(not(windows))]
+    let result = cli::dispatch(std::env::args().skip(1).collect());
+    let code = match result {
         Ok(code) => code,
         Err(err) => {
             #[cfg(windows)]

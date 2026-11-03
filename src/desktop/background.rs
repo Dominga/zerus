@@ -30,6 +30,8 @@ pub(super) struct Runtime {
     activations: activation::Router,
     drained: bool,
     stopping: bool,
+    #[cfg(windows)]
+    swarm: super::swarm_windows::Runtime,
     notifications: notification_service::Runtime,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     creation: super::creation_clone::Runtime,
@@ -37,6 +39,8 @@ pub(super) struct Runtime {
     worktree: super::creation_worktree::Runtime,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     launch: super::creation_launch::Runtime,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    task_start: super::task_start_reconcile::Runtime,
 }
 
 /// The actor can replace only an already admitted background runtime after its
@@ -70,6 +74,8 @@ impl Runtime {
         let worktree = super::creation_worktree::Runtime::new(config, epoch, owner.clone())?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let launch = super::creation_launch::Runtime::new(config, epoch, owner.clone())?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let task_start = super::task_start_reconcile::Runtime::new(config, epoch, owner.clone())?;
         match fleet::Runtime::start(config, epoch) {
             Ok(fleet) => Ok(Self {
                 fleet,
@@ -83,6 +89,8 @@ impl Runtime {
                 activations: activation::Router::new(&location.configuration, epoch),
                 drained: false,
                 stopping: false,
+                #[cfg(windows)]
+                swarm: super::swarm_windows::Runtime::new(config, owner.clone()),
                 notifications: notification_service::Runtime::new(config, &location, epoch, owner),
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 creation,
@@ -90,6 +98,8 @@ impl Runtime {
                 worktree,
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 launch,
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                task_start,
             }),
             Err(error) => {
                 producer.close();
@@ -115,6 +125,8 @@ impl Runtime {
             let _ = self.poll_drain(store);
             return (Vec::new(), false);
         }
+        #[cfg(windows)]
+        self.swarm.poll();
         let fleet = &self.fleet;
         self.details.tick(
             &mut |computer, generation, controls| fleet.controls(computer, generation, controls),
@@ -135,6 +147,8 @@ impl Runtime {
                     self.worktree.observe(&event);
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                     self.launch.observe(&event);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.task_start.observe(&event);
                     self.delivery.observe(store, &event);
                     self.maintenance.observe(store, &event);
                     if self.attention.enabled() {
@@ -159,6 +173,8 @@ impl Runtime {
                     self.worktree.reject(&event);
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                     self.launch.reject(&event);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.task_start.reject(&event);
                     self.maintenance.reject(&event);
                     self.attention.reject_event(&event);
                     self.details.reject(&event, seq);
@@ -178,6 +194,8 @@ impl Runtime {
         self.worktree.poll(store, self.notifications.handoff());
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.launch.poll(store, self.notifications.handoff());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.task_start.poll(store, self.notifications.handoff());
         // Disabled discovery must not accumulate permanent edge/baseline rows.
         // Enabling resets the baseline before later observations may post.
         if !self.notifications.ready() && self.attention.retiring() {
@@ -245,6 +263,17 @@ impl Runtime {
         }
         self.maintenance.frontend_request(store, authority)
     }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn task_start_request(
+        &mut self,
+        store: &mut Store,
+        authority: super::ui_authority::Validated,
+        queue: Arc<Queue>,
+        seq: u64,
+    ) -> Result<()> {
+        self.task_start
+            .frontend(store, authority, self.notifications.handoff(), queue, seq)
+    }
 
     pub fn details_open(&mut self, queue: &Arc<Queue>) -> Option<Value> {
         self.details.open(queue)
@@ -260,6 +289,11 @@ impl Runtime {
     }
 
     pub fn decorate(&self, value: &mut Value) {
+        #[cfg(windows)]
+        {
+            value["swarm_runtime"] = self.swarm.status();
+            value["lifecycle"]["background"]["swarm"] = self.swarm.status();
+        }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             value["creation_clone_runtime"] = self.creation.status();
@@ -267,6 +301,9 @@ impl Runtime {
             value["creation_launch_runtime"] = self.launch.status();
             value["lifecycle"]["background"]["operations"] =
                 value["creation_clone_runtime"].clone();
+            value["task_start_reconcile_runtime"] = self.task_start.status();
+            value["lifecycle"]["background"]["operations"]["task_start_reconcile"] =
+                self.task_start.status();
         }
         value["detail_subscriptions"] = self.details.status();
         value["attention_discovery"] = self.attention.status();
@@ -302,7 +339,12 @@ impl Runtime {
             value["lifecycle"]["background"]["approvals"]["code"].clone();
         value["lifecycle"]["background"]["delivery"] = delivery.clone();
         value["delivery_runtime"] = delivery.clone();
+        #[cfg(windows)]
+        let swarm_done = self.swarm.confirmed_drained();
+        #[cfg(not(windows))]
+        let swarm_done = true;
         value["ownership"] = if code == "drained"
+            && swarm_done
             && delivery["drained"] == true
             && self.maintenance.drained()
             && self.cache.drained()
@@ -355,6 +397,14 @@ impl Runtime {
     pub fn drained(&self) -> bool {
         self.drained
     }
+    #[cfg(windows)]
+    pub fn restart_swarm(&self) -> Value {
+        if self.stopping || self.drained {
+            json!({"schema":1,"accepted":false,"code":"background_service_stopping"})
+        } else {
+            self.swarm.restart()
+        }
+    }
 
     pub fn drain(&mut self, store: &mut Store, timeout: Duration) -> Result<()> {
         self.stopping = true;
@@ -368,12 +418,16 @@ impl Runtime {
         let cache_stop = self.cache.request_stop(store);
         self.attention.set_policy(attention::Policy::default());
         self.notifications.request_stop();
+        #[cfg(windows)]
+        self.swarm.request_stop();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.creation.request_stop();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.worktree.request_stop();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.launch.request_stop();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.task_start.request_stop();
         if let Some(presence) = &self.presence {
             presence.request_stop();
         }
@@ -406,6 +460,8 @@ impl Runtime {
         self.worktree.poll(store, self.notifications.handoff());
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.launch.poll(store, self.notifications.handoff());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.task_start.poll(store, self.notifications.handoff());
         if self.notifications.drained() {
             self.attention.request_stop();
         }
@@ -426,7 +482,12 @@ impl Runtime {
             self.drained = self.drained
                 && self.creation.drained()
                 && self.worktree.drained()
-                && self.launch.drained();
+                && self.launch.drained()
+                && self.task_start.drained();
+        }
+        #[cfg(windows)]
+        {
+            self.drained = self.swarm.drained() && self.drained;
         }
         Ok(self.drained)
     }

@@ -73,9 +73,10 @@ impl Downloads {
         };
         if lookup {
             let (root, source) = (key.0.clone(), source.clone());
+            let writer = self.cache.writer();
             let cached = self
                 .cache
-                .run(move || download_cache::lookup(&root, &source, now_ms()));
+                .run(move || writer.lookup(&root, &source, now_ms()));
             match cached.and_then(|result| result) {
                 Err(error) => {
                     self.finish(&key, Err(error));
@@ -110,8 +111,9 @@ impl Downloads {
             .and_then(|part| {
                 (self.transfer)(&source.host, &source.path, part.path())?;
                 let name = download_cache::filename(&source.path);
+                let writer = self.cache.writer();
                 self.cache
-                    .run(move || download_cache::complete(part, &name, Some(&source), now_ms()))?
+                    .run(move || writer.complete(part, &name, Some(&source), now_ms()))?
                     .map(|complete| (complete.path, complete.warning))
             });
         self.finish(&key, result);
@@ -202,7 +204,7 @@ mod tests {
         let work = Arc::new(Mutex::new(Vec::new()));
         let queue = work.clone();
         let downloads = Downloads::new(
-            crate::files::start(),
+            crate::files::start(Default::default()),
             Arc::new(move |job| lock(&queue).push(job)),
             Arc::new(move |host, path, output| {
                 assert_eq!((host, path), ("example-peer", "/srv/example/report.md"));
@@ -242,7 +244,7 @@ mod tests {
         let transfers = Arc::new(AtomicUsize::new(0));
         let called = transfers.clone();
         let downloads = Downloads::new(
-            crate::files::start(),
+            crate::files::start(Default::default()),
             Arc::new(move |job| lock(&queue).push(job)),
             Arc::new(move |_, _, output| {
                 if called.fetch_add(1, Ordering::SeqCst) == 0 {

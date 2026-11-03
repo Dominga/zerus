@@ -60,6 +60,9 @@ pub const MAX_BYTES: usize = 64 << 20;
 const MANIFEST: usize = drafts::MAX_MANIFEST as usize;
 const META: usize = 64 << 10;
 const INDEX: usize = 16 << 20;
+/// The largest leaf the private reader accepts on every platform (Windows
+/// refuses larger read limits): the container is kept in parts this size.
+const PART: usize = 16 << 20;
 
 /// Which store a manifest came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -165,7 +168,33 @@ struct Receipt {
     capture_id: String,
     index_sha256: String,
     index: Stamp,
+    /// The container's first part (`original.bin`).
     container: Option<Stamp>,
+    /// Its further parts (`original-1.bin`, ...), each [`PART`] bytes but
+    /// the last. Absent: `original.bin` holds the whole container, as every
+    /// receipt written before the parts did.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    more: Vec<Stamp>,
+}
+
+/// The container's leaf for part `n`.
+fn part(n: usize) -> String {
+    if n == 0 {
+        "original.bin".into()
+    } else {
+        format!("original-{n}.bin")
+    }
+}
+
+/// The exact size of each part of a `bytes`-long container written in
+/// `parts` parts: one part holds it all.
+fn part_sizes(bytes: usize, parts: usize) -> Vec<usize> {
+    if parts <= 1 {
+        return vec![bytes];
+    }
+    (0..parts)
+        .map(|n| PART.min(bytes.saturating_sub(n * PART)))
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,6 +203,59 @@ struct Failed {
     version: u32,
     capture_id: String,
     reason: String,
+}
+
+/// The version of failure records written now. Version 1 records come from
+/// builds whose own leaf reads used a limit the Windows reader refuses.
+const FAILED_VERSION: u32 = 2;
+
+/// Whether a failure record may be superseded: only a version 1
+/// `unreadable` record on Windows, where every capture of those builds
+/// failed that way at its own leaf reads. Every other failure is permanent.
+fn superseded(failed: &Failed, windows: bool) -> bool {
+    windows && failed.version == 1 && failed.reason == "unreadable"
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Lets tests on any platform take the Windows recovery path.
+    static WINDOWS: std::cell::Cell<bool> = const { std::cell::Cell::new(cfg!(windows)) };
+}
+
+fn windows() -> bool {
+    #[cfg(test)]
+    return WINDOWS.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    cfg!(windows)
+}
+
+/// Keeps a superseded attempt's records for review (`superseded-v1/`) and
+/// clears the slot for a new attempt under the same seed. That attempt is
+/// guarded like any seed without an outcome: Next's store is recorded only
+/// if nothing in it changed since the seed.
+///
+/// `failed.json` moves last. An interrupted move leaves it in place, so the
+/// next start supersedes again from where this one stopped; a slot without
+/// it never holds the old attempt's leftovers.
+fn supersede(slot: &Path) -> std::io::Result<()> {
+    if slot.join("receipt.json").exists() {
+        return Err(std::io::ErrorKind::AlreadyExists.into());
+    }
+    let kept = slot.join("superseded-v1");
+    drop(disk::Parents::open(&kept, true)?);
+    let leaves = std::iter::once("index.json".to_owned())
+        .chain((0..MAX_BYTES.div_ceil(PART)).map(part))
+        .chain(std::iter::once("failed.json".to_owned()));
+    for leaf in leaves {
+        let from = slot.join(&leaf);
+        if fs::symlink_metadata(&from).is_ok() {
+            if fs::symlink_metadata(kept.join(&leaf)).is_ok() {
+                return Err(std::io::ErrorKind::AlreadyExists.into());
+            }
+            fs::rename(&from, kept.join(&leaf))?;
+        }
+    }
+    Ok(())
 }
 
 /// What the draft store may do after the capture job.
@@ -332,6 +414,9 @@ impl Capture {
             return refuse;
         };
         match read_json::<Failed>(&slot.join("failed.json")) {
+            // A supersede that cannot finish keeps the recorded failure for
+            // this run, as before; the next start tries again.
+            Ok(Some(failed)) if superseded(&failed, windows()) && supersede(&slot).is_ok() => {}
             Ok(Some(failed)) => {
                 self.set(
                     failed_code(&failed.reason),
@@ -413,7 +498,7 @@ impl Capture {
             Err(error) => {
                 let reason = reason(error);
                 let failed = Failed {
-                    version: 1,
+                    version: FAILED_VERSION,
                     capture_id: seed.capture_id.clone(),
                     reason: reason.into(),
                 };
@@ -456,25 +541,28 @@ impl Capture {
         // A crashed attempt's leaves are kept, never replaced: an attempt
         // that sees other originals than the crashed one fails instead.
         let index_stamp = keep_or_create(&slot.join("index.json"), &index_bytes, INDEX)?;
-        let container_stamp = if container.is_empty() {
-            None
-        } else {
-            Some(keep_or_create(
-                &slot.join("original.bin"),
-                &container,
-                MAX_BYTES,
-            )?)
-        };
+        let mut stamps = Vec::new();
+        for (n, bytes) in container.chunks(PART).enumerate() {
+            stamps.push(keep_or_create(&slot.join(part(n)), bytes, PART)?);
+        }
         // The roots again, after the copy: the same originals, or none.
         let (again, _) = scan(&self.roots(), &seed.capture_id, resumed)?;
         if again != index {
             return Err(SourceError::SourceChanged);
         }
-        for (leaf, limit) in [
-            ("identity.json", META),
-            ("index.json", INDEX),
-            ("original.bin", MAX_BYTES),
-        ] {
+        // Every leaf durable, each read with its own exact size.
+        let leaves = [
+            ("identity.json".to_owned(), META),
+            ("index.json".to_owned(), INDEX),
+        ]
+        .into_iter()
+        .chain(
+            container
+                .chunks(PART)
+                .enumerate()
+                .map(|(n, bytes)| (part(n), bytes.len())),
+        );
+        for (leaf, limit) in leaves {
             let path = slot.join(leaf);
             let current = disk::read(&path, limit).map_err(unreadable)?;
             let synced = disk::durable(&path, limit).map_err(unreadable)?;
@@ -482,11 +570,13 @@ impl Capture {
                 return Err(SourceError::SourceChanged);
             }
         }
+        let mut stamps = stamps.into_iter();
         let receipt = Receipt {
             capture_id: seed.capture_id.clone(),
             index_sha256: sha256(&index_bytes),
             index: index_stamp,
-            container: container_stamp,
+            container: stamps.next(),
+            more: stamps.collect(),
         };
         create_json(&slot.join("receipt.json"), &receipt)?;
         Ok(index)
@@ -812,18 +902,29 @@ impl Snapshot {
         }
         let index: Index =
             serde_json::from_slice(&bytes).map_err(|_| SourceError::InvalidMetadata)?;
-        let container = match &receipt.container {
-            None => Vec::new(),
-            Some(expected) => {
-                let (bytes, stamp) = disk::read(&slot.join("original.bin"), MAX_BYTES)
+        let mut container = Vec::new();
+        if let Some(first) = &receipt.container {
+            let total = usize::try_from(index.container_bytes)
+                .ok()
+                .filter(|bytes| *bytes <= MAX_BYTES)
+                .ok_or(SourceError::SourceChanged)?;
+            let expected: Vec<&Stamp> = std::iter::once(first).chain(&receipt.more).collect();
+            let sizes = part_sizes(total, expected.len());
+            if receipt.more.len() + 1 != sizes.len() || sizes.contains(&0) {
+                return Err(SourceError::SourceChanged);
+            }
+            for (n, (stamp, size)) in expected.into_iter().zip(sizes).enumerate() {
+                let (bytes, actual) = disk::read(&slot.join(part(n)), size)
                     .map_err(unreadable)?
                     .ok_or(SourceError::SourceChanged)?;
-                if &stamp != expected {
+                if &actual != stamp || bytes.len() != size {
                     return Err(SourceError::SourceChanged);
                 }
-                bytes
+                container.extend_from_slice(&bytes);
             }
-        };
+        } else if !receipt.more.is_empty() {
+            return Err(SourceError::SourceChanged);
+        }
         if index.capture_id != seed.capture_id
             || index.format != FORMAT
             || index.container_bytes != container.len() as u64

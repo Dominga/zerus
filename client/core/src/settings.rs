@@ -1012,6 +1012,12 @@ impl Settings {
         self.loaded().contents.seed.clone()
     }
 
+    /// The Qt preference import by key name only (no values): handled
+    /// families, families waiting to retry, and Qt keys with no Next use.
+    pub fn preference_report(&self) -> Value {
+        imports::report(&self.loaded().contents)
+    }
+
     /// Background organization recovery shares this writer and its existing
     /// G3 journal. Unsupported settings/metadata never admit an import.
     pub fn organization_import(&self) -> Result<OrganizationImport, String> {

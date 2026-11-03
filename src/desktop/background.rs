@@ -317,7 +317,9 @@ impl Runtime {
         self.producer.close();
         self.delivery.request_stop();
         self.maintenance.request_stop();
-        self.cache.request_stop(store)?;
+        // Retain the error until every component has received its stop. An
+        // unavailable cache database must not leave other owners admitting work.
+        let cache_stop = self.cache.request_stop(store);
         self.attention.set_policy(attention::Policy::default());
         self.notifications.request_stop();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -325,6 +327,7 @@ impl Runtime {
         if let Some(presence) = &self.presence {
             presence.request_stop();
         }
+        cache_stop?;
         let end = Instant::now() + timeout;
         loop {
             if self.poll_drain(store)? {

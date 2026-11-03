@@ -100,7 +100,9 @@ impl Reader {
             .as_object()
             .expect("Metadata deserializes an object")
             .iter()
-            .filter(|(key, _)| !matches!(key.as_str(), "prompt" | "last_message"))
+            .filter(|(key, value)| {
+                !(matches!(key.as_str(), "prompt" | "last_message") && value.is_string())
+            })
             .collect();
         if serde_json::to_vec(&bounded_fields)
             .map_err(|e| e.to_string())?
@@ -399,6 +401,30 @@ mod tests {
             Record::Ready(expected)
         );
         assert_eq!(progress.bytes, bytes.len());
+    }
+
+    #[test]
+    fn non_string_public_snapshot_fields_still_count_toward_the_metadata_cap() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("binding.json");
+        for key in ["prompt", "last_message"] {
+            for value in [
+                json!({"not_public_text":"x".repeat(RECORD_BYTES + 1)}),
+                json!(["x".repeat(RECORD_BYTES + 1)]),
+            ] {
+                let mut record = json!({"version":1});
+                record[key] = value;
+                let bytes = serde_json::to_vec(&record).unwrap();
+                assert!(bytes.len() > RECORD_BYTES && bytes.len() < budget().bytes);
+                fs::write(&path, &bytes).unwrap();
+                let mut progress = Progress::default();
+                let error = Reader::default()
+                    .read(&path, &mut progress, &budget(), 0)
+                    .unwrap_err();
+                assert_eq!(error, "Session search metadata exceeds its budget", "{key}");
+                assert_eq!(progress.bytes, bytes.len());
+            }
+        }
     }
 
     #[cfg(windows)]

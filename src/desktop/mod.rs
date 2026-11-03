@@ -51,6 +51,7 @@ mod store;
 mod task_start_reconcile;
 mod transport;
 mod ui_authority;
+mod upgrade;
 #[cfg(windows)]
 mod windows_registration;
 #[cfg(any(windows, test))]
@@ -523,6 +524,7 @@ impl Drop for Permit {
 }
 
 fn serve(config: &Config, location: Location, background_mode: bool) -> Result<()> {
+    let mut upgrade = upgrade::Upgrade::new();
     let (_signals, owner, listener, epoch, mut store) = (|| -> Result<_> {
         #[cfg(windows)]
         crate::host::token::private_creation::prepare()
@@ -637,49 +639,78 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                 .context(StartupRefused)?;
         }
         while platform::shutdown_signal() == 0 {
-            // Prepared takeover reconciliation only reduces authority. Keep the
-            // same runtime until its actual drain succeeds; no replacement yet.
-            let handoff = background.as_ref().and_then(background::Runtime::handoff);
-            ownership::settle(&location, &mut store, handoff.as_deref(), |store| {
-                background.as_mut().map_or(Ok(()), |runtime| {
-                    runtime.drain(store, Duration::from_millis(10))
-                })
-            })?;
-            drop(handoff);
-            if background::replacement_permitted(
-                background_mode,
-                background
-                    .as_ref()
-                    .is_some_and(background::Runtime::drained),
-                &location,
-                &store,
-            )? {
-                feed.stop(&mut store)?;
-                background = None;
-            }
-            let ownership_status = ownership::status(&store, &location.configuration)?;
-            if ownership_status.state == zerus_client_core::desktop::ownership::State::Native {
-                if background.is_some() {
-                    // NativeReady was written only after this original drain.
+            let was_replacing = upgrade.requested();
+            if upgrade.poll(Instant::now()) {
+                if !was_replacing {
+                    seq += 1;
+                    fanout.publish(
+                        protocol::encode(&frame(
+                            &epoch,
+                            seq,
+                            "error",
+                            json!({"code":"hgs_replaced","fatal":true}),
+                        ))?
+                        .into(),
+                    );
+                }
+                // Only stop admission here. Original jobs/SDK callbacks keep
+                // their actual owners until the existing drain really finishes.
+                let drained = background.as_mut().map_or(Ok(()), |runtime| {
+                    runtime.drain(&mut store, Duration::from_millis(10))
+                });
+                if drained.is_ok() && feed.stop(&mut store).is_ok() {
+                    background = None;
+                    // Audit/finalizer I/O can retain the original serve owner
+                    // outside the background runtime. Never abandon those loans.
+                    if upgrade.restart_ready(&owner) {
+                        break;
+                    }
+                }
+            } else {
+                // Prepared takeover reconciliation only reduces authority. Keep the
+                // same runtime until its actual drain succeeds; no replacement yet.
+                let handoff = background.as_ref().and_then(background::Runtime::handoff);
+                ownership::settle(&location, &mut store, handoff.as_deref(), |store| {
+                    background.as_mut().map_or(Ok(()), |runtime| {
+                        runtime.drain(store, Duration::from_millis(10))
+                    })
+                })?;
+                drop(handoff);
+                if background::replacement_permitted(
+                    background_mode,
+                    background
+                        .as_ref()
+                        .is_some_and(background::Runtime::drained),
+                    &location,
+                    &store,
+                )? {
                     feed.stop(&mut store)?;
                     background = None;
                 }
-                background_blocked = true;
-            } else if background_mode
-                && background.is_none()
-                && revoke::background_permitted(&location, &store)?
-            {
-                background = Some(background::Runtime::start(
-                    config,
-                    &epoch,
-                    &mut feed,
-                    owner.clone(),
-                )?);
-                background.as_mut().unwrap().start_presence(&location)?;
-                background_blocked = false;
+                let ownership_status = ownership::status(&store, &location.configuration)?;
+                if ownership_status.state == zerus_client_core::desktop::ownership::State::Native {
+                    if background.is_some() {
+                        // NativeReady was written only after this original drain.
+                        feed.stop(&mut store)?;
+                        background = None;
+                    }
+                    background_blocked = true;
+                } else if background_mode
+                    && background.is_none()
+                    && revoke::background_permitted(&location, &store)?
+                {
+                    background = Some(background::Runtime::start(
+                        config,
+                        &epoch,
+                        &mut feed,
+                        owner.clone(),
+                    )?);
+                    background.as_mut().unwrap().start_presence(&location)?;
+                    background_blocked = false;
+                }
             }
             let mut full_batch = false;
-            if let Some(runtime) = &mut background {
+            if let Some(runtime) = background.as_mut().filter(|_| !upgrade.requested()) {
                 let previous = seq;
                 runtime.notification_controls(
                     notification_controls.preferences(),
@@ -704,7 +735,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
             }) {
                 Ok(Event::ImportOwner(configuration, reply)) => {
                     seq += 1;
-                    let owner = if configuration == location.configuration {
+                    let owner = if !upgrade.requested() && configuration == location.configuration {
                         background
                             .as_ref()
                             .map(|runtime| runtime.publication_owner(&store))
@@ -726,7 +757,9 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                 Ok(Event::ApprovalAudit(hello, reply)) => {
                     // Only bounded validation/admission occurs here. The same
                     // original client worker owns query I/O and transport cleanup.
-                    let _ = reply.try_send(audit.admit(hello, owner.clone(), seq));
+                    if !upgrade.requested() {
+                        let _ = reply.try_send(audit.admit(hello, owner.clone(), seq));
+                    } // Dropping the one-shot refuses new audit admission.
                 }
                 Ok(Event::Command(hello, queue, authority)) => {
                     let mut value = projection(
@@ -752,6 +785,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                     } else if background_blocked {
                         value["background_start"] = json!({"admitted":false,"code":"explicit_handoff_required","durably_blocked":true});
                     }
+                    upgrade.decorate(&mut value);
                     let mut streaming = false;
                     let mut activation_waiting = false;
                     let reply = if hello.abi != ABI || hello.configuration != location.configuration
@@ -761,6 +795,15 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                             seq,
                             "error",
                             json!({"code":"incompatible_configuration"}),
+                        )
+                    } else if upgrade.requested()
+                        && !upgrade::allowed_during_retirement(&hello.op, hello.request.as_ref())
+                    {
+                        frame(
+                            &epoch,
+                            seq,
+                            "error",
+                            json!({"code":"hgs_replaced","fatal":true}),
                         )
                     } else if hello.op == "watch" && hello.request.is_none() {
                         if fanout.subscribe(queue.clone()) {
@@ -1109,6 +1152,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                     let producer = if hello.abi == ABI
                         && hello.configuration == location.configuration
                         && hello.op == "feed"
+                        && !upgrade.requested()
                         && background.is_none()
                     {
                         feed.open(hello.request.as_ref()).ok()
@@ -1197,6 +1241,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                 } else if background_blocked {
                     value["background_start"] = json!({"admitted":false,"code":"explicit_handoff_required","durably_blocked":true});
                 }
+                upgrade.decorate(&mut value);
                 fanout.publish(protocol::encode(&frame(&epoch, seq, "heartbeat", value))?.into());
                 heartbeat = Instant::now() + HEARTBEAT;
             }
@@ -1204,6 +1249,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
         ensure!(!failed, "desktop listener failed");
         Ok(())
     })();
+    let replaced = upgrade.requested() && platform::shutdown_signal() == 0;
     stopped.store(true, Ordering::SeqCst);
     listener.close();
     let _ = acceptor.join();
@@ -1214,13 +1260,42 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
         }
     }
     let deadline = Instant::now() + TIMEOUT + Duration::from_secs(1);
-    while active.load(Ordering::SeqCst) != 0 && Instant::now() < deadline {
+    while upgrade::connections_pending(
+        active.load(Ordering::SeqCst),
+        replaced,
+        Instant::now() < deadline,
+        platform::shutdown_signal() != 0,
+    ) {
         thread::sleep(Duration::from_millis(10));
     }
-    let drained = background.as_mut().map_or(Ok(()), |runtime| {
-        runtime.drain(&mut store, Duration::from_secs(4))
-    });
+    let drained = if replaced {
+        // Even an unrelated listener/store error during replacement must not
+        // turn the normal four-second shutdown wait into abandonment. An
+        // explicit shutdown signal retains the existing termination behavior.
+        loop {
+            let result = background.as_mut().map_or(Ok(()), |runtime| {
+                runtime.drain(&mut store, Duration::from_millis(100))
+            });
+            if result.is_ok() || platform::shutdown_signal() != 0 {
+                break result;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    } else {
+        background.as_mut().map_or(Ok(()), |runtime| {
+            runtime.drain(&mut store, Duration::from_secs(4))
+        })
+    };
     let feed_stopped = feed.stop(&mut store);
+    if replaced && drained.is_ok() {
+        // A drained runtime can now drop its own serve-owner copies. Retain
+        // the original kernel owner through any independent finalizer/audit
+        // loan even if the actor ended on an unrelated listener/store error.
+        drop(background.take());
+        while !upgrade::owner_loans_released(&owner) && platform::shutdown_signal() == 0 {
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
     let checkpointed = store.checkpoint();
     if let Err(error) = run_result {
         if drained.is_err() {
@@ -1240,6 +1315,10 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     ensure!(
         active.load(Ordering::SeqCst) == 0,
         "desktop connections did not drain"
+    );
+    ensure!(
+        !replaced,
+        "hgs_replaced: original desktop resources drained; supervisor restart required"
     );
     Ok(())
 }
@@ -1414,8 +1493,9 @@ fn status(location: &Location) -> Result<Value> {
         "frontend_read_delivery":frontend::inspect(&location.configuration)})))
 }
 fn watch(location: &Location) -> Result<()> {
+    let mut upgrade = upgrade::Upgrade::new();
     let stream = connection(location, "watch", None)?.context("desktop service is not running")?;
-    stream.set_read_timeout(None)?;
+    stream.set_read_timeout(Some(Duration::from_millis(200)))?;
     let detached = stream.try_clone()?;
     thread::Builder::new()
         .name("desktop-stdin".into())
@@ -1425,9 +1505,58 @@ fn watch(location: &Location) -> Result<()> {
         })?;
     let mut reader = BufReader::new(stream);
     let mut output = std::io::stdout().lock();
-    while let Some(bytes) = protocol::line(&mut reader, protocol::FRAME_BYTES)? {
+    let mut line = protocol::WatchLine::default();
+    let mut last: Option<(String, u64)> = None;
+    loop {
+        if upgrade.poll(Instant::now()) {
+            if let Some((epoch, seq)) = &last {
+                output.write_all(&protocol::encode(&frame(
+                    epoch,
+                    *seq,
+                    "error",
+                    json!({"code":"hgs_replaced","fatal":true}),
+                ))?)?;
+                output.flush()?;
+            }
+            break;
+        }
+        let bytes = match line.read(&mut reader)? {
+            protocol::ReadTurn::Pending => continue,
+            protocol::ReadTurn::End => break,
+            protocol::ReadTurn::Frame(bytes) => bytes,
+        };
+        // Retain only the original stream identity for a local transport error.
+        // It cannot construct a writer receipt or a service incarnation.
+        #[derive(serde::Deserialize)]
+        struct ErrorCode {
+            code: Option<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Header {
+            abi: String,
+            epoch: String,
+            seq: u64,
+            t: String,
+            value: ErrorCode,
+        }
+        let header = serde_json::from_slice::<Header>(&bytes).ok();
+        if let Some(header) = &header {
+            if header.abi == ABI
+                && uuid::Uuid::parse_str(&header.epoch)
+                    .is_ok_and(|id| !id.is_nil() && id.to_string() == header.epoch)
+            {
+                last = Some((header.epoch.clone(), header.seq));
+            }
+        }
         output.write_all(&bytes)?;
         output.flush()?;
+        if header.is_some_and(|header| {
+            header.abi == ABI
+                && header.t == "error"
+                && header.value.code.as_deref() == Some("hgs_replaced")
+        }) {
+            break;
+        }
     }
     Ok(())
 }

@@ -151,6 +151,25 @@ pub(super) fn create(args: &[String]) -> Result<Value> {
 }
 
 fn create_direct(args: &[String]) -> Result<Value> {
+    create_receipt(args, None)
+}
+
+/// An owned (service) worktree request. The actor's Reserve check precedes
+/// the original receipt; the same receipt store means it is never replayed.
+#[cfg(unix)]
+#[cfg_attr(not(all(test, target_os = "linux")), allow(dead_code))] // Wired by the worktree actor.
+pub(crate) fn create_owned(
+    args: &[String],
+    control: &super::worktrees::Control<'_>,
+) -> Result<Value> {
+    (control.before)(super::worktrees::Step::Reserve)?;
+    create_receipt(args, Some(control))
+}
+
+fn create_receipt(
+    args: &[String],
+    control: Option<&super::worktrees::Control<'_>>,
+) -> Result<Value> {
     let id = token(args)?;
     let args: Vec<String> = args.iter().filter(|a| *a != "--receipt").cloned().collect();
     let fingerprint = format!(
@@ -180,7 +199,7 @@ fn create_direct(args: &[String]) -> Result<Value> {
     atomic(&folder().join(format!("{id}.json")), &receipt.to_string())?;
     CANCEL.with(|slot| *slot.borrow_mut() = Some(folder().join(format!("{id}.cancel"))));
     EFFECTS.with(|slot| slot.set(false));
-    let result = super::worktrees::create(&args);
+    let result = super::worktrees::create_with(&args, control);
     CANCEL.with(|slot| *slot.borrow_mut() = None);
     match result {
         Ok(value) => {
@@ -303,5 +322,103 @@ mod tests {
             !super::folder().exists(),
             "no request receipt store is touched"
         );
+    }
+
+    /// Runs inside the private probe, whose HOME/state are private: a real
+    /// repository fixture, the original custody lock and recorded steps.
+    #[cfg(target_os = "linux")]
+    fn owned(
+        before: impl Fn(super::super::worktrees::Step) -> super::Result<()>,
+    ) -> (
+        std::path::PathBuf,
+        std::path::PathBuf,
+        super::Result<serde_json::Value>,
+    ) {
+        use std::sync::{atomic::AtomicBool, Arc};
+        let root = std::path::PathBuf::from(std::env::var("TMPDIR").unwrap());
+        let repository = root.join("repo");
+        std::fs::create_dir(&repository).unwrap();
+        let destination = root.join("repo-zerus-example");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(root.join("custody.lock"))
+            .unwrap();
+        let custody: Arc<_> =
+            zerus_client_core::run::custody::InheritedLock::try_lock(file).unwrap();
+        let cancelled = AtomicBool::new(false);
+        let id = "22222222-2222-4222-8222-222222222222";
+        let args = [
+            "--path",
+            repository.to_str().unwrap(),
+            "--common-dir",
+            repository.join(".git").to_str().unwrap(),
+            "--branch",
+            "zerus-example",
+            "--base",
+            "HEAD",
+            "--destination",
+            destination.to_str().unwrap(),
+            "--request-id",
+            id,
+            "--json",
+        ]
+        .map(String::from);
+        let result = super::create_owned(
+            &args,
+            &super::super::worktrees::Control {
+                before: &before,
+                cancelled: &cancelled,
+                custody: &custody,
+            },
+        );
+        (
+            super::folder().join(format!("{id}.json")),
+            destination,
+            result,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owned_creation_checks_the_actor_before_its_receipt_and_never_runs_a_test_image() {
+        crate::self_exec::private_probe("state::worktree_requests::tests::owned_creation_probe");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "run by owned_creation_checks_the_actor_before_its_receipt_and_never_runs_a_test_image"]
+    fn owned_creation_probe() {
+        crate::self_exec::probe_child("state::worktree_requests::tests::owned_creation_probe");
+        use super::super::worktrees::Step;
+        // A refused Reserve leaves no receipt, store or destination.
+        let calls = std::sync::Mutex::new(Vec::new());
+        let (receipt, destination, result) = owned(|step| {
+            calls.lock().unwrap().push(step);
+            Err("creation_lease_revoked".into())
+        });
+        assert_eq!(result.unwrap_err(), "creation_lease_revoked");
+        assert_eq!(*calls.lock().unwrap(), [Step::Reserve]);
+        assert!(!super::folder().exists());
+        assert!(!destination.exists() && !receipt.exists());
+        std::fs::remove_dir(std::env::var("TMPDIR").unwrap() + "/repo").unwrap();
+        std::fs::remove_file(std::env::var("TMPDIR").unwrap() + "/custody.lock").unwrap();
+        // An admitted request writes its original receipt, then the Git worker
+        // refuses this unit image before any destination or checkout effect.
+        let calls = std::sync::Mutex::new(Vec::new());
+        let (receipt, destination, result) = owned(|step| {
+            calls.lock().unwrap().push(step);
+            Ok(())
+        });
+        let value = result.unwrap();
+        assert_eq!(value["status"], "failed", "{value}");
+        assert_eq!(value["detail"], crate::self_exec::TEST_IMAGE);
+        assert_eq!(value["effects_started"], false);
+        assert_eq!(*calls.lock().unwrap(), [Step::Reserve]);
+        assert!(!destination.exists());
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&receipt).unwrap()).unwrap();
+        assert_eq!(saved, value);
+        assert_eq!(Step::Own.ordinal(), 5);
     }
 }

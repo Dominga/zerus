@@ -440,8 +440,95 @@ fn inherited_upstream(read: &dyn Fn(&[&str]) -> Result<String>, base: &str) -> O
     Some((remote, merge))
 }
 
+/// New external steps of an owned (service) worktree creation, each checked
+/// by the admitted desktop actor. The direct CLI path has no such checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(unix), allow(dead_code))] // The owned executor is POSIX-only.
+pub(crate) enum Step {
+    Reserve,
+    Destination,
+    Checkout,
+    Verify,
+    Track,
+    Own,
+}
+impl Step {
+    #[cfg_attr(not(all(test, target_os = "linux")), allow(dead_code))] // Read by the actor's ledger.
+    pub(crate) fn ordinal(self) -> usize {
+        match self {
+            Self::Reserve => 0,
+            Self::Destination => 1,
+            Self::Checkout => 2,
+            Self::Verify => 3,
+            Self::Track => 4,
+            Self::Own => 5,
+        }
+    }
+}
+
+/// The service's per-step actor check and original custody. It is never
+/// constructed from CLI arguments or imported recovery records.
+#[cfg_attr(not(all(test, target_os = "linux")), allow(dead_code))] // Built by the worktree actor.
+pub(crate) struct Control<'a> {
+    pub before: &'a dyn Fn(Step) -> Result<()>,
+    #[cfg(unix)]
+    pub cancelled: &'a std::sync::atomic::AtomicBool,
+    #[cfg(unix)]
+    pub custody: &'a std::sync::Arc<zerus_client_core::run::custody::InheritedLock>,
+}
+
+/// Pinned directories and checks of an owned creation; Git runs in the
+/// deadline-owning worker under the effect's custody.
+#[cfg(unix)]
+struct Owned<'a> {
+    control: &'a Control<'a>,
+    source: super::repositories::directory::Directory,
+    parent: super::repositories::directory::Directory,
+}
+#[cfg(unix)]
+impl Owned<'_> {
+    fn before(&self, step: Step) -> Result<()> {
+        if self
+            .control
+            .cancelled
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err("Worktree creation stopped".into());
+        }
+        (self.control.before)(step)
+    }
+    fn git(
+        &self,
+        directory: &super::repositories::directory::Directory,
+        args: &[&str],
+        seconds: u64,
+    ) -> Result<Vec<u8>> {
+        self.source.verify()?;
+        self.parent.verify()?;
+        super::repositories::owned_git(
+            directory,
+            args,
+            seconds,
+            self.control.cancelled,
+            self.control.custody,
+        )
+    }
+}
+
 pub(super) fn create(args: &[String]) -> Result<Value> {
+    create_with(args, None)
+}
+
+pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Result<Value> {
     let mobile = args.iter().any(|value| value == "--mobile");
+    if mobile && control.is_some() {
+        return Err("An owned worktree creation has no mobile form".into());
+    }
+    // The first owned worktree executor is POSIX-only, like the clone leaf.
+    #[cfg(not(unix))]
+    if control.is_some() {
+        return Err("creation_worktree_unsupported".into());
+    }
     let _signals = mobile.then(MobileSignals::install);
     let total_deadline = Instant::now() + Duration::from_secs(if mobile { 25 } else { 315 });
     let mut options = BTreeMap::new();
@@ -473,19 +560,38 @@ pub(super) fn create(args: &[String]) -> Result<Value> {
         return Err("Repository and destination must be absolute folder paths".into());
     }
     let source = crate::platform::canonical(source).map_err(|e| format!("Repository: {e}"))?;
-    let parent = crate::platform::canonical(destination.parent().ok_or("Choose a destination folder")?)
-        .map_err(|e| format!("Destination parent must already exist: {e}"))?;
-    let destination = parent.join(
-        destination
-            .file_name()
-            .ok_or("Choose a destination folder")?,
-    );
+    let parent =
+        crate::platform::canonical(destination.parent().ok_or("Choose a destination folder")?)
+            .map_err(|e| format!("Destination parent must already exist: {e}"))?;
+    let name = destination
+        .file_name()
+        .ok_or("Choose a destination folder")?
+        .to_owned();
+    let destination = parent.join(&name);
     if fs::symlink_metadata(&destination).is_ok() {
         return Err("Destination already exists. Choose a new folder.".into());
     }
+    // The owned path pins the repository and the destination's parent now and
+    // rechecks both around every Git command and step.
+    #[cfg(unix)]
+    let owned = match control {
+        Some(control) => Some(Owned {
+            control,
+            source: super::repositories::directory::Directory::open(&source)?,
+            parent: super::repositories::directory::Directory::open(&parent)?,
+        }),
+        None => None,
+    };
     let deadline = total_deadline.min(Instant::now() + Duration::from_secs(5));
     let read = |args: &[&str]| -> Result<String> {
-        String::from_utf8(git(&source, args, deadline).map_err(|e| e.detail)?)
+        #[cfg(unix)]
+        let bytes = match &owned {
+            Some(owned) => owned.git(&owned.source, args, 5)?,
+            None => git(&source, args, deadline).map_err(|e| e.detail)?,
+        };
+        #[cfg(not(unix))]
+        let bytes = git(&source, args, deadline).map_err(|e| e.detail)?;
+        String::from_utf8(bytes)
             .map(|s| s.trim_end_matches('\n').to_owned())
             .map_err(|e| e.to_string())
     };
@@ -535,7 +641,11 @@ pub(super) fn create(args: &[String]) -> Result<Value> {
     let cache = cache_file("repo", &common.to_string_lossy());
     fs::create_dir_all(cache.parent().unwrap()).map_err(|e| e.to_string())?;
     let guard = crate::platform::private_open(
-        OpenOptions::new().create(true).truncate(false).read(true).write(true),
+        OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true),
     )
     .open(cache.with_extension("lock"))
     .map_err(|e| e.to_string())?;
@@ -550,38 +660,90 @@ pub(super) fn create(args: &[String]) -> Result<Value> {
     let _lock = crate::platform::FileLock::held(guard);
     // Atomic reservation rejects simultaneous creators and existing/symlinked
     // destinations. Git accepts this empty directory but never overwrites files.
-    if mobile_stopped() || Instant::now() >= total_deadline { return Err("Worktree creation cancelled before checkout".into()); }
+    if mobile_stopped() || Instant::now() >= total_deadline {
+        return Err("Worktree creation cancelled before checkout".into());
+    }
+    #[cfg(unix)]
+    if let Some(owned) = &owned {
+        owned.before(Step::Destination)?;
+    }
     super::worktree_requests::reserve_checkout()?;
+    #[cfg(unix)]
+    let pinned = match &owned {
+        // A private staging folder is published with no-replace rename; a
+        // failed publication keeps it beside the destination for review.
+        Some(owned) => Some(
+            owned
+                .parent
+                .create(
+                    &name.to_string_lossy(),
+                    &format!(".zerus-worktree-{}", uuid::Uuid::new_v4()),
+                )
+                .map_err(|e| format!("Cannot reserve destination: {e}"))?,
+        ),
+        None => {
+            fs::create_dir(&destination).map_err(|e| format!("Cannot reserve destination: {e}"))?;
+            None
+        }
+    };
+    #[cfg(not(unix))]
     fs::create_dir(&destination).map_err(|e| format!("Cannot reserve destination: {e}"))?;
+    let destination_text = destination.to_string_lossy().into_owned();
+    let add = [
+        "worktree",
+        "add",
+        "--quiet",
+        "-b",
+        branch,
+        "--",
+        destination_text.as_str(),
+        head.as_str(),
+    ];
+    #[cfg(unix)]
+    let outcome = match &owned {
+        Some(owned) => owned
+            .before(Step::Checkout)
+            .and_then(|()| owned.git(&owned.source, &add, 300).map(drop)),
+        None => git(
+            &source,
+            &add,
+            total_deadline.min(Instant::now() + Duration::from_secs(if mobile { 15 } else { 300 })),
+        )
+        .map(drop)
+        .map_err(|e| e.detail),
+    };
+    #[cfg(not(unix))]
     let outcome = git(
         &source,
-        &[
-            "worktree",
-            "add",
-            "--quiet",
-            "-b",
-            branch,
-            "--",
-            &destination.to_string_lossy(),
-            &head,
-        ],
+        &add,
         total_deadline.min(Instant::now() + Duration::from_secs(if mobile { 15 } else { 300 })),
-    );
+    )
+    .map(drop)
+    .map_err(|e| e.detail);
     let _ = fs::remove_file(cache);
-    outcome.map_err(|e| format!("{}\nCheck {} and branch '{branch}' before retrying. Any created files and branch have been kept.", e.detail, destination.display()))?;
+    outcome.map_err(|e| format!("{e}\nCheck {} and branch '{branch}' before retrying. Any created files and branch have been kept.", destination.display()))?;
     // Confirm the resulting checkout, not merely the exit code (hooks may fail
     // after creation, or another process may have changed the destination).
     let deadline = total_deadline.min(Instant::now() + Duration::from_secs(5));
-    let actual = git(
-        &destination,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        deadline,
-    )
-    .map_err(|e| e.detail)?;
-    let actual = crate::platform::canonical(String::from_utf8_lossy(&actual).trim_end_matches('\n'))
-        .map_err(|e| e.to_string())?;
-    let actual_branch =
-        git(&destination, &["symbolic-ref", "--quiet", "HEAD"], deadline).map_err(|e| e.detail)?;
+    let in_checkout = |args: &[&str]| -> Result<Vec<u8>> {
+        #[cfg(unix)]
+        if let (Some(owned), Some(pinned)) = (&owned, &pinned) {
+            pinned.verify()?;
+            let bytes = owned.git(pinned, args, 5)?;
+            pinned.verify()?;
+            return Ok(bytes);
+        }
+        git(&destination, args, deadline).map_err(|e| e.detail)
+    };
+    #[cfg(unix)]
+    if let Some(owned) = &owned {
+        owned.before(Step::Verify)?;
+    }
+    let actual = in_checkout(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+    let actual =
+        crate::platform::canonical(String::from_utf8_lossy(&actual).trim_end_matches('\n'))
+            .map_err(|e| e.to_string())?;
+    let actual_branch = in_checkout(&["symbolic-ref", "--quiet", "HEAD"])?;
     if actual != common
         || String::from_utf8_lossy(&actual_branch).trim_end_matches('\n') != reference
     {
@@ -592,17 +754,44 @@ pub(super) fn create(args: &[String]) -> Result<Value> {
     }
     // Best effort: the checkout exists either way, and a missing upstream only
     // leaves publication unverified. Never keep half of the tracking pair.
+    // An owned creation checks this write as its own step.
+    #[cfg(unix)]
+    if let (Some(owned), Some(_)) = (&owned, &upstream) {
+        owned.before(Step::Track)?;
+    }
     let upstream = upstream.filter(|(remote, merge)| {
         let set = |key: &str, value: &str| {
-            git(&destination, &["config", &format!("branch.{branch}.{key}"), value], deadline).is_ok()
+            in_checkout(&["config", &format!("branch.{branch}.{key}"), value]).is_ok()
         };
         let complete = set("remote", remote) && set("merge", merge);
         if !complete {
-            let _ = git(&destination, &["config", "--unset", &format!("branch.{branch}.remote")], deadline);
+            let _ = in_checkout(&["config", "--unset", &format!("branch.{branch}.remote")]);
         }
         complete
     });
-    let upstream = upstream.map(|(remote, merge)| format!("{remote}/{}", merge.strip_prefix("refs/heads/").unwrap_or(&merge)));
+    let upstream = upstream.map(|(remote, merge)| {
+        format!(
+            "{remote}/{}",
+            merge.strip_prefix("refs/heads/").unwrap_or(&merge)
+        )
+    });
+    #[cfg(unix)]
+    let managed = match &owned {
+        Some(owned) => {
+            owned.before(Step::Own)?;
+            in_checkout(&["rev-parse", "--absolute-git-dir"]).and_then(|metadata| {
+                super::worktree_lifecycle::created_at(
+                    &common,
+                    &destination,
+                    branch,
+                    &head,
+                    &metadata,
+                )
+            })
+        }
+        None => super::worktree_lifecycle::created(&common, &destination, branch, &head),
+    };
+    #[cfg(not(unix))]
     let managed = super::worktree_lifecycle::created(&common, &destination, branch, &head);
     Ok(
         json!({"status":"created", "path":destination, "branch":branch, "base":base, "head":head,

@@ -45,6 +45,24 @@ pub(crate) struct Control<'a> {
     #[cfg(unix)]
     pub custody: &'a std::sync::Arc<zerus_client_core::run::custody::InheritedLock>,
 }
+/// One Git command for another admitted creation effect: anchored in a pinned
+/// directory, run by the deadline-owning worker and held by that effect's
+/// original close-only custody and cancellation.
+#[cfg(unix)]
+pub(in crate::state) fn owned_git(
+    directory: &directory::Directory,
+    args: &[&str],
+    seconds: u64,
+    cancelled: &std::sync::atomic::AtomicBool,
+    custody: &std::sync::Arc<zerus_client_core::run::custody::InheritedLock>,
+) -> Result<Vec<u8>> {
+    let control = Control {
+        before: &|_| Ok(()),
+        cancelled,
+        custody,
+    };
+    git(directory, args, seconds, Some(&control))
+}
 fn before(control: Option<&Control<'_>>, step: Step) -> Result<()> {
     if let Some(control) = control {
         (control.before)(step)?;

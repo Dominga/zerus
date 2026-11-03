@@ -22,7 +22,19 @@ pub(super) fn created(common: &Path, path: &Path, branch: &str, head: &str) -> R
         Instant::now() + Duration::from_secs(3),
     )
     .map_err(|e| e.detail)?;
-    let metadata = crate::platform::canonical(String::from_utf8_lossy(&metadata).trim())
+    created_at(common, path, branch, head, &metadata)
+}
+
+/// `metadata` is the checkout's `rev-parse --absolute-git-dir` output, read by
+/// the caller (an owned effect reads it under its own custody).
+pub(super) fn created_at(
+    common: &Path,
+    path: &Path,
+    branch: &str,
+    head: &str,
+    metadata: &[u8],
+) -> Result<()> {
+    let metadata = crate::platform::canonical(String::from_utf8_lossy(metadata).trim())
         .map_err(|e| e.to_string())?;
     if !metadata.starts_with(common.join("worktrees")) {
         return Err("Cannot verify linked worktree metadata".into());

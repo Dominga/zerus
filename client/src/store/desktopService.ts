@@ -32,7 +32,7 @@ export function retainedSourceNotice(state: DesktopService | undefined): string 
   const creations = report?.creations_report;
   if (creations?.required && !creations.complete) {
     if (creations.running) return tr("Preparing the saved creation report. Your sessions remain available.");
-    if (["creations_import_waiting", "creations_import_source_resources_pending", "creations_import_handoff_busy"].includes(creations.code)) return tr("The saved creation report is deferred. Your sessions remain available; Retry keeps the original report identity.");
+    if (["creations_import_waiting", "creations_import_source_resources_pending", "creations_import_handoff_busy", "creations_import_before_record"].includes(creations.code)) return tr("The saved creation report is deferred. Your sessions remain available; Retry keeps the original report identity.");
     return tr("The saved creation report needs review. An unconfirmed publication will only be looked up, never resent.");
   }
   if (!report?.required || !report.code || report.code === "retained_import_staged") return "";

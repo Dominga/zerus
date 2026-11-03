@@ -92,6 +92,124 @@ fn missing_creation_source_is_not_applicable_without_an_empty_report() {
     assert!(!f.root.join("creations-retained-import-v1.json").exists());
 }
 #[test]
+fn callback_lock_contention_is_definitely_before_record_and_explicitly_retryable_after_restart() {
+    use std::os::fd::AsRawFd;
+    struct Held {
+        file: std::fs::File,
+        data: PathBuf,
+        persisted: u8,
+        expected: migration::transport::StagedReceipt,
+    }
+    impl Drop for Held {
+        fn drop(&mut self) {
+            let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+            if self.persisted != 0 {
+                // Model a receipt that reached disk despite failed write/readback.
+                let j = CreationJournal::new(&self.data, &"a".repeat(64)).unwrap();
+                let old = j.load().unwrap().unwrap();
+                let mut record = old.record;
+                record.expected = Some(self.expected.clone());
+                let saved = j.save(record, Some(&old.sha256)).unwrap();
+                if self.persisted == 2 {
+                    // A different/unknown journal state must never be adopted
+                    // as proof that the original attempt can be retried.
+                    let mut record = saved.record;
+                    record.phase = Phase::Unknown;
+                    j.save(record, Some(&saved.sha256)).unwrap();
+                }
+            }
+        }
+    }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    for persisted in 0..3 {
+        let f = Fixture::new("success");
+        source(&f);
+        let id = f.report.inputs.creations.status().capture_id.unwrap();
+        let data = f.root.clone();
+        let lock = data.join("creations-retained-import-v1.lock");
+        f.report.creation_state().before_record = Some(Box::new(move |expected| {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(lock)
+                .unwrap();
+            assert_eq!(
+                unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+                0
+            );
+            Box::new(Held {
+                file,
+                data,
+                persisted,
+                expected: expected.clone(),
+            })
+        }));
+        assert_eq!(
+            run(&f, false),
+            Err(if persisted == 2 {
+                "creations_import_record_unavailable"
+            } else {
+                "creations_import_before_record"
+            })
+        );
+        assert_eq!(f.attempts(), 1);
+        assert!(!f.root.join("committed.json").exists());
+        assert!(!f.root.join(format!("record-{id}.json")).exists());
+        let saved = CreationJournal::new(&f.root, &"a".repeat(64))
+            .unwrap()
+            .load()
+            .unwrap()
+            .unwrap()
+            .record;
+        assert_eq!(
+            saved.phase,
+            if persisted == 2 {
+                Phase::Unknown
+            } else {
+                Phase::BeforeRecord
+            }
+        );
+        assert_eq!(saved.expected.is_some(), persisted != 0);
+        assert_eq!(saved.import_id, id);
+        let restarted = Report::new(f.report.inputs.clone());
+        for explicit in [false, true] {
+            let charge = restarted.work.admit(Role::Operations).unwrap();
+            let result = restarted.run_creation(
+                f.relay.clone(),
+                "a".repeat(64),
+                Arc::new(AtomicBool::new(false)),
+                explicit,
+                Arc::new(charge),
+            );
+            assert_eq!(
+                result,
+                if persisted == 2 {
+                    Err("creations_import_original_result_unconfirmed")
+                } else if explicit {
+                    Ok(())
+                } else {
+                    Err("creations_import_before_record")
+                }
+            );
+        }
+        let current = restarted.creation_state().stored.clone().unwrap().record;
+        assert_eq!(
+            current.phase,
+            if persisted == 2 {
+                Phase::Unknown
+            } else {
+                Phase::Published
+            }
+        );
+        assert_eq!(current.attempt, if persisted == 2 { 1 } else { 2 });
+        assert_eq!(current.import_id, saved.import_id);
+        assert_eq!(current.source, saved.source);
+        assert_eq!(current.created_at, saved.created_at);
+        assert_eq!(f.attempts(), if persisted == 2 { 1 } else { 2 });
+    }
+}
+
+#[test]
 fn restarted_capture_and_report_settle_the_original_unknown_without_republishing() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     let f = Fixture::new("commit_lost");

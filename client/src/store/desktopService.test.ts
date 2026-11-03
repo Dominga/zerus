@@ -62,6 +62,7 @@ describe("desktop service presentation", () => {
     const creation = { required: true, complete: false, running: false, code: "creations_import_handoff_busy", phase: "not_committed" };
     const view = (patch = {}) => serviceView({ retained_source_import: { ...report, creations_report: { ...creation, ...patch } } });
     expect(retainedSourceNotice(view())).toContain("keeps the original report identity");
+    expect(retainedSourceNotice(view({ phase: "before_record", code: "creations_import_before_record" }))).toContain("deferred");
     expect(retainedSourceNotice(view({ running: true }))).toContain("Preparing the saved creation report");
     expect(retainedSourceNotice(view({ code: "creations_import_original_result_unconfirmed", phase: "unknown" }))).toContain("never resent");
     expect(retainedSourceNotice(view({ complete: true }))).toBe("");

@@ -206,11 +206,16 @@ pub struct Journal {
 /// How long a save waits for another run's compare/write on the same journal.
 /// That write is bounded metadata only, so this is never a long wait.
 const LOCK_WAIT: Duration = Duration::from_secs(2);
-/// Another holder of the journal lock: `flock` refuses on Unix; Windows
-/// refuses the exclusive open with a sharing or lock violation.
+/// Another run at the journal lock: `flock` refuses on Unix; on Windows see
+/// [`contended_on`].
 fn contended(error: &io::Error) -> bool {
+    contended_on(error, cfg!(windows))
+}
+/// Windows: a sharing (32) or lock (33) violation while another run holds the
+/// lock, or ERROR_FILE_EXISTS (80) when two runs race to create it first.
+fn contended_on(error: &io::Error, windows: bool) -> bool {
     error.kind() == io::ErrorKind::WouldBlock
-        || (cfg!(windows) && matches!(error.raw_os_error(), Some(32 | 33)))
+        || (windows && matches!(error.raw_os_error(), Some(32 | 33 | 80)))
 }
 /// The journal lock, waiting a bounded time for a concurrent run (a recovery
 /// fence and the original's final write may overlap). Any other failure, or a

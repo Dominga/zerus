@@ -65,13 +65,23 @@ impl Fixture {
         self.prepare_timing(root, revision, "immediate")
     }
     fn prepare_timing(&mut self, root: &Path, revision: u64, timing: &str) -> (String, String) {
+        self.prepare_from(root, revision, timing, "")
+    }
+    fn prepare_from(
+        &mut self,
+        root: &Path,
+        revision: u64,
+        timing: &str,
+        application: &str,
+    ) -> (String, String) {
         let prepare = id();
         let operation = id();
         let value = json!({"op":"cache_maintenance","request_id":prepare,"command":{"phase":"prepare",
             "operation_id":operation,"configuration":self.location.configuration,"root":root,"limit":1,"revision":revision,"timing":timing,"policy_change":true}});
-        let result = self
-            .runtime
-            .frontend_request(&mut self.store, Validated::fixture(&value));
+        let result = self.runtime.frontend_request(
+            &mut self.store,
+            Validated::fixture_from(&value, application),
+        );
         assert_eq!(result["phase"], "preparing", "{result}");
         assert_eq!(self.store.operation_undrained().unwrap(), 1);
         let end = Instant::now() + Duration::from_secs(5);
@@ -108,6 +118,39 @@ impl Fixture {
             thread::sleep(Duration::from_millis(2));
         }
         assert_eq!(self.store.operation_undrained().unwrap(), 0);
+    }
+}
+
+/// G3 (zerus-5wmh.66.5.2.1.3): only the maintained production build's
+/// passes record the folder's original index, inside the admitted execution;
+/// preparation writes nothing and a development build never records.
+#[test]
+fn only_the_maintained_build_records_the_original_index_and_only_when_executing() {
+    use zerus_client_core::download_cache::evidence;
+    for (application, records) in [
+        (evidence::MAINTAINED_APPLICATION, true),
+        ("dev.zerus.next", false),
+    ] {
+        let mut f = Fixture::new();
+        let root = f.save();
+        let original = fs::read(root.join(".zerus-files.json")).unwrap();
+        let (prepare, operation) = f.prepare_from(&root, 0, "immediate", application);
+        assert!(
+            !root.join(evidence::DIR).exists(),
+            "preparation writes nothing"
+        );
+        assert_eq!(f.execute(&prepare, &operation)["accepted"], true);
+        f.drain();
+        assert!(!root.join("report.txt").exists());
+        match evidence::evidence(&root) {
+            evidence::Evidence::Captured(receipt) if records => {
+                assert_eq!(receipt.bytes, original.len() as u64);
+            }
+            evidence::Evidence::None if !records => {
+                assert!(!root.join(evidence::DIR).exists());
+            }
+            other => panic!("{application}: {other:?}"),
+        }
     }
 }
 
@@ -228,7 +271,7 @@ fn schema_upgrades_exactly_from_real_creation_seventeen_without_a_placeholder() 
         .store
         .db
         .prepare(
-            "SELECT name,sql FROM sqlite_schema WHERE name LIKE 'desktop_creation_%' ORDER BY name",
+            "SELECT name,sql FROM sqlite_schema WHERE name LIKE 'desktop_creation_clone%' ORDER BY name",
         )
         .unwrap()
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
@@ -263,7 +306,7 @@ fn schema_upgrades_exactly_from_real_creation_seventeen_without_a_placeholder() 
     let creation_after: Vec<(String, String)> = store
         .db
         .prepare(
-            "SELECT name,sql FROM sqlite_schema WHERE name LIKE 'desktop_creation_%' ORDER BY name",
+            "SELECT name,sql FROM sqlite_schema WHERE name LIKE 'desktop_creation_clone%' ORDER BY name",
         )
         .unwrap()
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
@@ -659,6 +702,25 @@ fn a_missing_original_start_ack_never_unlinks_or_invents_an_unknown_fence() {
     );
     assert_eq!(f.store.operation_undrained().unwrap(), 1);
     assert!(root.join("report.txt").is_file());
+    // Keep the original sender connected across several 50 ms receive polls.
+    // A timeout must not manufacture a permit; Disconnected is a separate path.
+    let unanswered_until = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < unanswered_until {
+        assert_eq!(
+            fs::read(root.join("report.txt")).unwrap(),
+            b"cached original"
+        );
+        assert!(!f
+            .runtime
+            .job
+            .as_ref()
+            .unwrap()
+            .thread
+            .as_ref()
+            .unwrap()
+            .is_finished());
+        thread::sleep(Duration::from_millis(10));
+    }
     drop(reply); // Only the original private reply; no actor commit or permit.
     f.drain();
     let row = ledger::load(&f.store.db, &operation).unwrap().unwrap();
@@ -716,6 +778,64 @@ fn a_start_commit_write_failure_does_not_release_a_permit_or_unlink() {
         [ledger::FileState::Kept]
     );
     assert!(root.join("report.txt").is_file());
+}
+
+#[test]
+fn a_start_commit_veto_after_the_update_never_releases_a_permit() {
+    let mut f = Fixture::new();
+    let root = f.save();
+    let (prepare, operation) = f.prepare(&root, 0);
+    f.execute(&prepare, &operation);
+    let updates = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = Arc::clone(&updates);
+    f.store.db.update_hook(Some(
+        move |action: rusqlite::hooks::Action, _database: &str, table: &str, _row: i64| {
+            if action == rusqlite::hooks::Action::SQLITE_UPDATE
+                && table == "desktop_cache_operations"
+            {
+                observed.fetch_add(1, Ordering::AcqRel);
+            }
+        },
+    ));
+    let commits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = Arc::clone(&commits);
+    f.store.db.commit_hook(Some(move || {
+        observed.fetch_add(1, Ordering::AcqRel);
+        true // Roll back at commit, after start_effects completed its UPDATE.
+    }));
+    let until = Instant::now() + Duration::from_secs(3);
+    while !f.runtime.error {
+        f.runtime.poll(&mut f.store);
+        assert!(Instant::now() < until, "start commit veto was not observed");
+        thread::sleep(Duration::from_millis(1));
+    }
+    f.store.db.commit_hook(None::<fn() -> bool>);
+    f.store
+        .db
+        .update_hook(None::<fn(rusqlite::hooks::Action, &str, &str, i64)>);
+    assert_eq!(updates.load(Ordering::Acquire), 1);
+    assert_eq!(commits.load(Ordering::Acquire), 1);
+    assert!(
+        !ledger::load(&f.store.db, &operation)
+            .unwrap()
+            .unwrap()
+            .effect_started
+    );
+    assert!(root.join("report.txt").is_file());
+    // Removing the veto only permits settlement, never a replacement start ACK.
+    f.drain();
+    let row = ledger::load(&f.store.db, &operation).unwrap().unwrap();
+    assert_eq!(row.phase, ledger::Phase::Settled);
+    assert!(!row.effect_started);
+    assert_eq!(
+        row.receipt.as_ref().unwrap().files,
+        [ledger::FileState::Kept]
+    );
+    assert_eq!(row.receipt, row.kept_receipt);
+    assert_eq!(
+        fs::read(root.join("report.txt")).unwrap(),
+        b"cached original"
+    );
 }
 
 #[test]

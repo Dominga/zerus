@@ -130,8 +130,13 @@ fn page_with_slices(
     let mut next = cursor.map(str::to_owned);
     for _ in 0..32 {
         let slice = next_budget();
-        let reply = store
-            .publish(
+        // Index readiness is prepared above. Folder enrichment has a separate
+        // 250 ms deadline and must not make this query fixture depend on Git
+        // process startup (especially on a cold Windows runner).
+        let scopes =
+            json!({"cwd_canonical":crate::platform::canonical(state).unwrap(),"git_root":""});
+        let reply = search::scope_fixture::with(state.to_str().unwrap(), Some(scopes), || {
+            store.publish(
                 state,
                 "needle",
                 2,
@@ -139,7 +144,8 @@ fn page_with_slices(
                 &slice,
                 &AtomicBool::new(false),
             )
-            .unwrap();
+        })
+        .unwrap();
         // Publication can yield before even reading the first candidate.
         // Resume that exact cursor only; a completed wrong/empty reply or a
         // proof/output budget stop must reach the original assertions.
@@ -306,6 +312,11 @@ fn archive_pages_keep_exact_navigation_and_cursor_snapshot_without_fallback() {
         first["results"][0]["archive_id"]
     );
     assert_eq!(first["proof"]["files"], 2);
+    assert_eq!(
+        first["results"][0]["session"]["cwd_canonical"],
+        json!(crate::platform::canonical(&state).unwrap())
+    );
+    assert_eq!(first["results"][0]["session"]["git_root"], "");
     let second = page(&mut store, &state, first["next_cursor"].as_str(), &budget());
     assert_eq!(second["results"][0]["message_id"], "m4");
     let third = page(
@@ -316,6 +327,41 @@ fn archive_pages_keep_exact_navigation_and_cursor_snapshot_without_fallback() {
     );
     assert_eq!(third["results"][0]["message_id"], "m2");
     assert!(third["next_cursor"].is_null());
+}
+
+#[test]
+fn archive_publication_stays_incomplete_when_only_folder_scopes_are_unavailable() {
+    let (_temp, state, _path, _transcript, mut store) = fixture();
+    assert_eq!(store.status().unwrap()["coverage"]["state"], "ready");
+    let reply = search::scope_fixture::with(state.to_str().unwrap(), None, || {
+        store.publish(
+            &state,
+            "needle",
+            2,
+            None,
+            &budget(),
+            &AtomicBool::new(false),
+        )
+    })
+    .unwrap();
+    assert_eq!(reply["index_coverage"]["state"], "indexing");
+    assert_eq!(reply["truncated"], true);
+    assert_eq!(reply["proof"]["files"], 2);
+    assert_eq!(reply["unavailable_sessions"], 0);
+    assert!(reply["fallback"].is_null());
+    let hits = reply["results"].as_array().unwrap();
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0]["message_id"], "m6");
+    assert_eq!(hits[1]["message_id"], "m5");
+    assert!(hits[0]["session"].get("cwd_canonical").is_none());
+    assert!(hits[0]["session"].get("git_root").is_none());
+    // The unavailable lookup must neither consume another page nor leak into
+    // the next prepared publication on this same thread.
+    let ready = page(&mut store, &state, None, &budget());
+    assert_eq!(ready["index_coverage"]["state"], "ready");
+    assert_eq!(ready["results"][0]["message_id"], "m6");
+    let next = page(&mut store, &state, reply["next_cursor"].as_str(), &budget());
+    assert_eq!(next["results"][0]["message_id"], "m4");
 }
 
 #[test]

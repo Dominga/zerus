@@ -117,7 +117,15 @@ impl Prepared {
 
     /// No directory creation, index rewrite, hashing of cached content or
     /// deletion. Refuses oversized legacy indexes without truncating them.
-    pub fn open(root: &Path, limit: u64, now: i64, cancel: &AtomicBool) -> Result<Self, String> {
+    /// With `evidence` (a maintained Next build), the folder's original index
+    /// is kept in memory only; `execute` records it before its first unlink.
+    pub fn open(
+        root: &Path,
+        limit: u64,
+        now: i64,
+        cancel: &AtomicBool,
+        evidence: bool,
+    ) -> Result<Self, String> {
         let at = Instant::now();
         live(cancel, at)?;
         let canonical = fs::canonicalize(root).map_err(|_| REFUSED)?;
@@ -125,7 +133,9 @@ impl Prepared {
             return Err(REFUSED.into());
         }
         let directory = open(root, true)?;
-        let mut ledger = Ledger::open_bounded(root, INDEX_BYTES)?;
+        // The cache worker's own locked load keeps the folder's original index
+        // in memory (G3 evidence) within these budgets, writing nothing.
+        let mut ledger = Ledger::load(root, INDEX_BYTES, evidence)?;
         if ledger.entries.len() > INDEX_ENTRIES {
             return Err(REFUSED.into());
         }
@@ -278,6 +288,11 @@ impl Prepared {
             {
                 continue;
             }
+            // The folder's original index is committed before its first
+            // unlink; a refusal keeps this file and every later one.
+            if self.ledger.before_change().is_err() {
+                continue;
+            }
             states[i] = unlink_outcome(fs::remove_file(self.ledger.root.join(&candidate.name)));
             if states[i] == State::Removed {
                 self.usage.bytes = self.usage.bytes.saturating_sub(candidate.bytes);
@@ -381,7 +396,7 @@ fn read_index(file: &File) -> Result<Vec<u8>, String> {
     }
     Ok(bytes)
 }
-fn open(path: &Path, directory: bool) -> Result<File, String> {
+pub(super) fn open(path: &Path, directory: bool) -> Result<File, String> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -416,7 +431,7 @@ fn open(path: &Path, directory: bool) -> Result<File, String> {
 fn identity(file: &File, directory: bool) -> Result<String, String> {
     Ok(identities(file, directory)?.1)
 }
-fn identities(file: &File, directory: bool) -> Result<(String, String), String> {
+pub(super) fn identities(file: &File, directory: bool) -> Result<(String, String), String> {
     let meta = file.metadata().map_err(|_| REFUSED)?;
     if meta.is_dir() != directory || (!directory && !meta.is_file()) {
         return Err(REFUSED.into());

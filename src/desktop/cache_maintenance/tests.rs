@@ -65,13 +65,23 @@ impl Fixture {
         self.prepare_timing(root, revision, "immediate")
     }
     fn prepare_timing(&mut self, root: &Path, revision: u64, timing: &str) -> (String, String) {
+        self.prepare_from(root, revision, timing, "")
+    }
+    fn prepare_from(
+        &mut self,
+        root: &Path,
+        revision: u64,
+        timing: &str,
+        application: &str,
+    ) -> (String, String) {
         let prepare = id();
         let operation = id();
         let value = json!({"op":"cache_maintenance","request_id":prepare,"command":{"phase":"prepare",
             "operation_id":operation,"configuration":self.location.configuration,"root":root,"limit":1,"revision":revision,"timing":timing,"policy_change":true}});
-        let result = self
-            .runtime
-            .frontend_request(&mut self.store, Validated::fixture(&value));
+        let result = self.runtime.frontend_request(
+            &mut self.store,
+            Validated::fixture_from(&value, application),
+        );
         assert_eq!(result["phase"], "preparing", "{result}");
         assert_eq!(self.store.operation_undrained().unwrap(), 1);
         let end = Instant::now() + Duration::from_secs(5);
@@ -108,6 +118,39 @@ impl Fixture {
             thread::sleep(Duration::from_millis(2));
         }
         assert_eq!(self.store.operation_undrained().unwrap(), 0);
+    }
+}
+
+/// G3 (zerus-5wmh.66.5.2.1.3): only the maintained production build's
+/// passes record the folder's original index, inside the admitted execution;
+/// preparation writes nothing and a development build never records.
+#[test]
+fn only_the_maintained_build_records_the_original_index_and_only_when_executing() {
+    use zerus_client_core::download_cache::evidence;
+    for (application, records) in [
+        (evidence::MAINTAINED_APPLICATION, true),
+        ("dev.zerus.next", false),
+    ] {
+        let mut f = Fixture::new();
+        let root = f.save();
+        let original = fs::read(root.join(".zerus-files.json")).unwrap();
+        let (prepare, operation) = f.prepare_from(&root, 0, "immediate", application);
+        assert!(
+            !root.join(evidence::DIR).exists(),
+            "preparation writes nothing"
+        );
+        assert_eq!(f.execute(&prepare, &operation)["accepted"], true);
+        f.drain();
+        assert!(!root.join("report.txt").exists());
+        match evidence::evidence(&root) {
+            evidence::Evidence::Captured(receipt) if records => {
+                assert_eq!(receipt.bytes, original.len() as u64);
+            }
+            evidence::Evidence::None if !records => {
+                assert!(!root.join(evidence::DIR).exists());
+            }
+            other => panic!("{application}: {other:?}"),
+        }
     }
 }
 

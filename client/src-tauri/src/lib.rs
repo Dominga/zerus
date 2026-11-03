@@ -702,7 +702,11 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(termination_cleanup::TerminationCleanup::default());
                 app.manage(worktree_cleanup::WorktreeCleanup::default());
                 app.manage(recovery::start(app.handle()));
-                app.manage(files::start());
+                // Only the maintained production build records the cache
+                // folder's original index before changing it (G3).
+                app.manage(files::start(zerus_client_core::download_cache::Writer {
+                    evidence: app.state::<identity::Identity>().records_evidence(replay),
+                }));
                 app.manage(analytics::start(app.handle()));
                 app.manage(worktree_policy::start(app.handle()));
                 app.manage(mobile::start(app.handle()));

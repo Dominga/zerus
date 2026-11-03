@@ -9,10 +9,10 @@ const branchState = (retained: boolean | null) => retained === true ? tr("Branch
 
 /** A partially removed folder: what remains and the two explicit actions.
  * No file browsing; the owning computer reviews the folder again before any action. */
-export function LeftoverPanel(props: { row: OverviewRow; busy: boolean; keep(): void; remove(): void; review(): void }) {
+export function LeftoverPanel(props: { row: OverviewRow; busy: boolean; open(): void; keep(): void; remove(): void; review(): void }) {
   const item = () => props.row.leftover!;
   const done = () => !!item().outcome;
-  const deletable = () => item().deletable || item().consent;
+  const deletable = () => !item().macos_deletion_blocked && (item().deletable || item().consent);
   return <section class="su-insp wtl-panel" aria-label={tr("Partially removed folder")}>
     <header class="ip-head"><h3 class="ell" title={props.row.path}>{leaf(props.row.path)}</h3></header>
     <p class="ip-brief mono ell" title={props.row.path}>{props.row.path}</p>
@@ -25,13 +25,15 @@ export function LeftoverPanel(props: { row: OverviewRow; busy: boolean; keep(): 
       <Show when={item().sessions.length}><dt>{tr("Sessions")}</dt><dd>{item().sessions.join(", ")}</dd></Show>
       <Show when={item().processes}><dt>{tr("Running programs")}</dt><dd class="tabular">{item().processes}</dd></Show>
     </dl>
+    <Show when={item().macos_deletion_blocked}><div class="notice warn" role="status"><span><b>{tr("Leftover deletion is disabled on macOS")}</b><p>{tr("AppleDouble cleanup can remove unreviewed files. Open this folder in Finder on %1 to review and clean it up manually, or keep it.", props.row.machine)}</p></span></div></Show>
     <Show when={item().reasons.length && !done()}><div class="wtl-reasons"><b>{tr("Deleting is blocked")}</b><ul><For each={item().reasons}>{(reason) => <li>{reason}</li>}</For></ul></div></Show>
     <Show when={item().outcome}>{(outcome) => <div class="notice" classList={{ warn: outcome().outcome === "unknown" || outcome().outcome === "refused" }} role="status"><span><b>{props.row.state}</b> {props.row.remains}</span></div>}</Show>
     <span class="grow" />
     <div class="row wtl-actions"><span class="grow" />
+      <Show when={item().macos_deletion_blocked && !props.row.computer}><button class="btn" disabled={props.busy} onClick={() => props.open()}><Icon name="folder" size={13} />{tr("Open in Finder")}</button></Show>
       <Show when={!done()} fallback={<button class="btn" disabled={props.busy} onClick={() => props.review()}><Icon name="refresh-cw" size={13} />{tr("Review again")}</button>}>
         <button class="btn" disabled={props.busy} onClick={() => props.keep()}>{tr("Keep folder…")}</button>
-        <Show when={item().repository}><button class="btn danger" disabled={props.busy || !deletable()} title={deletable() ? undefined : tr("Resolve what blocks deleting, then review again.")} onClick={() => props.remove()}><Icon name="trash" size={13} />{tr("Delete remaining files…")}</button></Show>
+        <Show when={item().repository && !item().macos_deletion_blocked}><button class="btn danger" disabled={props.busy || !deletable()} title={deletable() ? undefined : tr("Resolve what blocks deleting, then review again.")} onClick={() => props.remove()}><Icon name="trash" size={13} />{tr("Delete remaining files…")}</button></Show>
       </Show>
     </div>
   </section>;

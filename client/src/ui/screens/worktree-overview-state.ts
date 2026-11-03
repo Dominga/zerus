@@ -12,7 +12,7 @@ export interface Filter { search: string; project: string; computer: string; cat
 export const emptyFilter = (): Filter => ({ search: "", project: "", computer: "", category: null, show_main: false, sort: "size" });
 export type Settled = { outcome: "deleted" } | { outcome: "forgotten" } | { outcome: "resolved" } | { outcome: "refused"; detail: string } | { outcome: "unknown"; detail: string };
 /** A reviewed leftover as the native side shows it; the folder and repository stay native. */
-export interface Leftover { branch: string; branch_retained: boolean | null; bytes: number | null; complete: boolean; stopped: string; interrupted: boolean; reasons: string[]; sessions: string[]; processes: number; fingerprint: string; consent: boolean; deletable: boolean; repository: boolean; reserved_at: number | null; outcome: Settled | null }
+export interface Leftover { branch: string; branch_retained: boolean | null; bytes: number | null; complete: boolean; stopped: string; interrupted: boolean; reasons: string[]; sessions: string[]; processes: number; fingerprint: string; consent: boolean; deletable: boolean; macos_deletion_blocked?: boolean; repository: boolean; reserved_at: number | null; outcome: Settled | null }
 export interface OverviewRow { id: string; path: string; branch: string; kind: string; machine: string; computer: string; category: number; state: string; remains: string; size: string; fresh: boolean; sessions: string[]; leftover: Leftover | null }
 export interface Frame { id: string; reading: boolean; processed: number; total: number; incomplete: number; pending: number; repositories: number; partial: boolean; updated: number | null; page: { index: number; total: number; groups: { name: string; category: number; total: number; rows: OverviewRow[] }[]; selected: number; selected_ids: string[]; candidates: number; estimated_bytes: number | null; partial: boolean } }
 export interface ManualRow { id: string; path: string; label: string; computer: string; machine: string; branch: string; size: string; status: "removed" | "kept" | "unknown" | "ready" | "checking" | "removing"; reason: string; details: string; ready: boolean; can_check: boolean; forgotten: boolean }
@@ -90,6 +90,10 @@ export function createOverview(call: Call = invoke, warn = (e: unknown) => toast
         return value;
       } catch (error) { return String(error); }
       finally { if (!closed) setWorking(false); }
+    },
+    openLeftover(row: OverviewRow) {
+      if (!row.leftover?.macos_deletion_blocked || row.computer) return Promise.resolve();
+      return action(async () => { await call("worktree_leftover_open_folder", { id, row: row.id }); });
     },
     inspect(row: string, file = "", offset = 0) { return call<Inspection>("worktree_overview_inspect", { id, row, file, offset }); },
     inspectBatch(key: string, row: string, file = "", offset = 0) { return call<Inspection>("worktree_manual_inspect", { id: key, row, file, offset }); },

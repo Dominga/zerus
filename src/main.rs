@@ -27,6 +27,13 @@ mod tasks;
 mod watch;
 
 fn main() {
+    // A creation launch child keeps the desktop actor's custody lock for its
+    // own lifetime only: marked close-on-exec before anything else starts.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Err(error) = desktop::creation_launch::adopt_custody() {
+        eprintln!("hgs: {error}");
+        std::process::exit(2);
+    }
     // COM cold activation cannot load config, create jobs or acquire ownership.
     #[cfg(windows)]
     if let Some(code) = desktop::windows_notification_activation(std::env::args().nth(1).as_deref())

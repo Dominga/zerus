@@ -87,6 +87,9 @@ impl Fixture {
                 owner.clone(),
             )
             .unwrap(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            launch: crate::desktop::creation_launch::Runtime::new(&config, &epoch, owner.clone())
+                .unwrap(),
         };
         Self {
             _temp: temp,

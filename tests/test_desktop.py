@@ -237,7 +237,7 @@ finally:
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_operations').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_operation_attempts').fetchone()[0], 0)
 
-    def test_creation_launch_is_closed_and_not_yet_advertised(self):
+    def test_creation_launch_is_a_closed_native_intent_with_scoped_read_only_lookup(self):
         self.serve()
         status = self.cli('desktop', 'status', '--json')
         scope = dict(configuration=status['configuration'], service_epoch=status['epoch'])
@@ -250,8 +250,27 @@ finally:
         refused = self.cli('desktop', 'request', '--json', data=dict(op='creation_launch', intent=intent))
         self.assertFalse(refused['accepted'])
         self.assertEqual(refused['code'], 'frontend_authentication_required')
+        query = dict(request_id=str(uuid.uuid4()), scope=scope, creation_id=creation, launch_id=creation,
+                     plan_sha256='a' * 64)
+        result = self.cli('desktop', 'request', '--json', data=dict(op='creation_launch_result', query=query))
+        self.assertEqual(result['abi'], 'desktop-creation-launch-v1')
+        self.assertEqual(result['scope'], scope)
+        self.assertTrue(result['read_only'])
+        self.assertFalse(result['found'])
+        self.assertIsNone(result['receipt'])
+        self.assertIsNone(result['observation'], 'no evidence without an original')
+        bad = dict(query, scope=dict(scope, service_epoch=str(uuid.uuid4())))
+        self.assertEqual(self.cli('desktop', 'request', '--json', data=dict(op='creation_launch_result', query=bad))['code'], 'creation_result_unavailable')
+        with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_creation_launches').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT rows,bytes,active FROM desktop_creation_launch_budget').fetchone(), (0, 0, 0))
+        status = self.cli('desktop', 'status', '--json')
+        self.assertEqual(status['operation_queue']['kinds']['creation_launch']['undrained'], 0)
         help_text = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True).stdout
-        self.assertNotIn('desktop-creation-launch', help_text)
+        if sys.platform.startswith('linux') or sys.platform == 'darwin':
+            self.assertIn('Desktop creation launch ABI: desktop-creation-launch-v1', help_text)
+        else:
+            self.assertNotIn('desktop-creation-launch', help_text)
 
     @unittest.skipUnless(sys.platform.startswith('linux') or sys.platform == 'darwin', 'Unix registration mode')
     def test_registration_variant_is_read_only_and_service_reports_its_requested_mode(self):
@@ -1311,8 +1330,11 @@ finally:
 
     @staticmethod
     def remove_catalog_reason_schema(db):
-        # Rewind the later leaves too, never leaving either labelled older:
-        # the schema-23 creation worktree, then the schema-22 catalog approval.
+        # Rewind the later leaves too, never leaving one labelled older: the
+        # schema-24 creation launch, the schema-23 creation worktree, then the
+        # schema-22 catalog approval.
+        db.execute('DROP TABLE desktop_creation_launches')
+        db.execute('DROP TABLE desktop_creation_launch_budget')
         db.execute('DROP TABLE desktop_creation_worktrees')
         db.execute('DROP TABLE desktop_creation_worktree_budget')
         db.execute('DROP INDEX desktop_catalog_approval')

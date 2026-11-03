@@ -294,6 +294,16 @@ impl Validated {
         };
         Ok(*intent)
     }
+    /// Only the launch actor calls this after BEGIN IMMEDIATE. Cached native
+    /// Service mode was bound to this exact original request during admission.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn creation_launch(self) -> Result<zerus_client_core::desktop::creation_launch::Intent> {
+        self.check()?;
+        let Request::CreationLaunch { intent } = self.0 else {
+            anyhow::bail!("not a creation launch");
+        };
+        Ok(*intent)
+    }
     /// Only the worktree actor calls this after BEGIN IMMEDIATE. Cached native
     /// Service mode was bound to this exact original request during admission.
     #[cfg(any(target_os = "linux", target_os = "macos"))]

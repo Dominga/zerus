@@ -601,6 +601,63 @@ mod native {
     }
 
     #[test]
+    fn a_check_between_recovery_eligibility_and_admission_never_admits_an_unbound_grant() {
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        tauri::async_runtime::block_on(async {
+            let f = Fixture::new(
+                Mode::Service,
+                json!({"ready":true,"lost":true,"lost_once":true,"definitive":true}),
+            );
+            let (entered, paused) = std::sync::mpsc::channel();
+            let (resume, released) = tokio::sync::oneshot::channel();
+            crate::desktop_service::recovery_pause::arm(f.root.join("hgs"), entered, released);
+            let (service, _) = f.service();
+            let view = || {
+                service
+                    .snapshot()
+                    .notification_ownership
+                    .unwrap_or_default()
+            };
+            until("a definitive not-applied for the lost original", || {
+                f.calls("ownership-result").len() == 1 && view()["code"] == "ownership_not_applied"
+            })
+            .await;
+            // Recovery chose its fresh Grant step and holds before admission.
+            let held = std::sync::atomic::AtomicBool::new(false);
+            until("recovery paused before admission", || {
+                held.fetch_or(paused.try_recv().is_ok(), Ordering::AcqRel)
+                    || held.load(Ordering::Acquire)
+            })
+            .await;
+            assert_eq!(f.calls("frontend-request").len(), 1);
+            // The authority moves on and a real Check reads it in that window.
+            fs::write(
+                f.root.join("current.json"),
+                json!({"abi":"desktop-ownership-v1","configuration":"a".repeat(64),
+                    "journal":"00000000-0000-4000-8000-000000000005","revision":4,
+                    "state":"passive","rearm_required":false,"request_id":null,
+                    "owner_epoch":null,"identity_current":false})
+                .to_string(),
+            )
+            .unwrap();
+            let checked = service.ownership_result().await;
+            assert_eq!(checked.status.as_ref().unwrap().revision, 4, "{checked:?}");
+            assert_ne!(checked.code, "ownership_not_applied");
+            resume.send(()).unwrap();
+            tokio::time::sleep(Duration::from_millis(2500)).await;
+            assert_eq!(
+                f.calls("frontend-request").len(),
+                1,
+                "no unbound Grant after the allowance vanished"
+            );
+            let view = view();
+            assert_eq!(view["status"]["revision"], 4, "{view}");
+            assert_eq!(view["status"]["state"], "passive", "{view}");
+            service.join().await.unwrap();
+        });
+    }
+
+    #[test]
     fn only_a_verified_exit_and_unchanged_scope_let_not_applied_admit_a_grant() {
         let _process = crate::PROCESS_TREE.read().unwrap();
         let f = Fixture::new(Mode::Service, json!({"lost":true,"missing":true}));

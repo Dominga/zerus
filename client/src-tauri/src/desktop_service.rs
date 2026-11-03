@@ -1682,6 +1682,8 @@ async fn recover_grant(
                 crate::desktop_ownership::Phase::Result
             }
             None => {
+                #[cfg(test)]
+                recovery_pause::reached(&shared.hgs).await;
                 shared
                     .ownership
                     .recovery_grant(configuration.clone(), stop.clone())
@@ -1691,6 +1693,38 @@ async fn recover_grant(
         };
         shared.publish_ownership(phase).await;
         step = (step + 1).min(DELAYS.len() - 1);
+    }
+}
+
+/// Test seam: hold one service's recovery after it chose a fresh Grant step
+/// and before admission, so a concurrent Check can land in that window. It
+/// awaits rather than blocks: a blocked worker can stall the runtime's timers.
+#[cfg(test)]
+pub(crate) mod recovery_pause {
+    use std::{
+        path::{Path, PathBuf},
+        sync::{mpsc, Mutex},
+        time::Duration,
+    };
+    use tokio::sync::oneshot;
+    type Hook = (PathBuf, mpsc::Sender<()>, oneshot::Receiver<()>);
+    static HOOK: Mutex<Option<Hook>> = Mutex::new(None);
+    // Armed only by the Unix ownership tests.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn arm(hgs: PathBuf, entered: mpsc::Sender<()>, resume: oneshot::Receiver<()>) {
+        *HOOK.lock().unwrap() = Some((hgs, entered, resume));
+    }
+    pub(super) async fn reached(hgs: &Path) {
+        let hook = {
+            let mut hook = HOOK.lock().unwrap();
+            if hook.as_ref().is_none_or(|(armed, ..)| armed != hgs) {
+                return;
+            }
+            hook.take().unwrap()
+        };
+        let (_, entered, resume) = hook;
+        let _ = entered.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(30), resume).await;
     }
 }
 

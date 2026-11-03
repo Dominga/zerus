@@ -62,6 +62,12 @@ impl Basis {
             && !status.rearm_required
     }
 }
+/// Why recovery may send a fresh Grant, captured under the admission lock.
+enum Reason {
+    Capacity,
+    Refused,
+    NotApplied(Basis),
+}
 #[derive(Default)]
 struct State {
     status: Option<Status>,
@@ -187,11 +193,14 @@ impl Controller {
     /// original after its verified exit, or capacity before an uncertain
     /// original exists, can admit another fresh startup Grant.
     pub(crate) fn retryable_grant(&self) -> bool {
-        let state = self.state();
-        (!state.running && state.code == "ownership_transport_busy"
-                    && state.intent.as_ref().is_none_or(|intent| intent.complete))
-                    || Self::not_applied_basis(&state).is_some()
-                    || state.intent.as_ref().is_some_and(|intent| {
+        Self::grant_reason(&self.state()).is_some()
+    }
+    /// Each allowance is verified separately; there is no unrestricted Grant.
+    fn grant_reason(state: &State) -> Option<Reason> {
+        if let Some(basis) = Self::not_applied_basis(state) {
+            return Some(Reason::NotApplied(basis));
+        }
+        let refused = state.intent.as_ref().is_some_and(|intent| {
                     intent.complete && intent.exit_confirmed
                         && matches!(intent.request, Request::DesktopOwnership { action: Action::Grant, .. })
                         && intent.receipt.as_ref().is_some_and(|receipt| {
@@ -201,7 +210,14 @@ impl Controller {
                                     if (state.code.is_empty() || state.code == *code)
                                         && matches!(code.as_str(), "ownership_drain_pending" | "ownership_resources_pending" | "ownership_transport_busy"))
                         })
-                })
+                });
+        if refused {
+            return Some(Reason::Refused);
+        }
+        (!state.running
+            && state.code == "ownership_transport_busy"
+            && state.intent.as_ref().is_none_or(|intent| intent.complete))
+        .then_some(Reason::Capacity)
     }
     /// A complete Grant original found definitively not applied after its
     /// verified exit, while the cached status still equals the one it was
@@ -241,12 +257,19 @@ impl Controller {
         configuration: String,
         cancel: Arc<AtomicBool>,
     ) -> View {
-        let basis = Self::not_applied_basis(&self.state());
-        let Some(mut job) = self.admit(Some(Action::Grant), Some(configuration), Some(cancel))
-        else {
+        // Revalidate the reason and capture its basis under the same state
+        // lock that marks this job running. A vanished allowance refuses.
+        let Some(job) = self.admit_with(
+            Some(Action::Grant),
+            Some(configuration),
+            Some(cancel),
+            |state| match Self::grant_reason(state)? {
+                Reason::NotApplied(basis) => Some(Some(basis)),
+                Reason::Refused | Reason::Capacity => Some(None),
+            },
+        ) else {
             return self.view();
         };
-        job.basis = basis;
         let owner = self.clone();
         let _ = tauri::async_runtime::spawn_blocking(move || job.run()).await;
         owner.view()
@@ -279,6 +302,17 @@ impl Controller {
         configuration: Option<String>,
         cancel: Option<Arc<AtomicBool>>,
     ) -> Option<Job> {
+        self.admit_with(action, configuration, cancel, |_| Some(None))
+    }
+    /// `allowed` runs under the state lock before `running` is set; `None`
+    /// refuses, `Some(basis)` binds the job to that basis.
+    fn admit_with(
+        self: &Arc<Self>,
+        action: Option<Action>,
+        configuration: Option<String>,
+        cancel: Option<Arc<AtomicBool>>,
+        allowed: impl FnOnce(&State) -> Option<Option<Basis>>,
+    ) -> Option<Job> {
         if self.stop.load(Ordering::Acquire) {
             return None;
         }
@@ -297,6 +331,7 @@ impl Controller {
         if state.running {
             return None;
         }
+        let basis = allowed(&state)?;
         state.running = true;
         drop(state);
         Some(Job {
@@ -307,7 +342,7 @@ impl Controller {
             resources: Arc::new(charge),
             deadline: None,
             refresh_absent_native: false,
-            basis: None,
+            basis,
         })
     }
     pub(crate) fn granted(&self) -> bool {

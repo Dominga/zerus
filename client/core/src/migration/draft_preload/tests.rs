@@ -816,3 +816,87 @@ fn a_failure_written_now_is_never_superseded_on_windows() {
         "a version 2 failure stays"
     );
 }
+
+/// review-q on #1242: failed.json moves last, so a recovery interrupted
+/// after some leaves moved is resumed on the next start.
+#[test]
+fn an_interrupted_supersede_is_resumed_on_the_next_start() {
+    let s = Scratch::new();
+    draft(&s.next(), "codex/sample/a", "before", b"abc", true);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    failed_v1(&s, "unreadable");
+    // Interrupted after index.json moved, before failed.json did.
+    let kept = s.slot().join("superseded-v1");
+    drop(disk::Parents::open(&kept, true).unwrap());
+    fs::rename(s.slot().join("index.json"), kept.join("index.json")).unwrap();
+    on_windows(true);
+    let capture = s.capture();
+    let gate = capture.prepare();
+    on_windows(false);
+    assert_eq!(
+        gate,
+        Gate {
+            writes: true,
+            import: true
+        }
+    );
+    assert_eq!(capture.status().code, "draft_capture_captured");
+    assert!(kept.join("failed.json").exists() && kept.join("index.json").exists());
+}
+
+#[test]
+fn a_supersede_that_cannot_finish_keeps_the_failure_and_its_record() {
+    let s = Scratch::new();
+    draft(&s.next(), "codex/sample/a", "before", b"abc", true);
+    failed_v1(&s, "unreadable");
+    // A review copy already holds index.json: the move stops there.
+    let kept = s.slot().join("superseded-v1");
+    drop(disk::Parents::open(&kept, true).unwrap());
+    fs::write(kept.join("index.json"), b"earlier").unwrap();
+    on_windows(true);
+    let capture = s.capture();
+    let gate = capture.prepare();
+    on_windows(false);
+    assert_eq!(
+        gate,
+        Gate {
+            writes: true,
+            import: false
+        },
+        "typing continues"
+    );
+    assert_eq!(capture.status().code, "draft_capture_unreadable");
+    assert!(
+        s.slot().join("failed.json").exists(),
+        "failed.json moves last"
+    );
+    assert!(!kept.join("failed.json").exists());
+}
+
+/// review-q M2 on #1242: a receipt's parts must be exactly the container's
+/// parts. An extra empty part, even with its true stamp, is refused.
+#[test]
+fn a_receipt_with_an_extra_empty_part_is_refused() {
+    let s = Scratch::new();
+    draft(&s.next(), "codex/sample/a", "text", b"abc", true);
+    assert!(s.capture().prepare().import);
+    let empty = disk::create(&s.slot().join("original-1.bin"), b"").unwrap();
+    let mut receipt: Receipt = read_json(&s.slot().join("receipt.json")).unwrap().unwrap();
+    receipt.more = vec![empty];
+    fs::write(
+        s.slot().join("receipt.json"),
+        serde_json::to_vec(&receipt).unwrap(),
+    )
+    .unwrap();
+    let seed: Seed = read_json(&s.slot().join("identity.json")).unwrap().unwrap();
+    assert!(Snapshot::open(&s.slot(), &seed).is_err());
+    let again = s.capture();
+    assert_eq!(
+        again.prepare(),
+        Gate {
+            writes: true,
+            import: false
+        }
+    );
+    assert_eq!(again.status().code, "draft_capture_changed");
+}

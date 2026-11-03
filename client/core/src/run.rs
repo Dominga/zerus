@@ -1135,23 +1135,32 @@ mod hidden_tests {
     use super::*;
     use base64::{engine::general_purpose::STANDARD, Engine};
 
+    const CASE: &str = "run::hidden_tests::hidden_helper_child";
+    const MARKER: &str = "ZERUS_TEST_HIDDEN_HELPER_CASE";
+
+    #[test]
+    #[ignore = "exact-filter hidden-helper child, launched only by its parent test"]
+    fn hidden_helper_child() {
+        // Fail before I/O or spawning if the marker was lost. This child has
+        // a different name from its parent and can never re-enter that test.
+        assert_eq!(
+            std::env::var(MARKER).as_deref(),
+            Ok(CASE),
+            "hidden-helper child requires its explicit marker"
+        );
+        use windows_sys::Win32::System::Console::GetConsoleWindow;
+        // No PowerShell startup or C# compilation runs inside this deadline.
+        // SAFETY: GetConsoleWindow has no preconditions.
+        assert!(unsafe { GetConsoleWindow() }.is_null());
+        let mut input = Vec::new();
+        std::io::stdin().take(1025).read_to_end(&mut input).unwrap();
+        assert_eq!(input, b"exact helper input");
+        println!("\n0:exact helper input");
+    }
+
     #[test]
     fn a_hidden_helper_has_no_console_and_receives_exact_input_through_eof() {
-        const CASE: &str = "run::hidden_tests::a_hidden_helper_has_no_console_and_receives_exact_input_through_eof";
-        const MARKER: &str = "ZERUS_TEST_HIDDEN_HELPER_CASE";
         const FIXTURE_WAIT: Duration = Duration::from_secs(15);
-        if std::env::var(MARKER).as_deref() == Ok(CASE) {
-            use windows_sys::Win32::System::Console::GetConsoleWindow;
-            // The exact-filter child is native: no PowerShell startup or C#
-            // compilation runs inside the console/EOF fixture's deadline.
-            // SAFETY: GetConsoleWindow has no preconditions.
-            assert!(unsafe { GetConsoleWindow() }.is_null());
-            let mut input = Vec::new();
-            std::io::stdin().take(1025).read_to_end(&mut input).unwrap();
-            assert_eq!(input, b"exact helper input");
-            println!("\n0:exact helper input");
-            return;
-        }
         let system_root = std::env::var("SystemRoot").expect("Windows has Unicode SystemRoot");
         let program = std::path::PathBuf::from(&system_root)
             .join("System32/WindowsPowerShell/v1.0/powershell.exe");
@@ -1176,6 +1185,7 @@ mod hidden_tests {
             args: vec![
                 "--exact".into(),
                 CASE.into(),
+                "--ignored".into(),
                 "--nocapture".into(),
                 "--test-threads=1".into(),
             ],
@@ -1199,6 +1209,25 @@ mod hidden_tests {
                 assert!(output.contains("test result: ok. 1 passed; 0 failed; 0 ignored;"));
             }
             other => panic!("{other:?}"),
+        }
+
+        // Exercise the original env-loss hazard through the same hidden
+        // launch path. The child must fail its guard, never invoke a parent.
+        let missing_marker =
+            run_hidden_limited(&std::env::current_exe().unwrap(), &call, &environment, 4096)
+                .unwrap();
+        match missing_marker {
+            Exit::Code {
+                code: 101,
+                stdout,
+                stderr,
+            } => {
+                let output = String::from_utf8(stdout).unwrap();
+                assert!(output.contains("test result: FAILED. 0 passed; 1 failed;"));
+                assert!(format!("{output}{stderr}")
+                    .contains("hidden-helper child requires its explicit marker"));
+            }
+            other => panic!("missing marker: {other:?}"),
         }
 
         let body = "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);[Console]::WriteLine($env:PSModulePath);[Console]::WriteLine($env:ZERUS_TEST_PARENT_PROFILE);[Console]::WriteLine([string]$PSModuleAutoLoadingPreference)";

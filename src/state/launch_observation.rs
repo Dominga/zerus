@@ -611,7 +611,12 @@ mod unix {
             root.finish(counts)?;
         }
         launches.finish(counts)?;
+        // Its final path_stamp is the last metadata reservation.
         state.finish(counts)?;
+        #[cfg(test)]
+        if let Some(hook) = AFTER_LAST_RESERVATION.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
         Ok(result)
     }
     pub(super) fn observe(state: &Path, launch: &str, deadline: Instant) -> Observation {
@@ -622,7 +627,20 @@ mod unix {
             deadline: Some(deadline),
             ..Counts::default()
         };
-        selected(launch, state, &mut counts).unwrap_or(Observation::Unknown)
+        let observation = selected(launch, state, &mut counts).unwrap_or(Observation::Unknown);
+        // The counters check the deadline before each reservation; an
+        // observation that completes after it, rechecks included, is Unknown.
+        if Instant::now() >= deadline {
+            return Observation::Unknown;
+        }
+        observation
+    }
+    #[cfg(test)]
+    thread_local! {
+        /// Runs after the last state-root metadata reservation, when every
+        /// read and recheck is done, before the final deadline gate.
+        static AFTER_LAST_RESERVATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
     }
     #[cfg(test)]
     mod tests {
@@ -974,6 +992,37 @@ mod unix {
             let old = counts.opens;
             assert!(counts.walk(Path::new("/")).is_err());
             assert_eq!(counts.opens, old);
+        }
+        #[test]
+        fn a_deadline_that_passes_after_the_last_reservation_is_unknown() {
+            let f = Fixture::new();
+            f.start();
+            f.put_binding(&f.binding());
+            let later = Instant::now() + Duration::from_secs(5);
+            assert!(matches!(
+                super::super::observe(&f.state, &id(2), later),
+                Observation::ObservedBinding { .. }
+            ));
+            // Every reservation succeeds; the deadline passes only after the
+            // last state-root metadata reservation, every recheck done.
+            let deadline = Instant::now() + Duration::from_millis(500);
+            let reached = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let window = reached.clone();
+            AFTER_LAST_RESERVATION.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    assert!(Instant::now() < deadline, "reached before the deadline");
+                    window.store(true, std::sync::atomic::Ordering::SeqCst);
+                    std::thread::sleep(deadline.saturating_duration_since(Instant::now()))
+                }))
+            });
+            assert!(matches!(
+                super::super::observe(&f.state, &id(2), deadline),
+                Observation::Unknown
+            ));
+            assert!(
+                reached.load(std::sync::atomic::Ordering::SeqCst),
+                "the final window after the last reservation was reached"
+            );
         }
         #[test]
         fn a_passed_deadline_or_a_noncanonical_launch_id_is_unknown() {

@@ -45,9 +45,12 @@ function creationCaptureNotice(report: DesktopService["retained_source_import"])
 
 export function retainedSourceNotice(state: DesktopService | undefined): string {
   const report = state?.retained_source_import;
+  const drafts = report?.drafts_capture;
+  if (drafts && !drafts.writes) return tr("Drafts are not being saved because their earlier versions could not be recorded. Check the Zerus data folder, then retry.");
   if (report?.local_read_capture?.paused) return tr("Local read marks are paused while their original file is preserved. Review the migration report and retry.");
   const captureNotice = creationCaptureNotice(report);
   if (captureNotice) return captureNotice;
+  if (drafts?.paused) return tr("Importing drafts from Qt is paused because the earlier drafts could not be recorded. New drafts are saved.");
   const local = report?.local_reads_report;
   if (local?.required && !local.complete) {
     if (local.running) return tr("Preparing the historical local read-mark report. Your sessions remain available.");
@@ -66,8 +69,11 @@ export function retainedSourceNotice(state: DesktopService | undefined): string 
   return tr("The migration report needs review. Your sessions remain available.");
 }
 
+/** Draft capture outcomes that recorded the earlier drafts (or found none). */
+const DRAFTS_RECORDED = ["draft_capture_waiting", "draft_capture_captured", "draft_capture_not_applicable"];
+
 export interface MigrationReportDetail { reason: string; next: string; code: string; phase: string | null }
-export type MigrationReportDetails = Partial<Record<"settings" | "creations" | "capture" | "localReads" | "localReadsReport", MigrationReportDetail>>;
+export type MigrationReportDetails = Partial<Record<"settings" | "creations" | "capture" | "localReads" | "localReadsReport" | "drafts", MigrationReportDetail>>;
 
 /** Independent native report reasons. Reviewing never retries or publishes. */
 export function retainedSourceDetails(state: DesktopService | undefined): MigrationReportDetails | undefined {
@@ -109,6 +115,24 @@ export function retainedSourceDetails(state: DesktopService | undefined): Migrat
   if (capture?.paused) details.capture = {
     reason: creationCaptureNotice(report), next: tr("Check the original journal and archive access before retrying."),
     code: capture.code, phase: null,
+  };
+  // A not-captured drafts outcome stays visibly incomplete after Retry
+  // resumes the import; any code not known to be recorded counts as one.
+  const drafts = report.drafts_capture;
+  if (drafts && (!drafts.writes || drafts.paused || !DRAFTS_RECORDED.includes(drafts.code))) details.drafts = {
+    reason: !drafts.writes
+      ? tr("Drafts are not being saved because their earlier versions could not be recorded. Check the Zerus data folder, then retry.")
+      : drafts.paused
+        ? tr("Importing drafts from Qt is paused because the earlier drafts could not be recorded. New drafts are saved.")
+        : drafts.code === "draft_capture_next_earlier_run"
+          ? tr("Your Qt drafts were recorded. Drafts already in Zerus could not be recorded, because an earlier run changed them first.")
+          : tr("The earlier drafts could not be recorded for the migration report. Drafts are saved and imported normally."),
+    next: !drafts.writes
+      ? tr("Check that the Zerus data folder is available and owned by your user. Retry records the earlier drafts before any draft is saved.")
+      : drafts.paused
+        ? tr("Retry imports the drafts from Qt. The earlier drafts stay unrecorded; Retry never records them later.")
+        : tr("This part of the migration report stays incomplete. Retry never records the earlier drafts later."),
+    code: drafts.code, phase: null,
   };
   const code = report.code;
   let reason: string, next: string;

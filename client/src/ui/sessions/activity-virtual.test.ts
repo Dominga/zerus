@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { Virtualizer } from "@tanstack/solid-virtual";
 import { activityFlow, activityGeometryValid, activityRange, activityText, checkActivityGeometry, type ActivityGeometryRow } from "./activity-virtual";
 import { loadMarkdown } from "./markdown";
 import type { TranscriptItem } from "./types";
+import { ACTIVITY_RESIZE_OVERSCAN } from "./activity-heights";
 
 const geometryRow = (index: number, top: number, bottom: number, start = top): ActivityGeometryRow => ({
   index, key: `item-${index}`, top, bottom, height: bottom - top, start, domStart: top,
@@ -31,6 +33,17 @@ describe("Activity copy and virtual retention", () => {
 
   it("keeps a loading or playing media row mounted while it is scrolled out", () => {
     expect(activityRange({ startIndex: 6, endIndex: 7, overscan: 1, count: 12 }, 1)).toEqual([1, 5, 6, 7, 8]);
+  });
+
+  it("keeps the playing and selected rows while resize mounts only its visible window", () => {
+    const virtualizer = new Virtualizer<HTMLElement, HTMLElement>({
+      count: 100, getScrollElement: () => null, estimateSize: () => 100,
+      initialRect: { width: 400, height: 300 }, initialOffset: 5000,
+      observeElementRect: () => undefined, observeElementOffset: () => undefined,
+      scrollToFn: () => {}, overscan: ACTIVITY_RESIZE_OVERSCAN,
+      rangeExtractor: range => activityRange(range, 0, [49, 90]),
+    });
+    expect(virtualizer.getVirtualItems().map(item => item.index)).toEqual([0, 49, 50, 51, 52, 90]);
   });
 
   it("copies the current CommonMark tree without losing nested text or table cells", async () => {

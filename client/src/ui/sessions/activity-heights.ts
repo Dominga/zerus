@@ -1,7 +1,9 @@
 import { defaultRangeExtractor, type Range } from "@tanstack/solid-virtual";
 
 export const ACTIVITY_OVERSCAN = 8;
-export const ACTIVITY_RESIZE_OVERSCAN = 2;
+// Mounted visible rows stay exact; off-screen estimates need no DOM during a
+// resize. Selection and playing media remain retained by activityRange.
+export const ACTIVITY_RESIZE_OVERSCAN = 0;
 
 /** Exclude retained media/selection/premeasure rows from width invalidation. */
 export function activityMeasureWindow(range: Pick<Range, "startIndex" | "endIndex"> | null, count: number, overscan = ACTIVITY_OVERSCAN): number[] {
@@ -37,11 +39,11 @@ export function syncActivityHeights(heights: ActivityHeights, previous: Readonly
   heights.retain(new Set(next.keys()));
 }
 
-/** How long widths must stay unchanged before scrolling gets its overscan back. */
+/** How long column and viewport geometry must stay unchanged before scrolling gets its overscan back. */
 export const ACTIVITY_RESIZE_SETTLE_MS = 250;
 export const activityOverscan = (resizing: boolean) => resizing ? ACTIVITY_RESIZE_OVERSCAN : ACTIVITY_OVERSCAN;
 
-/** A width change uses the small resize overscan; ACTIVITY_OVERSCAN returns
+/** A viewport or column resize uses the small resize overscan; ACTIVITY_OVERSCAN returns
  * ACTIVITY_RESIZE_SETTLE_MS after the last one, then `settled` runs once. */
 export function createActivityResize(setResizing: (resizing: boolean) => void, settled: () => void,
   timers: { set(run: () => void, ms: number): unknown; clear(id: unknown): void } = {

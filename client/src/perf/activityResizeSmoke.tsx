@@ -80,10 +80,48 @@ async function run() {
   // Settings/column drag can resize the text without changing the viewport.
   root.style.setProperty("--col", "480px"); await sleep(350);
   check(activityGeometryValid(activityGeometry(scroller)), "column-only resize broke virtual geometry");
+  // A capped text column still lives in a changing viewport. It must not
+  // restore scroll overscan while that viewport is being resized.
+  let cappedMaximum = 0;
+  const cappedBefore = scroller.querySelectorAll(".act-virtual-row").length;
+  for (let n = 1; n <= 8; n++) {
+    root.style.width = `${940 - n * 20}px`;
+    root.style.height = `${740 - n * 5}px`;
+    await frame(); await frame();
+    const mounted = [...scroller.querySelectorAll<HTMLElement>(".act-virtual-row")];
+    const edge = scroller.getBoundingClientRect();
+    const visible = mounted.filter(row => { const r = row.getBoundingClientRect(); return r.bottom > edge.top && r.top < edge.bottom; }).length;
+    cappedMaximum = Math.max(cappedMaximum, mounted.length);
+    check(mounted.length <= visible + 6, "capped column restored normal overscan during viewport resize");
+    check(activityGeometryValid(activityGeometry(scroller)), "capped-column viewport resize broke geometry");
+    await sleep(80);
+  }
+  await sleep(350);
+  const cappedAfter = scroller.querySelectorAll(".act-virtual-row").length;
+  check(cappedAfter > cappedMaximum, "scroll overscan did not return after viewport resize settled");
   Element.prototype.getBoundingClientRect = rect;
   const sorted = measuredFrames.slice().sort((a, b) => a - b);
   dispose();
-  const result = { failures, observerWarnings: (window as unknown as { activityResizeObserverWarnings: number }).activityResizeObserverWarnings, rows: 100, maximumMounted, rowReads: measuredReads, transitions, frames: measuredFrames.length,
+  root.style.setProperty("--col", "100%");
+  const voiceSource: ActivitySource = { ...source, target: () => ({ id: "synthetic-voice-resize" }),
+    events: () => [{ seq: 1, type: "UserPromptSubmit", source: "hgs_voice", message_id: "voice-resize", at: 1793000000,
+      voice: { id: "voice-resize", state: "submitted", audio: { duration_ms: 60000, waveform: Array(64).fill(128) }, transcript: "Synthetic transcript" } }],
+    summary: () => ({ conversation_id: "synthetic-voice-resize" }) };
+  const closeVoice = render(() => <ActivityView source={voiceSource} />, root);
+  const voiceDeadline = performance.now() + 5000;
+  while (!root.querySelector(".vp")) { if (performance.now() > voiceDeadline) throw Error("voice geometry deadline"); await sleep(20); }
+  const voiceWidths: unknown[] = [];
+  for (const scale of [0.75, 1, 2]) for (const width of [240, 320, 480, 760, 940]) {
+    root.style.width = `${width}px`; root.style.setProperty("--content-scale", String(scale));
+    await frame(); await frame();
+    const column = root.querySelector<HTMLElement>(".act-col")!.getBoundingClientRect().width;
+    const player = root.querySelector<HTMLElement>(".vp")!.getBoundingClientRect().width;
+    const expected = Math.max(80, Math.min(420, column - 112));
+    voiceWidths.push({ scale, width, column, player, expected });
+    check(Math.abs(player - expected) <= 1, `voice player changed geometry at ${width}px / ${scale}`);
+  }
+  closeVoice();
+  const result = { failures, cappedMaximum, cappedBefore, cappedAfter, voiceWidths, observerWarnings: (window as unknown as { activityResizeObserverWarnings: number }).activityResizeObserverWarnings, rows: 100, maximumMounted, rowReads: measuredReads, transitions, frames: measuredFrames.length,
     frameMs: { p50: sorted[Math.floor(sorted.length * .5)], p95: sorted[Math.floor(sorted.length * .95)], max: sorted.at(-1) } };
   (window as unknown as { webkit: { messageHandlers: { result: { postMessage(value: string): void } } } }).webkit.messageHandlers.result.postMessage(JSON.stringify(result));
 }

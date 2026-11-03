@@ -1713,8 +1713,20 @@ mod deletion {
     use std::os::unix::ffi::OsStrExt;
     use std::path::{Component, Path};
 
-    pub(super) fn open(at: RawFd, name: &CStr) -> Result<OwnedFd> {
-        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    /// Ancestors are only looked up in, identified and unlinked from, which
+    /// needs search permission alone: Linux opens them as paths and macOS for
+    /// search, so an execute-only ancestor does not stop the deletion.
+    #[cfg(target_os = "linux")]
+    const ANCESTOR: libc::c_int = libc::O_PATH;
+    #[cfg(target_os = "macos")]
+    const ANCESTOR: libc::c_int = libc::O_SEARCH;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    const ANCESTOR: libc::c_int = libc::O_RDONLY;
+
+    fn open_as(at: RawFd, name: &CStr, access: libc::c_int) -> Result<OwnedFd> {
+        // O_DIRECTORY also refuses the link itself that O_PATH|O_NOFOLLOW
+        // would otherwise return.
+        let flags = access | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
         let fd = unsafe { libc::openat(at, name.as_ptr(), flags) };
         if fd < 0 {
             return Err(Error::last_os_error());
@@ -1722,15 +1734,20 @@ mod deletion {
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
 
+    /// A folder the deletion reads and changes.
+    pub(super) fn open(at: RawFd, name: &CStr) -> Result<OwnedFd> {
+        open_as(at, name, libc::O_RDONLY)
+    }
+
     /// Opens an absolute, canonical path one component at a time without
     /// following any link, so no component can redirect the result.
     pub(super) fn open_path(path: &Path) -> Result<OwnedFd> {
-        let mut fd = open(libc::AT_FDCWD, c"/")?;
+        let mut fd = open_as(libc::AT_FDCWD, c"/", ANCESTOR)?;
         for component in path.components() {
             match component {
                 Component::RootDir => {}
                 Component::Normal(name) => {
-                    fd = open(fd.as_raw_fd(), &CString::new(name.as_bytes())?)?;
+                    fd = open_as(fd.as_raw_fd(), &CString::new(name.as_bytes())?, ANCESTOR)?;
                 }
                 _ => return Err(Error::other("unexpected path component")),
             }
@@ -2515,6 +2532,33 @@ mod tests {
         // The reviewed folder itself is still deleted and confirmed.
         delete_tree(&real.join("leftover"), &identity, deadline()).unwrap();
         assert!(!real.join("leftover").exists());
+    }
+
+    /// zerus-ty94 #4: an ancestor the owner may only search (execute without
+    /// read) does not stop the deletion, and a link in the ancestor chain is
+    /// still never followed.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_search_only_ancestor_does_not_stop_the_deletion() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let base = tempfile::tempdir().unwrap();
+        let base_path = fs::canonicalize(base.path()).unwrap();
+        let gate = base_path.join("search-only");
+        let root = gate.join("parent/leftover");
+        fs::create_dir_all(root.join("build")).unwrap();
+        fs::write(root.join("build/file"), "reviewed").unwrap();
+        std::os::unix::fs::symlink(&gate, base_path.join("link")).unwrap();
+        let identity = root_identity(&root).unwrap();
+        fs::set_permissions(&gate, fs::Permissions::from_mode(0o100)).unwrap();
+        let linked = deletion::open_path(&base_path.join("link/parent"));
+        let result = delete_tree(&root, &identity, Instant::now() + Duration::from_secs(10));
+        fs::set_permissions(&gate, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(linked.is_err(), "a link in the ancestor chain was followed");
+        result.unwrap();
+        assert!(!root.exists() && gate.join("parent").is_dir());
     }
 
     #[cfg(unix)]

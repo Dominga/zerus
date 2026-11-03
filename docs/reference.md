@@ -2594,8 +2594,9 @@ the macOS filesystem ID and mount point), so a link, a mount or a same-device bi
 mount that appears after the review stops the deletion before anything in it
 changes. A filesystem whose mount cannot be identified is refused. The reviewed
 folder itself is part of the confirmed fingerprint (device, inode and mount): it
-is reopened through its parent without following links, and completion is
-confirmed through that parent. Only after those checks does deletion grant the
+is reopened through its parent without following links (folders above it need
+only search permission: Linux opens them as paths and macOS for search), and
+completion is confirmed through that parent. Only after those checks does deletion grant the
 owner write access to their own folders inside the reviewed tree, which is what
 blocked Git; it never touches the branch. If it
 stops partway, the record stays with the reason and the deletion is never

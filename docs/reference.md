@@ -2619,7 +2619,10 @@ explicit confirmation and the fingerprint of the fresh review the owner saw. It
 checks everything again under the repository and session locks and refuses
 saved or running sessions, other running programs, nested Git repositories,
 special files, folders on another filesystem or owned by another user, and an
-incomplete listing. The narrow manual exception for programs whose folders
+incomplete listing. A failed saved-session inventory (including an unreadable or
+malformed binding) is an explicit blocker, never evidence that no session uses
+the folder. The process-only manual exception cannot override it.
+The narrow manual exception for programs whose folders
 cannot be read works as it does for worktree removal: it is bound to the exact
 leftover path and its fresh-review fingerprint and expires after five minutes,
 the known-use, session, ownership and file protections still apply, and

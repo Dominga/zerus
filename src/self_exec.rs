@@ -52,7 +52,8 @@ pub(crate) fn private_probe(child: &str) {
     let bin = root.join("bin");
     fs::create_dir(&bin).unwrap();
     let called = root.join("manager-called");
-    for manager in ["systemctl", "launchctl"] {
+    // Recording-only shims: none of them runs what it is handed.
+    for manager in ["systemctl", "launchctl", "tmux"] {
         let path = bin.join(manager);
         fs::write(
             &path,

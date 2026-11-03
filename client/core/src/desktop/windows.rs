@@ -272,8 +272,8 @@ impl Drop for Verification {
     }
 }
 /// Acquisition is part of the exchange deadline. Only one read-only verifier
-/// may remain in flight after a timeout; subsequent attempts fail Unknown and
-/// cannot accumulate threads or pinned resources. It never forwards or grants
+/// may remain in flight after a timeout; waiting callers share their original
+/// deadline and cannot accumulate verifier threads. It never forwards or grants
 /// foreground, and a late result is discarded with its original pins.
 pub fn verify_server_until(pipe: &OwnedHandle, image: &PinnedImage, until: Instant) -> Server {
     verify_until(pipe, image, until, verify_server)
@@ -306,12 +306,19 @@ fn acquire_until(
     verify: impl FnOnce(&OwnedHandle) -> Server + Send + 'static,
 ) -> Server {
     use std::sync::{atomic::Ordering, mpsc};
-    if Instant::now() >= until
-        || VERIFYING
+    loop {
+        if Instant::now() >= until {
+            return Server::Unknown;
+        }
+        if VERIFYING
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-    {
-        return Server::Unknown;
+            .is_ok()
+        {
+            break;
+        }
+        // Existing callers can share the single acquisition slot. Waiting uses
+        // their original deadline and starts no additional worker.
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
     let admission = Verification;
     let Ok(pipe) = pipe.try_clone() else {
@@ -573,15 +580,24 @@ mod tests {
             done.try_recv().is_err(),
             "verification finished before explicit release"
         );
+        let second_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = second_started.clone();
         assert!(matches!(
             verify_until(
                 &pipe,
                 &selected,
-                Instant::now() + Duration::from_secs(1),
-                |_, _| panic!("a second acquisition must not start while the first is retained")
+                Instant::now() + Duration::from_millis(30),
+                move |_, _| {
+                    observed.store(true, std::sync::atomic::Ordering::Release);
+                    Server::Unknown
+                }
             ),
             Server::Unknown
         ));
+        assert!(
+            !second_started.load(std::sync::atomic::Ordering::Acquire),
+            "a second acquisition started while the first remained retained"
+        );
         drop(selected);
         assert!(std::fs::write(&path, b"replacement").is_err());
         assert!(std::fs::rename(&root, root.with_extension("moved")).is_err());

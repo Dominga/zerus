@@ -287,6 +287,17 @@ impl Out {
         }
     }
 
+    /// Writes the stream's last frame within `limit`, or halts the stream.
+    fn finish(&self, body: &Body, limit: Duration) -> bool {
+        match Self::encode(body) {
+            Some(body) => self.writer.finish(Item { coalesce: None, body }, limit),
+            None => {
+                self.writer.halt();
+                false
+            }
+        }
+    }
+
     fn error(&mut self, code: &str, message: &str, topic: Option<&str>, key: Option<&str>) {
         let body = Body::Error(protocol::ErrorFrame {
             code: code.into(),
@@ -432,15 +443,19 @@ impl<'a> Watch<'a> {
     /// Ends the stream so that its client starts the new executable: a
     /// stream left running would keep the old code's summaries beside the
     /// new CLI's commands. Clients keep their rows across the restart.
+    /// One deadline covers the frame's room in the queue and its write; past
+    /// it the stream halts and the process ends, closing stdout (EOF).
     fn end_replaced(&mut self) {
-        self.out.put(&Body::Error(protocol::ErrorFrame {
-            code: protocol::code::HGS_REPLACED.into(),
-            message: "the hgs executable was replaced; start the stream again to run the new version".into(),
-            topic: None,
-            key: None,
-            fatal: true,
-        }));
-        self.out.writer.drain(END_DRAIN);
+        self.out.finish(
+            &Body::Error(protocol::ErrorFrame {
+                code: protocol::code::HGS_REPLACED.into(),
+                message: "the hgs executable was replaced; start the stream again to run the new version".into(),
+                topic: None,
+                key: None,
+                fatal: true,
+            }),
+            END_DRAIN,
+        );
     }
 
     fn hello(&mut self) {

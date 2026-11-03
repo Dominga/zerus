@@ -242,6 +242,8 @@ fn a_replaced_executable_restarts_at_once_and_only_once_a_minute() {
         reconnecting(event, 1)
     });
     seen.until_from(failed, "live after the delay", live);
+    // Only what arrived before the stop, whose own replacement is empty.
+    let before_stop = seen.all.len();
     handle.stop();
     let starts = fake.runs("", &["watch", "--json"]);
     assert_eq!(starts.len(), 3, "{starts:?}");
@@ -253,14 +255,20 @@ fn a_replaced_executable_restarts_at_once_and_only_once_a_minute() {
         starts[2] - starts[1] >= 2.0,
         "the repeat waited the delay: {starts:?}"
     );
-    // Rows stay as last known throughout.
-    for event in &seen.all {
+    // Rows stay as last known throughout: once the row is known, no
+    // replacement drops it, an empty one included.
+    let mut known = false;
+    for event in &seen.all[..before_stop] {
         match change_of(event) {
-            Some(Change::Replace { rows, .. }) if !rows.is_empty() => assert_eq!(rows.len(), 1),
+            Some(Change::Replace { rows, .. }) => {
+                assert!(rows.len() == 1 || (!known && rows.is_empty()), "{rows:?}");
+                known |= rows.len() == 1;
+            }
             Some(Change::Remove { .. }) => panic!("a removal across the restart"),
             _ => {}
         }
     }
+    assert!(known, "the row was never live");
 }
 
 #[test]

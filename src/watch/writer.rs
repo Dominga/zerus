@@ -101,15 +101,27 @@ impl Writer {
     /// Queues a body, waiting while the queue is full. False once the stream
     /// has stopped.
     pub(super) fn put(&self, item: Item) -> bool {
+        self.put_until(item, None)
+    }
+
+    /// `put`, waiting for room at most until `deadline`.
+    fn put_until(&self, item: Item, deadline: Option<Instant>) -> bool {
         let mut queue = self.shared.lock();
         while !queue.items.is_empty() && queue.bytes + item.body.len() > self.shared.capacity {
             if self.stopped() {
                 return false;
             }
+            let wait = match deadline {
+                Some(deadline) => match deadline.checked_duration_since(Instant::now()) {
+                    Some(left) if !left.is_zero() => left.min(Duration::from_millis(100)),
+                    _ => return false,
+                },
+                None => Duration::from_millis(100),
+            };
             queue = self
                 .shared
                 .space
-                .wait_timeout(queue, Duration::from_millis(100))
+                .wait_timeout(queue, wait)
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .0;
         }
@@ -139,10 +151,29 @@ impl Writer {
         self.shared.stopped.load(Ordering::SeqCst)
     }
 
+    /// Writes `item` as the stream's last frame within `limit`, which covers
+    /// both its room in the queue and the writes of everything before it.
+    /// When that cannot complete (a client that stopped reading leaves the
+    /// queue full or a write blocked), the stream halts instead: its queued
+    /// frames are dropped, and the caller ends the process, which closes
+    /// stdout so the client sees EOF. True once the frame was written.
+    pub(super) fn finish(&self, item: Item, limit: Duration) -> bool {
+        let deadline = Instant::now() + limit;
+        let written = self.put_until(item, Some(deadline)) && self.drain_until(deadline);
+        if !written {
+            self.halt();
+        }
+        written
+    }
+
     /// Waits up to `limit` until every queued frame is written; for tests
     /// and orderly ends.
+    #[cfg(test)]
     pub(super) fn drain(&self, limit: Duration) -> bool {
-        let deadline = Instant::now() + limit;
+        self.drain_until(Instant::now() + limit)
+    }
+
+    fn drain_until(&self, deadline: Instant) -> bool {
         // The queue is read first: a frame taken from it is marked as being
         // written before the queue's lock is released.
         let written = || self.backlog() == 0 && !self.shared.writing.load(Ordering::SeqCst);
@@ -333,6 +364,37 @@ mod tests {
         sink.open();
         assert_eq!(waited.recv_timeout(Duration::from_secs(5)), Ok(true));
         assert!(writer.drain(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn the_last_frame_has_one_deadline_and_a_blocked_client_halts_the_stream() {
+        // zerus-5wmh.66.2.46 review: a client that stopped reading leaves a
+        // write blocked and the queue full; the last frame's room and write
+        // share one deadline, then the stream halts so the process can end.
+        let limit = Duration::from_millis(300);
+        let one = body("x").len();
+        for full in [true, false] {
+            let sink = Sink::new(false);
+            let writer = Writer::spawn(sink.clone(), 3 * one, Duration::from_secs(60), || {});
+            assert!(writer.offer(item("x", None)));
+            std::thread::sleep(Duration::from_millis(20));
+            while full && writer.offer(item("x", None)) {}
+            let started = Instant::now();
+            assert!(!writer.finish(item("last", None), limit), "full={full}");
+            let took = started.elapsed();
+            assert!(took >= limit && took < limit + Duration::from_millis(250), "full={full} {took:?}");
+            assert!(writer.stopped());
+            assert!(!sink.lines().iter().any(|line| line["id"] == "last"));
+            sink.open();
+        }
+        // A reading client gets the frame, written last.
+        let sink = Sink::new(true);
+        let writer = Writer::spawn(sink.clone(), 3 * one, Duration::from_secs(60), || {});
+        assert!(writer.offer(item("x", None)));
+        assert!(writer.finish(item("last", None), limit));
+        let lines = sink.lines();
+        assert_eq!(lines.last().unwrap()["id"], "last");
+        assert!(!writer.stopped());
     }
 
     #[test]

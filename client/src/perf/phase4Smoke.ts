@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import * as bridge from "../bridge";
 import { orderedRows } from "../store/catalog";
 import { activity, subagentActivity } from "../store/session";
-import { notices } from "../store/actions";
+import { notices, perform } from "../store/actions";
 import { composer } from "../store/composer";
 import { terminal } from "../store/terminal";
 import { processes } from "../store/processes";
@@ -964,6 +964,45 @@ async function startStep() {
   if (!sent[2].stdin.includes("resume smoke")) throw new Error("the resumed send has the wrong payload");
 }
 
+async function resumeHistoryStep() {
+  const row = await select(REVIEW);
+  const historical = () => [...document.querySelectorAll<HTMLElement>(".act-virtual-row [id^=item-]")]
+    .find((node) => node.textContent?.includes("Existing Activity reply before resume"));
+  await until(() => !!historical() && getComputedStyle(document.querySelector(".act-col")!).visibility === "visible", 5000, "the stopped history did not appear");
+  const original = historical()!;
+  const follow = bridge.activityPort.follow;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let held = false;
+  const requests: unknown[] = [];
+  bridge.activityPort.follow = async (request) => {
+    requests.push(request);
+    if (request.name === REVIEW && request.run_id?.endsWith("-resumed")) { held = true; await gate; }
+    return follow(request);
+  };
+  try {
+    await perform(row, { kind: "resume" });
+    await waitCall("resume", 1);
+    await invoke("smoke_resume", { key: row.catalogKey });
+    await until(() => held, 5000, "the resumed Activity did not subscribe").catch((error) => {
+      throw new Error(`${error.message}: ${JSON.stringify({ selected: selectedKey(), target: activity.target(), requests,
+        original: { key: row.key, run: row.runId, conversation: row.conversationId, state: row.state, archive: row.archiveId },
+        rows: orderedRows().filter((next) => next.name === REVIEW).map((next) => ({ key: next.key, run: next.runId, conversation: next.conversationId, state: next.state, archive: next.archiveId })) })}`);
+    });
+    for (let frame = 0; frame < 12; frame++) {
+      await new Promise(requestAnimationFrame);
+      if (!original.isConnected || getComputedStyle(document.querySelector(".act-col")!).visibility !== "visible")
+        throw new Error("the visible history disappeared while the new run's page was pending");
+    }
+    release();
+    await until(() => activity.summary()?.run_id === `${row.runId}-resumed`, 5000, "the new run did not settle");
+    if (historical() !== original) throw new Error("resuming replaced the existing message DOM");
+  } finally {
+    release();
+    bridge.activityPort.follow = follow;
+  }
+}
+
 async function processesStep() {
   await select(API);
   await setSetting("processes/enabled", true);
@@ -1222,6 +1261,7 @@ export async function phase4Smoke(allowed: boolean, smokeFile?: string) {
     ["send", () => sendStep(smokeFile!)],
     ["cold", coldStep],
     ["start", startStep],
+    ["resume-history", resumeHistoryStep],
     ["processes", processesStep],
     ["preview", previewStep],
     ["question", questionStep],
@@ -1248,7 +1288,8 @@ export async function phase4Smoke(allowed: boolean, smokeFile?: string) {
     if (!smokeFile) throw new Error("ZERUS_CLIENT_SMOKE_FILE is not set");
     const only = new URLSearchParams(location.search).get("phase4-only");
     if (only && !steps.some(([name]) => name === only)) throw new Error("Unknown phase4 step");
-    for (const [name, run] of steps.filter(([name]) => !only || name === only)) {
+    // resume-history uses its own stopped transcript and runs standalone.
+    for (const [name, run] of steps.filter(([name]) => only ? name === only : name !== "resume-history")) {
       current = name;
       await run();
       log(`phase4-smoke ${name}: done`);

@@ -183,3 +183,141 @@ fn group_writable_data_directory_does_not_relax_the_record_leaf() {
     fs::hard_link(s.0.join(FILE), s.0.join("alias")).unwrap();
     assert!(s.journal().load().is_err());
 }
+
+fn initial_v2(s: &Scratch) -> Stored {
+    s.journal()
+        .save(
+            Record::new_v2("a".repeat(64), s.reference(), 1).unwrap(),
+            None,
+        )
+        .unwrap()
+}
+#[test]
+fn v2_gate_counter_and_recovery_fence_preserve_the_original_payload() {
+    let s = Scratch::new();
+    let j = s.journal();
+    let attempted = update(&j, initial_v2(&s), |r| {
+        r.phase = Phase::Attempted;
+        r.attempt = 1;
+    });
+    assert!(attempted.record.preparation_recoverable());
+    let fenced = j.fence_preparation(&attempted).unwrap();
+    assert_ne!(fenced.sha256, attempted.sha256);
+    assert_eq!(fenced.record.attempt, 1);
+    assert_eq!(fenced.record.recorded_attempt, Some(0));
+    assert_eq!(fenced.record.source, attempted.record.source);
+    let old_gate = attempted
+        .record
+        .with_expected(&receipt(&attempted.record))
+        .unwrap();
+    assert!(j.save(old_gate, Some(&attempted.sha256)).is_err());
+    let next = update(&j, fenced, |r| {
+        r.phase = Phase::Attempted;
+        r.attempt += 1;
+    });
+    let gate = next.record.with_expected(&receipt(&next.record)).unwrap();
+    let gate = j.save(gate, Some(&next.sha256)).unwrap();
+    assert_eq!(gate.record.recorded_attempt, Some(2));
+    assert!(!gate.record.preparation_recoverable());
+    assert!(j.fence_preparation(&next).is_err());
+    assert!(j.fence_preparation(&gate).is_err());
+    let unknown = update(&j, gate, |r| r.phase = Phase::Unknown);
+    assert!(j.fence_preparation(&unknown).is_err());
+}
+#[test]
+fn v2_retry_keeps_an_old_receipt_but_must_record_the_new_attempt_gate() {
+    let s = Scratch::new();
+    let j = s.journal();
+    let first = update(&j, initial_v2(&s), |r| {
+        r.phase = Phase::Attempted;
+        r.attempt = 1;
+    });
+    let expected = receipt(&first.record);
+    let gate = j
+        .save(
+            first.record.with_expected(&expected).unwrap(),
+            Some(&first.sha256),
+        )
+        .unwrap();
+    let negative = update(&j, gate, |r| r.phase = Phase::NotCommitted);
+    let next = update(&j, negative, |r| {
+        r.phase = Phase::Attempted;
+        r.attempt += 1;
+    });
+    assert_eq!(next.record.expected, Some(expected));
+    assert_eq!(next.record.recorded_attempt, Some(1));
+    assert!(next.record.preparation_recoverable());
+    let mut bad = next.record.clone();
+    bad.recorded_attempt = Some(0);
+    assert!(!bad.valid());
+    assert!(j.save(bad, Some(&next.sha256)).is_err());
+    let unknown = update(&j, next, |r| r.phase = Phase::Unknown);
+    assert!(!unknown.record.preparation_recoverable());
+    assert!(j.fence_preparation(&unknown).is_err());
+}
+#[test]
+fn only_a_legacy_attempted_record_without_a_receipt_can_upgrade_for_recovery() {
+    for has_receipt in [false, true] {
+        let s = Scratch::new();
+        let j = s.journal();
+        let attempted = update(&j, s.initial(), |r| {
+            r.phase = Phase::Attempted;
+            r.attempt = 1;
+        });
+        let current = if has_receipt {
+            j.save(
+                attempted
+                    .record
+                    .with_expected(&receipt(&attempted.record))
+                    .unwrap(),
+                Some(&attempted.sha256),
+            )
+            .unwrap()
+        } else {
+            attempted
+        };
+        if has_receipt {
+            assert!(j.fence_preparation(&current).is_err());
+        } else {
+            let upgraded = j.fence_preparation(&current).unwrap();
+            assert_eq!(upgraded.record.version, 2);
+            assert_eq!(upgraded.record.recorded_attempt, Some(0));
+            assert_eq!(upgraded.record.import_id, current.record.import_id);
+            assert_eq!(upgraded.record.source, current.record.source);
+            assert!(j.save(current.record, Some(&upgraded.sha256)).is_err());
+        }
+    }
+}
+#[test]
+fn rollback_reader_refuses_v2_and_the_bounded_loader_never_defaults_a_missing_counter() {
+    // Frozen PR1131 v1 wire shape: its deny_unknown_fields reader must refuse
+    // the extra v2 field before it can interpret a new state as an old one.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct Legacy {
+        version: u32,
+        scope: String,
+        configuration: String,
+        import_id: String,
+        created_at: u64,
+        source: Reference,
+        attempt: u32,
+        phase: Phase,
+        expected: Option<StagedReceipt>,
+    }
+    let s = Scratch::new();
+    let record = Record::new("a".repeat(64), s.reference(), 1).unwrap();
+    assert!(serde_json::from_value::<Legacy>(serde_json::to_value(&record).unwrap()).is_ok());
+    let v2 = initial_v2(&s);
+    let mut value = serde_json::to_value(&v2.record).unwrap();
+    assert!(serde_json::from_value::<Legacy>(value.clone()).is_err());
+    value.as_object_mut().unwrap().remove("recorded_attempt");
+    crate::fsx::write_private_durable(&s.0.join(FILE), &serde_json::to_vec(&value).unwrap())
+        .unwrap();
+    assert!(s.journal().load().is_err());
+    let oversized = vec![b' '; BYTES + 1];
+    crate::fsx::write_private_durable(&s.0.join(FILE), &oversized).unwrap();
+    assert!(s.journal().load().is_err());
+    assert_eq!(fs::read(s.0.join(FILE)).unwrap(), oversized);
+}

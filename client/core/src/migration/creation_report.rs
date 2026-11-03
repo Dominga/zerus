@@ -40,6 +40,8 @@ pub struct Record {
     pub attempt: u32,
     pub phase: Phase,
     pub expected: Option<StagedReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_attempt: Option<u32>,
 }
 impl Record {
     pub fn new(configuration: String, source: Reference, created_at: u64) -> SourceResult<Self> {
@@ -53,15 +55,67 @@ impl Record {
             attempt: 0,
             phase: Phase::Reserved,
             expected: None,
+            recorded_attempt: None,
         };
         if !record.valid() {
             return Err(SourceError::InvalidMetadata);
         }
         Ok(record)
     }
+    pub fn new_v2(configuration: String, source: Reference, created_at: u64) -> SourceResult<Self> {
+        let mut record = Self::new(configuration, source, created_at)?;
+        record.version = 2;
+        record.recorded_attempt = Some(0);
+        Ok(record)
+    }
+    /// Durable evidence that this Attempted record has not passed its commit
+    /// gate. This is never inferred from the child/status reply or other phases.
+    pub fn preparation_recoverable(&self) -> bool {
+        self.valid()
+            && self.phase == Phase::Attempted
+            && match self.version {
+                1 => self.expected.is_none(),
+                2 => self.recorded_attempt.is_some_and(|n| n < self.attempt),
+                _ => false,
+            }
+    }
+    pub fn fence_preparation(&self) -> SourceResult<Self> {
+        if !self.preparation_recoverable() {
+            return Err(SourceError::InvalidMetadata);
+        }
+        let mut record = self.clone();
+        record.version = 2;
+        record.recorded_attempt = Some(self.recorded_attempt.unwrap_or(0));
+        record.phase = Phase::BeforeRecord;
+        Ok(record)
+    }
+    /// Called only for the originally admitted attempt, before its final frame.
+    pub fn with_expected(&self, expected: &StagedReceipt) -> SourceResult<Self> {
+        if self.phase != Phase::Attempted
+            || self.expected.as_ref().is_some_and(|old| old != expected)
+        {
+            return Err(SourceError::SourceChanged);
+        }
+        let mut record = self.clone();
+        record.expected = Some(expected.clone());
+        if record.version == 2 {
+            record.recorded_attempt = Some(record.attempt);
+        }
+        if !record.valid() {
+            return Err(SourceError::InvalidMetadata);
+        }
+        Ok(record)
+    }
     pub fn valid(&self) -> bool {
-        self.version == 1
-            && self.scope == SCOPE
+        (match self.version {
+            1 => self.recorded_attempt.is_none(),
+            2 => self.recorded_attempt.is_some_and(|n| {
+                n <= self.attempt
+                    && (n == 0) == self.expected.is_none()
+                    && (self.phase != Phase::NotCommitted || n == self.attempt)
+            }),
+            _ => false,
+        }) && self.scope == SCOPE
             && digest(&self.configuration)
             && self.source.valid()
             && self.import_id == self.source.capture_id()
@@ -98,6 +152,19 @@ impl Record {
                 && (old.phase != Phase::Attempted || self.phase != Phase::Attempted)
         {
             return false;
+        }
+        if self.version != old.version {
+            return old.version == 1 && old.fence_preparation().is_ok_and(|fenced| *self == fenced);
+        }
+        if self.version == 2 && self.recorded_attempt != old.recorded_attempt {
+            let gate = old.phase == Phase::Attempted
+                && self.phase == Phase::Attempted
+                && self.attempt == old.attempt
+                && self.recorded_attempt == Some(self.attempt)
+                && old.recorded_attempt.is_some_and(|n| n < self.attempt);
+            if !gate {
+                return false;
+            }
         }
         match (old.phase, self.phase) {
             (Phase::Reserved, Phase::Attempted) => self.attempt == 1,
@@ -157,6 +224,9 @@ impl Journal {
             record,
             sha256: sha256(&bytes),
         }))
+    }
+    pub fn fence_preparation(&self, original: &Stored) -> SourceResult<Stored> {
+        self.save(original.record.fence_preparation()?, Some(&original.sha256))
     }
     pub fn save(&self, record: Record, previous: Option<&str>) -> SourceResult<Stored> {
         if !record.valid() || record.configuration != self.configuration {

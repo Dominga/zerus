@@ -213,32 +213,6 @@ if pathlib.Path(sys.argv[0]).name == "python3" and os.environ["ZERUS_CASK_TEST_R
             self.assertEqual(len(findings), 2, findings)
             self.assertIn("QtMultimedia", findings[0])
 
-    def test_plist_identity_and_minimum_system_are_required(self):
-        good = {"CFBundleIdentifier": "com.hgdev.hgs-tray", "CFBundleExecutable": "hgs-tray",
-                "CFBundleName": "Zerus", "CFBundleDisplayName": "Zerus", "CFBundleShortVersionString": "0.38.0",
-                "CFBundleVersion": "0.38.0", "LSMinimumSystemVersion": "14.0",
-                "NSAppleEventsUsageDescription": "Zerus opens your agent sessions in Terminal.",
-                "ZerusReleaseVersion": "0.38.0"}
-        self.assertEqual(check.plist_findings(good, "0.38.0"), [])
-        missing = dict(good)
-        del missing["NSAppleEventsUsageDescription"]
-        self.assertTrue(check.plist_findings(missing, "0.38.0"), "hardened runtime needs the Apple Events purpose")
-        for key, value in (("CFBundleIdentifier", "dev.zerus.app"), ("CFBundleIdentifier", "com.hgdev.hgs-tray.local"),
-                           ("CFBundleShortVersionString", "0.37.0"),
-                           ("LSMinimumSystemVersion", "15.0"), ("CFBundleName", "hgs zerus")):
-            self.assertTrue(check.plist_findings(dict(good, **{key: value}), "0.38.0"), key)
-
-    def test_plist_records_the_channel_release_version(self):
-        good = {"CFBundleIdentifier": "com.hgdev.hgs-tray", "CFBundleExecutable": "hgs-tray",
-                "CFBundleName": "Zerus", "CFBundleDisplayName": "Zerus", "CFBundleShortVersionString": "0.38.0",
-                "CFBundleVersion": "0.38.0", "LSMinimumSystemVersion": "14.0",
-                "NSAppleEventsUsageDescription": "Zerus opens your agent sessions in Terminal."}
-        nightly = "0.38.0.r812.gabcdef0.n41"
-        self.assertTrue(check.plist_findings(good, "0.38.0"), "the release version key is required")
-        self.assertEqual(check.plist_findings(dict(good, ZerusReleaseVersion="0.38.0"), "0.38.0"), [])
-        self.assertEqual(check.plist_findings(dict(good, ZerusReleaseVersion=nightly), "0.38.0", nightly), [])
-        self.assertTrue(check.plist_findings(dict(good, ZerusReleaseVersion="0.38.0"), "0.38.0", nightly))
-
     def test_required_files_include_setup_and_notices(self):
         names = set(check.TAURI_RELEASE_REQUIRED)
         for name in ("Contents/MacOS/hgs", "Contents/MacOS/zerus-mobile-connector", "Contents/Resources/bin/zerus-setup",

@@ -1,6 +1,6 @@
-"""Verified official Qt archives for the pinned macOS and Windows installations.
+"""Verified official Qt archives for the retained optional Windows installation.
 
-A pin (packaging/macos/qt.json, packaging/windows/qt.json) names its Qt online
+The Windows pin (packaging/windows/qt.json) names its Qt online
 repository, the PackageUpdate entries of that repository's Updates.xml and every
 archive taken from them by path, size and SHA-256. A Windows pin also names the
 Qt prefix and, for each archive, the directory its Extract operation names, as

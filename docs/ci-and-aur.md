@@ -35,10 +35,9 @@ conservative change selection, including both sides of renames.
 | Android unit tests and lint | Always | `testDebugUnitTest` and `lintRelease` of the Firebase variant that Dev ships, with a synthetic `google-services.json` and no credentials |
 | Linux CLI | Always | Stable Rust unit tests, terminal smoke tests, Python integration modules, release build |
 | Native desktop client | Linux with the CLI; macOS/Windows with their desktop jobs | Linux `client/media` audio/video tests, including synthetic GStreamer recordings, and `client/src-tauri` tests under headless Xvfb plus clippy with video; native macOS `client/core` tests, `client/media` video checks and `client/src-tauri` clippy (its test suite runs on the local Mac gate until `zerus-5wmh.78` is fixed); native Windows `client/core` tests, `client/media` video checks and `client/src-tauri` clippy (its test suite stays pending `zerus-5wmh.52`), all on standard runners with Rust 1.99.1 |
-| Arch desktop | Always | Qt build and all CTest suites |
 | Arch package | Always | Production package with the recipe's `check()`, namcap, staged and installed bundle checks; the only producer of the `arch-x86_64-<commit>` candidate artifact |
-| macOS CLI and desktop | Always | Native CLI integration and all Qt CTest suites on two standard macOS jobs |
-| Windows client and desktop | Affected PR; full nightly/stable | Rust tests, Rust 1.99 clippy for the Windows target, Windows client and session host integration tests, MSVC Qt build with all offscreen CTest suites, and the portable zip checked from an isolated extraction |
+| macOS CLI | Always | Native CLI integration and the maintained Next core/Tauri checks |
+| Windows client and desktop | Affected PR; full nightly/stable | Rust tests, Rust 1.99 clippy for the Windows target, Windows client and session host integration tests, Tauri build with video and frontend notices, and the portable zip checked from an isolated extraction |
 | Windows real agents | Affected PR; full nightly/stable | One latest `win32-x64` Claude Code and Codex release in isolated session hosts of the release build, each against a local fake API; skipped or empty suites fail |
 | CI gate | Always | Requires every selected suite to succeed; fails on unexpected skips, cancellation and errors |
 
@@ -206,7 +205,7 @@ save them.
 | `client-native-` | Native desktop client | OS/arch, hash of `rustc +1.99.1 -Vv`, month, hashes of the three client lockfiles | Exact key missed; native checks passed | Monthly restart; Cargo registry and Git checkouts only, so multi-GB native target directories are never cached |
 | `arch-cargo-v1-` | Arch package | Month, hash of `Cargo.lock` and the connector's lock | Exact key missed; package built | Cargo registry only |
 | `android-gradle-v1-` | Android | Month, hash of the Gradle wrapper properties and `*.gradle.kts` | Exact key missed; tests and lint passed | Monthly restart; about 700 MB (`~/.gradle/caches` and `wrapper`) |
-| `arch-ccache-v1-`, `arch-package-ccache-v1-`, `mac-desktop-ccache-v1-` | Arch desktop, Arch package, macOS | Architecture (macOS), run ID | Build passed with ccache misses | `CCACHE_MAXSIZE` 150, 100 and 100 MB |
+| `arch-package-ccache-v1-` | Arch package | Run ID | Build passed with ccache misses | `CCACHE_MAXSIZE` 100 MB |
 
 Quick, relay and Linux native-client checks reclaim only unused Android, .NET, Haskell and CodeQL installations on disposable hosted Ubuntu runners. Disk checkpoints record free bytes and build-directory sizes. Quick shares one Cargo target across its crates; the new cache family avoids restoring the former duplicated debug and incremental trees. Relay removes its completed host Cargo targets before Docker compiles the deployment image; the remaining memory-envelope checks run that image. PostgreSQL containers and volumes, Cargo registries and the Python test environment stay available. Runner classes and the repository cache limit are unchanged.
 
@@ -1468,8 +1467,8 @@ Each flavor installs the same ADE bundle:
 
 The Arch desktop dynamically links system GTK3/WebKitGTK and GStreamer; packages
 ship no Qt/KDE runtime or native UI plugin. Existing sealed Qt candidates remain
-valid for publication retries without changing their original bytes. The Qt
-source installer remains an explicit fallback until Linux acceptance.
+valid for publication retries without changing their original bytes. Qt
+source builds and Qt installer selections are retired on Linux/macOS.
 The runtime also declares curl for native account HTTP requests and procps-ng
 for process inspection. Optional Node.js/npm enable agent installation from
 Accounts; Git enables repository/worktree features. Arch's Node.js package does

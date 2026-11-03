@@ -24,12 +24,9 @@ native agents as part of a Zerus GUI/package update.
 
 For the Linux desktop: Rust, Node.js/npm, GTK3, WebKitGTK 4.1, ALSA and
 GStreamer. The source installer and AUR packages build Zerus Next by default;
-standard autostart uses user systemd. `HGS_LINUX_GUI=qt` keeps the explicit
-Qt fallback until Linux acceptance and needs CMake, a C++17 compiler, Qt 6
-Widgets/Multimedia/SVG and KDE Frameworks KStatusNotifierItem, KWindowSystem
-and KIdleTime. Qt WebEngine is optional for that fallback's embedded DeepSeek
-[Native UI](reference.md#deepseek). On macOS, the Qt source-build path uses
-Homebrew Qt and requires macOS 14 or later.
+standard autostart uses user systemd. Linux/macOS Qt builds and explicit Qt
+installer selections are retired. Existing Qt state remains read-only migration
+input; do not delete it. The Mac source route builds Next on macOS 14 or later.
 
 ## Local installation
 
@@ -623,10 +620,11 @@ To install on a Mac from another machine:
 ```
 
 Fresh installs and upgrades use Zerus Next, including upgrades from Qt.
-Until Mac acceptance, `HGS_MAC_GUI=qt ./mac-install.sh <ssh-alias>` selects
-the Qt fallback; use it on each install that should stay on Qt. Without the
-override, the next install selects Next again. The maintained GUI updater
-keeps the replaced Qt app as its rollback copy and preserves drafts.
+Qt installer selections are refused. The maintained updater preserves drafts and
+one usable previous Next build. On the first Next-to-Next update after a Qt
+switch, the original Qt image moves to `desktop-qt-legacy` beside
+`desktop-previous`; it is retained for manual recovery and is never offered by
+`--rollback`. Qt's settings export stays at its existing compatible path.
 
 Desktop signing uses the Mac's existing keychain. An optional
 `HGS_MACOS_SIGN_IDENTITY` selector is forwarded to the remote installer; private

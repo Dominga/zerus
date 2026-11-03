@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """Rebuild tray/tests/qt-shard-durations.txt from per-function QtTest results.
 
-scripts/ci/gui.sh writes the JUnit results of each Qt suite to
-artifacts/test-results/qt-functions/<test>.xml, and of each shard to
-<suite>-<shard>.xml. Pass one directory per measured run, such as the desktop
-artifacts of a main CI run, each downloaded into a directory of its own:
+Retained optional Windows Qt CTest runs write per-function JUnit results when
+configured with ZERUS_QT_RESULTS_DIR. This tool is kept only until Windows PC
+acceptance; the former Linux/macOS Qt jobs and shared GUI runner are retired.
+For a saved Windows result directory:
 
-    gh run download <run> -n arch-desktop-results -D <dir>/arch
-    gh run download <run> -n mac-desktop-results -D <dir>/mac
-    gh run download <run> -n windows-x86_64-<commit> -D <dir>/windows
-    python3 scripts/ci/qt-shard-seed.py <dir>/arch <dir>/mac <dir>/windows
+    python3 scripts/ci/qt-shard-seed.py <directory>/qt-functions
 
 A run sums each function over its data rows and shards. The seed keeps the
 largest duration of every function and row across the runs. It covers the

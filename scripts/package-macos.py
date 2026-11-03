@@ -7,7 +7,6 @@ an ad-hoc signature so the bundle can be checked locally. The macos-signing job
 replaces that signature with the Developer ID one. Nothing is published here.
 """
 import argparse
-import json
 import os
 from pathlib import Path
 import plistlib
@@ -78,6 +77,14 @@ def main():
             parser.error("collect the Tauri Cargo and frontend notices first")
     if not (args.licenses / "inventory.json").is_file():
         parser.error("collect Cargo dependency notices first")
+    source_info = (args.app / "Contents/Info.plist").read_bytes()
+    info = plistlib.loads(source_info)
+    if (info.get("CFBundleShortVersionString") != args.version
+            or info.get("CFBundleIdentifier") not in ("com.hgdev.hgs-tray.local", "com.hgdev.hgs-tray")):
+        parser.error("the GUI build does not match this version and bundle identifier")
+    if args.gui == "tauri" and (info.get("ZerusGUI") != "tauri"
+                                or info.get("ZerusReleaseVersion") != (args.release or args.version)):
+        parser.error("the source must be the Tauri switch bundle for this release")
     if args.output.exists() and any(args.output.iterdir()):
         parser.error("use an empty output directory")
     args.output.mkdir(parents=True, exist_ok=True)
@@ -85,15 +92,9 @@ def main():
     # Keep the installed executable name while assembling the public bundle.
     staged = work / "hgs-tray.app"
     run("ditto", args.app, staged)
-
     info_path = staged / "Contents/Info.plist"
-    info = plistlib.loads(info_path.read_bytes())
-    if (info.get("CFBundleShortVersionString") != args.version
-            or info.get("CFBundleIdentifier") not in ("com.hgdev.hgs-tray.local", "com.hgdev.hgs-tray")):
-        parser.error("the GUI build does not match this version and bundle identifier")
-    if args.gui == "tauri" and (info.get("ZerusGUI") != "tauri"
-                                or info.get("ZerusReleaseVersion") != (args.release or args.version)):
-        parser.error("the source must be the Tauri switch bundle for this release")
+    if info_path.read_bytes() != source_info:
+        parser.error("the source bundle changed while staging")
     # LaunchServices needs CFBundleExecutable once the bundle is no longer named hgs-tray.app.
     # Terminal integration runs osascript; under the hardened runtime TCC attributes its
     # Apple Events to Zerus, which therefore declares their purpose.

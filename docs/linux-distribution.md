@@ -14,8 +14,8 @@ which opens Sessions through the existing single-instance socket. A second
 start forwards `show` or `sessions`; it does not create another GUI.
 
 Fresh installs and upgrades default to Zerus Next. `HGS_LINUX_GUI=client`
-selects it explicitly. `HGS_LINUX_GUI=qt` retains the Qt source-build fallback
-until Linux acceptance; it does not change what the AUR packages ship.
+selects it explicitly. Qt source builds and the Qt installer selection are
+retired; existing Qt settings remain read-only migration input.
 
 The client uses Qt's `com.hgdev.hgs-tray` identity and data root. Its first
 start imports Qt and development-client drafts read-only and seeds its settings
@@ -271,30 +271,13 @@ The coordinator and owner then check on the real display:
 - sleep, wake, and ordinary use leave no main-thread watchdog report in the
   user journal.
 
-## Later Dev updates and rollback
+## Previous Next build and retained Qt image
 
-Run the same installer from the new exact main checkout without
-`HGS_LINUX_GUI`. The installed client remains selected, and the original Qt
-stays the rollback copy until G6 removal; there is no second rollback slot. The numbered Dev
-guard refuses an unnumbered replacement before anything changes.
-
-Rollback to Qt is one command from the source checkout:
-
-```sh
-python3 tray/update-installed.py --rollback ~/.local/bin/hgs-tray
-```
-
-Before Qt starts, the updater probes the selected `hgs` for
-`Desktop revoke ABI: desktop-revoke-v1` and obtains either a settled revocation
-or the explicit no-handoff no-op. An older CLI retains the plain path only when
-the state directory has no `desktop` entry; any existing entry, including a
-link, keeps Qt stopped because a handoff cannot be ruled out. Failure, timeout,
-a malformed or pending receipt, or a configuration mismatch keeps Qt stopped.
-Recovery inspects the same request ID and reason; it never invents a new UUID
-or stops another service.
-
-The same guarded replacement and verification runs in reverse. The client then
-becomes the rollback copy, so a second `--rollback` returns to it. Drafts typed
-in the client remain in `~/.local/share/com.hgdev.hgs-tray/drafts`; Qt does not
-read them. Use `HGS_LINUX_GUI=qt` on later installations to stay on Qt, and file
-a Bead for the reason for the rollback.
+Use `python3 tray/update-installed.py --rollback ~/.local/bin/hgs-tray` to
+restore a verified previous Next build through the same draft/process checks.
+After a Qt-to-Next switch, the first Next-to-Next update retains Qt separately
+under `~/.local/share/hgs/desktop-qt-legacy/`, then places the replaced Next
+build in `desktop-previous`. Later updates refresh that usable Next rollback;
+the retained Qt image is never deleted or selected by `--rollback`. Qt source
+builds and `HGS_LINUX_GUI=qt` are retired. The old Qt image is manual-recovery
+material, not permission to start its background duties alongside the service.

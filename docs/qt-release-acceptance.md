@@ -817,6 +817,14 @@ this split on **2026-11-03**:
   non-CI rollback/build dependencies before deleting the tree. Historical immutable
   Qt ZIP validation and old-client update compatibility remain supported.
 
+Coordinator rollback decision (2026-11-03): after #906a, the replaced verified
+Next always becomes `desktop-previous`. The first Next-to-Next update moves the
+Qt image once to a separate `desktop-qt-legacy` retained location; it is never
+deleted or offered as rollback, and remains manual-recovery material only. Its
+settings export remains at its compatible path. A collision/unsafe retained
+location keeps the original in a named recovery path; it never overwrites a
+retained image. Draft/native-process checks and failed-upgrade recovery remain.
+
 Windows PC testing is deferred and is not a merge gate for #906a. The ready state
 of #906a is not an acceptance result or a merge authorization. Each part must be rebased on the final installer/consumer/notification/packaging PRs and pass
 source/privacy, workflow/security, package and retained migration/updater tests.

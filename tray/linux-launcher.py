@@ -12,12 +12,19 @@ LAUNCHER = Path('libexec/hgs-tray-launch')
 ENV_MARKER = 'HGS_LINUX_WEBKIT_ORIGINAL_ENV'
 LIBRARIES = ('gtk/lib/libgtk-3.so.0', 'gtk/lib/libgdk-3.so.0',
              'lib/libwebkit2gtk-4.1.so.0', 'lib/libjavascriptcoregtk-4.1.so.0')
+GTK_LIBRARIES = LIBRARIES[:2]
+WEBKIT_LIBRARIES = LIBRARIES[2:]
 PROCESSES = tuple(f'libexec/webkit2gtk-4.1/{name}' for name in
                   ('WebKitWebProcess', 'WebKitNetworkProcess', 'WebKitGPUProcess'))
 
 
 def available(prefix):
-    return (all((prefix / name).is_file() for name in LIBRARIES)
+    # An absent GTK override deliberately uses system GTK. An incomplete or
+    # dangling override is still an invalid stack, not a silent mixed install.
+    gtk = prefix / 'gtk'
+    return (all((prefix / name).is_file() for name in WEBKIT_LIBRARIES)
+            and (not (gtk.exists() or gtk.is_symlink())
+                 or all((prefix / name).is_file() for name in GTK_LIBRARIES))
             and all((prefix / name).is_file() and os.access(prefix / name, os.X_OK) for name in PROCESSES))
 
 
@@ -62,7 +69,8 @@ def install_launcher(install):
         if value:
             if not valid_path(value) or not available(Path(value)):
                 raise ValueError('HGS_LINUX_WEBKIT_PREFIX must name an existing absolute WebKitGTK/GTK3 prefix '
-                                 'with libraries and WebKit processes (no colon or newline)')
+                                 'with WebKit libraries and processes, and a complete GTK override if present '
+                                 '(no colon or newline)')
             content = (json.dumps({'version': 1, 'prefix': str(Path(value))}) + '\n').encode()
             changed |= replace(setting, content, 0o600)
         else:
@@ -95,7 +103,9 @@ def environment(install, binary):
             return env
     except (OSError, ValueError, subprocess.SubprocessError):
         return env
-    libraries = f'{prefix}/gtk/lib:{prefix}/lib'
+    libraries = f'{prefix}/lib'
+    if (prefix / 'gtk').exists():
+        libraries = f'{prefix}/gtk/lib:' + libraries
     if env.get('LD_LIBRARY_PATH'):
         libraries += ':' + env['LD_LIBRARY_PATH']
     # Zerus restores this environment at each non-WebKit child boundary. Encode

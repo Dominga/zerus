@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -87,6 +88,52 @@ else:
             original = json.loads(self.launch(**env)[0]['original'])
             decode = lambda value: None if value is None else bytes.fromhex(value).decode()
             self.assertEqual((decode(original['LD_LIBRARY_PATH']), decode(original['WEBKIT_EXEC_PATH'])), (libraries, processes))
+
+    def test_webkit_only_prefix_uses_system_gtk_and_preserves_child_environment(self):
+        shutil.rmtree(self.stack / 'gtk')
+        self.assertTrue(launcher.available(self.stack))
+        self.select()
+        self.assertEqual(self.configure().stdout, '', 'the WebKit-only selection persists')
+        result, error = self.launch(LD_LIBRARY_PATH='/original/libraries',
+                                    WEBKIT_EXEC_PATH='/original/processes')
+        self.assertEqual(error, '')
+        self.assertEqual(result['libraries'], f'{self.stack}/lib:/original/libraries')
+        self.assertEqual(result['processes'], f'{self.stack}/libexec/webkit2gtk-4.1')
+        self.assertEqual(json.loads(result['original']), dict(
+            version=1, LD_LIBRARY_PATH=b'/original/libraries'.hex(),
+            WEBKIT_EXEC_PATH=b'/original/processes'.hex()))
+        (self.stack / launcher.WEBKIT_LIBRARIES[0]).unlink()
+        self.assertIsNone(self.launch()[0]['libraries'], 'WebKit itself remains mandatory')
+
+    def test_partial_or_dangling_gtk_override_never_selects_system_gtk(self):
+        self.select()
+        setting = (self.install / launcher.SETTING).read_bytes()
+        for missing in launcher.GTK_LIBRARIES:
+            path = self.stack / missing
+            path.unlink()
+            self.assertFalse(launcher.available(self.stack))
+            self.assertNotEqual(self.configure(HGS_LINUX_WEBKIT_PREFIX=str(self.stack)).returncode, 0)
+            self.assertEqual((self.install / launcher.SETTING).read_bytes(), setting)
+            self.assertIsNone(self.launch()[0]['libraries'])
+            path.write_text('fixture')
+        shutil.rmtree(self.stack / 'gtk')
+        (self.stack / 'gtk').symlink_to(self.stack / 'missing-gtk', target_is_directory=True)
+        self.assertFalse(launcher.available(self.stack))
+        self.assertIsNone(self.launch()[0]['libraries'])
+
+    def test_webkit_only_symlink_variant_leaves_the_original_gtk_out(self):
+        variant = self.root / 'system gtk variant'
+        variant.mkdir()
+        for directory in ('lib', 'libexec'):
+            (variant / directory).symlink_to(self.stack / directory, target_is_directory=True)
+        result = self.configure(HGS_LINUX_WEBKIT_PREFIX=str(variant))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        selected, _ = self.launch()
+        self.assertEqual(selected['libraries'], f'{variant}/lib')
+        self.assertEqual(selected['processes'], f'{variant}/libexec/webkit2gtk-4.1')
+        self.assertTrue((self.stack / 'gtk').is_dir(), 'the original stack is unchanged')
+        (self.stack / launcher.PROCESSES[0]).unlink()
+        self.assertIsNone(self.launch()[0]['libraries'], 'a missing WebKit process still refuses')
 
     def test_missing_or_partial_stack_falls_back_and_returns_without_reconfiguration(self):
         self.select()

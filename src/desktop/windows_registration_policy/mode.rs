@@ -1,6 +1,7 @@
 //! Bounded installer metadata, never a caller or ownership permission.
 use super::*;
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 
 pub(in crate::desktop) const RECORD_BYTES: usize = 8192;
 
@@ -38,6 +39,52 @@ pub(in crate::desktop) enum Phase {
     Updated,
     StartOffered,
     Ready,
+}
+impl Phase {
+    pub fn pre_manager(self) -> bool {
+        matches!(self, Self::Prepared | Self::RevokeOffered | Self::Held)
+    }
+}
+
+/// Each logical phase gets a fresh bound. The outer original-child exchange
+/// remains within the shared runner's existing 30-second maximum.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::desktop) enum Budget {
+    Preflight,
+    Rollback,
+    Hold,
+    Stop,
+    Update,
+    Start,
+    Readiness,
+    Release,
+}
+impl Budget {
+    pub const ALL: [Self; 8] = [
+        Self::Preflight,
+        Self::Rollback,
+        Self::Hold,
+        Self::Stop,
+        Self::Update,
+        Self::Start,
+        Self::Readiness,
+        Self::Release,
+    ];
+    pub fn duration(self) -> Duration {
+        Duration::from_secs(match self {
+            Self::Preflight => 2,
+            Self::Rollback => 6,
+            Self::Hold => 3,
+            Self::Stop | Self::Update | Self::Start | Self::Release => 2,
+            Self::Readiness => 8,
+        })
+    }
+    pub fn deadline(self, now: Instant) -> Instant {
+        now + self.duration()
+    }
+    pub fn exchange_timeout() -> Duration {
+        Self::ALL.into_iter().map(Self::duration).sum::<Duration>() + Duration::from_secs(3)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,20 +232,25 @@ impl Record {
         pending.phase = next;
         Ok(())
     }
-    /// Call only after fresh native caller/current-Service-grant checks under
-    /// the installer lock. Metadata cancellation has no native side effect.
-    pub fn cancel(&mut self, request_id: &str) -> Result<()> {
+    /// A policy requirement, never a grant or native permit. The caller checks
+    /// this actual grant before and after the record-only passive cancellation.
+    pub fn cancellation_requires_grant(&self, request_id: &str) -> Result<bool> {
         let pending = self
             .pending
             .as_ref()
-            .context("No original rollback is pending.")?;
+            .context("No original transition is pending.")?;
         ensure!(
             canonical_id(request_id) && pending.request_id == request_id,
-            "Pending rollback UUID changed."
+            "Pending transition UUID changed."
         );
-        ensure!(pending.desired == Mode::Passive && matches!(pending.phase,
-            Phase::Prepared | Phase::RevokeOffered | Phase::Held),
+        ensure!(pending.phase.pre_manager(),
             "A manager effect was already offered; inspect its unknown result rather than discarding the original identity.");
+        Ok(pending.desired == Mode::Passive)
+    }
+    /// Call only after fresh native caller and, for passive rollback, current
+    /// Service-grant checks under the installer lock. No native side effect.
+    pub fn cancel(&mut self, request_id: &str) -> Result<()> {
+        self.cancellation_requires_grant(request_id)?;
         self.cancelled = Some(request_id.into());
         self.pending = None;
         Ok(())
@@ -218,6 +270,42 @@ mod tests {
         }
         for value in ["", "auto", "service", "Background"] {
             assert!(Mode::parse(value).is_err());
+        }
+    }
+    #[test]
+    fn readiness_has_a_fresh_budget_after_rollback_and_the_exchange_remains_bounded() {
+        let start = Instant::now();
+        let after_rollback = Budget::Rollback.deadline(start);
+        let ready = Budget::Readiness.deadline(after_rollback);
+        assert_eq!(
+            ready.duration_since(after_rollback),
+            Budget::Readiness.duration()
+        );
+        assert_eq!(Budget::Readiness.duration(), Duration::from_secs(8));
+        assert_eq!(Budget::exchange_timeout(), Duration::from_secs(30));
+        assert_eq!(
+            Budget::ALL
+                .into_iter()
+                .map(Budget::duration)
+                .sum::<Duration>(),
+            Duration::from_secs(27)
+        );
+    }
+    #[test]
+    fn either_pre_manager_mode_can_be_cancelled_with_its_own_grant_requirement() {
+        for mode in [Mode::Passive, Mode::Background] {
+            for phase in [Phase::Prepared, Phase::RevokeOffered, Phase::Held] {
+                let mut record = Record::empty(&plan()).unwrap();
+                let id = record.begin(mode, None).unwrap().request_id.clone();
+                record.pending.as_mut().unwrap().phase = phase;
+                assert_eq!(
+                    record.cancellation_requires_grant(&id).unwrap(),
+                    mode == Mode::Passive
+                );
+                record.cancel(&id).unwrap();
+                assert!(record.pending.is_none());
+                assert_eq!(record.cancelled.as_deref(), Some(id.as_str()));
+            }
         }
     }
     #[test]

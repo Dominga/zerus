@@ -6,6 +6,7 @@ use std::{
     fs::File,
     io::{BufReader, Write},
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 use zerus_client_core::desktop::windows::process::Original;
@@ -78,7 +79,7 @@ pub(super) fn selected_image(path: &Path) -> Result<(File, crate::platform::File
 }
 
 struct Service {
-    process: Original,
+    process: Arc<Original>,
     _image: File,
     image: crate::platform::FileIdentity,
     selected: PathBuf,
@@ -88,16 +89,15 @@ impl Service {
     fn observe(
         location: &Location,
         plan: &Plan,
-        engine: u32,
+        process: Arc<Original>,
         until: Instant,
     ) -> Result<Option<Self>> {
         let Some(stream) = crate::desktop::connection(location, "status", None)? else {
             return Ok(None);
         };
         let pid = transport::peer_pid(&stream)?;
-        let process = Original::open(pid)?;
         ensure!(
-            process.own && process.current(),
+            process.pid == pid && process.own && process.current(),
             "Desktop process identity unavailable."
         );
         let current_session = crate::host::token::windows_session()?;
@@ -142,8 +142,10 @@ impl Service {
         // EnginePID alone never supplies a service PID. Require the SAME
         // process independently verified through the original desktop pipe.
         // A common scheduler/ancestor engine cannot bind a specific instance.
-        ensure!(Instant::now() < until && engine == process.pid,
-            "Task engine is not the verified desktop process; this instance topology cannot be stopped safely.");
+        ensure!(
+            Instant::now() < until && process.current(),
+            "Original task engine is no longer the verified desktop process."
+        );
         // The original instance/pipe/kernel binding above selects this exact
         // runtime. An installer may have moved its image aside during upgrade;
         // retain that image independently of the replacement's selected file.
@@ -157,7 +159,43 @@ impl Service {
             epoch: epoch.into(),
         };
         value.check()?;
+        value.exchange(location, plan, until)?;
         Ok(Some(value))
+    }
+    fn exchange(&self, location: &Location, plan: &Plan, until: Instant) -> Result<()> {
+        self.check()?;
+        let mut stream =
+            transport::connect(location)?.context("Original desktop pipe disconnected.")?;
+        ensure!(
+            transport::peer_pid(&stream)? == self.process.pid && self.process.current(),
+            "Original desktop pipe peer changed."
+        );
+        let remaining = until
+            .checked_duration_since(Instant::now())
+            .context("Desktop readiness deadline expired.")?;
+        stream.set_read_timeout(Some(remaining.min(crate::desktop::TIMEOUT)))?;
+        stream.set_write_timeout(Some(remaining.min(crate::desktop::TIMEOUT)))?;
+        stream.write_all(&protocol::encode(&json!({"abi":crate::desktop::ABI,"configuration":location.configuration,"op":"status"}))?)?;
+        let bytes = protocol::line(&mut BufReader::new(stream), protocol::FRAME_BYTES)?
+            .context("Original desktop pipe ended before its reply.")?;
+        let reply: Value = serde_json::from_slice(&bytes)?;
+        let life = &reply["value"]["lifecycle"];
+        let mode = if plan.argv.last().is_some_and(|v| v == "--background") {
+            "background"
+        } else {
+            "passive"
+        };
+        ensure!(
+            reply["abi"] == crate::desktop::ABI
+                && life["configuration"] == location.configuration
+                && life["epoch"] == self.epoch
+                && life["pid"].as_u64() == Some(self.process.pid as u64)
+                && life["mode"] == mode
+                && life["ipc_ready"] == true
+                && life["abi"] == "desktop-lifecycle-v1",
+            "Original desktop pipe reply changed."
+        );
+        self.check()
     }
     fn check(&self) -> Result<()> {
         ensure!(self.process.current(), "Original desktop process changed.");
@@ -186,7 +224,17 @@ pub(super) struct Running {
     stopped: bool,
 }
 impl Running {
-    pub(super) fn revoke(&self, location: &Location, request: Value) -> Result<Value> {
+    pub(super) fn readiness(&self, location: &Location, plan: &Plan, until: Instant) -> Result<()> {
+        self.check()?;
+        self.service.exchange(location, plan, until)?;
+        self.check()
+    }
+    pub(super) fn revoke(
+        &self,
+        location: &Location,
+        request: Value,
+        until: Instant,
+    ) -> Result<Value> {
         ensure!(
             matches!(request["op"].as_str(), Some("revoke" | "revoke_status")),
             "Only the original rollback or its read-only result may use this channel."
@@ -198,7 +246,12 @@ impl Running {
         self.check()?;
         let mut stream =
             transport::connect(location)?.context("Original desktop service disconnected.")?;
-        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        stream.set_read_timeout(Some(
+            until
+                .checked_duration_since(Instant::now())
+                .context("Original rollback deadline expired.")?
+                .min(Duration::from_secs(10)),
+        ))?;
         stream.set_write_timeout(Some(crate::desktop::TIMEOUT))?;
         ensure!(
             transport::peer_pid(&stream)? == self.service.process.pid,
@@ -256,6 +309,7 @@ impl Running {
         instance: IRunningTask,
         location: &Location,
         plan: &Plan,
+        candidate: Option<&Arc<Original>>,
         until: Instant,
     ) -> Result<Option<Self>> {
         let id = guid(&instance)?;
@@ -267,9 +321,23 @@ impl Running {
         unsafe { instance.Refresh() }?;
         let engine = unsafe { instance.EnginePID() }?;
         if engine == 0 {
+            ensure!(candidate.is_none(), "Original task engine disappeared.");
             return Ok(None);
         }
-        let Some(service) = Service::observe(location, plan, engine, until)? else {
+        // Pin the first engine incarnation even before its pipe exists. This
+        // is only a candidate; the native pipe/config/instance join below is
+        // still required before any ownership or stop decision.
+        let process = match candidate {
+            Some(original) => {
+                ensure!(
+                    original.pid == engine && original.current(),
+                    "Original started task engine changed."
+                );
+                original.clone()
+            }
+            None => Arc::new(Original::open(engine)?),
+        };
+        let Some(service) = Service::observe(location, plan, process, until)? else {
             return Ok(None);
         };
         let value = Self {
@@ -327,7 +395,7 @@ pub(super) fn original(
     let selected = task(&native.folder, plan, wanted)?;
     let mut values = instances(&selected)?;
     match values.pop() {
-        Some(instance) => Running::bind(instance, location, plan, until)?
+        Some(instance) => Running::bind(instance, location, plan, None, until)?
             .map(Some)
             .context("Task is running but its original desktop process cannot be verified."),
         None => {
@@ -424,7 +492,26 @@ pub(super) struct Starting {
     instance: IRunningTask,
     guid: String,
     path: String,
-    engine: Option<u32>,
+    engine: Option<Arc<Original>>,
+}
+fn pin_engine(candidate: &mut Option<Arc<Original>>, pid: u32) -> Result<Option<Arc<Original>>> {
+    if let Some(original) = candidate {
+        ensure!(
+            pid == original.pid && original.current(),
+            "Original started task engine changed."
+        );
+        return Ok(Some(original.clone()));
+    }
+    if pid == 0 {
+        return Ok(None);
+    }
+    let original = Arc::new(Original::open(pid)?);
+    ensure!(
+        original.current(),
+        "Original started task engine is unavailable."
+    );
+    *candidate = Some(original.clone());
+    Ok(Some(original))
 }
 impl Starting {
     pub(super) fn id(&self) -> &str {
@@ -443,18 +530,37 @@ impl Starting {
             "Original started task instance changed."
         );
         let engine = unsafe { self.instance.EnginePID() }?;
-        if engine == 0 {
+        if pin_engine(&mut self.engine, engine)?.is_none() {
             return Ok(None);
-        }
-        if let Some(original) = self.engine {
-            ensure!(engine == original, "Original started task engine changed.");
-        } else {
-            self.engine = Some(engine);
         }
         // Clone retains this same returned COM interface; it never reselects
         // an instance by task name, saved GUID or process ID.
-        Running::bind(self.instance.clone(), location, plan, until)
+        Running::bind(
+            self.instance.clone(),
+            location,
+            plan,
+            self.engine.as_ref(),
+            until,
+        )
     }
+}
+
+pub(super) fn observe_started(
+    native: &Native,
+    location: &Location,
+    plan: &Plan,
+    wanted: &Shape,
+    expected: &str,
+    until: Instant,
+) -> Result<Option<Running>> {
+    let selected = task(&native.folder, plan, wanted)?;
+    let Some(instance) = instances(&selected)?.pop() else {
+        return Ok(None);
+    };
+    if guid(&instance)? != expected {
+        return Ok(None);
+    }
+    Running::bind(instance, location, plan, None, until)
 }
 
 pub(super) fn start(
@@ -506,4 +612,72 @@ pub(super) fn start(
         path,
         engine: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn first_engine_incarnation_is_not_reopened_when_its_numeric_pid_matches() {
+        let mut candidate = None;
+        let first = pin_engine(&mut candidate, std::process::id())
+            .unwrap()
+            .unwrap();
+        assert!(first.current());
+        drop(first);
+        // A changed incarnation invalidates the retained proof. A fresh open
+        // of this numeric PID would succeed, but must never replace that proof.
+        Arc::get_mut(candidate.as_mut().unwrap()).unwrap().birth += 1;
+        assert!(Original::open(std::process::id()).unwrap().current());
+        assert!(pin_engine(&mut candidate, std::process::id()).is_err());
+        assert!(pin_engine(&mut candidate, 0).is_err());
+    }
+    #[test]
+    fn engine_exit_before_pipe_readiness_cannot_be_replaced_by_a_later_process() {
+        use std::os::windows::process::CommandExt;
+        use std::process::{Child, Command, Stdio};
+        struct Held(Child);
+        impl Drop for Held {
+            fn drop(&mut self) {
+                drop(self.0.stdin.take());
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = Held(
+            Command::new("cmd.exe")
+                .args(["/D", "/Q", "/C", "set /p ZERUS_ENGINE_FIXTURE_WAIT="])
+                .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let mut candidate = None;
+        let until = Instant::now() + Duration::from_secs(2);
+        loop {
+            if pin_engine(&mut candidate, child.0.id()).is_ok() {
+                break;
+            }
+            assert!(
+                Instant::now() < until,
+                "private engine did not become inspectable"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(child.0.stdin.take());
+        let until = Instant::now() + Duration::from_secs(2);
+        while child.0.try_wait().unwrap().is_none() {
+            assert!(
+                Instant::now() < until,
+                "private original engine did not exit"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        child.0.wait().unwrap();
+        assert!(candidate.as_ref().unwrap().exited());
+        assert!(pin_engine(&mut candidate, child.0.id()).is_err());
+        assert!(pin_engine(&mut candidate, std::process::id()).is_err());
+    }
 }

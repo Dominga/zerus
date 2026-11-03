@@ -179,21 +179,24 @@ class WindowsTaskMode(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(prefix='zerus-task-mode-')).resolve()
         self.cli_image = self.root / 'portable' / 'hgs.exe'
-        self.frontend = self.cli_image.with_name('hgs-tray.exe')
         self.cli_image.parent.mkdir()
         shutil.copy2(kernel.HGS, self.cli_image)
-        shutil.copy2(Path(os.environ['HGS_WINDOWS_FRONTEND_FIXTURE']).resolve(strict=True), self.frontend)
+        self.profile = self.root / 'profile'
+        self.profile.mkdir()
+        self.frontend = self.profile / '.local' / 'bin' / 'hgs-tray.exe'
+        self.frontend_source = Path(os.environ['HGS_WINDOWS_FRONTEND_FIXTURE']).resolve(strict=True)
         self.config = self.root / 'config'
         self.config.mkdir()
         (self.config / 'config').write_text('HGS_SELF=windows-mode-fixture\nHGS_PEERS=\n', encoding='utf-8')
         self.state = self.root / 'state'
         self.control = self.root / 'control.json'
         self.env = {k:v for k,v in os.environ.items() if not k.upper().startswith('HGS_')}
-        # Task Scheduler uses the real interactive user's canonical instance
-        # namespace. Only configuration, service state and images are private.
+        # HOME selects a wholly private staging profile. USERPROFILE stays
+        # real solely for the canonical native instance namespace shared with
+        # the Scheduler-launched service; it is not a caller/ownership permit.
         profile = os.environ['USERPROFILE']
-        self.env.update(HOME=profile, USERPROFILE=profile, HGS_CONFIG_DIR=str(self.config),
-                        HGS_STATE_DIR=str(self.state), HGS_EXECUTABLE=str(self.cli_image), HGS_PEERS='')
+        self.env.update(HOME=str(self.profile), USERPROFILE=profile, HGS_CONFIG_DIR=str(self.config),
+                        HGS_STATE_DIR=str(self.state), HGS_PEERS='')
         self.task = None
         self.installed = False
         self.latest = None
@@ -210,7 +213,7 @@ class WindowsTaskMode(unittest.TestCase):
         result = subprocess.run([str(self.frontend), '--exact',
                                  'instance::tests::evidence::native_frontend_request_fixture', '--nocapture'],
                                 env=dict(self.env, HGS_FRONTEND_TEST_CONTROL=str(self.control)),
-                                capture_output=True, text=True, timeout=30,
+                                capture_output=True, text=True, timeout=40,
                                 creationflags=subprocess.CREATE_NO_WINDOW)
         self.assertEqual(result.returncode, 0, (result.stdout + result.stderr)[-8192:])
         values = [json.loads(line.removeprefix(prefix)) for line in result.stdout.splitlines()
@@ -233,42 +236,86 @@ class WindowsTaskMode(unittest.TestCase):
         self.assertTrue(result['durable'], result)
         self.assertEqual(result['outcome']['state'], 'granted', result)
 
+    def cancel(self, request_id):
+        result = self.frontend_call(dict(case='mode_cancel', request_id=request_id), 'MODE_CALLER_RESULT ')
+        self.assertEqual(result['code'], 0, result)
+        return json.loads(result['stdout'])
+
+    def recover_initial_start_and_cancel_background_before_a_grant(self, passive):
+        path = self.state / 'desktop' / 'windows-registration-mode.json'
+        record = json.loads(path.read_text(encoding='utf-8'))
+        # Arrange an actual successful start whose reply was lost. The SAME
+        # native instance must settle through the helper; no file reset follows.
+        request_id = str(uuid.uuid4())
+        record['pending'] = dict(request_id=request_id, desired='passive', phase='start_offered',
+                                 original=None, started=passive['instance']['guid'])
+        path.write_text(json.dumps(record), encoding='utf-8')
+        settled = self.mode('passive')
+        self.assertTrue(settled['ok'], settled)
+        self.assertEqual(settled['code'], 'original_start_observed')
+        self.assertEqual(settled['request_id'], request_id)
+        self.assertEqual(settled['instance'], passive['instance'])
+        self.assertFalse(settled['manager_changed'])
+        self.assertIsNone(json.loads(path.read_text(encoding='utf-8'))['pending'])
+        self.assertEqual(self.cli('desktop', 'ownership-status', '--json')['state'], 'passive')
+        # A reboot/restart may invalidate the original tuple before any manager
+        # effect. Cancellation of either background phase requires no grant.
+        for phase in ('prepared', 'held'):
+            record = json.loads(path.read_text(encoding='utf-8'))
+            identity = dict(passive['instance'], birth=passive['instance']['birth'] + 1)
+            request_id = str(uuid.uuid4())
+            record['pending'] = dict(request_id=request_id, desired='background', phase=phase,
+                                     original=identity, started=None)
+            path.write_text(json.dumps(record), encoding='utf-8')
+            receipt = self.cancel(request_id)
+            self.assertTrue(receipt['ok'], receipt)
+            self.assertFalse(receipt['manager_changed'])
+            self.assertEqual(receipt['cancelled_request_id'], request_id)
+        self.assertEqual(self.cli('desktop', 'status', '--json')['lifecycle']['pid'], passive['instance']['pid'])
+        return settled
+
     def metadata_refusals(self, passive):
-        # Only this private fixture metadata is arranged. It cannot construct
-        # native custody. Every refusal must preserve the actual SDK/process.
-        record_path = self.state / 'desktop' / 'windows-registration-mode.json'
-        original = record_path.read_text(encoding='utf-8')
+        # Only fixture metadata is arranged, never native custody. Every wrong
+        # original refuses; supported record-only cancellation replaces resets.
+        path = self.state / 'desktop' / 'windows-registration-mode.json'
         pid = passive['instance']['pid']
-        try:
-            for field in ('guid', 'pid', 'birth', 'epoch'):
-                record = json.loads(original)
-                identity = dict(passive['instance'])
-                identity[field] = str(uuid.uuid4()) if field in ('guid', 'epoch') else identity[field] + 1
-                pending = dict(request_id=str(uuid.uuid4()), desired='passive', phase='prepared',
-                               original=identity, started=None)
-                record['pending'] = pending
-                record_path.write_text(json.dumps(record), encoding='utf-8')
-                reply = self.mode('passive')
-                self.assertFalse(reply['ok'], reply)
-                self.assertIn('Original task or service changed', reply['error'])
-                self.assertEqual(reply['pending_transition']['request_id'], pending['request_id'])
-                self.assertEqual(self.cli('desktop', 'status', '--json')['lifecycle']['pid'], pid)
-            record = json.loads(original)
-            pending = dict(request_id=str(uuid.uuid4()), desired='passive', phase='start_offered',
-                           original=passive['instance'], started=passive['instance']['guid'])
+        for field in ('guid', 'pid', 'birth', 'epoch'):
+            record = json.loads(path.read_text(encoding='utf-8'))
+            identity = dict(passive['instance'])
+            identity[field] = str(uuid.uuid4()) if field in ('guid', 'epoch') else identity[field] + 1
+            pending = dict(request_id=str(uuid.uuid4()), desired='passive', phase='prepared',
+                           original=identity, started=None)
             record['pending'] = pending
-            record_path.write_text(json.dumps(record), encoding='utf-8')
-            for _ in range(2):
-                reply = self.mode('passive')
+            path.write_text(json.dumps(record), encoding='utf-8')
+            reply = self.mode('passive')
+            self.assertFalse(reply['ok'], reply)
+            self.assertIn('Original task or service changed', reply['error'])
+            self.assertEqual(reply['pending_transition']['request_id'], pending['request_id'])
+            receipt = self.cancel(pending['request_id'])
+            self.assertTrue(receipt['ok'], receipt)
+            self.assertFalse(receipt['manager_changed'])
+            self.assertEqual(self.cli('desktop', 'status', '--json')['lifecycle']['pid'], pid)
+        with closing(sqlite3.connect((self.state / 'desktop' / 'state.sqlite3').as_uri() + '?mode=ro', uri=True)) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_commands').fetchone()[0], 0)
+
+    def busy_exclusion_does_not_reserve(self, passive):
+        import msvcrt
+        path = self.state / 'desktop' / 'windows-registration-mode.json'
+        before = path.read_bytes()
+        # The fixture holds byte zero of the SAME private handoff file; fs2's
+        # exclusive LockFileEx range includes it. No actor/manager is stopped.
+        with (self.state / 'desktop' / 'handoff.lock').open('r+b') as file:
+            file.seek(0)
+            msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)
+            try:
+                reply = self.mode('background')
                 self.assertFalse(reply['ok'], reply)
-                self.assertEqual(reply['code'], 'original_transition_pending')
-                self.assertEqual(reply['pending_transition'], pending)
-                self.assertEqual(self.cli('desktop', 'status', '--json')['lifecycle']['pid'], pid)
-            with closing(sqlite3.connect((self.state / 'desktop' / 'state.sqlite3').as_uri() + '?mode=ro', uri=True)) as db:
-                self.assertEqual(db.execute('SELECT count(*) FROM desktop_commands').fetchone()[0], 0)
-        finally:
-            # No native manager effect was offered by these arranged records.
-            record_path.write_text(original, encoding='utf-8')
+                self.assertIsNone(reply['pending_transition'])
+                self.assertEqual(path.read_bytes(), before)
+            finally:
+                file.seek(0)
+                msvcrt.locking(file.fileno(), msvcrt.LK_UNLCK, 1)
+        self.assertEqual(self.cli('desktop', 'status', '--json')['lifecycle']['pid'], passive['instance']['pid'])
 
     def cancel_unsent_private_rollback(self, passive):
         record_path = self.state / 'desktop' / 'windows-registration-mode.json'
@@ -346,6 +393,13 @@ if(@($t.GetInstances(0)).Count-ne 0) {throw 'fixture instance remains'};
         try:
             installed = self.cli('desktop', 'registration', 'install', '--json')
             self.installed = True
+            # The maintained registration installer stages the stable CLI
+            # without enabling local sessions. Native relays must then use
+            # THAT image, matching the actual service's file identity.
+            self.cli_image = Path(installed['cli']['path']).resolve(strict=True)
+            self.assertEqual(self.cli_image, self.profile / '.local' / 'bin' / 'hgs.exe')
+            shutil.copy2(self.frontend_source, self.frontend)
+            self.assertFalse((self.config / 'local-sessions').exists())
             self.assertFalse(installed['started'])
             self.assertFalse(self.cli('desktop', 'status', '--json')['running'])
             refused = self.mode('background')
@@ -356,8 +410,16 @@ if(@($t.GetInstances(0)).Count-ne 0) {throw 'fixture instance remains'};
             self.latest = passive['instance']
             self.assertEqual(passive['selected_mode'], 'passive')
             self.assertIsNone(shell.poll())
-            self.metadata_refusals(passive)
+            passive = self.recover_initial_start_and_cancel_background_before_a_grant(passive)
             self.grant()
+            granted = self.cli('desktop', 'ownership-status', '--json')
+            no_op = self.mode('passive')
+            self.assertTrue(no_op['ok'], no_op)
+            self.assertFalse(no_op['changed'])
+            self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), granted)
+            self.assertEqual(self.cli('desktop', 'status', '--json')['lifecycle']['pid'], passive['instance']['pid'])
+            self.metadata_refusals(passive)
+            self.busy_exclusion_does_not_reserve(passive)
             cancelled = self.cancel_unsent_private_rollback(passive)
             background = self.mode('background')
             self.assertTrue(background['ok'], background)
@@ -400,7 +462,13 @@ if(@($t.GetInstances(0)).Count-ne 0) {throw 'fixture instance remains'};
                 # Preserve its exact paths; disposable VM teardown is the final
                 # boundary. The failed test remains failed/unqualified.
                 if self.installed:
-                    print('MODE_TASK_OBSERVATION ' + json.dumps(self.observe()), file=sys.stderr)
+                    try:
+                        print('MODE_TASK_OBSERVATION ' + json.dumps(self.observe()), file=sys.stderr)
+                        status = self.cli('desktop', 'status', '--json')
+                        print('MODE_TASK_SERVICE ' + json.dumps({key: status.get(key) for key in
+                              ('configuration', 'running', 'lifecycle')}), file=sys.stderr)
+                    except Exception as error:
+                        print('MODE_TASK_OBSERVATION_UNAVAILABLE ' + type(error).__name__, file=sys.stderr)
                 print('MODE_TASK_PRIVATE_ROOT_RETAINED ' + str(self.root), file=sys.stderr)
 
 

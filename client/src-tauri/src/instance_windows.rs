@@ -544,7 +544,7 @@ mod tests {
                 let invocation = zerus_client_core::Invocation {
                     args,
                     stdin: None,
-                    timeout: Duration::from_secs(if mode == "mode_check" { 8 } else { 20 }),
+                    timeout: Duration::from_secs(if mode == "mode_check" { 8 } else { 30 }),
                     request_id: None,
                 };
                 let environment: Vec<_> = std::env::vars()

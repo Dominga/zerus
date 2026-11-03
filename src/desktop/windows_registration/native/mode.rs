@@ -9,7 +9,8 @@ use crate::{
     },
     platform,
 };
-use policy::mode::{Mode, Phase, Record, RECORD_BYTES};
+use policy::mode::{Budget, Mode, Phase, Record, RECORD_BYTES};
+mod recovery;
 use std::{
     path::Path,
     sync::{atomic::AtomicBool, Arc},
@@ -87,7 +88,7 @@ pub(in crate::desktop::windows_registration) fn command(
     let invocation = zerus_client_core::actions::Invocation {
         args: vec![ENTRY.into(), frame.len().to_string()],
         stdin: Some(frame),
-        timeout: Duration::from_secs(15),
+        timeout: Budget::exchange_timeout(),
         request_id: None,
     };
     let proof = admission.clone();
@@ -232,6 +233,9 @@ struct Fence<'a> {
     image: &'a Path,
 }
 impl Fence<'_> {
+    fn phase(&mut self, phase: Budget) {
+        self.until = phase.deadline(Instant::now());
+    }
     fn check(&mut self) -> Result<()> {
         ensure!(
             Instant::now() < self.until,
@@ -305,10 +309,11 @@ fn revoke_original(
     location: &Location,
     request_id: &str,
     original: Option<&instances::Running>,
+    until: Instant,
 ) -> Result<Value> {
     let command = revoke::cli(&["--json", "--request-id", request_id, "--reason", "rollback"])?;
     match original {
-        Some(original) => original.revoke(location, revoke::payload(&command)?),
+        Some(original) => original.revoke(location, revoke::payload(&command)?, until),
         None => revoke::offline(location, &command),
     }
 }
@@ -337,7 +342,8 @@ struct Runtime<'a> {
     passive: &'a Plan,
     background: &'a Plan,
 }
-fn effect(runtime: Runtime<'_>, desired: Mode, until: Instant) -> Result<Value> {
+fn effect(runtime: Runtime<'_>, desired: Mode) -> Result<Value> {
+    let until = Budget::Preflight.deadline(Instant::now());
     let Runtime {
         config,
         location,
@@ -360,16 +366,22 @@ fn effect(runtime: Runtime<'_>, desired: Mode, until: Instant) -> Result<Value> 
     };
     let mut record = load(location, passive)?;
     let resuming = record.pending.clone();
-    if resuming.as_ref().is_some_and(|pending| {
-        pending.desired != desired
-            || !matches!(
-                pending.phase,
-                Phase::Prepared | Phase::RevokeOffered | Phase::Held
-            )
-    }) {
-        return Ok(
-            json!({"abi":MODE_ABI,"schema":1,"configuration":location.configuration,"task_name":passive.name,"selected_mode":from.name(),"pending":record.pending,"changed":false,"code":"original_transition_pending"}),
-        );
+    if let Some(pending) = &resuming {
+        if pending.desired != desired || !pending.phase.pre_manager() {
+            return recovery::observe(
+                recovery::Inputs {
+                    config,
+                    location,
+                    native,
+                    admission,
+                    passive,
+                    background,
+                },
+                &mut record,
+                desired,
+                from,
+            );
+        }
     }
     let (source, identity) = instances::selected_image(Path::new(&new.argv[0]))?;
     let mut fence = Fence {
@@ -391,12 +403,37 @@ fn effect(runtime: Runtime<'_>, desired: Mode, until: Instant) -> Result<Value> 
             "Original task or service changed; retain the pending UUID and inspect it."
         );
     }
-    if resuming.is_none() && desired == Mode::Background && from == desired && original.is_some() {
+    if resuming.is_none() && from == desired && original.is_some() {
         return Ok(
             json!({"abi":MODE_ABI,"schema":1,"configuration":location.configuration,"task_name":passive.name,"selected_mode":desired.name(),"running_mode":desired.name(),"pending":null,"changed":false}),
         );
     }
     marker(config, &new.argv[0])?;
+    let database = location.root.join("state.sqlite3").try_exists()?;
+    if desired == Mode::Background || !database {
+        // Do not reserve metadata for a transient exclusion/drain refusal.
+        // Rollback alone must save its UUID before its authority reduction.
+        fence.phase(Budget::Hold);
+        location.prepare()?;
+        let lock = location
+            .try_handoff_lock()?
+            .context("Desktop native or operation resources have not drained.")?;
+        if desired == Mode::Passive {
+            ensure!(
+                !location.root.join("state.sqlite3").try_exists()?
+                    && !location
+                        .root
+                        .join(zerus_desktop_migration::HANDOFF_FILE)
+                        .try_exists()?,
+                "Passive bootstrap state changed."
+            );
+        }
+        fence.exclusion = Some(Exclusion::Handoff(lock));
+        fence.check()?;
+        if let Some(original) = &original {
+            original.check()?;
+        }
+    }
     let id = if let Some(pending) = &resuming {
         pending.request_id.clone()
     } else {
@@ -404,12 +441,12 @@ fn effect(runtime: Runtime<'_>, desired: Mode, until: Instant) -> Result<Value> 
         save(location, passive, &record, &mut || fence.check())?;
         id
     };
-    let database = location.root.join("state.sqlite3").try_exists()?;
     if desired == Mode::Passive && database {
+        fence.phase(Budget::Rollback);
         let mut receipt = if record.pending.as_ref().expect("pending").phase == Phase::Prepared {
             record.advance(Phase::Prepared, Phase::RevokeOffered)?;
             save(location, passive, &record, &mut || fence.check())?;
-            let value = revoke_original(location, &id, original.as_ref())?;
+            let value = revoke_original(location, &id, original.as_ref(), fence.until)?;
             if value["checkpointed"] == true {
                 value
             } else {
@@ -433,47 +470,32 @@ fn effect(runtime: Runtime<'_>, desired: Mode, until: Instant) -> Result<Value> 
             // the same UUID and original process. The maintained revoke API
             // reconciles that original drain; an absent/unknown reservation is
             // never resent and a new writer still fails its native epoch check.
-            receipt = revoke_original(location, &id, original.as_ref())?;
+            receipt = revoke_original(location, &id, original.as_ref(), fence.until)?;
             if receipt["checkpointed"] != true {
                 receipt = rollback_result(location, &id, original.as_ref())?;
             }
         }
+        fence.phase(Budget::Hold);
         fence.exclusion = Some(Exclusion::Rollback(Box::new(hold_child::Hold::start(
             Path::new(&new.argv[0]),
             &environment(config, &new.argv[0])?,
             &receipt,
             &fence.identity,
             admission.caller.source() != "installed_frontend",
-            until,
+            fence.until,
         )?)));
         if record.pending.as_ref().expect("pending").phase == Phase::RevokeOffered {
             record.advance(Phase::RevokeOffered, Phase::Held)?;
         }
     } else {
-        // Passive bootstrap has no old database/receipt. Background enablement
-        // already requires an actual stored Service grant. Both exclude new
-        // operation/native owners and Rearm while replacing the passive actor.
-        location.prepare()?;
-        let lock = location
-            .try_handoff_lock()?
-            .context("Desktop native or operation resources have not drained.")?;
-        if desired == Mode::Passive {
-            ensure!(
-                !location.root.join("state.sqlite3").try_exists()?
-                    && !location
-                        .root
-                        .join(zerus_desktop_migration::HANDOFF_FILE)
-                        .try_exists()?,
-                "Passive bootstrap state changed."
-            );
-        }
-        fence.exclusion = Some(Exclusion::Handoff(lock));
+        // The handoff and aggregate drain checks already preceded begin().
         fence.check()?;
         if record.pending.as_ref().expect("pending").phase == Phase::Prepared {
             record.advance(Phase::Prepared, Phase::Held)?;
         }
     }
     save(location, passive, &record, &mut || fence.check())?;
+    fence.phase(Budget::Stop);
     if let Some(original) = &mut original {
         record.advance(Phase::Held, Phase::StopOffered)?;
         save(location, passive, &record, &mut || fence.check())?;
@@ -487,6 +509,7 @@ fn effect(runtime: Runtime<'_>, desired: Mode, until: Instant) -> Result<Value> 
         record.advance(Phase::Held, Phase::Stopped)?;
     }
     save(location, passive, &record, &mut || fence.check())?;
+    fence.phase(Budget::Update);
     record.advance(Phase::Stopped, Phase::UpdateOffered)?;
     save(location, passive, &record, &mut || fence.check())?;
     instances::replace(
@@ -499,15 +522,17 @@ fn effect(runtime: Runtime<'_>, desired: Mode, until: Instant) -> Result<Value> 
     )?;
     record.advance(Phase::UpdateOffered, Phase::Updated)?;
     save(location, passive, &record, &mut || fence.check())?;
+    fence.phase(Budget::Start);
     record.advance(Phase::Updated, Phase::StartOffered)?;
     save(location, passive, &record, &mut || fence.check())?;
     let mut started =
         instances::start(native, location, new, &wanted(new)?, &mut || fence.check())?;
     record.pending.as_mut().expect("pending").started = Some(started.id().into());
     save(location, passive, &record, &mut || fence.check())?;
+    fence.phase(Budget::Readiness);
     let ready = loop {
         fence.check()?;
-        if let Some(ready) = started.poll(location, new, until)? {
+        if let Some(ready) = started.poll(location, new, fence.until)? {
             break ready;
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -516,9 +541,10 @@ fn effect(runtime: Runtime<'_>, desired: Mode, until: Instant) -> Result<Value> 
     fence.check()?;
     record.advance(Phase::StartOffered, Phase::Ready)?;
     save(location, passive, &record, &mut || fence.check())?;
+    fence.phase(Budget::Release);
     // Keep the ORIGINAL hold through actual passive SDK/process/IPC readiness.
     if let Some(Exclusion::Rollback(hold)) = &mut fence.exclusion {
-        hold.finish(until)?;
+        hold.finish(fence.until)?;
     } else {
         drop(fence.exclusion.take());
     }
@@ -561,7 +587,28 @@ fn operation(args: &[String]) -> Result<Value> {
     let sid = crate::host::token::user_sid()?;
     let (passive, background) = plans(&config, &location, &sid)?;
     let _lock = Lock::acquire(&sid)?;
-    let until = Instant::now() + Duration::from_secs(12);
+    if op == "cancel_rollback" {
+        admission.check()?;
+        let mut record = load(&location, &passive)?;
+        let id = request["request_id"]
+            .as_str()
+            .context("Original transition UUID required.")?;
+        let needs_grant = record.cancellation_requires_grant(id)?;
+        let mut check = || {
+            admission.check()?;
+            if needs_grant {
+                ensure!(ownership::registration_granted(&location)?,"Passive rollback cancellation requires a fresh Service Grant/Rearm; it changes metadata only.");
+            }
+            Ok(())
+        };
+        check()?;
+        record.cancel(id)?;
+        save(&location, &passive, &record, &mut check)?;
+        return Ok(
+            json!({"abi":MODE_ABI,"schema":1,"configuration":location.configuration,"task_name":passive.name,
+            "selected_mode":null,"pending":null,"cancelled_request_id":id,"changed":true,"manager_changed":false}),
+        );
+    }
     let _apartment = Apartment::new()?;
     let scheduler: ITaskService =
         unsafe { CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER) }?;
@@ -576,30 +623,6 @@ fn operation(args: &[String]) -> Result<Value> {
     let mut native = Native {
         folder: unsafe { scheduler.GetFolder(&BSTR::from("\\")) }?,
     };
-    if op == "cancel_rollback" {
-        admission.check()?;
-        ensure!(
-            ownership::registration_granted(&location)?,
-            "Cancellation requires a fresh Service Grant/Rearm; it changes metadata only."
-        );
-        let mode = selected(&mut native, &passive, &background)?;
-        let mut record = load(&location, &passive)?;
-        let id = request["request_id"]
-            .as_str()
-            .context("Original rollback UUID required.")?;
-        record.cancel(id)?;
-        save(&location, &passive, &record, &mut || {
-            admission.check()?;
-            ensure!(
-                ownership::registration_granted(&location)?,
-                "Service grant changed."
-            );
-            Ok(())
-        })?;
-        return Ok(
-            json!({"abi":MODE_ABI,"schema":1,"configuration":location.configuration,"task_name":passive.name,"selected_mode":mode.name(),"pending":null,"cancelled_request_id":id,"changed":true,"manager_changed":false}),
-        );
-    }
     let desired = Mode::parse(request["mode"].as_str().unwrap_or(""))?;
     effect(
         Runtime {
@@ -612,7 +635,6 @@ fn operation(args: &[String]) -> Result<Value> {
             background: &background,
         },
         desired,
-        until,
     )
 }
 

@@ -4,6 +4,9 @@ The maintained user task is passive on a fresh installation. Ordinary
 `hgs desktop registration install --json` refreshes an owned registration
 without starting or stopping it and preserves its existing passive/background
 selection. Read-only `registration --json --background` only renders a plan.
+An explicit selection that already matches the verified running task is a
+no-op, for both modes. In particular, selecting an already running passive
+task preserves its unused Service grant and original process.
 
 An explicit change uses the selected installed CLI:
 
@@ -81,9 +84,28 @@ after that exclusion is released.
 The private bounded record stores the original UUID, phase and observed instance
 identities. It is metadata, never permission to stop or adopt a process.
 Each Stop/Update/Start is recorded as offered before its native call. Unknown
-manager effects stay pending; repeating the choice does not replay them or
-adopt a replacement instance. A before-manager interruption may resume only
-with the same original runtime, UUID and native rollback exclusion.
+manager effects stay pending; repeating the choice never replays them. A
+before-manager interruption may resume only with the same original runtime,
+UUID and native rollback exclusion. Background and initial passive starts
+acquire their actual handoff exclusion and complete drain checks before saving
+a new record, so transient refusal leaves no pending intent.
+
+Repeating the same choice at `start_offered` or `ready` is observe-only. The
+recorded original started GUID must bind to the exact owned task and a ready
+service in the requested mode. Passive recovery also reacquires the same
+UUID's read-only revoke hold, or proves an untouched, drained initial passive
+bootstrap under the handoff exclusion. Any reacquired hold still requires its
+matching release frame, original exit and both pipe EOFs. Completion changes
+only installer metadata: no Stop, Update, RunEx or revoke is issued. A missing
+GUID, changed definition, unready original instance or unverifiable exclusion
+reports its exact unknown phase/reason; another instance is never adopted.
+
+The phase budgets are independent: preflight 2 s, rollback 6 s, hold acquisition
+3 s, Stop 2 s, update 2 s, start 2 s, readiness 8 s and release 2 s. Readiness
+gets its full budget after earlier phases; it does not spend the drain's
+remaining time. The original child exchange remains bounded by the shared
+runner's existing 30 s maximum. Its timeout still leaves uncertainty pending
+for observation, never permission to replay a manager call.
 
 If a fresh frontend Rearm won before hold acquisition, explicitly cancel only
 the obsolete saved rollback metadata:
@@ -92,22 +114,36 @@ the obsolete saved rollback metadata:
 hgs desktop registration cancel-rollback --json --request-id UUID
 ```
 
-Cancellation checks the original pending UUID, native caller and current
-Service grant twice. It changes no task, grant or revoke receipt. It also covers
-a saved rollback that never took effect. It refuses after any manager effect
-was offered. A later separately confirmed passive choice receives a new UUID;
+Cancellation checks the original pending UUID and native caller twice. It can
+discard any pre-manager record for either mode, including stale background
+preparation after a restart. Passive rollback additionally requires a current
+Service grant twice; background cancellation requires no grant. It changes no
+task, grant or revoke receipt and does not contact Task Scheduler. It also covers
+a saved rollback that never took effect. Cancellation refuses after any manager
+effect was offered. A later separately confirmed choice receives a new UUID;
 there is no automatic UUID rotation or unknown-effect replay.
 
 ## Private qualification
 
 `tests/windows_frontend_auth.py` includes the disposable hosted-Windows task
-round-trip. It uses private images/configuration/state, a real authenticated
-frontend Grant, passive/background/passive transitions, unchanged runtime on
-ordinary refresh, and a retained unrelated child. Cleanup targets only the
-exact verified fixture instance and checks its real process birth and exit;
-changed-birth cleanup refuses. A failure preserves uncertainty and private
-diagnostics instead of killing by task name or executable pattern. This suite
-does not authorize an owner's installed task, GUI, agents or sessions.
+round-trip. The maintained registration installer stages the stable CLI under
+the test's private HOME, with the native test frontend beside that selected
+image. A portable `HGS_EXECUTABLE` override never bypasses the Windows stable
+path rule. USERPROFILE is retained only for the canonical native instance
+namespace shared with the Scheduler-launched service; native caller/process
+checks remain mandatory. The runner's actual profile files are never staged or
+changed. The fixture refuses a pre-existing per-user task and runs only on
+disposable hosted Windows VMs.
+
+It uses private configuration/state, a real authenticated frontend Grant,
+passive/background/passive transitions, unchanged runtime on ordinary refresh,
+observe-only completion and explicit cancellation without manual record resets,
+and a retained unrelated child. Cleanup targets only the exact verified fixture
+instance and checks its real process birth and exit; changed-birth cleanup
+refuses. Only then are its private images/state removed. A failure preserves
+uncertainty and private diagnostics instead of killing by task name or
+executable pattern. This suite authorizes no owner's installed task, GUI,
+agents or sessions.
 
 Microsoft API contracts: [RunEx](https://learn.microsoft.com/en-us/windows/win32/api/taskschd/nf-taskschd-iregisteredtask-runex),
 [instance Stop](https://learn.microsoft.com/en-us/windows/win32/api/taskschd/nf-taskschd-irunningtask-stop)

@@ -476,6 +476,11 @@ pub fn payload(command: &Command) -> Result<Value> {
 /// submits or resumes a revoke and never supplies a held exclusion.
 #[cfg(any(windows, test))]
 pub(super) fn rollback_receipt(location: &Location, id: &str) -> Result<Value> {
+    rollback_receipt_if_present(location, id)?.context(Declined("request_not_found"))
+}
+
+#[cfg(any(windows, test))]
+pub(super) fn rollback_receipt_if_present(location: &Location, id: &str) -> Result<Option<Value>> {
     ensure!(canonical_id(id), Declined("invalid_request_id"));
     let (db, _verification) = hold::database(location)?;
     let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -492,7 +497,9 @@ pub(super) fn rollback_receipt(location: &Location, id: &str) -> Result<Value> {
         configuration == location.configuration,
         Declined("configuration_changed")
     );
-    let saved = record_db(&db, id)?.context(Declined("request_not_found"))?;
+    let Some(saved) = record_db(&db, id)? else {
+        return Ok(None);
+    };
     ensure!(
         saved.writer_epoch.as_deref().is_none_or(canonical_id),
         Declined("invalid_writer_epoch")
@@ -508,12 +515,12 @@ pub(super) fn rollback_receipt(location: &Location, id: &str) -> Result<Value> {
     );
     if saved.state == "prepared" {
         ensure!(saved.result.is_none(), Declined("invalid_prepared_receipt"));
-        return Ok(
+        return Ok(Some(
             json!({"request_id":id,"configuration":location.configuration,"accepted":true,"durable":true,
             "revoked":false,"checkpointed":false,"writer_epoch":saved.writer_epoch,"code":"revocation_pending"}),
-        );
+        ));
     }
-    receipt(location, &command, &saved)
+    receipt(location, &command, &saved).map(Some)
 }
 /// CLI-only absent-service path. Existing state requires owner.lock; a running
 /// but unreachable actor cannot be bypassed. No listener, manager or worker starts.
@@ -599,6 +606,11 @@ mod tests {
             original.state
         );
         assert!(rollback_receipt(&f.location, &uuid::Uuid::new_v4().to_string()).is_err());
+        assert!(
+            rollback_receipt_if_present(&f.location, &uuid::Uuid::new_v4().to_string())
+                .unwrap()
+                .is_none()
+        );
         let settled = execute_scoped(
             &f.location,
             &mut f.store,

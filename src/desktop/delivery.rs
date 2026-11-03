@@ -54,8 +54,10 @@ const RECENT: usize = 4096;
 const SCAN: Duration = Duration::from_secs(1);
 /// Approval-phase rows read per scan, before the one-page catalog walk.
 const INDEXED: usize = 16;
-/// Rows stored before schema 22 whose flag one scan derives.
+/// Rows stored before schema 22 whose flag one scan derives, and the JSON
+/// bytes past the first of them, so one short transaction stays short.
 const BACKFILL: usize = 1024;
+const BACKFILL_BYTES: usize = 8 << 20;
 const COOLDOWN: Duration = Duration::from_secs(5);
 const UNKNOWN: &str = "Answer delivery could not be confirmed. Check Activity or Terminal.";
 
@@ -220,6 +222,9 @@ pub(super) struct Runtime {
     scan_at: Instant,
     /// No row stored before schema 22 is left without its approval flag.
     backfilled: bool,
+    /// Which discovery goes first this scan: the approval-phase index or the
+    /// catalog walk, in turn, so neither keeps both approval slots.
+    indexed_first: bool,
 }
 impl Runtime {
     /// No child, registration, service activation or journal constructor here.
@@ -279,6 +284,7 @@ impl Runtime {
             stopping: false,
             scan_at: Instant::now(),
             backfilled: false,
+            indexed_first: true,
         }
     }
 
@@ -623,38 +629,71 @@ impl Runtime {
             }
             // Bounded, resumable: each scan derives one batch of old rows.
             if !self.backfilled {
-                match zerus_desktop_catalog::approvals::backfill(&mut store.db, BACKFILL) {
+                match zerus_desktop_catalog::approvals::backfill(&mut store.db, BACKFILL, BACKFILL_BYTES) {
                     Ok(0) => self.backfilled = true,
                     Ok(_) => (),
                     Err(_) => self.read_error = Some("delivery_catalog_unavailable"),
                 }
             }
-            // Sessions in an approval phase first, whatever the catalog size;
-            // the walk below stays the backstop. Eligibility is unchanged.
-            if self.policy.is_some_and(|p| p.enabled) && self.approval_error.is_none() {
-                match self.sources.approvals(store, INDEXED) {
-                    Ok(candidates) => {
-                        for candidate in candidates {
-                            self.inspect(store, candidate);
-                        }
-                    }
-                    Err(_) => self.read_error = Some("delivery_catalog_unavailable"),
-                }
-            }
-            match self.sources.page(store) {
-                Ok(candidates) => {
-                    if self.policy.is_some_and(|p| p.enabled) && self.approval_error.is_none() {
-                        for candidate in candidates {
-                            self.inspect(store, candidate);
-                        }
-                    }
-                }
-                Err(_) => self.read_error = Some("delivery_catalog_unavailable"),
+            // Sessions in an approval phase, whatever the catalog size, and
+            // the one-page catalog walk as the backstop, taking turns to go
+            // first. Eligibility is unchanged.
+            let indexed_first = self.indexed_first;
+            self.indexed_first = !indexed_first;
+            if indexed_first {
+                self.scan_indexed(store);
+                self.scan_page(store);
+            } else {
+                self.scan_page(store);
+                self.scan_indexed(store);
             }
         }
     }
 
-    fn inspect(&mut self, store: &Store, candidate: catalog::Candidate) {
+    fn approving(&self) -> bool {
+        self.policy.is_some_and(|p| p.enabled) && self.approval_error.is_none()
+    }
+
+    /// The approval-phase rows of this scan, in pass order. A pass moves past
+    /// a row only once it was inspected or found to need nothing; at the first
+    /// candidate without a free approval slot the scan stops, and the next one
+    /// starts there, so no row is skipped while both slots are busy.
+    fn scan_indexed(&mut self, store: &Store) {
+        if !self.approving() {
+            return;
+        }
+        match self.sources.approvals(store, INDEXED) {
+            Ok(rows) => {
+                for row in rows {
+                    if let Some(candidate) = row.candidate.clone() {
+                        if !self.inspect(store, candidate) {
+                            break;
+                        }
+                    }
+                    self.sources.handled(&row);
+                }
+            }
+            Err(_) => self.read_error = Some("delivery_catalog_unavailable"),
+        }
+    }
+
+    fn scan_page(&mut self, store: &mut Store) {
+        match self.sources.page(store) {
+            Ok(candidates) => {
+                if self.approving() {
+                    for candidate in candidates {
+                        self.inspect(store, candidate);
+                    }
+                }
+            }
+            Err(_) => self.read_error = Some("delivery_catalog_unavailable"),
+        }
+    }
+
+    /// Starts the native inspection of `candidate` unless it needs none now
+    /// (inspected within the cooldown, already under way, or no longer the
+    /// current row). False only when no approval slot is free.
+    fn inspect(&mut self, store: &Store, candidate: catalog::Candidate) -> bool {
         let key = format!(
             "{:x}",
             Sha256::digest(
@@ -683,10 +722,10 @@ impl Runtime {
                 .any(|old| old.target.key == candidate.target.key)
             || !self.sources.same(store, &candidate).unwrap_or(false)
         {
-            return;
+            return true;
         }
         let Some(lease) = self.lease(Kind::Approval) else {
-            return;
+            return false;
         };
         if self.recent.len() == RECENT {
             self.recent.pop_front();
@@ -696,6 +735,7 @@ impl Runtime {
         let work = Work::Inspect(candidate.target.clone());
         let job = self.launch(Phase::Inspect(candidate), inv, work, lease);
         self.jobs.push(job);
+        true
     }
 
     fn finish(&mut self, store: &mut Store, job: &mut Job) -> Result<bool> {

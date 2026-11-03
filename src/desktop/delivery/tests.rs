@@ -1,5 +1,6 @@
 use super::*;
 use crate::desktop::{feed, store::Location};
+use rusqlite::params;
 use std::sync::{atomic::AtomicUsize, Mutex};
 use zerus_watch_protocol::CatalogItem;
 
@@ -1060,4 +1061,157 @@ fn rows_stored_before_the_index_are_found_once_the_scan_backfills_them() {
     // The next scan finds nothing left and stops backfilling.
     f.scan();
     assert!(f.runtime.backfilled);
+}
+
+/// Rows the approval policy reads: `name` in `phase`, keyed by its run.
+fn named(name: &str, phase: &str, tracked: bool) -> CatalogItem {
+    let mut row = row();
+    row["name"] = json!(format!("claude/example/{name}"));
+    row["phase"] = json!(phase);
+    row["tracked"] = json!(tracked);
+    row["run_id"] = json!(format!("run-{name}"));
+    row["conversation_id"] = json!(format!("conversation-{name}"));
+    CatalogItem {
+        key: format!("run:run-{name}"),
+        row,
+    }
+}
+
+/// Idle rows first: the one-page catalog walk needs 32 scans to pass them,
+/// so within these tests only the approval-phase index reaches what follows.
+fn idle(count: usize) -> Vec<CatalogItem> {
+    (0..count)
+        .map(|n| named(&format!("idle-{n}"), "working", true))
+        .collect()
+}
+
+impl Fixture {
+    /// One scan, its inspections settled, then a second passes: the 5 s
+    /// inspection cooldown counts it.
+    fn second(&mut self) {
+        self.scan();
+        self.tick_until(|r| r.jobs.is_empty());
+        for (_, at) in self.runtime.recent.iter_mut() {
+            *at = at.checked_sub(Duration::from_secs(1)).unwrap_or(*at);
+        }
+    }
+}
+
+#[test]
+fn questions_that_need_manual_trust_cannot_keep_a_later_indexed_row_waiting() {
+    // Review of #1191: 96 flagged sessions whose native questions need manual
+    // trust, and only the fourth one's could be approved. With two approval
+    // slots, rows past the second of each indexed page were dropped while the
+    // pass moved on, and the same first rows came back as their cooldown ran
+    // out: the fourth row was never inspected. A pass now moves only past
+    // rows it inspected or decided.
+    let (run, seen) = inspections();
+    let mut f = Fixture::new(run);
+    f.active();
+    f.enabled(true);
+    let mut rows = idle(4_000);
+    rows.extend((0..96).map(|n| named(&format!("ask-{n}"), "approval", true)));
+    f.source_rows(rows);
+    for _ in 0..18 {
+        f.second();
+    }
+    let seen = seen.lock().unwrap();
+    assert!(seen.iter().any(|a| a == "claude/example/ask-3"), "{seen:?}");
+    // Two slots a scan, in pass order, each row once and none skipped (the
+    // two inspections of one scan run side by side, in either order).
+    let mut asked: Vec<usize> = seen
+        .iter()
+        .filter_map(|a| a.strip_prefix("claude/example/ask-")?.parse().ok())
+        .collect();
+    assert_eq!(asked.len(), 36, "{asked:?}");
+    asked.sort_unstable();
+    assert_eq!(asked, (0..36).collect::<Vec<_>>());
+    assert!(!seen.iter().any(|a| a.contains("/idle-")));
+}
+
+#[test]
+fn a_pass_ends_where_it_began_so_arrivals_cannot_hide_an_older_row() {
+    // Review of #1191: an older session entering approval behind the pass,
+    // while 16 new flagged rows arrive before every scan, was never found
+    // again: every page stayed full and the pass never wrapped. A pass now
+    // ends at the highest flagged row it started with.
+    let untracked = named("untracked-0", "approval", false).row;
+    assert!(zerus_desktop_catalog::approvals::approval_phase(&untracked));
+    assert!(policy::candidate("", &zerus_client_core::view::row(&untracked)).is_none());
+    let (run, seen) = inspections();
+    let mut f = Fixture::new(run);
+    f.active();
+    f.enabled(true);
+    let mut rows = idle(4_000);
+    rows.push(named("older", "working", true));
+    rows.extend((0..20).map(|n| named(&format!("untracked-{n}"), "approval", false)));
+    f.source_rows(rows);
+    f.second();
+    let generation: i64 = f
+        .store
+        .db
+        .query_row(
+            "SELECT generation FROM desktop_catalog_rows WHERE key='run:run-older'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    // The older session enters approval, keeping its row id.
+    let older = named("older", "approval", true).row.to_string();
+    f.store
+        .db
+        .execute(
+            "UPDATE desktop_catalog_rows SET json=?1,bytes=length(?1),approval=1
+             WHERE generation=?2 AND key='run:run-older'",
+            params![older, generation],
+        )
+        .unwrap();
+    let mut arrived = 20;
+    for _ in 0..4 {
+        for _ in 0..16 {
+            let row = named(&format!("untracked-{arrived}"), "approval", false);
+            let json = row.row.to_string();
+            f.store
+                .db
+                .execute(
+                    "INSERT INTO desktop_catalog_rows(generation,key,json,bytes,approval)
+                     VALUES(?1,?2,?3,length(?3),1)",
+                    params![generation, row.key, json],
+                )
+                .unwrap();
+            arrived += 1;
+        }
+        f.second();
+    }
+    let seen = seen.lock().unwrap();
+    assert!(seen.iter().any(|a| a == "claude/example/older"), "{seen:?}");
+}
+
+#[test]
+fn the_catalog_walk_still_gets_approval_slots_while_the_index_is_busy() {
+    // The index and the walk take turns to go first: a row only the walk
+    // sees (here, one whose flag is wrong) is inspected while 40 indexed
+    // rows would otherwise keep both approval slots for 20 scans.
+    let (run, seen) = inspections();
+    let mut f = Fixture::new(run);
+    f.active();
+    f.enabled(true);
+    let mut rows = vec![named("unflagged", "approval", true)];
+    rows.extend((0..40).map(|n| named(&format!("ask-{n}"), "approval", true)));
+    f.source_rows(rows);
+    f.store
+        .db
+        .execute(
+            "UPDATE desktop_catalog_rows SET approval=0 WHERE key='run:run-unflagged'",
+            [],
+        )
+        .unwrap();
+    for _ in 0..4 {
+        f.second();
+    }
+    let seen = seen.lock().unwrap();
+    assert!(
+        seen.iter().any(|a| a == "claude/example/unflagged"),
+        "{seen:?}"
+    );
 }

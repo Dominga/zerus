@@ -87,6 +87,7 @@ pub mod renderer;
 mod replay;
 #[cfg(feature = "live")]
 mod screens;
+mod selection_diagnostic;
 #[cfg(feature = "live")]
 mod session_files;
 #[cfg(feature = "live")]
@@ -1409,6 +1410,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::unfollow,
         commands::metrics,
         commands::perf_config,
+        commands::acceptance_selection,
         commands::save_perf,
         commands::perf_log,
         commands::smoke_log,
@@ -1754,6 +1756,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::tasks_follow,
         commands::metrics,
         commands::perf_config,
+        commands::acceptance_selection,
         commands::save_perf,
         commands::perf_log,
         commands::display_hz,

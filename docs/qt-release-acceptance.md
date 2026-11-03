@@ -284,6 +284,17 @@ Capture/report success alone does not complete G3 or installed acceptance.
 
 ## macOS
 
+For a coordinator-approved private click fixture, opt in to actual GUI selection
+readback with `ZERUS_CLIENT_ACCEPTANCE_SELECTION=1` and a canonical, owned 0700
+`XDG_STATE_HOME`. The main webview records its current page, detail tab and selected
+computer/name/run/conversation in `hgs/client-selection-diagnostic.json` below that
+private state directory (atomic 0600, at most 2 KiB, timestamp and source commit).
+Only one write and the latest pending observation are retained. Match this actual
+selection against the original Delivered mapping after the owner's click; a native
+intended target or a visible project alone does not prove the selected Activity.
+The opt-in is off by default and accepts no navigation, permission or service
+command. Readback is observation only and never supplies authority.
+
 Use the signed/notarized Next bundle/cask and the maintained local installer for
 the owner's main-account evaluation. **Run Mac first after the source admission
 gates merge; GUI/native acceptance may run at any time without a separate owner

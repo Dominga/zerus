@@ -22,6 +22,10 @@ fn task(folder: &ITaskFolder, plan: &Plan, wanted: &Shape) -> Result<IRegistered
         state: unsafe { task.State() }?.0,
     }
     .validate(wanted, &plan.sid)?;
+    ensure!(
+        text(&unsafe { task.Path() }?)? == format!(r"\{}", plan.name),
+        "Owned task path differs."
+    );
     Ok(task)
 }
 
@@ -32,18 +36,25 @@ fn guid(instance: &IRunningTask) -> Result<String> {
     Ok(value)
 }
 
-fn instances(task: &IRegisteredTask) -> Result<Vec<IRunningTask>> {
-    let list = unsafe { task.GetInstances(0) }?;
-    let count = unsafe { list.Count() }?;
-    // The maintained task's IgnoreNew policy admits only one instance. Extra
-    // instances are an uncertain topology, never permission to stop them all.
+fn instances(native: &Native, task: &IRegisteredTask, until: Instant) -> Result<Vec<IRunningTask>> {
     ensure!(
-        (0..=1).contains(&count),
-        "Multiple task instances require inspection."
+        Instant::now() < until,
+        "Running-task verification deadline expired."
     );
-    (1..=count)
-        .map(|index| Ok(unsafe { list.get_Item(&VARIANT::from(index)) }?))
-        .collect()
+    let owned_path = text(&unsafe { task.Path() }?)?;
+    // GetInstances reserves flags=0 and may omit the maintained hidden task.
+    // Use the documented hidden-aware API on the SAME retained connection.
+    let list = unsafe { native.scheduler.GetRunningTasks(TASK_ENUM_HIDDEN.0) }?;
+    let count = unsafe { list.Count() }?;
+    policy::running::select(count, &owned_path, until, |index| {
+        let instance = unsafe { list.get_Item(&VARIANT::from(index)) }?;
+        Ok((text(&unsafe { instance.Path() }?)?, instance))
+    })
+}
+
+/// A filtered empty collection alone cannot establish absence or drain.
+fn idle(task: &IRegisteredTask) -> Result<bool> {
+    policy::running::idle(unsafe { task.State() }?.0)
 }
 
 fn session(pid: u32) -> Result<u32> {
@@ -374,12 +385,21 @@ impl Running {
             .context("Original task stop result is unknown; inspect the pending transition.")?;
         fence()
     }
-    pub(super) fn exited(&self, selected: &IRegisteredTask) -> Result<bool> {
+    pub(super) fn exited(
+        &self,
+        native: &Native,
+        selected: &IRegisteredTask,
+        until: Instant,
+    ) -> Result<bool> {
         ensure!(self.stopped, "Original task was not stopped.");
         if !self.service.process.exited() {
             return Ok(false);
         }
-        Ok(instances(selected)?
+        let visible = instances(native, selected, until)?;
+        if visible.is_empty() {
+            return idle(selected);
+        }
+        Ok(visible
             .iter()
             .all(|instance| guid(instance).is_ok_and(|id| id != self.guid)))
     }
@@ -393,12 +413,16 @@ pub(super) fn original(
     until: Instant,
 ) -> Result<Option<Running>> {
     let selected = task(&native.folder, plan, wanted)?;
-    let mut values = instances(&selected)?;
+    let mut values = instances(native, &selected, until)?;
     match values.pop() {
         Some(instance) => Running::bind(instance, location, plan, None, until)?
             .map(Some)
             .context("Task is running but its original desktop process cannot be verified."),
         None => {
+            ensure!(
+                idle(&selected)?,
+                "Owned task is active but its original instance is not visible."
+            );
             ensure!(
                 crate::desktop::connection(location, "status", None)?.is_none(),
                 "A desktop process exists outside this task instance."
@@ -413,8 +437,9 @@ pub(super) fn stopped(
     plan: &Plan,
     wanted: &Shape,
     original: &Running,
+    until: Instant,
 ) -> Result<bool> {
-    original.exited(&task(&native.folder, plan, wanted)?)
+    original.exited(native, &task(&native.folder, plan, wanted)?, until)
 }
 
 pub(super) fn stop_original(
@@ -422,11 +447,12 @@ pub(super) fn stop_original(
     plan: &Plan,
     wanted: &Shape,
     original: &mut Running,
+    until: Instant,
     fence: &mut impl FnMut() -> Result<()>,
 ) -> Result<()> {
     fence()?;
     let selected = task(&native.folder, plan, wanted)?;
-    let values = instances(&selected)?;
+    let values = instances(native, &selected, until)?;
     ensure!(
         values.len() == 1 && guid(&values[0])? == original.guid,
         "Original task selection changed before stop."
@@ -440,6 +466,7 @@ pub(super) fn replace(
     location: &Location,
     old: (&Plan, &Shape),
     new: (&Plan, &Shape),
+    until: Instant,
     fence: &mut impl FnMut() -> Result<()>,
 ) -> Result<()> {
     let (old_plan, old_shape) = old;
@@ -460,7 +487,7 @@ pub(super) fn replace(
     fence()?;
     let selected = task(&native.folder, old_plan, old_shape)?;
     ensure!(
-        instances(&selected)?.is_empty(),
+        instances(native, &selected, until)?.is_empty() && idle(&selected)?,
         "Original task instances have not drained."
     );
     ensure!(
@@ -554,7 +581,7 @@ pub(super) fn observe_started(
     until: Instant,
 ) -> Result<Option<Running>> {
     let selected = task(&native.folder, plan, wanted)?;
-    let Some(instance) = instances(&selected)?.pop() else {
+    let Some(instance) = instances(native, &selected, until)?.pop() else {
         return Ok(None);
     };
     if guid(&instance)? != expected {
@@ -568,6 +595,7 @@ pub(super) fn start(
     location: &Location,
     plan: &Plan,
     wanted: &Shape,
+    until: Instant,
     fence: &mut impl FnMut() -> Result<()>,
 ) -> Result<Starting> {
     let session = crate::host::token::windows_session()?;
@@ -578,7 +606,7 @@ pub(super) fn start(
     fence()?;
     let selected = task(&native.folder, plan, wanted)?;
     ensure!(
-        instances(&selected)?.is_empty(),
+        instances(native, &selected, until)?.is_empty() && idle(&selected)?,
         "A task instance already exists; no second start is allowed."
     );
     ensure!(

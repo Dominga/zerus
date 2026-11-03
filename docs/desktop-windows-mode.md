@@ -61,6 +61,22 @@ connections keep their client impersonation and integrity checks. These are
 separate endpoint roles; a failed check never falls back to the opposite role
 or the checking process's own PID.
 
+The maintained task is hidden. Instance discovery uses the same retained local
+`ITaskService::GetRunningTasks(TASK_ENUM_HIDDEN)` connection, after validating
+the registered definition, SID, ACL and exact root task path. It reads at most
+256 entries under the original phase deadline and keeps only that exact path;
+duplicates, unknown paths/counts, COM errors or expiry refuse. Other known task
+paths are ignored and confer no authority. `GetInstances` continues to reserve
+flags zero; no undocumented flags are used. Microsoft provides the
+[hidden-aware enumeration example](https://learn.microsoft.com/en-us/windows/win32/taskschd/displaying-task-names-and-state--c---).
+
+Discovery is security-context filtered. An empty scan never proves that the
+original process exited or resources drained: the held-process physical exit,
+task activity and endpoint-owner checks still apply. A running/queued task with
+no visible original cannot authorize another start. Recovery still joins the
+same recorded GUID to full native process/pipe readiness, then completes only
+the original UUID. It does not repeat Stop, update, RunEx or revoke.
+
 A registered CLI that refuses startup with exit code 78 retains its last bounded
 error in the existing private desktop state's `startup-failure.json`, when that
 state is safe and writable. The record includes configuration, PID/birth and the

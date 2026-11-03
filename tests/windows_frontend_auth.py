@@ -286,7 +286,10 @@ class WindowsTaskMode(unittest.TestCase):
         record = json.loads(path.read_text(encoding='utf-8'))
         # Arrange an actual successful start whose reply was lost. The SAME
         # native instance must settle through the helper; no file reset follows.
-        request_id = str(uuid.uuid4())
+        request_id = passive['request_id']
+        self.assertEqual(record['completed'], request_id)
+        before = self.observe()
+        record['completed'] = None  # original completion reply/save was lost
         record['pending'] = dict(request_id=request_id, desired='passive', phase='start_offered',
                                  original=None, started=passive['instance']['guid'])
         path.write_text(json.dumps(record), encoding='utf-8')
@@ -296,6 +299,7 @@ class WindowsTaskMode(unittest.TestCase):
         self.assertEqual(settled['request_id'], request_id)
         self.assertEqual(settled['instance'], passive['instance'])
         self.assertFalse(settled['manager_changed'])
+        self.assertEqual(self.observe(), before, 'same GUID/process/start time; no manager replay')
         self.assertIsNone(json.loads(path.read_text(encoding='utf-8'))['pending'])
         self.assertEqual(self.cli('desktop', 'ownership-status', '--json')['state'], 'passive')
         # A reboot/restart may invalidate the original tuple before any manager
@@ -446,7 +450,25 @@ class WindowsTaskMode(unittest.TestCase):
         request = self.root / ('sdk-' + str(uuid.uuid4()) + '.json')
         request.write_text(json.dumps(data), encoding='utf-8')
         escaped = str(request).replace("'", "''")
-        body = "$ErrorActionPreference='Stop';$x=Get-Content -Raw -LiteralPath '" + escaped + "'|ConvertFrom-Json;" + script
+        lookup = r'''
+function Get-OwnInstances($scheduler,$registered) {
+ $path=[string]$registered.Path;
+ if($path-cne ('\'+[string]$x.task)) {throw 'fixture registered task path changed'};
+ $clock=[Diagnostics.Stopwatch]::StartNew();$all=$scheduler.GetRunningTasks(1);$count=$all.Count;
+ if($count-lt 0 -or $count-gt 256) {throw 'fixture running inventory exceeds its bound'};
+ $items=@();for($index=1;$index-le $count;$index++) {
+  if($clock.ElapsedMilliseconds-ge 2000) {throw 'fixture original scan deadline expired'};
+  $candidate=$all.Item($index);$candidatePath=[string]$candidate.Path;
+  if([string]::IsNullOrEmpty($candidatePath)-or $candidatePath.Length-gt 32768) {throw 'fixture task path unavailable'};
+  if($candidatePath-ceq $path) {
+   $items+=@($candidate);if($items.Count-gt 1) {throw 'fixture has multiple exact task instances'}
+  }
+ };
+ if($clock.ElapsedMilliseconds-ge 2000) {throw 'fixture original scan deadline expired'};
+ return $items
+};
+'''
+        body = "$ErrorActionPreference='Stop';$x=Get-Content -Raw -LiteralPath '" + escaped + "'|ConvertFrom-Json;" + lookup + script
         command = [str(Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'),
                    '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
                    base64.b64encode(body.encode('utf-16le')).decode('ascii')]
@@ -458,10 +480,10 @@ class WindowsTaskMode(unittest.TestCase):
     def observe(self):
         return self.powershell(r'''
 $s=New-Object -ComObject Schedule.Service;$s.Connect();$t=$s.GetFolder('\').GetTask($x.task);
-$items=@();foreach($i in $t.GetInstances(0)) {
+$items=@();foreach($i in @(Get-OwnInstances $s $t)) {
  $p=$null;try {$p=[Diagnostics.Process]::GetProcessById($i.EnginePID).ProcessName} catch {}
  $items+=@{guid=$i.InstanceGuid;engine_pid=$i.EnginePID;engine_image=$p;state=[int]$i.State}
-};@{instances=$items;state=[int]$t.State;last_task_result=[int64]$t.LastTaskResult;
+};@{instances=$items;registered_instances_count=$t.GetInstances(0).Count;hidden=[bool]$t.Definition.Settings.Hidden;state=[int]$t.State;last_task_result=[int64]$t.LastTaskResult;
 last_run_utc=$t.LastRunTime.ToUniversalTime().ToString('o')}|ConvertTo-Json -Compress -Depth 4
 ''', dict(task=self.task))
 
@@ -530,16 +552,16 @@ $items=@();foreach($p in $x.paths) {
 $s=New-Object -ComObject Schedule.Service;$s.Connect();$t=$s.GetFolder('\').GetTask($x.task);
 $d=$t.Definition;
 if($d.Actions.Count-ne 1 -or $d.Actions.Item(1).Path-cne $x.image -or $d.Principal.UserId-ne $x.sid) {throw 'fixture task definition changed'};
-$values=@($t.GetInstances(0));if($values.Count-ne 1) {throw 'fixture task instance count changed'};
-$i=$values[0];$i.Refresh();if($i.InstanceGuid-cne $x.guid -or $i.EnginePID-ne $x.pid) {throw 'fixture original instance changed'};
+$values=@(Get-OwnInstances $s $t);if($values.Count-ne 1) {throw 'fixture task instance count changed'};
+$i=$values[0];$i.Refresh();$guid=$i.InstanceGuid;if($guid-cne $x.guid -or $i.EnginePID-ne $x.pid) {throw 'fixture original instance changed'};
 $p=[Diagnostics.Process]::GetProcessById($i.EnginePID);$handle=$p.Handle;
 if($p.HasExited -or $p.StartTime.ToFileTimeUtc()-ne $x.birth -or $p.MainModule.FileName-cne $x.image) {
  @{stopped=$false;reason='original_birth_or_image_changed'}|ConvertTo-Json -Compress;exit 0
 };
 $i.Refresh();if($i.InstanceGuid-cne $x.guid -or $i.EnginePID-ne $p.Id) {throw 'fixture instance changed before stop'};
 $i.Stop();if(-not $p.WaitForExit(5000)) {throw 'fixture original process exit unconfirmed'};
-if(@($t.GetInstances(0)).Count-ne 0) {throw 'fixture instance remains'};
-@{stopped=$true;original_pid=$p.Id;original_guid=$i.InstanceGuid}|ConvertTo-Json -Compress
+if(@(Get-OwnInstances $s $t).Count-ne 0) {throw 'fixture instance remains'};
+@{stopped=$true;original_pid=$p.Id;original_guid=$guid}|ConvertTo-Json -Compress
 ''', dict(task=self.task, image=str(self.cli_image), sid=self.sid, guid=expected['guid'],
           pid=expected['pid'], birth=expected['birth'] + (1 if wrong_birth else 0)))
 
@@ -574,6 +596,11 @@ if(@($t.GetInstances(0)).Count-ne 0) {throw 'fixture instance remains'};
             self.latest = passive['instance']
             self.assertEqual(passive['selected_mode'], 'passive')
             self.assert_exact_user_created_state()
+            discovery = self.observe()
+            self.assertTrue(discovery['hidden'], discovery)
+            self.assertEqual([item['guid'] for item in discovery['instances']],
+                             [passive['instance']['guid']], discovery)
+            print('MODE_TASK_HIDDEN_DISCOVERY ' + json.dumps(discovery), file=sys.stderr)
             self.assertIsNone(shell.poll())
             passive = self.recover_initial_start_and_cancel_background_before_a_grant(passive)
             self.grant()

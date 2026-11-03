@@ -333,6 +333,7 @@ fn shape(definition: &ITaskDefinition) -> Result<Shape> {
 
 struct Native {
     folder: ITaskFolder,
+    scheduler: ITaskService,
 }
 impl Scheduler for Native {
     fn read(&mut self, name: &str) -> Result<Option<Task>> {
@@ -435,7 +436,14 @@ fn operation(args: &[String], trace: &mut Trace) -> Result<Value> {
     );
     let folder = unsafe { service.GetFolder(&BSTR::from("\\")) }?;
     trace.phase("folder");
-    let reply = policy::perform_preserving_mode(&plan, &wanted, &mut Native { folder })?;
+    let reply = policy::perform_preserving_mode(
+        &plan,
+        &wanted,
+        &mut Native {
+            folder,
+            scheduler: service.clone(),
+        },
+    )?;
     trace.phase("done");
     Ok(reply)
 }

@@ -502,8 +502,15 @@ fn effect(runtime: Runtime<'_>, desired: Mode) -> Result<Value> {
     if let Some(original) = &mut original {
         record.advance(Phase::Held, Phase::StopOffered)?;
         save(location, passive, &record, &mut || fence.check())?;
-        instances::stop_original(native, old, &wanted(old)?, original, &mut || fence.check())?;
-        while !instances::stopped(native, old, &wanted(old)?, original)? {
+        instances::stop_original(
+            native,
+            old,
+            &wanted(old)?,
+            original,
+            fence.until,
+            &mut || fence.check(),
+        )?;
+        while !instances::stopped(native, old, &wanted(old)?, original, fence.until)? {
             fence.check()?;
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -521,6 +528,7 @@ fn effect(runtime: Runtime<'_>, desired: Mode) -> Result<Value> {
         location,
         (old, &wanted(old)?),
         (new, &wanted(new)?),
+        fence.until,
         &mut || fence.check(),
     )?;
     record.advance(Phase::UpdateOffered, Phase::Updated)?;
@@ -528,8 +536,14 @@ fn effect(runtime: Runtime<'_>, desired: Mode) -> Result<Value> {
     fence.phase(Budget::Start);
     record.advance(Phase::Updated, Phase::StartOffered)?;
     save(location, passive, &record, &mut || fence.check())?;
-    let mut started =
-        instances::start(native, location, new, &wanted(new)?, &mut || fence.check())?;
+    let mut started = instances::start(
+        native,
+        location,
+        new,
+        &wanted(new)?,
+        fence.until,
+        &mut || fence.check(),
+    )?;
     record.pending.as_mut().expect("pending").started = Some(started.id().into());
     save(location, passive, &record, &mut || fence.check())?;
     fence.phase(Budget::Readiness);
@@ -638,6 +652,7 @@ fn operation(args: &[String]) -> Result<Value> {
     }?;
     let mut native = Native {
         folder: unsafe { scheduler.GetFolder(&BSTR::from("\\")) }?,
+        scheduler: scheduler.clone(),
     };
     if let Some((mut record, id)) = offered_cancel {
         // This read-only lane returns before the effect path. It cannot stop,

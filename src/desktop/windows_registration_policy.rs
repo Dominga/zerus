@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 pub(super) const CAP: usize = 64 * 1024;
 
 pub(super) mod mode;
+pub(super) mod running;
 
 /// Read only the original length-delimited request; never wait for pipe EOF.
 /// The caller's original process runner owns the deadline and physical wait.

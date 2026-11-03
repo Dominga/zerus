@@ -116,12 +116,30 @@ fn callback_lock_contention_is_definitely_before_record_and_explicitly_retryable
                     let mut record = saved.record;
                     record.phase = Phase::Unknown;
                     j.save(record, Some(&saved.sha256)).unwrap();
+                } else if self.persisted >= 3 {
+                    // Each is well-shaped metadata, but not the SAME attempt
+                    // and receipt that this callback was preparing.
+                    let mut record = saved.record;
+                    match self.persisted {
+                        3 => record.attempt += 1,
+                        4 => record.created_at += 1,
+                        5 => {
+                            record.expected.as_mut().unwrap().import_record.sha256 = "e".repeat(64)
+                        }
+                        _ => unreachable!(),
+                    }
+                    assert!(record.valid());
+                    zerus_client_core::fsx::write_private_durable(
+                        &self.data.join("creations-retained-import-v1.json"),
+                        &serde_json::to_vec(&record).unwrap(),
+                    )
+                    .unwrap();
                 }
             }
         }
     }
     let _process = crate::PROCESS_TREE.read().unwrap();
-    for persisted in 0..3 {
+    for persisted in 0..6 {
         let f = Fixture::new("success");
         source(&f);
         let id = f.report.inputs.creations.status().capture_id.unwrap();
@@ -146,7 +164,7 @@ fn callback_lock_contention_is_definitely_before_record_and_explicitly_retryable
         }));
         assert_eq!(
             run(&f, false),
-            Err(if persisted == 2 {
+            Err(if persisted >= 2 {
                 "creations_import_record_unavailable"
             } else {
                 "creations_import_before_record"
@@ -165,6 +183,8 @@ fn callback_lock_contention_is_definitely_before_record_and_explicitly_retryable
             saved.phase,
             if persisted == 2 {
                 Phase::Unknown
+            } else if persisted >= 3 {
+                Phase::Attempted
             } else {
                 Phase::BeforeRecord
             }
@@ -183,7 +203,7 @@ fn callback_lock_contention_is_definitely_before_record_and_explicitly_retryable
             );
             assert_eq!(
                 result,
-                if persisted == 2 {
+                if persisted >= 2 {
                     Err("creations_import_original_result_unconfirmed")
                 } else if explicit {
                     Ok(())
@@ -197,16 +217,116 @@ fn callback_lock_contention_is_definitely_before_record_and_explicitly_retryable
             current.phase,
             if persisted == 2 {
                 Phase::Unknown
+            } else if persisted >= 3 {
+                Phase::Attempted
             } else {
                 Phase::Published
             }
         );
-        assert_eq!(current.attempt, if persisted == 2 { 1 } else { 2 });
+        assert_eq!(
+            current.attempt,
+            if persisted < 2 { 2 } else { saved.attempt }
+        );
         assert_eq!(current.import_id, saved.import_id);
         assert_eq!(current.source, saved.source);
         assert_eq!(current.created_at, saved.created_at);
-        assert_eq!(f.attempts(), if persisted == 2 { 1 } else { 2 });
+        assert_eq!(f.attempts(), if persisted >= 2 { 1 } else { 2 });
     }
+}
+
+#[test]
+fn a_source_changed_inside_the_callback_is_quarantined_without_a_commit_record() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    let f = Fixture::new("success");
+    source(&f);
+    let id = f.report.inputs.creations.status().capture_id.unwrap();
+    let path = f.root.join("creation-preload-v1/original.bin");
+    let changed = b"changed inside the final callback";
+    let replace = path.clone();
+    f.report.creation_state().before_record = Some(Box::new(move |_| {
+        zerus_client_core::fsx::write_private_durable(&replace, changed).unwrap();
+        Box::new(())
+    }));
+    assert_eq!(
+        run(&f, false),
+        Err("creations_import_source_kept_for_review")
+    );
+    assert_eq!(f.report.creation_status()["phase"], "quarantined");
+    assert_eq!(f.report.creation_status()["import_id"], id);
+    assert_eq!(fs::read(path).unwrap(), changed);
+    assert!(!f.root.join("committed.json").exists());
+    assert!(!f.root.join(format!("record-{id}.json")).exists());
+    assert_eq!(
+        run(&f, true),
+        Err("creations_import_source_kept_for_review")
+    );
+    assert_eq!(f.attempts(), 1);
+}
+
+#[test]
+fn callback_failure_then_unreadable_reconciliation_never_replays_after_metadata_recovers() {
+    use std::os::{fd::AsRawFd, unix::fs::PermissionsExt};
+    struct Held {
+        file: std::fs::File,
+        journal: PathBuf,
+    }
+    impl Drop for Held {
+        fn drop(&mut self) {
+            let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+            fs::set_permissions(&self.journal, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+    }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    let f = Fixture::new("success");
+    source(&f);
+    let id = f.report.inputs.creations.status().capture_id.unwrap();
+    let lock = f.root.join("creations-retained-import-v1.lock");
+    let journal = f.root.join("creations-retained-import-v1.json");
+    let affect = journal.clone();
+    f.report.creation_state().before_record = Some(Box::new(move |_| {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(lock)
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        Box::new(Held {
+            file,
+            journal: affect,
+        })
+    }));
+    assert_eq!(run(&f, false), Err("creations_import_record_unavailable"));
+    assert!(!f.root.join("committed.json").exists());
+    assert!(!f.root.join(format!("record-{id}.json")).exists());
+    let bytes = fs::read(&journal).unwrap();
+    let record: CreationRecord = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(record.phase, Phase::Attempted);
+    assert!(record.expected.is_none());
+    assert_eq!(record.import_id, id);
+    // Restoring access is not permission to turn an Attempted record into a
+    // new publication. The lost durable preparation proof needs review.
+    fs::set_permissions(&journal, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        run(&f, true),
+        Err("creations_import_original_result_unconfirmed")
+    );
+    let restarted = Report::new(f.report.inputs.clone());
+    let charge = restarted.work.admit(Role::Operations).unwrap();
+    assert_eq!(
+        restarted.run_creation(
+            f.relay.clone(),
+            "a".repeat(64),
+            Arc::new(AtomicBool::new(false)),
+            true,
+            Arc::new(charge)
+        ),
+        Err("creations_import_original_result_unconfirmed")
+    );
+    assert_eq!(f.attempts(), 1);
+    assert_eq!(fs::read(journal).unwrap(), bytes);
 }
 
 #[test]

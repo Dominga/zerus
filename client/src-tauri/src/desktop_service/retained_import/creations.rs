@@ -237,16 +237,16 @@ impl Report {
         let failed = failed_preparation.clone();
         let result = publisher.publish_with_receipt(bundle, move |expected| {
             let prepared = (|| {
+                #[cfg(test)]
+                let hook = report.creation_state().before_record.take();
+                #[cfg(test)]
+                let _held = hook.map(|hook| hook(expected));
                 if stop.load(Ordering::Acquire) {
                     return Err(SourceError::SourceUnreadable);
                 }
                 if snapshot.reference()? != reference {
                     return Err(SourceError::SourceChanged);
                 }
-                #[cfg(test)]
-                let hook = report.creation_state().before_record.take();
-                #[cfg(test)]
-                let _held = hook.map(|hook| hook(expected));
                 report
                     .save_creation(&save, |r| {
                         if r.attempt != attempt {

@@ -182,3 +182,36 @@ fn unused_bad_flag_and_old_seed_keys_cannot_override_an_existing_choice() {
     let value = saved(&path, settings);
     assert!(value["g3"]["families"].get("project-vivid").is_some());
 }
+
+/// #1243 review: the report says when project fills kept Next values. One
+/// Qt key fills many projects: kept when some project kept its Next value,
+/// imported when some fill imported (Q1, Q1b).
+#[test]
+fn the_preference_report_shows_kept_and_imported_project_fills() {
+    let organization = json!({"version":2,"projects":[
+        {"id":"alpha","name":"Alpha","vivid":true},
+        {"id":"beta","name":"Beta","vivid":false}]});
+    let family = |values: Value| {
+        let scratch = Scratch::new();
+        let path = scratch.settings(values);
+        let (store, _) = scratch.qt(&organization);
+        let settings = Settings::open(path, Some(store));
+        assert!(settings.flush_within(Duration::from_secs(5)));
+        settings.preference_report()["families"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["family"] == "project-vivid")
+            .cloned()
+            .unwrap()
+    };
+    let both = family(json!({"projects/vivid/alpha": false}));
+    assert_eq!(both["imported"], json!(["workspace/organization"]));
+    assert_eq!(both["kept"], json!(["workspace/organization"]));
+    let kept = family(json!({"projects/vivid/alpha": false, "projects/vivid/beta": true}));
+    assert_eq!(kept["imported"], json!([]));
+    assert_eq!(kept["kept"], json!(["workspace/organization"]));
+    let imported = family(json!({}));
+    assert_eq!(imported["imported"], json!(["workspace/organization"]));
+    assert_eq!(imported["kept"], json!([]));
+}

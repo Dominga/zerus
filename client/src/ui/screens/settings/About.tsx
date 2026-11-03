@@ -1,4 +1,5 @@
 import { DesktopServiceStatus } from "../../components/DesktopServiceStatus";
+import { MigrationReportDialog } from "../../components/MigrationReportDialog";
 import { Show, createSignal, onMount } from "solid-js";
 import { desktopService, checkDesktopServiceStatus } from "../../../store/desktopService";
 import { toast } from "../../../store/ui";
@@ -40,6 +41,9 @@ export function refreshAbout() {
 
 export function AboutSection() {
   onMount(refreshAbout);
+  // The same read-only Migration report the service status offers, in every
+  // mode: without the background service it is otherwise unreachable.
+  const [reportOrigin, setReportOrigin] = createSignal<HTMLElement>();
   return (
     <>
       <SectionHead title={trNoop("About")} />
@@ -61,11 +65,17 @@ export function AboutSection() {
         </section>
       </Show>
       <div>
+        <button type="button" class="btn" onClick={(event) => setReportOrigin(event.currentTarget)}>
+          <Icon name="file-text" size={16} />{tr("Migration report…")}
+        </button>
+      </div>
+      <div>
         <button class="btn" title="https://github.com/ufna/zerus" aria-label={tr("Open Zerus repository on GitHub")}
           onClick={() => { if (inTauri()) void invoke("open_repository").catch(() => {}); }}>
           <Icon name="github" size={16} />ufna/zerus
         </button>
       </div>
+      <Show when={reportOrigin()}>{(origin) => <MigrationReportDialog origin={origin()} close={() => setReportOrigin(undefined)} />}</Show>
     </>
   );
 }

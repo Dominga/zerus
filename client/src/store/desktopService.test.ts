@@ -67,6 +67,24 @@ describe("desktop service presentation", () => {
     expect(view().connected).toBe(true);
   });
 
+  it("keeps a paused folder-cache write separate from draft/read capture, publication and service readiness", () => {
+    const base = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
+    const state = serviceView({ retained_source_import: { ...base,
+      worktree_cache_capture: { code: "worktree_cache_source_unsupported", paused: true, capture_id: "original" },
+      local_reads_report: { required: true, complete: false, running: false, code: "local_reads_import_original_result_unconfirmed", phase: "unknown" },
+      drafts_capture: { code: "draft_capture_next_earlier_run", writes: true, paused: false, capture_id: "draft", manifests: 1 } } });
+    const before = structuredClone(state);
+    expect(retainedSourceNotice(state)).toContain("Fresh folder queries and session creation remain available");
+    const detail = retainedSourceDetails(state)!;
+    expect(detail.worktreeCache?.code).toBe("worktree_cache_source_unsupported");
+    expect(detail.worktreeCache?.next).toContain("never replaces a saved original");
+    expect(detail.drafts?.reason).toContain("earlier run");
+    expect(detail.localReadsReport?.next).toContain("checks the original report");
+    expect(state).toEqual(before); expect(state.connected).toBe(true);
+    const unavailable = serviceView({ retained_source_import: { ...base, worktree_cache_capture: { code: "worktree_cache_source_owner_unavailable", paused: true, capture_id: null } } });
+    expect(retainedSourceDetails(unavailable)!.worktreeCache?.next).toContain("Restart Zerus");
+  });
+
   it("reviews the actual migration reason and gives a read-only next step", () => {
     const report = { required: true, complete: false, running: false, code: "retained_import_qt_unavailable", phase: null };
     const state = serviceView({ retained_source_import: report, background: { fleet: { ready: true, code: "ready" } } });

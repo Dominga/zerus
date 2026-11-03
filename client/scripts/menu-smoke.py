@@ -49,7 +49,13 @@ if not args.real_display and not args.xvfb_child:
         command += ["--paint-row", str(args.paint_row)]
     if args.probe_display:
         command.append("--probe-display")
-    child = subprocess.Popen(command, env=env, start_new_session=True)
+    # Debian/Ubuntu xvfb-run runs its command with 2>&1. Hand the child this
+    # stderr as an inherited descriptor, so its reasons (a missing GTK stack,
+    # a refused display) stay on stderr and stdout carries only the result.
+    stderr_fd = os.dup(2)
+    env["ZERUS_MENU_STDERR_FD"] = str(stderr_fd)
+    child = subprocess.Popen(command, env=env, start_new_session=True, pass_fds=(stderr_fd,))
+    os.close(stderr_fd)
     try:
         raise SystemExit(child.wait(timeout=45))
     except subprocess.TimeoutExpired:
@@ -61,6 +67,12 @@ if not args.real_display and not args.xvfb_child:
             os.killpg(child.pid, signal.SIGKILL)
             child.wait(timeout=5)
         raise SystemExit("Private display regression exceeded its deadline")
+
+if args.xvfb_child and os.environ.get("ZERUS_MENU_STDERR_FD", "").isdigit():
+    # Restore the parent's stderr that xvfb-run merged into stdout (see above).
+    inherited = int(os.environ.pop("ZERUS_MENU_STDERR_FD"))
+    os.dup2(inherited, 2)
+    os.close(inherited)
 
 if not args.real_display:
     os.environ["GDK_BACKEND"] = "x11"

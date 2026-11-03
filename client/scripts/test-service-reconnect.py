@@ -98,11 +98,27 @@ def main():
             # GUI test compares the service rows with native delivery and
             # acknowledges that step before the next frame.
             feed, _, frames = fixture.feed()
-            for index, line in enumerate(PARITY_FRAMES[args.scenario].read_text().splitlines()):
-                frame = json.loads(line)['frame']
+            recorded = [json.loads(line)['frame'] for line in PARITY_FRAMES[args.scenario].read_text().splitlines()]
+
+            def step(frame):
+                return frame.get('topic') == 'catalog' and (frame['t'] == 'delta' or frame.get('last'))
+            # Native mode receives its bootstrap (hello, the complete catalog
+            # snapshot, then catalog.meta) as one burst when it subscribes. Send
+            # all of it before waiting for its steps: the GUI's first step (rows
+            # and Live after the snapshot) is still compared, but no longer
+            # depends on how its walks interleave with a half-sent bootstrap
+            # (#1163 review). Every later step has a new catalog revision.
+            snapshot = next(i for i, f in enumerate(recorded) if f.get('topic') == 'catalog' and f['t'] == 'snapshot' and f.get('last'))
+            bootstrap = next(i for i, f in enumerate(recorded) if i > snapshot and f.get('topic') == 'catalog.meta' and f.get('last'))
+            held = []
+            for index, frame in enumerate(recorded):
                 fixture.send(feed, frames, dict(t='watch', computer='peer', generation=1, frame=frame))
-                if frame.get('topic') == 'catalog' and (frame['t'] == 'delta' or frame.get('last')):
-                    wait(f'parity-{index}')
+                if step(frame):
+                    held.append(index)
+                if index >= bootstrap:
+                    for marker in held:
+                        wait(f'parity-{marker}')
+                    held = []
             wait('client-finished')
         elif args.scenario == 'resync':
             # The native watch's overflow resync (gap, then a full snapshot

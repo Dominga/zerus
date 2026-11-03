@@ -8,6 +8,7 @@
 //! [`Change::Tasks`], a changed `catalog.meta` [`Change::Machine`] and the
 //! organization's frames [`Change::Organization`]. Frame types and topics it
 //! does not know change nothing.
+use crate::optional_questions::{archive, conversation, unknown as unknown_questions};
 use crate::{
     view, ActivityUpdate, Change, ComputerId, ComputerStatus, ProcessesState, TasksState, ViewRow,
 };
@@ -854,23 +855,6 @@ struct Question<'a> {
 /// incoming rows look up starts with no row.
 type Index<'a> = HashMap<String, HashMap<String, Option<&'a ViewRow>>>;
 
-/// Qt's `archiveId`: only an archived row has one (`HgsClient.cpp`).
-fn archive(row: &ViewRow) -> &str {
-    if row.state == "archived" {
-        row.archive_id.as_deref().unwrap_or("")
-    } else {
-        ""
-    }
-}
-
-fn conversation(row: &ViewRow) -> &str {
-    row.conversation_id.as_deref().unwrap_or("")
-}
-
-fn unknown_questions(row: &ViewRow) -> bool {
-    row.notify.optional_reported && row.notify.optional_count < 0
-}
-
 fn slot<'i, 'a>(
     index: &'i mut Index<'a>,
     first: &str,
@@ -931,7 +915,7 @@ impl<'a> Before<'a> {
                     }
                 }
             }
-            if old.notify.optional_count >= 0 {
+            if crate::optional_questions::known(old) {
                 let same = |question: &&mut Question| {
                     question.archive == archive(old) && question.conversation == conversation(old)
                 };
@@ -978,9 +962,7 @@ impl<'a> Before<'a> {
                     .flatten()
             });
         if let Some(old) = old {
-            row.notify.optional_count = old.notify.optional_count;
-            row.notify.optional_ids.clone_from(&old.notify.optional_ids);
-            row.optional_question_count = Some(old.notify.optional_count);
+            crate::optional_questions::keep(old, row);
         }
     }
 

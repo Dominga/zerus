@@ -172,6 +172,20 @@ pub(crate) struct NotificationScope {
     generation: u64,
 }
 
+#[cfg(test)]
+impl NotificationScope {
+    /// A service scope for pump tests; real scopes come from catalog delivery.
+    pub(crate) fn for_test(computer: &str) -> Self {
+        Self {
+            computer: computer.into(),
+            configuration: "test-configuration".into(),
+            epoch: "test-epoch".into(),
+            incarnation: 1,
+            generation: 1,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct NotificationReceipt {
     pub(crate) scope: NotificationScope,

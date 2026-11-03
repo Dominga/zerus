@@ -78,6 +78,9 @@ pub struct Leftover {
     /// cannot be read; the checkbox is shown only then.
     pub consent: bool,
     pub deletable: bool,
+    /// The owning macOS CLI refuses directory deletion until its AppleDouble
+    /// by-name behavior has a verified native guard. Display-only guidance.
+    pub macos_deletion_blocked: bool,
     /// False once the repository itself is gone: only Keep folder remains.
     pub repository: bool,
     pub reserved_at: Option<f64>,
@@ -127,7 +130,12 @@ pub fn leftover(row: &Value, repository: bool) -> Option<Leftover> {
         .filter(|message| !message.is_empty())
         .take(20)
         .collect();
-    let deletable = repository && row["deletable"] == true;
+    let macos_deletion_blocked = row["reasons"].as_array().is_some_and(|reasons| {
+        reasons
+            .iter()
+            .any(|reason| reason["code"] == "macos_appledouble_safety")
+    });
+    let deletable = repository && row["deletable"] == true && !macos_deletion_blocked;
     Some(Leftover {
         path: path.into(),
         common_dir: common_dir.into(),
@@ -141,9 +149,10 @@ pub fn leftover(row: &Value, repository: bool) -> Option<Leftover> {
         sessions: strings("sessions"),
         processes: row["process_count"].as_u64().unwrap_or(0),
         fingerprint: fingerprint.into(),
-        consent: !deletable && !process_fingerprint.is_empty(),
+        consent: !macos_deletion_blocked && !deletable && !process_fingerprint.is_empty(),
         process_fingerprint,
         deletable,
+        macos_deletion_blocked,
         repository,
         reserved_at: removal["reserved_at"].as_f64().filter(|n| n.is_finite()),
         outcome: None,
@@ -717,5 +726,23 @@ mod tests {
         assert_eq!((taken.len(), partial), (1, true));
         assert!(listing(exit(0, json!({"leftovers":[]}), ""), "").is_err());
         assert!(listing(Exit::TimedOut, "").is_err());
+    }
+    #[test]
+    fn macos_safety_reason_blocks_delete_and_process_consent_but_keeps_the_row() {
+        let mut value = row();
+        value["reasons"] = json!([{"code":"macos_appledouble_safety","message":"Deletion is disabled on macOS. Open the folder in Finder."}]);
+        value["deletable"] = json!(true);
+        value["process_fingerprint"] = json!("v2:1:proof");
+        let item = leftover(&value, true).unwrap();
+        assert!(item.macos_deletion_blocked);
+        assert!(!item.deletable && !item.consent);
+        assert!(item.repository);
+        assert!(item.reasons[0].contains("Finder"));
+        let shown = serde_json::to_value(&item).unwrap();
+        assert_eq!(shown["macos_deletion_blocked"], true);
+        assert!(shown.get("path").is_none());
+        assert!(keep_invocation(&ComputerId::local(), &item, "manual-keep")
+            .args
+            .contains(&"keep-folder".to_owned()));
     }
 }

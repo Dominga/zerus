@@ -22,13 +22,30 @@ On Linux in desktop-service mode only (default-off), the native creation host
 routes a local, receipt-backed `CreateWorktree` and its `status` reads to the
 service
 (`client/src-tauri/src/desktop_service/creation_worktree.rs`):
-- **Fresh intent.** Only a direct Submit, consumed once and separately from
-  clone's, sends a fresh intent. Recovered and task-reserved creations get
-  read-only lookups.
-- **Lookup results.** A missing or Unknown lookup is unconfirmed. It never
-  resends and never falls back to the direct path.
-- **Older CLI.** If the CLI does not advertise the kind, a fresh intent fails
-  as definitely unsent, and only then may the reducer retire its request UUID.
+- **Fresh intent.** Only native consent in the current host sends a fresh
+  intent, each consumed once and separately from clone's:
+  - a Submit, direct or from the task executor's Start (the same New session
+    button, with a reserved identity);
+  - an explicit Continue setup that the reducer applies, for exactly its next
+    service step (zerus-5wmh.66.4.3.9). The reducer allows it only after
+    definite predecessors: an Unknown original refuses Continue and stays
+    lookup-only. The consent is process-local, never persisted or supplied
+    by the renderer, and binds the creation and the Resume's revision. It
+    authorizes only a request reserved after that Resume. The first service
+    admission after the Resume consumes it, whatever its kind; clone and
+    launch do not honour it yet. A restart, recovery or replayed Continue
+    grants nothing.
+- **Never sent.** The reducer emits a create only for a request it reserved
+  and persisted in this process. A create without fresh consent, or one that
+  stops before its admission request is written, was never sent: it fails as
+  definitely effect-free, its UUID is retired, and the creation stays
+  resumable, never Unknown.
+- **Lookup results.** A missing or Unknown lookup of a sent original is
+  unconfirmed. It never resends and never falls back to the direct path.
+- **Older CLI.** When a completed probe finds that the selected service does
+  not advertise the kind, the create and its status reads take the unchanged
+  direct `worktrees` path, as before the service; nothing of this kind reached
+  that service. A probe that fails is not such proof.
 - **Stable plan.** When it reserves the request, the reducer records its
   source folder as `worktree_source`. Preparation later moves `target` to the
   checkout, and the final receipt read, a resume or a restart still derive the
@@ -125,12 +142,20 @@ a pinned directory object.
   serving it. `worktree add` would start its own checkout child (`reset
   --hard`) with an absolute `GIT_DIR`, so the owned path runs it with
   `--no-checkout`, which creates only the branch, the metadata entry and the
-  gitfile. After pinning that entry, it runs the same checkout itself: `reset
-  --hard --no-recurse-submodules`, then the `post-checkout` hook through `git
-  hook run`. Both run with `GIT_DIR` and `GIT_COMMON_DIR` bound to the pinned
-  entry and common directory as `/proc/self/fd/N`, and every child Git starts
-  inherits them. This needs Git 2.36 or later; older Git is refused before any
-  effect. The checkout forces `worktree.useRelativePaths=false`, so the
+  gitfile. After pinning that entry, it checks the tree out itself: `read-tree
+  --reset -u --no-recurse-submodules <head>`, then the `post-checkout` hook
+  through `git hook run`. Both run with `GIT_DIR` and `GIT_COMMON_DIR` bound to
+  the pinned entry and common directory as `/proc/self/fd/N`. The binding
+  does not cover refs: for a linked worktree, Git's files ref backend re-reads
+  the entry's `commondir` and resolves its real path at startup, so a swap
+  during a command could redirect a ref write. The checkout therefore updates
+  no ref (unlike `reset --hard`); `read-tree` writes only the index, through
+  the entry, and the work tree. Hooks and filters are the repository's own
+  code: Git commands they start inherit the binding but resolve refs the same
+  way, so a ref-writing hook is not bound. This needs Git 2.44 or later, the
+  first whose `worktree add` creates the new HEAD in-process (2.36 to 2.43
+  still run `git symbolic-ref` through the gitfile's real path); older Git is
+  refused before any effect. The checkout forces `worktree.useRelativePaths=false`, so the
   links Own checks are absolute. Because the path is `.`, Git names the
   linked-worktree metadata entry `-` (then `-1`, ...); nothing derives meaning
   from that name.

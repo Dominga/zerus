@@ -8,7 +8,7 @@ use zerus_client_core::migration::{
     },
     preload::Prepared,
 };
-/// Both historical groups use the same bounded executor and receipt rules.
+/// Closed historical groups use the same bounded executor and receipt rules.
 macro_rules! codes {
     ($($variant:ident => $suffix:literal),* $(,)?) => {
         enum Code { $($variant),* }
@@ -17,6 +17,7 @@ macro_rules! codes {
                 match group {
                     Group::Creations => match self { $(Self::$variant => concat!("creations_import_", $suffix)),* },
                     Group::LocalReads => match self { $(Self::$variant => concat!("local_reads_import_", $suffix)),* },
+                    Group::WorktreeCache => match self { $(Self::$variant => concat!("worktree_cache_import_", $suffix)),* },
                 }
             }
         }
@@ -41,7 +42,7 @@ codes! {
     Waiting => "waiting",
     WorkerUnavailable => "worker_unavailable",
 }
-const GROUPS: [Group; 2] = [Group::Creations, Group::LocalReads];
+const GROUPS: [Group; 3] = [Group::Creations, Group::LocalReads, Group::WorktreeCache];
 #[cfg(test)]
 type BeforeRecordHook =
     Box<dyn FnOnce(&migration::transport::StagedReceipt) -> Box<dyn Send> + Send>;
@@ -81,6 +82,7 @@ impl Report {
         match group {
             Group::Creations => &self.creations,
             Group::LocalReads => &self.local_reads,
+            Group::WorktreeCache => &self.worktree_cache,
         }
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -102,6 +104,7 @@ impl Report {
         match group {
             Group::Creations => &self.inputs.creations,
             Group::LocalReads => &self.inputs.local_reads,
+            Group::WorktreeCache => &self.inputs.worktree_cache,
         }
     }
     #[cfg(all(test, unix))]
@@ -503,17 +506,35 @@ fn schedule(
         let capture = report.capture_for(group).status();
         // Waiting/unavailable capture is visible already; do not spin helpers or
         // let this reporter initialize/recover the mutable source.
-        if !matches!(
-            capture.code,
-            "creation_source_captured"
-                | "creation_source_not_applicable"
-                | "creation_source_unsupported"
-                | "creation_source_too_large"
-                | "local_read_source_captured"
-                | "local_read_source_not_applicable"
-                | "local_read_source_unsupported"
-                | "local_read_source_too_large"
-        ) {
+        // The cache report describes its committed historical archive. A later
+        // live-file write refusal may pause persistence, but must not hide that
+        // archive. The worker validates retained() off the GUI in every case;
+        // waiting/partial/unreadable capture can never become empty success.
+        let ready = if group == Group::WorktreeCache {
+            matches!(
+                capture.code,
+                "worktree_cache_source_captured"
+                    | "worktree_cache_source_not_applicable"
+                    | "worktree_cache_source_unsupported"
+                    | "worktree_cache_source_too_large"
+                    | "worktree_cache_source_changed"
+                    | "worktree_cache_source_writer_unavailable"
+                    | "worktree_cache_source_owner_unavailable"
+            )
+        } else {
+            matches!(
+                capture.code,
+                "creation_source_captured"
+                    | "creation_source_not_applicable"
+                    | "creation_source_unsupported"
+                    | "creation_source_too_large"
+                    | "local_read_source_captured"
+                    | "local_read_source_not_applicable"
+                    | "local_read_source_unsupported"
+                    | "local_read_source_too_large"
+            )
+        };
+        if !ready {
             continue;
         }
         let (charge, explicit) = {
@@ -567,3 +588,5 @@ fn schedule(
 mod local_reads_tests;
 #[cfg(all(test, unix))]
 mod tests;
+#[cfg(all(test, unix))]
+mod worktree_cache_tests;

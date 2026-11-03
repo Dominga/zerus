@@ -214,6 +214,8 @@ pub(super) struct Authorized {
     serial: u64,
     ownership_origin: Option<super::ownership::Origin>,
     notification: Option<zerus_client_core::desktop::notification_control::NativeControl>,
+    /// The verified frontend's own application identity (its hello).
+    application: String,
     #[cfg(windows)]
     windows: Option<Box<WindowsFreshness>>,
 }
@@ -223,6 +225,7 @@ pub(super) struct Authorized {
 struct Metadata {
     ownership: Option<super::ownership::Origin>,
     notification: Option<zerus_client_core::desktop::notification_control::NativeControl>,
+    application: String,
 }
 pub(super) struct Validated(Request, Freshness, Metadata);
 enum Freshness {
@@ -239,6 +242,11 @@ enum Freshness {
 impl Validated {
     pub fn id(&self) -> &str {
         self.0.id()
+    }
+    /// The verified frontend's application identity from its hello: which
+    /// build asked, never a permission by itself.
+    pub fn application(&self) -> &str {
+        &self.2.application
     }
     pub fn operation(&self) -> &'static str {
         self.0.operation()
@@ -291,6 +299,16 @@ impl Validated {
         self.check()?;
         let Request::CreationClone { intent } = self.0 else {
             anyhow::bail!("not a creation clone");
+        };
+        Ok(*intent)
+    }
+    /// Only the launch actor calls this after BEGIN IMMEDIATE. Cached native
+    /// Service mode was bound to this exact original request during admission.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn creation_launch(self) -> Result<zerus_client_core::desktop::creation_launch::Intent> {
+        self.check()?;
+        let Request::CreationLaunch { intent } = self.0 else {
+            anyhow::bail!("not a creation launch");
         };
         Ok(*intent)
     }
@@ -374,6 +392,13 @@ impl Validated {
             Freshness::Fixture,
             Metadata::default(),
         )
+    }
+    /// A fixture from a frontend whose hello names `application`.
+    #[cfg(test)]
+    pub fn fixture_from(value: &Value, application: &str) -> Self {
+        let mut permit = Self::fixture(value);
+        permit.2.application = application.into();
+        permit
     }
     #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
     pub fn fixture_expiring(value: &Value, until: Instant) -> Self {
@@ -616,6 +641,7 @@ impl Authorized {
             Metadata {
                 ownership: self.ownership_origin,
                 notification: self.notification,
+                application: self.application,
             },
         ))
     }
@@ -695,6 +721,7 @@ pub(super) fn authenticate(location: &Scope, peer_pid: u32, value: &Value) -> Re
         serial: reply.request.serial,
         ownership_origin,
         notification: reply.request.notification,
+        application: reply.hello.application,
         #[cfg(windows)]
         windows: Some(Box::new(windows)),
     })
@@ -1803,6 +1830,7 @@ mod tests {
             serial,
             ownership_origin: None,
             notification: None,
+            application: "com.hgdev.hgs-tray".into(),
         }
     }
 

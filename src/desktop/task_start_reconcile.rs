@@ -30,6 +30,9 @@ use zerus_desktop_ledger::operations::{
     Ticket,
 };
 
+mod result;
+pub(super) use result::query;
+
 struct Consent {
     original: operations::VerifiedOriginal,
     executor: Original,

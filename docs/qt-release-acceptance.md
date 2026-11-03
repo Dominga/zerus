@@ -343,6 +343,41 @@ not shared-read delivery or acknowledgement, notification suppression,
 current-source completeness, ownership or permission to act. Installed import
 and upgrade acceptance remain pending.
 
+The native NewSession owner also preserves `worktree-snapshots.json` in a fixed
+`worktree-cache-preload-v1` slot before its first service-mode load or file write.
+The exact historical original and capture ID remain unchanged after later cache
+writes. Both the original and today's restarted file pass the existing strict
+64-record/8 MiB cache decoder before the pruning model runs (raw reads stay
+bounded to 16 MiB). Opaque cache hashes never prove current checkout ownership.
+Only this legacy cache's read accepts an owned, single-link 0644 Unix source;
+group/other writes, links and changed canonical identities refuse capture.
+The source is never chmodded. Archive/metadata and replacement cache files stay
+private (0600); Windows native ACL/reparse checks are unchanged. The existing
+local-disk and ancestor-list requirements still apply; a redirected UNC source
+remains unavailable.
+
+A failure pauses only cache file persistence. Fresh folder queries and separately
+authorized session creation remain available; dirty in-memory cache data stays
+bounded and unsaved until an explicit same-owner Retry passes its original
+source checks. Quit refuses late model installation and new cache writes.
+Review shows `worktree_cache_capture` separately from drafts, local read marks
+and published reports. The separate `worktree_cache_report` publishes only the
+committed archive plus its pre-first-load provenance under the closed
+`next-worktree-cache-preload-v1` scope and `worktree-cache-retained-import-v1.json`
+journal. It binds once to the actual paired canonical configuration, original
+capture/import ID and expected record. Later live writes or a paused cache
+writer do not replace that historical source. Every publication reopens and
+rechecks the private original; it never reads today's mutable cache as evidence.
+
+The existing one-slot report executor and original helper/pipe resources remain
+in use. An unknown publication is lookup-only under the original ID. An exact
+negative or a fenced definitely-unsent preparation can be retried only explicitly
+with that same source/configuration/payload. Missing is not applicable;
+unsupported, over-cap, changed or unreadable retained data stays incomplete and
+reviewable. Grant/watch/catalog/Resume stay independent. This is component/source
+coverage, not current checkout identity, creation/cleanup consent, drain or
+installed acceptance; no acceptance row is promoted.
+
 ## macOS
 
 For a coordinator-approved private click fixture, opt in to actual GUI selection

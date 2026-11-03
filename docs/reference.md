@@ -4032,6 +4032,12 @@ app's workspace, unless with `--background`. After a main-thread watchdog abort,
 Windows Error Reporting restarts the app with the same settings in the background
 (`--background`, never `--sessions`): a window that opens by itself after a crash
 would be a surprise.
+When the desktop service receives a toast click and no Zerus window runs, it
+starts the installed `hgs-tray.exe` (the per-user installation or the copy next
+to the service's `hgs.exe`) for the exact session, after checking that its
+`--help` lists the desktop target environment marker. It starts the window
+outside the service's job when Windows allows that, so a service restart does
+not close it, and passes it the right to come to the front.
 
 **Updates.** The portable zip has no installer or self-update. Stable releases
 after 0.42.2 and nightly releases carry the same tested zip. A portable

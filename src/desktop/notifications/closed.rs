@@ -1,15 +1,14 @@
-//! Linux closed-instance selection and original launch custody, off the actor.
-//! No status/caption/PATH inference can manufacture the native ownership grant.
-use super::{
-    activation,
-    frontend::{linux::OwnedFrontend, SelectedFrontend},
-    preparation::Owner,
-    Outbox,
-};
+//! Linux and Windows closed-instance selection and original launch custody,
+//! off the actor. No status/caption/PATH inference can manufacture the native
+//! ownership grant.
+#[cfg(target_os = "linux")]
+use super::frontend::linux::OwnedFrontend;
+#[cfg(windows)]
+use super::frontend::OwnedFrontend;
+use super::{activation, frontend::SelectedFrontend, preparation::Owner, Outbox};
 use crate::{
     config::Config,
     desktop::{
-        owner,
         ownership::Grant,
         store::{Location, Store},
         ui_authority::Scope,
@@ -141,11 +140,7 @@ impl Runtime {
                 );
                 grant.revalidate_image()?;
                 let image = scope.select_frontend(grant.image())?;
-                let observation = desktop::probe_at(
-                    &owner::instance_path(),
-                    &uuid::Uuid::new_v4().to_string(),
-                    &scope.configuration,
-                );
+                let observation = probe(&scope.configuration)?;
                 image.revalidate()?;
                 grant.revalidate_image()?;
                 ensure!(
@@ -203,6 +198,27 @@ impl Drop for Runtime {
     fn drop(&mut self) {
         self.stop();
     }
+}
+/// Read-only absence evidence from the frontend's own activation endpoint.
+#[cfg(target_os = "linux")]
+fn probe(configuration: &str) -> Result<desktop::Observation> {
+    Ok(desktop::probe_at(
+        &crate::desktop::owner::instance_path(),
+        &uuid::Uuid::new_v4().to_string(),
+        configuration,
+    ))
+}
+/// The profile pipe that the Windows GUI listens on with its hello reply.
+#[cfg(windows)]
+fn probe(configuration: &str) -> Result<desktop::Observation> {
+    let home =
+        std::env::home_dir().ok_or_else(|| anyhow::anyhow!("profile directory unavailable"))?;
+    Ok(desktop::windows::probe_at(
+        &desktop::windows::activation_name("hgs-tray", &home),
+        &uuid::Uuid::new_v4().to_string(),
+        configuration,
+        Instant::now() + desktop::PROBE_WAIT,
+    ))
 }
 fn bounded(error: anyhow::Error) -> String {
     format!("{error:#}").chars().take(256).collect()

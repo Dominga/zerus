@@ -562,8 +562,15 @@ impl Job {
         if self.stopped() || bytes.len() > wire::BYTES {
             return Err("ownership_unconfirmed");
         }
-        let receipt: Receipt =
-            serde_json::from_slice(&bytes).map_err(|_| "ownership_unconfirmed")?;
+        let receipt: Receipt = serde_json::from_slice(&bytes).map_err(|_| {
+            if let Some(code) = response_refusal(&bytes, request.id()) {
+                self.owner
+                    .state()
+                    .diagnostic
+                    .get_or_insert(("native_takeover.frontend_response", code));
+            }
+            "ownership_unconfirmed"
+        })?;
         self.settle(receipt, &request, &status.configuration)
     }
     fn settle(
@@ -603,20 +610,76 @@ impl NativeReady {
     }
 }
 /// Called after canonical claim, before Bootstrap or notifier construction.
-pub(crate) fn native_takeover(
+pub(crate) struct NativeRecovery {
+    // Keep the exact uncertain intent, original child/pipe charges and route.
+    // A new consumer controller cannot replay or replace this original.
+    _owner: Arc<Controller>,
+    pub code: &'static str,
+}
+
+impl NativeRecovery {
+    pub(crate) fn close(&self) -> Closed {
+        self._owner.close()
+    }
+}
+
+pub(crate) fn native_takeover_recoverable(
     hgs: PathBuf,
     responder: Arc<Responder>,
-) -> Result<NativeReady, &'static str> {
-    let owner = Controller::new(hgs, Some(responder), Mode::Native);
-    let result = native_startup(owner.clone(), Instant::now() + Duration::from_secs(15));
-    if let Err(code) = result {
-        let diagnostic = owner
-            .state()
-            .diagnostic
-            .unwrap_or(("native_takeover", code));
-        crate::startup_error::record(diagnostic.0, diagnostic.1);
+) -> Result<NativeReady, NativeRecovery> {
+    native_takeover_until(
+        Controller::new(hgs, Some(responder), Mode::Native),
+        Instant::now() + Duration::from_secs(15),
+    )
+}
+
+fn native_takeover_until(
+    owner: Arc<Controller>,
+    deadline: Instant,
+) -> Result<NativeReady, NativeRecovery> {
+    match native_startup(owner.clone(), deadline) {
+        Ok(ready) => Ok(ready),
+        Err(code) => {
+            let diagnostic = owner
+                .state()
+                .diagnostic
+                .unwrap_or(("native_takeover", code));
+            crate::startup_error::record(diagnostic.0, diagnostic.1);
+            owner.stop();
+            Err(NativeRecovery {
+                _owner: owner,
+                code,
+            })
+        }
     }
-    result
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn native_takeover(hgs: PathBuf, responder: Arc<Responder>) -> Result<NativeReady, &'static str> {
+    native_takeover_recoverable(hgs, responder).map_err(|failure| failure.code)
+}
+
+// A matching closed negative explains a refusal; it cannot complete, replay or
+// grant an uncertain ownership intent. Child-selected text is never published.
+fn response_refusal(bytes: &[u8], original: &str) -> Option<&'static str> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Refusal {
+        request_id: String,
+        accepted: bool,
+        durable: bool,
+        code: String,
+    }
+    let refusal: Refusal = serde_json::from_slice(bytes).ok()?;
+    if refusal.request_id != original || refusal.accepted || refusal.durable {
+        return None;
+    }
+    match refusal.code.as_str() {
+        "frontend_authentication_refused" => Some("frontend_authentication_refused"),
+        "frontend_identity_expired" => Some("frontend_identity_expired"),
+        "ownership_not_settled" => Some("ownership_not_settled"),
+        _ => None,
+    }
 }
 
 fn failure_code(error: &OwnedError, stderr: Option<&str>) -> &'static str {

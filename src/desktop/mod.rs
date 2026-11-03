@@ -6,6 +6,7 @@ mod background;
 mod catalog_read;
 mod catalog_relay;
 mod counts;
+mod creation_clone;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod custody;
 mod delivery;
@@ -838,6 +839,21 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                     json!({"request_id":hello.request.as_ref().unwrap()["request_id"],"accepted":false,"code":"details_unavailable"})
                                 }
                             }
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "creation_clone_result")
+                        {
+                            creation_clone::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "creation_clone")
+                        {
+                            frontend_refused(
+                                hello.request.as_ref(),
+                                "frontend_authentication_required",
+                            )
                         } else if hello.request.as_ref().is_some_and(|v| {
                             matches!(
                                 v["op"].as_str(),

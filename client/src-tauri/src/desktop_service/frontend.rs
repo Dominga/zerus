@@ -17,6 +17,8 @@ const MAINTENANCE_UNAVAILABLE: &str =
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
+    #[serde(skip)] // Native creation owner only; never generic policy dispatch or receipts.
+    CreationClone,
     #[serde(skip)] // Separate native notification controller, never generic policy JSON.
     NotificationControl,
     #[serde(skip)] // Separate native ownership controller, never a generic policy request.
@@ -31,6 +33,7 @@ pub enum Operation {
 impl Operation {
     fn of(request: &Request) -> Self {
         match request {
+            Request::CreationClone { .. } => Self::CreationClone,
             Request::NotificationControl { .. } => Self::NotificationControl,
             Request::DesktopOwnership { .. } => Self::DesktopOwnership,
             Request::ImportPendingReads { .. } => Self::ImportPendingReads,
@@ -41,6 +44,7 @@ impl Operation {
     }
     fn name(self) -> &'static str {
         match self {
+            Self::CreationClone => "creation_clone",
             Self::NotificationControl => "notification_controls",
             Self::DesktopOwnership => "desktop_ownership",
             Self::ImportPendingReads => "import_pending_reads",
@@ -499,7 +503,10 @@ fn help(
 }
 /// Presentation gates only; never a native permission or a writer grant.
 fn submission_ready(snapshot: &Snapshot, request: &Request) -> bool {
-    if matches!(request, Request::NotificationControl { .. }) {
+    if matches!(
+        request,
+        Request::NotificationControl { .. } | Request::CreationClone { .. }
+    ) {
         return false;
     }
     if !snapshot.connected || snapshot.epoch.is_none() {
@@ -641,7 +648,10 @@ fn lookup(
     request: &Request,
     resources: Arc<dyn Send + Sync>,
 ) -> Result<Receipt, &'static str> {
-    if matches!(request, Request::NotificationControl { .. }) {
+    if matches!(
+        request,
+        Request::NotificationControl { .. } | Request::CreationClone { .. }
+    ) {
         return Err("frontend_receipt_unconfirmed");
     }
     let id = uuid::Uuid::new_v4().to_string();
@@ -669,7 +679,10 @@ fn lookup(
     lookup_receipt(request, &id, value)
 }
 fn lookup_receipt(request: &Request, id: &str, value: Value) -> Result<Receipt, &'static str> {
-    if matches!(request, Request::NotificationControl { .. }) {
+    if matches!(
+        request,
+        Request::NotificationControl { .. } | Request::CreationClone { .. }
+    ) {
         return Err("frontend_receipt_unconfirmed");
     }
     if value["request_id"] != id || value["original_request_id"] != request.id() {
@@ -718,6 +731,7 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
         Request::DesktopOwnership { .. }
             | Request::ActivationWait { .. }
             | Request::NotificationControl { .. }
+            | Request::CreationClone { .. }
     ) {
         // Their separate consumers validate different receipts and completion rules.
         return None;
@@ -765,7 +779,8 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
         }
         Request::DesktopOwnership { .. }
         | Request::ActivationWait { .. }
-        | Request::NotificationControl { .. } => return None,
+        | Request::NotificationControl { .. }
+        | Request::CreationClone { .. } => return None,
         Request::AutomaticApprovals { enabled, .. } => {
             if value["op"] != "automatic_approvals" || value["enabled"] != *enabled {
                 return None;

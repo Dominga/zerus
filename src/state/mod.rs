@@ -88,7 +88,7 @@ mod conversation_history;
 mod usage;
 mod workspace;
 mod git_status;
-mod repositories;
+pub(crate) mod repositories;
 mod worktrees;
 mod worktree_requests;
 mod worktree_cleanup;

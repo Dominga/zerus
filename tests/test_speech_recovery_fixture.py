@@ -17,6 +17,7 @@ selector = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(selector)
 
 
+@unittest.skipUnless(os.name == "posix", "speech recovery fixture preparation is Unix-only")
 class PreparedSpeechFixture(unittest.TestCase):
     def test_prepared_executable_does_not_start_cargo_in_the_worker(self):
         with tempfile.TemporaryDirectory() as directory:

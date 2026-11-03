@@ -763,16 +763,31 @@ pub fn assert_pipes_absent(names: &[String]) {
     }
 }
 fn pipe(name: &str, mode: &str) -> io::Result<Pipe> {
+    // Apply the refusing DACL at creation, as the maintained native probe
+    // control does; no post-creation ACL mutation can fail before the case.
+    let denied = if mode == "denied" {
+        let own = windows::own_facts().ok_or_else(|| io::Error::other("own facts unavailable"))?;
+        Some(Descriptor::new(&format!(
+            "D:P(D;;GA;;;{})",
+            sid_text(&own.user)?
+        ))?)
+    } else {
+        None
+    };
+    let mut attributes = denied.as_ref().map(Descriptor::attributes);
+    if let Some(attributes) = &mut attributes {
+        attributes.bInheritHandle = 0;
+    }
     let handle = acquired("CreateNamedPipeW", unsafe {
         CreateNamedPipeW(
             wide(format!(r"\\.\pipe\{name}")).as_ptr(),
-            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE | WRITE_DAC,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT | PIPE_REJECT_REMOTE_CLIENTS,
             1,
             4096,
             4096,
             0,
-            ptr::null(),
+            attributes.as_ref().map_or(ptr::null(), |value| value),
         )
     })?;
     unsafe {
@@ -783,35 +798,6 @@ fn pipe(name: &str, mode: &str) -> io::Result<Pipe> {
     } else {
         None
     };
-    if mode == "denied" {
-        let sid = sid_text(
-            &windows::own_facts()
-                .ok_or(io::ErrorKind::PermissionDenied)?
-                .user,
-        )?;
-        let denied = Descriptor::new(&format!("D:P(D;;GA;;;{sid})"))?;
-        let (mut present, mut defaulted, mut acl) = (0, 0, ptr::null_mut());
-        check("GetSecurityDescriptorDacl", unsafe {
-            GetSecurityDescriptorDacl(denied.0, &mut present, &mut acl, &mut defaulted)
-        })?;
-        let code = unsafe {
-            SetSecurityInfo(
-                handle.as_raw_handle(),
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                acl,
-                ptr::null_mut(),
-            )
-        };
-        if code != ERROR_SUCCESS {
-            return Err(context(
-                "SetSecurityInfo",
-                io::Error::from_raw_os_error(code as i32),
-            ));
-        }
-    }
     Ok(Pipe {
         handle,
         _busy: busy,
@@ -887,7 +873,13 @@ fn run_child(output: &mut File) {
     output.flush().unwrap();
     let until = Instant::now() + Duration::from_secs(30);
     let (mut queries, mut forwards, mut received_bytes) = (0, 0, 0usize);
-    while unsafe { WaitForSingleObject(stop.as_raw_handle(), 0) } == WAIT_TIMEOUT {
+    let mut drain_until = None;
+    loop {
+        let stopped = unsafe { WaitForSingleObject(stop.as_raw_handle(), 0) };
+        assert!(matches!(stopped, WAIT_TIMEOUT | WAIT_OBJECT_0));
+        if stopped == WAIT_OBJECT_0 {
+            drain_until.get_or_insert_with(|| Instant::now() + Duration::from_secs(1));
+        }
         assert!(
             Instant::now() < until,
             "original parent did not stop its fixture"
@@ -922,10 +914,11 @@ fn run_child(output: &mut File) {
                         ptr::null_mut(),
                     )
                 };
-                if read == 0 {
+                if read == 0 && count == 0 {
                     match unsafe { GetLastError() } {
                         ERROR_NO_DATA => continue,
                         ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED => {
+                            assert!(pipe.input.is_empty(), "truncated original frontend frame");
                             unsafe {
                                 DisconnectNamedPipe(pipe.handle.as_raw_handle());
                             }
@@ -940,12 +933,13 @@ fn run_child(output: &mut File) {
                     continue;
                 }
                 received_bytes += count as usize;
+                assert!(received_bytes <= 4096, "original frontend capture bound");
                 pipe.input.extend_from_slice(&bytes[..count as usize]);
                 assert!(
                     pipe.input.len() <= 64,
                     "unexpected oversized frontend frame"
                 );
-                if let Some(lf) = pipe.input.iter().position(|b| *b == b'\n') {
+                while let Some(lf) = pipe.input.iter().position(|b| *b == b'\n') {
                     if let Some(nonce) = desktop::query_nonce(&pipe.input[..lf]) {
                         queries += 1;
                         let hello = Hello {
@@ -982,9 +976,25 @@ fn run_child(output: &mut File) {
                     } else {
                         forwards += 1;
                     }
-                    pipe.input.clear();
+                    pipe.input.drain(..=lf);
                 }
             }
+        }
+        if let Some(until) = drain_until {
+            // Parent stop follows its completed writes and closed client handles.
+            // Drain every accepted connection through real EOF, never an expected
+            // count or a sleep: the final buffered forward must remain observable.
+            if mode != "reply"
+                || pipes
+                    .iter()
+                    .all(|pipe| !pipe.connected && pipe.input.is_empty())
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < until,
+                "original connections did not drain after stop"
+            );
         }
         thread::sleep(Duration::from_millis(1));
     }

@@ -68,19 +68,18 @@ impl NewSession {
     }
     /// A pending capture never blocks a fresh folder query or marks a failed
     /// cache write as saved. The model itself retains its existing 64/8MiB cap.
-    pub(super) fn save_captured(&self) -> bool {
+    pub(super) fn save_captured(&self) {
         let Some(cache) = &self.0.capture else {
-            return false;
+            return;
         };
         {
             let mut state = lock(&cache.state);
             if state.closed {
-                return true;
+                return;
             }
             state.dirty = true;
         }
         self.schedule_cache();
-        true
     }
     pub(super) fn schedule_cache(&self) {
         let Some(cache) = &self.0.capture else {
@@ -134,10 +133,9 @@ impl NewSession {
                     }
                     let mut catalogs = lock(&self.0.catalogs);
                     // Fresh replies/invalidation may have arrived while capture
-                    // ran. Never replace that model or reset its generations.
-                    if *catalogs == Catalogs::new(&self.0.hgs.to_string_lossy(), None) {
-                        *catalogs = Catalogs::new(&self.0.hgs.to_string_lossy(), saved);
-                    }
+                    // ran. Keep them and their generations, filling only missing
+                    // folders from this fully classified current cache.
+                    catalogs.restore_saved(saved);
                     live = Some(current);
                 }
             }

@@ -124,12 +124,19 @@ fn a_fresh_cli_reply_during_capture_is_not_overwritten_and_only_then_can_persist
     assert_eq!(f.bytes(), raw());
     assert_eq!(lock(&f.jobs).len(), 1);
     f.run();
-    assert_eq!(*lock(&f.session.0.catalogs), fresh);
+    let restored = lock(&f.session.0.catalogs).saved();
+    for (key, value) in fresh.saved().as_object().unwrap() {
+        assert_eq!(&restored[key], value, "fresh folder wins");
+    }
+    assert_eq!(
+        restored["a".repeat(64)],
+        serde_json::from_slice::<Value>(&raw()).unwrap()["a".repeat(64)]
+    );
     assert_eq!(f.archive(), raw());
     assert_ne!(f.bytes(), raw());
     assert_eq!(
         serde_json::from_slice::<Value>(&f.bytes()).unwrap(),
-        fresh.saved()
+        restored
     );
     use std::os::unix::fs::MetadataExt;
     assert_eq!(
@@ -212,6 +219,17 @@ fn replacement_refuses_file_writes_and_retry_keeps_the_same_owner_and_original()
     assert_eq!(f.bytes(), raw());
 }
 #[test]
+fn an_invalidation_during_capture_restores_cached_folders_only_as_stale() {
+    let f = Fixture::new();
+    f.session
+        .invalidate_worktrees(&ComputerId::local(), "/srv/example/.git");
+    f.run();
+    let saved = lock(&f.session.0.catalogs).saved();
+    assert_eq!(saved["a".repeat(64)]["stale"], true);
+    assert_eq!(serde_json::from_slice::<Value>(&f.bytes()).unwrap(), saved);
+    assert_eq!(f.archive(), raw());
+}
+#[test]
 fn quit_during_capture_never_installs_a_late_model_or_writes_a_pending_cache() {
     let f = Fixture::new();
     let weak = Arc::downgrade(&f.session.0);
@@ -232,6 +250,11 @@ fn quit_during_capture_never_installs_a_late_model_or_writes_a_pending_cache() {
     f.capture.request_retry();
     f.session.save();
     assert!(lock(&f.jobs).is_empty());
+    assert_eq!(
+        f.bytes(),
+        raw(),
+        "post-Quit save must not use the legacy writer"
+    );
 }
 #[test]
 fn closing_before_the_queued_job_does_no_source_io_and_spawn_failure_has_no_fallback() {

@@ -1695,6 +1695,12 @@ fn delete_tree(root: &Path, expected: &RootIdentity, deadline: Instant) -> std::
         }
     }
     deletion::unlink(parent.as_raw_fd(), &name, libc::AT_REMOVEDIR)?;
+    #[cfg(test)]
+    AFTER_ROOT_UNLINK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook()
+        }
+    });
     match deletion::is_directory(parent.as_raw_fd(), &name) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Ok(_) => Err(Error::other(
@@ -1702,6 +1708,14 @@ fn delete_tree(root: &Path, expected: &RootIdentity, deadline: Instant) -> std::
         )),
         Err(e) => Err(e),
     }
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    /// Runs right after the reviewed root is unlinked, before its absence is
+    /// confirmed through the parent.
+    static AFTER_ROOT_UNLINK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(unix)]
@@ -2515,6 +2529,29 @@ mod tests {
         // The reviewed folder itself is still deleted and confirmed.
         delete_tree(&real.join("leftover"), &identity, deadline()).unwrap();
         assert!(!real.join("leftover").exists());
+    }
+
+    /// Mutation R5: the deletion is confirmed only when the name is absent
+    /// through the parent, never because the unlink returned.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_reappears_after_the_root_is_unlinked_is_not_confirmed() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("leftover");
+        fs::create_dir_all(root.join("build")).unwrap();
+        fs::write(root.join("build/file"), "reviewed").unwrap();
+        let identity = root_identity(&root).unwrap();
+        let again = root.clone();
+        AFTER_ROOT_UNLINK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || fs::create_dir(&again).unwrap()))
+        });
+        let error =
+            delete_tree(&root, &identity, Instant::now() + Duration::from_secs(10)).unwrap_err();
+        assert!(
+            error.to_string().contains("could not be confirmed"),
+            "{error}"
+        );
+        assert!(root.is_dir() && !root.join("build").exists());
     }
 
     #[cfg(unix)]

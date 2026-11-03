@@ -932,7 +932,14 @@ export function ActivityView(props: { source?: ActivitySource }) {
   const reading = createActivityAnchor({
     visible: () => activityReadingRows(scroller).visible(),
     offset: measuredOffset,
-    adjust: (delta) => activityReadingRows(scroller).adjust(delta),
+    adjust: (delta) => {
+      activityReadingRows(scroller).adjust(delta);
+      // The virtualizer learns the position only from the next scroll event,
+      // one frame later. A window recomputed before then (premeasured rows
+      // dropping after an older page lands) used the anchor's previous,
+      // estimated write and painted one blank frame (zerus-oavj).
+      virtualizer.scrollOffset = scroller.scrollTop;
+    },
     scrollTop: () => scroller.scrollTop,
   }, () => !end.active() && !preview(), animationFrames, () => !motion.active() && !selectionInside());
   const holdSelection = () => {

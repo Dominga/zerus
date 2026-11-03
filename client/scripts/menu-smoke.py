@@ -23,8 +23,9 @@ parser.add_argument("--title", default="Zerus menu regression (synthetic)")
 parser.add_argument("--probe-display", action="store_true", help="verify the isolated display without opening a window")
 parser.add_argument("--xvfb-child", action="store_true", help=argparse.SUPPRESS)
 parser.add_argument("--paint-column", type=int, metavar="X",
-                    help="check the presented frames of a page that reports `morphs`: a 4 px column at X "
-                         "through a magenta collapsing card must never grow again (row-collapse-smoke)")
+                    help="check the presented frames of a page that reports `morphs` (a 4 px column at X through "
+                         "a magenta collapsing card must never grow again, row-collapse-smoke) or `landings` (a magenta "
+                         "reading anchor must keep its top while an older page lands, activity-older-smoke)")
 parser.add_argument("--paint-row", type=int, metavar="Y",
                     help="check the presented frames of a page that reports `slides`: the right edge of a "
                          "magenta panel on a 4 px row at Y must only move with each slide (panel-slide-smoke)")
@@ -162,6 +163,43 @@ def painted_slide(frames, slides, width, stride):
     return {"paint": cases, "paint_failures": failures}
 
 
+def painted_anchor(frames, landings, height):
+    """While each older page lands, the painted reading anchor (magenta) keeps
+    the top it had in the last frame before the landing, in every frame."""
+    def column(data):
+        stride = len(data) // height
+        out = []
+        for y in range(height):
+            b, g, r = data[y * stride + 4], data[y * stride + 5], data[y * stride + 6]
+            out.append("M" if r > 200 and g < 60 and b > 200 else "C" if r < 60 and g > 200 and b > 200 else ".")
+        return "".join(out)
+
+    def runs(col):
+        out, start = [], 0
+        for y in range(1, height + 1):
+            if y == height or col[y] != col[start]:
+                out.append(f"{col[start]}{start}+{y - start}")
+                start = y
+        return out[:8]
+    cases, failures = [], []
+    for index, start in enumerate(m / 1000 for m in landings):
+        # Frames are recorded only when the paint changes: the last one before
+        # the landing is what the screen showed then, however long ago.
+        before = [column(data) for t, data in frames if t < start]
+        place = before[-1].find("M") if before and "M" in before[-1] else None
+        shown = [(t, column(data)) for t, data in frames if start <= t <= start + 0.9]
+        away = [{"ms": round((t - start) * 1000), "top": col.find("M") if "M" in col else None, "column": runs(col)}
+                for t, col in shown if place is None or "M" not in col or abs(col.find("M") - place) > 2]
+        cases.append({"landing": index, "top": place, "painted_frames": len(shown), "away": away[:5]})
+        # No new frame after the landing means the screen kept showing the
+        # anchor where it was: the best outcome, not a missing sample.
+        if place is None:
+            failures.append(f"landing {index}: no painted anchor before the page landed")
+        elif away:
+            failures.append(f"landing {index}: {len(away)} painted frames showed the reading anchor away from its place")
+    return {"paint": cases, "paint_failures": failures}
+
+
 with tempfile.TemporaryDirectory(prefix="zerus-menu-") as scratch:
     for variable, directory in [("HOME", "home"), ("XDG_CONFIG_HOME", "config"),
                                 ("XDG_DATA_HOME", "data"), ("XDG_CACHE_HOME", "cache")]:
@@ -255,7 +293,10 @@ with tempfile.TemporaryDirectory(prefix="zerus-menu-") as scratch:
     view.load_uri(args.url)
     window.show_all()
     Gtk.main()
-    if args.paint_column is not None:
+    if args.paint_column is not None and "landings" in result:
+        result = {**result, **painted_anchor(painted, result["landings"], PAINT_HEIGHT)}
+        result["failures"] = result.get("failures", []) + result.pop("paint_failures")
+    elif args.paint_column is not None:
         result = {**result, **painted_collapse(painted, result.get("morphs", []), PAINT_HEIGHT)}
         result["failures"] = result.get("failures", []) + result.pop("paint_failures")
     if args.paint_row is not None:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reclaim unused build space only on the two disposable hosted Ubuntu jobs."""
+"""Report hosted Ubuntu disk use; cleanup remains limited to Quick and relay."""
 
 import argparse
 import json
@@ -18,6 +18,8 @@ UNUSED_TOOLS = (
     "/opt/hostedtoolcache/CodeQL",
 )
 RELAY_TARGETS = ("target", "services/mobile/relay/target", "services/mobile/crypto/target")
+REPORT_JOBS = ("quick", "relay", "client-native-linux")
+CLEANUP_JOBS = ("quick", "relay")
 
 
 def hosted_workspace():
@@ -27,9 +29,9 @@ def hosted_workspace():
         "RUNNER_OS": "Linux",
     }
     if any(os.environ.get(key) != value for key, value in required.items()):
-        raise ValueError("disk cleanup is restricted to disposable hosted Linux jobs")
-    if os.environ.get("GITHUB_JOB") not in ("quick", "relay"):
-        raise ValueError("unexpected hosted job for disk cleanup")
+        raise ValueError("disk diagnostics are restricted to disposable hosted Linux jobs")
+    if os.environ.get("GITHUB_JOB") not in REPORT_JOBS:
+        raise ValueError("unexpected hosted job for disk diagnostics")
     workspace = Path(os.environ["GITHUB_WORKSPACE"])
     if not workspace.is_absolute() or workspace.resolve() != Path.cwd().resolve():
         raise ValueError("run from the original checked-out workspace")
@@ -41,8 +43,12 @@ def report(workspace, phase):
     print(json.dumps({"phase": phase, "disk_bytes": {
         "total": usage.total, "used": usage.used, "free": usage.free,
     }}), flush=True)
-    paths = [workspace / path for path in RELAY_TARGETS]
+    native = os.environ.get("GITHUB_JOB") == "client-native-linux"
+    targets = ("target/client-native",) if native else RELAY_TARGETS
+    paths = [workspace / path for path in targets]
     paths.append(Path.home() / ".cargo/registry")
+    if native:
+        paths.append(Path.home() / ".cargo/git")
     existing = [str(path) for path in paths if path.exists()]
     if existing:
         try:
@@ -57,6 +63,8 @@ def report(workspace, phase):
 
 
 def prepare(workspace):
+    if os.environ.get("GITHUB_JOB") not in CLEANUP_JOBS:
+        raise ValueError("only Quick and relay may reclaim unused tools")
     report(workspace, "before-unused-tools")
     subprocess.run(["sudo", "rm", "-rf", "--one-file-system", "--", *UNUSED_TOOLS], check=True)
     report(workspace, "after-unused-tools")

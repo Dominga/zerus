@@ -732,6 +732,8 @@ jobs:
         with:
           ref: ${{ needs.source.outputs.commit }}
           persist-credentials: false
+      - name: Disk usage after native checkout
+        run: python3 scripts/ci/ubuntu-disk.py report after-native-checkout
       - name: Linux media, video and Tauri build dependencies
         run: >-
           sudo apt-get update && sudo apt-get install --no-install-recommends -y
@@ -739,6 +741,8 @@ jobs:
           gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav
           libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev xvfb dbus-bin dbus-daemon
       - run: rustup toolchain install 1.99.1 --profile minimal --component clippy
+      - name: Disk usage after native dependencies
+        run: python3 scripts/ci/ubuntu-disk.py report after-native-dependencies
       - name: Rust cache identity
         id: rust
         run: |
@@ -753,8 +757,15 @@ jobs:
             ~/.cargo/git
           key: client-native-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('client/core/Cargo.lock', 'client/media/Cargo.lock', 'client/src-tauri/Cargo.lock') }}
           restore-keys: client-native-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
+      - name: Disk usage after native cache restore
+        run: python3 scripts/ci/ubuntu-disk.py report after-native-cache-restore
       - name: Media and video tests and Tauri media clippy
+        # This job observes disk use without reclaiming tools or build outputs.
+        # The script also reports between its existing Linux build phases.
         run: bash scripts/ci/client-native.sh linux
+      - name: Disk usage after native checks
+        if: ${{ !cancelled() }}
+        run: python3 scripts/ci/ubuntu-disk.py report after-native-checks
       - name: Save native client Rust cache
         if: inputs.save_caches && steps.rust-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

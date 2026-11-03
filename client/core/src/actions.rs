@@ -994,12 +994,13 @@ pub fn help_invocation() -> Invocation {
 }
 
 /// Whether the help text has a line that is exactly `session-notifications-v1`
-/// (a trailing CR is allowed, nothing else).
+/// once surrounding ASCII whitespace (including a CRLF ending) is trimmed. The
+/// CLI prints the marker indented; its own check and the remote probe accept
+/// surrounding whitespace too. The token must be the whole line, never a part.
 pub fn has_notifications_marker(stdout: &[u8]) -> bool {
-    stdout.split(|&b| b == b'\n').any(|line| {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        line == NOTIFICATIONS_MARKER.as_bytes()
-    })
+    stdout
+        .split(|&b| b == b'\n')
+        .any(|line| line.trim_ascii() == NOTIFICATIONS_MARKER.as_bytes())
 }
 
 /// A probe that passes: a normal exit 0 with the marker.
@@ -1985,23 +1986,37 @@ mod tests {
         assert_eq!(probe.args, ["--help"]);
         assert_eq!(probe.stdin, None);
         assert_eq!(probe.timeout, std::time::Duration::from_secs(5));
-        assert!(has_notifications_marker(
-            b"usage\nsession-notifications-v1\nmore"
-        ));
-        assert!(has_notifications_marker(
-            b"usage\r\nsession-notifications-v1\r\n"
-        ));
-        assert!(has_notifications_marker(b"session-notifications-v1"));
+        for text in [
+            &b"usage\nsession-notifications-v1\nmore"[..],
+            b"usage\r\nsession-notifications-v1\r\n",
+            b"session-notifications-v1",
+            // The CLI help indents the marker (src/cli.rs usage text).
+            b"Usage:\n       hgs [@host] dirs\n       session-notifications-v1\n       hgs kill\n",
+            b"usage\r\n       session-notifications-v1\r\nmore\r\n",
+            b"\tsession-notifications-v1 \t\n",
+            b"session-notifications-v1\r\r\n",
+        ] {
+            assert!(has_notifications_marker(text), "{text:?}");
+        }
         for text in [
             &b"session-notifications-v10\n"[..],
-            b" session-notifications-v1\n",
-            b"session-notifications-v1 \n",
+            b"session-notifications-v1-extra\n",
             b"x session-notifications-v1\n",
-            b"session-notifications-v1\r\r\n",
+            b"       session-notifications-v1 x\n",
+            // The command summary names the marker inside another line.
+            b"       hgs [@host] notifications <session> --json   shared mute preference (session-notifications-v1)\n",
+            b"notifications (session-notifications-v1)\r\n",
+            b"(session-notifications-v1)\n",
+            b"session-\nnotifications-v1\n",
+            b"   \r\n",
             b"",
         ] {
             assert!(!has_notifications_marker(text), "{text:?}");
         }
+        assert!(help_confirms(&exit0(
+            b"usage\n       session-notifications-v1\n",
+            ""
+        )));
         assert!(help_confirms(&exit0(b"session-notifications-v1\n", "")));
         assert!(!help_confirms(&Exit::Code {
             code: 1,

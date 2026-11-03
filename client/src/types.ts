@@ -625,6 +625,8 @@ export type CreationAdmission = { admitted: string } | { refused: string };
  * `can_resume` and `can_edit` from the core (`creation::caption`, `can_resume`, `Creations::can_edit`).
  */
 export interface CreationCard {
+  /** Current launch attempt, rotated on retry; absent on older hosts. */
+  launch_id?: string;
   id: string; tag: string;
   /** The operation's state (`saving` ... `failed`, `bound`). */
   state: string;

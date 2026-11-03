@@ -99,6 +99,7 @@ pub enum CreationAction {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CreationCard {
     id: String,
+    launch_id: String,
     tag: String,
     state: String,
     caption: String,
@@ -123,6 +124,7 @@ impl CreationCard {
     fn of(id: &str, operation: &Value, can_edit: bool) -> Self {
         Self {
             id: id.into(),
+            launch_id: text(operation, "launch_id").into(),
             tag: text(operation, "tag").into(),
             state: text(operation, "state").into(),
             caption: creation::caption(text(operation, "state")).into(),
@@ -2484,6 +2486,76 @@ mod tests {
             json!({"studio": {"codex": "remote"}, "": {"claude": "local"}})
         );
         assert!(settings.flush_within(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn catalog_arrival_binds_a_waiting_creation_in_service_and_native_modes() {
+        for service_mode in [true, false] {
+            let fake = Fake::new();
+            let live = crate::commands::TestLive::default();
+            let pump = live.pump.clone();
+            let mut services = fake.services();
+            let watch = pump.clone();
+            services.watch =
+                Arc::new(move |computer, launches| watched(&watch, computer, launches));
+            pump.push(Change::Computer {
+                computer: ComputerId::local(),
+                status: zerus_client_core::ComputerStatus::Live,
+            });
+            pump.push(Change::Machine {
+                computer: ComputerId::local(),
+                machine: zerus_client_core::MachineMeta::project(
+                    &json!({"ok":true,"host":"workstation","ended_launches":[]}),
+                ),
+            });
+            let host = CreationHost::new(fake.dir.join("creations.json"), services);
+            assert!(live.creations.set(host.clone()).is_ok());
+            let id = admitted(&host, plan());
+            state(&host, &id, "confirming");
+            // Finish launch completion and its initial empty-watch read before
+            // publishing the row. Otherwise that first read can mask a missing
+            // catalog wake by racing the fixture's publication.
+            assert!(host.flush_journal_for_test());
+            let launch = text(&operation(&host, &id), "launch_id").to_owned();
+            assert_eq!(host.view()[0].launch_id, launch);
+            let mut row = zerus_client_core::view::row(&json!({"name":"codex/repo/created",
+                "cmd":"codex","launch_id":launch,"state":"running"}));
+            row.machine = "workstation".into();
+            let change = Change::Upsert {
+                computer: ComputerId::local(),
+                key: "run:created".into(),
+                row,
+            };
+            if service_mode {
+                let (send, receive) = mpsc::sync_channel(8);
+                let drain = live.service_drain(receive);
+                send.send(crate::desktop_service::Data::Change(Box::new(change)))
+                    .unwrap();
+                drop(send);
+                drain.join().unwrap();
+            } else {
+                let (send, receive) = mpsc::channel();
+                let observing = host.clone();
+                pump.drain_with_after(receive, CreationHost::observes, move || {
+                    observing.catalog_changed()
+                });
+                send.send(change).unwrap();
+                drop(send);
+            }
+            state(&host, &id, "bound");
+            assert!(host.view().is_empty());
+            assert_eq!(
+                fake.probe.reads.load(Ordering::SeqCst),
+                0,
+                "the capable watch must bind without Check or fallback polling"
+            );
+            wait("the bound placement", || {
+                !lock(&fake.probe.bound).is_empty()
+            });
+            assert_eq!(*lock(&fake.probe.bound), ["codex/repo/created"]);
+            drop(live);
+            fake.stop(host);
+        }
     }
 
     #[test]

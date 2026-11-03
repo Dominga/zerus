@@ -153,6 +153,13 @@ pub struct CatalogDelivery {
 }
 enum CatalogValue {
     Row(Box<Change>),
+    /// A delta removal after its revision's upserts. One revision is one
+    /// native catalog frame, whose removal is `replaced` when that frame lists
+    /// the session's name again (`listed`); the journal drops the reason.
+    Removal {
+        key: String,
+        listed: Arc<BTreeSet<String>>,
+    },
     Finish {
         through: Option<Revision>,
         keys: Option<BTreeSet<String>>,
@@ -183,6 +190,21 @@ impl CatalogDelivery {
                 observe(&change);
                 pump.push(*change);
             }
+            CatalogValue::Removal { key, listed } => {
+                // The serial drain's mirror holds exactly the rows delivered
+                // before this removal, so the removed run's name is current.
+                let reason = pump
+                    .row(&self.computer, &key)
+                    .filter(|old| listed.contains(&old.name))
+                    .map(|_| "replaced".to_owned());
+                let change = Change::Remove {
+                    computer: ComputerId(self.computer),
+                    key,
+                    reason,
+                };
+                observe(&change);
+                pump.push(change);
+            }
             CatalogValue::Finish {
                 through,
                 keys,
@@ -209,7 +231,7 @@ impl CatalogDelivery {
                 if let (Some(keys), Some(_)) = (keys, through) {
                     pump.service_catalog_finish(&computer, &keys);
                 }
-                pump.push(Change::Computer {
+                let change = Change::Computer {
                     computer,
                     // A contiguous delta range remains live even when a newer
                     // head needs another catch-up. Pending display changes do
@@ -219,7 +241,9 @@ impl CatalogDelivery {
                     } else {
                         ComputerStatus::Reconnecting { attempt: 0 }
                     },
-                });
+                };
+                observe(&change);
+                pump.push(change);
                 let _ = done.send(());
             }
         }

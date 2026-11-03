@@ -167,6 +167,68 @@ describe("applyBatch", () => {
     expect(moves).toContainEqual(["\nrun:new", "\nrun:last"]);
   });
 
+  // The background service journal keeps only each key's final row, so its
+  // deltas and reconnect baselines remove keys without a reason (zerus-uutz).
+  const paused = () => row("run:old", "claude/p/review", { run_id: "old", conversation_id: "conversation", state: "paused" });
+  const resumed = (extra: Partial<ViewRow> = {}) => row("run:new", "claude/p/review", { run_id: "new", conversation_id: "conversation", state: "running", ...extra });
+  it.each([
+    ["restored replaced reason after its successor, in one batch", [{ upserts: [resumed()], removes: [{ computer: "", key: "run:old", reason: "replaced" }] }]],
+    ["no reason, successor first in one batch", [{ upserts: [resumed()], removes: [{ computer: "", key: "run:old", reason: null }] }]],
+    ["no reason, removal first, successor in a later batch", [{ removes: [{ computer: "", key: "run:old", reason: null }] }, { upserts: [resumed()] }]],
+    ["no reason, successor in an earlier batch, removal later", [{ upserts: [resumed()] }, { removes: [{ computer: "", key: "run:old" }] }]],
+  ] as [string, Partial<Batch>[]][])("carries selection across a service resume: %s", (_, batches) => {
+    const c = createCatalog(), moves: [string, string][] = [];
+    c.applyBatch(batchOf({ upserts: [paused()] }));
+    c.onReplaced((from, to) => moves.push([from, to]));
+    for (const part of batches) c.applyBatch(batchOf(part));
+    expect(moves).toEqual([["\nrun:old", "\nrun:new"]]);
+    expect(c.catalog.order).toEqual(["\nrun:new"]);
+  });
+
+  it.each([
+    ["a different conversation", { conversation_id: "different" }],
+    ["an unknown conversation", { conversation_id: "" }],
+    ["an archived row", { state: "archived" }],
+    ["an unknown run", { run_id: "" }],
+    ["the same run", { run_id: "old" }],
+  ] as [string, Partial<ViewRow>][])("does not infer a reasonless successor from %s in either order", (_, changed) => {
+    for (const order of [0, 1]) {
+      const c = createCatalog(), moves: unknown[] = [];
+      c.applyBatch(batchOf({ upserts: [paused()] }));
+      c.onReplaced((...move) => moves.push(move));
+      const removal = batchOf({ removes: [{ computer: "", key: "run:old", reason: null }] }), successor = batchOf({ upserts: [resumed(changed)] });
+      for (const part of order ? [removal, successor] : [successor, removal]) c.applyBatch(part);
+      expect(moves).toEqual([]);
+    }
+  });
+
+  it("keeps explicit removal reasons, ambiguous successors and expired removals from a reasonless handoff", () => {
+    for (const reason of ["ended", "archived", "forgotten"]) {
+      const c = createCatalog(), moves: unknown[] = [];
+      c.applyBatch(batchOf({ upserts: [paused()] }));
+      c.onReplaced((...move) => moves.push(move));
+      c.applyBatch(batchOf({ removes: [{ computer: "", key: "run:old", reason }] }));
+      c.applyBatch(batchOf({ upserts: [resumed()] }));
+      expect(moves).toEqual([]);
+    }
+    const ambiguous = createCatalog(), moves: unknown[] = [];
+    ambiguous.applyBatch(batchOf({ upserts: [paused()] }));
+    ambiguous.onReplaced((...move) => moves.push(move));
+    ambiguous.applyBatch(batchOf({ upserts: [resumed(), row("run:other", "claude/p/review", { run_id: "other", conversation_id: "conversation", state: "running" })] }));
+    ambiguous.applyBatch(batchOf({ removes: [{ computer: "", key: "run:old", reason: null }] }));
+    expect(moves).toEqual([]);
+    vi.useFakeTimers();
+    try {
+      const late = createCatalog();
+      late.applyBatch(batchOf({ upserts: [paused()] }));
+      late.onReplaced((...move) => moves.push(move));
+      late.applyBatch(batchOf({ removes: [{ computer: "", key: "run:old", reason: null }] }));
+      vi.advanceTimersByTime(10_001);
+      late.applyBatch(batchOf({ upserts: [resumed()] }));
+      expect(moves).toEqual([]);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("records computer status", () => {
     createRoot((dispose) => {
       const { catalog, applyBatch } = createCatalog();

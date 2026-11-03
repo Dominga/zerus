@@ -557,7 +557,9 @@ backend and confirms its IPC readiness **before** starting the replacement GUI.
 It uses the maintained macOS service helper and the installer's independent
 runner selection; a failed refresh leaves GUI startup refused. Restored GUI
 starts use the same ordering. This preserves the selected passive/background
-mode and does not perform a new Grant or Rearm.
+mode and does not perform a new Grant or Rearm. The installer skips any second
+backend refresh after this opt-in update. When no GUI was running, the updater
+still completes the backend refresh before returning to the installer.
 
 If native takeover remains unconfirmed, the GUI opens as a service consumer
 without native writers. It retains the original uncertain takeover and its child

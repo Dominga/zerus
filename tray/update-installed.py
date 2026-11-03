@@ -1146,6 +1146,10 @@ def update(built, installed, rollback=False):
                 done = True
                 raise UpdateError('the new GUI is installed, but Zerus started during the update; '
                                   'the replaced GUI was kept')
+            if MAC and REFRESH_MAC_DESKTOP:
+                # The installer skips its second refresh after this successful
+                # opt-in update, even when no GUI needed restarting here.
+                refresh_mac_desktop(installed)
             settled = settle(aside if aside.exists() else None, keep, progress)
             done = True
             say(f'installed {name} without starting it; {settled}')

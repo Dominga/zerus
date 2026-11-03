@@ -592,32 +592,42 @@ mod native {
         );
         tauri::async_runtime::block_on(async {
             let (service, _pump) = f.service();
-            wait_for("recovery watch", || service.snapshot().connected).await;
-            assert!(f.calls("frontend-request").is_empty());
+            // Preflight is earlier than the ownership action. The actual watch
+            // child is spawned only after that action's awaited completion.
+            wait_for("settled startup and original watch", || {
+                !f.calls("watch").is_empty() && service.snapshot().connected
+            })
+            .await;
+            let startup_mutations = f.calls("frontend-request");
+            if !startup_mutations.is_empty()
+                || !service
+                    .snapshot()
+                    .notification_ownership
+                    .as_ref()
+                    .is_some_and(|view| view["request_id"].is_null())
+            {
+                service.join().await.unwrap();
+                panic!("settled recovery startup emitted a mutation");
+            }
             assert_eq!(
                 service.snapshot().notification_ownership.unwrap()["native_recovery"],
                 true
             );
-            let statuses = f.calls("ownership-status").len();
+            let watches = f.calls("watch").len();
             service.retry();
-            wait_for("read-only manual retry", || {
-                f.calls("ownership-status").len() > statuses && service.snapshot().connected
+            wait_for("settled retry and replacement watch", || {
+                f.calls("watch").len() > watches && service.snapshot().connected
             })
             .await;
-            assert!(
-                f.calls("frontend-request").is_empty(),
-                "Retry must not invent a new grant"
-            );
-            // A transport hello can precede its original status worker. Wait
-            // for that SAME controller to finish before issuing the UI action.
-            let until = Instant::now() + Duration::from_secs(5);
-            loop {
-                let current = service.ownership_result().await;
-                if !current.running && current.status.is_some() {
-                    break;
-                }
-                assert!(Instant::now() < until, "original ownership status worker");
-                tokio::time::sleep(Duration::from_millis(5)).await;
+            if !f.calls("frontend-request").is_empty()
+                || !service
+                    .snapshot()
+                    .notification_ownership
+                    .as_ref()
+                    .is_some_and(|view| view["request_id"].is_null())
+            {
+                service.join().await.unwrap();
+                panic!("settled recovery Retry emitted a mutation");
             }
             let view = service.ownership_rearm().await;
             assert!(view.code.is_empty(), "{view:?}");

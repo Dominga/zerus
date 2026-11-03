@@ -396,6 +396,27 @@ class Flow(Fixture):
 
 
 class UpdateFlow(Flow):
+    def test_stopped_pair_refresh_is_complete_before_opt_in_update_returns(self):
+        self.install('client-1', 'tauri', self.installed)
+        self.running = False
+        def refresh(installed):
+            self.events.append(('desktop-ready', self.variant(installed)))
+            self.assertFalse(self.running)
+        with mock.patch.object(updater, 'REFRESH_MAC_DESKTOP', self.root / 'runner-hgs'), \
+                mock.patch.object(updater, 'refresh_mac_desktop', side_effect=refresh):
+            self.assertEqual(updater.update(self.bundle('client-2', 'tauri'), self.installed), 0)
+        self.assertEqual(self.events, [('desktop-ready', 'client-2')])
+        self.assertFalse(self.running, 'the source installer owns the later first GUI load')
+
+    def test_stopped_pair_refresh_failure_cannot_report_success_or_start_gui(self):
+        self.running = False
+        with mock.patch.object(updater, 'REFRESH_MAC_DESKTOP', self.root / 'runner-hgs'), \
+                mock.patch.object(updater, 'refresh_mac_desktop', side_effect=updater.UpdateError('private desktop unavailable')):
+            with self.assertRaisesRegex(updater.UpdateError, 'private desktop unavailable'):
+                updater.update(self.bundle('client-1', 'tauri'), self.installed)
+        self.assertEqual(self.events, [])
+        self.assertFalse(self.running)
+
     def test_a_client_that_does_not_start_brings_back_the_client_it_replaced(self):
         self.install('client-1', 'tauri', self.installed)
         self.install('qt', 'qt', self.slot)

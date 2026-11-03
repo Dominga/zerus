@@ -1,5 +1,7 @@
 """Private filesystem plus recorded subprocesses; no launchd or GUI is reached."""
 import importlib.util
+import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -82,6 +84,52 @@ class MacDesktopStartupOrder(unittest.TestCase):
             updater.start(self.installed)
         self.assertEqual(self.calls[0][0:2], ('launchctl', 'bootout'))
         self.assertFalse(any('--restart' in call for call in self.calls))
+
+
+class Step4ServiceOrder(unittest.TestCase):
+    """Execute the real shell tail, updater.start and real registration helper."""
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='zstep4-')
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.home = self.root / 'home'
+        self.home.mkdir()
+        self.installed = self.home / 'Applications/hgs-tray.app'
+        for path in (self.installed / 'Contents/MacOS/hgs', self.root / 'bin/hgs'):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('private synthetic CLI; never executed')
+            path.chmod(0o755)
+        self.driver = ROOT / 'tests/fixtures/mac_desktop_startup_driver.py'
+        self.state = self.root / 'launchd-model.json'
+        self.environment = dict(os.environ, HOME=str(self.home), TEST_PYTHON=sys.executable,
+            TEST_DRIVER=str(self.driver), TEST_REPO=str(ROOT), TEST_ROOT=str(self.root),
+            SCRIPT_DIR=str(self.root / 'tray'), HGS_BIN=str(self.root / 'bin/hgs'),
+            APP_DEST=str(self.installed), BUILD_APP=str(self.root / 'build.app'),
+            PLIST_DEST=str(self.home / 'Library/LaunchAgents/com.hgdev.hgs-tray.plist'),
+            LABEL='com.hgdev.hgs-tray', RELOAD='0', RESTART_RUNNING='1', CHANGED='0')
+
+    def step4(self, update):
+        script = (ROOT / 'tray/install.sh').read_text()
+        begin = script.index('# --- 4. load ')
+        end = script.index('\nif [ "${GUI}" = "client" ]; then\n    HINT_SELFTEST', begin)
+        prefix = r'''set -euo pipefail
+python3() { "$TEST_PYTHON" "$TEST_DRIVER" "$TEST_REPO" "$TEST_ROOT" python "$@"; }
+launchctl() { "$TEST_PYTHON" "$TEST_DRIVER" "$TEST_REPO" "$TEST_ROOT" launchctl "$@"; }
+DESKTOP_HGS="$APP_DEST/Contents/MacOS/hgs"
+DESKTOP_ARGS=(--restart --runner-hgs "$HGS_BIN")
+'''
+        result = subprocess.run(['bash', '-s'], input=prefix + script[begin:end],
+            env=dict(self.environment, UPDATE=str(update)), text=True, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return json.loads(self.state.read_text())['events']
+
+    def test_changed_backend_has_no_second_restart_after_gui_bootstrap(self):
+        subprocess.run([sys.executable, str(self.driver), str(ROOT), str(self.root), 'init'],
+                       check=True, timeout=10)
+        self.assertEqual(self.step4(1), ['desktop:bootout', 'desktop:bootstrap', 'gui:bootstrap'])
+
+    def test_non_updater_install_refreshes_service_before_its_first_gui(self):
+        self.assertEqual(self.step4(0), ['desktop:bootstrap', 'gui:bootstrap'])
 
 
 if __name__ == '__main__':

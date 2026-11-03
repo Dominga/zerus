@@ -1002,13 +1002,13 @@ export function ActivityView(props: { source?: ActivitySource }) {
         setMeasuring(pending);
       });
     };
-    let viewportWidth = scroller.clientWidth, viewportHeight = scroller.clientHeight;
+    let viewportWidth = scroller.clientWidth;
     // A capped column can stay fixed while the surrounding viewport resizes.
     const widths = createActivityResize(setResizing, () => { end.settle(); settleReading(); });
     const resize = new ResizeObserver((entries) => {
       const viewport = entries.find(entry => entry.target === scroller)?.contentRect;
-      const viewportChanged = viewport && (Math.abs(viewport.width - viewportWidth) > .5 || Math.abs(viewport.height - viewportHeight) > .5);
-      if (viewport) { viewportWidth = viewport.width; viewportHeight = viewport.height; }
+      const viewportChanged = viewport && Math.abs(viewport.width - viewportWidth) > .5;
+      if (viewport) viewportWidth = viewport.width;
       // These borderless boxes already have current geometry. A synchronous
       // DOM read can flush another whole-page layout after virtual row writes.
       const width = entries.find(entry => entry.target === (column ?? scroller))?.contentRect.width ?? measurementWidth;

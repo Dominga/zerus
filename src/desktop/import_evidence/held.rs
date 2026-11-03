@@ -1,10 +1,14 @@
 //! Immutable Staged finalization by the service's actual lock owner. Filesystem
 //! work stays on the existing bounded client thread, never the actor.
 use super::*;
+// Production uses the original std::fs::rename. Tests model an uncertain
+// result after a real rename, without a production fault switch or route.
 use crate::{
     desktop::{notifications::preparation::Owner, transport::Stream},
     platform::FileIdentity,
 };
+#[cfg(not(test))]
+use std::fs::rename as claim_move;
 use std::{
     collections::VecDeque,
     sync::{
@@ -12,6 +16,8 @@ use std::{
         Arc,
     },
 };
+#[cfg(test)]
+use tests::claim_move;
 
 pub(in crate::desktop) const OP: &str = "import_publish";
 static ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -315,7 +321,7 @@ fn finalize(
         // Set before the syscall: even a failed/uncertain rename must not grant a
         // pre-claim negative, let alone allow reuse after UUID reservation.
         rename_entered = true;
-        fs::rename(&original, &owned)?;
+        claim_move(&original, &owned)?;
         ensure!(
             key(&directory_handle(&owned)?)? == reference.directory,
             "managed import directory replaced during transfer"

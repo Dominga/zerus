@@ -2,6 +2,19 @@ use super::*;
 #[cfg(target_os = "linux")]
 static CLIENT_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+thread_local! {
+    static RENAME_ERROR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static RENAMED: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+pub(super) fn claim_move(from: &Path, to: &Path) -> io::Result<()> {
+    fs::rename(from, to)?;
+    if RENAME_ERROR.with(|enabled| enabled.replace(false)) {
+        RENAMED.with(|owned| *owned.borrow_mut() = Some(to.to_path_buf()));
+        return Err(io::Error::other("fixture unknown rename outcome"));
+    }
+    Ok(())
+}
+
 struct Fixture {
     _temp: tempfile::TempDir,
     location: Location,
@@ -618,5 +631,91 @@ fn preclaim_refusals_return_the_exact_negative_and_release_original_connections(
         assert!(!f.location.root.join("imports").join(import_id).exists());
         drop(_busy);
         assert!(Admission::take().is_ok());
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn postrename_failures_through_the_original_client_never_emit_a_negative_or_reserve() {
+    use crate::desktop::notifications::preparation::{Preparation, TEST_SERIAL};
+    let _preparing = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _client = CLIENT_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    for unknown_rename in [false, true] {
+        let f = Fixture::new();
+        let import = id();
+        let (reference, original) = transfer(staged(&f.location, &import));
+        let request = json!({"version":1,"stage":reference.stage,"import_id":reference.import_id,
+            "record_sha256":reference.record_sha256,"max_bytes":reference.max_bytes,"directory":reference.directory});
+        let hello = serde_json::from_value(json!({"abi":protocol::ABI,
+            "configuration":f.location.configuration,"op":OP,"request":request}))
+        .unwrap();
+        // Acquire the real original service/handoff/admission owner. Join this
+        // fixture's selection thread BEFORE assertions can panic; only its
+        // original Owner loan remains, with no SDK/process/native delivery.
+        let (release, wait) = mpsc::channel();
+        let mut preparation =
+            Preparation::blocked_for_test(Arc::new(f.location.lock().unwrap()), &f.location, wait);
+        let owner = preparation.owner().unwrap();
+        preparation.stop();
+        release.send(()).unwrap();
+        let until = Instant::now() + Duration::from_secs(3);
+        while !preparation.drained() {
+            let _ = preparation.poll();
+            assert!(Instant::now() < until);
+            std::thread::yield_now();
+        }
+        drop(preparation);
+        let location = Location {
+            root: f.location.root.clone(),
+            configuration: f.location.configuration.clone(),
+        };
+        let (peer, stream) = std::os::unix::net::UnixStream::pair().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let (send, receive) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            RENAME_ERROR.with(|enabled| enabled.set(unknown_rename));
+            let result = client_with(
+                stream,
+                hello,
+                send,
+                Arc::new(AtomicBool::new(false)),
+                &location,
+                |owned| {
+                    RENAMED.with(|saved| *saved.borrow_mut() = Some(owned.to_path_buf()));
+                    anyhow::bail!("fixture after-claim failure")
+                },
+            );
+            (result, RENAMED.with(|saved| saved.borrow_mut().take()))
+        });
+        match receive.recv_timeout(Duration::from_secs(2)).unwrap() {
+            super::super::super::Event::ImportOwner(configuration, reply) => {
+                assert_eq!(configuration, f.location.configuration);
+                reply
+                    .send(Loan {
+                        owner: Some(owner),
+                        epoch: "original-epoch".into(),
+                        seq: 1,
+                    })
+                    .unwrap_or_else(|_| panic!("original receiver closed"));
+            }
+            _ => panic!("unexpected request"),
+        }
+        let (result, owned) = worker.join().unwrap();
+        let frame = protocol::line(&mut BufReader::new(peer), protocol::FRAME_BYTES).unwrap();
+        assert!(
+            result.is_err(),
+            "post-rename failure cannot settle negatively"
+        );
+        assert!(
+            frame.is_none(),
+            "neither success nor attempt-only negative is permitted"
+        );
+        let owned = owned.expect("the real rename completed");
+        assert!(!original.exists());
+        assert!(owned.join("record-v1.json").is_file());
+        assert!(!f.location.root.join("imports").join(&import).exists());
+        assert!(Admission::take().is_ok());
+        assert!(f.location.handoff_lock().is_ok());
+        assert!(f.location.lock().is_ok());
     }
 }

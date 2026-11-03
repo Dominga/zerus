@@ -655,6 +655,53 @@ impl Overview {
         state.queue.clear();
         Ok(())
     }
+    /// Open only the displayed local leftover, never a webview-supplied path.
+    fn open_leftover_folder(
+        &self,
+        org: &Organization,
+        id: &str,
+        row: &str,
+        open: &dyn Fn(&std::path::Path) -> bool,
+    ) -> Result<(), String> {
+        let (binding, path) = {
+            let state = locked(&self.0)?;
+            let window = state
+                .window
+                .as_ref()
+                .filter(|w| w.id == id && w.pending.is_none())
+                .ok_or(CHANGED)?;
+            let data = locked(&window.current.data)?;
+            let found = data.model.row(row).ok_or(CHANGED)?;
+            let item = found
+                .leftover
+                .as_ref()
+                .filter(|item| item.macos_deletion_blocked)
+                .ok_or(CHANGED)?;
+            let binding = window
+                .current
+                .bindings
+                .get(found.source)
+                .cloned()
+                .ok_or(CHANGED)?;
+            if !binding.source.computer.is_empty() {
+                return Err(format!(
+                    "Open this folder in Finder on {}.",
+                    binding.source.machine
+                ));
+            }
+            (binding, item.path.clone())
+        };
+        current(org, &binding, false)?;
+        let path = std::path::Path::new(&path);
+        if !path.is_absolute() || !path.is_dir() {
+            return Err("This folder is unavailable. Review it again.".into());
+        }
+        if !open(path) {
+            return Err("Could not open the folder in Finder.".into());
+        }
+        Ok(())
+    }
+
     /// One explicit action on the displayed leftover row. The row must still
     /// carry the fingerprint the owner saw and no outcome yet; no refresh may
     /// be pending and no other action running. The outcome stays on the row
@@ -691,6 +738,9 @@ impl Overview {
                 return Err("This folder changed since it was shown. Review it again.".into());
             }
             if let calls_for::Action::Delete { consent } = action {
+                if item.macos_deletion_blocked {
+                    return Err(item.reasons.join(" "));
+                }
                 if !item.repository || !(item.deletable || (consent && item.consent)) {
                     return Err("These files cannot be deleted now. Review them again.".into());
                 }
@@ -1015,6 +1065,31 @@ async fn leftover_action(
     catalogs.invalidate_worktrees(&ComputerId(computer), &common);
     Ok(settled)
 }
+/// A local folder opener, bound to the opaque current overview row.
+#[tauri::command]
+pub async fn worktree_leftover_open_folder(
+    window: tauri::Webview,
+    state: tauri::State<'_, Overview>,
+    org: tauri::State<'_, Organization>,
+    folders: tauri::State<'_, crate::session_folders::SessionFolders>,
+    id: String,
+    row: String,
+) -> Result<(), String> {
+    main(&window)?;
+    if !cfg!(target_os = "macos") {
+        return Err("Open this folder in Finder from Zerus on its Mac.".into());
+    }
+    if id.len() > 64 || row.len() > 64 {
+        return Err(CHANGED.into());
+    }
+    let (own, org, opener) = (state.inner().clone(), org.inner().clone(), folders.opener());
+    tauri::async_runtime::spawn_blocking(move || {
+        own.open_leftover_folder(&org, &id, &row, &*opener.open)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 /// Keep folder: forget the reviewed leftover's record; its files stay.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -1430,6 +1505,63 @@ mod tests {
         });
         calls
     }
+    #[test]
+    fn opening_a_blocked_leftover_uses_only_the_current_local_native_row() {
+        let f = Fixture::new(1);
+        let own = Overview::default();
+        let folder = f.dir.clone();
+        let mut calls = leftover_calls(
+            &f,
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            true,
+        );
+        calls.review = Arc::new(move |_, _, common| {
+            let mut row = left(folder.to_str().unwrap(), common, true, true);
+            row["reasons"] = json!([{"code":"macos_appledouble_safety","message":"Deletion is disabled on macOS. Open the folder in Finder."}]);
+            Ok(
+                json!({"state":"ok","common_dir":common,"worktrees":[],"leftovers":[row],"leftovers_partial":false}),
+            )
+        });
+        let head = own.start(&f.org, false, false, calls).unwrap();
+        settled(&own);
+        let row = leftovers(&own, &head.id)
+            .into_iter()
+            .find(|row| row.path == f.dir.to_str().unwrap())
+            .unwrap();
+        let opened = Mutex::new(Vec::new());
+        let opener = |path: &std::path::Path| {
+            opened.lock().unwrap().push(path.to_path_buf());
+            true
+        };
+        own.open_leftover_folder(&f.org, &head.id, &row.id, &opener)
+            .unwrap();
+        assert_eq!(
+            opened.lock().unwrap().as_slice(),
+            std::slice::from_ref(&f.dir)
+        );
+        assert!(own
+            .open_leftover_folder(&f.org, "old-window", &row.id, &opener)
+            .is_err());
+        assert!(own
+            .open_leftover_folder(&f.org, &head.id, "webview-path", &opener)
+            .is_err());
+        let refused = own.act(
+            &f.org,
+            &head.id,
+            &row.id,
+            &row.leftover.unwrap().fingerprint,
+            calls_for::Action::Delete { consent: true },
+            &|_, _| panic!("no CLI mutation for a blocked row"),
+        );
+        assert!(refused.unwrap_err().contains("Finder"));
+        f.machine("22222222-2222-4222-8222-222222222222");
+        assert!(own
+            .open_leftover_folder(&f.org, &head.id, &row.id, &opener)
+            .is_err());
+        assert_eq!(opened.lock().unwrap().len(), 1);
+    }
+
     #[test]
     fn leftovers_join_the_overview_with_one_listing_per_computer() {
         let f = Fixture::new(3);

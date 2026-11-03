@@ -42,6 +42,13 @@ pub(crate) fn probe_child(name: &str) {
 /// below the private home, where service-backed paths treat it as default.
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) fn private_probe(child: &str) {
+    private_probe_with(child, 10, 16);
+}
+
+/// The same isolation with a larger bound, for children that run real Git
+/// (its helpers count toward the descendant budget).
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn private_probe_with(child: &str, seconds: u32, processes: u32) {
     use std::{fs, os::unix::fs::PermissionsExt, process::Command};
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
@@ -76,7 +83,13 @@ pub(crate) fn private_probe(child: &str) {
             env!("CARGO_MANIFEST_DIR"),
             "/tests/bounded_process.py"
         ))
-        .args(["--seconds", "10", "--max-processes", "16", "--"])
+        .args([
+            "--seconds",
+            &seconds.to_string(),
+            "--max-processes",
+            &processes.to_string(),
+            "--",
+        ])
         .arg(std::env::current_exe().unwrap())
         .args([child, "--exact", "--ignored", "--test-threads=1"])
         .env_clear()

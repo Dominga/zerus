@@ -887,6 +887,28 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
     def delete(self,path,fingerprint,confirm=True,extra=()):
         return subprocess.run([str(HGS),'worktrees','delete-leftover','--path',str(path),'--common-dir',str(self.repo/'.git'),'--fingerprint',fingerprint,
             *(['--confirm-delete'] if confirm else []),'--request-id','test-delete','--json',*extra],env=self.env,text=True,capture_output=True,timeout=60)
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS fail-closed leftover contract')
+    def test_macos_leftover_refusal_preserves_files_permissions_record_and_keep_folder(self):
+        import sqlite3
+        tree,row,_=self.partial('macos-refused');left=self.leftover(tree)
+        self.assertIn('macos_appledouble_safety',codes(left['reasons']))
+        self.assertFalse(left['deletable']);self.assertNotIn('process_fingerprint',left)
+        payload=tree/'target'/'readonly'/'out';mode=payload.parent.stat().st_mode
+        database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3'
+        with contextlib.closing(sqlite3.connect(database)) as db:
+            before=db.execute('SELECT * FROM removals').fetchall()
+        result=self.delete(tree,left['fingerprint'])
+        self.assertNotEqual(result.returncode,0);value=json.loads(result.stdout)
+        self.assertEqual((value['operation'],value['outcome_version'],value['status']),('worktree_leftover_delete',1,'kept'))
+        self.assertEqual(value['request_id'],'test-delete');self.assertIn('AppleDouble',value['detail']);self.assertIn('Finder',value['detail'])
+        self.assertEqual(payload.read_text(),'build');self.assertEqual(payload.parent.stat().st_mode,mode)
+        with contextlib.closing(sqlite3.connect(database)) as db:
+            self.assertEqual(db.execute('SELECT * FROM removals').fetchall(),before,'no attempt marker may be written')
+        self.assertEqual(self.leftover(tree)['fingerprint'],left['fingerprint'])
+        self.assertIn(row['branch'],self.git('-C',str(self.repo),'branch','--list',row['branch']))
+        kept=self.keep(tree,left['fingerprint']);self.assertEqual(kept.returncode,0,kept.stderr)
+        self.assertEqual(payload.read_text(),'build');self.assertEqual(self.records(),[])
+
     @unittest.skipUnless(sys.platform == 'linux', 'Linux protected-process review')
     def test_unrelated_hidden_process_churn_keeps_leftover_confirmations_valid(self):
         def hidden():
@@ -905,6 +927,7 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         kept_result=self.keep(kept,keep_row['fingerprint']);self.assertEqual(kept_result.returncode,0,kept_result.stderr)
         result=self.delete(deleted,delete_row['fingerprint'],extra=('--process-fingerprint',delete_row['process_fingerprint']))
         self.assertEqual(result.returncode,0,result.stderr);self.assertFalse(deleted.exists());self.assertTrue(kept.exists())
+    @unittest.skipUnless(sys.platform == 'linux', 'Leftover deletion is disabled on macOS pending a native AppleDouble guard')
     def test_deleting_a_leftover_needs_confirmation_and_a_fresh_review_and_keeps_the_branch(self):
         tree,row,_=self.partial('deleted');outside=self.root/'outside';outside.mkdir();(outside/'keep.txt').write_text('outside')
         (tree/'target'/'readonly').chmod(0o755);(tree/'target'/'readonly'/'link').symlink_to(outside,target_is_directory=True);(tree/'target'/'readonly').chmod(0o555)
@@ -918,6 +941,7 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         self.assertFalse(tree.exists());self.assertEqual((outside/'keep.txt').read_text(),'outside')
         self.assertEqual(self.records(),[]);self.assertIsNone(self.leftover(tree))
         self.assertIn(row['branch'],self.git('-C',str(self.repo),'branch','--list',row['branch']))
+    @unittest.skipUnless(sys.platform == 'linux', 'Leftover deletion is disabled on macOS pending a native AppleDouble guard')
     def test_deleting_a_leftover_refuses_sessions_processes_and_nested_repositories(self):
         tree,_,_=self.partial('occupied')
         self.binding('codex/fixture/leftover',tree);left=self.leftover(tree)
@@ -933,6 +957,7 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         left=self.leftover(tree);self.assertIn('nested_repository',codes(left['reasons']));self.assertFalse(left['deletable'])
         self.assertNotEqual(self.delete(tree,left['fingerprint']).returncode,0)
         self.assertTrue((nested/'.git').is_dir());self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
+    @unittest.skipUnless(sys.platform == 'linux', 'Leftover deletion is disabled on macOS pending a native AppleDouble guard')
     def test_leftover_deletion_refuses_an_incomplete_saved_binding_inventory(self):
         for failure in ('unreadable-file','malformed-record','unreadable-directory'):
             with self.subTest(failure=failure):
@@ -994,6 +1019,7 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
             self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
         finally:bad.chmod(0o600)
 
+    @unittest.skipUnless(sys.platform == 'linux', 'Leftover deletion is disabled on macOS pending a native AppleDouble guard')
     def test_a_stopped_deletion_keeps_its_record_and_is_never_retried(self):
         tree,_,_=self.partial('stopped');left=self.leftover(tree)
         parent=tree.parent;mode=parent.stat().st_mode;parent.chmod(0o555);self.addCleanup(lambda:parent.chmod(mode))
@@ -1006,6 +1032,7 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         self.assertNotEqual(self.delete(tree,left['fingerprint']).returncode,0);self.assertTrue(tree.exists())
         finished=self.delete(tree,later['fingerprint']);self.assertEqual(finished.returncode,0,finished.stderr)
         self.assertFalse(tree.exists());self.assertEqual(self.records(),[])
+    @unittest.skipUnless(sys.platform == 'linux', 'Leftover deletion is disabled on macOS pending a native AppleDouble guard')
     def test_delete_confirmation_is_spent_even_when_no_file_changed_and_settlement_fails(self):
         import sqlite3
         tree,row,_=self.partial('single-use')
@@ -1036,6 +1063,7 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
             self.assertNotEqual(self.leftover(tree)['fingerprint'],before['fingerprint'],'a repeated refusal must not restore its spent confirmation')
         self.assertEqual((retained/'target'/'readonly'/'out').read_text(),'build')
         self.assertIn(row['branch'],self.git('-C',str(self.repo),'branch','--list',row['branch']))
+    @unittest.skipUnless(sys.platform == 'linux', 'Leftover deletion is disabled on macOS pending a native AppleDouble guard')
     def test_unwritable_attempt_record_refuses_before_deleting_any_files(self):
         import sqlite3
         tree,_,_=self.partial('intent-refused');left=self.leftover(tree)

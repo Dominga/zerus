@@ -233,15 +233,19 @@ fn windows() -> bool {
 /// clears the slot for a new attempt under the same seed. That attempt is
 /// guarded like any seed without an outcome: Next's store is recorded only
 /// if nothing in it changed since the seed.
+///
+/// `failed.json` moves last. An interrupted move leaves it in place, so the
+/// next start supersedes again from where this one stopped; a slot without
+/// it never holds the old attempt's leftovers.
 fn supersede(slot: &Path) -> std::io::Result<()> {
     if slot.join("receipt.json").exists() {
         return Err(std::io::ErrorKind::AlreadyExists.into());
     }
     let kept = slot.join("superseded-v1");
     drop(disk::Parents::open(&kept, true)?);
-    let leaves = std::iter::once("failed.json".to_owned())
-        .chain(std::iter::once("index.json".to_owned()))
-        .chain((0..MAX_BYTES.div_ceil(PART)).map(part));
+    let leaves = std::iter::once("index.json".to_owned())
+        .chain((0..MAX_BYTES.div_ceil(PART)).map(part))
+        .chain(std::iter::once("failed.json".to_owned()));
     for leaf in leaves {
         let from = slot.join(&leaf);
         if fs::symlink_metadata(&from).is_ok() {
@@ -410,12 +414,9 @@ impl Capture {
             return refuse;
         };
         match read_json::<Failed>(&slot.join("failed.json")) {
-            Ok(Some(failed)) if superseded(&failed, windows()) => {
-                if supersede(&slot).is_err() {
-                    self.set("draft_capture_private_slot", None, 0);
-                    return refuse;
-                }
-            }
+            // A supersede that cannot finish keeps the recorded failure for
+            // this run, as before; the next start tries again.
+            Ok(Some(failed)) if superseded(&failed, windows()) && supersede(&slot).is_ok() => {}
             Ok(Some(failed)) => {
                 self.set(
                     failed_code(&failed.reason),

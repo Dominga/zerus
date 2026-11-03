@@ -23,6 +23,30 @@ const PROCESS_CONSENT_SECONDS: u64 = 300;
 const LEFTOVER_ROWS: usize = 32;
 const LEFTOVER_BYTES: usize = 1024 * 1024;
 
+const MACOS_LEFTOVER_REASON: &str = "Deleting leftover files is disabled on macOS until AppleDouble cleanup can be guarded. Open this folder in Finder to review and clean it up manually, or keep the folder.";
+
+fn macos_leftover_deletion_blocked() -> bool {
+    #[cfg(test)]
+    if FORCE_MACOS_LEFTOVER_GUARD.with(std::cell::Cell::get) {
+        return true;
+    }
+    cfg!(target_os = "macos")
+}
+
+fn leftover_deletion_guard() -> std::io::Result<()> {
+    if macos_leftover_deletion_blocked() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            MACOS_LEFTOVER_REASON,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_MACOS_LEFTOVER_GUARD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 fn admit_leftover(used: &mut usize, row: &Value) -> bool {
     let size = serde_json::to_vec(row).map_or(usize::MAX, |bytes| bytes.len());
     match used.checked_add(size).filter(|n| *n <= LEFTOVER_BYTES) {
@@ -1104,6 +1128,9 @@ fn leftover(
 ) -> Value {
     let path = PathBuf::from(&record.path);
     let mut reasons = Vec::new();
+    if macos_leftover_deletion_blocked() {
+        reasons.push(reason("macos_appledouble_safety", MACOS_LEFTOVER_REASON));
+    }
     let mut notes = vec![reason(
         "partially_removed",
         "Git no longer tracks this folder, but files remain. Review them; the removal is never retried.",
@@ -1223,7 +1250,7 @@ fn scan_leftover_limit(root: &Path, deadline: Instant, limit: usize) -> Leftover
     #[cfg(not(unix))]
     scan.blockers.push(reason(
         "unsupported_platform",
-        "Deleting leftover files is available on Linux and macOS. Keep the folder or delete it manually.",
+        "Deleting leftover files is currently available on Linux only. Keep the folder or delete it manually.",
     ));
     let mut manifest = BTreeMap::new();
     let mut pending = vec![root.to_path_buf()];
@@ -1574,7 +1601,11 @@ pub(super) fn leftovers_command(args: &[String]) -> Result<Value> {
 /// and is never retried.
 pub(super) fn delete_leftover_command(args: &[String]) -> (Result<Value>, bool) {
     let mut attempted = false;
-    let result = delete_leftover(args, &mut attempted);
+    // Refuse before even reserving an attempt: a known platform refusal is
+    // the existing kept/v1 outcome, with no partial filesystem effect.
+    let result = leftover_deletion_guard()
+        .map_err(|error| error.to_string())
+        .and_then(|()| delete_leftover(args, &mut attempted));
     (result, attempted)
 }
 
@@ -1754,6 +1785,7 @@ fn root_identity(path: &Path) -> std::io::Result<RootIdentity> {
 /// descriptor.
 #[cfg(unix)]
 fn delete_tree(root: &Path, expected: &RootIdentity, deadline: Instant) -> std::io::Result<()> {
+    leftover_deletion_guard()?;
     use std::ffi::CString;
     use std::io::Error;
     use std::os::fd::AsRawFd;
@@ -2013,6 +2045,11 @@ mod deletion {
     }
 
     pub(super) fn unlink(at: RawFd, name: &CStr, flags: libc::c_int) -> Result<()> {
+        // XNU may remove ordinary ._* files while retrying a directory
+        // removal. Both nested and root callers must fail before that syscall.
+        if flags & libc::AT_REMOVEDIR != 0 {
+            super::leftover_deletion_guard()?;
+        }
         if unsafe { libc::unlinkat(at, name.as_ptr(), flags) } != 0 {
             return Err(Error::last_os_error());
         }
@@ -2611,7 +2648,7 @@ mod tests {
                     + fs::symlink_metadata(root.join("link")).unwrap().len()
             )
         );
-        assert_eq!(row["deletable"], true);
+        assert_eq!(row["deletable"], !cfg!(target_os = "macos"));
         assert_eq!(fs::read_to_string(outside).unwrap(), "keep this data");
         assert_eq!(
             leftover(
@@ -2623,6 +2660,71 @@ mod tests {
             )["fingerprint"],
             row["fingerprint"]
         );
+        {
+            struct Restore(bool);
+            impl Drop for Restore {
+                fn drop(&mut self) {
+                    FORCE_MACOS_LEFTOVER_GUARD.with(|guard| guard.set(self.0));
+                }
+            }
+            let _restore = Restore(FORCE_MACOS_LEFTOVER_GUARD.with(|guard| guard.replace(true)));
+            use std::os::unix::fs::PermissionsExt;
+            let original_mode = fs::metadata(&root).unwrap().permissions();
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o500)).unwrap();
+            let blocked = leftover(
+                &record,
+                &common,
+                false,
+                &context,
+                Instant::now() + Duration::from_secs(10),
+            );
+            assert_eq!(blocked["reasons"][0]["code"], "macos_appledouble_safety");
+            assert_eq!(blocked["deletable"], false);
+            assert!(blocked["process_fingerprint"].is_null());
+            let mode = fs::metadata(&root).unwrap().permissions();
+            let (refused, attempted) = delete_leftover_command(&[
+                "--path".into(),
+                root.to_string_lossy().into_owned(),
+                "--common-dir".into(),
+                common.join("never-opened").to_string_lossy().into_owned(),
+                "--fingerprint".into(),
+                string(&blocked, "fingerprint").into(),
+                "--confirm-delete".into(),
+            ]);
+            assert!(
+                !attempted,
+                "a platform refusal cannot consume a confirmation"
+            );
+            assert_eq!(refused.unwrap_err(), MACOS_LEFTOVER_REASON);
+            assert_eq!(
+                delete_tree(
+                    &root,
+                    &RootIdentity::from_json(&row["root_identity"]).unwrap(),
+                    Instant::now() + Duration::from_secs(10)
+                )
+                .unwrap_err()
+                .kind(),
+                std::io::ErrorKind::Unsupported
+            );
+            assert_eq!(fs::metadata(&root).unwrap().permissions(), mode);
+            assert_eq!(
+                fs::read_to_string(root.join("cache/bytes")).unwrap(),
+                "fixture data"
+            );
+            use std::os::fd::AsRawFd;
+            let parent = deletion::open_path(&fs::canonicalize(base.path()).unwrap()).unwrap();
+            for name in [c"empty-root", c"empty-nested"] {
+                fs::create_dir(base.path().join(name.to_str().unwrap())).unwrap();
+                assert_eq!(
+                    deletion::unlink(parent.as_raw_fd(), name, libc::AT_REMOVEDIR)
+                        .unwrap_err()
+                        .kind(),
+                    std::io::ErrorKind::Unsupported
+                );
+                assert!(base.path().join(name.to_str().unwrap()).is_dir());
+            }
+            fs::set_permissions(&root, original_mode).unwrap();
+        }
         // A replacement after the walk cannot inherit its manifest. Keep
         // the old root identity in the row so the effect refuses it.
         let original = row["root_identity"].clone();
@@ -2657,7 +2759,6 @@ mod tests {
             "fixture data"
         );
     }
-
     #[cfg(unix)]
     #[test]
     fn a_wide_leftover_bounds_enumeration_and_reports_incomplete_size() {
@@ -2687,7 +2788,46 @@ mod tests {
         assert_eq!(fs::read_dir(root).unwrap().count(), 64);
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires an explicitly authorized native macOS filesystem window"]
+    fn macos_late_swap_preserves_appledouble_payload_at_root_and_nested_names() {
+        use std::os::fd::AsRawFd;
+        for nested in [false, true] {
+            let base = tempfile::tempdir().unwrap();
+            let parent = if nested {
+                base.path().join("parent")
+            } else {
+                base.path().to_path_buf()
+            };
+            fs::create_dir_all(&parent).unwrap();
+            let root = parent.join("reviewed");
+            fs::create_dir(&root).unwrap();
+            let parent_fd = deletion::open_path(&fs::canonicalize(&parent).unwrap()).unwrap();
+            let pinned = deletion::open(parent_fd.as_raw_fd(), c"reviewed").unwrap();
+            let expected = deletion::identify(&pinned).unwrap();
+            assert_eq!(
+                deletion::identify(&deletion::open(parent_fd.as_raw_fd(), c"reviewed").unwrap())
+                    .unwrap(),
+                expected
+            );
+            // The swap is AFTER the final identity check, not before it.
+            let moved = parent.join("original");
+            fs::rename(&root, &moved).unwrap();
+            fs::create_dir(&root).unwrap();
+            fs::write(root.join("._payload"), b"unreviewed user bytes").unwrap();
+            assert!(
+                deletion::unlink(parent_fd.as_raw_fd(), c"reviewed", libc::AT_REMOVEDIR).is_err()
+            );
+            assert_eq!(
+                fs::read(root.join("._payload")).unwrap(),
+                b"unreviewed user bytes"
+            );
+            assert_eq!(deletion::identify(&pinned).unwrap(), expected);
+            assert!(moved.is_dir());
+        }
+    }
+    #[cfg(target_os = "linux")]
     #[test]
     fn an_empty_replacement_before_the_final_unlink_is_refused() {
         let base = tempfile::tempdir().unwrap();
@@ -2842,7 +2982,7 @@ mod tests {
 
     /// The reviewed root is bound by device and inode. Swapping its parent for
     /// a link, or renaming another folder into place, stops the deletion.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_swapped_leftover_root_is_refused_and_the_decoy_survives() {
         let base = tempfile::tempdir().unwrap();
@@ -2886,7 +3026,7 @@ mod tests {
     /// zerus-ty94 #4: an ancestor the owner may only search (execute without
     /// read) does not stop the deletion, and a link in the ancestor chain is
     /// still never followed.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_search_only_ancestor_does_not_stop_the_deletion() {
         use std::os::unix::fs::PermissionsExt;
@@ -2912,7 +3052,7 @@ mod tests {
 
     /// Mutation R5: the deletion is confirmed only when the name is absent
     /// through the parent, never because the unlink returned.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_name_that_reappears_after_the_root_is_unlinked_is_not_confirmed() {
         let base = tempfile::tempdir().unwrap();

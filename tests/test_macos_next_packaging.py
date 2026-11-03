@@ -90,8 +90,7 @@ class NextPackaging(unittest.TestCase):
                     "--connector", str(cli), "--licenses", str(root / "rust"),
                     "--client-licenses", str(root / "client-rust"), "--frontend-licenses", str(root / "frontend"),
                     "--version", VERSION, "--release", DEV_BASE + "-dev.17", "--output", str(output)]
-            with mock.patch.object(sys, "argv", argv), mock.patch.object(package, "run", side_effect=run), \
-                    mock.patch.object(package, "ffmpeg_provenance", side_effect=AssertionError("Qt must not be used")):
+            with mock.patch.object(sys, "argv", argv), mock.patch.object(package, "run", side_effect=run):
                 package.main()
             bundle = output / "Zerus.app"
             final = plistlib.loads((bundle / "Contents/Info.plist").read_bytes())

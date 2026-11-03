@@ -764,7 +764,8 @@ this split on **2026-11-03**:
   complete**, including the clean-install exception's CI/package and owner-upgrade
   evidence. Remove the `arch` and `mac-desktop` Qt jobs, their runner/sampler,
   Linux/macOS Qt build/start/rollback selections and macOS Qt assembly/install
-  inputs. This also retires the tests tracked by `.66.21` and `.66.24`.
+  inputs. Keep the shared sampler/shard helpers for the retained optional Windows
+  Qt source tests until #906b; the retired sampler CI regression is removed. This also retires the tests tracked by `.66.21` and `.66.24`.
 - **#906b (Windows/tree):** retain as a draft until **va-kids acceptance**. Remove
   the remaining `tray/` C++/CMake/tests, Windows Qt installer/pin/notices, shared
   Qt archive installer, comparison programs and obsolete documentation. Audit

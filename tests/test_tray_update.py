@@ -35,7 +35,7 @@ if sys.argv[1:] == ['--build-info']:
         sys.exit(1)
     info = {{'version': '0.42.0', 'versionName': VARIANT, 'devBuildNumber': int(VARIANT[4:]) if VARIANT.startswith('dev-') else 0,
              'sourceCommit': VARIANT.ljust(40, '0'), 'sourceDirty': False}}
-    if VARIANT.startswith('client-'):
+    if not VARIANT.startswith('qt-'):
         info.update(CFBundleIdentifier='com.hgdev.hgs-tray', ZerusGUI='tauri')
     print(json.dumps(info))
     sys.exit(0)
@@ -230,6 +230,20 @@ class TrayUpdate(unittest.TestCase):
         self.wait(lambda: [variant for variant, _ in self.running()] == ['first'])
         self.assertEqual(self.leftovers(), [])
 
+    def test_retired_qt_update_and_preflight_keep_both_images_untouched(self):
+        self.build('client-existing', self.installed)
+        legacy = self.build('qt-old')
+        before = (self.installed.read_bytes(), legacy.read_bytes())
+        for prefix in ([], ['--check']):
+            with self.subTest(prefix=prefix):
+                result = subprocess.run([sys.executable, str(UPDATER), *prefix,
+                                         str(legacy), str(self.installed)],
+                                        env=self.env, capture_output=True, text=True, timeout=20)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('Qt installation is retired', result.stderr)
+                self.assertEqual((self.installed.read_bytes(), legacy.read_bytes()), before)
+                self.assertFalse((self.root / 'systemctl').exists())
+
     def test_stopped_gui_is_replaced_without_starting_it(self):
         self.build('first', self.installed)
         result = self.update(self.build('second'))
@@ -301,9 +315,8 @@ class TrayUpdate(unittest.TestCase):
         self.assertEqual(json.loads((snapshot / 'qt/kept/draft.json').read_text())['text'], 'unsent text')
         self.assertEqual(snapshot.stat().st_mode & 0o777, 0o700)
 
-    def installer(self, build, plugin=None):
-        """A copy of tray/install.sh whose cmake builds `build` and, given bytes, the native UI plugin."""
-        self.env['HGS_LINUX_GUI'] = 'qt'  # Existing Qt cases exercise the explicit fallback.
+    def base_installer(self, build):
+        """A copy of the maintained installer with private service tools."""
         tray = self.root / 'tray'
         if not tray.exists():
             for name in ('install.sh', 'update-installed.py', 'linux-launcher.py', 'packaging/hgs-tray.service', 'packaging/hgs-tray.desktop'):
@@ -323,16 +336,13 @@ class TrayUpdate(unittest.TestCase):
             self.script(self.bin / 'uname', '#!/bin/sh\necho Linux\n')
             for tool in ('gtk-update-icon-cache', 'kbuildsycoca6'):
                 self.script(self.bin / tool, '#!/bin/sh\nexit 0\n')
-        source = self.root / 'plugin.so'
-        # Like CMakeLists.txt: a configuration without the plugin removes an old one.
-        step = f'cp "{source}" "$2/plugins/libhgs-tray-native-ui.so"' if plugin else 'rm -f "$2/plugins/libhgs-tray-native-ui.so"'
-        if plugin:
-            source.write_bytes(plugin)
-        self.script(self.bin / 'cmake', f'#!/bin/sh\nif [ "$1" = --build ]; then mkdir -p "$2/plugins" && cp "{build}" "$2/hgs-tray" && {step}; fi\n')
         return tray / 'install.sh'
 
+    def installer(self, build):
+        return self.client_installer(build)
+
     def client_installer(self, build, gstreamer=True):
-        install = self.installer(build)
+        install = self.base_installer(build)
         self.env.pop('HGS_LINUX_GUI', None)
         tauri = self.root / 'client/src-tauri'
         tauri.mkdir(parents=True, exist_ok=True)
@@ -378,7 +388,7 @@ class TrayUpdate(unittest.TestCase):
 
     def test_default_install_upgrades_existing_qt_to_next(self):
         install = self.client_installer(self.build('client-1'))
-        self.launch('first')
+        self.launch('qt-first')
         env = dict(self.env)
         self.assertNotIn('HGS_LINUX_GUI', env)
         result = subprocess.run(['bash', str(install)], env=env, capture_output=True, text=True, timeout=90)
@@ -471,16 +481,6 @@ class TrayUpdate(unittest.TestCase):
         self.assertEqual(unit.read_bytes(), (REPO / 'tray/packaging/hgs-tray.service').read_bytes())
         self.assertIn(f'Exec={self.installed} --sessions', desktop.read_text())
 
-    def test_installer_places_and_removes_the_native_ui_plugin(self):
-        installed = self.home / '.local/lib/hgs-tray/plugins/libhgs-tray-native-ui.so'
-        build = self.build('first', self.installed)
-        for plugin, expected in ((b'first plugin', b'first plugin'), (b'second plugin', b'second plugin'), (None, None)):
-            result = subprocess.run(['bash', str(self.installer(build, plugin))], env=self.env, capture_output=True,
-                                    text=True, timeout=90)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertIn('Installed hgs-tray.', result.stdout)
-            self.assertEqual(installed.read_bytes() if installed.exists() else None, expected)
-            self.assertFalse(installed.with_name(installed.name + '.new').exists())
 
     def test_default_install_keeps_the_packaged_unit_byte_identical(self):
         install = self.installer(self.build('first'))
@@ -536,33 +536,31 @@ class TrayUpdate(unittest.TestCase):
         self.installed = prefix / 'bin/hgs-tray'
         (prefix / 'bin').mkdir(parents=True)
         self.script(prefix / 'bin/hgs', REVOCATION_CLI.format(python=sys.executable))
-        self.launch('first')
+        self.launch('qt-first')
         self.draft('kept', 'from Qt')
         result = self.update(self.build('client-1'))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual([variant for variant, _ in self.running()], ['client-1'])
         slot = prefix / 'share/hgs/desktop-previous/hgs-tray'
-        self.assertIn("'first'", slot.read_text())
+        self.assertIn("'qt-first'", slot.read_text())
         client_drafts = prefix / 'share/com.hgdev.hgs-tray/drafts'
         (client_drafts / 'kept').mkdir(parents=True)
         (client_drafts / 'kept/draft.json').write_text(json.dumps({'key': 'kept', 'text': 'from the client'}))
         result = self.update(self.build('client-2'))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual([variant for variant, _ in self.running()], ['client-2'])
-        self.assertIn("'first'", slot.read_text(), 'later client updates retain the original Qt')
+        self.assertIn("'qt-first'", slot.read_text(), 'later client updates retain the original Qt')
         self.assertEqual(json.loads((client_drafts / 'kept/draft.json').read_text())['text'], 'from the client')
         self.assertEqual(list(self.installed.parent.glob('.hgs-tray-kept-*')), [])
         kind = subprocess.run([sys.executable, str(UPDATER), '--installed-gui', str(self.installed)],
                               env=self.env, capture_output=True, text=True, timeout=30)
         self.assertEqual((kind.returncode, kind.stdout.strip()), (0, 'tauri'), kind.stderr)
         result = self.rollback()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual([variant for variant, _ in self.running()], ['first'])
-        self.assertIn("'client-2'", slot.read_text())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Qt rollback is retired', result.stderr)
+        self.assertEqual([variant for variant, _ in self.running()], ['client-2'])
+        self.assertIn("'qt-first'", slot.read_text(), 'retirement never deletes the saved legacy copy')
         self.assertEqual(json.loads((client_drafts / 'kept/draft.json').read_text())['text'], 'from the client')
-        kind = subprocess.run([sys.executable, str(UPDATER), '--installed-gui', str(self.installed)],
-                              env=self.env, capture_output=True, text=True, timeout=30)
-        self.assertEqual((kind.returncode, kind.stdout.strip()), (0, 'qt'), kind.stderr)
 
     def test_an_unreadable_legacy_gui_is_replaced_and_keeps_the_existing_slot(self):
         for variant in ('second', 'client-1'):
@@ -587,125 +585,37 @@ class TrayUpdate(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_an_on_disk_client_switch_needs_the_live_update(self):
-        self.build('first', self.installed)
+        self.build('qt-first', self.installed)
         result = subprocess.run([sys.executable, str(UPDATER), '--check', str(self.build('client-1')),
                                  str(self.installed)], env=self.env, capture_output=True, text=True, timeout=30)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('needs the live update', result.stderr)
-        self.assertIn("'first'", self.installed.read_text())
+        self.assertIn("'qt-first'", self.installed.read_text())
+
+    def test_qt_start_is_refused_without_touching_state_for_every_legacy_cli_condition(self):
+        self.build('client-1', self.installed)
+        for mode in ('noop', 'unsupported', 'held', 'pending', 'malformed', 'wrong_config', 'timeout'):
+            with self.subTest(mode=mode):
+                self.env['REVOCATION_MODE'] = mode
+                result = self.update(self.build('qt-new'))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('Qt installation is retired', result.stderr)
+                self.assertIn("'client-1'", self.installed.read_text())
+                self.assertEqual(self.revocation_calls(), [])
+                self.assertEqual(self.running(), [])
+                self.assertFalse((self.root / 'systemctl').exists())
 
     def revocation_calls(self):
         path = self.root / 'revocation.jsonl'
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
-    def test_no_handoff_revocation_allows_qt_to_start(self):
-        self.env['REVOCATION_MODE'] = 'noop'
-        self.build('first', self.installed)
-        result = self.update(self.build('second'))
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("'second'", self.installed.read_text())
-        slot = self.home / '.local/share/hgs/desktop-previous/hgs-tray'
-        self.assertIn("'first'", slot.read_text())
 
-    def test_revocation_recovers_the_same_request_after_disconnect(self):
-        self.env['REVOCATION_MODE'] = 'disconnect'
-        self.launch('first')
-        result = self.update(self.build('second'))
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        calls = [call for call in self.revocation_calls()
-                 if call['args'][:2] in (['desktop', 'revoke'], ['desktop', 'request'])]
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[0]['args'][:2], ['desktop', 'revoke'])
-        self.assertEqual(calls[1]['args'][:2], ['desktop', 'request'])
-        self.assertEqual(calls[0]['request_id'], calls[1]['request_id'])
-        self.assertEqual([variant for variant, _ in self.running()], ['second'])
 
-    def test_legacy_cli_without_desktop_state_keeps_qt_update_and_rollback(self):
-        self.env['REVOCATION_MODE'] = 'unsupported'
-        self.env.pop('HGS_STATE_DIR', None)
-        self.env.pop('XDG_STATE_HOME', None)
-        self.build('first', self.installed)
-        result = self.update(self.build('second'))
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("'second'", self.installed.read_text())
-        self.assertIn('no desktop state; keeping the plain Qt path', result.stdout)
 
-        result = self.rollback()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("'first'", self.installed.read_text())
-        self.assertFalse(any(call['args'][:2] in (['desktop', 'status'], ['desktop', 'revoke'],
-                                                  ['desktop', 'request']) for call in self.revocation_calls()))
-        self.assertFalse((self.home / '.local/state/hgs/sessions').exists())
 
-    def test_missing_cli_without_desktop_state_keeps_qt_update_and_rollback(self):
-        # A GUI installed before hgs (no zerus-setup yet) has no writers to revoke.
-        (self.home / '.local/bin/hgs').unlink()
-        self.env.pop('HGS_STATE_DIR', None)
-        self.env.pop('XDG_STATE_HOME', None)
-        self.build('first', self.installed)
-        result = self.update(self.build('second'))
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("'second'", self.installed.read_text())
-        self.assertIn('no hgs is installed and there is no desktop state', result.stdout)
-        result = self.rollback()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("'first'", self.installed.read_text())
-        self.assertFalse((self.home / '.local/state/hgs/sessions').exists())
 
-    def test_missing_cli_with_desktop_state_keeps_qt_stopped(self):
-        (self.home / '.local/bin/hgs').unlink()
-        self.env.pop('HGS_STATE_DIR', None)
-        self.env.pop('XDG_STATE_HOME', None)
-        (self.home / '.local/state/hgs/sessions/desktop').mkdir(parents=True)
-        self.build('first', self.installed)
-        result = self.update(self.build('second'))
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('cannot check desktop revocation', result.stderr)
-        self.assertIn("'first'", self.installed.read_text())
-        self.assertEqual(self.running(), [])
 
-    def test_legacy_cli_with_desktop_state_keeps_qt_stopped(self):
-        self.env['REVOCATION_MODE'] = 'unsupported'
-        self.env.pop('HGS_STATE_DIR', None)
-        self.env.pop('XDG_STATE_HOME', None)
-        desktop = self.home / '.local/state/hgs/sessions/desktop'
-        desktop.mkdir(parents=True)
-        self.build('first', self.installed)
-        result = self.update(self.build('second'))
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('cannot check desktop revocation', result.stderr)
-        self.assertIn(str(desktop), result.stderr)
-        self.assertIn("'first'", self.installed.read_text())
-        self.assertEqual(self.running(), [])
-        self.assertFalse(any(call['args'][:2] == ['desktop', 'revoke'] for call in self.revocation_calls()))
 
-    def test_failed_revocation_keeps_qt_stopped(self):
-        for mode in ('held', 'pending', 'malformed', 'wrong_config', 'timeout'):
-            with self.subTest(mode=mode):
-                self.env['REVOCATION_MODE'] = mode
-                self.build('first', self.installed)
-                result = self.update(self.build('second'))
-                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertIn("'first'", self.installed.read_text())
-                self.assertEqual(self.running(), [])
-                self.assertFalse((self.root / 'systemctl').exists())
-
-    def test_undrained_operation_names_exact_attempt_and_manual_remediation(self):
-        self.env['REVOCATION_MODE'] = 'resources'
-        self.build('first', self.installed)
-        result = self.update(self.build('second'))
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('33333333-3333-4333-8333-333333333333', result.stderr)
-        self.assertIn('helper 7654321 is running', result.stderr)
-        calls = [call for call in self.revocation_calls() if call['args'][:2] == ['desktop', 'revoke']]
-        self.assertEqual(len(calls), 1)
-        self.assertIn(calls[0]['request_id'], result.stderr)
-        self.assertIn('stop only that helper yourself', result.stderr)
-        self.assertIn('restart only hgs-desktop', result.stderr)
-        self.assertLess(result.stderr.index('Wait for'), result.stderr.index('restart only'))
-        self.assertLess(result.stderr.index('restart only'), result.stderr.index('Reboot only'))
-        self.assertEqual(self.running(), [])
-        self.assertFalse((self.root / 'systemctl').exists())
 
     def test_rollback_without_a_copy_changes_nothing(self):
         self.build('first', self.installed)
@@ -744,7 +654,7 @@ class TrayUpdate(unittest.TestCase):
                 (self.root / 'systemctl').unlink(missing_ok=True)
                 self.build('dev-1413', self.installed)
                 pid = self.launch('dev-1413') if restart == '1' else None
-                install = self.installer(self.build('third'), b'new plugin')
+                install = self.installer(self.build('third'))
                 result = subprocess.run(['bash', str(install)], env=dict(self.env, HGS_TRAY_RESTART=restart),
                                         capture_output=True, text=True, timeout=90)
                 self.assertNotEqual(result.returncode, 0)

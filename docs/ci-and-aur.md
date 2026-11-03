@@ -354,7 +354,6 @@ and [Dependabot options](https://docs.github.com/en/code-security/reference/supp
 ```sh
 python3 scripts/ci/check-source.py
 bash scripts/ci/cli.sh
-bash scripts/ci/gui.sh
 cargo +1.99.1 test --locked
 # Arch only, as an ordinary user with the documented build dependencies:
 bash scripts/ci/arch.sh

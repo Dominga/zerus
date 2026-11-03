@@ -1283,10 +1283,17 @@ def main():
             print(bundle_kind(args.installed_gui) or 'none')
             return 0
         elif args.rollback and len(chosen) == 1 and not args.paths:
+            previous = ROLLBACK / args.rollback.name
+            if bundle_kind(previous) == 'qt':
+                raise UpdateError('Qt rollback is retired after platform acceptance; the saved copy and user data were kept.')
             return roll_back_installed(args.rollback)
         elif args.check and len(chosen) == 1 and not args.paths:
+            if bundle_kind(args.check[0]) == 'qt':
+                raise UpdateError('Qt installation is retired; build Zerus Next. Nothing was replaced.')
             return check_replace(*args.check, live=args.live)
         elif len(args.paths) == 2 and not chosen:
+            if bundle_kind(args.paths[0]) == 'qt':
+                raise UpdateError('Qt installation is retired; build Zerus Next. Nothing was replaced.')
             return update(*args.paths)
     except (UpdateError, subprocess.SubprocessError) as error:
         print(f'hgs-tray update failed: {error}', file=sys.stderr)

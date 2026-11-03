@@ -236,6 +236,16 @@ fn folder(root: &Path) -> io::Result<(PathBuf, String, Option<String>)> {
     Ok((canonical, object, birth))
 }
 
+/// Whether `path` is verified missing: only NotFound says so. Any other
+/// error (a permission, an unreadable parent) is an error, never "missing".
+fn missing(path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
 fn slot(canonical: &Path, object: &str, birth: Option<&str>) -> PathBuf {
     let key = format!("{object}\0{}", birth.unwrap_or("-"));
     canonical
@@ -356,7 +366,7 @@ impl Pending {
         let slots = canonical.join(DIR);
         let slot = slot(&canonical, &object, birth.as_deref());
         let _parents = disk::Parents::open(&slots, true)?;
-        if !slot.exists() {
+        if missing(&slot)? {
             // Every raw entry counts, whatever it is, and an unreadable one
             // refuses: a bounded listing that may be incomplete never admits
             // another slot.
@@ -547,8 +557,10 @@ pub fn status(root: &Path) -> Evidence {
         return Evidence::Unreadable;
     };
     let slot = slot(&canonical, &object, birth.as_deref());
-    if !slot.exists() {
-        return Evidence::None;
+    match missing(&slot) {
+        Ok(true) => return Evidence::None,
+        Ok(false) => {}
+        Err(_) => return Evidence::Unreadable,
     }
     let seed = match read_json::<Seed>(&slot.join("identity.json")) {
         Ok(Some(seed)) if seed.binds(&object, birth.as_deref()) => seed,
@@ -580,8 +592,10 @@ pub fn evidence(root: &Path) -> Evidence {
         return Evidence::Unreadable;
     };
     let slot = slot(&canonical, &object, birth.as_deref());
-    if !slot.exists() {
-        return Evidence::None;
+    match missing(&slot) {
+        Ok(true) => return Evidence::None,
+        Ok(false) => {}
+        Err(_) => return Evidence::Unreadable,
     }
     match Snapshot::open(&slot, &object, birth.as_deref()) {
         Ok(snapshot) => Evidence::Captured(Box::new(snapshot.receipt)),

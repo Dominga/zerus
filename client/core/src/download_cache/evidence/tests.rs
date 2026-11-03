@@ -607,3 +607,30 @@ fn the_stat_only_status_follows_the_capture() {
     assert_eq!(status(&folder.0), Evidence::Unreadable);
     assert_eq!(evidence(&folder.0), Evidence::Unreadable);
 }
+
+/// review-n P2 on #1256: only a verified missing slot is "no evidence". An
+/// evidence folder that cannot be read is Unreadable, as the refused change
+/// says, never None.
+#[cfg(unix)]
+#[test]
+fn an_inaccessible_evidence_folder_is_unreadable_not_missing() {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = Folder::new();
+    folder.plain("a.txt", b"a", 90_000);
+    assert_eq!(ON.trim(&folder.0, 0, NOW).error, None);
+    let dir = folder.0.join(DIR);
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).unwrap();
+    // Root bypasses permissions: nothing to check then.
+    let blocked = fs::read_dir(&dir).is_err();
+    let (status, full, trimmed) = (
+        status(&folder.0),
+        evidence(&folder.0),
+        ON.trim(&folder.0, 0, NOW).error,
+    );
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    if blocked {
+        assert_eq!(status, Evidence::Unreadable);
+        assert_eq!(full, Evidence::Unreadable);
+        assert_eq!(trimmed.as_deref(), Some(NOT_RECORDED));
+    }
+}

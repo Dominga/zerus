@@ -102,8 +102,8 @@ struct State {
 }
 pub(super) struct Report {
     inputs: Inputs,
-    /// The last download-folder status shown, and when.
-    downloads: Mutex<Option<(Instant, Value)>>,
+    /// The last download-folder status shown: for which folder, and when.
+    downloads: Mutex<Option<(PathBuf, Instant, Value)>>,
     state: Mutex<State>,
     creations: Mutex<creations::CreationState>,
     local_reads: Mutex<creations::CreationState>,
@@ -173,17 +173,20 @@ impl Report {
         let Some(folder) = &self.inputs.downloads else {
             return Value::Null;
         };
+        // The folder as configured now: a cached value is reused only for
+        // that same folder, never across a settings change.
+        let folder = folder();
         let mut shown = self
             .downloads
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if let Some((at, value)) = shown.as_ref() {
-            if at.elapsed() < DOWNLOADS_FRESH {
+        if let Some((cached, at, value)) = shown.as_ref() {
+            if *cached == folder && at.elapsed() < DOWNLOADS_FRESH {
                 return value.clone();
             }
         }
-        let value = downloads_value(&folder());
-        *shown = Some((Instant::now(), value.clone()));
+        let value = downloads_value(&folder);
+        *shown = Some((folder, Instant::now(), value.clone()));
         value
     }
     pub fn status(&self) -> Value {

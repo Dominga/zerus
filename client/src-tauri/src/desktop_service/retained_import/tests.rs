@@ -7,6 +7,8 @@ use std::{
 
 pub(super) struct Fixture {
     pub(super) root: PathBuf,
+    /// The download folder the report resolves, switchable like the setting.
+    pub(super) downloads: Arc<Mutex<PathBuf>>,
     pub(super) report: Arc<Report>,
     pub(super) relay: Arc<zerus_client_core::desktop::relay::Connection>,
 }
@@ -33,6 +35,7 @@ impl Fixture {
         let qt = root.join("qt.ini");
         zerus_client_core::fsx::write_private_durable(&qt, b"[workspace]\nlanguage=en\n").unwrap();
         fs::write(root.join("mode"), mode).unwrap();
+        let downloads = Arc::new(Mutex::new(root.join("downloads")));
         let report = Report::new(Inputs {
             creations: zerus_client_core::migration::preload::Capture::new(root.clone()),
             local_reads: zerus_client_core::migration::preload::Capture::local_reads(root.clone()),
@@ -48,8 +51,8 @@ impl Fixture {
             )),
             // A synthetic download folder under this fixture's root.
             downloads: Some({
-                let folder = root.join("downloads");
-                Arc::new(move || folder.clone())
+                let folder = downloads.clone();
+                Arc::new(move || folder.lock().unwrap().clone())
             }),
             data: root.clone(),
             settings: Settings::open(settings_path, None),
@@ -58,6 +61,7 @@ impl Fixture {
         let relay = Arc::new(zerus_client_core::desktop::relay::Connection::select(&cli).unwrap());
         Self {
             root,
+            downloads,
             report,
             relay,
         }
@@ -661,4 +665,51 @@ fn the_report_shows_the_download_folders_evidence() {
         "download_capture_captured"
     );
     assert!(status["downloads_capture"]["capture_id"].is_string());
+}
+
+/// review-n P2 on #1256: the shown status follows the configured folder at
+/// once; a cached value is never reused for another folder.
+#[test]
+fn the_download_status_follows_a_folder_change_at_once() {
+    let f = Fixture::new("success");
+    let writer = zerus_client_core::download_cache::Writer { evidence: true };
+    let save = |folder: &std::path::Path| {
+        let part = zerus_client_core::download_cache::reserve(folder).unwrap();
+        fs::write(part.path(), b"copy").unwrap();
+        writer.complete(part, "copy.txt", None, 1).unwrap();
+    };
+    let a = f.root.join("downloads");
+    save(&a);
+    assert_eq!(
+        f.report.status()["downloads_capture"]["code"],
+        "download_capture_captured"
+    );
+    // Another folder, within the reuse window: never A's value.
+    *f.downloads.lock().unwrap() = f.root.join("elsewhere");
+    assert_eq!(
+        f.report.status()["downloads_capture"]["code"],
+        "download_capture_none"
+    );
+    // A folder whose receipt is damaged: unreadable at once.
+    let c = f.root.join("damaged");
+    save(&c);
+    let slots = c.join(".zerus-files-preload-v1");
+    let slot = fs::read_dir(&slots)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::write(slot.join("receipt.json"), b"{}").unwrap();
+    *f.downloads.lock().unwrap() = c;
+    assert_eq!(
+        f.report.status()["downloads_capture"]["code"],
+        "download_capture_unreadable"
+    );
+    // Back to A: its own value again.
+    *f.downloads.lock().unwrap() = a;
+    assert_eq!(
+        f.report.status()["downloads_capture"]["code"],
+        "download_capture_captured"
+    );
 }

@@ -181,7 +181,7 @@ describe("desktop service presentation", () => {
     expect(retainedSourceDetails(refused)!.downloads!.next).toContain("Nothing is recaptured or overwritten");
     const unsupported = view("download_capture_unsupported");
     expect(retainedSourceNotice(unsupported)).toBe("");
-    expect(retainedSourceDetails(unsupported)!.downloads!.reason).toContain("network or removable location");
+    expect(retainedSourceDetails(unsupported)!.downloads!.reason).toContain("cannot be recorded, so it is not part of the migration report");
     expect(retainedSourceDetails(unsupported)!.downloads!.next).toContain("stays incomplete");
   });
   it("explains the archive and data-directory refusals without changing readiness", () => {

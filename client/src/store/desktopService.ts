@@ -147,7 +147,7 @@ export function retainedSourceDetails(state: DesktopService | undefined): Migrat
   // never consent to download, remove or clean up anything.
   const downloads = report.downloads_capture;
   if (downloads && ["download_capture_unsupported", "download_capture_unreadable"].includes(downloads.code)) details.downloads = {
-    reason: downloads.code === "download_capture_unsupported" ? tr("The downloaded files folder is on a network or removable location, so its earlier index is not recorded for the migration report. Downloads keep working.") : tr("Changes to the downloaded files folder are refused because its earlier index record could not be verified. Existing files are kept."),
+    reason: downloads.code === "download_capture_unsupported" ? tr("The downloaded files folder is in a location where its earlier index cannot be recorded, so it is not part of the migration report. Downloads keep working.") : tr("Changes to the downloaded files folder are refused because its earlier index record could not be verified. Existing files are kept."),
     next: downloads.code === "download_capture_unsupported" ? tr("This part of the migration report stays incomplete.") : tr("Check that the folder and its .zerus-files-preload-v1 folder belong to your user and are private. Nothing is recaptured or overwritten."),
     code: downloads.code, phase: null,
   };

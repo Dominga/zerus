@@ -2532,7 +2532,7 @@
   "The connector is draining its current request. Refresh status to confirm it has stopped.": "Коннектор завершает текущий запрос. Обновите состояние, чтобы убедиться, что он остановлен.",
   "The current draft cannot be replaced while it is loading, sending or waiting to send.": "Текущий черновик нельзя заменить, пока он загружается, отправляется или ждёт отправки.",
   "The current filters hide every session. Filters change only this list, never the open conversation.": "Текущие фильтры скрывают все сессии. Фильтры меняют только этот список, а не открытый разговор.",
-  "The downloaded files folder is on a network or removable location, so its earlier index is not recorded for the migration report. Downloads keep working.": "Папка скачанных файлов находится в сетевом или съёмном расположении, поэтому её прежний индекс не записывается для отчёта о миграции. Скачивание продолжает работать.",
+  "The downloaded files folder is in a location where its earlier index cannot be recorded, so it is not part of the migration report. Downloads keep working.": "Папка скачанных файлов находится в расположении, где её прежний индекс нельзя записать, поэтому она не входит в отчёт о миграции. Скачивание продолжает работать.",
   "The draft's text is on the clipboard": "Текст черновика скопирован в буфер обмена",
   "The earlier drafts could not be recorded for the migration report. Drafts are saved and imported normally.": "Не удалось записать прежние черновики для отчёта о миграции. Черновики сохраняются и импортируются как обычно.",
   "The estimated cache lifetime has ended. Continuing may rebuild the cached context.": "Расчетное время жизни кэша закончилось. Продолжение может привести к перестроению кэшированного контекста.",

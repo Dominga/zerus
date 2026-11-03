@@ -90,8 +90,9 @@ that join; a joined worker alone cannot settle the attachment. Native setup
 faults remain unavailable, and no registry repair occurs here. One user click
 can arrive through both the toast's Activated delegate and the registered COM
 activator. The worker forwards a delivered mapping's click at most once per
-five-second window. That window holds at most 32 recent clicks, the callback
-queue size, and unknown requests never enter it. Runtime status reports
+five-second window. The suppression marker lives on that delivered mapping, so
+the 8192-mapping bound also bounds the markers. A marker leaves with its
+mapping and is never evicted while live; unknown requests leave no state. Runtime status reports
 forwarded clicks per native path (`clicks.activator`, `clicks.delegate`) and
 `clicks.coalesced`, so acceptance can show which path a real click used.
 

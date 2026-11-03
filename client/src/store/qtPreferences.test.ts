@@ -28,8 +28,12 @@ describe("Qt preferences in the Migration report", () => {
     expect(qtPreferenceRows({ families: [], unused: [] })).toEqual([]);
   });
   it("labels the explicit sessions dock width like the legacy splitter", () => {
-    expect(qtPreferenceRows({ families: [{ family: "sessions-width", state: "imported", keys: ["workspace/sessionsWidth"],
-      imported: ["workspace/sessionsWidth"], kept: [] }], unused: [] }))
+    // The splitter neither imported nor kept a width the dock width wrote.
+    expect(qtPreferenceRows({ families: [
+      { family: "sessions-width", state: "imported", keys: ["workspace/sessionsWidth"],
+        imported: ["workspace/sessionsWidth"], kept: [] },
+      { family: "session-splitter", state: "imported", keys: ["workspace/splitter"], imported: [], kept: [] },
+    ], unused: [] }))
       .toEqual([{ label: "Sessions list width", status: "Imported", keys: ["workspace/sessionsWidth"] }]);
   });
   it("names an unknown family by its identity", () => {

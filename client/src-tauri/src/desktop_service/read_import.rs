@@ -53,10 +53,7 @@ fn publish(shared: &Shared) {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .status();
-    let mut snapshot = shared
-        .snapshot
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut snapshot = admission(&shared.snapshot);
     snapshot.pending_read_import = Some(status);
     shared.pump.service(snapshot.clone());
 }
@@ -150,11 +147,7 @@ pub(super) fn retry(shared: Arc<Shared>) {
                 finish(&shared, "pending_read_import_stopped");
                 return;
             }
-            let connected = shared
-                .snapshot
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .connected;
+            let connected = admission(&shared.snapshot).connected;
             let configuration = shared
                 .responder
                 .as_ref()

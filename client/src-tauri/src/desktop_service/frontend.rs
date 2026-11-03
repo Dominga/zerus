@@ -588,7 +588,7 @@ fn execute(
             return Err("frontend_route_unavailable");
         }
         if !reservation.lookup && operation != Operation::ImportPendingReads {
-            let snapshot = admission(&shared.snapshot).clone();
+            let snapshot = shared.snapshot.lock().clone();
             if !submission_ready(&snapshot, &reservation.request) {
                 return Err("desktop_background_unavailable");
             }

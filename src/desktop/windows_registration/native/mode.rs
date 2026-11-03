@@ -255,7 +255,7 @@ impl Fence<'_> {
                     if self.background {
                         let (db, _verification) = revoke::hold::database(self.location)?;
                         ensure!(
-                            zerus_desktop_ledger::operations::totals(&db)?.undrained == 0,
+                            crate::desktop::store::operation_undrained(&db)? == 0,
                             "Desktop operation resources have not drained."
                         );
                     }

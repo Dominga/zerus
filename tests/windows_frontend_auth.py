@@ -233,6 +233,63 @@ class WindowsTaskMode(unittest.TestCase):
         self.assertTrue(result['durable'], result)
         self.assertEqual(result['outcome']['state'], 'granted', result)
 
+    def metadata_refusals(self, passive):
+        # Only this private fixture metadata is arranged. It cannot construct
+        # native custody. Every refusal must preserve the actual SDK/process.
+        record_path = self.state / 'desktop' / 'windows-registration-mode.json'
+        original = record_path.read_text(encoding='utf-8')
+        pid = passive['instance']['pid']
+        try:
+            for field in ('guid', 'pid', 'birth', 'epoch'):
+                record = json.loads(original)
+                identity = dict(passive['instance'])
+                identity[field] = str(uuid.uuid4()) if field in ('guid', 'epoch') else identity[field] + 1
+                pending = dict(request_id=str(uuid.uuid4()), desired='passive', phase='prepared',
+                               original=identity, started=None)
+                record['pending'] = pending
+                record_path.write_text(json.dumps(record), encoding='utf-8')
+                reply = self.mode('passive')
+                self.assertFalse(reply['ok'], reply)
+                self.assertIn('Original task or service changed', reply['error'])
+                self.assertEqual(reply['pending_transition']['request_id'], pending['request_id'])
+                self.assertEqual(self.cli('desktop', 'status', '--json')['lifecycle']['pid'], pid)
+            record = json.loads(original)
+            pending = dict(request_id=str(uuid.uuid4()), desired='passive', phase='start_offered',
+                           original=passive['instance'], started=passive['instance']['guid'])
+            record['pending'] = pending
+            record_path.write_text(json.dumps(record), encoding='utf-8')
+            for _ in range(2):
+                reply = self.mode('passive')
+                self.assertFalse(reply['ok'], reply)
+                self.assertEqual(reply['code'], 'original_transition_pending')
+                self.assertEqual(reply['pending_transition'], pending)
+                self.assertEqual(self.cli('desktop', 'status', '--json')['lifecycle']['pid'], pid)
+            with closing(sqlite3.connect((self.state / 'desktop' / 'state.sqlite3').as_uri() + '?mode=ro', uri=True)) as db:
+                self.assertEqual(db.execute('SELECT count(*) FROM desktop_commands').fetchone()[0], 0)
+        finally:
+            # No native manager effect was offered by these arranged records.
+            record_path.write_text(original, encoding='utf-8')
+
+    def cancel_unsent_private_rollback(self, passive):
+        record_path = self.state / 'desktop' / 'windows-registration-mode.json'
+        record = json.loads(record_path.read_text(encoding='utf-8'))
+        request_id = str(uuid.uuid4())
+        record['pending'] = dict(request_id=request_id, desired='passive', phase='revoke_offered',
+                                 original=passive['instance'], started=None)
+        record_path.write_text(json.dumps(record), encoding='utf-8')
+        before = self.cli('desktop', 'ownership-status', '--json')
+        result = self.frontend_call(dict(case='mode_cancel', request_id=request_id), 'MODE_CALLER_RESULT ')
+        self.assertEqual(result['code'], 0, result)
+        receipt = json.loads(result['stdout'])
+        self.assertTrue(receipt['ok'], receipt)
+        self.assertFalse(receipt['manager_changed'])
+        self.assertEqual(receipt['cancelled_request_id'], request_id)
+        self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), before)
+        self.assertEqual(self.cli('desktop', 'status', '--json')['lifecycle']['pid'], passive['instance']['pid'])
+        with closing(sqlite3.connect((self.state / 'desktop' / 'state.sqlite3').as_uri() + '?mode=ro', uri=True)) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_commands').fetchone()[0], 0)
+        return request_id
+
     def powershell(self, script, data):
         # Fixture-only native COM observation/cleanup. No task-name-wide Stop,
         # schtasks /End, PID kill or executable-pattern cleanup is used.
@@ -299,9 +356,12 @@ if(@($t.GetInstances(0)).Count-ne 0) {throw 'fixture instance remains'};
             self.latest = passive['instance']
             self.assertEqual(passive['selected_mode'], 'passive')
             self.assertIsNone(shell.poll())
+            self.metadata_refusals(passive)
             self.grant()
+            cancelled = self.cancel_unsent_private_rollback(passive)
             background = self.mode('background')
             self.assertTrue(background['ok'], background)
+            self.assertNotEqual(background['request_id'], cancelled)
             self.assertEqual(background['running_mode'], 'background')
             self.latest = background['instance']
             # Ordinary install/refresh preserves selection and the SAME runtime.

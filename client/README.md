@@ -183,6 +183,22 @@ scripts/check-licenses.sh      # a license notice for every shipped crate (Linux
 RUSTUP_TOOLCHAIN=1.99.1 npx tauri dev
 ```
 
+The main window remains hidden until the saved theme and local skin library have
+been applied. Its first presentation uses the resolved page color for the native
+window and webview, including system appearance and imported skins. Readiness
+never opens a background start or cancels an explicit hide. Later theme changes
+update the native surfaces without reopening a hidden window.
+
+The `window_theme_fixture` example and `scripts/window-theme-smoke.py` check the
+first painted client pixels of a synthetic window in dark, light and both system
+appearances. Build the example with `--features tauri/custom-protocol` after
+`npm run build`, using a private Cargo target directory. Run the script only in an
+authorized Arch display window under `flock -w 1800 /tmp/zerus-arch-display.lock`;
+pass `--fixture` and a fresh `--output` directory, and `--webkit-prefix` when using
+the maintained local engine. The harness stops on screen lock and closes its
+owned windows. It uses a private HOME/bus and the canonical bundle ID, with no
+tray, live data source or service connection.
+
 `scripts/check-licenses.sh` needs the crates in Cargo's cache (`cargo +1.99.1 fetch
 --locked --manifest-path src-tauri/Cargo.toml`). When it stops at a crate without a
 notice, add the upstream text under `packaging/rust-licenses` as its README there

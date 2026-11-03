@@ -133,6 +133,92 @@ fn live_history_keeps_fresh_legacy_fallback_after_cache_ingestion() {
 }
 
 #[test]
+fn large_job_records_progress_through_discovery_and_catchup() {
+    for archive in [false, true] {
+        let (_temp, state, mut store) = fixture(archive);
+        let path = if archive {
+            fs::read_dir(state.join("archives"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path()
+        } else {
+            state.join(format!(
+                "{:x}.json",
+                Sha256::digest(b"codex/example/search")
+            ))
+        };
+        let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        record["shell_jobs"] = json!({"command":"private-shell-command ".repeat(70_000)});
+        fs::write(&path, record.to_string()).unwrap();
+        assert!(fs::metadata(&path).unwrap().len() > RECORD_BYTES as u64);
+        discover(&store, &state);
+        let mut small = budget(2);
+        small.bytes = RECORD_BYTES;
+        let deferred = store
+            .consume(&state, &small, &AtomicBool::new(false))
+            .unwrap();
+        assert!(deferred.ingestion.stopped && deferred.ingestion.errors.is_empty());
+        assert!(deferred.ingestion.bytes <= small.bytes);
+        assert_eq!(totals(&store).0, 1);
+        for _ in 0..32 {
+            let progress = store
+                .consume(&state, &budget(2), &AtomicBool::new(false))
+                .unwrap();
+            assert!(progress.ingestion.bytes <= 4 << 20);
+            assert!(progress.ingestion.files <= 32 && progress.ingestion.records <= 2);
+            if totals(&store).0 == 0 {
+                break;
+            }
+        }
+        assert_eq!(totals(&store), (0, i64::from(!archive)));
+        assert_eq!(store.index.query("needle", 50, None).unwrap().hits.len(), 6);
+    }
+}
+
+#[test]
+fn a_record_beyond_this_slice_stays_pending_without_blocking_other_sessions() {
+    let (_temp, state, mut store) = fixture(false);
+    let path = state.join(format!(
+        "{:x}.json",
+        Sha256::digest(b"codex/example/search")
+    ));
+    let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    record["shell_jobs"] = json!({"command":"private command ".repeat(300_000)});
+    fs::write(&path, record.to_string()).unwrap();
+    assert!(fs::metadata(&path).unwrap().len() > (4 << 20));
+    discover(&store, &state);
+    // Ensure the expensive path is staged before a healthy session.
+    record["name"] = json!("codex/example/other");
+    record.as_object_mut().unwrap().remove("shell_jobs");
+    fs::write(
+        state.join(format!("{:x}.json", Sha256::digest(b"codex/example/other"))),
+        record.to_string(),
+    )
+    .unwrap();
+    discover(&store, &state);
+    for _ in 0..32 {
+        let progress = store
+            .consume(&state, &budget(2), &AtomicBool::new(false))
+            .unwrap();
+        assert!(progress.ingestion.bytes <= 4 << 20);
+        assert!(progress.ingestion.files <= 32 && progress.ingestion.records <= 2);
+        if totals(&store).0 == 1 && store.index.query("needle", 50, None).unwrap().hits.len() == 6 {
+            break;
+        }
+    }
+    assert_eq!(store.index.query("needle", 50, None).unwrap().hits.len(), 6);
+    assert_eq!(totals(&store).0, 1);
+    let skipped: i64 = store
+        .index
+        .connection()
+        .query_row("SELECT sum(skipped) FROM catalog_queue", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(skipped, 0);
+}
+
+#[test]
 fn invalid_metadata_is_marked_unavailable_without_a_fake_source_or_body() {
     let (_temp, state, mut store) = fixture(false);
     let path = state.join(format!(
@@ -237,4 +323,182 @@ fn queue_ranges_use_bounded_index_searches_including_retired_references() {
         assert!(plan.contains(index) && plan.contains("SEARCH"), "{plan}");
         assert!(!plan.contains("SCAN catalog_queue"), "{plan}");
     }
+}
+
+// A saved binding can grow beyond every allowed publication slice.
+#[test]
+fn grown_binding_beyond_the_publication_budget_does_not_fence_later_hits() {
+    let (_temp, state, mut store) = fixture(false);
+    let path = state.join(format!(
+        "{:x}.json",
+        Sha256::digest(b"codex/example/search")
+    ));
+    discover(&store, &state);
+    for _ in 0..32 {
+        store
+            .consume(&state, &budget(128), &AtomicBool::new(false))
+            .unwrap();
+        if totals(&store).0 == 0 {
+            break;
+        }
+    }
+    let publication = || Budget {
+        files: 128,
+        directory_entries: 2000,
+        records: 512,
+        bytes: 8 << 20,
+        deadline: Instant::now() + Duration::from_millis(500),
+    };
+    let show = |label: &str, page: &Value| {
+        eprintln!(
+            "{label}: results={} next={} truncated={} coverage={} unavailable={}",
+            page["results"].as_array().map_or(0, Vec::len),
+            page["next_cursor"],
+            page["truncated"],
+            page["index_coverage"]["state"],
+            page["unavailable_sessions"]
+        )
+    };
+    let page = store
+        .publish(
+            &state,
+            "needle",
+            2,
+            None,
+            &publication(),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    show("indexed, first page", &page);
+    let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    record["shell_jobs"] = json!({"big":{"command":"x".repeat(9 << 20)}});
+    fs::write(&path, record.to_string()).unwrap();
+    record["name"] = json!("codex/example/other");
+    record["run_id"] = json!("fixture-other-run");
+    record.as_object_mut().unwrap().remove("shell_jobs");
+    fs::write(
+        state.join(format!("{:x}.json", Sha256::digest(b"codex/example/other"))),
+        record.to_string(),
+    )
+    .unwrap();
+    eprintln!("grown binding bytes={}", fs::metadata(&path).unwrap().len());
+    // As read() does for a first page: discovery, one interactive consume, publish.
+    discover(&store, &state);
+    let consumed = store.consume(&state, &Budget::interactive(), &AtomicBool::new(false));
+    eprintln!(
+        "interactive consume ok={} pending={:?}",
+        consumed.is_ok(),
+        totals(&store)
+    );
+    let mut cursor: Option<String> = None;
+    let mut stalled = 0;
+    let mut returned = 0;
+    let mut unavailable = 0;
+    for round in 0..4 {
+        let page = store
+            .publish(
+                &state,
+                "needle",
+                2,
+                cursor.as_deref(),
+                &publication(),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        show(&format!("after growth, page {round}"), &page);
+        returned += page["results"].as_array().unwrap().len();
+        unavailable += page["unavailable_sessions"].as_u64().unwrap();
+        assert_ne!(page["index_coverage"]["state"], "ready");
+        let next = page["next_cursor"].as_str().map(str::to_owned);
+        if round > 0
+            && next.is_some()
+            && next == cursor
+            && page["results"].as_array().unwrap().is_empty()
+        {
+            stalled += 1;
+        }
+        cursor = next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(
+        stalled, 0,
+        "pagination returned its own cursor with no results"
+    );
+    assert!(cursor.is_none());
+    assert!(totals(&store).0 > 0);
+    assert_eq!(
+        returned, 6,
+        "the later healthy session must remain reachable"
+    );
+    assert!(unavailable > 0);
+    assert_eq!(
+        store.index.query("needle", 50, None).unwrap().hits.len(),
+        12,
+        "unavailable proof must not retire the source"
+    );
+}
+
+#[test]
+fn a_fresh_slice_resumes_a_proof_that_only_exhausted_the_previous_slice() {
+    let (_temp, state, mut store) = fixture(false);
+    let path = state.join(format!(
+        "{:x}.json",
+        Sha256::digest(b"codex/example/search")
+    ));
+    let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    record["shell_jobs"] = json!({"command":"private command ".repeat(90_000)});
+    fs::write(&path, record.to_string()).unwrap();
+    record["name"] = json!("codex/example/other");
+    record["run_id"] = json!("fixture-other-run");
+    let other = state.join(format!("{:x}.json", Sha256::digest(b"codex/example/other")));
+    fs::write(&other, record.to_string()).unwrap();
+    let bytes = fs::metadata(&path)
+        .unwrap()
+        .len()
+        .max(fs::metadata(&other).unwrap().len()) as usize
+        + 1024;
+    discover(&store, &state);
+    for _ in 0..32 {
+        store
+            .consume(&state, &budget(128), &AtomicBool::new(false))
+            .unwrap();
+        if totals(&store).0 == 0 {
+            break;
+        }
+    }
+    assert_eq!(totals(&store).0, 0);
+    let mut cursor: Option<String> = None;
+    let mut returned = std::collections::BTreeSet::new();
+    for _ in 0..16 {
+        let mut slice = budget(128);
+        slice.bytes = bytes;
+        let page = store
+            .publish(
+                &state,
+                "needle",
+                50,
+                cursor.as_deref(),
+                &slice,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert_eq!(page["unavailable_sessions"], 0);
+        assert!(page["proof"]["bytes"].as_u64().unwrap() <= bytes as u64);
+        let hits = page["results"].as_array().unwrap();
+        assert!(!hits.is_empty());
+        for hit in hits {
+            assert!(returned.insert((hit["name"].to_string(), hit["message_id"].to_string())));
+        }
+        let next = page["next_cursor"].as_str().map(str::to_owned);
+        if next.is_none() {
+            cursor = None;
+            break;
+        }
+        assert_ne!(next, cursor);
+        cursor = next;
+    }
+    assert!(cursor.is_none());
+    assert_eq!(returned.len(), 12);
 }

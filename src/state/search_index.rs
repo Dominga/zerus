@@ -13,6 +13,7 @@ use std::{
 };
 use zerus_content_search::{Index, Message, Role, Target, DEFAULT_FILE_BYTES, DOCUMENT_BYTES};
 mod catalog;
+mod metadata;
 mod query;
 mod wire;
 pub(crate) use catalog::{DiscoveryBudget, DiscoveryProgress};
@@ -215,6 +216,23 @@ impl Store {
         budget: &Budget,
         cancel: &AtomicBool,
     ) -> Result<Progress> {
+        self.step_with_reader(
+            state,
+            targets,
+            budget,
+            cancel,
+            &mut metadata::Reader::default(),
+        )
+    }
+
+    fn step_with_reader(
+        &mut self,
+        state: &Path,
+        targets: &[Identity],
+        budget: &Budget,
+        cancel: &AtomicBool,
+        reader: &mut metadata::Reader,
+    ) -> Result<Progress> {
         if targets.len() > 16
             || budget.files > 256
             || budget.directory_entries > 2000
@@ -237,18 +255,20 @@ impl Store {
             return Ok(progress);
         }
         self.cleanup()?;
-        self.sweep(state, budget, &mut progress, cancel)?;
+        self.sweep(state, budget, &mut progress, cancel, reader)?;
         for identity in targets {
             let target = identity.target();
             let key = target.key().map_err(|e| e.to_string())?;
-            if !progress.available(budget, cancel)
-                || budget.bytes - progress.bytes < RECORD_BYTES + 1
-            {
+            if !progress.available(budget, cancel) {
                 progress.stopped = true;
                 break;
             }
-            let record = match binding(state, identity, &mut progress, budget) {
-                Ok(record) => record,
+            let record = match binding(state, identity, &mut progress, budget, reader, 0) {
+                Ok(metadata::Record::Ready(record)) => record,
+                Ok(metadata::Record::Deferred | metadata::Record::OverBudget) => {
+                    progress.stopped = true;
+                    break;
+                }
                 Err(_) => {
                     self.retire(&key)?;
                     progress
@@ -730,6 +750,7 @@ impl Store {
         budget: &Budget,
         progress: &mut Progress,
         cancel: &AtomicBool,
+        reader: &mut metadata::Reader,
     ) -> Result<()> {
         let last: String = self
             .index
@@ -755,9 +776,7 @@ impl Store {
             last
         };
         for (key, target) in entries {
-            if !progress.available(budget, cancel)
-                || budget.bytes - progress.bytes < RECORD_BYTES + 1
-            {
+            if !progress.available(budget, cancel) {
                 break;
             }
             let target: Target = serde_json::from_str(&target)
@@ -768,8 +787,12 @@ impl Store {
                 conversation_id: target.conversation_id,
                 archive_id: target.archive_id,
             };
-            if binding(state, &identity, progress, budget).is_err() {
-                self.retire(&key)?;
+            match binding(state, &identity, progress, budget, reader, 0) {
+                Ok(metadata::Record::Ready(_)) => (),
+                // Keep this source active and revisit it on a later sweep;
+                // an expensive record must not fence every following source.
+                Ok(metadata::Record::Deferred | metadata::Record::OverBudget) => (),
+                Err(_) => self.retire(&key)?,
             }
             next = key;
         }
@@ -803,7 +826,9 @@ fn binding(
     identity: &Identity,
     progress: &mut Progress,
     budget: &Budget,
-) -> Result<Value> {
+    reader: &mut metadata::Reader,
+    reserve: usize,
+) -> Result<metadata::Record> {
     let path = if identity.archive_id.is_empty() {
         let basename = format!("{:x}.json", Sha256::digest(identity.name.as_bytes()));
         if state.join("name_routes").join(&basename).exists() {
@@ -817,24 +842,10 @@ fn binding(
             .join("archives")
             .join(format!("{}.json", identity.archive_id))
     };
-    progress.files += 1;
-    let file = crate::platform::no_follow(fs::OpenOptions::new().read(true))
-        .open(path)
-        .map_err(|_| "Binding unavailable")?;
-    if !file.metadata().map_err(|e| e.to_string())?.is_file() {
-        return Err("Binding is not a regular file".into());
-    }
-    let cap = (RECORD_BYTES + 1).min(budget.bytes - progress.bytes);
-    let mut bytes = Vec::new();
-    file.take(cap as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-    progress.bytes += bytes.len();
-    if bytes.len() > RECORD_BYTES {
-        return Err("Binding exceeds the index metadata budget".into());
-    }
-    let mut record: Value =
-        serde_json::from_slice(&bytes).map_err(|_| "Binding is incomplete or invalid")?;
+    let mut record = match reader.read(&path, progress, budget, reserve)? {
+        metadata::Record::Ready(record) => record,
+        other => return Ok(other),
+    };
     if !identity.archive_id.is_empty() {
         rename::normalize_archive(&mut record)?;
     }
@@ -847,7 +858,7 @@ fn binding(
     {
         return Err("Binding identity changed".into());
     }
-    Ok(record)
+    Ok(metadata::Record::Ready(record))
 }
 fn sample(
     file: &mut fs::File,

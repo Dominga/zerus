@@ -488,7 +488,7 @@ pub(super) fn resumed_start(record: &Value, event: &Value) -> bool {
     let pending = resume_input::pending(record)
         || (resume_input::pending_binding(record) && ended_request(record));
     if !string(record,"restore_archive_id").is_empty() {
-        return string(event,"source") == "clear" && pending
+        return string(event,"source") == "clear" && resume_input::pending(record)
             && restore_request(record).is_some_and(|request| archive::restore_source(record)
                 .is_ok_and(|archived| archived["run_id"] == request["restore_archive_run_id"]));
     }

@@ -208,9 +208,30 @@ fn real_service_restart_retains_catalog_and_recovers_without_retry() {
 #[test]
 #[ignore = "run client/scripts/test-service-reconnect.py --scenario resume with private binaries"]
 fn real_service_resume_delta_keeps_the_native_replaced_reason() {
-    // zerus-uutz: the real journal drops removal reasons. Its revision for the
-    // native resume frame must still reach the view successor first, with the
-    // stopped run removed as `replaced`, so selection and Activity follow it.
+    // zerus-uutz: the real journal's revision for the native resume frame
+    // reaches the view successor first, with the stopped run `replaced`.
+    real_service_replacement(vec![
+        ("run:run-1".to_owned(), None),
+        ("run:run-2".to_owned(), None),
+        ("run:run-1".to_owned(), Some(Some("replaced".to_owned()))),
+    ]);
+}
+
+#[test]
+#[ignore = "run client/scripts/test-service-reconnect.py --scenario paged-fresh with private binaries"]
+fn real_service_paged_start_fresh_keeps_the_journaled_replaced_reason() {
+    // zerus-ic13: the removal and its new-conversation successor arrive as
+    // separate native frames; only the journaled native reason says so.
+    real_service_replacement(vec![
+        ("run:run-1".to_owned(), None),
+        ("run:run-1".to_owned(), Some(Some("replaced".to_owned()))),
+        ("run:run-2".to_owned(), None),
+    ]);
+}
+
+/// The view's changes for the peer while the harness replaces `run:run-1`
+/// by `run:run-2` of the same session name.
+fn real_service_replacement(expected: Vec<(String, Option<Option<String>>)>) {
     let _process = crate::PROCESS_TREE.read().unwrap();
     let root =
         PathBuf::from(std::env::var_os("ZERUS_TEST_SERVICE_RESTART").expect("private harness"));
@@ -251,19 +272,12 @@ fn real_service_resume_delta_keeps_the_native_replaced_reason() {
         })
         .await;
         mark("baseline-ready");
-        eventually("resumed run replaces the stopped run", || {
+        eventually("new run replaces the stopped run", || {
             pump.row("peer", "run:run-2").is_some() && pump.row("peer", "run:run-1").is_none()
         })
         .await;
         service.join().await.unwrap();
-        assert_eq!(
-            *seen.lock().unwrap(),
-            vec![
-                ("run:run-1".to_owned(), None),
-                ("run:run-2".to_owned(), None),
-                ("run:run-1".to_owned(), Some(Some("replaced".to_owned()))),
-            ]
-        );
+        assert_eq!(*seen.lock().unwrap(), expected);
         mark("client-finished");
     });
 }

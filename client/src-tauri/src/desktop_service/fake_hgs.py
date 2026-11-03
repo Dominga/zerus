@@ -187,9 +187,9 @@ def row(key):
     return {'key': key, 'row': {'name': 'codex/example/' + key, 'agent': 'codex', 'state': 'running', 'status': 'ready'}}
 
 
-def resumed(key, run, state):
+def resumed(key, run, state, conversation='conversation'):
     return {'key': key, 'row': {'name': 'codex/example/review', 'agent': 'codex', 'state': state, 'status': 'ready',
-                                'run_id': run, 'conversation_id': 'conversation'}}
+                                'run_id': run, 'conversation_id': conversation}}
 
 
 def change(key, revision, remove=False):
@@ -318,6 +318,8 @@ def desktop_request():
             (root / 'replacement-page-selected').touch()
         if config.get('resume_delta'):
             page.update(items=[resumed('run:0-old', 'old', 'paused'), row('run:9-ended')])
+        if config.get('paged_fresh'):
+            page.update(items=[resumed('run:0-old', 'old', 'paused')])
         print(json.dumps(page))
     elif op == 'catalog_changes':
         number = counter('delta-number')
@@ -384,6 +386,16 @@ def desktop_request():
             elif number == 3:
                 successor = dict(change('run:1-new', '1'), row=resumed('run:1-new', 'new', 'running')['row'])
                 page.update(through_revision='1', revision='1', items=[successor, change('run:9-ended', '1', True)])
+        if config.get('paged_fresh'):
+            # A Start fresh whose native delta paged its removal (with the
+            # journaled native reason) and its new-conversation successor
+            # into separate frames, hence separate revisions.
+            if number == 1:
+                (root / 'initial-complete').touch()
+            elif number == 2:
+                successor = dict(change('run:1-new', '2'), row=resumed('run:1-new', 'new', 'running', 'fresh')['row'])
+                page.update(through_revision='2', revision='2',
+                            items=[dict(change('run:0-old', '1', True), reason='replaced'), successor])
         print(json.dumps(page))
     elif op == 'read_intent':
         path = root / 'read-seen'
@@ -633,6 +645,9 @@ elif args == ['desktop', 'watch', '--json']:
     if config.get('resume_delta'):
         wait(root / 'initial-complete')
         hint(1, '1')
+    if config.get('paged_fresh'):
+        wait(root / 'initial-complete')
+        hint(1, '2')
     if config.get('peer_failure'):
         wait(root / 'peer-hints')
         hint(1, '1')

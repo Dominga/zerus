@@ -65,6 +65,13 @@ task-instance identity, authority or proof that resources drained. An unavailabl
 diagnostic leaves the original stderr and failure exit unchanged. Task Scheduler's
 last-run result and this private record can explain an early exit after RunEx;
 an absent running instance never permits issuing RunEx again.
+The admitted mode helper reserves that diagnostic file before offering a start.
+The scheduled process can write through the same checked user-owned object even
+if its token chooses a different owner for newly created files. Failure data
+includes the token's user/default-owner SIDs; the private fixture also reads
+bounded owner/DACL metadata for its four known state entries. These observations
+do not change token defaults, repair file ownership or relax a privacy check.
+An untouched `reserved` record means no failure text was safely recorded.
 
 Passive rollback saves one UUID before offering the original rollback revoke.
 Only a known committed prepared command can reconcile its original drain with

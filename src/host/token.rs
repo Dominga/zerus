@@ -12,8 +12,8 @@ use windows_sys::Win32::{
     Foundation::{LocalFree, ERROR_NO_TOKEN, HANDLE},
     Security::{
         Authorization::ConvertSidToStringSidW, GetLengthSid, GetSidSubAuthority,
-        GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel, TokenUser, PSID,
-        TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER,
+        GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel, TokenOwner, TokenUser,
+        PSID, TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
     },
     System::{
         JobObjects::IsProcessInJob,
@@ -140,6 +140,15 @@ impl Token {
         // SAFETY: GetTokenInformation(TokenUser) filled `buffer`, aligned for it, with
         // a TOKEN_USER whose SID points into the same buffer.
         Ok(unsafe { Sid::copy((*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid) })
+    }
+
+    /// Diagnostic default owner for newly created objects, not user identity
+    /// or permission to change an existing object's owner.
+    pub(crate) fn default_owner(&self) -> io::Result<Sid> {
+        let buffer = self.information(TokenOwner)?;
+        // SAFETY: GetTokenInformation(TokenOwner) supplied this aligned header
+        // and its valid SID, which is copied before the buffer is released.
+        Ok(unsafe { Sid::copy((*buffer.as_ptr().cast::<TOKEN_OWNER>()).Owner) })
     }
 
     pub fn integrity(&self) -> io::Result<Integrity> {

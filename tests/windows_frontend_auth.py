@@ -489,6 +489,28 @@ $items=@();foreach($e in $events) {
 };@{available=$true;events=$items}|ConvertTo-Json -Compress -Depth 5
 ''', dict(task=self.task, started=started))
 
+    def startup_security(self):
+        # Native metadata of four fixed fixture-owned entries only. This
+        # explains a refused privacy check; it is never an admission result.
+        return self.powershell(r'''
+$items=@();foreach($p in $x.paths) {
+ try {
+  $acl=Get-Acl -LiteralPath $p.path -ErrorAction Stop;
+  $rules=@($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]));
+  $entries=@();foreach($r in ($rules|Select-Object -First 8)) {
+   $sid=[string]$r.IdentityReference.Value;if($sid.Length-gt 64) {$sid=$sid.Substring(0,64)};
+   $entries+=@{sid=$sid;type=[string]$r.AccessControlType;
+     propagation=[string]$r.PropagationFlags;inherited=[bool]$r.IsInherited}
+  };
+  $items+=@{name=$p.name;owner=$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value;
+    protected=[bool]$acl.AreAccessRulesProtected;count=$rules.Count;entries=$entries}
+ } catch {$items+=@{name=$p.name;error=$_.Exception.GetType().Name;code=[int]$_.Exception.HResult}}
+};@{objects=$items}|ConvertTo-Json -Compress -Depth 5
+''', dict(paths=[dict(name=name, path=str(path)) for name, path in (
+            ('state', self.state), ('desktop', self.state / 'desktop'),
+            ('owner', self.state / 'desktop' / 'owner.lock'),
+            ('diagnostic', self.state / 'desktop' / 'startup-failure.json'))]))
+
     def stop_exact_passive(self, expected, *, wrong_birth=False):
         return self.powershell(r'''
 $s=New-Object -ComObject Schedule.Service;$s.Connect();$t=$s.GetFolder('\').GetTask($x.task);
@@ -620,6 +642,10 @@ if(@($t.GetInstances(0)).Count-ne 0) {throw 'fixture instance remains'};
                             self.assertEqual(data['abi'], 'desktop-startup-failure-v1')
                             self.assertEqual(data['configuration'], status['configuration'])
                             print('MODE_TASK_STARTUP_REFUSAL ' + json.dumps(data), file=sys.stderr)
+                        try:
+                            print('MODE_TASK_STARTUP_SECURITY ' + json.dumps(self.startup_security()), file=sys.stderr)
+                        except Exception as error:
+                            print('MODE_TASK_STARTUP_SECURITY_UNAVAILABLE ' + type(error).__name__, file=sys.stderr)
                         record = json.loads((self.state / 'desktop' / 'windows-registration-mode.json')
                                             .read_text(encoding='utf-8'))
                         started = (record.get('pending') or {}).get('started')

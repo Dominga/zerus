@@ -434,6 +434,9 @@ fn effect(runtime: Runtime<'_>, desired: Mode) -> Result<Value> {
             original.check()?;
         }
     }
+    fence.check()?;
+    crate::desktop::startup_diagnostic::reserve(location);
+    fence.check()?;
     let id = if let Some(pending) = &resuming {
         pending.request_id.clone()
     } else {

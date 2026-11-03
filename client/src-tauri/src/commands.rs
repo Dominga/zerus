@@ -171,6 +171,10 @@ impl AppState {
 }
 
 #[cfg(feature = "live")]
+#[cfg(test)]
+pub(crate) use live::Live as TestLive;
+
+#[cfg(feature = "live")]
 mod live {
     use std::collections::BTreeSet;
     use std::sync::{mpsc, Arc, Mutex, OnceLock, PoisonError};
@@ -394,6 +398,30 @@ mod live {
                     .map(std::path::PathBuf::from),
             )
         }
+
+        pub(crate) fn service_drain(
+            &self,
+            changes: mpsc::Receiver<crate::desktop_service::Data>,
+        ) -> std::thread::JoinHandle<()> {
+            let organization = self.organization.get().cloned();
+            let creations = self.creations.get().cloned();
+            let after = creations.clone();
+            self.pump.drain_service_with_after(
+                changes,
+                move |change| {
+                    if let Some(organization) = &organization {
+                        organization.observe(change);
+                    }
+                    creations.is_some() && crate::creations::CreationHost::observes(change)
+                },
+                move || {
+                    if let Some(creations) = &after {
+                        creations.catalog_changed();
+                    }
+                },
+            )
+        }
+
         fn start_from(
             self: &Arc<Self>,
             hgs: impl FnOnce() -> std::path::PathBuf,
@@ -423,12 +451,7 @@ mod live {
             if crate::desktop_service::mode() {
                 let (sink, changes) = mpsc::sync_channel(256);
                 let pump = self.pump.clone();
-                let observe = organization.clone();
-                let drain = pump.drain_service(changes, move |change| {
-                    if let Some(organization) = &observe {
-                        organization.observe(change);
-                    }
-                });
+                let drain = self.service_drain(changes);
                 let allowed = replay.is_none()
                     || std::env::var_os("ZERUS_CLIENT_HGS").is_some_and(|value| !value.is_empty());
                 let service = crate::desktop_service::Service::start_observed(

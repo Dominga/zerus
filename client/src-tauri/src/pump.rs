@@ -282,16 +282,39 @@ impl Pump {
         }
     }
 
+    #[cfg(test)]
     pub fn drain_service(
         &self,
         changes: Receiver<crate::desktop_service::Data>,
         observe: impl Fn(&Change) + Send + 'static,
+    ) -> std::thread::JoinHandle<()> {
+        self.drain_service_with_after(
+            changes,
+            move |change| {
+                observe(change);
+                false
+            },
+            || {},
+        )
+    }
+
+    /// Service deliveries validate their scope before observing a change.
+    /// Wake consumers only after admission and the mirror update have finished.
+    pub fn drain_service_with_after(
+        &self,
+        changes: Receiver<crate::desktop_service::Data>,
+        before: impl Fn(&Change) -> bool + Send + 'static,
+        after: impl Fn() + Send + 'static,
     ) -> std::thread::JoinHandle<()> {
         let pump = self.clone();
         std::thread::Builder::new()
             .name("zerus-service-view".into())
             .spawn(move || {
                 for data in changes {
+                    let interested = std::cell::Cell::new(false);
+                    let observe = |change: &Change| {
+                        interested.set(before(change) || interested.get());
+                    };
                     match data {
                         crate::desktop_service::Data::Change(change) => {
                             observe(&change);
@@ -303,6 +326,9 @@ impl Pump {
                         crate::desktop_service::Data::Detail(delivery) => {
                             delivery.apply(&pump, &observe)
                         }
+                    }
+                    if interested.get() {
+                        after();
                     }
                 }
             })

@@ -1551,6 +1551,48 @@ fn temporary_rpc_admission_pressure_retries_follow_without_halting_the_view() {
     });
 }
 #[test]
+fn catalog_finish_wakes_consumers_after_publishing_the_live_mirror() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({"details":true}));
+        let pump = crate::pump::Pump::default();
+        let (sink, rx) = std::sync::mpsc::sync_channel(256);
+        let reader = pump.clone();
+        let live = Arc::new(AtomicBool::new(false));
+        let seen = live.clone();
+        let drain = pump.drain_service_with_after(
+            rx,
+            |change| {
+                matches!(
+                    change,
+                    Change::Computer {
+                        status: ComputerStatus::Live,
+                        ..
+                    }
+                )
+            },
+            move || {
+                let batch = reader.take(Duration::ZERO);
+                if batch
+                    .computers
+                    .iter()
+                    .any(|c| c.computer.0.is_empty() && c.status == "live")
+                    && reader.row("", "row").is_some()
+                {
+                    seen.store(true, Ordering::Release);
+                }
+            },
+        );
+        let service = Service::start(fixture.0.join("hgs"), pump, sink, true, drain, None, vec![]);
+        eventually("the applied catalog finish wakes consumers", || {
+            live.load(Ordering::Acquire)
+        })
+        .await;
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
 fn service_source_roster_bootstraps_catalogs_independently_of_shared_counts() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {

@@ -123,6 +123,9 @@ fn backoff_is_bounded_and_a_healthy_worker_resets_it() {
 }
 #[test]
 fn delayed_restart_acquisition_is_bounded_and_keeps_its_original_admission() {
+    let _serial = crate::desktop::swarm_cli_test::SERIAL
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());
     let released = Arc::new(AtomicBool::new(false));
@@ -161,14 +164,7 @@ fn delayed_restart_acquisition_is_bounded_and_keeps_its_original_admission() {
     until(|| released.load(Ordering::Acquire), 3);
     // Completion can follow the captured resource's drop by one scheduling turn.
     until(
-        || {
-            crate::desktop::bounded_swarm_restart(
-                &config,
-                Instant::now() + Duration::from_secs(1),
-                |_, _| Ok(json!({"accepted":true})),
-            )
-            .is_ok()
-        },
+        || !crate::desktop::SWARM_RESTART_ACQUIRING.load(Ordering::Acquire),
         2,
     );
 }

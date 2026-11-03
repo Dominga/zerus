@@ -158,11 +158,18 @@ pub fn launch_configuration(args: &[String]) -> cli::Result<()> {
 }
 
 pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cli::Result<i32> {
+    #[cfg(test)]
+    use swarm_cli_test::Location;
     let run = || -> Result<()> {
         ensure!(
             !dry && (target.is_empty() || config.is_self(target)),
             "desktop manages only this computer; remote desktop IPC is refused"
         );
+        #[cfg(any(windows, test))]
+        if args == ["swarm-restart", "--json"] {
+            println!("{}", restart_swarm(config)?);
+            return Ok(());
+        }
         let location = Location::new(config).map_err(|error| {
             if args.first().is_some_and(|arg| arg == "serve") {
                 error.context(StartupRefused)
@@ -346,11 +353,6 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
             }
             ["status", "--json"] => {
                 println!("{}", status(&location)?);
-                Ok(())
-            }
-            #[cfg(windows)]
-            ["swarm-restart", "--json"] => {
-                println!("{}", restart_swarm(config)?);
                 Ok(())
             }
             ["status"] => {
@@ -1426,9 +1428,22 @@ fn exchange(location: &Location, op: &str, request: Option<Value>) -> Result<Opt
 /// Offline/passive/revoked owners are refused; this never starts a service or GUI.
 #[cfg(windows)]
 pub(crate) fn restart_swarm(config: &Config) -> Result<Value> {
-    bounded_swarm_restart(config, Instant::now() + TIMEOUT, restart_swarm_until)
+    let budget = TIMEOUT;
+    #[cfg(test)]
+    let budget = swarm_cli_test::budget(config).unwrap_or(budget);
+    bounded_swarm_restart(config, Instant::now() + budget, restart_swarm_until)
 }
-#[cfg(windows)]
+#[cfg(all(test, not(windows)))]
+fn restart_swarm(config: &Config) -> Result<Value> {
+    let budget = swarm_cli_test::budget(config).context("no CLI lookup fixture selected")?;
+    bounded_swarm_restart(config, Instant::now() + budget, |config, _| {
+        let _ = swarm_cli_test::Location::new(config)?;
+        anyhow::bail!("CLI lookup fixture finished")
+    })
+}
+#[cfg(any(windows, test))]
+static SWARM_RESTART_ACQUIRING: AtomicBool = AtomicBool::new(false);
+#[cfg(any(windows, test))]
 fn bounded_swarm_restart(
     config: &Config,
     until: Instant,
@@ -1436,9 +1451,8 @@ fn bounded_swarm_restart(
 ) -> Result<Value> {
     // Path/state discovery can involve filesystem I/O. Only one
     // acquisition/request worker may outlive this caller's total deadline.
-    static ACQUIRING: AtomicBool = AtomicBool::new(false);
     ensure!(
-        ACQUIRING
+        SWARM_RESTART_ACQUIRING
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok(),
         "desktop swarm restart acquisition is still owned"
@@ -1451,7 +1465,7 @@ fn bounded_swarm_restart(
             struct Admission;
             impl Drop for Admission {
                 fn drop(&mut self) {
-                    ACQUIRING.store(false, Ordering::Release);
+                    SWARM_RESTART_ACQUIRING.store(false, Ordering::Release);
                 }
             }
             let _admission = Admission;
@@ -1460,7 +1474,7 @@ fn bounded_swarm_restart(
             let _ = send.try_send(result);
         });
     if let Err(error) = spawned {
-        ACQUIRING.store(false, Ordering::Release);
+        SWARM_RESTART_ACQUIRING.store(false, Ordering::Release);
         return Err(error.into());
     }
     receive
@@ -1469,6 +1483,8 @@ fn bounded_swarm_restart(
 }
 #[cfg(windows)]
 fn restart_swarm_until(config: &Config, until: Instant) -> Result<Value> {
+    #[cfg(test)]
+    use swarm_cli_test::Location;
     use zerus_client_core::desktop::windows::{verify_own_server_until, Server};
     let location = Location::new(config)?;
     location.check_existing()?;
@@ -1508,6 +1524,8 @@ fn restart_swarm_until(config: &Config, until: Instant) -> Result<Value> {
     );
     Ok(value)
 }
+#[cfg(test)]
+mod swarm_cli_test;
 fn status(location: &Location) -> Result<Value> {
     Ok(exchange(location, "status", None)?.unwrap_or_else(|| json!({"abi":ABI,"running":false,"ownership":"unavailable","configuration":location.configuration,"writers_enabled":false,
         "lifecycle":lifecycle::unavailable(&location.configuration),

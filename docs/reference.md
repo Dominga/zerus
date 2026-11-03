@@ -1828,6 +1828,9 @@ earlier message and its answer does not. Old
 context and prompt-cache values are hidden until the new conversation reports
 native usage. The saved native identity changes only on the real hook, and an
 unconfirmed command does not reset counters.
+A resumed Codex session can also confirm a Terminal clear when its main end
+precedes that hook; the end alone never confirms a reset. Zerus keeps the process
+and run and observes the real successor without replaying the clear or message.
 A stopped session offers **Start fresh…** instead, with the same confirmation, and
 keeps **Send** available: it offers **Resume and send** with the full saved context,
 **Resume, compact and send**, or **Start fresh and send**. Zerus Next names the

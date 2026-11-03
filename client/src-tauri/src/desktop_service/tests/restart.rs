@@ -1,5 +1,6 @@
 //! Driven by test-service-reconnect.py against two original private service
 //! children. This is the GUI's real subscriber/pump without a display window.
+use super::readiness::Readiness;
 use super::*;
 
 #[test]
@@ -13,6 +14,7 @@ fn reconnect_refollows_every_topic_and_keeps_projects_while_metadata_is_warming(
                 {"id":"ungrouped","name":"Inbox","sessions":[]}]}}),
         );
         let pump = crate::pump::Pump::default();
+        let mut readiness = Readiness::new(&fixture, pump.clone());
         let organization = crate::organization::Organization::new(
             pump.clone(),
             fixture.0.join("hgs"),
@@ -38,28 +40,21 @@ fn reconnect_refollows_every_topic_and_keeps_projects_while_metadata_is_warming(
         for topic in ["activity", "processes", "tasks", "organization"] {
             service.follow_detail("", detail_spec(topic, None)).unwrap();
         }
-        let grouped = || {
-            pump.resend();
-            let batch = pump.take(Duration::ZERO);
-            batch
-                .grouping
-                .is_some_and(|g| g.loaded && g.headers.iter().any(|h| h.id == "alpha"))
-                && batch
-                    .groups
-                    .iter()
-                    .any(|g| g.key == "row" && g.group == "alpha")
-        };
-        eventually("organization topic is ready", || {
-            service.organization_snapshot().is_some()
-        })
-        .await;
-        eventually("source row reaches its project", grouped).await;
-        eventually("same-generation metadata becomes readable", || {
-            pump.machine(&ComputerId::local()).is_some_and(|m| {
-                m.machine_id.as_deref() == Some("00000000-0000-4000-8000-000000000009")
+        readiness
+            .until("organization topic is ready", |_| {
+                service.organization_snapshot().is_some()
             })
-        })
-        .await;
+            .await;
+        readiness
+            .until("source row reaches its project", Readiness::grouped)
+            .await;
+        readiness
+            .until("same-generation metadata becomes readable", |_| {
+                pump.machine(&ComputerId::local()).is_some_and(|m| {
+                    m.machine_id.as_deref() == Some("00000000-0000-4000-8000-000000000009")
+                })
+            })
+            .await;
         assert!(
             fixture
                 .calls()
@@ -69,6 +64,31 @@ fn reconnect_refollows_every_topic_and_keeps_projects_while_metadata_is_warming(
                 .count()
                 >= 2
         );
+        // Every desired topic must be followed on the first lease before the
+        // socket gap. Otherwise a topic the detail worker has not reached yet
+        // is followed only once, on the new lease, and never shows two IDs.
+        readiness
+            .until(
+                "all four desired topics followed on the first lease",
+                |_| {
+                    let calls = fixture.calls();
+                    ["activity", "processes", "tasks", "organization"]
+                        .iter()
+                        .all(|topic| {
+                            calls
+                                .iter()
+                                .filter(|c| {
+                                    c["value"]["op"] == "detail_follow"
+                                        && c["value"]["subscription"]["topic"] == *topic
+                                })
+                                .filter_map(|c| c["value"]["id"].as_str())
+                                .collect::<BTreeSet<_>>()
+                                .len()
+                                == 1
+                        })
+                },
+            )
+            .await;
         fs::write(
             fixture.0.join("runtime-epoch"),
             uuid::Uuid::new_v4().to_string(),
@@ -79,51 +99,64 @@ fn reconnect_refollows_every_topic_and_keeps_projects_while_metadata_is_warming(
         config["produced_status"] = json!({"running":false});
         fs::write(fixture.0.join("fixture.json"), config.to_string()).unwrap();
         fs::write(fixture.0.join("restart-watch"), []).unwrap();
-        eventually(
-            "socket gap is transient and retains the stale project",
-            || {
-                fixture.0.join("produced-status-read").exists()
-                    && !service.snapshot().connected
-                    && service.snapshot().reconnecting
-                    && service.snapshot().code == "service_unavailable"
-                    && !pump.online("")
-            },
-        )
-        .await;
-        assert!(grouped());
+        readiness
+            .until(
+                "socket gap is transient and retains the stale project",
+                |_| {
+                    fixture.0.join("produced-status-read").exists()
+                        && !service.snapshot().connected
+                        && service.snapshot().reconnecting
+                        && service.snapshot().code == "service_unavailable"
+                        && !pump.online("")
+                },
+            )
+            .await;
+        assert!(readiness.checkpoint_grouped());
         assert_eq!(watch_calls(&fixture.calls()), 1);
         config.as_object_mut().unwrap().remove("produced_status");
         fs::write(fixture.0.join("fixture.json"), config.to_string()).unwrap();
-        eventually("automatic replacement watch held before greeting", || {
-            fixture.0.join("second-watch-held").exists()
-        })
-        .await;
+        readiness
+            .until("automatic replacement watch held before greeting", |_| {
+                fixture.0.join("second-watch-held").exists()
+            })
+            .await;
         assert!(!pump.online(""));
         assert!(
-            grouped(),
+            readiness.checkpoint_grouped(),
             "project placement survives the unavailable organization topic"
         );
         fs::write(fixture.0.join("release-second-watch"), []).unwrap();
-        eventually("all four desired topics re-follow with new IDs", || {
-            let calls = fixture.calls();
-            ["activity", "processes", "tasks", "organization"]
-                .iter()
-                .all(|topic| {
-                    let ids: BTreeSet<_> = calls
-                        .iter()
-                        .filter(|c| {
-                            c["value"]["op"] == "detail_follow"
-                                && c["value"]["subscription"]["topic"] == *topic
-                        })
-                        .filter_map(|c| c["value"]["id"].as_str())
-                        .collect();
-                    ids.len() == 2
-                })
-                && service.organization_snapshot().is_some()
-                && pump.online("")
-                && grouped()
-        })
-        .await;
+        readiness
+            .until("all four desired topics re-follow with new IDs", |view| {
+                let calls = fixture.calls();
+                ["activity", "processes", "tasks", "organization"]
+                    .iter()
+                    .all(|topic| {
+                        let ids: BTreeSet<_> = calls
+                            .iter()
+                            .filter(|c| {
+                                c["value"]["op"] == "detail_follow"
+                                    && c["value"]["subscription"]["topic"] == *topic
+                            })
+                            .filter_map(|c| c["value"]["id"].as_str())
+                            .collect();
+                        ids.len() == 2
+                    })
+                    && service.organization_snapshot().is_some()
+                    && pump.online("")
+                    && view.grouped()
+            })
+            .await;
+        readiness.report();
+        assert!(
+            readiness.checkpoint_grouped(),
+            "the final current grouping must still match the GUI snapshot"
+        );
+        assert_eq!(
+            watch_calls(&fixture.calls()),
+            2,
+            "the held replacement watch must not expire and be silently replaced"
+        );
         service.join().await.unwrap();
         organization.flush();
     });

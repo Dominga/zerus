@@ -63,6 +63,10 @@ pub fn removal_button(checked: bool) -> &'static str {
     }
 }
 
+/// Why a folder whose removal stopped partway stays.
+pub const LEFTOVER: &str =
+    "Git no longer tracks this folder, but files remain. Review them in Projects > Worktrees.";
+
 /// After the dialog the session must still be the one asked about.
 pub const STATE_CHANGED: &str = "The session state changed. Open its actions again.";
 
@@ -333,23 +337,36 @@ impl Cleanup {
         match reply {
             Ok(data) => {
                 let target = entry.path().to_owned();
-                let rows: Vec<&Value> = if host == entry.host
+                let same = host == entry.host
                     && common_dir == entry.common_dir
                     && data["state"] == "ok"
-                    && data["common_dir"].as_str() == Some(entry.common_dir.as_str())
-                {
-                    data["worktrees"]
+                    && data["common_dir"].as_str() == Some(entry.common_dir.as_str());
+                let matching = |key: &str| -> Vec<&Value> {
+                    if !same {
+                        return Vec::new();
+                    }
+                    data[key]
                         .as_array()
                         .into_iter()
                         .flatten()
                         .filter(|row| row["path"].as_str() == Some(target.as_str()))
                         .collect()
-                } else {
-                    Vec::new()
                 };
+                let rows = matching("worktrees");
+                let leftovers = matching("leftovers");
                 if rows.len() == 1 {
                     entry.row = rows[0].clone();
                     entry.verified = true;
+                } else if rows.is_empty()
+                    && leftovers.len() == 1
+                    && leftovers[0]["kind"] == "leftover"
+                    && leftovers[0]["verdict"] == "partially_removed"
+                {
+                    // Git stopped tracking the folder while files remain: never
+                    // removable here, kept for review where leftovers are handled.
+                    entry.row = leftovers[0].clone();
+                    entry.verified = true;
+                    entry.detail = LEFTOVER.into();
                 } else {
                     entry.review_error =
                         "Could not verify this folder. Check again after reconnecting.".into();
@@ -742,6 +759,57 @@ mod tests {
             cleanup.retained_reason().as_deref(),
             Some("Could not verify this folder. Check again after reconnecting.")
         );
+    }
+
+    // zerus-ty94 #2: a targeted review reports the folder's own leftover after
+    // a removal stopped partway. It is kept with that reason, never removed and
+    // never shown as an unverified folder; another folder's leftover is not it.
+    #[test]
+    fn a_partially_removed_folder_is_kept_with_its_own_reason() {
+        let leftover = |path: &str| {
+            json!({"path": path, "kind": "leftover", "verdict": "partially_removed",
+                   "common_dir": "/home/example/repo/.git", "fingerprint": "f2", "deletable": true,
+                   "reasons": [], "removal": {"path": path, "status": "partial"}})
+        };
+        let reply = |path: &str| {
+            json!({"state": "ok", "common_dir": "/home/example/repo/.git", "worktrees": [],
+                   "leftovers": [leftover(path)]})
+        };
+        let mut cleanup = Cleanup::after_termination(vec![terminated("owner-1")]);
+        let Step::Review {
+            host, common_dir, ..
+        } = cleanup.step()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            cleanup.reviewed(&host, &common_dir, Ok(&reply("/home/example/repo-work-1"))),
+            Step::Idle,
+            "a leftover is never removed here"
+        );
+        assert_eq!(cleanup.count(Status::Kept), 1);
+        assert_eq!(cleanup.retained_reason().as_deref(), Some(LEFTOVER));
+        assert!(cleanup.entries[0].review_error.is_empty());
+        assert_eq!(cleanup.entries[0].row["kind"], "leftover");
+        // Another folder's leftover, or one from another repository, is not this one.
+        for other in [reply("/home/example/repo-work-2"), {
+            let mut value = reply("/home/example/repo-work-1");
+            value["common_dir"] = json!("/other/.git");
+            value
+        }] {
+            let mut cleanup = Cleanup::after_termination(vec![terminated("owner-1")]);
+            let Step::Review {
+                host, common_dir, ..
+            } = cleanup.step()
+            else {
+                panic!()
+            };
+            cleanup.reviewed(&host, &common_dir, Ok(&other));
+            assert_eq!(
+                cleanup.retained_reason().as_deref(),
+                Some("Could not verify this folder. Check again after reconnecting.")
+            );
+        }
     }
 
     #[test]

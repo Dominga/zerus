@@ -262,6 +262,8 @@ impl Worker {
             {
                 let _ = window.unminimize();
                 let _ = window.show();
+                // Not Windows: no synthetic Alt here (clippy.toml).
+                #[allow(clippy::disallowed_methods)]
                 let _ = window.set_focus();
             }
             // Never Tao's set_focus here: it falls back to a synthetic Alt.

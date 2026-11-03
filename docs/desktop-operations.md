@@ -227,6 +227,11 @@ agreed its contract on 2026-10-30. It has no actor integration, process runner,
 SQL, positive job IPC or executing permission. The dedicated operation
 table/API remains G1's lane, separate from native `desktop-ledger::Kind`.
 
+The [closed native request boundary](desktop-task-start-reconcile.md) carries
+bounded exact producer checkpoints in a distinct TaskStartReconcile lane. Its
+current backend still refuses execution; it adds no worker or general Operations
+permission and leaves the background profile unchanged.
+
 `Key` separates kind (`task_start_reconcile`), schema 1, configuration,
 project/task and the original request UUID from every reconciliation-attempt
 UUID. `Binding` adds the exact marker, original executor's stable machine,
@@ -244,6 +249,24 @@ bindings and parsed equality between the input and the complete saved
 `intent.plan`. Opaque fields stay intact. Missing retained input stays reviewable;
 this policy never regenerates request bytes from a plan or another build graph.
 An actor must not replace bytes, consent or fingerprints under the same key.
+
+The ordinary Next Start producer constructs its one actual delivery `TaskCall`
+before the durable checkpoint, then executes that same captured call. When the
+complete encoded checkpoint fits 1 MiB, `intent.retained_input` preserves the
+exact input string, including its original serialization. The size check counts
+the duplicated plan, JSON escaping and unknown record fields, reserving 12 KiB
+for the worst-case 2048-character settlement error. If either input
+or checkpoint exceeds that bound, the producer omits this optional field and
+continues through the existing native Start path. Native 31 MiB plans and 32 MiB
+outboxes keep their limits; the 64 KiB frontend control frame stays separate.
+The future actor must independently recheck its record/input bounds and refuse
+missing retained input. Existing pending records are never backfilled from a
+plan, and a new UUID reusing a terminal record cannot adopt its old input.
+Reservation or checkpoint failure offers no delivery. Settlement and the G3
+adapter preserve the retained field as private original data; generic outbox
+equality/snapshot checks and explicit native release semantics are unchanged.
+This producer checkpoint supplies evidence, without current actor admission or
+permission to execute a recovery call.
 
 Each explicit `step` returns NeedsReview, one private Proposed call, or
 SettledSubmitted evidence. Default review, cancellation and unknown outcomes

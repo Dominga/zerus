@@ -184,7 +184,12 @@ export function activityGeometry(scroller: HTMLElement): ActivityGeometryReport 
   return checkActivityGeometry(measured, edge, scroller.clientHeight);
 }
 
-export function activityGeometryValid(report: ActivityGeometryReport, estimateSize = 96): boolean {
-  return report.rows.length > 0 && report.visible.length > 0 && report.overlaps.length === 0
-    && (report.firstVisibleGap === null || report.firstVisibleGap <= estimateSize);
+export function activityGeometryValid(report: ActivityGeometryReport, tolerance = 1): boolean {
+  if (!report.rows.length || !report.visible.length || report.overlaps.length) return false;
+  const first = report.visible[0];
+  // The first transcript row may follow the history header. Elsewhere only
+  // a real gap after a mounted predecessor can explain space at the top.
+  if (first.index === 0 || (report.firstVisibleGap ?? 0) <= tolerance) return true;
+  const previous = report.rows.find(row => row.index === first.index - 1);
+  return !!previous && first.top - previous.bottom <= 10 + tolerance;
 }

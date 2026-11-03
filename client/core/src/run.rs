@@ -233,6 +233,9 @@ struct Pipes {
     clear_environment: bool,
     #[cfg(any(windows, test))]
     hidden_stop: Option<Arc<hidden::State>>,
+    /// Runs in the writer thread right after it signals completion.
+    #[cfg(test)]
+    after_written: Option<Box<dyn FnOnce() + Send>>,
 }
 
 struct StopContext {
@@ -651,8 +654,9 @@ fn run_inner(
     } else {
         None
     };
+    #[cfg(test)]
+    let after_written = pipes.after_written;
     thread::spawn(move || {
-        let _input = input_guard;
         let ok = match (stdin, pipes.input, input) {
             (Some(pipe), Some(write), _) => write(pipe),
             (Some(mut pipe), None, Some(bytes)) => {
@@ -660,7 +664,14 @@ fn run_inner(
             }
             _ => true,
         };
+        // The pipe is closed: release the group before signalling, as the
+        // readers do, so a completed exchange holds no hidden admission.
+        drop(input_guard);
         let _ = write_tx.send(ok);
+        #[cfg(test)]
+        if let Some(hook) = after_written {
+            hook();
+        }
     });
     let (done_tx, done_rx) = mpsc::channel();
     let over = Arc::new(AtomicBool::new(false));
@@ -1109,6 +1120,42 @@ mod stream_tests {
             thread::sleep(Duration::from_millis(5));
         }
         assert!(weak.upgrade().is_none());
+    }
+
+    // A completed exchange returns only after every pipe thread signalled; a
+    // writer that still held the group then kept the caller's admission
+    // charged, and the next admission was refused with Capacity.
+    #[test]
+    fn a_completed_retained_exchange_leaves_no_admission_held_by_its_writer() {
+        let resource = Arc::new(());
+        let weak = Arc::downgrade(&resource);
+        let (resume, held) = mpsc::channel::<()>();
+        let exit = run_inner(
+            Path::new("python3"),
+            &python("import sys; sys.stdin.read()", Duration::from_secs(5)),
+            &[],
+            &[],
+            1024,
+            None,
+            Pipes {
+                input: Some(Box::new(|mut pipe| pipe.write_all(b"input").is_ok())),
+                require_complete: true,
+                readers: Some(resource),
+                child_exited: Some(Arc::new(AtomicBool::new(false))),
+                // Keep the writer thread alive past its signal.
+                after_written: Some(Box::new(move || {
+                    let _ = held.recv_timeout(Duration::from_secs(5));
+                })),
+                ..Pipes::default()
+            },
+        )
+        .unwrap();
+        assert!(matches!(exit, Exit::Code { code: 0, .. }), "{exit:?}");
+        assert!(
+            weak.upgrade().is_none(),
+            "the writer still held the admission after the exchange completed"
+        );
+        resume.send(()).unwrap();
     }
 
     #[test]

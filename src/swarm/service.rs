@@ -214,6 +214,15 @@ fn identity(path: &Path) -> Option<Identity> {
 pub struct Executable {
     path: PathBuf,
     started: Identity,
+    /// The size of the running image, where it can be read.
+    size: Option<u64>,
+}
+
+/// A ready file at an executable's path that is not the one it started from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Replacement {
+    identity: Identity,
+    size: u64,
 }
 
 impl Executable {
@@ -229,12 +238,47 @@ impl Executable {
             .to_str()
             .and_then(|path| path.strip_suffix(" (deleted)"))
             .map_or(path.clone(), PathBuf::from);
-        Some(Self { path, started })
+        #[cfg(target_os = "linux")]
+        let size = fs::metadata("/proc/self/exe").ok().map(|image| image.len());
+        // Elsewhere the file at the path, while it is still the running one.
+        #[cfg(not(target_os = "linux"))]
+        let size = (identity(&path) == Some(started))
+            .then(|| fs::metadata(&path).ok().map(|file| file.len()))
+            .flatten();
+        Some(Self {
+            path,
+            started,
+            size,
+        })
     }
     /// A different file at the same path. A missing file may be mid-upgrade.
     pub fn replaced(&self) -> bool {
         identity(&self.path).is_some_and(|now| now != self.started)
     }
+    /// The file now at the path, when it is a regular executable file that
+    /// differs from the running one in device, inode, modification time or
+    /// size. None while the path is missing or not yet executable, which an
+    /// upgrade may pass through.
+    pub fn replacement(&self) -> Option<Replacement> {
+        let (identity, metadata) = Identity::at(&self.path).ok()?;
+        if !metadata.is_file() || !runnable(&metadata) {
+            return None;
+        }
+        let size = metadata.len();
+        (identity != self.started || self.size.is_some_and(|started| started != size))
+            .then_some(Replacement { identity, size })
+    }
+}
+
+#[cfg(unix)]
+fn runnable(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn runnable(_: &fs::Metadata) -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -430,6 +474,7 @@ mod tests {
         let executable = Executable {
             path: path.clone(),
             started: identity(&path).unwrap(),
+            size: None,
         };
         assert!(!executable.replaced());
         // Package managers install the new file under a temporary name and rename it.
@@ -446,9 +491,67 @@ mod tests {
                 modified: 0,
                 ..identity(&path).unwrap()
             },
+            size: None,
         };
         assert!(executable.replaced());
         assert!(Executable::current().is_some_and(|current| !current.replaced()));
+    }
+
+    /// zerus-5wmh.66.2.46: a long-lived reader restarts only for a ready
+    /// replacement: another identity, modification time or size, and a
+    /// regular executable file; never for a path an upgrade left missing.
+    #[test]
+    fn only_a_ready_replacement_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hgs");
+        let write = |at: &Path, bytes: &[u8], mode: u32| {
+            fs::write(at, bytes).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(at, fs::Permissions::from_mode(mode)).unwrap();
+            }
+            #[cfg(not(unix))]
+            let _ = mode;
+        };
+        write(&path, b"old", 0o755);
+        let executable = Executable {
+            path: path.clone(),
+            started: identity(&path).unwrap(),
+            size: Some(3),
+        };
+        assert_eq!(executable.replacement(), None);
+        fs::remove_file(&path).unwrap();
+        assert_eq!(executable.replacement(), None, "mid-upgrade");
+        fs::create_dir(&path).unwrap();
+        assert_eq!(executable.replacement(), None, "not a file");
+        fs::remove_dir(&path).unwrap();
+        let next = dir.path().join(".hgs.new");
+        #[cfg(unix)]
+        {
+            write(&next, b"newer", 0o644);
+            fs::rename(&next, &path).unwrap();
+            assert_eq!(executable.replacement(), None, "not executable yet");
+            fs::remove_file(&path).unwrap();
+        }
+        write(&next, b"newer", 0o755);
+        fs::rename(&next, &path).unwrap();
+        let ready = executable.replacement().expect("a ready replacement");
+        // The same replacement reads the same until it changes again.
+        assert_eq!(executable.replacement(), Some(ready));
+        // The same file with another size (an in-place rewrite) is one too.
+        let same = Executable {
+            path: path.clone(),
+            started: identity(&path).unwrap(),
+            size: Some(3),
+        };
+        assert!(same.replacement().is_some());
+        let unchanged = Executable {
+            size: Some(5),
+            ..same
+        };
+        assert_eq!(unchanged.replacement(), None);
+        assert!(Executable::current().is_some_and(|current| current.replacement().is_none()));
     }
 
     /// Set, to the folder they share, for the process

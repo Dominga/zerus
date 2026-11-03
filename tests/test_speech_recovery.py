@@ -23,6 +23,13 @@ KEY = "synthetic-recovery-key"
 class SpeechRecovery(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        selected = os.environ.get("HGS_TEST_SPEECH_RECOVERY_BIN")
+        if selected is not None:
+            cls.fixture = Path(selected)
+            if not selected or not cls.fixture.is_file() or not os.access(cls.fixture, os.X_OK):
+                raise AssertionError("The prepared speech recovery fixture is not executable")
+            cls.fixture = cls.fixture.resolve()
+            return
         build = subprocess.run(["cargo", "+1.99.1", "test", "--locked", "--test",
                                 "voice_recovery_fixture", "--no-run", "--message-format=json"],
                                cwd=REPO, capture_output=True, text=True, timeout=240)

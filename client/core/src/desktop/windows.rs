@@ -1,7 +1,8 @@
 //! Read-only queries on the existing canonical per-user activation pipe.
 use super::{
+    query,
     server_trust::{verdict, ProcessFacts, Verdict},
-    ui_requests, PROBE_WAIT, REPLY_BYTES,
+    ui_requests, Hello, Observation, PROBE_WAIT, REPLY_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -349,23 +350,33 @@ fn acquire_until(
     result.unwrap_or(Server::Unknown)
 }
 
+enum Raw {
+    Absent,
+    Unknown,
+    /// An authenticated server; None when it sent no bounded reply.
+    Live(Option<Vec<u8>>, Peer),
+}
+
 /// One bounded local exchange, never WaitNamedPipe/FlushFileBuffers or a helper
-/// process. Keep the authenticated server handle with the decoded evidence.
-pub fn probe_ui_request_at(
+/// process. Keep the authenticated server handle with the reply. A pipe name
+/// with no server is Absent unless `retry_missing`; a busy one is retried and
+/// an unreadable one is Unknown. With `image`, the server must pass
+/// verify_server first, so a refused or unreadable server is Unknown.
+fn exchange(
     name: &str,
-    attempt: &str,
-    configuration: &str,
+    request: &[u8],
     until: Instant,
-) -> Option<(Peer, ui_requests::Reply)> {
+    retry_missing: bool,
+    image: Option<&PinnedImage>,
+) -> Raw {
     if name.is_empty()
         || name.len() > 128
         || name
             .bytes()
             .any(|b| !b.is_ascii_alphanumeric() && b != b'-')
     {
-        return None;
+        return Raw::Unknown;
     }
-    let request = ui_requests::query(attempt)?;
     let until = until.min(Instant::now() + PROBE_WAIT);
     let name: Vec<u16> = format!(r"\\.\pipe\{name}")
         .encode_utf16()
@@ -373,7 +384,7 @@ pub fn probe_ui_request_at(
         .collect();
     let pipe = loop {
         if Instant::now() >= until {
-            return None;
+            return Raw::Unknown;
         }
         let handle = unsafe {
             CreateFileW(
@@ -388,13 +399,29 @@ pub fn probe_ui_request_at(
         };
         match owned(handle) {
             Ok(pipe) => break pipe,
+            Err(e) if e.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) && !retry_missing => {
+                return Raw::Absent
+            }
             Err(e) if matches!(e.raw_os_error(), Some(2 | 231)) => {
                 std::thread::sleep(std::time::Duration::from_millis(5))
             }
-            Err(_) => return None,
+            Err(_) => return Raw::Unknown,
         }
     };
-    let peer = server(&pipe)?;
+    let peer = match image {
+        Some(image) => match verify_server_until(&pipe, image, until) {
+            Server::Verified(peer) => peer,
+            Server::Refused(_) | Server::Unknown => return Raw::Unknown,
+        },
+        None => match server(&pipe) {
+            Some(peer) => peer,
+            None => return Raw::Unknown,
+        },
+    };
+    let reply = reply(&pipe, &peer, request, until);
+    Raw::Live(reply, peer)
+}
+fn reply(pipe: &OwnedHandle, peer: &Peer, request: &[u8], until: Instant) -> Option<Vec<u8>> {
     let mode = PIPE_NOWAIT;
     if unsafe {
         SetNamedPipeHandleState(
@@ -454,16 +481,66 @@ pub fn probe_ui_request_at(
             if lf + 1 != reply.len() || !peer.current() {
                 return None;
             }
-            let reply: ui_requests::Reply = serde_json::from_slice(&reply[..lf]).ok()?;
-            return (reply.hello.identity_matches(attempt, configuration)
-                && reply.request.attempt == attempt)
-                .then_some((peer, reply));
+            reply.truncate(lf);
+            return Some(reply);
         }
         if ok == 0 && unsafe { GetLastError() } != ERROR_NO_DATA {
             return None;
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
+}
+
+/// Read-only frontend observation on the profile activation pipe, the Windows
+/// counterpart of the Unix socket probe. Caller supplies a FRESH random nonce
+/// and the retained maintained frontend image it already pinned. Only a missing
+/// pipe is Absent; a server that fails verify_server is Unknown, and a
+/// verified but silent or legacy peer is LiveLegacyOrUnknown.
+pub fn probe_at(
+    name: &str,
+    nonce: &str,
+    configuration: &str,
+    until: Instant,
+    image: &PinnedImage,
+) -> Observation {
+    let Some(request) = query(nonce) else {
+        return Observation::Unknown;
+    };
+    match exchange(name, &request, until, false, Some(image)) {
+        Raw::Absent => Observation::Absent,
+        Raw::Unknown => Observation::Unknown,
+        Raw::Live(bytes, peer) => {
+            match bytes.and_then(|b| serde_json::from_slice::<Hello>(&b).ok()) {
+                Some(hello)
+                    if Instant::now() < until
+                        && peer.current()
+                        && hello.identity_matches(nonce, configuration) =>
+                {
+                    Observation::LiveNext {
+                        hello: Box::new(hello),
+                    }
+                }
+                _ => Observation::LiveLegacyOrUnknown,
+            }
+        }
+    }
+}
+
+/// Keep the authenticated server handle with the decoded evidence. Its
+/// existing same-user check is unchanged here.
+pub fn probe_ui_request_at(
+    name: &str,
+    attempt: &str,
+    configuration: &str,
+    until: Instant,
+) -> Option<(Peer, ui_requests::Reply)> {
+    let request = ui_requests::query(attempt)?;
+    let Raw::Live(Some(bytes), peer) = exchange(name, &request, until, true, None) else {
+        return None;
+    };
+    let reply: ui_requests::Reply = serde_json::from_slice(&bytes).ok()?;
+    (reply.hello.identity_matches(attempt, configuration) && reply.request.attempt == attempt)
+        .then_some((peer, reply))
 }
 
 #[cfg(test)]

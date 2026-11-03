@@ -2,9 +2,9 @@ use super::*;
 
 const CHILD: &str = "ZERUS_TEST_QUIT_DEADLINE_ONE_WORKER";
 
-/// zerus-5wmh.66.3.31.11: with one runtime worker, a view callback stalled
-/// inside catalog admission blocks that worker on the snapshot lock, so no
-/// runtime timer can fire. The quit deadline must still finish on time.
+/// zerus-5wmh.66.3.31.11: with its only runtime worker occupied while a view
+/// callback is stalled inside catalog admission, no runtime timer can fire.
+/// The quit deadline must still finish on time.
 #[test]
 fn a_starved_runtime_cannot_hold_the_quit_completion_past_its_deadline() {
     let _process = crate::PROCESS_TREE.read().unwrap();
@@ -86,15 +86,19 @@ fn one_worker_child() {
     observed
         .recv_timeout(Duration::from_secs(60))
         .expect("catalog row callback");
-    let blocker = service.clone();
-    let _starved = tauri::async_runtime::spawn(async move { blocker.snapshot() });
+    // Occupy the only runtime worker outright. An admission reader no longer
+    // does: since zerus-bck0 it waits inside block_in_place.
+    let (unblock, held) = std::sync::mpsc::channel::<()>();
+    let _starved = tauri::async_runtime::spawn(async move {
+        let _ = held.recv();
+    });
     let ran = Arc::new(AtomicBool::new(false));
     let probe = ran.clone();
     let _probe = tauri::async_runtime::spawn(async move { probe.store(true, Ordering::Release) });
     std::thread::sleep(Duration::from_millis(200));
     assert!(
         !ran.load(Ordering::Acquire),
-        "the only runtime worker waits on the held admission lock"
+        "the only runtime worker is occupied"
     );
     let (finished, done) = std::sync::mpsc::channel();
     let started = Instant::now();
@@ -112,6 +116,7 @@ fn one_worker_child() {
         !ran.load(Ordering::Acquire),
         "completed without any runtime worker"
     );
+    drop(unblock);
     drop(release);
     runtime.block_on(async {
         eventually("starved worker resumed", || ran.load(Ordering::Acquire)).await;

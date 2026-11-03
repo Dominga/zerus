@@ -143,6 +143,8 @@ pub fn show_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
             window.unminimize()?;
         }
         window.show()?;
+        // Not Windows: no synthetic Alt here (clippy.toml).
+        #[allow(clippy::disallowed_methods)]
         window.set_focus()?;
     }
     sync_policy(app);
@@ -225,6 +227,8 @@ fn reopen(app: &AppHandle) {
         ReopenAction::Restore => {
             if let Some(window) = window {
                 let _ = window.unminimize();
+                // macOS only: no synthetic Alt here (clippy.toml).
+                #[allow(clippy::disallowed_methods)]
                 let _ = window.set_focus();
             }
         }

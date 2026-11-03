@@ -76,10 +76,7 @@ impl Completion {
         let Some(shared) = self.0.shared.upgrade() else {
             return false;
         };
-        let snapshot = shared
-            .snapshot
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let snapshot = admission(&shared.snapshot);
         !self.0.stop.load(Ordering::Acquire)
             && !shared.stopped.load(Ordering::Acquire)
             && snapshot.connected
@@ -266,10 +263,7 @@ pub(super) async fn run(shared: Arc<Shared>, configuration: String, stop: Arc<At
             return;
         };
         let epoch = {
-            let snapshot = shared
-                .snapshot
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+            let snapshot = admission(&shared.snapshot);
             snapshot.connected.then(|| snapshot.epoch.clone()).flatten()
         };
         let Some(epoch) = epoch else {

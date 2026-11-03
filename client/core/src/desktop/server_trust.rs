@@ -11,8 +11,8 @@ pub struct ProcessFacts {
     /// The mandatory integrity RID (low 0x1000, medium 0x2000, high 0x3000).
     pub integrity: u32,
     pub session: u32,
-    /// Volume serial number and file index of the image, when readable.
-    pub image: Option<(u64, u64)>,
+    /// Volume serial number and full 128-bit file ID of the image, when readable.
+    pub image: Option<(u64, u128)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,7 +27,7 @@ pub enum Verdict {
 /// A server stands for the frontend only with this process's user and logon
 /// session, at least this process's integrity, and exactly the maintained
 /// image. Anything else is a refusal: never absence and never a live GUI.
-pub fn verdict(server: &ProcessFacts, own: &ProcessFacts, image: (u64, u64)) -> Verdict {
+pub fn verdict(server: &ProcessFacts, own: &ProcessFacts, image: (u64, u128)) -> Verdict {
     if server.user != own.user {
         Verdict::OtherUser
     } else if server.integrity < own.integrity {

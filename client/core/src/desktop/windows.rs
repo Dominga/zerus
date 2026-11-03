@@ -18,7 +18,9 @@ use windows_sys::Win32::{
     System::{Pipes::*, Threading::*},
 };
 
+pub mod image;
 pub mod process;
+use image::{FileId, PinnedImage};
 
 /// Qt-compatible Unicode casefold and original 16-hex home digest. Both the
 /// listener and service use this function; neither selects another namespace.
@@ -105,12 +107,17 @@ pub struct Peer {
     pub pid: u32,
     pub birth: String,
     process: OwnedHandle,
+    image: Option<PinnedImage>,
 }
 impl Peer {
     pub fn current(&self) -> bool {
         (unsafe { GetProcessId(self.process.as_raw_handle()) }) == self.pid
             && (unsafe { WaitForSingleObject(self.process.as_raw_handle(), 0) }) == WAIT_TIMEOUT
             && birth(self.process.as_raw_handle()).as_deref() == Some(&self.birth)
+            && self
+                .image
+                .as_ref()
+                .is_none_or(|image| image.matches_process(&self.process).is_ok())
     }
 }
 fn server(pipe: &OwnedHandle) -> Option<Peer> {
@@ -133,6 +140,7 @@ fn server(pipe: &OwnedHandle) -> Option<Peer> {
         pid,
         birth: birth(process.as_raw_handle())?,
         process,
+        image: None,
     };
     let mut again = 0;
     (peer.current()
@@ -153,47 +161,18 @@ fn token_value(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> Option<Vec<u64>
     (unsafe { GetTokenInformation(token, class, data.as_mut_ptr().cast(), size, &mut size) } != 0)
         .then_some(data)
 }
-/// Volume serial number and file index of an open file or directory.
-pub fn file_id(file: &impl AsRawHandle) -> Option<(u64, u64)> {
-    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-    // SAFETY: an open file handle and a writable information block.
-    (unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } != 0).then(|| {
-        (
-            u64::from(info.dwVolumeSerialNumber),
-            (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
-        )
-    })
+/// Full volume serial/file ID of an open file or directory (FileIdInfo).
+pub fn file_id(file: &impl AsRawHandle) -> Option<FileId> {
+    image::file_id(file).ok()
 }
-fn image_id(process: HANDLE) -> Option<(u64, u64)> {
-    let mut path = vec![0u16; 32_768];
-    let mut size = path.len() as u32;
-    // SAFETY: a live process handle and a writable buffer of `size` units.
-    if unsafe {
-        QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, path.as_mut_ptr(), &mut size)
-    } == 0
-    {
-        return None;
-    }
-    path.truncate(size as usize);
-    path.push(0);
-    // SAFETY: a NUL-terminated path; attributes-only access shares everything.
-    let file = owned(unsafe {
-        CreateFileW(
-            path.as_ptr(),
-            FILE_READ_ATTRIBUTES,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            std::ptr::null(),
-            OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS,
-            std::ptr::null_mut(),
-        )
-    })
-    .ok()?;
-    file_id(&file)
-}
-/// The user, integrity, session and image of a process this handle may query.
+/// A diagnostic snapshot of a process this handle may query. This value is
+/// not server authority: verify_server separately retains the supplied image
+/// pins and checks its mapping against the original process object.
 pub fn process_facts(process: &impl AsRawHandle) -> Option<ProcessFacts> {
-    let process = process.as_raw_handle();
+    let image = PinnedImage::for_process(process).ok()?;
+    token_facts(process.as_raw_handle(), image.id())
+}
+fn token_facts(process: HANDLE, image: FileId) -> Option<ProcessFacts> {
     let mut token = std::ptr::null_mut();
     // SAFETY: a live process handle and a writable output.
     if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
@@ -216,12 +195,15 @@ pub fn process_facts(process: &impl AsRawHandle) -> Option<ProcessFacts> {
         user: user(process).ok()?,
         integrity,
         session: session[0] as u32,
-        image: image_id(process),
+        image: Some(image),
     })
 }
-pub fn own_facts() -> Option<ProcessFacts> {
+fn own_process() -> std::os::windows::io::BorrowedHandle<'static> {
     // SAFETY: the current-process pseudo handle is always valid.
-    process_facts(&unsafe { std::os::windows::io::BorrowedHandle::borrow_raw(GetCurrentProcess()) })
+    unsafe { std::os::windows::io::BorrowedHandle::borrow_raw(GetCurrentProcess()) }
+}
+pub fn own_facts() -> Option<ProcessFacts> {
+    process_facts(&own_process())
 }
 
 /// A connected pipe's server, judged while its original process handle is held.
@@ -234,24 +216,31 @@ pub enum Server {
 }
 /// The one check every Windows frontend endpoint uses before trusting a pipe
 /// server: forwarding, the service's absence probe and its launch decision.
-pub fn verify_server(pipe: &OwnedHandle, image: (u64, u64)) -> Server {
+pub fn verify_server(pipe: &OwnedHandle, image: &PinnedImage) -> Server {
     let mut pid = 0;
     if unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle(), &mut pid) } == 0 || pid == 0 {
         return Server::Unknown;
     }
-    let Ok(process) = owned(unsafe {
-        OpenProcess(
-            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
-            0,
-            pid,
-        )
-    }) else {
+    let Ok(process) =
+        owned(unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_SYNCHRONIZE, 0, pid) })
+    else {
         return Server::Unknown;
     };
-    let (Some(server), Some(own)) = (process_facts(&process), own_facts()) else {
+    // The caller supplies its already selected image. Trust acquisition never
+    // opens a server-reported filename, local or remote.
+    if image.matches_process(&process).is_err() {
+        return Server::Unknown;
+    }
+    let Ok(retained_image) = image.try_clone() else {
         return Server::Unknown;
     };
-    match verdict(&server, &own, image) {
+    let (Some(server), Some(own)) = (
+        token_facts(process.as_raw_handle(), image.id()),
+        token_facts(own_process().as_raw_handle(), (0, 0)),
+    ) else {
+        return Server::Unknown;
+    };
+    match verdict(&server, &own, image.id()) {
         Verdict::Trusted => {}
         refused => return Server::Refused(refused),
     }
@@ -262,6 +251,7 @@ pub fn verify_server(pipe: &OwnedHandle, image: (u64, u64)) -> Server {
         pid,
         birth,
         process,
+        image: Some(retained_image),
     };
     let mut again = 0;
     if peer.current()
@@ -272,6 +262,56 @@ pub fn verify_server(pipe: &OwnedHandle, image: (u64, u64)) -> Server {
     } else {
         Server::Unknown
     }
+}
+
+static VERIFYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+struct Verification;
+impl Drop for Verification {
+    fn drop(&mut self) {
+        VERIFYING.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+/// Acquisition is part of the exchange deadline. Only one read-only verifier
+/// may remain in flight after a timeout; subsequent attempts fail Unknown and
+/// cannot accumulate threads or pinned resources. It never forwards or grants
+/// foreground, and a late result is discarded with its original pins.
+pub fn verify_server_until(pipe: &OwnedHandle, image: &PinnedImage, until: Instant) -> Server {
+    verify_until(pipe, image, until, verify_server)
+}
+fn verify_until(
+    pipe: &OwnedHandle,
+    image: &PinnedImage,
+    until: Instant,
+    verify: impl FnOnce(&OwnedHandle, &PinnedImage) -> Server + Send + 'static,
+) -> Server {
+    use std::sync::{atomic::Ordering, mpsc};
+    if Instant::now() >= until
+        || VERIFYING
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+    {
+        return Server::Unknown;
+    }
+    let admission = Verification;
+    let (Ok(pipe), Ok(image)) = (pipe.try_clone(), image.try_clone()) else {
+        return Server::Unknown;
+    };
+    let (sender, receiver) = mpsc::sync_channel(1);
+    if std::thread::Builder::new()
+        .name("frontend-verification".into())
+        .spawn(move || {
+            let _admission = admission;
+            let _ = sender.send(verify(&pipe, &image));
+        })
+        .is_err()
+    {
+        return Server::Unknown;
+    }
+    let result = receiver.recv_timeout(until.saturating_duration_since(Instant::now()));
+    if Instant::now() >= until {
+        return Server::Unknown;
+    }
+    result.unwrap_or(Server::Unknown)
 }
 
 /// One bounded local exchange, never WaitNamedPipe/FlushFileBuffers or a helper
@@ -394,8 +434,9 @@ pub fn probe_ui_request_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
-    fn own_image() -> (u64, u64) {
+    fn own_image() -> FileId {
         let file = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
         file_id(&file).unwrap()
     }
@@ -441,15 +482,218 @@ mod tests {
             )
         })
         .unwrap();
-        match verify_server(&client, own_image()) {
+        match verify_server(
+            &client,
+            &PinnedImage::open(&std::env::current_exe().unwrap()).unwrap(),
+        ) {
             Server::Verified(peer) => assert_eq!(peer.pid, std::process::id()),
             _ => panic!("this process's own server must verify"),
         }
-        assert!(matches!(
-            verify_server(&client, (0, 0)),
-            Server::Refused(Verdict::OtherImage)
-        ));
+        let other =
+            std::env::temp_dir().join(format!("zerus-other-image-{}.exe", uuid::Uuid::new_v4()));
+        std::fs::copy(std::env::current_exe().unwrap(), &other).unwrap();
+        let selected = PinnedImage::open(&other).unwrap();
+        assert!(matches!(verify_server(&client, &selected), Server::Unknown));
+        drop(selected);
+        std::fs::remove_file(other).unwrap();
         drop(client);
         drop(server);
+    }
+
+    #[test]
+    fn delayed_verification_obeys_the_deadline_and_retains_its_inflight_pins() {
+        const CASE: &str = "ZERUS_DELAYED_VERIFIER_CASE";
+        if std::env::var_os(CASE).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["desktop::windows::tests::delayed_verification_obeys_the_deadline_and_retains_its_inflight_pins",
+                    "--exact", "--test-threads=1", "--nocapture"])
+                .env(CASE, "1").env_remove("HGS_SESSION").env_remove("HGS_RUN_ID").output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let root =
+            std::env::temp_dir().join(format!("zerus-delayed-verifier-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("fixture.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &path).unwrap();
+        let selected = PinnedImage::open(&path).unwrap();
+        // This control replaces only the verifier. The event is a clonable
+        // kernel handle; the delayed callback never interprets it as a pipe.
+        let pipe =
+            owned(unsafe { CreateEventW(std::ptr::null(), 0, 0, std::ptr::null()) }).unwrap();
+        let (release, held) = std::sync::mpsc::channel();
+        let (finished, done) = std::sync::mpsc::channel();
+        let start = Instant::now();
+        let result = verify_until(
+            &pipe,
+            &selected,
+            start + Duration::from_millis(30),
+            move |_, _| {
+                let _ = held.recv_timeout(Duration::from_secs(2));
+                let _ = finished.send(());
+                Server::Unknown
+            },
+        );
+        assert!(matches!(result, Server::Unknown));
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "delayed verifier escaped the total deadline"
+        );
+        assert!(
+            done.try_recv().is_err(),
+            "verification finished before explicit release"
+        );
+        assert!(matches!(
+            verify_until(
+                &pipe,
+                &selected,
+                Instant::now() + Duration::from_secs(1),
+                |_, _| panic!("a second acquisition must not start while the first is retained")
+            ),
+            Server::Unknown
+        ));
+        drop(selected);
+        assert!(std::fs::write(&path, b"replacement").is_err());
+        assert!(std::fs::rename(&root, root.with_extension("moved")).is_err());
+        release.send(()).unwrap();
+        done.recv_timeout(Duration::from_secs(2)).unwrap();
+        let until = Instant::now() + Duration::from_secs(2);
+        while VERIFYING.load(std::sync::atomic::Ordering::Acquire) {
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        std::fs::rename(&path, root.join("released.exe")).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "private copied-image subprocess entry, invoked by its native parent"]
+    fn pinned_peer_child() {
+        let name = std::env::var("ZERUS_PINNED_PEER_PIPE").unwrap();
+        assert!(name.starts_with("zerus-image-peer-"));
+        let name: Vec<u16> = format!(r"\\.\pipe\{name}")
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        let pipe = owned(unsafe {
+            CreateNamedPipeW(
+                name.as_ptr(),
+                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                1,
+                64,
+                64,
+                0,
+                std::ptr::null(),
+            )
+        })
+        .unwrap();
+        unsafe { ConnectNamedPipe(pipe.as_raw_handle(), std::ptr::null_mut()) };
+        // The parent controls this exact process handle and always confirms its
+        // physical exit. This ceiling also bounds a lost-parent fixture.
+        std::thread::sleep(Duration::from_secs(10));
+    }
+
+    struct FixtureChild(std::process::Child);
+    impl Drop for FixtureChild {
+        fn drop(&mut self) {
+            // SAFETY: only the original private subprocess returned by spawn.
+            unsafe {
+                if WaitForSingleObject(self.0.as_raw_handle(), 0) != WAIT_OBJECT_0 {
+                    TerminateProcess(self.0.as_raw_handle(), 1);
+                    assert_eq!(
+                        WaitForSingleObject(self.0.as_raw_handle(), 5_000),
+                        WAIT_OBJECT_0,
+                        "private peer cleanup unknown"
+                    );
+                }
+            }
+            assert!(self.0.try_wait().unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn verified_peer_retains_image_pins_and_refuses_a_replaced_loaded_image_path() {
+        use std::{os::windows::process::CommandExt, process::Stdio};
+        let root = std::env::temp_dir().join(format!("zerus-image-peer-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("peer.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &path).unwrap();
+        let name = format!("zerus-image-peer-{}", uuid::Uuid::new_v4());
+        let mut child = FixtureChild(
+            std::process::Command::new(&path)
+                .args([
+                    "desktop::windows::tests::pinned_peer_child",
+                    "--exact",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("ZERUS_PINNED_PEER_PIPE", &name)
+                .env_remove("HGS_SESSION")
+                .env_remove("HGS_RUN_ID")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn()
+                .unwrap(),
+        );
+        let pipe_name: Vec<u16> = format!(r"\\.\pipe\{name}")
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        let until = Instant::now() + Duration::from_secs(5);
+        let pipe = loop {
+            assert!(
+                Instant::now() < until,
+                "private peer did not create its pipe"
+            );
+            let candidate = owned(unsafe {
+                CreateFileW(
+                    pipe_name.as_ptr(),
+                    GENERIC_READ | GENERIC_WRITE,
+                    0,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                    std::ptr::null_mut(),
+                )
+            });
+            if let Ok(pipe) = candidate {
+                break pipe;
+            }
+            assert!(child.0.try_wait().unwrap().is_none());
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let selected = PinnedImage::open(&path).unwrap();
+        let original = selected.id();
+        let Server::Verified(peer) = verify_server(&pipe, &selected) else {
+            panic!("exact private peer must verify");
+        };
+        assert_eq!(peer.pid, child.0.id());
+        drop(selected);
+        assert!(std::fs::rename(&path, root.join("blocked.exe")).is_err());
+        assert!(std::fs::rename(&root, root.with_extension("blocked")).is_err());
+        assert!(peer.current());
+        drop(peer);
+        let moved = root.join("loaded.exe");
+        std::fs::rename(&path, &moved).unwrap();
+        std::fs::copy(std::env::current_exe().unwrap(), &path).unwrap();
+        let replacement = PinnedImage::open(&path).unwrap();
+        assert_ne!(replacement.id(), original);
+        assert!(matches!(
+            verify_server(&pipe, &replacement),
+            Server::Unknown
+        ));
+        let loaded = PinnedImage::open(&moved).unwrap();
+        loaded.matches_process(&child.0).unwrap();
+        assert_eq!(loaded.id(), original);
+        drop((loaded, replacement, pipe, child));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

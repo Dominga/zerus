@@ -535,3 +535,234 @@ fn a_fresh_slice_resumes_a_proof_that_only_exhausted_the_previous_slice() {
     assert!(cursor.is_none());
     assert_eq!(returned.len(), 12);
 }
+
+// Every journaled commit flushes the disk several times. A queued source step
+// is one commit: its index rows never become durable without its input cursor,
+// source row and queue completion, however many bounded passes it takes.
+#[test]
+fn a_queued_source_step_commits_rows_cursor_and_completion_together() {
+    use std::collections::BTreeSet;
+    use std::sync::{Arc, Mutex};
+    let (_temp, state, mut store) = fixture(false);
+    discover(&store, &state);
+    let open = Arc::new(Mutex::new(BTreeSet::<String>::new()));
+    let commits = Arc::new(Mutex::new(Vec::<BTreeSet<String>>::new()));
+    let (tables, committed) = (open.clone(), commits.clone());
+    store.index.connection().update_hook(Some(
+        move |_: rusqlite::hooks::Action, _: &str, table: &str, _: i64| {
+            tables.lock().unwrap().insert(table.to_owned());
+        },
+    ));
+    store.index.connection().commit_hook(Some(move || {
+        committed
+            .lock()
+            .unwrap()
+            .push(std::mem::take(&mut *open.lock().unwrap()));
+        false
+    }));
+    consume_until(&mut store, &state, |store| totals(store).0 == 0);
+    store.index.connection().commit_hook(None::<fn() -> bool>);
+    store
+        .index
+        .connection()
+        .update_hook(None::<fn(rusqlite::hooks::Action, &str, &str, i64)>);
+    let commits = commits.lock().unwrap();
+    let steps: Vec<_> = commits.iter().filter(|t| t.contains("messages")).collect();
+    assert!(!steps.is_empty(), "{commits:?}");
+    for step in steps {
+        for table in ["input_cursors", "sources", "catalog_queue"] {
+            assert!(
+                step.contains(table),
+                "{table} outside its step: {commits:?}"
+            );
+        }
+    }
+    assert_eq!(
+        store.index.query("needle", 100, None).unwrap().hits.len(),
+        6
+    );
+}
+
+#[test]
+fn an_interrupted_source_step_persists_nothing_and_a_new_step_commits_it_whole() {
+    let (_temp, state, mut store) = fixture(false);
+    let path = state.join(format!(
+        "{:x}.json",
+        Sha256::digest(b"codex/example/search")
+    ));
+    let record: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    let identity = Identity {
+        name: "codex/example/search".into(),
+        run_id: "fixture-run".into(),
+        conversation_id: record["conversation_id"].as_str().unwrap().into(),
+        archive_id: String::new(),
+    };
+    let budget = || Budget {
+        deadline: Instant::now() + Duration::from_secs(2),
+        ..budget(128)
+    };
+    let database = state.join("content-search-v1/index.sqlite3");
+    let durable = || {
+        let other = rusqlite::Connection::open_with_flags(
+            &database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let count = |table: &str| -> i64 {
+            other
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap()
+        };
+        (count("messages"), count("input_cursors"))
+    };
+    // A nested step joins the open one: nothing is durable before it commits.
+    assert!(store.begin_step().unwrap());
+    store
+        .step(
+            &state,
+            std::slice::from_ref(&identity),
+            &budget(),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert!(!store
+        .index
+        .query("needle", 100, None)
+        .unwrap()
+        .hits
+        .is_empty());
+    assert_eq!(durable(), (0, 0));
+    // The process ends before its commit; SQLite rolls the whole step back.
+    drop(store);
+    assert_eq!(durable(), (0, 0));
+    let mut store = Store::open(&state.join("content-search-v1")).unwrap();
+    for _ in 0..32 {
+        store
+            .step(
+                &state,
+                std::slice::from_ref(&identity),
+                &budget(),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        let (messages, cursors) = durable();
+        // Rows and their cursor only ever become durable together.
+        assert_eq!(cursors, 1, "{messages} rows without a cursor");
+        if messages == 6 {
+            return;
+        }
+    }
+    panic!("the source was not indexed within 32 bounded steps");
+}
+
+#[test]
+fn a_step_that_sqlite_cancelled_refuses_further_step_writes() {
+    let (_temp, _state, mut store) = fixture(false);
+    assert!(store.begin_step().unwrap());
+    // SQLite can end the transaction itself after SQLITE_FULL, IOERR or NOMEM.
+    store.index.connection().execute_batch("ROLLBACK").unwrap();
+    assert!(store.step_open().is_err());
+    // A nested step must not silently open a fresh transaction.
+    assert!(store.begin_step().is_err());
+    assert!(store.end_step(true).is_err());
+    assert!(!store.step);
+    assert!(store.begin_step().unwrap());
+    store.end_step(true).unwrap();
+    assert!(store.index.connection().is_autocommit());
+}
+
+#[test]
+fn a_cancelled_snapshot_put_never_persists_a_cursor_past_rolled_back_rows() {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    use std::sync::Arc;
+    let (_temp, state, mut store) = fixture(false);
+    let path = state.join(format!(
+        "{:x}.json",
+        Sha256::digest(b"codex/example/search")
+    ));
+    let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    record["last_message"] = json!("needle snapshot");
+    record["last_event_at"] = json!(43);
+    fs::write(&path, record.to_string()).unwrap();
+    let identity = Identity {
+        name: "codex/example/search".into(),
+        run_id: "fixture-run".into(),
+        conversation_id: record["conversation_id"].as_str().unwrap().into(),
+        archive_id: String::new(),
+    };
+    let budget = || Budget {
+        deadline: Instant::now() + Duration::from_secs(2),
+        ..budget(128)
+    };
+    let database = state.join("content-search-v1/index.sqlite3");
+    let durable = || {
+        let other = rusqlite::Connection::open_with_flags(
+            &database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let count = |table: &str| -> i64 {
+            other
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap()
+        };
+        (count("messages"), count("input_cursors"))
+    };
+    let inserted = Arc::new(AtomicUsize::new(0));
+    let armed = Arc::new(AtomicBool::new(false));
+    let (count, arm, fire) = (inserted.clone(), armed.clone(), armed.clone());
+    store.index.connection().update_hook(Some(
+        move |action: rusqlite::hooks::Action, _: &str, table: &str, _: i64| {
+            if action == rusqlite::hooks::Action::SQLITE_INSERT
+                && table == "messages"
+                && count.fetch_add(1, SeqCst) == 6
+            {
+                arm.store(true, SeqCst);
+            }
+        },
+    ));
+    store
+        .index
+        .connection()
+        .progress_handler(1, Some(move || fire.swap(false, SeqCst)));
+    let cancelled = store.step(
+        &state,
+        std::slice::from_ref(&identity),
+        &budget(),
+        &AtomicBool::new(false),
+    );
+    store
+        .index
+        .connection()
+        .progress_handler(1, None::<fn() -> bool>);
+    store
+        .index
+        .connection()
+        .update_hook(None::<fn(rusqlite::hooks::Action, &str, &str, i64)>);
+    assert!(inserted.load(SeqCst) >= 7, "the snapshot put never ran");
+    assert!(store.index.connection().is_autocommit());
+    assert!(cancelled.is_err(), "the cancelled step reported success");
+    let (messages, cursors) = durable();
+    assert_eq!(
+        cursors, 0,
+        "cursor persisted past {} rolled-back rows (durable rows: {messages})",
+        6
+    );
+    for _ in 0..32 {
+        store
+            .step(
+                &state,
+                std::slice::from_ref(&identity),
+                &budget(),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        if durable().0 == 7 {
+            break;
+        }
+    }
+    assert_eq!(
+        store.index.query("needle", 100, None).unwrap().hits.len(),
+        7
+    );
+}

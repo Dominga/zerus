@@ -71,6 +71,11 @@ impl Budget {
         }
     }
 }
+#[derive(Clone, Copy, PartialEq)]
+enum Flow {
+    Next,
+    Stop,
+}
 #[derive(Default, Serialize)]
 pub(crate) struct Progress {
     files: usize,
@@ -122,6 +127,8 @@ pub(crate) struct Store {
     directory: PathBuf,
     index: Index,
     wire_roots: std::collections::BTreeMap<PathBuf, std::sync::Arc<wire::Snapshot>>,
+    /// An owned source-step transaction is open (see `begin_step`).
+    step: bool,
 }
 impl Store {
     pub fn open(directory: &Path) -> Result<Self> {
@@ -204,6 +211,7 @@ impl Store {
             directory: directory.to_owned(),
             index,
             wire_roots: Default::default(),
+            step: false,
         })
     }
 
@@ -263,117 +271,188 @@ impl Store {
                 progress.stopped = true;
                 break;
             }
-            let record = match binding(state, identity, &mut progress, budget, reader, 0) {
-                Ok(metadata::Record::Ready(record)) => record,
-                Ok(metadata::Record::Deferred | metadata::Record::OverBudget) => {
-                    progress.stopped = true;
-                    break;
-                }
-                Err(_) => {
-                    self.retire(&key)?;
-                    progress
-                        .errors
-                        .push("Source missing, replaced or unreadable; index entry retired".into());
-                    continue;
-                }
-            };
-            let target = record_target(&record);
-            if let Err(error) = self.index.register(&target) {
-                progress.errors.push(error.to_string());
-                continue;
+            let owned = self.begin_step()?;
+            let flow =
+                self.step_identity(state, identity, &key, budget, cancel, reader, &mut progress);
+            let ended = self.end_step(owned);
+            let flow = flow?;
+            ended?;
+            if flow == Flow::Stop {
+                break;
             }
-            let encoded: Option<String> = self
-                .index
-                .connection()
-                .query_row(
-                    "SELECT cursor FROM input_cursors WHERE source=?",
-                    [&key],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(|e| e.to_string())?;
-            let mut cursor: Cursor = match encoded {
-                Some(encoded) => serde_json::from_str(&encoded)
-                    .map_err(|_| "Invalid source cursor; dispose and rebuild the search index")?,
-                None => Cursor::default(),
-            };
-            let before = cursor.clone();
-            let mut unavailable = false;
-            let result = self.transcript(&record, &key, &mut cursor, budget, &mut progress, cancel);
-            let complete = match result {
-                Ok(complete) => complete,
-                Err(error) => {
-                    cursor = before;
-                    unavailable = true;
-                    progress.errors.push(error.chars().take(160).collect());
-                    false
-                }
-            };
-            let active: bool = self
-                .index
-                .connection()
-                .query_row("SELECT active FROM sources WHERE id=?", [&key], |r| {
-                    r.get(0)
-                })
-                .map_err(|e| e.to_string())?;
-            if !active {
-                progress.targets += 1;
-                continue;
-            }
-            // A missing or unsupported provider never hides its recorded journal.
-            let journal_complete =
-                match self.journal(&record, &key, &mut cursor, budget, &mut progress, cancel) {
-                    Ok(complete) => complete,
-                    Err(_) => {
-                        unavailable = true;
-                        false
-                    }
-                };
-            let mut snapshots_complete = true;
-            for (field, kind, role, time) in [
-                ("prompt", "UserPromptSubmit", "user", "turn_started"),
-                ("last_message", "AgentMessage", "assistant", "last_event_at"),
-            ] {
-                if !progress.can_read(budget, cancel) {
-                    snapshots_complete = false;
-                    break;
-                }
-                let text = if field == "prompt" {
-                    journal::user_prompt(&record).as_str().unwrap_or("")
-                } else {
-                    string(&record, field)
-                };
-                if !text.is_empty() {
-                    let event =
-                        json!({"type":kind,"source":"snapshot","at":record[time],"detail":text});
-                    if self
-                        .put(&key, event, role, &mut cursor, &mut progress)
-                        .is_err()
-                    {
-                        unavailable = true;
-                        snapshots_complete = false;
-                    }
-                }
-            }
-            self.index
-                .connection()
-                .execute(
-                    "INSERT OR REPLACE INTO input_cursors VALUES(?,?)",
-                    params![
-                        key,
-                        serde_json::to_string(&cursor).map_err(|e| e.to_string())?
-                    ],
-                )
-                .map_err(|e| e.to_string())?;
-            let _ = self.index.source_progress(
-                &key,
-                complete && journal_complete && snapshots_complete && !cursor.incomplete,
-                unavailable || cursor.incomplete,
-            );
-            progress.targets += 1;
         }
         progress.stopped |= !progress.available(budget, cancel);
         Ok(progress)
+    }
+
+    /// One identity's source step; `Stop` ends this bounded call.
+    #[allow(clippy::too_many_arguments)]
+    fn step_identity(
+        &mut self,
+        state: &Path,
+        identity: &Identity,
+        key: &str,
+        budget: &Budget,
+        cancel: &AtomicBool,
+        reader: &mut metadata::Reader,
+        progress: &mut Progress,
+    ) -> Result<Flow> {
+        let key = key.to_owned();
+        let record = match binding(state, identity, progress, budget, reader, 0) {
+            Ok(metadata::Record::Ready(record)) => record,
+            Ok(metadata::Record::Deferred | metadata::Record::OverBudget) => {
+                progress.stopped = true;
+                return Ok(Flow::Stop);
+            }
+            Err(_) => {
+                self.retire(&key)?;
+                progress
+                    .errors
+                    .push("Source missing, replaced or unreadable; index entry retired".into());
+                return Ok(Flow::Next);
+            }
+        };
+        let target = record_target(&record);
+        if let Err(error) = self.index.register(&target) {
+            progress.errors.push(error.to_string());
+            return Ok(Flow::Next);
+        }
+        let encoded: Option<String> = self
+            .index
+            .connection()
+            .query_row(
+                "SELECT cursor FROM input_cursors WHERE source=?",
+                [&key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let mut cursor: Cursor = match encoded {
+            Some(encoded) => serde_json::from_str(&encoded)
+                .map_err(|_| "Invalid source cursor; dispose and rebuild the search index")?,
+            None => Cursor::default(),
+        };
+        let before = cursor.clone();
+        let mut unavailable = false;
+        let result = self.transcript(&record, &key, &mut cursor, budget, progress, cancel);
+        let complete = match result {
+            Ok(complete) => complete,
+            Err(error) => {
+                cursor = before;
+                unavailable = true;
+                progress.errors.push(error.chars().take(160).collect());
+                false
+            }
+        };
+        let active: bool = self
+            .index
+            .connection()
+            .query_row("SELECT active FROM sources WHERE id=?", [&key], |r| {
+                r.get(0)
+            })
+            .map_err(|e| e.to_string())?;
+        if !active {
+            progress.targets += 1;
+            return Ok(Flow::Next);
+        }
+        // A missing or unsupported provider never hides its recorded journal.
+        let journal_complete =
+            match self.journal(&record, &key, &mut cursor, budget, progress, cancel) {
+                Ok(complete) => complete,
+                Err(_) => {
+                    unavailable = true;
+                    false
+                }
+            };
+        let mut snapshots_complete = true;
+        for (field, kind, role, time) in [
+            ("prompt", "UserPromptSubmit", "user", "turn_started"),
+            ("last_message", "AgentMessage", "assistant", "last_event_at"),
+        ] {
+            if !progress.can_read(budget, cancel) {
+                snapshots_complete = false;
+                break;
+            }
+            let text = if field == "prompt" {
+                journal::user_prompt(&record).as_str().unwrap_or("")
+            } else {
+                string(&record, field)
+            };
+            if !text.is_empty() {
+                let event =
+                    json!({"type":kind,"source":"snapshot","at":record[time],"detail":text});
+                if self.put(&key, event, role, &mut cursor, progress).is_err() {
+                    unavailable = true;
+                    snapshots_complete = false;
+                }
+            }
+        }
+        // Never record a cursor past rows that SQLite rolled back.
+        self.step_open()?;
+        self.index
+            .connection()
+            .execute(
+                "INSERT OR REPLACE INTO input_cursors VALUES(?,?)",
+                params![
+                    key,
+                    serde_json::to_string(&cursor).map_err(|e| e.to_string())?
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        let _ = self.index.source_progress(
+            &key,
+            complete && journal_complete && snapshots_complete && !cursor.incomplete,
+            unavailable || cursor.incomplete,
+        );
+        progress.targets += 1;
+        Ok(Flow::Next)
+    }
+
+    /// A source step commits once: its index rows, input cursor, progress and
+    /// queue completion become durable together. Each journaled commit flushes
+    /// the disk several times, and a small session used to take about fourteen,
+    /// more than a slow Windows disk fits into an interactive budget. A step
+    /// begun inside an open one joins it. IMMEDIATE takes the write lock first,
+    /// so a concurrent writer waits for the busy timeout instead of deadlocking.
+    fn begin_step(&mut self) -> Result<bool> {
+        if self.step {
+            self.step_open()?;
+            return Ok(false);
+        }
+        self.index
+            .connection()
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| e.to_string())?;
+        self.step = true;
+        Ok(true)
+    }
+
+    /// SQLite can cancel a whole transaction after SQLITE_FULL, IOERR or NOMEM;
+    /// later statements would then commit one by one. A step must not record
+    /// its cursor or completion after that: the next step redoes it instead.
+    fn step_open(&self) -> Result<()> {
+        if self.step && self.index.connection().is_autocommit() {
+            return Err("Search-index step was rolled back; a later step retries it".into());
+        }
+        Ok(())
+    }
+
+    /// Commit the step even when it returned an error, as the former
+    /// per-statement commits kept everything written before the error. A
+    /// failed commit rolls the whole step back.
+    fn end_step(&mut self, owned: bool) -> Result<()> {
+        if !owned {
+            return Ok(());
+        }
+        let cancelled = self.step_open();
+        self.step = false;
+        cancelled?;
+        let connection = self.index.connection();
+        if let Err(error) = connection.execute_batch("COMMIT") {
+            let _ = connection.execute_batch("ROLLBACK");
+            return Err(error.to_string());
+        }
+        Ok(())
     }
 
     fn put(

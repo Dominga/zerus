@@ -343,3 +343,39 @@ fn large_catalog_plans_bound_candidate_source_and_purge_lookups() {
     assert_eq!(page.candidates, CANDIDATES);
     assert!(page.next_cursor.is_some());
 }
+
+#[test]
+fn a_full_batch_inside_a_caller_transaction_rolls_back_alone() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("index.sqlite3");
+    let mut index = Index::new(Connection::open(&path).unwrap(), MIN_FILE_BYTES).unwrap();
+    let key = index.register(&target("one", false)).unwrap();
+    let large = "needle public text ".repeat(6000);
+    index.db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut stored = 0;
+    let mut full = false;
+    for id in 0..100 {
+        match index.ingest(&key, &[message(id, &large)]) {
+            Ok(_) => stored += 1,
+            Err(error) => {
+                assert!(
+                    matches!(error.downcast_ref::<rusqlite::Error>(),
+                        Some(rusqlite::Error::SqliteFailure(code, _)) if code.code == rusqlite::ErrorCode::DiskFull),
+                    "{error}"
+                );
+                full = true;
+                break;
+            }
+        }
+    }
+    assert!(full && stored > 0);
+    // Only the failed batch was undone; the caller's transaction is still open
+    // and eviction inside it makes room for the next batch.
+    assert!(!index.db.is_autocommit());
+    assert!(index.evict().unwrap() > 0);
+    index.ingest(&key, &[message(1000, &large)]).unwrap();
+    index.db.execute_batch("COMMIT").unwrap();
+    assert!(std::fs::metadata(&path).unwrap().len() <= MIN_FILE_BYTES);
+    assert_eq!(index.status().unwrap().state, "partial");
+    assert!(!index.query("needle", 1, None).unwrap().hits.is_empty());
+}

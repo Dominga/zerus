@@ -66,6 +66,25 @@ fn branch(name: &str) -> bool {
         && !name.chars().any(|c| c.is_control() || c.is_whitespace())
 }
 impl Plan {
+    /// Read-only recovery also accepts a well-formed later journal state. It
+    /// supplies no fresh native admission or execution consent.
+    pub fn from_operation(id: &str, value: &Value) -> Option<Self> {
+        if !creation::valid_operation(id, value)
+            || value["host"].as_str().is_some_and(|host| !host.is_empty())
+        {
+            return None;
+        }
+        let text = |key| value[key].as_str().map(str::to_owned);
+        let plan = Self {
+            worktree_request_id: text("worktree_id")?,
+            expected_machine: text("expected_machine")?,
+            path: text("target")?,
+            common_dir: text("worktree_common")?,
+            branch: text("branch")?,
+            destination: text("destination")?,
+        };
+        plan.valid().then_some(plan)
+    }
     pub fn valid(&self) -> bool {
         uuid(&self.worktree_request_id)
             && uuid(&self.expected_machine)
@@ -594,7 +613,13 @@ mod tests {
     fn accepts_the_real_reducers_durable_worktree_checkpoint() {
         let intent = checkpoint();
         let original = intent.original.clone();
+        let operation: Value = serde_json::from_str(&original).unwrap();
+        let recovered = Plan::from_operation(ID, &operation).unwrap();
         let verified = intent.verify().unwrap();
+        assert!(recovered == verified.plan, "recovery reads the same plan");
+        let mut remote = operation.clone();
+        remote["host"] = json!("peer");
+        assert!(Plan::from_operation(ID, &remote).is_none());
         assert_eq!(verified.intent.original, original);
         assert_eq!(verified.binding.source_sha256, hash(original.as_bytes()));
         assert_eq!(verified.plan.path, "/srv/repo");

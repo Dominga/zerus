@@ -14,9 +14,21 @@ mode and the exact configuration authenticate it. Generic `into_request`
 refuses it, and it has its own ordering lane. On Linux and macOS the service
 advertises `Desktop creation worktree ABI: desktop-creation-worktree-v1`, and
 the admitted desktop actor executes it. Windows answers
-`creation_worktree_unsupported` and advertises nothing. The client keeps its
-existing direct `worktrees create --receipt` path until a separate
-default-off service path lands.
+`creation_worktree_unsupported` and advertises nothing.
+
+In desktop-service mode only (default-off), the native creation host routes a
+local, receipt-backed `CreateWorktree` and its `status` reads to the service
+(`client/src-tauri/src/desktop_service/creation_worktree.rs`):
+- **Fresh intent.** Only a direct Submit, consumed once and separately from
+  clone's, sends a fresh intent. Recovered and task-reserved creations get
+  read-only lookups.
+- **Lookup results.** A missing or Unknown lookup is unconfirmed. It never
+  resends and never falls back to the direct path.
+- **Older CLI.** If the CLI does not advertise the kind, a fresh intent fails
+  as definitely unsent, and only then may the reducer retire its request UUID.
+
+Cancel, remote creations and every creation outside desktop-service mode keep
+the existing direct `worktrees` calls.
 
 ## Actor
 

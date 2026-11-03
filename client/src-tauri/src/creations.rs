@@ -156,6 +156,8 @@ struct Services {
     write: JournalWriter,
     call: Arc<dyn Fn(&creation::Call) -> creation::Answer + Send + Sync>,
     service_clone: Option<ServiceClone>,
+    /// The same native intent shape for the worktree leaf, never shared state.
+    service_worktree: Option<ServiceClone>,
     launch: LaunchSession,
     binding: ReadBinding,
     watch: WatchBinding,
@@ -290,6 +292,7 @@ impl CreationHost {
                     quitting: false,
                     loaded: false,
                     fresh_creations: BTreeSet::new(),
+                    fresh_worktrees: BTreeSet::new(),
                     #[cfg(all(test, unix))]
                     barrier: None,
                 };
@@ -536,6 +539,8 @@ struct Worker {
     quitting: bool,
     loaded: bool,
     fresh_creations: BTreeSet<String>,
+    /// Consumed once by a fresh worktree intent, separately from clone's.
+    fresh_worktrees: BTreeSet<String>,
     #[cfg(all(test, unix))]
     barrier: Option<SyncSender<()>>,
 }
@@ -555,6 +560,7 @@ impl Worker {
             self.queue.quit();
             self.pending.clear();
             self.fresh_creations.clear();
+            self.fresh_worktrees.clear();
         }
     }
 
@@ -586,6 +592,11 @@ impl Worker {
                 if direct && self.services.service_clone.is_some() {
                     if let Ok(id) = &result {
                         self.fresh_creations.insert(id.clone());
+                    }
+                }
+                if direct && self.services.service_worktree.is_some() {
+                    if let Ok(id) = &result {
+                        self.fresh_worktrees.insert(id.clone());
                     }
                 }
                 self.effects(effects);
@@ -688,6 +699,7 @@ impl Worker {
                 }
                 Effect::Removed { id } => {
                     self.fresh_creations.remove(&id);
+                    self.fresh_worktrees.remove(&id);
                     self.pending.remove(&id);
                     let mut cache = lock(&self.cache);
                     cache.operations.remove(&id);
@@ -733,6 +745,41 @@ impl Worker {
                         // Consume BEFORE scheduling any helper. Even a lost
                         // response or later Resume never sends this ID again.
                         let fresh = wait && self.fresh_creations.remove(&id);
+                        Some(Ok((sender.clone(), id, value, fresh, wait)))
+                    });
+                    // A local receipt-backed checkout and its status reads go
+                    // to the service; cancel and remote calls stay direct.
+                    let clone_call = clone_call.or_else(|| {
+                        let sender = self.services.service_worktree.as_ref()?;
+                        let (request_id, wait) = match &call {
+                            creation::Call::CreateWorktree {
+                                host,
+                                request_id,
+                                receipt: true,
+                                ..
+                            } if host.is_empty() => (request_id, true),
+                            creation::Call::WorktreeReceipt {
+                                host,
+                                action,
+                                request_id,
+                                ..
+                            } if host.is_empty() && action == "status" => (request_id, false),
+                            _ => return None,
+                        };
+                        let mut originals =
+                            self.queue.operations().iter().filter(|(_, value)| {
+                                value["worktree_id"].as_str() == Some(request_id)
+                            });
+                        let original = originals
+                            .next()
+                            .map(|(id, value)| (id.clone(), value.clone()));
+                        if originals.next().is_some() {
+                            return Some(Err(()));
+                        }
+                        let Some((id, value)) = original else {
+                            return Some(Err(()));
+                        };
+                        let fresh = wait && self.fresh_worktrees.remove(&id);
                         Some(Ok((sender.clone(), id, value, fresh, wait)))
                     });
                     (self.services.spawn)(Box::new(move || {
@@ -1230,6 +1277,23 @@ fn detached(hgs: &Path, invocation: &zerus_client_core::Invocation) -> Result<()
 /// calls and the same terminal launcher Qt's New session uses.
 pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> CreationHost {
     let clone_app = app.clone();
+    let worktree_app = app.clone();
+    let service_worktree = crate::desktop_service::mode().then(|| {
+        Arc::new(
+            move |id: &str, operation: &Value, fresh: bool, wait: bool, shutdown: &AtomicBool| {
+                crate::desktop_service::creation_worktree::call(
+                    worktree_app
+                        .state::<crate::commands::AppState>()
+                        .desktop_service(),
+                    id,
+                    operation,
+                    fresh,
+                    wait,
+                    shutdown,
+                )
+            },
+        ) as ServiceClone
+    });
     let service_clone = crate::desktop_service::mode().then(|| {
         Arc::new(
             move |id: &str, operation: &Value, fresh: bool, wait: bool, shutdown: &AtomicBool| {
@@ -1285,6 +1349,7 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
             }),
             call: Arc::new(move |call| creation::run_call(&call_hgs, call)),
             service_clone,
+            service_worktree,
             binding: Arc::new(move |computer| {
                 creation::binding_listing(
                     zerus_client_core::run_limited(
@@ -1462,6 +1527,16 @@ mod tests {
         serde_json::to_value(launch::plan(&choices())).unwrap()
     }
 
+    /// The automatic checkout of a new branch: a receipt-backed worktree.
+    fn worktree_plan() -> Value {
+        serde_json::to_value(launch::plan(&Choices {
+            auto_preferred: true,
+            automatic_available: true,
+            ..choices()
+        }))
+        .unwrap()
+    }
+
     impl Fake {
         fn new() -> Self {
             let tree = crate::PROCESS_TREE
@@ -1527,6 +1602,7 @@ mod tests {
                 }),
                 call: Arc::new(move |step| creation::run_call(&call, step)),
                 service_clone: None,
+                service_worktree: None,
                 launch: Arc::new(move |operation| detached(&launch, &launch_invocation(operation))),
                 binding: Arc::new(move |_| {
                     binding.reads.fetch_add(1, Ordering::SeqCst);
@@ -1882,6 +1958,110 @@ mod tests {
             value["error"],
             crate::desktop_service::creation_clone::UNAVAILABLE
         );
+        fake.stop(host);
+    }
+
+    fn service_worktree_probe(fake: &Fake, calls: Arc<Mutex<Vec<(bool, bool)>>>) -> Services {
+        let mut services = fake.services();
+        let journal = fake.dir.join("creations.json");
+        services.service_worktree = Some(Arc::new(move |id, operation, fresh, wait, _| {
+            // The exact reducer checkpoint is durable before the original
+            // service intent. Presentation/recovery never supplies fresh Start.
+            let saved: Value = serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+            if fresh {
+                assert_eq!(saved["operations"][id], *operation);
+                assert!(wait);
+            } else {
+                assert_eq!(
+                    saved["operations"][id]["worktree_id"],
+                    operation["worktree_id"]
+                );
+            }
+            lock(&calls).push((fresh, wait));
+            creation::Answer {
+                ok: false,
+                data: Value::Null,
+                error: zerus_client_core::repository::UNCONFIRMED_OPERATION.into(),
+            }
+        }));
+        services
+    }
+    #[test]
+    fn service_worktree_uses_only_direct_start_once_after_durable_checkpoint_and_checks_without_replay(
+    ) {
+        let fake = Fake::new();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let host = CreationHost::new(
+            fake.dir.join("creations.json"),
+            service_worktree_probe(&fake, calls.clone()),
+        );
+        let id = admitted(&host, worktree_plan());
+        state(&host, &id, "unknown");
+        assert_eq!(*lock(&calls), [(true, true)]);
+        let original = operation(&host, &id)["worktree_id"].clone();
+        host.action(id.clone(), CreationAction::Check).unwrap();
+        wait("service worktree lookup", || lock(&calls).len() == 2);
+        state(&host, &id, "unknown");
+        assert_eq!(*lock(&calls), [(true, true), (false, false)]);
+        assert_eq!(
+            operation(&host, &id)["worktree_id"],
+            original,
+            "never a new UUID"
+        );
+        // Neither the original create nor its receipt went to the direct CLI.
+        assert!(!fake.log().iter().any(|args| {
+            args.iter().any(|v| v == "worktrees")
+                && args.iter().any(|v| v == "create" || v == "status")
+        }));
+        fake.stop(host);
+        let host = CreationHost::new(
+            fake.dir.join("creations.json"),
+            service_worktree_probe(&fake, calls.clone()),
+        );
+        state(&host, &id, "recover");
+        host.action(id.clone(), CreationAction::Resume).unwrap();
+        assert!(host.flush_journal_for_test());
+        assert_eq!(
+            lock(&calls).len(),
+            2,
+            "Resume cannot restart an unknown worktree"
+        );
+        host.action(id.clone(), CreationAction::Check).unwrap();
+        wait("recovered service worktree lookup", || {
+            lock(&calls).len() == 3
+        });
+        state(&host, &id, "unknown");
+        assert_eq!(
+            *lock(&calls),
+            [(true, true), (false, false), (false, false)]
+        );
+        fake.stop(host);
+    }
+    #[test]
+    fn a_definitely_unsent_service_worktree_fails_and_frees_its_request() {
+        let fake = Fake::new();
+        let mut services = fake.services();
+        services.service_worktree = Some(Arc::new(|_, operation, fresh, _, _| {
+            assert!(fresh);
+            creation::Answer {
+                ok: false,
+                data: json!({"status":"failed","request_id":operation["worktree_id"],
+                    "effects_started":false,"detail":crate::desktop_service::creation_worktree::UNAVAILABLE}),
+                error: crate::desktop_service::creation_worktree::UNAVAILABLE.into(),
+            }
+        }));
+        let host = CreationHost::new(fake.dir.join("creations.json"), services);
+        let id = admitted(&host, worktree_plan());
+        state(&host, &id, "failed");
+        let value = operation(&host, &id);
+        assert_eq!(value["failed_stage"], "worktree");
+        assert_eq!(
+            value["error"],
+            crate::desktop_service::creation_worktree::UNAVAILABLE
+        );
+        // Only a definitely effect-free original is retired for a later retry.
+        assert!(value.get("worktree_id").is_none());
+        assert_eq!(value["worktree_previous"].as_array().unwrap().len(), 1);
         fake.stop(host);
     }
 

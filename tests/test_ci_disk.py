@@ -27,9 +27,13 @@ class HostedDiskTests(unittest.TestCase):
                  "RUNNER_OS": "Linux", "GITHUB_JOB": "quick", "GITHUB_WORKSPACE": str(ROOT)}
         for key, value in (("GITHUB_ACTIONS", "false"), ("RUNNER_ENVIRONMENT", "self-hosted"),
                            ("RUNNER_OS", "Windows"), ("GITHUB_JOB", "publish")):
-            with self.subTest(key=key), patch.dict(os.environ, {**valid, key: value}, clear=True):
+            with self.subTest(key=key), patch.dict(os.environ, {**valid, key: value}, clear=True), \
+                    patch.object(sys, "argv", ["ubuntu-disk.py", "prepare"]), \
+                    patch.object(DISK.subprocess, "run") as run, patch.object(DISK.shutil, "rmtree") as remove:
                 with self.assertRaises(ValueError):
-                    DISK.hosted_workspace()
+                    DISK.main()
+                run.assert_not_called()
+                remove.assert_not_called()
 
     def test_preparation_removes_only_the_fixed_unused_toolchains(self):
         with patch.dict(os.environ, {"GITHUB_JOB": "quick"}), \
@@ -102,20 +106,90 @@ class HostedDiskTests(unittest.TestCase):
             )
             remove.assert_not_called()
 
-    def test_native_report_permission_never_authorizes_either_cleanup_operation(self):
+    def test_native_cannot_retire_relay_builds(self):
         env = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted",
                "RUNNER_OS": "Linux", "GITHUB_JOB": "client-native-linux", "GITHUB_WORKSPACE": str(ROOT)}
-        for operation in ("prepare", "relay-before-image"):
-            with self.subTest(operation=operation), patch.dict(os.environ, env, clear=True), \
+        with patch.dict(os.environ, env, clear=True), patch.object(DISK.Path, "cwd", return_value=ROOT), \
+                patch.object(sys, "argv", ["ubuntu-disk.py", "relay-before-image"]), \
+                patch.object(DISK, "report") as report, patch.object(DISK.subprocess, "run") as run, \
+                patch.object(DISK.shutil, "rmtree") as remove:
+            with self.assertRaises(ValueError):
+                DISK.main()
+            report.assert_not_called()
+            run.assert_not_called()
+            remove.assert_not_called()
+
+    def test_native_prepare_checks_fresh_space_after_fixed_cleanup_at_exact_threshold(self):
+        threshold = 24 * 1024**3
+        self.assertEqual(DISK.NATIVE_MIN_FREE_BYTES, threshold)
+        tools = ("/usr/local/lib/android", "/usr/share/dotnet", "/opt/ghc", "/opt/hostedtoolcache/CodeQL")
+        self.assertEqual(DISK.UNUSED_TOOLS, tools)
+        env = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted",
+               "RUNNER_OS": "Linux", "GITHUB_JOB": "client-native-linux", "GITHUB_WORKSPACE": str(ROOT)}
+        for actual in (0, threshold - 1, threshold, threshold + 1):
+            events, output = [], io.StringIO()
+            measurements = iter((threshold - 1, threshold + 1, actual))
+
+            def measure(_workspace):
+                events.append("measure")
+                return SimpleNamespace(free=next(measurements))
+
+            def report(workspace, phase):
+                events.append(phase)
+                DISK.shutil.disk_usage(workspace)
+
+            with self.subTest(actual=actual), patch.dict(os.environ, env, clear=True), \
                     patch.object(DISK.Path, "cwd", return_value=ROOT), \
-                    patch.object(sys, "argv", ["ubuntu-disk.py", operation]), \
-                    patch.object(DISK, "report") as report, \
-                    patch.object(DISK.subprocess, "run") as run, patch.object(DISK.shutil, "rmtree") as remove:
-                with self.assertRaises(ValueError):
+                    patch.object(sys, "argv", ["ubuntu-disk.py", "prepare"]), \
+                    patch.object(DISK, "report", side_effect=report), \
+                    patch.object(DISK.shutil, "disk_usage", side_effect=measure) as usage, \
+                    patch.object(DISK.subprocess, "run", side_effect=lambda *a, **kw: events.append("cleanup")) as run, \
+                    patch.object(DISK.shutil, "rmtree") as remove, contextlib.redirect_stdout(output):
+                if actual >= threshold:
                     DISK.main()
-                report.assert_not_called()
-                run.assert_not_called()
+                else:
+                    with self.assertRaisesRegex(SystemExit, f"required_free_bytes={threshold} .*actual_free_bytes={actual}"):
+                        DISK.main()
+                run.assert_called_once_with(["sudo", "rm", "-rf", "--one-file-system", "--", *tools], check=True)
+                self.assertEqual(usage.call_count, 3)
                 remove.assert_not_called()
+            self.assertEqual(events, ["before-unused-tools", "measure", "cleanup",
+                                      "after-unused-tools", "measure", "measure"])
+            lines = output.getvalue().splitlines()
+            self.assertEqual(json.loads(lines[0]), {
+                "phase": "native-space-admission", "required_free_bytes": threshold,
+                "actual_free_bytes": actual, "admitted": actual >= threshold,
+            })
+            if actual >= threshold:
+                self.assertEqual(len(lines), 1)
+            else:
+                # One annotation names both measurements on the run summary.
+                self.assertEqual(len(lines), 2)
+                self.assertTrue(lines[1].startswith("::error title=Native Linux disk admission::"))
+                self.assertIn(f"required_free_bytes={threshold} (24.0 GiB)", lines[1])
+                self.assertIn(f"actual_free_bytes={actual} ({actual / 1024**3:.1f} GiB)", lines[1])
+
+    def test_failed_cleanup_never_passes_native_space_admission(self):
+        with patch.dict(os.environ, {"GITHUB_JOB": "client-native-linux"}), \
+                patch.object(DISK, "report") as report, \
+                patch.object(DISK.subprocess, "run", side_effect=subprocess.CalledProcessError(1, ["sudo", "rm"])), \
+                patch.object(DISK.shutil, "disk_usage") as usage, contextlib.redirect_stdout(io.StringIO()) as output:
+            with self.assertRaises(subprocess.CalledProcessError):
+                DISK.prepare(ROOT)
+            report.assert_called_once_with(ROOT, "before-unused-tools")
+            usage.assert_not_called()
+            self.assertEqual(output.getvalue(), "")
+
+    def test_quick_and_relay_cleanup_have_no_native_minimum(self):
+        for job in ("quick", "relay"):
+            with self.subTest(job=job), patch.dict(os.environ, {"GITHUB_JOB": job}), \
+                    patch.object(DISK, "report") as report, patch.object(DISK.subprocess, "run") as run, \
+                    patch.object(DISK.shutil, "disk_usage") as usage:
+                DISK.prepare(ROOT)
+                self.assertEqual([call.args for call in report.call_args_list],
+                                 [(ROOT, "before-unused-tools"), (ROOT, "after-unused-tools")])
+                run.assert_called_once()
+                usage.assert_not_called()
 
 
 class NativeScriptCheckpoints(unittest.TestCase):

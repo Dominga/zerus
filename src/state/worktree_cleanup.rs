@@ -167,8 +167,8 @@ fn bindings() -> Result<Vec<Reference>> {
 
 fn context(common: &Path, trees: &[Value], deadline: Instant) -> Context {
     let mut bases = Vec::new();
-    if trees[0]["kind"] == "main" {
-        if let Some(branch) = trees[0]["branch"].as_str().filter(|b| !b.is_empty()) {
+    if let Some(main) = trees.first().filter(|tree| tree["kind"] == "main") {
+        if let Some(branch) = main["branch"].as_str().filter(|b| !b.is_empty()) {
             bases.push((branch.to_owned(), format!("refs/heads/{branch}")));
         }
     }
@@ -1019,11 +1019,23 @@ fn leftovers(
             continue;
         }
         if registered {
+            // The review's list can be seconds old. Only a fresh list, taken
+            // while no removal holds the repository lock, may resolve the
+            // record; a folder Git stopped tracking meanwhile is shown.
             let lock = repository_lock(common)?;
-            if lock.try_lock_exclusive().is_ok() {
-                super::worktree_maintenance::forget_removal(&record.path)?;
+            if lock.try_lock_exclusive().is_err() {
+                continue;
             }
-            continue;
+            let Ok((fresh, partial)) = list(common, common, step(total, 5)) else {
+                continue;
+            };
+            if fresh.iter().any(|tree| tree["path"] == json!(path)) {
+                super::worktree_maintenance::forget_removal(&record.path)?;
+                continue;
+            }
+            if partial {
+                continue;
+            }
         }
         rows.push(leftover(&record, common, listing_partial, context, total));
     }
@@ -1058,7 +1070,11 @@ fn leftover(
         })
         .flatten();
     row["branch_head"] = json!(branch_head);
-    row["branch_retained"] = json!(branch_head.as_deref() == Some(record.head.as_str()));
+    // Unknown (no branch, Git failed or the budget ran out) is null, not moved.
+    row["branch_retained"] = match &branch_head {
+        Some(head) => json!(head == &record.head),
+        None => Value::Null,
+    };
     if listing_partial {
         notes.push(reason(
             "status_unavailable",
@@ -1191,6 +1207,35 @@ pub(super) fn review_command(args: &[String]) -> Result<Value> {
     ))
 }
 
+/// A leftover whose repository no longer exists: review cannot list it, but it
+/// still counts toward the bound, so it is listed here for keep-folder.
+fn orphan_row(
+    record: &super::worktree_maintenance::Removal,
+    context: &Context,
+    total: Instant,
+) -> Value {
+    let mut row = leftover(record, Path::new(&record.common_dir), false, context, total);
+    row["repository_available"] = json!(false);
+    row
+}
+
+/// `hgs worktrees leftovers`: records whose repository is gone. Those whose
+/// folder is gone too are resolved first.
+pub(super) fn leftovers_command(args: &[String]) -> Result<Value> {
+    if !args.iter().all(|arg| arg == "--json") {
+        return Err("usage: hgs worktrees leftovers [--json]".into());
+    }
+    let total = Instant::now() + Duration::from_secs(20);
+    let records = super::worktree_maintenance::orphan_removals()?;
+    let context = context(Path::new("/"), &[], step(total, 3));
+    let rows: Vec<_> = records
+        .iter()
+        .map(|record| orphan_row(record, &context, total))
+        .collect();
+    Ok(json!({"schema":1,"leftovers":rows,"sampled_at":now(),
+        "machine":crate::config::Config::load().map(|c| c.host().to_owned()).unwrap_or_default()}))
+}
+
 /// "Keep folder, forget record": the leftover folder and its files stay as
 /// they are; only the private removal record goes. Bound under the repository
 /// lock to the fresh review the owner confirmed.
@@ -1229,16 +1274,24 @@ pub(super) fn keep_folder_command(args: &[String]) -> Result<Value> {
     if !target.is_absolute() || !common.is_absolute() {
         return Err("Folder and repository must be absolute paths".into());
     }
-    let common = crate::platform::canonical(common).map_err(|e| format!("Repository: {e}"))?;
-    let actual = git(
-        &common,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        Instant::now() + Duration::from_secs(5),
-    )
-    .map_err(|e| e.detail)?;
-    if crate::platform::canonical(text(actual)).ok().as_ref() != Some(&common) {
-        return Err("Repository changed. Review the worktrees again.".into());
-    }
+    // A record whose repository is gone is reached by its stored path.
+    let orphan =
+        fs::symlink_metadata(common).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+    let common = if orphan {
+        common.to_path_buf()
+    } else {
+        let common = crate::platform::canonical(common).map_err(|e| format!("Repository: {e}"))?;
+        let actual = git(
+            &common,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            Instant::now() + Duration::from_secs(5),
+        )
+        .map_err(|e| e.detail)?;
+        if crate::platform::canonical(text(actual)).ok().as_ref() != Some(&common) {
+            return Err("Repository changed. Review the worktrees again.".into());
+        }
+        common
+    };
     let guard = repository_lock(&common)?;
     let waited = Instant::now() + Duration::from_secs(10);
     while guard.try_lock_exclusive().is_err() {
@@ -1256,13 +1309,18 @@ pub(super) fn keep_folder_command(args: &[String]) -> Result<Value> {
         .find(|r| Path::new(&r.path) == target || resolved.as_deref() == Some(Path::new(&r.path)))
         .ok_or("No partial-removal record exists for this folder. Review the worktrees again.")?;
     let total = Instant::now() + Duration::from_secs(20);
-    let (trees, partial) = list(&common, &common, step(total, 5)).map_err(|e| e.detail)?;
     let path = PathBuf::from(&record.path);
-    if trees.iter().any(|tree| tree["path"] == json!(path)) {
-        return Err("Git tracks this folder again. Review it as a worktree.".into());
-    }
-    let context = context(&common, &trees, step(total, 3));
-    let row = leftover(&record, &common, partial, &context, total);
+    let row = if orphan {
+        let context = context(&common, &[], step(total, 3));
+        orphan_row(&record, &context, total)
+    } else {
+        let (trees, partial) = list(&common, &common, step(total, 5)).map_err(|e| e.detail)?;
+        if trees.iter().any(|tree| tree["path"] == json!(path)) {
+            return Err("Git tracks this folder again. Review it as a worktree.".into());
+        }
+        let context = context(&common, &trees, step(total, 3));
+        leftover(&record, &common, partial, &context, total)
+    };
     if row["fingerprint"] != expected {
         return Err("The leftover folder changed since the review. Review it again.".into());
     }
@@ -1270,10 +1328,6 @@ pub(super) fn keep_folder_command(args: &[String]) -> Result<Value> {
     Ok(json!({"status":"kept","path":path,"common_dir":common,
         "request_id":options.get("--request-id"),"machine":crate::config::Config::load()
             .map(|c| c.host().to_owned()).unwrap_or_default()}))
-}
-
-pub(super) fn remove_command(args: &[String]) -> Result<Value> {
-    remove_with_outcome(args).0
 }
 
 /// Only the CLI exposes the structured outcome. Internal lifecycle callers keep

@@ -2555,7 +2555,10 @@ registration is never treated as proof of deletion, and the removal is never
 retried. **Keep folder, forget record** (`hgs worktrees keep-folder`) checks the
 reviewed leftover again under the repository lock and drops only its record;
 the folder, its files and the branch stay. A record resolves by itself once its
-folder is gone or Git tracks the worktree again. At most 512 unresolved records
+folder is gone, or once a fresh worktree list taken under the repository lock shows
+that Git tracks the worktree again. A leftover whose repository is gone is listed
+by `hgs worktrees leftovers` and can still be kept; a record whose repository and
+folder are both gone resolves. At most 512 unresolved records
 are kept per computer; at that bound new removals are refused with a visible
 reason, and no record is evicted. Automatic cleanup never acts on these records.
 

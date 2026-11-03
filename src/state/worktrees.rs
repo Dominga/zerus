@@ -342,13 +342,14 @@ pub(super) fn catalog_until(path: &Path, refresh: bool, deadline: Instant) -> Va
 
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let action = args.first().map(String::as_str);
-    if let Some(action @ ("create" | "status" | "cancel" | "review" | "inspect" | "remove" | "keep-folder" | "policy" | "sweep")) = action {
+    if let Some(action @ ("create" | "status" | "cancel" | "review" | "inspect" | "remove" | "keep-folder" | "leftovers" | "policy" | "sweep")) = action {
         let value = match action {
             "create" if args.iter().any(|arg| arg == "--receipt") => super::worktree_requests::create(&args[1..])?,
             "create" => create(&args[1..])?,
             "status" | "cancel" => super::worktree_requests::control(action, &args[1..])?,
             "review" => super::worktree_cleanup::review_command(&args[1..])?,
             "keep-folder" => super::worktree_cleanup::keep_folder_command(&args[1..])?,
+            "leftovers" => super::worktree_cleanup::leftovers_command(&args[1..])?,
             "inspect" => super::worktree_inspection::command(&args[1..])?,
             "policy" => super::worktree_maintenance::command(&args[1..])?,
             "sweep" if args[1..].iter().all(|a| a=="--json") => super::worktree_maintenance::Sweep::default().tick()?,

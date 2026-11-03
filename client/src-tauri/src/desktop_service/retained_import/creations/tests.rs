@@ -989,6 +989,23 @@ fn the_gate_is_bound_to_the_exact_bytes_its_attempt_reserved() {
     let rewritten = journal(&f).load().unwrap().unwrap();
     assert_eq!(rewritten.record, pending.record);
     assert_ne!(rewritten.sha256, pending.sha256);
+    // An overlapping ordinary run on the SAME report refreshes its shared view
+    // to the rewritten bytes and stays lookup-only. The paused gate must still
+    // compare against what its own attempt reserved, not that shared view.
+    assert_eq!(
+        f.report.run_creation(
+            f.relay.clone(),
+            "a".repeat(64),
+            Arc::new(AtomicBool::new(false)),
+            false,
+            Arc::new(()),
+        ),
+        Err("creations_import_original_result_unconfirmed")
+    );
+    assert_eq!(
+        f.report.creation_state().stored.as_ref().unwrap().sha256,
+        rewritten.sha256
+    );
     release.send(()).unwrap();
     assert_eq!(
         original.join().unwrap(),

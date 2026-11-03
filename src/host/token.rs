@@ -25,6 +25,8 @@ use windows_sys::Win32::{
     },
 };
 
+pub(crate) mod private_creation;
+
 /// A security identifier in its binary form.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Sid(Vec<u8>);

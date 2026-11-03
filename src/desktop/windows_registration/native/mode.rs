@@ -587,6 +587,9 @@ fn operation(args: &[String]) -> Result<Value> {
     let caller = ui_authority::registration::Caller::capture(&scope)?;
     let admission = Admission { scope, caller };
     admission.check()?;
+    crate::host::token::private_creation::prepare()
+        .context("select exact-user mode-worker creation owner")?;
+    admission.check()?;
     let sid = crate::host::token::user_sid()?;
     let (passive, background) = plans(&config, &location, &sid)?;
     let _lock = Lock::acquire(&sid)?;

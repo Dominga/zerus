@@ -72,6 +72,16 @@ use std::{
 use store::{Location, Store};
 use transport::{Listener, Stream, TIMEOUT};
 
+// Native token regression uses the actual Store/guards without exposing them
+// to another production caller or adding a mock ownership verdict.
+#[cfg(all(windows, test))]
+pub(crate) mod creation_test {
+    pub(crate) use super::store::{Location, Store};
+    pub(crate) fn database_files(location: &Location) -> anyhow::Result<()> {
+        super::store::database_files(location)
+    }
+}
+
 const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] [--background] | status [--json] | startup --json | owner-status --json | ownership-status --json | ownership-result --json | watch --json | feed --json | request --json | catalog-relay --json | registration --json [--background] | registration install|remove|status --json (Windows) | registration install --mode background|passive --json (Windows) | registration cancel-rollback --json --request-id UUID (Windows) | notification-registration install|status --json | notification-registration remove --json --request-id UUID (Windows) | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
 const HEARTBEAT: Duration = Duration::from_secs(10);
 pub const STARTUP_REFUSED: i32 = 78;
@@ -512,6 +522,9 @@ impl Drop for Permit {
 
 fn serve(config: &Config, location: Location, background_mode: bool) -> Result<()> {
     let (_signals, owner, listener, epoch, mut store) = (|| -> Result<_> {
+        #[cfg(windows)]
+        crate::host::token::private_creation::prepare()
+            .context("select exact-user desktop creation owner")?;
         let signals =
             platform::ShutdownGuard::install().context("install desktop shutdown handler")?;
         // This dedicated service process has no workers yet. Make socket creation

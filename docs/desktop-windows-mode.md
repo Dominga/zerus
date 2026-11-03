@@ -73,6 +73,25 @@ bounded owner/DACL metadata for its four known state entries. These observations
 do not change token defaults, repair file ownership or relax a privacy check.
 An untouched `reserved` record means no failure text was safely recorded.
 
+The native task probe confirmed that an elevated scheduled process can have
+the correct User SID while its default creation owner is
+`BUILTIN\Administrators`. Before creating private state or starting workers,
+the dedicated desktop service selects its actual primary token's User SID as
+that token's default owner. The dedicated mode worker does the same only after
+capturing and checking its native caller, and checks that caller again before
+continuing. This covers SQLite's internal WAL, SHM and rollback-journal files
+as well as locks and atomic replacement files. The operation has no PID or SID
+argument, refuses impersonation, and rechecks the original primary token and
+the selected owner. It changes only `TokenOwner`: user, privileges, groups,
+integrity, session and the default DACL remain unchanged. Windows documents
+this creation rule in [Owner of a New Object](https://learn.microsoft.com/en-us/windows/win32/secauthz/owner-of-a-new-object).
+
+The existing exact-user, ACL, no-reparse and single-link checks still run.
+Inherited ACLs must still satisfy the existing private-state guard; the creation
+step does not repair a directory, rewrite any ACL, accept an Administrators-owned
+file or replace one. A previously refused file remains refused. No task, grant,
+revoke receipt or uncertain manager effect is replayed to repair that state.
+
 Passive rollback saves one UUID before offering the original rollback revoke.
 Only a known committed prepared command can reconcile its original drain with
 that same UUID and original process. An absent or uncertain command is never
@@ -156,6 +175,17 @@ confirmed choice receives a new UUID; there is no automatic UUID rotation or
 unknown-effect replay.
 
 ## Private qualification
+
+The Windows unit suite runs the creation-owner regression in one bounded child,
+never by changing a parallel test runner's token. On an eligible elevated token
+it reproduces the original Administrators-owned lock refusal, selects the actual
+User owner, opens the real desktop Store and checks the resulting locks, database,
+WAL, SHM, rollback journal and replacement file. It retains the bad original file
+and verifies its owner and identity remain refused. Token groups, privileges,
+integrity, session, default DACL and parent token remain unchanged, and an
+impersonating thread refuses. Hosted CI must execute this control without an
+eligibility skip. The task round-trip independently checks the actual scheduled
+service's file owners in each mode.
 
 `tests/windows_frontend_auth.py` includes the disposable hosted-Windows task
 round-trip. The maintained registration installer stages the stable CLI under

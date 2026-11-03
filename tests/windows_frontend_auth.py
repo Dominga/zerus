@@ -511,6 +511,20 @@ $items=@();foreach($p in $x.paths) {
             ('owner', self.state / 'desktop' / 'owner.lock'),
             ('diagnostic', self.state / 'desktop' / 'startup-failure.json'))]))
 
+    def assert_exact_user_created_state(self):
+        # Check objects actually created by the scheduled service and SQLite,
+        # rather than inferring ownership from a successful manager reply.
+        observed = self.powershell(r'''
+$items=@();foreach($p in $x.paths) {
+ $acl=Get-Acl -LiteralPath $p.path -ErrorAction Stop;
+ $items+=@{name=$p.name;owner=$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value}
+};@{objects=$items}|ConvertTo-Json -Compress -Depth 3
+''', dict(paths=[dict(name=name, path=str(self.state / 'desktop' / name))
+                  for name in ('owner.lock', 'state.sqlite3', 'state.sqlite3-wal', 'state.sqlite3-shm')]))
+        self.assertEqual(len(observed['objects']), 4, observed)
+        for item in observed['objects']:
+            self.assertEqual(item['owner'], self.sid, item)
+
     def stop_exact_passive(self, expected, *, wrong_birth=False):
         return self.powershell(r'''
 $s=New-Object -ComObject Schedule.Service;$s.Connect();$t=$s.GetFolder('\').GetTask($x.task);
@@ -559,6 +573,7 @@ if(@($t.GetInstances(0)).Count-ne 0) {throw 'fixture instance remains'};
             self.assertTrue(passive['ok'], passive)
             self.latest = passive['instance']
             self.assertEqual(passive['selected_mode'], 'passive')
+            self.assert_exact_user_created_state()
             self.assertIsNone(shell.poll())
             passive = self.recover_initial_start_and_cancel_background_before_a_grant(passive)
             self.grant()
@@ -576,6 +591,7 @@ if(@($t.GetInstances(0)).Count-ne 0) {throw 'fixture instance remains'};
             self.assertNotEqual(background['request_id'], cancelled)
             self.assertEqual(background['running_mode'], 'background')
             self.latest = background['instance']
+            self.assert_exact_user_created_state()
             # Ordinary install/refresh preserves selection and the SAME runtime.
             before = self.cli('desktop', 'status', '--json')['lifecycle']['pid']
             refresh = self.cli('desktop', 'registration', 'install', '--json')
@@ -588,6 +604,7 @@ if(@($t.GetInstances(0)).Count-ne 0) {throw 'fixture instance remains'};
             rollback = self.mode('passive')
             self.assertTrue(rollback['ok'], rollback)
             self.latest = rollback['instance']
+            self.assert_exact_user_created_state()
             self.assertEqual(self.cli('desktop', 'ownership-status', '--json')['state'], 'revoked')
             status = self.cli('desktop', 'registration', 'status', '--json')
             self.assertEqual(status['selected_mode'], 'passive')

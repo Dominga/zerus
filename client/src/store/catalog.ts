@@ -132,7 +132,7 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     reviewLater: false,
     attentionNeeded: typeof v.needs_attention === "boolean" ? v.needs_attention : undefined,
     childAttention: !!v.child_attention,
-    optionalQuestions: undefined,
+    optionalQuestions: typeof v.optional_question_count === "number" ? v.optional_question_count : undefined,
     updatedAt: typeof v.updated_at === "number" ? v.updated_at : undefined,
     turnStarted: typeof v.turn_started === "number" && v.turn_started > 0 ? v.turn_started : undefined,
     runId: optional(v.run_id),

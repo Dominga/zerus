@@ -1000,6 +1000,7 @@ impl<'a> Before<'a> {
         if let Some(old) = old {
             row.notify.optional_count = old.notify.optional_count;
             row.notify.optional_ids.clone_from(&old.notify.optional_ids);
+            row.optional_question_count = Some(old.notify.optional_count);
         }
     }
 
@@ -1489,6 +1490,7 @@ mod tests {
             ),
         );
         let row = row_of(&unknown, "run:run");
+        assert_eq!(row.optional_question_count, Some(2));
         assert_eq!(
             (row.notify.optional_count, row.notify.optional_ids.clone()),
             (2, vec!["q1".to_owned(), "q2".to_owned()]),
@@ -1506,6 +1508,7 @@ mod tests {
             2,
             "also across a full listing"
         );
+        assert_eq!(row_of(&again, "run:run").optional_question_count, Some(2));
         let other = state.apply(
             &local,
             &upsert(4, "run:run", questions(Value::Null, "other", "running")),
@@ -1515,6 +1518,7 @@ mod tests {
             -1,
             "another conversation starts unknown"
         );
+        assert_eq!(row_of(&other, "run:run").optional_question_count, None);
     }
 
     #[test]

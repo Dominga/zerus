@@ -700,11 +700,16 @@ pub(super) fn apply(
                 (*family).into(),
                 json!({"imported": imported, "kept": kept}),
             );
-            // The splitter's earlier import no longer holds the width.
+            // The splitter's earlier import no longer holds the width. A record
+            // from before outcomes gets an empty one, so the report shows no
+            // superseded "Imported earlier" row. Replace requires the splitter's
+            // outcome, if any, to list its only key as imported, so nothing kept
+            // is lost.
             if matches!(width, Width::Replace(_)) {
-                if let Some(splitter) = outcome.get_mut("session-splitter") {
-                    splitter["imported"] = json!([]);
-                }
+                outcome.insert(
+                    "session-splitter".into(),
+                    json!({"imported": [], "kept": []}),
+                );
             }
             candidate
                 .extra

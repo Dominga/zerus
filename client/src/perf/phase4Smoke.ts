@@ -7,7 +7,7 @@ import { composer } from "../store/composer";
 import { terminal } from "../store/terminal";
 import { processes } from "../store/processes";
 import { questions } from "../store/questions";
-import { selectedKey, setDetailTab, setSelectedKey, subagentOpen } from "../store/ui";
+import { detailTab, selectedKey, setDetailTab, setSelectedKey, subagentOpen } from "../store/ui";
 import { flag, setSetting } from "../store/settings";
 import type { Session } from "../ui/sessions/types";
 import type { ActivityEvent } from "../types";
@@ -964,6 +964,28 @@ async function startStep() {
   if (!sent[2].stdin.includes("resume smoke")) throw new Error("the resumed send has the wrong payload");
 }
 
+async function startPollStep() {
+  const row = await select(REVIEW);
+  type("resume without switching views");
+  await composer.send();
+  await until(() => document.querySelector("#composer-dlg-title")?.textContent === "Start the session to send?", 5000, "the start question did not open");
+  button("Compact and resume", document.querySelector("dialog[open]")!).click();
+  await waitCall("resume", 1);
+  // Publish a starting stream frame, while the CLI's next inspection is ready.
+  await invoke("smoke_resume", { key: row.catalogKey });
+  await waitCall("compact-context", 1, 15_000);
+  const sent = await waitCall("send", 1, 15_000);
+  await until(() => !composer.view()?.waiting && !composer.view()?.sending, 3000, "the queued send did not settle");
+  const message = JSON.parse(sent[0].stdin);
+  if (message.text !== "resume without switching views" || !message.expected_run_id.endsWith("-resumed") || !message.expected_compaction_id)
+    throw new Error("the resumed send lost its original message or ready run/compaction identity");
+  await sleep(3000);
+  if ((await calls("send")).length !== 1 || (await calls("compact-context")).length !== 1)
+    throw new Error("the queued continuation repeated an effect");
+  if (detailTab() !== "activity" || (await calls("a")).length !== 0)
+    throw new Error("the queued send needed a Terminal view switch");
+}
+
 async function processesStep() {
   await select(API);
   await setSetting("processes/enabled", true);
@@ -1222,6 +1244,7 @@ export async function phase4Smoke(allowed: boolean, smokeFile?: string) {
     ["send", () => sendStep(smokeFile!)],
     ["cold", coldStep],
     ["start", startStep],
+    ["start-poll", startPollStep],
     ["processes", processesStep],
     ["preview", previewStep],
     ["question", questionStep],
@@ -1248,7 +1271,8 @@ export async function phase4Smoke(allowed: boolean, smokeFile?: string) {
     if (!smokeFile) throw new Error("ZERUS_CLIENT_SMOKE_FILE is not set");
     const only = new URLSearchParams(location.search).get("phase4-only");
     if (only && !steps.some(([name]) => name === only)) throw new Error("Unknown phase4 step");
-    for (const [name, run] of steps.filter(([name]) => !only || name === only)) {
+    // start-poll uses its own starting-only stream fixture and runs standalone.
+    for (const [name, run] of steps.filter(([name]) => only ? name === only : name !== "start-poll")) {
       current = name;
       await run();
       log(`phase4-smoke ${name}: done`);

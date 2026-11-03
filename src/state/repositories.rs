@@ -194,7 +194,23 @@ fn run_git(
     seconds: u64,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<u8>> {
-    let mut cmd = Command::new("git");
+    #[cfg(unix)]
+    let program = {
+        let found = crate::platform::which("git").ok_or("Cannot find Git")?;
+        let path = crate::platform::canonical(&found).map_err(|e| e.to_string())?;
+        if crate::platform::file_identity(&path)
+            .zip(crate::platform::image_identity())
+            .is_some_and(|(git, running)| git == running)
+        {
+            return Err("Git resolves to the running hgs image".into());
+        }
+        found
+    };
+    #[cfg(windows)]
+    let program = "git";
+    let mut cmd = Command::new(program);
+    #[cfg(unix)]
+    cmd.env(worker::CONTEXT, "1");
     if let Some(directory) = directory {
         directory.anchor(&mut cmd)?;
     }
@@ -605,8 +621,6 @@ mod tests {
             }
         };
         let starts = worker::STARTS.with(std::cell::Cell::get);
-        // Keep a missing-gate mutation bounded without starting a Git helper.
-        worker::REFUSE_START.with(|value| value.set(true));
         let id = "33333333-3333-4333-8333-333333333333";
         let receipt = clone_owned(
             &state,
@@ -638,7 +652,6 @@ mod tests {
         );
         assert!(!folder.join("checkout/.git").exists());
         assert_eq!(read_receipt(&state, id).unwrap(), receipt);
-        worker::REFUSE_START.with(|value| value.set(false));
         drop(custody);
         fs::remove_dir_all(folder).unwrap();
     }

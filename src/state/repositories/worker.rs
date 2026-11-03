@@ -9,7 +9,25 @@ use std::process::Stdio;
 #[cfg(test)]
 thread_local! {
     pub(super) static STARTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    pub(super) static REFUSE_START: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+// A denial-only reentrancy marker inherited by Git and its descendants. It is
+// never evidence of permission or a substitute for the original image proof.
+pub(super) const CONTEXT: &str = "HGS_REPOSITORY_GIT_WORKER";
+
+fn wrapper_context(test_image: bool, nested: bool) -> Result<()> {
+    if test_image {
+        return Err("A unit-test image cannot launch a repository Git worker".into());
+    }
+    if nested {
+        return Err("Nested repository Git workers are refused".into());
+    }
+    Ok(())
+}
+
+fn worker_arguments(mut args: impl Iterator<Item = std::ffi::OsString>) -> bool {
+    args.next().is_some_and(|v| v == "__state")
+        && args.next().is_some_and(|v| v == "repository-git-worker")
 }
 
 fn image_proof(identity: crate::platform::FileIdentity) -> String {
@@ -46,12 +64,13 @@ pub(super) fn run(
     control: Option<&Control<'_>>,
 ) -> Result<Vec<u8>> {
     #[cfg(test)]
-    {
-        STARTS.with(|count| count.set(count.get() + 1));
-        if REFUSE_START.with(std::cell::Cell::get) {
-            return Err("fixture Git worker entry".into());
-        }
-    }
+    STARTS.with(|count| count.set(count.get() + 1));
+    // libtest replaces main: re-executing a unit-test image with worker argv
+    // would interpret "clone" as a test filter and run those tests recursively.
+    wrapper_context(
+        cfg!(test),
+        std::env::var_os(CONTEXT).is_some() || worker_arguments(std::env::args_os().skip(1)),
+    )?;
     #[cfg(target_os = "linux")]
     let executable = PathBuf::from("/proc/self/exe");
     #[cfg(not(target_os = "linux"))]
@@ -148,6 +167,10 @@ fn with_lifeline<T>(
 }
 
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
+    // Git must not re-enter the worker, even through a script that execs hgs.
+    if std::env::var_os(CONTEXT).is_some() {
+        return Err("Nested repository Git workers are refused".into());
+    }
     let seconds: u64 = args
         .first()
         .ok_or("Missing Git deadline")?
@@ -197,6 +220,30 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unit_images_and_nested_contexts_refuse_before_any_self_exec() {
+        assert!(wrapper_context(true, false).is_err());
+        assert!(wrapper_context(true, true).is_err());
+        assert!(wrapper_context(false, true).is_err());
+        assert!(wrapper_context(false, false).is_ok());
+        let args = ["__state", "repository-git-worker", "600", "proof", "clone"];
+        assert!(worker_arguments(args.into_iter().map(Into::into)));
+        assert!(!worker_arguments(
+            ["repository", "clone"].into_iter().map(Into::into)
+        ));
+    }
+
+    #[test]
+    fn clone_worker_entry_in_a_unit_image_is_always_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = directory::Directory::open(&root.path().canonicalize().unwrap()).unwrap();
+        let error = run(&directory, &["clone"], 600, None).unwrap_err();
+        assert_eq!(
+            error,
+            "A unit-test image cannot launch a repository Git worker"
+        );
+    }
 
     #[test]
     fn actor_cancellation_closes_the_lifeline_without_releasing_the_original_reader() {

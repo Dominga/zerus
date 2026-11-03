@@ -80,6 +80,8 @@ pub struct Record {
     pub binding_sha256: Option<String>,
     pub receipt: Option<Receipt>,
     pub undrained: bool,
+    pub effect_started: bool,
+    pub kept_receipt: Option<Receipt>,
 }
 fn digest(s: &str) -> bool {
     s.len() == 64
@@ -178,6 +180,17 @@ pub fn migrate(tx: &Transaction<'_>) -> Result<()> {
           SELECT RAISE(ABORT,'cache unknown identity is immutable'); END;")?;
     Ok(())
 }
+/// Extend the existing leaf. Legacy reservations may already have unlinked;
+/// only new original preparations can establish the never-started invariant.
+pub fn migrate_effects(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch("ALTER TABLE desktop_cache_operations ADD COLUMN effect_started INTEGER NOT NULL DEFAULT 1 CHECK(effect_started IN(0,1));
+        ALTER TABLE desktop_cache_operations ADD COLUMN kept_receipt TEXT CHECK(length(CAST(kept_receipt AS BLOB))<=32768);
+        CREATE TRIGGER desktop_cache_effect_monotone BEFORE UPDATE OF effect_started ON desktop_cache_operations
+        WHEN OLD.effect_started=1 AND NEW.effect_started!=1 BEGIN SELECT RAISE(ABORT,'cache effects cannot become never-started'); END;
+        CREATE TRIGGER desktop_cache_kept_original BEFORE UPDATE OF kept_receipt ON desktop_cache_operations
+        WHEN OLD.kept_receipt IS NOT NULL AND NEW.kept_receipt IS NOT OLD.kept_receipt BEGIN SELECT RAISE(ABORT,'immutable original kept receipt'); END;")?;
+    Ok(())
+}
 /// Intake is not permission to delete. A worker only freezes the real folder;
 /// another FRESH original native child must admit that exact frozen binding.
 pub fn begin(tx: &Transaction<'_>, original: &Original, fingerprint: &str) -> Result<bool> {
@@ -260,7 +273,7 @@ pub fn begin(tx: &Transaction<'_>, original: &Original, fingerprint: &str) -> Re
         )?;
     }
     tx.execute("INSERT INTO desktop_cache_operations(preparation_id,operation_id,configuration,root,bytes_limit,revision,
-        fingerprint,service_epoch,writer_epoch,lease,state,revoked,undrained,defer_ms,policy_change) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'preparing',0,1,?11,?12)",
+        fingerprint,service_epoch,writer_epoch,lease,state,revoked,undrained,defer_ms,policy_change,effect_started) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'preparing',0,1,?11,?12,0)",
         params![original.preparation_id,original.operation_id,original.configuration,original.root,original.limit,
             original.revision,fingerprint,original.service_epoch,original.writer_epoch,original.lease,original.defer_ms,original.policy_change])?;
     Ok(true)
@@ -268,13 +281,14 @@ pub fn begin(tx: &Transaction<'_>, original: &Original, fingerprint: &str) -> Re
 pub fn load(db: &rusqlite::Connection, id: &str) -> Result<Option<Record>> {
     uuid(id)?;
     db.query_row("SELECT preparation_id,operation_id,configuration,root,bytes_limit,revision,service_epoch,writer_epoch,lease,
-        state,binding,binding_sha256,receipt,undrained,defer_ms,policy_change FROM desktop_cache_operations WHERE preparation_id=?1 OR operation_id=?1", [id], |r| {
+        state,binding,binding_sha256,receipt,undrained,defer_ms,policy_change,effect_started,kept_receipt FROM desktop_cache_operations WHERE preparation_id=?1 OR operation_id=?1", [id], |r| {
         Ok((Original { preparation_id:r.get(0)?,operation_id:r.get(1)?,configuration:r.get(2)?,root:r.get(3)?,limit:r.get(4)?,revision:r.get(5)?,
             service_epoch:r.get(6)?,writer_epoch:r.get(7)?,lease:r.get(8)?,defer_ms:r.get(14)?,policy_change:r.get(15)? }, r.get::<_,String>(9)?, r.get::<_,Option<String>>(10)?,
-            r.get::<_,Option<String>>(11)?,r.get::<_,Option<String>>(12)?,r.get::<_,bool>(13)?))
-    }).optional()?.map(|(original,state,binding,binding_sha256,receipt,undrained)| {
+            r.get::<_,Option<String>>(11)?,r.get::<_,Option<String>>(12)?,r.get::<_,bool>(13)?,r.get::<_,bool>(16)?,r.get::<_,Option<String>>(17)?))
+    }).optional()?.map(|(original,state,binding,binding_sha256,receipt,undrained,effect_started,kept_receipt)| {
         validate(&original)?;
-        ensure!(binding.as_ref().is_none_or(|v|v.len()<=BINDING_BYTES) && receipt.as_ref().is_none_or(|v|v.len()<=BINDING_BYTES), "invalid cache row");
+        ensure!(binding.as_ref().is_none_or(|v|v.len()<=BINDING_BYTES) && receipt.as_ref().is_none_or(|v|v.len()<=BINDING_BYTES)
+            && kept_receipt.as_ref().is_none_or(|v|v.len()<=BINDING_BYTES), "invalid cache row");
         let binding:Option<Binding>=binding.map(|v|serde_json::from_str(&v)).transpose()?;
         if let Some(binding)=&binding {
             validate_binding(&original,binding)?;
@@ -286,8 +300,10 @@ pub fn load(db: &rusqlite::Connection, id: &str) -> Result<Option<Record>> {
             ensure!(receipt.index_sha256==binding.index_sha256 && receipt.files.len()==binding.candidates.len()
                 && receipt.count<=1024,"cache stored receipt changed");
         }
+        let kept_receipt:Option<Receipt>=kept_receipt.map(|v|serde_json::from_str(&v)).transpose()?;
+        if let Some(kept)=&kept_receipt {validate_kept(binding.as_ref().context("cache kept receipt has no freeze")?,kept)?;}
         Ok(Record { original,phase:serde_json::from_value(serde_json::Value::String(state))?,
-            binding,binding_sha256,receipt,undrained })
+            binding,binding_sha256,receipt,undrained,effect_started,kept_receipt })
     }).transpose()
 }
 fn validate_binding(original: &Original, binding: &Binding) -> Result<()> {
@@ -315,15 +331,51 @@ fn validate_binding(original: &Original, binding: &Binding) -> Result<()> {
     }
     Ok(())
 }
-pub fn prepared(tx: &Transaction<'_>, original: &Original, binding: &Binding) -> Result<String> {
+fn validate_kept(binding: &Binding, kept: &Receipt) -> Result<()> {
+    ensure!(
+        kept.index_sha256 == binding.index_sha256
+            && kept.files.len() == binding.candidates.len()
+            && kept.files.iter().all(|f| *f == FileState::Kept)
+            && (binding.candidates.len()..=1024).contains(&kept.count),
+        "invalid original kept receipt"
+    );
+    Ok(())
+}
+pub fn prepared(
+    tx: &Transaction<'_>,
+    original: &Original,
+    binding: &Binding,
+    kept: &Receipt,
+) -> Result<String> {
     service(tx, original)?;
     validate_binding(original, binding)?;
+    validate_kept(binding, kept)?;
     let bytes = encoded(binding)?;
     let hash = hash(bytes.as_bytes());
-    ensure!(tx.execute("UPDATE desktop_cache_operations SET binding=?2,binding_sha256=?3,state='prepared'
-        WHERE preparation_id=?1 AND state='preparing' AND revoked=0 AND lease=?4 AND service_epoch=?5 AND writer_epoch=?6",
-        params![original.preparation_id,bytes,hash,original.lease,original.service_epoch,original.writer_epoch])? == 1, "cache preparation expired");
+    ensure!(tx.execute("UPDATE desktop_cache_operations SET binding=?2,binding_sha256=?3,state='prepared',kept_receipt=?7
+        WHERE preparation_id=?1 AND state='preparing' AND revoked=0 AND effect_started=0 AND kept_receipt IS NULL AND lease=?4 AND service_epoch=?5 AND writer_epoch=?6",
+        params![original.preparation_id,bytes,hash,original.lease,original.service_epoch,original.writer_epoch,encoded(kept)?])? == 1, "cache preparation expired");
     Ok(hash)
+}
+/// Called by the original actor Job, inside its current-guard transaction.
+/// A commit must precede the private one-shot permit; no caller JSON is proof.
+pub fn start_effects(tx: &Transaction<'_>, original: &Original, expected_hash: &str) -> Result<()> {
+    service(tx, original)?;
+    let row = load(tx, &original.operation_id)?.context("cache original missing")?;
+    ensure!(
+        row.original == *original
+            && row.phase == Phase::Reserved
+            && row.undrained
+            && !row.effect_started
+            && row.kept_receipt.is_some()
+            && row.binding_sha256.as_deref() == Some(expected_hash),
+        "cache effect start changed"
+    );
+    ensure!(tx.query_row("SELECT revision=?2 AND bytes_limit=?3 AND revoked=0 FROM desktop_cache_roots WHERE root=?1",
+        params![original.root,original.revision+u64::from(original.policy_change),original.limit],|r|r.get::<_,bool>(0))?, "cache policy changed");
+    ensure!(tx.execute("UPDATE desktop_cache_operations SET effect_started=1 WHERE operation_id=?1 AND effect_started=0 AND revoked=0",
+        [&original.operation_id])?==1,"cache effect lease revoked");
+    Ok(())
 }
 /// The caller checks the FRESH opaque native permit inside this SAME transaction
 /// immediately before this call. Return values are dispatched only after commit.
@@ -398,6 +450,21 @@ pub fn finish_joined(
         return Ok(());
     }
     let (phase, receipt) = if row.phase == Phase::Reserved {
+        // With no committed start permit, the original worker could not enter
+        // execute. Use only its retained receipt, never reconstructed totals.
+        let known_kept;
+        let receipt = if !row.effect_started {
+            known_kept = row
+                .kept_receipt
+                .context("original kept receipt unavailable")?;
+            ensure!(
+                receipt.is_none_or(|r| *r == known_kept),
+                "unstarted cache reported an effect"
+            );
+            Some(&known_kept)
+        } else {
+            receipt
+        };
         let binding = row.binding.context("cache binding missing")?;
         if let Some(receipt) = receipt {
             ensure!(
@@ -467,8 +534,8 @@ pub fn revoke(tx: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 /// A bounded caller deadline does not release a still-running original worker.
-/// Known pre-execution preparation is refused; reserved effects stay Unknown
-/// even if their late worker eventually reports a successful unlink.
+/// Preparation is refused and never-started reservations await actual join.
+/// Started effects stay Unknown even if a late worker reports successful unlink.
 pub fn expire(tx: &Transaction<'_>, original: &Original) -> Result<()> {
     let row = load(tx, &original.operation_id)?.context("cache original missing")?;
     ensure!(
@@ -480,6 +547,15 @@ pub fn expire(tx: &Transaction<'_>, original: &Original) -> Result<()> {
             tx.execute("UPDATE desktop_cache_operations SET state='refused',revoked=1 WHERE operation_id=?1", [&original.operation_id])?;
         }
         Phase::Reserved => {
+            if !row.effect_started {
+                // Cancel start admission durably; retain the actual resource
+                // until join. It cannot start after this transaction commits.
+                tx.execute(
+                    "UPDATE desktop_cache_operations SET revoked=1 WHERE operation_id=?1",
+                    [&original.operation_id],
+                )?;
+                return Ok(());
+            }
             tx.execute("INSERT OR IGNORE INTO desktop_cache_unknown SELECT content_id,operation_id FROM desktop_cache_files
                 WHERE operation_id=?1 AND state='reserved'", [&original.operation_id])?;
             tx.execute("UPDATE desktop_cache_files SET state='unknown' WHERE operation_id=?1 AND state='reserved'", [&original.operation_id])?;
@@ -499,7 +575,8 @@ pub fn undrained(db: &rusqlite::Connection) -> Result<u64> {
 }
 /// Called only after acquiring the actual exclusive serve owner. All cache I/O
 /// is in-process and retained that owner; there is no surviving helper/process
-/// to infer gone from PID absence. Reserved effects become terminal unknown.
+/// to infer gone from PID absence. Started reservations become terminal unknown;
+/// never-started reservations require their original retained Kept receipt.
 pub fn recover(tx: &Transaction<'_>) -> Result<()> {
     let mut statement = tx.prepare(
         "SELECT operation_id FROM desktop_cache_operations WHERE undrained=1 ORDER BY seq LIMIT 2",

@@ -13,6 +13,7 @@ import {
 } from "./SessionCard";
 import { agentKind, catalog, computerFresh, computerOffline } from "../../store/catalog";
 import { visibleUnreadReply } from "../../store/attention";
+import { optionalQuestionCount } from "./optional-questions";
 import { runningCommandsEntry } from "../../store/processes";
 import { flag } from "../../store/settings";
 import { archiveCount, archiveTip } from "../../store/archive";
@@ -125,26 +126,30 @@ function setRowCompact(key: string, compact: boolean) {
   morphTimer = window.setTimeout(() => setMorphing(false), MORPH.duration + 40);
 }
 
-let clearRead: { id: string; checking: boolean; control?: ClearControl } | undefined;
+type ClearRead = { id: string; checking: boolean; control?: ClearControl; pending?: Promise<void> };
+let clearRead: ClearRead | undefined;
 const [clearRevision, setClearRevision] = createSignal(0);
+const clearReadIdentity = (s: Session) => `${s.key}\n${s.runId}\n${s.conversationId}\n${s.state}\n${!computerOffline(s.computer)}`;
 
 function clearReadFor(s: Session) {
   clearRevision();
   const online = !computerOffline(s.computer);
-  const id = `${s.key}\n${s.runId}\n${s.conversationId}\n${s.state}\n${online}`;
+  const id = clearReadIdentity(s);
   if (clearRead?.id !== id || (!clearRead.checking && !clearRead.control)) {
     clearRead = { id, checking: true };
     if (!catalog.rows[s.key] || !online) {
       clearRead = { id, checking: false };
     } else {
       const session: SessionRef = { computer: s.computer, key: s.catalogKey, name: s.name, archive_id: s.archiveId ?? null };
-      void composerClearControl(session).then((control) => {
+      const read = clearRead;
+      read.pending = composerClearControl(session).then((control) => {
+        read.checking = false;
+        read.control = control ?? undefined;
         if (clearRead?.id !== id) return;
-        clearRead = { id, checking: false, control: control ?? undefined };
         setClearRevision((n) => n + 1);
       }).catch(() => {
+        read.checking = false;
         if (clearRead?.id !== id) return;
-        clearRead = { id, checking: false };
         setClearRevision((n) => n + 1);
       });
     }
@@ -157,9 +162,9 @@ function clearReadFor(s: Session) {
  * uses the composer's control. An unselected row gets its own inspection and
  * Qt's checking tooltip, then selects and opens the same guarded dialog.
  */
-function clearEntry(s: Session): MenuEntry {
+function clearEntry(s: Session, prepared?: ClearRead): MenuEntry {
   const selected = s.key === selectedKey() && !subagentOpen() && !!composer.view()?.clear;
-  const read = selected ? undefined : clearReadFor(s);
+  const read = selected ? undefined : prepared ?? clearReadFor(s);
   const control = selected ? composer.view()?.clear : read?.control;
   return {
     label: tr("Clear session…"), icon: "clear",
@@ -180,7 +185,7 @@ function clearEntry(s: Session): MenuEntry {
   };
 }
 
-export function sessionMenu(s: Session, folderStatus?: { request: ReturnType<typeof folderRequest>; status: FolderStatus }, forkDetails?: import("../../types").Details): MenuEntry[] {
+export function sessionMenu(s: Session, folderStatus?: { request: ReturnType<typeof folderRequest>; status: FolderStatus }, forkDetails?: import("../../types").Details, preparedClear?: ClearRead): MenuEntry[] {
   // The selected row's menu reads the same details as the header (Qt's m_details).
   const details = s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined;
   const act = actionEntries(s, undefined, { context: true });
@@ -206,7 +211,7 @@ export function sessionMenu(s: Session, folderStatus?: { request: ReturnType<typ
     cp.command,
     { separator: true },
     act.change,
-    ...(fresh ? [fresh] : archived ? [] : [clearEntry(s)]),
+    ...(fresh ? [fresh] : archived ? [] : [clearEntry(s, preparedClear)]),
     act.rename,
     forkEntry(s, forkDetails ?? details),
     ...(act.archive ? [act.archive] : []),
@@ -224,23 +229,24 @@ export function sessionMenu(s: Session, folderStatus?: { request: ReturnType<typ
 function openSessionMenu(e: MouseEvent, s: Session) {
   const details = s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined;
   const request = folderRequest(s, details);
-  let items = sessionMenu(s);
-  let folderStatus: { request: ReturnType<typeof folderRequest>; status: FolderStatus } | undefined;
-  let forkDetails = details;
-  openMenu(e, items, s.key);
-  const refresh = () => {
-    const shown = menu();
-    if (shown?.items !== items) return;
-    items = sessionMenu(s, folderStatus, forkDetails);
-    setMenu({ ...shown, items });
-  };
-  void sessionFolderStatus(request.target.computer, request.directory).then((status) => {
-    folderStatus = { request, status }; refresh();
-  }).catch(() => { /* Keep explicit unavailable states, with no automatic retry. */ });
-  // An explicitly opened nonselected row reads capability once, as Qt's
-  // contextForkSession. The exact open-menu identity drops late replies.
-  if (!details && !computerOffline(s.computer)) void inspectSession({ computer: s.computer, name: s.name, run_id: s.runId ?? "", conversation_id: s.conversationId ?? "" }, s.archiveId ?? null)
-    .then((value) => { forkDetails = value ?? undefined; refresh(); }).catch(() => {});
+  const items = sessionMenu(s), read = clearRead?.id === clearReadIdentity(s) ? clearRead : undefined;
+  let folderStatus: { request: ReturnType<typeof folderRequest>; status: FolderStatus } | undefined, forkDetails = details;
+  let update: ReturnType<typeof setMenu>;
+  const snapshot = () => sessionMenu(s, folderStatus, forkDetails, read);
+  const refresh = () => update?.(snapshot());
+  // Local reads can finish before the bounded opening; slower replies update
+  // the same slots through this opening's revision guard, without refocusing.
+  const folders = sessionFolderStatus(request.target.computer, request.directory).catch(() => undefined).then((status) => {
+    folderStatus = status ? { request, status } : undefined; refresh();
+  });
+  const fork = !details && !computerOffline(s.computer)
+    ? inspectSession({ computer: s.computer, name: s.name, run_id: s.runId ?? "", conversation_id: s.conversationId ?? "" }, s.archiveId ?? null).catch(() => undefined)
+    : Promise.resolve(details);
+  const inspected = fork.then((value) => { forkDetails = value ?? undefined; refresh(); });
+  const cleared = read?.pending?.then(refresh);
+  e.preventDefault();
+  e.stopPropagation();
+  update = setMenu({ x: e.clientX, y: e.clientY, items, sessionKey: s.key }, Promise.all([folders, inspected, cleared]).then(snapshot));
 }
 
 /** A context target is independent of the open conversation and selection. */
@@ -846,9 +852,10 @@ function StripBand(props: { row: Extract<Row, { type: "header" }> }) {
 /** A square tile: status and provider marks, name on up to two lines, state; the frame carries the state colour. */
 function StripTile(props: { row: Extract<Row, { type: "card" }> }) {
   const s = () => props.row.session;
+  const optionalCount = () => optionalQuestionCount(s(), computerFresh(s().computer));
   const kind = () => badgeKind(s());
   const frame = () => (emphasis(s()) === "draft" ? "draft" : kind() === "muted-attention" || kind() === "muted-unread" ? "muted" : kind() === "unread" ? "attention" : kind());
-  const tip = () => [`${s().name}: ${statusCaption(s())}`, s().summary, `${folderOf(s())}${s().branch ? ` / ${s().branch}` : ""} on ${s().machine}`, s().git ? gitTooltip(s()) : "", s().optionalQuestions ? `${s().optionalQuestions} optional question(s) waiting` : ""].filter(Boolean).join("\n");
+  const tip = () => [`${s().name}: ${statusCaption(s())}`, s().summary, `${folderOf(s())}${s().branch ? ` / ${s().branch}` : ""} on ${s().machine}`, s().git ? gitTooltip(s()) : "", optionalCount() ? `${optionalCount()} optional question(s) waiting` : ""].filter(Boolean).join("\n");
   return (
     <button class="strip-tile" classList={{ selected: selectedKey() === s().key, "context-target": visibleMenu()?.sessionKey === s().key }} data-frame={frame()} title={tip()} onClick={() => selectSession(s().key)}
       onContextMenu={(e) => sessionContextMenu(e, s())}>
@@ -861,7 +868,7 @@ function StripTile(props: { row: Extract<Row, { type: "card" }> }) {
           <Show when={s().muted}><Icon name="mute" size={14} class="st-mute" /></Show>
           <span class="st-provider">
             <AgentBadge agent={s().agent} narrow />
-            <Show when={s().optionalQuestions}><i class="st-question" classList={{ muted: !!s().muted }}>?</i></Show>
+            <Show when={optionalCount()}><i class="st-question" classList={{ muted: !!s().muted }}>?</i></Show>
           </span>
         </span>
         <span class="st-name">{s().title}</span>

@@ -530,8 +530,8 @@ class WorkflowSecurityTests(unittest.TestCase):
             manifest = f"--manifest-path crates/{crate}/Cargo.toml"
             with self.subTest(crate=crate):
                 self.assertIn(f"cargo +1.99.1 fmt --check {manifest}\n", quick)
-                self.assertRegex(quick, rf"cargo \+1\.99\.1 clippy --locked {re.escape(manifest)} --target-dir target/[\w-]+ --all-targets -- -D warnings\n")
-                self.assertRegex(quick, rf"cargo \+1\.99\.1 test --locked {re.escape(manifest)} --target-dir target/[\w-]+\n")
+                self.assertRegex(quick, rf"cargo \+1\.99\.1 clippy --locked {re.escape(manifest)} --target-dir target --all-targets -- -D warnings\n")
+                self.assertRegex(quick, rf"cargo \+1\.99\.1 test --locked {re.escape(manifest)} --target-dir target\n")
 
     def test_native_client_jobs_cover_media_and_platform_code(self):
         checks = (ROOT / ".github/workflows/checks.yml").read_text()
@@ -643,13 +643,13 @@ class WorkflowSecurityTests(unittest.TestCase):
         for line in ("run: python3 scripts/ci/check-source.py", "-p 'test_*publication.py'", "-p test_ci_security.py",
                      "sha256sum --check --ignore-missing actionlint_1.7.12_checksums.txt",
                      "run: cargo +1.99.1 test --locked",
-                     "cargo +1.99.1 test --locked --manifest-path crates/replica/Cargo.toml --target-dir target/replica",
+                     "cargo +1.99.1 test --locked --manifest-path crates/replica/Cargo.toml --target-dir target",
                      "cargo +1.99.1 fmt --check --manifest-path crates/replica-ffi/Cargo.toml",
-                     "cargo +1.99.1 clippy --locked --manifest-path crates/replica-ffi/Cargo.toml --target-dir target/replica-ffi --all-targets -- -D warnings",
-                     "cargo +1.99.1 test --locked --manifest-path crates/replica-ffi/Cargo.toml --target-dir target/replica-ffi",
+                     "cargo +1.99.1 clippy --locked --manifest-path crates/replica-ffi/Cargo.toml --target-dir target --all-targets -- -D warnings",
+                     "cargo +1.99.1 test --locked --manifest-path crates/replica-ffi/Cargo.toml --target-dir target",
                      "cargo +1.99.1 fmt --check --manifest-path crates/watch-protocol/Cargo.toml",
-                     "cargo +1.99.1 clippy --locked --manifest-path crates/watch-protocol/Cargo.toml --target-dir target/watch-protocol --all-targets -- -D warnings",
-                     "cargo +1.99.1 test --locked --manifest-path crates/watch-protocol/Cargo.toml --target-dir target/watch-protocol",
+                     "cargo +1.99.1 clippy --locked --manifest-path crates/watch-protocol/Cargo.toml --target-dir target --all-targets -- -D warnings",
+                     "cargo +1.99.1 test --locked --manifest-path crates/watch-protocol/Cargo.toml --target-dir target",
                      'run: python3 scripts/collect-licenses.py "$RUNNER_TEMP/rust-licenses"'):
             self.assertIn(line, quick)
         for name in ("quick", "relay", "connector", "connector-macos", "android", "client-native-linux", "client-native-macos-core",
@@ -988,7 +988,7 @@ class WorkflowSecurityTests(unittest.TestCase):
             for second in families.values():
                 self.assertTrue(first == second or not first.startswith(second))
         identity = "${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-"
-        rust = {"quick": ("msrv-${{ runner.os }}-${{ runner.arch }}-", "rustc +1.99.1 -Vv"),
+        rust = {"quick": ("msrv-v2-${{ runner.os }}-${{ runner.arch }}-", "rustc +1.99.1 -Vv"),
                 "cli": ("cli-${{ runner.os }}-${{ runner.arch }}-", "rustc -Vv"),
                 "cli-macos-debug": ("cli-${{ runner.os }}-${{ runner.arch }}-", "rustc -Vv"),
                 "cli-macos-core": ("cli-${{ runner.os }}-${{ runner.arch }}-", "rustc -Vv"),
@@ -1026,6 +1026,59 @@ class WorkflowSecurityTests(unittest.TestCase):
                 save = next(step for step in self.checks_steps(name)
                             if f"key: ${{{{ steps.{step_id}.outputs.cache-primary-key }}}}" in step)
                 self.assertIn(f"if: inputs.save_caches && steps.{step_id}.outputs.cache-hit != 'true'\n", save)
+
+    def test_hosted_ubuntu_jobs_bound_disk_overlap_without_changing_cache_trust(self):
+        checks = (ROOT / ".github/workflows/checks.yml").read_text()
+        quick, relay = job(checks, "quick"), job(checks, "relay")
+        for text in (quick, relay):
+            self.assertIn('runs-on: ubuntu-24.04', text)
+            self.assertIn('CARGO_INCREMENTAL: "0"', text)
+            self.assertIn('CARGO_PROFILE_DEV_DEBUG: "0"', text)
+            self.assertIn('CARGO_PROFILE_TEST_DEBUG: "0"', text)
+            self.assertIn('scripts/ci/ubuntu-disk.py prepare', text)
+            self.assertIn('scripts/ci/ubuntu-disk.py report', text)
+            self.assertNotIn('docker system prune', text)
+        targets = re.findall(r"--target-dir (\S+)", quick)
+        self.assertTrue(targets)
+        self.assertEqual(set(targets), {"target"})
+        self.assertIn('key: msrv-v2-', quick)
+        self.assertIn('restore-keys: msrv-v2-', quick)
+        self.assertNotIn('restore-keys: msrv-${{', quick)
+        retired = relay.index('scripts/ci/ubuntu-disk.py relay-before-image')
+        self.assertLess(relay.index('name: Released HTTP'), retired)
+        self.assertLess(retired, relay.index('docker build --tag zerus-relay-contract'))
+        self.assertIn('name: Enforce the 256 MiB runtime envelope', relay)
+
+    def test_native_linux_disk_checkpoints_only_observe_existing_checks(self):
+        native = job((ROOT / ".github/workflows/checks.yml").read_text(), "client-native-linux")
+        self.assertNotIn("ubuntu-disk.py prepare", native)
+        self.assertNotIn("ubuntu-disk.py relay-before-image", native)
+        self.assertNotIn("CARGO_PROFILE_DEV_DEBUG", native)
+        self.assertNotIn("CARGO_PROFILE_TEST_DEBUG", native)
+        phases = ("after-native-checkout", "after-native-dependencies",
+                  "after-native-cache-restore", "after-native-checks")
+        indices = [native.index(f"ubuntu-disk.py report {phase}") for phase in phases]
+        self.assertEqual(indices, sorted(indices))
+        self.assertLess(indices[0], native.index("sudo apt-get update"))
+        self.assertLess(native.index("rustup toolchain install"), indices[1])
+        self.assertLess(native.index("actions/cache/restore@"), indices[2])
+        self.assertLess(indices[2], native.index("bash scripts/ci/client-native.sh linux"))
+        self.assertIn("name: Disk usage after native checks\n        if: ${{ !cancelled() }}\n", native)
+        script = (ROOT / "scripts/ci/client-native.sh").read_text()
+        linux = script.split("    linux:all)\n", 1)[1].split("        ;;", 1)[0]
+        boundaries = (
+            ("presence_tests", "after-native-presence-tests"),
+            ("--manifest-path client/media/Cargo.toml --features video", "after-native-media-tests"),
+            ("--manifest-path client/src-tauri/Cargo.toml\n", "after-native-tauri-tests"),
+            ("--all-targets --features video -- -D warnings", "after-native-tauri-clippy"),
+            ("--all-targets --features linux-native-notify -- -D warnings", "before-native-core-test-linking"),
+            ("--features linux-native-notify linux_notify", "after-native-core-tests"),
+        )
+        for command, phase in boundaries:
+            with self.subTest(phase=phase):
+                self.assertLess(linux.index(command), linux.index(f"disk_checkpoint {phase}"))
+        self.assertLess(linux.index("disk_checkpoint before-native-core-test-linking"),
+                        linux.index("dbus-run-session -- cargo"))
 
     def test_historical_deepseek_lock_keeps_exact_registry_integrities(self):
         fixture = ROOT / "scripts/ci/dsh-fixture"

@@ -10,6 +10,9 @@ import time
 root = Path(os.path.abspath(__file__)).parent
 args = sys.argv[1:]
 configuration = 'a' * 64
+if args[:2] in [['desktop', 'import-evidence'], ['desktop', 'import-status']]:
+    with (root / 'import-calls').open('a') as log:
+        log.write(json.dumps(args) + '\n')
 if args == ['--help']:
     print('Desktop import ABI: desktop-import-v1')
 elif args == ['desktop', 'status', '--json']:

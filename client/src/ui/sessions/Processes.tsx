@@ -34,7 +34,7 @@ function rowMenu(v: ProcessesView, at: { x: number; y: number }) {
   }] });
 }
 
-/** Copy command: the command as the agent ran it (Qt copies it verbatim). */
+/** Copy the recorded command or bounded preview verbatim, as Qt does. */
 async function copyCommand(command: string) {
   try { await copyVerbatim(command); } catch (error) { notify("error", typeof error === "string" ? error : String(error), true, undefined, tr("Not copied")); }
 }

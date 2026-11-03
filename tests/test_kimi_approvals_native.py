@@ -76,10 +76,16 @@ GOAL_OPTIONS = {
 def goal_mode(method):
     if not method.startswith('test_goal_'):
         return None
+    method = method.replace('test_goal_fullscreen_', 'test_goal_', 1)
     for mode in GOAL_OPTIONS:
         if method.startswith('test_goal_' + mode + '_'):
             return mode
     raise ValueError('a goal scenario must name its manual or yolo mode')
+
+
+def tui_config(method):
+    mode = 'fullscreen' if method.startswith('test_goal_fullscreen_') else 'regular'
+    return 'tui_mode = "%s"\n[upgrade]\nauto_install = false\n' % mode
 
 
 def digest(path):
@@ -462,8 +468,9 @@ class GoalCases:
         screen = ' '.join(self.screen().split())
         self.assertIn('Approve CreateGoal?', screen)
         rows = [' '.join(row.split()) for row in self.screen().splitlines()]
+        fullscreen = self._testMethodName.startswith('test_goal_fullscreen_')
         width = len(next(row.strip() for row in self.screen().splitlines()
-                         if row.strip() and set(row.strip()) == {'─'}))
+                         if row.strip() and set(row.strip()) == {'─'})) - int(fullscreen)
         # Every fixture character is one terminal cell; assert Kimi's exact truncation.
         for prefix, text in (('Start goal: ', GOAL_OBJECTIVE), ('Done when: ', GOAL_CRITERION)):
             line = '  ' + prefix + text
@@ -471,7 +478,8 @@ class GoalCases:
             self.assertIn(expected_line.strip(), rows)
         for number, (_, label, description, _) in enumerate(expected, 1):
             self.assertIn('%d. %s' % (number, label), screen)
-            self.assertIn(description, screen)
+            if not fullscreen or number == 1:
+                self.assertIn(description, screen)
         return card
 
     def wire_events(self, kind):
@@ -519,6 +527,18 @@ class GoalCases:
         self.assertEqual(self.decide(card, option='manual'), {'decision': 'approved', 'selectedLabel': 'manual'})
         self.assert_goal_created()
         self.assert_mode_change(modes, [])
+
+    def test_goal_fullscreen_manual_starts_in_manual(self):
+        self.test_goal_manual_starts_in_manual()
+
+    def test_goal_fullscreen_yolo_auto_switches_to_never_ask(self):
+        self.test_goal_yolo_auto_switches_to_never_ask()
+
+    def test_goal_fullscreen_yolo_cancel_does_not_start(self):
+        self.test_goal_yolo_cancel_does_not_start()
+
+    def test_goal_fullscreen_yolo_keeps_ask_when_needed(self):
+        self.test_goal_yolo_keeps_ask_when_needed()
 
 
 class PlanCases:
@@ -664,7 +684,7 @@ class NativeKimiApprovals(ApprovalCases, GoalCases, PlanCases, lifecycle.Harness
         server, home = self.server, self.home
         home.mkdir()
         (home / 'config.toml').write_text(model_config(server.server_port, self.goal_mode or 'default'))
-        (home / 'tui.toml').write_text('[upgrade]\nauto_install = false\n')
+        (home / 'tui.toml').write_text(tui_config(self._testMethodName))
         self.assertEqual(Path(shutil.which('kimi', path=self.env['PATH'])).resolve(),
                          (self.bin / 'kimi').resolve() if sys.platform == 'darwin' else self.image)
         self.name = 'kimi/p/approval'

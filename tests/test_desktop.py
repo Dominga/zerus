@@ -682,6 +682,50 @@ finally:
         self.cli('--dry-run', 'desktop', 'serve', ok=False)
         self.assertFalse((self.root / 'unexpected-tool').exists())
 
+    @unittest.skipUnless(os.name == 'posix', 'Unix endpoint publication ordering')
+    def test_status_does_not_connect_to_a_service_waiting_for_its_schema_transaction(self):
+        import fcntl
+        process, _ = self.serve()
+        self.stop(process)
+        database = self.desktop / 'state.sqlite3'
+        with closing(sqlite3.connect(database)) as db:
+            # Rebuild the real predecessor so startup must take a write
+            # transaction. Hold it until the read-only readiness probe returns.
+            self.remove_attention_retention_schema(db)
+            db.executescript('DROP TRIGGER desktop_cache_effect_monotone; DROP TRIGGER desktop_cache_kept_original; '
+                             'ALTER TABLE desktop_cache_operations DROP COLUMN effect_started; '
+                             'ALTER TABLE desktop_cache_operations DROP COLUMN kept_receipt; PRAGMA user_version=18;')
+            db.execute('BEGIN IMMEDIATE')
+            process = subprocess.Popen([str(HGS), 'desktop', 'serve'], env=self.env,
+                                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, text=True)
+            self.addCleanup(process.stdout.close)
+            self.addCleanup(process.stderr.close)
+            self.addCleanup(self.stop, process)
+            try:
+                deadline = time.monotonic() + 3
+                with (self.desktop / 'owner.lock').open('r+b') as owner:
+                    while True:
+                        self.assertIsNone(process.poll(), 'original startup exited before owner acquisition')
+                        try:
+                            fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        except BlockingIOError:
+                            break
+                        fcntl.flock(owner, fcntl.LOCK_UN)
+                        self.assertLess(time.monotonic(), deadline, 'original startup did not acquire its owner')
+                        time.sleep(0.005)
+                status = self.cli('desktop', 'status', '--json')
+                self.assertFalse(status['running'])
+                self.assertIsNone(process.poll())
+                self.assertFalse((self.desktop / 'service.sock').exists())
+            finally:
+                db.rollback()
+        deadline = time.monotonic() + 5
+        while not self.cli('desktop', 'status', '--json')['running']:
+            self.assertIsNone(process.poll(), 'original startup exited after releasing the schema transaction')
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+
     @unittest.skipIf(os.name == 'nt', 'Windows preview requires an installed stable CLI')
     def test_registration_preview_preserves_selected_paths_without_installing(self):
         preview = self.cli('desktop', 'registration', '--json')
@@ -1164,7 +1208,15 @@ finally:
             self.assertEqual(db.execute('SELECT configuration FROM service').fetchone()[0], configuration)
 
     @staticmethod
-    def remove_cache_schema(db):
+    def remove_attention_retention_schema(db):
+        db.execute('DROP TRIGGER desktop_attention_edge_remove')
+        db.execute('DROP INDEX desktop_attention_compact')
+        db.execute('DROP TABLE desktop_attention_tombstones')
+        db.execute('DROP TABLE desktop_attention_gc')
+
+    @classmethod
+    def remove_cache_schema(cls, db):
+        cls.remove_attention_retention_schema(db)
         for trigger in ('desktop_cache_unknown_preserve', 'desktop_cache_unknown_immutable'):
             db.execute(f'DROP TRIGGER {trigger}')
         for table in ('desktop_cache_unknown', 'desktop_cache_files', 'desktop_cache_operations', 'desktop_cache_roots'):
@@ -1202,7 +1254,7 @@ finally:
         process, before = self.serve()
         self.stop(process)
         database = self.desktop / 'state.sqlite3'
-        previous = SCHEMA - 1
+        previous = 17  # Historical predecessor of the original cache-18 leaf.
         with closing(sqlite3.connect(database)) as db, db:
             self.remove_cache_schema(db)
             db.execute(f'PRAGMA user_version={previous}')
@@ -1224,6 +1276,30 @@ finally:
         with closing(sqlite3.connect(database)) as db:
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_cache_operations').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_cache_unknown').fetchone()[0], 0)
+
+    def test_cache_effect_migration_is_atomic_and_keeps_existing_cache_tables(self):
+        process, before = self.serve()
+        self.stop(process)
+        database = self.desktop / 'state.sqlite3'
+        with closing(sqlite3.connect(database)) as db, db:
+            self.remove_attention_retention_schema(db)
+            db.execute('DROP TRIGGER desktop_cache_effect_monotone')
+            db.execute('DROP TRIGGER desktop_cache_kept_original')
+            db.execute('ALTER TABLE desktop_cache_operations DROP COLUMN effect_started')
+            db.execute('ALTER TABLE desktop_cache_operations DROP COLUMN kept_receipt')
+            db.execute('PRAGMA user_version=18')
+            db.execute('CREATE TRIGGER desktop_cache_effect_monotone BEFORE UPDATE ON desktop_cache_operations BEGIN SELECT 1; END')
+        self.failed_serve()
+        with closing(sqlite3.connect(database)) as db, db:
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 18)
+            self.assertEqual(db.execute("SELECT count(*) FROM pragma_table_info('desktop_cache_operations') WHERE name IN('effect_started','kept_receipt')").fetchone()[0], 0)
+            db.execute('DROP TRIGGER desktop_cache_effect_monotone')
+        process, status = self.serve()
+        self.assertEqual(status['schema'], SCHEMA)
+        self.assertEqual(status['configuration'], before['configuration'])
+        self.assertFalse(status['writers_enabled'])
+        self.assertFalse(status['automatic_approvals'])
+        self.assertEqual(status['operation_queue']['undrained'], 0)
 
     def test_schema_five_metadata_is_charged_once_and_preserved(self):
         process, _ = self.serve()

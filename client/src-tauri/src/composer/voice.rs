@@ -45,6 +45,7 @@ impl Composers {
             reason,
             warning,
             draft_only: false,
+            draft_revision: None,
         })
     }
 

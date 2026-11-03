@@ -51,6 +51,7 @@ mod details;
 pub mod frontend;
 pub(crate) mod notification_controls;
 mod read_import;
+mod reconnect;
 pub(crate) mod retained_import;
 
 /// Registered at setup before start_source. Some contains a verified service
@@ -840,12 +841,13 @@ impl Shared {
         *current = snapshot.clone();
         self.pump.service(snapshot);
     }
-    fn unavailable(&self, code: &str) {
+    fn unavailable(&self, code: &str, reconnecting: bool) {
         for projection in &self.projections {
             projection(None);
         }
         self.publish(Snapshot {
             code: code.into(),
+            reconnecting,
             ..Snapshot::default()
         });
     }
@@ -1112,6 +1114,11 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
     )
     .await?;
     let value: Value = serde_json::from_slice(&bytes).map_err(|_| "invalid_service_response")?;
+    // A successful status CLI can report an absent socket. Its unavailable
+    // response has no capability table; this is not a protocol incompatibility.
+    if value["running"] == false {
+        return Err("service_unavailable");
+    }
     let configuration = value["configuration"]
         .as_str()
         .filter(|value| zerus_client_core::desktop::digest(value))
@@ -1134,6 +1141,8 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
 }
 
 async fn run(shared: Arc<Shared>, mut control: watch::Receiver<Control>) {
+    let mut backoff = reconnect::Backoff::default();
+    let mut automatic = false;
     loop {
         let requested = *control.borrow_and_update();
         if requested == Control::Stop || shared.stopped.load(Ordering::Acquire) {
@@ -1144,18 +1153,12 @@ async fn run(shared: Arc<Shared>, mut control: watch::Receiver<Control>) {
             .cancellation
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(stop.clone());
-        let result = connection(shared.clone(), &mut control, stop.clone()).await;
+        let mut greeted = None;
+        let result = connection(shared.clone(), &mut control, stop.clone(), automatic, &mut greeted).await;
+        let code = result.err().unwrap_or("service_unavailable");
+        let retry = backoff.next(code, greeted.is_some_and(|at: tokio::time::Instant| at.elapsed() >= Duration::from_secs(30)))
+            .map(|delay| tokio::time::Instant::now() + delay);
         shared.notification_controls.disconnect();
-        if !shared.stopped.load(Ordering::Acquire)
-            && shared.ownership_supported.load(Ordering::Acquire)
-        {
-            // A revoked stream can end while the passive authenticated endpoint
-            // remains available. Read its status; never auto-rearm at EOF.
-            shared.ownership.request(None, None, None).await;
-        }
-        shared
-            .publish_ownership(crate::desktop_ownership::Phase::ConnectionClosed)
-            .await;
         *shared.relay.lock().unwrap_or_else(PoisonError::into_inner) = None;
         stop.store(true, Ordering::Release);
         shared.audit_help.clear();
@@ -1172,7 +1175,7 @@ async fn run(shared: Arc<Shared>, mut control: watch::Receiver<Control>) {
         for change in changes {
             let _ = emit(&shared, change, &AtomicBool::new(false)).await;
         }
-        shared.unavailable(result.err().unwrap_or("service_unavailable"));
+        shared.unavailable(code, retry.is_some());
         for computer in computers {
             let _ = emit(
                 &shared,
@@ -1184,15 +1187,40 @@ async fn run(shared: Arc<Shared>, mut control: watch::Receiver<Control>) {
             )
             .await;
         }
+        if !shared.stopped.load(Ordering::Acquire)
+            && shared.ownership_supported.load(Ordering::Acquire)
+        {
+            // A revoked stream can end while the passive authenticated endpoint
+            // remains available. Read its status; never auto-rearm at EOF.
+            shared.ownership.request(None, None, None).await;
+        }
+        shared
+            .publish_ownership(crate::desktop_ownership::Phase::ConnectionClosed)
+            .await;
         if *control.borrow() == Control::Stop {
             break;
         }
-        // Retry is explicit and reuses this one worker after its children join.
+        // Reuse this one worker only after its original children have joined.
+        // Explicit Retry interrupts the delay and retains its existing intents.
         if *control.borrow() != requested {
+            automatic = false;
+            backoff.reset();
             continue;
         }
-        if control.changed().await.is_err() {
-            break;
+        if let Some(retry_at) = retry {
+            tokio::select! {
+                biased;
+                changed = control.changed() => {
+                    if changed.is_err() { break; }
+                    automatic = false;
+                    backoff.reset();
+                }
+                _ = tokio::time::sleep_until(retry_at) => automatic = true,
+            }
+        } else {
+            if control.changed().await.is_err() { break; }
+            automatic = false;
+            backoff.reset();
         }
     }
 }
@@ -1201,6 +1229,8 @@ async fn connection(
     shared: Arc<Shared>,
     control: &mut watch::Receiver<Control>,
     stop: Arc<AtomicBool>,
+    automatic: bool,
+    greeted: &mut Option<tokio::time::Instant>,
 ) -> Result<(), &'static str> {
     shared
         .publish_ownership(crate::desktop_ownership::Phase::Connecting)
@@ -1218,23 +1248,31 @@ async fn connection(
     }
     *shared.relay.lock().unwrap_or_else(PoisonError::into_inner) = Some(relay.clone());
     let configuration = preflight(&shared, stop.clone()).await?;
-    let explicit = shared
-        .retained_import
-        .as_ref()
-        .is_some_and(|report| report.take_retry());
-    retained_import::before_grant(
-        &shared,
-        relay.clone(),
-        configuration.clone(),
-        stop.clone(),
-        explicit,
-    )
-    .await;
+    if !automatic {
+        let explicit = shared
+            .retained_import
+            .as_ref()
+            .is_some_and(|report| report.take_retry());
+        retained_import::before_grant(
+            &shared,
+            relay.clone(),
+            configuration.clone(),
+            stop.clone(),
+            explicit,
+        )
+        .await;
+    }
     if shared.ownership_supported.load(Ordering::Acquire) {
-        shared
-            .ownership
-            .startup_grant(configuration.clone(), stop.clone())
-            .await;
+        if automatic {
+            // Reopening a read stream is never a new Grant/Rearm or replay of
+            // a retained migration, approval, send or other native intent.
+            shared.ownership.request(None, Some(configuration.clone()), Some(stop.clone())).await;
+        } else {
+            shared
+                .ownership
+                .startup_grant(configuration.clone(), stop.clone())
+                .await;
+        }
     } else {
         shared.ownership.unsupported();
     }
@@ -1299,7 +1337,9 @@ async fn connection(
             configuration.clone(),
         );
         tauri::async_runtime::spawn(async move {
-            recover_grant(shared, configuration, stop, cancelled).await;
+            if !automatic {
+                recover_grant(shared, configuration, stop, cancelled).await;
+            }
         })
     };
     let mut last_frame = tokio::time::Instant::now();
@@ -1322,6 +1362,7 @@ async fn connection(
                         let frame: Value = serde_json::from_slice(&buffer).map_err(|_| "invalid_service_frame")?;
                         buffer.clear();
                         let update = state.frame(&frame)?;
+                        if frame["t"] == "hello" { *greeted = Some(tokio::time::Instant::now()); }
                         details::frame(&shared,&frame,&stop).await?;
                         for projection in &shared.projections { projection(Some(&frame)); }
                         last_frame = tokio::time::Instant::now();
@@ -1364,7 +1405,7 @@ async fn connection(
                                         // This roster discovers sources. Catalog hints/pages
                                         // bind their scope and coverage; transport readiness
                                         // alone cannot repeatedly re-baseline cached rows.
-                                        shared.details.lock().unwrap_or_else(PoisonError::into_inner).source(name,computer.generation)?;
+                                        shared.details.lock().unwrap_or_else(PoisonError::into_inner).source_state(name,computer.generation,computer.online)?;
                                         shared.details_changed.notify_one();
                                     }
                                 }

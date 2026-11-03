@@ -115,6 +115,10 @@ pub struct ViewRow {
     pub process_state: String,
     /// `process_work.count`, -1 when unknown.
     pub background: i64,
+    /// Listed optional-question count for the card, None while unknown. Catalog
+    /// state keeps the last known count of the same session and conversation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub optional_question_count: Option<i64>,
     pub archive_id: Option<String>,
     /// Native children in the listing, capped and keyed by their exact agent ID.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -1170,6 +1174,7 @@ fn child_roster(value: &Value) -> BTreeMap<String, Value> {
 /// The view row of one catalog row.
 pub fn row(value: &Value) -> ViewRow {
     let session = Session::new(value);
+    let notify = notify_facts(value, &session);
     let (status, caption) = session.status();
     let (acknowledged_status, acknowledged_caption) = session.status_with(true);
     let notifications = session.notifications();
@@ -1252,6 +1257,7 @@ pub fn row(value: &Value) -> ViewRow {
         activity: session.activity.to_owned(),
         process_state: session.process_state.to_owned(),
         background: session.background,
+        optional_question_count: (notify.optional_count >= 0).then_some(notify.optional_count),
         archive_id: some(text(value, "archive_id")),
         subagents: child_roster(value),
         subagent_counts_complete: flag("subagent_counts_complete").unwrap_or(false),
@@ -1293,7 +1299,7 @@ pub fn row(value: &Value) -> ViewRow {
         terminal_reported: flag("terminal_supported").is_some(),
         terminal_attach_supported: flag("terminal_attach_supported").unwrap_or(false),
         terminal_attach_reported: flag("terminal_attach_supported").is_some(),
-        notify: notify_facts(value, &session),
+        notify,
         bulk_lifecycle_supported: flag("bulk_lifecycle_supported").unwrap_or(cmd != "opencode"),
     }
 }

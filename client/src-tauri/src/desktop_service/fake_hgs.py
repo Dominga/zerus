@@ -23,8 +23,6 @@ abi = 'desktop-catalog-changes-v1'
 args = sys.argv[1:]
 watch_seq, watch_status = 0, None
 value = json.loads(sys.stdin.readline()) if args[:2] in [['desktop', 'request'], ['desktop', 'frontend-request']] else {}
-with (root / 'calls').open('a') as log:
-    log.write(json.dumps({'args': args, 'value': value, 'pid': os.getpid()}) + '\n')
 
 
 def wait(path):
@@ -33,6 +31,18 @@ def wait(path):
         if time.monotonic() > until:
             raise SystemExit('fixture deadline')
         time.sleep(.005)
+
+
+# Delay only this fixture's first watch before it records startup. This models
+# a process that has spawned but has not been scheduled through its greeting.
+if args == ['desktop', 'watch', '--json'] and config.get('audit_first_watch_hold'):
+    held = root / 'audit-first-watch-held'
+    if not held.exists():
+        held.touch()
+        wait(root / 'audit-first-watch-release')
+
+with (root / 'calls').open('a') as log:
+    log.write(json.dumps({'args': args, 'value': value, 'pid': os.getpid()}) + '\n')
 
 
 def counter(name):
@@ -44,6 +54,7 @@ def counter(name):
 
 def status():
     if config.get('produced_status') is not None:
+        (root / 'produced-status-read').touch()
         return config['produced_status']
     online = not config.get('offline', False)
     catalog_online = online and not config.get('coverage_offline', False)
@@ -66,6 +77,8 @@ def status():
                 'status': 'live' if online else 'reconnecting', 'accepting': online}]
     if config.get('peer_failure'):
         sources.append(dict(sources[0], computer='broken', incarnation=2))
+    if config.get('project_peer'):
+        sources.append(dict(sources[0], computer='studio', incarnation=2))
     return {'abi': 'desktop-v1', 'configuration': 'a' * 64, 'epoch': epoch, 'generation': 1, 'host': 'caption-only',
             'lifecycle': {'abi': 'desktop-lifecycle-v1', 'phase': 'serving', 'ipc_ready': True,
                           'configuration': 'a' * 64, 'epoch': epoch, 'generation': 1, 'background': background},
@@ -122,10 +135,16 @@ def detail_follow():
                        'cursor': 0, 'items': [{'id': 'task'}],
                        'value': {'project': {'id': key}, 'damaged': [], 'digest': 'task-digest'}})
     elif topic == 'organization':
+        organization = config.get('organization', {'projects': []})
+        projects = organization.get('projects', [])
         full = {'node_id': native_hello()['machine_id'], 'swarm_id': 'swarm', 'digest': 'org-digest',
-                'organization': {'projects': []}}
+                'initialized': True, 'organization': dict(organization, projects=[p['id'] for p in projects])}
+        items = [{'key': 'organization', 'row': full}]
+        for project in projects:
+            items.append({'key': 'project:' + project['id'], 'row': dict(project, session_chunks=1)})
+            items.append({'key': 'members:' + project['id'] + ':0', 'row': {'sessions': project.get('sessions', [])}})
         bodies.append({'t': 'snapshot', 'topic': topic, 'page': 0, 'last': True, 'cursor': 0,
-                       'items': [{'key': 'organization', 'row': full}]})
+                       'items': items})
     if config.get('native_gap') and topic == 'activity':
         bodies.extend([{'t': 'gap', 'topic': topic, 'key': key, 'reason': 'overflow'},
                        {'t': 'snapshot', 'topic': topic, 'key': key, 'page': 0, 'last': True,
@@ -159,6 +178,9 @@ def hint(seq, revision, selected=projection, computer=''):
     frame(seq, 'catalog_changed', {'computer': computer, 'incarnation': 2 if computer else 1, 'generation': 1,
           'projection': selected, 'revision': revision, 'online': True, 'last_known': False,
           'complete': True, 'reset_required': False, 'changes_abi': abi, 'attention_counts': status()['attention_counts']})
+    if config.get('replace_projection') and selected == 'b' * 32 and (config.get('projection_publication_gate') or os.environ.get('ZERUS_TEST_SERVICE_PROJECTION_PUBLICATION_GATE') == '1'):
+        # Hold this exact publication boundary until the next page selects state.
+        wait(root / 'replacement-page-selected')
 
 
 def row(key):
@@ -222,6 +244,8 @@ def desktop_request():
               'changes_abi': abi, 'epoch': epoch, 'computer': value.get('computer', ''), 'incarnation': 1,
               'generation': 1, 'projection': projection, 'display_only': True, 'authority': False,
               'complete': True, 'online': True, 'last_known': False, 'stale': False, 'next_cursor': None}
+    if config.get('project_peer') and value.get('computer') == 'studio':
+        common['incarnation'] = 2
     if config.get('peer_failure') and value.get('computer') == 'broken':
         common['incarnation'] = 2
         if (root / 'peer-scope-recovered').exists():
@@ -240,6 +264,18 @@ def desktop_request():
         print(json.dumps({'request_id': request_id, 'accepted': True, 'durable': False,
                           'lease': value['lease'], 'id': value['id'], 'state': 'unfollowed'}))
     elif op == 'detail_source':
+        if config.get('source_held') and not (root / 'source-identity-ready').exists():
+            print(json.dumps({'request_id': request_id, 'accepted': False, 'code': 'source_pending'}))
+            return
+        if config.get('source_warming') and counter('source-' + epoch + '-' + value['part']) == 1:
+            failure = config.get('source_failure', 'offline')
+            if failure == 'transport':
+                raise SystemExit('private metadata read interrupted')
+            print(json.dumps({'request_id': request_id, 'accepted': failure != 'refused', 'durable': False,
+                'lease': value['lease'], 'computer': value['computer'], 'generation': value['generation'],
+                'part': value['part'], 'native': failure != 'native', 'online': failure != 'offline',
+                'complete': False, 'value': None if failure == 'null' else native_hello()}))
+            return
         metadata = native_hello() if value['part'] == 'hello' else {'host': 'metadata-caption', 'ok': True,
                     'machine_id': '00000000-0000-4000-8000-000000000099', 'peers': [],
                     'metrics': {'platform': 'linux'}}
@@ -273,6 +309,8 @@ def desktop_request():
             count = config['large']
             page.update(items=[row('row-' + str(i)) for i in range(offset, min(offset + 128, count))],
                         next_cursor=str(uuid.UUID(int=number + 100)) if offset + 128 < count else None)
+        if config.get('replace_projection') and number == 2 and (config.get('projection_publication_gate') or os.environ.get('ZERUS_TEST_SERVICE_PROJECTION_PUBLICATION_GATE') == '1'):
+            (root / 'replacement-page-selected').touch()
         print(json.dumps(page))
     elif op == 'catalog_changes':
         number = counter('delta-number')
@@ -494,12 +532,21 @@ elif args == ['desktop', 'frontend-request', '--json']:
 elif args == ['desktop', 'status', '--json']:
     print(json.dumps(status()))
 elif args == ['desktop', 'watch', '--json']:
+    cycle = counter('watch-cycle') if config.get('restart_watch') else 0
+    if cycle > 1:
+        (root / 'second-watch-held').touch()
+        wait(root / 'release-second-watch')
     initial = status()
     if config.get('details'):
         initial['details'] = {'abi': 'desktop-details-v1', 'epoch': epoch,
                               'lease': '00000000-0000-4000-8000-000000000003',
                               'limits': {'demands_per_subscriber': 64}}
     frame(0, 'hello', initial)
+    if config.get('silent_watch'):
+        # Keep the original watch alive, but send no further frame at all.
+        # EOF still belongs to the subscriber that owns this stdin pipe.
+        sys.stdin.read()
+        raise SystemExit(0)
     if config.get('peer_choices'):
         for seq, stage in enumerate(['known', 'invalid', 'warming', 'stopping', 'removed', 'empty'], 1):
             wait(root / ('roster-' + stage))
@@ -553,8 +600,9 @@ elif args == ['desktop', 'watch', '--json']:
         wait(root / ('page-started' if config['replace_projection'] == 'early' else 'initial-complete'))
         if config['replace_projection'] == 'exhausted':
             wait(root / 'release-replacement-hint')
-        hint(1, '0', 'b' * 32)
+        # The next request must see the state announced by this hint.
         (root / 'projection-replaced').touch()
+        hint(1, '0', 'b' * 32)
     if config.get('delta_live'):
         wait(root / 'send-delta')
         hint(1, '1')
@@ -580,6 +628,8 @@ elif args == ['desktop', 'watch', '--json']:
     seq, seen = max(100, watch_seq), set()
     heartbeat = time.monotonic() + 1
     while not select.select([sys.stdin], [], [], .005 if config.get('details') else .1)[0]:
+        if cycle == 1 and (root / 'restart-watch').exists():
+            raise SystemExit(0)
         if config.get('details'):
             for path in sorted(root.glob('pending-*')):
                 if path.suffix == '.tmp' or path.name in seen:
@@ -596,6 +646,28 @@ elif args == ['desktop', 'watch', '--json']:
 elif args == ['desktop', 'request', '--json']:
     desktop_request()
 elif args == ['desktop', 'catalog-relay', '--json']:
+    # Optional fault injection and lifecycle evidence for this private relay.
+    delay = int(os.environ.get('ZERUS_TEST_SERVICE_RELAY_FINALIZE_DELAY_MS', config.get('relay_finalize_delay_ms', 0)))
+    assert 0 <= delay <= 2000
+    exit_number = counter('relay-number') if delay or os.environ.get('ZERUS_TEST_SERVICE_RELAY_EXIT_TRACE') == '1' else 0
+    target = int(os.environ.get('ZERUS_TEST_SERVICE_RELAY_FINALIZE_NUMBER', config.get('relay_finalize_number', 1)))
+    trace_exit = os.environ.get('ZERUS_TEST_SERVICE_RELAY_EXIT_TRACE') == '1'
+
+    def relay_event(event):
+        if trace_exit:
+            with (root / 'relay-lifecycle').open('a') as log:
+                log.write(json.dumps(dict(event=event, pid=os.getpid(), number=exit_number,
+                                          at=time.monotonic_ns())) + '\n')
+
+    def finalize_relay():
+        relay_event('finalize-start')
+        if exit_number == target:
+            time.sleep(delay / 1000)
+        relay_event('finalize-done')
+
+    if trace_exit or delay:
+        import atexit
+        atexit.register(finalize_relay)
     print(json.dumps({'abi': 'desktop-catalog-relay-v1', 'configuration': ('b' if config.get('relay_fault') == 'configuration' else 'a') * 64}), flush=True)
     for line in sys.stdin:
         value = json.loads(line)
@@ -621,5 +693,18 @@ elif args == ['desktop', 'catalog-relay', '--json']:
             desktop_request()
         response = json.loads(captured.getvalue())
         print(json.dumps({'abi': 'desktop-catalog-relay-v1', 'request_id': str(uuid.uuid4()) if fault == 'identity' else value['request_id'], 'value': response}), flush=True)
+        pause = int(config.get('recovered_response_pause_ms', 0))
+        assert 0 <= pause <= 2000
+        if pause and value['op'] == 'catalog_page' and response.get('start_revision') == '5':
+            # The baseline reply is flushed, but the final catch-up request
+            # has not been consumed by this private relay yet.
+            (root / 'recovered-baseline-flushed').touch()
+            until = time.monotonic() + pause / 1000
+            while not (root / 'release-recovered-response').exists() and time.monotonic() < until:
+                time.sleep(.005)
+    relay_event('stdin-eof')
+    # Every reply was flushed above. This private proxy has no shutdown work;
+    # don't put interpreter finalizers inside the real child's bounded join.
+    os._exit(0)
 else:
     raise SystemExit('Forbidden fallback CLI call')

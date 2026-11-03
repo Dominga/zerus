@@ -11,6 +11,8 @@ use std::{
 };
 use zerus_client_core::desktop::approval_audit::{self as wire, Request};
 
+pub(super) mod worker;
+
 struct Journal {
     file: File,
     identity: (u64, u64),
@@ -38,7 +40,13 @@ impl Journal {
             Err(e) => return Err(e.into()),
             Ok(_) => (),
         }
-        let file = platform::refuse_link(OpenOptions::new().read(true)).open(&path)?;
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        platform::no_follow(&mut options);
+        #[cfg(windows)]
+        platform::refuse_link(&mut options);
+        let file = options.open(&path)?;
         ensure!(platform::verify_private_file(&file)?, "unsafe audit file");
         let identity = key(&file)?;
         let db = Connection::open_with_flags(

@@ -69,7 +69,14 @@ int main(int argc, char **argv) {
             if (escape) { if (escape == 1 && c == '[') escape = 2; else if (escape == 1 || (c >= 0x40 && c <= 0x7e)) escape = 0; continue; }
             if (c == 0x1b) { escape = 1; continue; }
             if (c == '\r') {
-                if (!strcmp(text, "/clear") && access("refuse-clear", F_OK)) { cleared = 1; close(open("native-cleared", O_CREAT | O_WRONLY, 0600)); }
+                if (!strcmp(text, "/clear") && access("refuse-clear", F_OK)) {
+                    if (!access("end-before-reset", F_OK)) {
+                        append("clear-waiting", "1", 1);
+                        int i; for (i = 0; i < 5000 && access("end-observed", F_OK); ++i) usleep(1000);
+                        if (i == 5000) return 3;
+                    }
+                    cleared = 1; close(open("native-cleared", O_CREAT | O_WRONLY, 0600));
+                }
                 else { append("submitted", text, length); append("submitted", "\n", 1); }
                 length = 0; text[0] = 0;
             } else if (c >= 0x20 && length + 1 < sizeof text) { text[length++] = c; text[length] = 0; }
@@ -361,6 +368,30 @@ class ResumedClearContext(unittest.TestCase):
   current=json.loads(self.record_path.read_text())
   self.assertFalse(self.archive_path.exists())
   self.assertNotIn('restore_archive_id',current);self.assertNotIn('resume_pending',current)
+ def test_real_deferred_start_can_settle_an_older_unmarked_resume_clear_end(self):
+  self.resumed()
+  self.record['clear_context_request']=dict(request_id=str(uuid.uuid4()),conversation_id=self.conversation_id,at=time.time())
+  self.write_record()
+  self.hook(dict(hook_event_name='SessionEnd',session_id=self.conversation_id,reason='other'))
+  self.record=json.loads(self.record_path.read_text())
+  for key in ('clear_request_id','clear_event_at'):self.record['session_end'].pop(key,None)
+  self.write_record()
+  self.assertFalse(self.inspect().get('resume_message_can_send'))
+  self.assertFalse(self.inspect().get('session_clear'))
+  self.assertEqual(self.received(),b'')
+  self.assert_cleared(self.started())
+ def test_unmarked_restore_end_refuses_successor_without_losing_archive(self):
+  self.restored();self.assertEqual(self.clear()['status'],'confirmed')
+  self.hook(dict(hook_event_name='SessionEnd',session_id=self.conversation_id,reason='other'))
+  self.record=json.loads(self.record_path.read_text())
+  for key in ('clear_request_id','clear_event_at'):self.record['session_end'].pop(key,None)
+  self.write_record()
+  self.started()
+  current=json.loads(self.record_path.read_text())
+  self.assertEqual((current['conversation_id'],current['expected_id']),(self.conversation_id,self.conversation_id))
+  self.assertEqual(current['restore_archive_id'],self.archive_id)
+  self.assertEqual(self.archive_path.read_bytes(),self.archive_bytes)
+  self.assertNotIn('restore_archive_cleanup',current)
  def test_archive_launch_reservation_does_not_change_clear_or_pause_eligibility(self):
   self.restored();self.record['resume_pending']=True;self.write_record()
   self.assertTrue(self.inspect()['clear_context_supported'])
@@ -452,6 +483,40 @@ class ResumedClearContext(unittest.TestCase):
   self.wait_for(lambda:(self.root/'native-cleared').exists())
   # No inspection saw the reset panel before the deferred hook arrived.
   self.assertNotIn('session_clear',json.loads(self.record_path.read_text()))
+  self.assert_cleared(self.started())
+ def test_resumed_clear_keeps_its_deferred_start_after_the_native_session_end(self):
+  self.resumed();self.clear_across_main_end()
+ def test_marked_restore_clear_keeps_its_transaction_across_the_native_session_end(self):
+  self.restored();self.clear_across_main_end()
+  self.assertFalse(self.archive_path.exists())
+ def test_main_end_after_a_confirmed_reset_keeps_its_deferred_start(self):
+  self.resumed();self.assertEqual(self.clear()['status'],'confirmed')
+  self.hook(dict(hook_event_name='SessionEnd',session_id=self.conversation_id,reason='other'))
+  info=self.inspect();self.assertTrue(info['session_clear']);self.assertTrue(info['resume_message_can_send'])
+  self.assert_cleared(self.started())
+ def test_main_end_after_a_confirmed_restore_reset_keeps_its_transaction(self):
+  self.restored();self.assertEqual(self.clear()['status'],'confirmed')
+  self.hook(dict(hook_event_name='SessionEnd',session_id=self.conversation_id,reason='other'))
+  self.assert_cleared(self.started());self.assertFalse(self.archive_path.exists())
+ def clear_across_main_end(self):
+  import concurrent.futures
+  (self.root/'end-before-reset').touch()
+  with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+   clear=pool.submit(self.clear)
+   self.wait_for(lambda:(self.root/'clear-waiting').exists())
+   self.hook(dict(hook_event_name='SessionEnd',session_id=self.conversation_id,reason='other'))
+   ended=json.loads(self.record_path.read_text())
+   self.assertEqual(ended['conversation_state'],'ended')
+   (self.root/'end-observed').touch()
+   self.assertEqual(clear.result(timeout=12)['status'],'confirmed')
+  self.assertEqual(self.received(),b'/clear\r')
+  info=self.inspect();self.assertTrue(info['session_clear'])
+  self.assertTrue(info['resume_message_can_send'],info.get('resume_message_reason'))
+  self.assertFalse(info['clear_context_supported']);self.assertFalse(info['compact_context_supported'])
+  self.assertEqual(info['conversation_id'],self.conversation_id)
+  test_input.InputTransport.send(self,test_input.InputTransport.payload(self,text='Fresh request after end'))
+  self.wait_for(lambda:(self.root/'submitted').exists())
+  self.assertEqual((self.root/'submitted').read_text(),'Fresh request after end\n')
   self.assert_cleared(self.started())
  def test_inspection_observes_a_terminal_clear_only_while_codex_owns_the_saved_conversation(self):
   self.resumed();initial=self.record.copy()

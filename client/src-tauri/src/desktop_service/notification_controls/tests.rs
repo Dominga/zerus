@@ -201,6 +201,68 @@ fn foreground_renewal_waits_for_a_fresh_hidden_window_observation() {
 }
 
 #[test]
+fn configure_status_and_lookup_do_not_wait_for_a_blocked_foreground_check() {
+    if !private_case("desktop_service::notification_controls::tests::configure_status_and_lookup_do_not_wait_for_a_blocked_foreground_check") {return}
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({"lose_configure":true}));
+        let setup = fixture.setup();
+        let (blocked, pending) = hold_renewal_refreshes(&setup.source);
+        let owner = Controller::new(Some(setup));
+        let responder = service_responder();
+        let _cache = CacheServer::start(&fixture.0, responder.clone());
+        let session = fixture.connect(&owner, responder).await;
+        let worker = tauri::async_runtime::spawn(run(owner.clone(), session.clone()));
+        until("initial status and Foreground", || {
+            owner.view().is_some_and(|v| v.status.is_some())
+                && !fixture.controls("focus").is_empty()
+        })
+        .await;
+        blocked.store(true, Ordering::Release);
+        until("renewal waiting for the main thread", || {
+            pending.lock().unwrap().is_some()
+        })
+        .await;
+        let statuses = || {
+            fixture
+                .lines("calls")
+                .iter()
+                .filter(|v| v["value"]["op"] == "notification_preferences_status")
+                .count()
+        };
+        let initial = statuses();
+        let original = owner.edit(true).unwrap().request_id.unwrap();
+        until("Configure runs while the callback stays blocked", || {
+            fixture.controls("configure").len() == 1
+                && owner.view().is_some_and(|v| v.pending && !v.running)
+        })
+        .await;
+        assert!(pending.lock().unwrap().is_some());
+        owner.check().unwrap();
+        until("lookup and status run without waiting for focus", || {
+            statuses() > initial
+                && fixture
+                    .lines("calls")
+                    .iter()
+                    .any(|v| v["value"]["op"] == "notification_preferences_result")
+        })
+        .await;
+        assert_eq!(fixture.controls("configure")[0]["request_id"], original);
+        assert_eq!(
+            fixture.controls("configure").len(),
+            1,
+            "unknown edits remain lookup-only"
+        );
+        assert_eq!(
+            fixture.controls("focus").len(),
+            1,
+            "no cached Foreground renewal"
+        );
+        assert!(pending.lock().unwrap().is_some());
+        stop(&owner, &session, worker).await;
+    });
+}
+
+#[test]
 fn native_loss_and_disconnect_do_not_wait_for_a_queued_renewal_enumeration() {
     if !private_case("desktop_service::notification_controls::tests::native_loss_and_disconnect_do_not_wait_for_a_queued_renewal_enumeration") { return; }
     tauri::async_runtime::block_on(async {

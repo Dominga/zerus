@@ -13,6 +13,23 @@ const row = (key: string, name: string, extra: Partial<ViewRow> = {}, computer =
 const batchOf = (part: Partial<Batch>): Batch => ({ ...emptyBatch(), ...part });
 
 describe("applyBatch", () => {
+  it("retains row identity and order while a service source reconnects", () => {
+    createRoot((dispose) => {
+      const { catalog, applyBatch } = createCatalog();
+      applyBatch(batchOf({
+        upserts: [row("run:a", "codex/p/a"), row("run:b", "codex/p/b")],
+        computers: [{ computer: "", status: "live", attempt: 0 }],
+      }));
+      const a = catalog.rows[rowId("", "run:a")], b = catalog.rows[rowId("", "run:b")];
+      const order = [...catalog.order];
+      applyBatch(batchOf({ computers: [{ computer: "", status: "reconnecting", attempt: 1 }] }));
+      expect(catalog.order).toEqual(order);
+      expect(catalog.rows[rowId("", "run:a")]).toBe(a);
+      expect(catalog.rows[rowId("", "run:b")]).toBe(b);
+      expect(catalog.computers[""].status).toBe("reconnecting");
+      dispose();
+    });
+  });
   it("keeps sh as Qt's Shell presentation rather than a Claude provider", () => {
     expect(agentKind("sh")).toBe("sh"); expect(agentKind("SH")).toBe("sh");
     const shell = toSession("", "run:shell", view("sh/example/probe", { agent: "sh", model: "", effort: null }));
@@ -109,6 +126,45 @@ describe("applyBatch", () => {
     createCatalog(own);
     expect(ownAttach).toHaveBeenCalledTimes(1);
     appAttach.mockRestore();
+  });
+
+  it("carries a known conversation's resumed run through a coalesced full catalog", () => {
+    const c = createCatalog(), moves: [string, string][] = [];
+    c.applyBatch(batchOf({ upserts: [row("run:old", "claude/p/review", { run_id: "old", conversation_id: "conversation", state: "paused" })] }));
+    c.onReplaced((from, to) => moves.push([from, to]));
+    c.applyBatch(batchOf({ replaces: [{ computer: "", rows: [row("run:new", "claude/p/review", { run_id: "new", conversation_id: "conversation", state: "running" })] }] }));
+    expect(moves).toEqual([["\nrun:old", "\nrun:new"]]);
+  });
+
+  it("hands selection to a successor published before the replaced removal in a later batch", () => {
+    const c = createCatalog(), moves: [string, string][] = [];
+    c.applyBatch(batchOf({ upserts: [row("run:old", "claude/p/review", { run_id: "old", conversation_id: "conversation", state: "paused" })] }));
+    c.onReplaced((from, to) => moves.push([from, to]));
+    c.applyBatch(batchOf({ upserts: [row("run:new", "claude/p/review", { run_id: "new", conversation_id: "conversation", state: "running" })] }));
+    expect(moves).toEqual([]);
+    c.applyBatch(batchOf({ removes: [{ computer: "", key: "run:old", reason: "replaced" }] }));
+    expect(moves).toEqual([["\nrun:old", "\nrun:new"]]);
+  });
+
+  it.each([{ conversation_id: "different" }, { conversation_id: "" }, { state: "archived" }, { run_id: "" }])(
+    "does not infer a resumed run from unknown or different identity: %j", (changed) => {
+      const c = createCatalog(), moves: unknown[] = [];
+      c.applyBatch(batchOf({ upserts: [row("run:old", "claude/p/review", { run_id: "old", conversation_id: "conversation", state: "paused" })] }));
+      c.onReplaced((...move) => moves.push(move));
+      c.applyBatch(batchOf({ replaces: [{ computer: "", rows: [row("run:new", "claude/p/review", { run_id: "new", conversation_id: "conversation", state: "running", ...changed })] }] }));
+      expect(moves).toEqual([]);
+    });
+
+  it("refuses ambiguous full-catalog successors and preserves an explicit handoff delivered before a full catalog", () => {
+    const c = createCatalog(), moves: [string, string][] = [];
+    c.applyBatch(batchOf({ upserts: [row("run:old", "claude/p/review", { run_id: "old", conversation_id: "conversation", state: "paused" })] }));
+    c.onReplaced((from, to) => moves.push([from, to]));
+    const next = row("run:new", "claude/p/review", { run_id: "new", conversation_id: "conversation", state: "running" });
+    c.applyBatch(batchOf({ replaces: [{ computer: "", rows: [next, row("run:other", "claude/p/review", { run_id: "other", conversation_id: "conversation", state: "running" })] }] }));
+    expect(moves).toEqual([]);
+    c.applyBatch(batchOf({ removes: [{ computer: "", key: "run:new", reason: "replaced" }] }));
+    c.applyBatch(batchOf({ replaces: [{ computer: "", rows: [row("run:last", "claude/p/review", { run_id: "last", conversation_id: "different", state: "running" })] }] }));
+    expect(moves).toContainEqual(["\nrun:new", "\nrun:last"]);
   });
 
   it("records computer status", () => {

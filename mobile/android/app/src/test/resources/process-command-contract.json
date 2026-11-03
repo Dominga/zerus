@@ -1,0 +1,75 @@
+{
+  "preview_bytes": 512,
+  "cases": [
+    {
+      "name": "short",
+      "command_input": "printf hello",
+      "processes": {
+        "items": [
+          {
+            "id": "job-a",
+            "call_id": "call-a",
+            "owner": "main",
+            "provider": "codex",
+            "run_id": "run-a",
+            "conversation_id": "conversation-a",
+            "command": "printf hello",
+            "command_digest": "2189aff6492b39e6aa62f939b98cbc0cfaa1392da9df3a5ef73a7b0b369119d3",
+            "command_truncated": false,
+            "cwd": "/workspace",
+            "status": "running",
+            "source": "hooks",
+            "observed": true,
+            "background": true,
+            "capabilities": {
+              "output": true,
+              "stop": false,
+              "stdin": false
+            }
+          }
+        ],
+        "active_count": 1,
+        "live_count": 0,
+        "unknown_count": 0,
+        "complete": false,
+        "notes": []
+      }
+    },
+    {
+      "name": "heredoc",
+      "command_input": "cat <<'EOF'\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nEOF",
+      "processes": {
+        "items": [
+          {
+            "id": "job-a",
+            "call_id": "call-a",
+            "owner": "main",
+            "provider": "codex",
+            "run_id": "run-a",
+            "conversation_id": "conversation-a",
+            "command": "cat <<'EOF'\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ🦀 payload\nЖ…",
+            "command_digest": "c6018e5a2e3694a6eeab3589bfc6c4fc17d5159b47b9b15613cbd1724e047a48",
+            "command_truncated": true,
+            "cwd": "/workspace",
+            "status": "running",
+            "source": "hooks",
+            "observed": true,
+            "background": true,
+            "capabilities": {
+              "output": true,
+              "stop": false,
+              "stdin": false
+            }
+          }
+        ],
+        "active_count": 1,
+        "live_count": 0,
+        "unknown_count": 0,
+        "complete": false,
+        "notes": [
+          "Long commands are shown as previews. Copy command copies the displayed preview."
+        ]
+      }
+    }
+  ]
+}

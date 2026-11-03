@@ -40,6 +40,8 @@ mod desktop_service;
 mod display;
 #[cfg(feature = "live")]
 mod drops;
+#[cfg(any(target_os = "macos", test))]
+pub mod entry;
 mod exit_flush;
 #[cfg(feature = "live")]
 mod external_open;
@@ -96,6 +98,7 @@ mod signals;
 mod speech_settings;
 #[cfg(feature = "live")]
 mod startup_error;
+mod startup_log;
 #[cfg(feature = "live")]
 mod task_details;
 #[cfg(feature = "live")]
@@ -207,7 +210,6 @@ pub struct Startup {
 /// activation to the running instance and returns, and runs the app.
 pub fn run() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
     let options = match cli::parse(&args) {
         Ok(cli::Command::Run(options)) => options,
         Ok(cli::Command::Help) => {
@@ -220,6 +222,8 @@ pub fn run() {
         }
         Ok(cli::Command::BuildInfo) => {
             #[cfg(any(target_os = "linux", windows))]
+            let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+            #[cfg(any(target_os = "linux", windows))]
             let info = cli::build_info_for(&cli::BUILD, &context.config().identifier);
             #[cfg(not(any(target_os = "linux", windows)))]
             let info = cli::build_info(&cli::BUILD);
@@ -229,6 +233,7 @@ pub fn run() {
         Ok(cli::Command::LoginItem { enabled }) => {
             #[cfg(all(windows, feature = "live"))]
             {
+                let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
                 let identity = identity::current(&context.config().identifier);
                 if !identity.is_switch() {
                     eprintln!("Login registration requires the installed Zerus identity");
@@ -257,14 +262,19 @@ pub fn run() {
             }
         }
         Err(error) => {
+            startup_log::record("failed", "invalid_arguments", None);
             eprint!("zerus-client: {error}\n\n{}", cli::usage());
             std::process::exit(2);
         }
     };
+    startup_log::record("entered", "gui_entry", None);
+    startup_log::install_panic_hook();
+    let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
     #[cfg(all(feature = "live", target_os = "linux"))]
     let options = {
         let mut options = options;
         if let Err(error) = cli::take_navigation_environment(&mut options) {
+            startup_log::record("failed", "invalid_navigation_environment", None);
             eprint!("zerus-client: {error}\n\n{}", cli::usage());
             std::process::exit(2);
         }
@@ -297,7 +307,11 @@ pub fn run() {
     let mut native_ownership = None;
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     let instance = match identity.instance_name(identity::flag("ZERUS_CLIENT_SINGLE_INSTANCE")) {
-        None => None,
+        None => {
+            startup_log::record("bypassed", "single_instance_not_requested", None);
+            renderer::choose();
+            None
+        }
         Some(name) => {
             let activation = if opens_sessions {
                 instance::Activation::Sessions
@@ -325,13 +339,20 @@ pub fn run() {
                 any(target_os = "linux", target_os = "macos", windows)
             )))]
             let reply = None;
-            match instance::claim(&name, identity.launchd_label(), activation, reply) {
+            match instance::claim(
+                &name,
+                identity.launchd_label(),
+                activation,
+                reply,
+                renderer::choose,
+            ) {
                 instance::Claim::Claimed(claimed) => {
                     #[cfg(all(feature = "live", any(target_os = "linux", target_os = "macos")))]
                     {
                         let settled = match desktop_hello::hold(identity.is_switch(), &responder) {
                             Ok(held) => held,
                             Err(_) => {
+                                startup_log::record("failed", "desktop_startup_unconfirmed", None);
                                 eprintln!("zerus-client: desktop startup is unconfirmed; writers remain stopped");
                                 startup_error::show(context);
                                 return;
@@ -348,11 +369,10 @@ pub fn run() {
                     Some(claimed)
                 }
                 instance::Claim::Forwarded => {
-                    eprintln!("zerus-client: already running");
                     return;
                 }
-                instance::Claim::Failed(error) => {
-                    eprintln!("zerus-client: cannot claim the socket: {error}");
+                instance::Claim::Duplicate(_) => return,
+                instance::Claim::Failed(_) => {
                     std::process::exit(3);
                 }
             }
@@ -375,6 +395,7 @@ pub fn run() {
                 ) {
                     Ok(proof) => Some(proof),
                     Err(code) => {
+                        startup_log::record("failed", "native_takeover_unconfirmed", Some(code));
                         eprintln!("zerus-client: native ownership takeover is unconfirmed: {code}");
                         startup_error::show(context);
                         return;
@@ -391,6 +412,7 @@ pub fn run() {
         .as_ref()
         .is_some_and(|proof| proof.helper().is_err())
     {
+        startup_log::record("failed", "native_ownership_helper_changed", None);
         eprintln!("zerus-client: native ownership helper changed before GUI startup");
         startup_error::show(context);
         return;
@@ -1004,6 +1026,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
             }
             let display = display::display_name();
             if !display::headless_allowed(std::env::var("ZERUS_CLIENT_HEADLESS").is_ok_and(|v| v == "1"), display.as_deref()) {
+                startup_log::record("failed", "headless_display_unavailable", None);
                 eprintln!("zerus-client: ZERUS_CLIENT_HEADLESS=1 but the display is {display:?}, not an X server; no window opens (set GDK_BACKEND=x11)");
                 std::process::exit(3);
             }
@@ -1033,12 +1056,16 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
             Ok(())
         })
         .build(context)
+        .inspect_err(|error| {
+            startup_log::record("failed", "tauri_build", Some(&error.to_string()));
+        })
         .expect("Zerus Next failed to start");
     #[cfg(target_os = "macos")]
     lifecycle::prepare(&mut app, menu_bar, opens_sessions);
     app.run(|app, event| {
         lifecycle::on_event(app, &event);
     });
+    startup_log::record("exited", "event_loop_returned", None);
 }
 
 /// The Processes tab's hub (`processes.rs`): the topic through the data

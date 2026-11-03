@@ -163,16 +163,17 @@ fn resource_charge_outlives_completion_timeout_and_stops_new_admission() {
     let outcome = delivered(dispatch.command());
     dispatch.finish(outcome);
     f.outbox.poll(&mut f.store, Instant::now());
-    assert_eq!(f.state(&request), "reserved");
+    assert_eq!(f.state(&request), "delivered");
+    assert!(!f.outbox.operations_idle());
     f.outbox.request_stop();
     assert!(f.host.stopping());
     f.outbox.poll(&mut f.store, Instant::now() + COMMAND_WAIT);
-    assert_eq!(f.state(&request), "unknown");
+    assert_eq!(f.state(&request), "delivered");
     assert!(!f.outbox.operation_drained());
     drop(resource);
     f.outbox.poll(&mut f.store, Instant::now() + COMMAND_WAIT);
     assert!(f.outbox.operation_drained());
-    assert_eq!(f.state(&request), "unknown");
+    assert_eq!(f.state(&request), "delivered");
 }
 #[test]
 fn unstarted_cancel_is_a_refusal_and_original_resources_must_drop() {
@@ -459,6 +460,7 @@ fn restoration_is_paged_at_a_fixed_highwater_and_never_replays_work() {
 fn an_on_time_original_completion_keeps_mapping_when_the_actor_polls_late() {
     let mut f = Fixture::new();
     let (request, dispatch) = f.queued();
+    let held = dispatch.resources();
     let Outcome::Delivered { native_id } = delivered(dispatch.command()) else {
         unreachable!()
     };
@@ -474,11 +476,20 @@ fn an_on_time_original_completion_keeps_mapping_when_the_actor_polls_late() {
     f.outbox
         .poll(&mut f.store, deadline + Duration::from_secs(1));
     assert_eq!(f.state(&request), "delivered");
+    assert_eq!(f.outbox.status()["pending"], 1);
+    assert!(!f.outbox.operations_idle());
     assert!(f
         .outbox
         .current_activation(&f.store, &activation)
         .unwrap()
         .is_some());
+    f.outbox.request_stop();
+    assert!(!f.outbox.operation_drained());
+    drop(held);
+    f.outbox
+        .poll(&mut f.store, deadline + Duration::from_secs(2));
+    assert!(f.outbox.operation_drained());
+    assert_eq!(f.state(&request), "delivered");
 }
 
 fn activation(dispatch: &Dispatch) -> Activation {
@@ -494,7 +505,7 @@ fn activation(dispatch: &Dispatch) -> Activation {
 }
 
 #[test]
-fn early_close_waits_for_original_resources_and_cannot_be_restored() {
+fn early_close_settles_while_original_resources_still_hold_drain() {
     let mut f = Fixture::new();
     let (request, dispatch) = f.queued();
     let held = dispatch.resources();
@@ -503,8 +514,9 @@ fn early_close_waits_for_original_resources_and_cannot_be_restored() {
     dispatch.finish(outcome);
     assert!(f.host.emit(Event::Closed(value.clone())));
     assert!(f.outbox.poll(&mut f.store, Instant::now()).is_empty());
-    assert_eq!(f.state(&request), "reserved");
-    assert_eq!(f.outbox.status()["callbacks"], 1);
+    assert_eq!(f.state(&request), "delivered");
+    assert_eq!(f.outbox.status()["callbacks"], 0);
+    assert!(!f.outbox.operations_idle());
     drop(held);
     assert!(f.outbox.poll(&mut f.store, Instant::now()).is_empty());
     assert_eq!(f.state(&request), "delivered");
@@ -545,9 +557,13 @@ fn early_click_keeps_ephemeral_wayland_context_but_restoration_does_not() {
     };
     dispatch.finish(Outcome::Delivered { native_id });
     assert!(f.host.emit(Event::Clicked(value.clone())));
-    assert!(f.outbox.poll(&mut f.store, Instant::now()).is_empty());
+    assert_eq!(
+        f.outbox.poll(&mut f.store, Instant::now()),
+        vec![value.clone()]
+    );
+    assert!(!f.outbox.operations_idle());
     drop(held);
-    assert_eq!(f.outbox.poll(&mut f.store, Instant::now()), vec![value]);
+    assert!(f.outbox.poll(&mut f.store, Instant::now()).is_empty());
     let head = f.outbox.restore_head(&f.store).unwrap();
     let restored = f.outbox.restore_page(&f.store, 0, head).unwrap();
     assert_eq!(restored.mappings.len(), 1);
@@ -571,14 +587,16 @@ fn early_callback_is_discarded_after_unknown_without_retry_or_mapping() {
     let held = dispatch.resources();
     let value = activation(&dispatch);
     let until = dispatch.deadline();
-    let outcome = delivered(dispatch.command());
-    dispatch.finish(outcome);
     assert!(f.host.emit(Event::Closed(value.clone())));
     f.outbox.poll(&mut f.store, Instant::now());
     assert_eq!(f.outbox.status()["callbacks"], 1);
     f.outbox.poll(&mut f.store, until);
     assert_eq!(f.state(&request), "unknown");
     assert_eq!(f.outbox.status()["callbacks"], 0);
+    // A genuinely missing completion caused the deadline. A late success
+    // cannot upgrade that consumed unknown, even after its resources release.
+    let outcome = delivered(dispatch.command());
+    dispatch.finish(outcome);
     drop(held);
     f.outbox.poll(&mut f.store, until);
     assert!(f
@@ -623,6 +641,7 @@ fn deferred_and_channel_callbacks_share_one_budget_and_hold_drain() {
     let value = activation(&dispatch);
     let outcome = delivered(dispatch.command());
     dispatch.finish(outcome);
+    f.store.db.execute_batch("CREATE TRIGGER refuse_receipt BEFORE UPDATE ON desktop_attempts BEGIN SELECT RAISE(FAIL,'fixture'); END;").unwrap();
     for _ in 0..EVENTS {
         assert!(f.host.emit(Event::Closed(value.clone())));
     }
@@ -633,8 +652,120 @@ fn deferred_and_channel_callbacks_share_one_budget_and_hold_drain() {
     f.outbox.request_stop();
     assert!(!f.outbox.operation_drained());
     drop(held);
+    f.store
+        .db
+        .execute_batch("DROP TRIGGER refuse_receipt")
+        .unwrap();
     f.outbox.poll(&mut f.store, Instant::now());
     assert!(f.outbox.operation_drained());
+}
+
+#[test]
+fn on_time_held_receipt_retries_only_sql_after_the_deadline() {
+    let mut f = Fixture::new();
+    let (request, dispatch) = f.queued();
+    let held = dispatch.resources();
+    let until = dispatch.deadline();
+    let outcome = delivered(dispatch.command());
+    dispatch.finish(outcome);
+    f.store.db.execute_batch("CREATE TRIGGER refuse_receipt BEFORE UPDATE ON desktop_attempts BEGIN SELECT RAISE(FAIL,'fixture'); END;").unwrap();
+    f.outbox.poll(&mut f.store, Instant::now());
+    assert_eq!(f.state(&request), "reserved");
+    assert!(matches!(
+        f.outbox.pending[0].terminal.as_ref().unwrap().outcome,
+        Outcome::Delivered { .. }
+    ));
+    f.store
+        .db
+        .execute_batch("DROP TRIGGER refuse_receipt")
+        .unwrap();
+    f.outbox.poll(&mut f.store, until + Duration::from_secs(1));
+    assert_eq!(f.state(&request), "delivered");
+    assert!(
+        f.host.try_next().is_err(),
+        "SQL retry cannot offer native work"
+    );
+    f.outbox.request_stop();
+    assert!(!f.outbox.operation_drained());
+    drop(held);
+    f.outbox.poll(&mut f.store, until + Duration::from_secs(2));
+    assert!(f.outbox.operation_drained());
+}
+
+#[test]
+fn completed_held_commands_keep_the_full_admission_charge_before_reservation() {
+    let mut f = Fixture::new();
+    let mut holds = Vec::new();
+    for _ in 0..wire::IN_FLIGHT {
+        let (request, dispatch) = f.queued();
+        holds.push(dispatch.resources());
+        let outcome = delivered(dispatch.command());
+        dispatch.finish(outcome);
+        f.outbox.poll(&mut f.store, Instant::now());
+        assert_eq!(f.state(&request), "delivered");
+    }
+    assert_eq!(f.outbox.pending.len(), wire::IN_FLIGHT);
+    let intent = f.intent();
+    let request = f.request(&intent);
+    assert!(f
+        .outbox
+        .offer(&mut f.store, request.clone(), Instant::now())
+        .is_err());
+    let count: i64 = f
+        .store
+        .db
+        .query_row(
+            "SELECT count(*) FROM desktop_attempts WHERE request_id=?1",
+            [&request.request_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0, "busy resources refuse BEFORE another reservation");
+    assert!(f.host.try_next().is_err());
+    drop(holds);
+    f.outbox.poll(&mut f.store, Instant::now());
+    assert!(f.outbox.operations_idle());
+    assert!(matches!(
+        f.outbox
+            .offer(&mut f.store, request, Instant::now())
+            .unwrap(),
+        Offered::Queued { .. }
+    ));
+}
+
+#[test]
+fn a_truly_late_completion_stays_unknown_until_and_after_resource_release() {
+    let mut f = Fixture::new();
+    let (request, dispatch) = f.queued();
+    let held = dispatch.resources();
+    let value = activation(&dispatch);
+    let until = dispatch.deadline();
+    let outcome = delivered(dispatch.command());
+    dispatch.finish(outcome);
+    // Exact native-time boundary, without widening a production timeout/sleep.
+    f.outbox.pending[0]
+        .shared
+        .reply
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .at = until;
+    assert!(f.host.emit(Event::Clicked(value.clone())));
+    assert!(f.outbox.poll(&mut f.store, until).is_empty());
+    assert_eq!(f.state(&request), "unknown");
+    assert!(f
+        .outbox
+        .current_activation(&f.store, &value)
+        .unwrap()
+        .is_none());
+    f.outbox.request_stop();
+    assert!(!f.outbox.operation_drained());
+    drop(held);
+    f.outbox.poll(&mut f.store, until + Duration::from_secs(1));
+    assert!(f.outbox.operation_drained());
+    assert_eq!(f.state(&request), "unknown");
+    assert!(f.host.try_next().is_err());
 }
 
 #[test]

@@ -21,6 +21,33 @@ stops or replaces the installed Zerus GUI, CLI, agents or services.
 On the Mac the client also builds as Zerus itself, the switch bundle that takes
 over `com.hgdev.hgs-tray`; see `docs/macos-distribution.md#tauri-client-switch`.
 
+The canonical `com.hgdev.hgs-tray` GUI has one owner per login user on macOS,
+Linux and Windows, independent of temporary directories, HOME/profile overrides
+and hgs configuration. Unix retains a kernel lock in a private UID directory
+under the OS `/tmp`; Windows retains a global kernel object keyed by the token
+SID. A duplicate forwards public navigation to the canonical endpoint and exits
+before GUI or desktop ownership setup. If that endpoint is not ready, it exits
+cleanly after a bounded wait. Unsafe or unavailable exclusion fails closed.
+Exclusion lasts through final GUI teardown until actual process exit. Crashes
+release it in the kernel; only its next owner replaces a stale Unix
+socket. The existing Qt activation endpoints remain available for updaters and
+configuration-bound desktop requests. `ZERUS_CLIENT_DESKTOP_SERVICE=1` still
+starts a GUI and receives the same exclusion. The fixed authenticated Mac
+`--desktop-notification-host` entry runs separately before GUI admission and
+creates no window or menu-bar item. Private canonical copies retain the published
+bundle ID and participate in this guard.
+
+During the two-second handoff wait, startup retries kernel acquisition so a
+finishing owner does not discard a relaunch. A successful activation write and
+an unresponsive duplicate are distinct outcomes. Every guard decision appends
+one line of at most 512 bytes to the GUI log: `~/Library/Logs/hgs-tray.log` on
+macOS, `$XDG_STATE_HOME/hgs/hgs-tray.log` (default `~/.local/state`) on Linux,
+and `%LOCALAPPDATA%/hgdev/hgs-tray/hgs-tray.log` on Windows. Entry, final teardown,
+startup refusals and Rust panics also leave bounded records; panic payloads are
+omitted. If the file is unwritable, macOS records a fixed reason in the unified
+log. The fallback never writes to inherited stderr, so a full pipe or a failed
+stderr write cannot block or panic during startup or teardown.
+
 The installed Linux and Windows switch uses the same identifier,
 `com.hgdev.hgs-tray`, and the `hgs-tray` executable/instance name. Settings seed
 once from Qt's `~/.config/hgdev/hgs-tray.conf` on Linux (an absolute
@@ -163,6 +190,26 @@ describes.
 
 `npm run dev` alone serves the frontend in a browser; without Tauri it replays
 `fixtures/replay-batches.json`, so the UI works without the app.
+
+The menu component regression uses native WebKitGTK (Python GI, GTK 3 and
+WebKit2 4.1), with synthetic delayed IPC and no real CLI or sessions. Start
+`npm run dev -- --port 1437`, then from the repository root run:
+
+```sh
+timeout 45s dbus-run-session -- xvfb-run -a -s '-screen 0 1440x900x24' \
+  env GDK_BACKEND=x11 WAYLAND_DISPLAY=zerus-nonexistent WEBKIT_DISABLE_DMABUF_RENDERER=1 \
+  /usr/bin/python3 client/scripts/menu-smoke.py
+```
+
+It checks painted frames, button identity, focus, placement layout reads and
+dismissal during preparation. A stalled inspection must paint after the 180 ms
+preparation budget, then update late capabilities without moving or refocusing.
+To use an authorized Arch display window, wrap
+the command in `flock -w 1800 /tmp/zerus-arch-display.lock`, omit Xvfb and the
+renderer/display overrides, pass the original desktop bus address as
+`ZERUS_MENU_SCREEN_BUS` through `dbus-run-session`, and add `--real-display`.
+That mode checks the screen lock before opening and throughout the run. Both
+modes use private webview data and close their own window on completion.
 
 Environment:
 

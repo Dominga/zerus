@@ -89,13 +89,6 @@ createRoot(() => {
   // Another selection lets the row whose reply was just read leave the
   // filtered list (Qt's selectSession and selectCreation clear m_readSelectionKey).
   createEffect(on(selectedKey, () => { setReadSelectionKey(undefined); }, { defer: true }));
-  createEffect(on(() => {
-    const s = selected();
-    return s ? `${s.key}\n${s.name}` : undefined;
-  }, () => {
-    const s = selected();
-    activity.follow(s && !activityReadOnly(s.key) ? { id: s.key, computer: s.computer, key: s.catalogKey, name: s.name, runId: s.runId, conversationId: s.conversationId } : undefined);
-  }));
   // The selected session's composer. A rename keeps the catalog key, so Rust
   // moves its draft to the new name. An archived row opens its own editable
   // draft too; only its recorded Activity stays read-only (Qt selectSession).
@@ -104,10 +97,14 @@ createRoot(() => {
     return s ? JSON.stringify([s.computer, s.catalogKey, s.name, s.state === "archived" ? s.archiveId ?? "" : "", subagentOpen(), s.conversationId ?? ""]) : undefined;
   }, (identity) => {
     const s = selected(), child = subagentOpen();
-    void composer.open(identity && s ? {
+    const opened = composer.open(identity && s ? {
       computer: s.computer, key: s.catalogKey, name: s.name, archive_id: s.state === "archived" ? s.archiveId ?? null : null,
       subagent: child ? { agent_id: child, parent_conversation_id: s.conversationId ?? "" } : undefined,
     } : undefined);
+    // The first new-run frame may be its only state. Rust must bind the
+    // composer's followed key before that frame can reach its observer.
+    // Display/routing moves immediately; only the original subscribe waits.
+    activity.follow(s && !activityReadOnly(s.key) ? { id: s.key, computer: s.computer, key: s.catalogKey, name: s.name, runId: s.runId, conversationId: s.conversationId } : undefined, opened);
   }));
   // The detail tab that shows: behind Terminal a failed read waits Qt's
   // background interval (Settings > Processes), which Rust reads when told.

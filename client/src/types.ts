@@ -72,6 +72,8 @@ export interface ViewRow {
   process_state?: string;
   /** `process_work.count`, -1 when unknown. */
   background?: number;
+  /** Listed optional-question count; null while unknown, retained by Rust for the same conversation. */
+  optional_question_count?: number | null;
   archive_id?: string | null;
   /** Native children by exact agent ID; never the hook-profile fallback. */
   subagents?: Record<string, Record<string, unknown>>;
@@ -178,6 +180,7 @@ export interface DesktopService {
     code: string;
   };
   connected: boolean;
+  reconnecting?: boolean;
   epoch: string | null;
   generation: number | null;
   background: Record<string, { ready: boolean; code: string }>;

@@ -19,7 +19,7 @@ struct Driver {
     saves: VecDeque<(u64, String, StoredDraft)>,
     calls: VecDeque<(u64, Call)>,
     loads: VecDeque<(u64, String)>,
-    inserts: VecDeque<(u64, String, String)>,
+    inserts: VecDeque<(u64, String, String, u64)>,
     polls: VecDeque<u64>,
     asks: VecDeque<Ask>,
     other: Vec<Effect>,
@@ -47,6 +47,10 @@ fn preferences() -> Preferences {
 
 impl Driver {
     fn new(target: Target, preferences: Preferences) -> Driver {
+        Self::with_draft(target, preferences, None)
+    }
+
+    fn with_draft(target: Target, preferences: Preferences, draft: Option<StoredDraft>) -> Driver {
         let next = Arc::new(AtomicU64::new(0));
         let mut driver = Driver {
             composer: VoiceComposer::new(move || id(next.fetch_add(1, Ordering::SeqCst) + 1)),
@@ -61,7 +65,7 @@ impl Driver {
         let effects = driver.composer.update(target, true, preferences);
         driver.take(effects);
         let (token, _) = driver.loads.pop_front().unwrap();
-        let effects = driver.composer.loaded(token, None);
+        let effects = driver.composer.loaded(token, draft);
         driver.take(effects);
         driver
     }
@@ -72,7 +76,12 @@ impl Driver {
                 Effect::Save { token, key, draft } => self.saves.push_back((token, key, draft)),
                 Effect::Call { token, call } => self.calls.push_back((token, call)),
                 Effect::Load { token, key } => self.loads.push_back((token, key)),
-                Effect::Insert { token, text, id } => self.inserts.push_back((token, text, id)),
+                Effect::Insert {
+                    token,
+                    text,
+                    id,
+                    revision,
+                } => self.inserts.push_back((token, text, id, revision)),
                 Effect::PollLater { token } => self.polls.push_back(token),
                 Effect::Ask(ask) => self.asks.push_back(ask),
                 other => self.other.push(other),
@@ -571,6 +580,7 @@ fn dictation_transcribes_into_the_draft() {
     let draft_target = Target {
         key: "draft\ntask-1".into(),
         draft_only: true,
+        draft_revision: Some(7),
         run: String::new(),
         conversation: String::new(),
         ..target()
@@ -621,7 +631,8 @@ fn dictation_transcribes_into_the_draft() {
         Ok(json!({"schema": 1, "job_id": job, "state": "completed", "text": "hello there"})),
     );
     driver.save(true);
-    let (token, text, inserted_id) = driver.inserts.pop_front().unwrap();
+    let (token, text, inserted_id, revision) = driver.inserts.pop_front().unwrap();
+    assert_eq!(revision, 7);
     assert_eq!(
         (text.as_str(), inserted_id.as_str()),
         ("hello there", job.as_str())
@@ -637,6 +648,7 @@ fn a_draft_that_changed_keeps_the_transcript_for_add_to_draft() {
     let draft_target = Target {
         key: "draft\ntask-1".into(),
         draft_only: true,
+        draft_revision: Some(7),
         ..target()
     };
     let mut driver = Driver::new(draft_target, preferences());
@@ -661,11 +673,139 @@ fn a_draft_that_changed_keeps_the_transcript_for_add_to_draft() {
         Ok(json!({"schema": 1, "job_id": job, "state": "completed", "text": "hi"})),
     );
     driver.save(true);
-    let (token, _, _) = driver.inserts.pop_front().unwrap();
+    let (token, _, _, _) = driver.inserts.pop_front().unwrap();
     let effects = driver.composer.inserted(token, Inserted::Refused);
     driver.take(effects);
     assert_eq!(driver.composer.notice().1, voice_composer::DRAFT_CHANGED);
     assert_eq!(driver.shown().send_label, "Add to draft");
+}
+
+#[test]
+fn a_restored_transcription_keeps_its_revision_and_needs_an_explicit_insertion() {
+    let mut first = dictation_preview();
+    let effects = first.composer.send();
+    first.take(effects);
+    let checkpoint = first.save(true);
+    let (_, Call::Speech { payload }) = first.call() else {
+        panic!()
+    };
+    let capture = first.composer.id().to_owned();
+    assert_eq!(payload["action"], "draft_submit");
+    assert_eq!(payload["request_id"], capture);
+    assert_eq!(checkpoint.form_state["draft_revision"], 7);
+    assert_eq!(checkpoint.form_state["operation_id"], capture);
+    assert_eq!(checkpoint.form_state["speech"]["profile_revision"], 3);
+    drop(first);
+
+    // Even a reused counter value after restart is only historical evidence.
+    for revision in [7, 9] {
+        let mut current = dictation_target();
+        current.draft_revision = Some(revision);
+        let mut restored = Driver::with_draft(current, preferences(), Some(checkpoint.clone()));
+        restored.profiles(providers());
+        assert!(restored.calls.is_empty());
+        let effects = restored.composer.send();
+        restored.take(effects);
+        let (token, call) = restored.call();
+        assert!(matches!(call, Call::Speech { ref payload }
+            if payload == &json!({"action":"draft_status","machine_id":MACHINE,"job_id":capture})));
+        restored.answer(
+            token,
+            Ok(json!({"schema":1,"job_id":capture,
+            "state":"completed","text":"Recovered transcript"})),
+        );
+        let saved = restored.save(true);
+        assert_eq!(saved.form_state["draft_revision"], 7);
+        assert_eq!(saved.form_state["id"], capture);
+        assert!(restored.inserts.is_empty());
+        assert_eq!(restored.composer.notice().1, voice_composer::DRAFT_CHANGED);
+
+        // Add to draft checkpoints a fresh explicit revision; it emits no
+        // audio or message request and retains the insertion UUID.
+        let effects = restored.composer.send();
+        restored.take(effects);
+        assert!(restored.inserts.is_empty());
+        let saved = restored.save(true);
+        assert_eq!(saved.form_state["draft_revision"], revision);
+        let (_, text, inserted, expected_revision) = restored.inserts.pop_front().unwrap();
+        assert_eq!(expected_revision, revision);
+        assert_eq!(inserted, capture);
+        assert_eq!(text, "Recovered transcript");
+        assert!(restored.calls.is_empty());
+    }
+}
+
+#[test]
+fn a_draft_revision_change_during_transcription_keeps_the_original_for_review() {
+    let mut driver = dictation_preview();
+    let effects = driver.composer.send();
+    driver.take(effects);
+    driver.save(true);
+    let (token, _) = driver.call();
+    let capture = driver.composer.id().to_owned();
+    let mut changed = dictation_target();
+    changed.draft_revision = Some(8);
+    let effects = driver.composer.update(changed, true, preferences());
+    driver.take(effects);
+    driver.answer(
+        token,
+        Ok(json!({"schema":1,"job_id":capture,
+        "state":"completed","text":"Keep this transcript"})),
+    );
+    let saved = driver.save(true);
+    assert_eq!(saved.form_state["draft_revision"], 7);
+    assert_eq!(saved.form_state["transcript"], "Keep this transcript");
+    assert!(driver.inserts.is_empty());
+    assert_eq!(driver.composer.notice().1, voice_composer::DRAFT_CHANGED);
+}
+
+#[test]
+fn legacy_transcriptions_never_borrow_the_current_draft_revision_for_status() {
+    let mut first = dictation_preview();
+    let effects = first.composer.send();
+    first.take(effects);
+    let mut checkpoint = first.save(true);
+    checkpoint.form_state.remove("draft_revision");
+    let capture = first.composer.id().to_owned();
+    let mut restored = Driver::with_draft(dictation_target(), preferences(), Some(checkpoint));
+    restored.profiles(providers());
+    let effects = restored.composer.send();
+    restored.take(effects);
+    let (token, call) = restored.call();
+    assert!(matches!(call, Call::Speech { ref payload } if payload["action"] == "draft_status"));
+    restored.answer(
+        token,
+        Ok(json!({"schema":1,"job_id":capture,
+        "state":"completed","text":"Legacy transcript"})),
+    );
+    let saved = restored.save(true);
+    assert!(!saved.form_state.contains_key("draft_revision"));
+    assert!(restored.inserts.is_empty());
+    assert!(restored.calls.is_empty());
+}
+
+fn dictation_target() -> Target {
+    Target {
+        key: "draft\ntask-1".into(),
+        draft_only: true,
+        draft_revision: Some(7),
+        ..target()
+    }
+}
+
+fn dictation_preview() -> Driver {
+    let mut driver = Driver::new(dictation_target(), preferences());
+    let effects = driver.composer.press();
+    driver.take(effects);
+    driver.profiles(providers());
+    let effects = driver.composer.started();
+    driver.take(effects);
+    let effects = driver.composer.press();
+    driver.take(effects);
+    let effects = driver.composer.recorded(pcm(1), None);
+    driver.take(effects);
+    driver.save(true);
+    driver
 }
 
 #[test]

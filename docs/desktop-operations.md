@@ -133,6 +133,24 @@ verified bodies, current discovery or completed migration. Absent and future
 families remain explicitly unavailable. Unsupported pages carry their exact
 manifest positions and their private bodies remain untouched.
 
+The existing speech service and provider-operation store already retain their
+own original receipts after the client exits. The client checkpoints the
+provider operation's original profile ID and `expected_revision` or
+`expected_profile_revision`, without its credential or editable profile body.
+Refreshing a provider list never replaces these saved expectations; legacy
+checkpoints keep their original status-only lookup.
+
+Draft transcription checkpoints retain the capture/request identity, selected
+machine/profile/revision and intended `draft_revision`. A restored revision is
+historical evidence, including when a new editor reuses the same counter value.
+Checking a restored capture reads its original job and saves the transcript for
+review. It never resubmits audio or grants insertion permission. Explicit
+**Add to draft** checkpoints the current insertion revision before emitting an
+insertion carrying that revision and the original insertion UUID. Missing legacy
+revisions remain unbound until that explicit action. Neither path sends a
+message. The current session voice frontend continues to refuse dictation
+insertions; this metadata contract does not enable a new draft-only UI.
+
 Separate pending launch/executor maps, deferred input, draft transcription,
 provider operations, cache maintenance and termination cleanup are unavailable
 in this consumer until their individual schemas and policy slices are admitted.

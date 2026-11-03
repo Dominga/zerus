@@ -92,6 +92,59 @@ are in `.ci-build/installed-cutover-20261102/ledger.json` (8,110 bytes) and adja
 selected records. Exact private identities stay there; this document contains no
 message bodies or owner settings dump.
 
+### Recorded second Arch active-service window — 2026-11-03
+
+Tracked by `zerus-5wmh.66.8.3`. The owner rescheduled this window and performed
+the maintained foreground mode switches. Physical checks used the existing
+source installation `5e4427f6792e4d0b9315e470cf23f85e69a8aa65`, reporting Tauri,
+`com.hgdev.hgs-tray` and `0.47.1-preview.design-polish.5e4427f`, with
+`sourceDirty:false`. The earlier `926b046b35f96594e2581a31ebce000a2bda84ab`
+preflight was read-only and superseded before effects; its observations do not
+qualify the later installation. **This window remains incomplete; every platform
+acceptance checkbox is unchanged.** It was not a package qualification, last-Qt
+upgrade, Qt type rollback or Qt removal.
+
+| Subcheck | Result | Actual evidence and limit |
+|---|---|---|
+| Installed identity | PASS, existing source install | Selected CLI/GUI hashes and running image identities matched the exact `5e4427f6` installation before effects; the restored Native GUI used the same installed image. No clean install or package transaction was tested. |
+| Maintained background selection and readiness | PASS, active runtime scope | The owner's foreground maintained helper selected background successfully. Actual service status showed `background_service`, writers enabled, two live Fleet sources, presence `published`, reads ready, and the Linux attention host ready with its attachment restored and outbox pending zero. Automatic approvals stayed OFF. These are readiness observations, not a delivered read, banner or click. |
+| Service GUI restart/reconnect | FAILED: `zerus-yqie` | Automatic reconnect failed after restart. The owner's manual Retry connected. This failed subcheck remains assigned to menu-c; a manual connection does not qualify automatic recovery or last-known catalog behavior. |
+| Service session/project grouping | FAILED: `zerus-gpz3` | After Retry, the owner observed all 47 sessions in Inbox. Source diagnosis found service baseline/delta rows projected with an empty `row.machine`, while Native mode fills the local host or configured peer alias used by membership keys. The coordinator independently confirmed authoritative shared projects and memberships intact; no project deletion occurred. The fix and rerun belong to menu-c. |
+| Retained Qt/Settings report | WARNING: `.66.5.11` | The retained Qt file's mode 0644 and the checkpoint's `0o077` refusal provide a sufficient source/metadata cause for the report warning; its detailed native error code was not directly observed. This independent best-effort Staged report neither gates the live connection nor imports or deletes live projects. No source permissions were changed to bypass it; complete G3 acceptance remains pending. |
+| Owner Quit and maintained passive restoration | PASS, original helper transition | After owner-confirmed normal Quit, the original GUI invocation exited successfully. The same maintained helper completed passive restoration using its retained original `ARCH_G6_ROLLBACK_ID`, with no pending transition/restart. A post-restart lookup of that original revoke returned `writer_epoch_changed`; it was retained as a refusal, never upgraded into a successful receipt or replayed. |
+| Fresh Native restoration | PASS, scoped restoration | Current status showed passive mode, no background runtime, writers disabled and no service owner epoch. The prior ABSENT startup flag was restored before one maintained Native GUI launch. A fresh authenticated `ARCH_G6_NATIVE_TAKEOVER_ID` was accepted and durable, with `native_ready`, revoked/checkpointed/drained, current Native revision 50 and current identity. This separate fresh takeover does not change the earlier revoke lookup's result. |
+| Managed draft files and sampled processes | PASS, sampled continuity | All 174 managed regular nonempty Qt/Next draft-file hashes were unchanged, with none added, missing or changed. All 24 sampled original process birth identities and images were unchanged. This does not prove unsent-content semantics or an all-process census. The retained Qt source hash was unchanged from the regression probe. |
+| Native project presentation after restore | PENDING, owner observation | The actual Native GUI was restored at the exact installed `5e4427f6` image with the service-mode environment absent. The owner's visual confirmation of project presentation was still pending when this ledger was prepared. |
+| Remaining delivery/native/platform cases | INCOMPLETE | No deliberate Post/banner/click, synthetic read mark, exact-target host ACK or approval ENABLE was submitted. Terminal, voice/video, destructive-review refusal, complete migration, Qt rollback and package acceptance were not qualified by this window. G6 requires a rerun after the reviewed menu-c fixes and the remaining native cases. |
+
+Root made no project/source edits or source-permission changes during the
+physical window. Approvals remained OFF. Normal GUI Quit and the maintained
+service transitions did not restart or signal the sampled agents, tmux or a
+DeepSeek host. The shared display lock is released; the owner
+visual observation above remains pending. These later active results do not
+rewrite the scope or blockers of the historical 2026-11-02 passive run.
+
+Evidence is retained privately under `.ci-build/g6-arch-5e4427f6/`; historical
+read-only preflight records remain under `.ci-build/g6-arch-926b046b/`. Private
+request UUIDs and process identities remain in those records; the stable labels
+above identify their roles without publishing their values. Installed image
+SHA-256 values were:
+
+- CLI: `c2b2171f6e0f2049c3efda22e10583963b699f3d5abfafcd5b42497fe12cfe2d`.
+- GUI: `b898362d3411f0f986d4a0bf63668b574eda35a37a17e52a306b8c21f73cee3e`.
+
+The following SHA-256 values identify exact retained evidence bytes, not their
+contents or an additional acceptance result:
+
+| Private evidence filename | SHA-256 |
+|---|---|
+| `preflight-images.json` | `965879d4cee152e98eed02d9c8fad99a186f2bf8b017da13c65e87fffee6b288` |
+| `status-after-background-switch.json` | `381dc2ad67b45234414cc514cdd32cefb4625ef29e0d1569e0792f1802819393` |
+| `restore-helper-status.json` | `d227af53388e58563f3e6a34a459ed67ce8a6d50739f8fc512e6d457ede55bc8` |
+| `restore-original-revoke-status.json` | `3987cd50bf5f58753a68a4daa060b8911802e5b18cce08cf32b7caa29fd4a1c7` |
+| `native-restored-takeover-receipt.json` | `4f558744a11d0731cda4907b74a47c002b202292b49d3e2168dd534b6d497c0c` |
+| `native-restore-continuity-summary.json` | `c351b54aad72fdcc547c6cddf858f6354bd0ff3ed7610fc79c9a3f596b533151` |
+
 ### Remaining G3 source work at this run
 
 The whole `.66.5` migration is still incomplete. The preference/organization and

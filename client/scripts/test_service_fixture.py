@@ -21,6 +21,32 @@ class ServiceFixture(unittest.TestCase):
         self.assertTrue(line.endswith(b"\n") and len(line) <= 65536)
         return json.loads(line)
 
+    def test_silent_watch_stays_alive_without_any_frame_after_hello(self):
+        with tempfile.TemporaryDirectory(prefix="zerus-silent-") as name:
+            root = Path(name)
+            script = root / "hgs"
+            shutil.copyfile(FIXTURE, script)
+            (root / "fixture.json").write_text(json.dumps({"silent_watch": True}))
+            child = subprocess.Popen(
+                [sys.executable, str(script), "desktop", "watch", "--json"],
+                env={"PATH": os.defpath, "HOME": name, "TMPDIR": name},
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                bufsize=0,
+            )
+            try:
+                self.assertEqual(self.frame(child)["t"], "hello")
+                self.assertFalse(select.select([child.stdout], [], [], 1.2)[0])
+                self.assertIsNone(child.poll(), "silence must not be EOF")
+                child.stdin.close()
+                child.stdin = None
+                output, error = child.communicate(timeout=5)
+                self.assertEqual(child.returncode, 0, error.decode())
+                self.assertEqual(output, b"")
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.communicate(timeout=5)
+
     def test_idle_heartbeats_preserve_the_latest_status_and_close_with_stdin(self):
         for config in ({}, {"details": True}, {"counts_degraded": True}):
             with self.subTest(config=config), tempfile.TemporaryDirectory(prefix="zerus-watch-") as name:

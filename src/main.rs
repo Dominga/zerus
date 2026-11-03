@@ -27,6 +27,7 @@ mod tasks;
 mod watch;
 
 fn main() {
+    zerus_client_core::quit_origin::capture_process_entry();
     // COM cold activation cannot load config, create jobs or acquire ownership.
     #[cfg(windows)]
     if let Some(code) = desktop::windows_notification_activation(std::env::args().nth(1).as_deref())

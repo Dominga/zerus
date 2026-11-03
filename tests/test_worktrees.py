@@ -578,10 +578,10 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         left=self.leftover(tree);self.assertIsNotNone(left)
         self.assertEqual(left['removal']['status'],'pending');self.assertEqual(left['verdict'],'partially_removed')
         self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
-    # zerus-ty94 #6: hgs is killed before Git starts removing; the lock is
-    # free while that orphaned Git has not deregistered the worktree yet. A
-    # review then must keep the recent pending record, so the folder Git
-    # leaves behind is still a reviewable leftover.
+    # zerus-ty94 #6: hgs is killed before Git starts removing. The Git it
+    # started inherited the repository lock, so the lock stays taken while that
+    # orphan runs: a review must keep the pending record however old it looks,
+    # and the folder Git leaves behind is still a reviewable leftover.
     def test_a_review_never_resolves_a_removal_an_orphaned_git_is_still_running(self):
         go=self.root/'orphan-go';done=self.root/'orphan-done'
         self.fake("args=sys.argv[1:]\n"
@@ -594,7 +594,11 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         tree,row,result=self.partial('orphaned-git')
         self.assertEqual(result.returncode,-9,result.stderr)
         self.assertEqual(self.records(),[(str(tree.resolve()),'pending')])
-        # Git has not started: the worktree is still registered and the lock is free.
+        # Git has not deregistered the worktree yet. A clock step or a long
+        # Git run ages the record (review-w's probe): it must still stay.
+        import sqlite3
+        database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3'
+        with contextlib.closing(sqlite3.connect(database)) as db,db:db.execute("UPDATE removals SET reserved_at=reserved_at-100000")
         data=self.review();self.assertIn(str(tree.resolve()),[r['path'] for r in data['worktrees']])
         self.assertEqual(self.records(),[(str(tree.resolve()),'pending')])
         go.touch();end=time.time()+30
@@ -603,6 +607,53 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         left=self.leftover(tree);self.assertIsNotNone(left)
         self.assertEqual(left['removal']['status'],'pending')
         self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build')
+    # Only the removal's Git inherits the repository lock; every other Git
+    # hgs runs, before and after, never holds it, and it is free afterwards.
+    @unittest.skipUnless(sys.platform=='linux','reads /proc/self/fd')
+    def test_only_the_removal_git_inherits_the_repository_lock(self):
+        log=self.root/'git-fds.log'
+        self.fake("args=sys.argv[1:]\n"
+                  "held=False\n"
+                  "for name in os.listdir('/proc/self/fd'):\n"
+                  " try:target=os.readlink('/proc/self/fd/'+name)\n"
+                  " except OSError:continue\n"
+                  " held=held or ('worktree-cache' in target and target.endswith('.lock'))\n"
+                  "open("+repr(str(log))+",'a').write(repr((held,args))+'\\n')\n"
+                  "os.execv("+repr(GIT)+",["+repr(GIT)+",*args])\n")
+        clean=self.linked('inherits');self.age(clean);row=self.row(clean)
+        result=self.remove(clean,row['fingerprint']);self.assertEqual(result.returncode,0,result.stderr)
+        calls=[eval(line) for line in log.read_text().splitlines()]
+        removal=[held for held,args in calls if any(args[i:i+2]==['worktree','remove'] for i in range(len(args)-1))]
+        self.assertEqual(removal,[True])
+        self.assertGreater(len(calls),len(removal));self.assertFalse(any(held for held,args in calls if 'remove' not in args))
+        import fcntl,hashlib
+        common=str((self.repo/'.git').resolve())
+        path=self.root/'state'/'worktree-cache'/('repo-'+hashlib.sha256(common.encode()).hexdigest()+'.lock')
+        with open(path,'r+') as handle:fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    # The removal releases its lock by closing it, never by an explicit
+    # unlock: a helper the removal's Git started keeps it taken until it exits.
+    @unittest.skipUnless(sys.platform in ('linux','darwin'),'flock inheritance')
+    def test_the_repository_lock_lasts_while_anything_the_removal_git_started_runs(self):
+        import fcntl,hashlib
+        go=self.root/'helper-go'
+        self.fake("args=sys.argv[1:]\n"
+                  "if any(args[i:i+2]==['worktree','remove'] for i in range(len(args)-1)) and os.fork()==0:\n"
+                  " [os.close(fd) for fd in (0,1,2)]\n end=time.time()+30\n"
+                  " while not os.path.exists("+repr(str(go))+") and time.time()<end: time.sleep(0.05)\n"
+                  " os._exit(0)\n"
+                  "os.execv("+repr(GIT)+",["+repr(GIT)+",*args])\n")
+        clean=self.linked('helper');self.age(clean);row=self.row(clean)
+        result=self.remove(clean,row['fingerprint']);self.assertEqual(result.returncode,0,result.stderr)
+        common=str((self.repo/'.git').resolve())
+        path=self.root/'state'/'worktree-cache'/('repo-'+hashlib.sha256(common.encode()).hexdigest()+'.lock')
+        def free():
+            with open(path,'r+') as handle:
+                try:fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB);return True
+                except BlockingIOError:return False
+        self.assertFalse(free(),'the lock was released while a helper of the removal Git ran')
+        go.touch();end=time.time()+10
+        while not free() and time.time()<end:time.sleep(0.05)
+        self.assertTrue(free())
     def test_resolved_and_stale_records_drop_and_the_bound_fails_closed(self):
         import sqlite3
         tree,_,_=self.partial('resolved');self.assertEqual(len(self.records()),1)

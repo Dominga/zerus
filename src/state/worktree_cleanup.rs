@@ -3,7 +3,7 @@
 //! person reviewed. Force is limited to explicitly confirmed, content-fingerprinted
 //! uncommitted files. A short-lived manual process confirmation accepts incomplete
 //! access to process paths; active/locked/nested and other unknowns stay protected.
-use super::worktrees::{cache_file, canonical, error, git, list, GitError};
+use super::worktrees::{cache_file, canonical, error, git, git_holding, list, GitError};
 use super::*;
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
@@ -21,10 +21,6 @@ const PROCESS_CONSENT_SECONDS: u64 = 300;
 /// Leftover rows in one reply, and their bytes: the rest stay recorded and
 /// the reply is marked partial, so many records never blank a bounded reply.
 const LEFTOVER_ROWS: usize = 32;
-/// A manual removal gives Git 300 s. A pending record younger than that, plus
-/// a margin, may belong to a Git that outlived a killed hgs: the repository
-/// lock is free while Git has not deregistered the worktree yet.
-const ORPHANED_GIT_GRACE: f64 = 330.0;
 const LEFTOVER_BYTES: usize = 1024 * 1024;
 
 fn admit_leftover(used: &mut usize, row: &Value) -> bool {
@@ -1046,11 +1042,6 @@ fn leftovers(
             continue;
         }
         if registered {
-            // A recent pending removal may still be running in a Git whose
-            // hgs was killed; never resolve it from under that Git.
-            if record.status == "pending" && now() - record.reserved_at < ORPHANED_GIT_GRACE {
-                continue;
-            }
             // The review's list can be seconds old. Only a fresh list, taken
             // while no removal holds the repository lock, may resolve the
             // record; a folder Git stopped tracking meanwhile is shown.
@@ -2109,7 +2100,11 @@ fn remove(args: &[String], attempted: &mut bool, observed: &mut Option<Value>) -
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    let lock = crate::platform::FileLock::held(guard);
+    // The removal's Git inherits this lock (`git_holding`), so it is released
+    // by closing, never by an explicit unlock: an unlock would free it for a
+    // Git that outlived this process, and a review could then resolve the
+    // record before Git deregisters the worktree.
+    let lock = guard;
     // One lock order: repository, then session writer. No lifecycle caller holds
     // the writer lock while entering cleanup. A new binding cannot race removal.
     let _state_lock = storage::writer_until(
@@ -2255,10 +2250,11 @@ fn remove(args: &[String], attempted: &mut bool, observed: &mut Option<Value>) -
     }
     command.extend(["--", &spelling]);
     *attempted = true;
-    let removed = git(
+    let removed = git_holding(
         &common,
         &command,
         Instant::now() + Duration::from_secs(if automatic { 3 } else { 300 }),
+        Some(&lock),
     );
     let _ = fs::remove_file(&cache);
     let settled = settle(&common, &path);

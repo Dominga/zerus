@@ -1302,10 +1302,14 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn test_image_refuses_before_service_activation() {
-        crate::self_exec::private_probe(
-            "state::voice::tests::test_image_refuses_before_service_activation",
-            || assert_eq!(ensure_worker().unwrap_err(), crate::self_exec::TEST_IMAGE),
-        );
+        crate::self_exec::private_probe("state::voice::tests::service_activation_probe");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "run by test_image_refuses_before_service_activation"]
+    fn service_activation_probe() {
+        crate::self_exec::probe_child("state::voice::tests::service_activation_probe");
+        assert_eq!(ensure_worker().unwrap_err(), crate::self_exec::TEST_IMAGE);
     }
     const ID: &str = "11111111-1111-4111-8111-111111111111";
     #[test]

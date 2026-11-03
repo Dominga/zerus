@@ -1164,10 +1164,14 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn test_image_refuses_before_service_activation() {
-        crate::self_exec::private_probe(
-            "state::recovery::tests::test_image_refuses_before_service_activation",
-            || assert_eq!(ensure_worker().unwrap_err(), crate::self_exec::TEST_IMAGE),
-        );
+        crate::self_exec::private_probe("state::recovery::tests::service_activation_probe");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "run by test_image_refuses_before_service_activation"]
+    fn service_activation_probe() {
+        crate::self_exec::probe_child("state::recovery::tests::service_activation_probe");
+        assert_eq!(ensure_worker().unwrap_err(), crate::self_exec::TEST_IMAGE);
     }
     fn codex_copy(snapshot: &mut Value) {
         let original = failure_id(snapshot);

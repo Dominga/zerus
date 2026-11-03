@@ -112,10 +112,11 @@ pub fn status(config: &Config) -> Status {
 }
 
 /// Reports the worker and restarts a stale one. Best effort: it never fails
-/// the calling command.
+/// the calling command. A unit-test image only reports: it never activates the
+/// service manager or records an attempt.
 pub fn supervise(config: &Config) -> Status {
     let status = status(config);
-    if status.running && !status.current {
+    if status.running && !status.current && crate::self_exec::ensure().is_ok() {
         let default = std::env::var_os("HGS_CONFIG_DIR").is_none();
         restart(&config.dir.join("swarm"), default, now(), || {
             if let Some((program, args)) = command() {
@@ -379,6 +380,46 @@ mod tests {
         fs2::FileExt::unlock(&lock).unwrap();
         assert!(!status(&config).running);
         fs2::FileExt::try_lock_exclusive(&lock).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_image_reports_a_stale_worker_without_restarting_it() {
+        crate::self_exec::private_probe("swarm::service::tests::stale_worker_restart_probe");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "run by test_image_reports_a_stale_worker_without_restarting_it"]
+    fn stale_worker_restart_probe() {
+        crate::self_exec::probe_child("swarm::service::tests::stale_worker_restart_probe");
+        // The private default directory: restarts are reachable but for the guard.
+        assert!(std::env::var_os("HGS_CONFIG_DIR").is_none());
+        let home = std::env::var("HOME").unwrap();
+        let config = Config {
+            home: home.clone(),
+            dir: crate::config::config_dir(&home),
+            state: PathBuf::from(&home).join("state"),
+            selves: vec![],
+            peers: vec![],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: BTreeMap::new(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        let swarm = config.dir.join("swarm");
+        fs::create_dir_all(&swarm).unwrap();
+        let lock = File::create(swarm.join(LOCK)).unwrap();
+        fs2::FileExt::try_lock_exclusive(&lock).unwrap();
+        let stale = Status {
+            running: true,
+            current: false,
+        };
+        assert_eq!(supervise(&config), stale);
+        assert!(
+            !swarm.join(RESTART).exists(),
+            "no restart attempt is recorded"
+        );
     }
 
     #[test]

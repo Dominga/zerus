@@ -988,6 +988,125 @@ mod tests {
             }
         }
         #[test]
+        fn frontend_probe_is_absent_only_without_a_pipe_and_live_only_on_a_matching_hello() {
+            use desktop::Observation;
+            // This test process owns the claimed pipes, so its image is expected.
+            let own = desktop::windows::image::PinnedImage::open(&std::env::current_exe().unwrap())
+                .unwrap();
+            let probe_as =
+                |name: &str, configuration: &str, image: &desktop::windows::image::PinnedImage| {
+                    desktop::windows::probe_at(
+                        name,
+                        &uuid::Uuid::new_v4().to_string(),
+                        configuration,
+                        Instant::now() + Duration::from_secs(2),
+                        image,
+                    )
+                };
+            let probe = |name: &str, configuration: &str| probe_as(name, configuration, &own);
+            let configuration = "a".repeat(64);
+            let name = format!("zerus-frontend-probe-{}", uuid::Uuid::new_v4());
+            assert_eq!(probe(&name, &configuration), Observation::Absent);
+            let root = Folder::new();
+            let responder = responder();
+            let reply: Reply = Arc::new(move |_, line| responder.reply(line));
+            let Claim::Claimed(claimed) =
+                claim_with_reply_at(&name, root.path(), Activation::Show, Some(reply))
+            else {
+                panic!("private claim")
+            };
+            assert!(matches!(
+                probe(&name, &configuration),
+                Observation::LiveNext { .. }
+            ));
+            // Another service configuration is a live peer, never absence.
+            assert_eq!(
+                probe(&name, &"b".repeat(64)),
+                Observation::LiveLegacyOrUnknown
+            );
+            // A server that is not the expected image is refused: never live or absent.
+            let other_path = root.path().join("other-image.exe");
+            std::fs::copy(std::env::current_exe().unwrap(), &other_path).unwrap();
+            let other = desktop::windows::image::PinnedImage::open(&other_path).unwrap();
+            assert_eq!(
+                probe_as(&name, &configuration, &other),
+                Observation::Unknown
+            );
+            assert!(claimed.activations.try_recv().is_err());
+            drop(claimed);
+            // A Qt-style owner that never answers the hello is not absent either.
+            let silent_root = Folder::new();
+            let silent = format!("zerus-frontend-silent-{}", uuid::Uuid::new_v4());
+            let Claim::Claimed(quiet) =
+                claim_with_reply_at(&silent, silent_root.path(), Activation::Show, None)
+            else {
+                panic!("silent claim")
+            };
+            assert_eq!(
+                probe(&silent, &configuration),
+                Observation::LiveLegacyOrUnknown
+            );
+            assert!(quiet.activations.try_recv().is_err());
+            drop(quiet);
+            // A pipe that refuses this user, and one held by another client,
+            // are neither absent nor live.
+            let denied = format!("zerus-frontend-denied-{}", uuid::Uuid::new_v4());
+            let sddl = wide(&format!("D:P(D;;GA;;;{})", own_sid().unwrap()));
+            let mut descriptor = std::ptr::null_mut();
+            assert_ne!(
+                unsafe {
+                    windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                        sddl.as_ptr(),
+                        windows_sys::Win32::Security::Authorization::SDDL_REVISION_1,
+                        &mut descriptor,
+                        std::ptr::null_mut(),
+                    )
+                },
+                0
+            );
+            let attributes = windows_sys::Win32::Security::SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<windows_sys::Win32::Security::SECURITY_ATTRIBUTES>()
+                    as u32,
+                lpSecurityDescriptor: descriptor,
+                bInheritHandle: 0,
+            };
+            let refusing = owned(unsafe {
+                CreateNamedPipeW(
+                    wide(&format!(r"\\.\pipe\{denied}")).as_ptr(),
+                    PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                    PIPE_TYPE_BYTE | PIPE_NOWAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                    1,
+                    64,
+                    64,
+                    0,
+                    &attributes,
+                )
+            })
+            .unwrap();
+            unsafe { windows_sys::Win32::Foundation::LocalFree(descriptor) };
+            unsafe { ConnectNamedPipe(refusing.as_raw_handle(), std::ptr::null_mut()) };
+            assert_eq!(probe(&denied, &configuration), Observation::Unknown);
+            drop(refusing);
+            let busy = format!("zerus-frontend-busy-{}", uuid::Uuid::new_v4());
+            let held = create_pipe(&busy, &Security::user_only().unwrap()).unwrap();
+            unsafe { ConnectNamedPipe(held.as_raw_handle(), std::ptr::null_mut()) };
+            let occupant = owned(unsafe {
+                CreateFileW(
+                    wide(&format!(r"\\.\pipe\{busy}")).as_ptr(),
+                    FILE_WRITE_DATA,
+                    0,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    0,
+                    std::ptr::null_mut(),
+                )
+            })
+            .unwrap();
+            assert_eq!(probe(&busy, &configuration), Observation::Unknown);
+            drop(occupant);
+            drop(held);
+        }
+        #[test]
         fn remote_names_and_unknown_attempts_fail_without_activation() {
             let root = Folder::new();
             let name = format!("zerus-unknown-request-{}", uuid::Uuid::new_v4());

@@ -95,16 +95,21 @@ pub struct Claimed {
 pub enum Claim {
     Claimed(Claimed),
     Forwarded,
+    Duplicate(&'static str),
     Failed(String),
 }
 pub struct InstanceState(pub Mutex<Option<Listening>>);
 impl InstanceState {
     pub fn release(&self) {
         if let Some(mut listening) = self.0.lock().unwrap_or_else(PoisonError::into_inner).take() {
+            let canonical = listening._canonical.is_some();
             // Final GUI teardown can precede actual process exit. Keep the
             // canonical kernel handle until the OS closes it at exit.
             std::mem::forget(listening._canonical.take());
             drop(listening);
+            if canonical {
+                crate::startup_log::record("quitting", "listeners_closed_owner_retained", None);
+            }
         }
     }
 }
@@ -369,7 +374,11 @@ pub fn claim(
     let canonical = if name == "hgs-tray" {
         let sid = match own_sid() {
             Ok(sid) => sid,
-            Err(error) => return Claim::Failed(error.to_string()),
+            Err(error) => {
+                let failed = Claim::Failed(error.to_string());
+                crate::startup_log::guard(&failed);
+                return failed;
+            }
         };
         Some(Canonical::name(&sid))
     } else {
@@ -385,16 +394,22 @@ fn claim_in(
     canonical: Option<String>,
     admitted: impl FnOnce(),
 ) -> Claim {
+    let result = claim_inner(name, activation, reply, canonical, admitted);
+    crate::startup_log::guard(&result);
+    result
+}
+fn claim_inner(
+    name: &str,
+    activation: Activation,
+    reply: Option<Reply>,
+    canonical: Option<String>,
+    admitted: impl FnOnce(),
+) -> Claim {
     let canonical = if let Some(pipe) = canonical {
-        match Canonical::acquire(pipe.clone()) {
-            Ok(Some(guard)) => Some(guard),
-            Ok(None) => {
-                let deadline = Instant::now() + Duration::from_secs(2);
-                while !forward(&pipe, activation) && Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                return Claim::Forwarded;
-            }
+        match canonical_claim_observed(pipe, activation, || {}) {
+            Ok(CanonicalClaim::Owner(guard)) => Some(guard),
+            Ok(CanonicalClaim::Forwarded) => return Claim::Forwarded,
+            Ok(CanonicalClaim::Busy) => return Claim::Duplicate("canonical_owner_unresponsive"),
             Err(error) => return Claim::Failed(error.to_string()),
         }
     } else {
@@ -410,6 +425,32 @@ fn claim_in(
         .unwrap_or_else(|| home.join("AppData/Local"))
         .join("hgdev/hgs-tray");
     claim_guarded(&name, &directory, activation, reply, canonical, admitted)
+}
+
+enum CanonicalClaim {
+    Owner(Canonical),
+    Forwarded,
+    Busy,
+}
+fn canonical_claim_observed(
+    pipe: String,
+    activation: Activation,
+    mut busy: impl FnMut(),
+) -> io::Result<CanonicalClaim> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(guard) = Canonical::acquire(pipe.clone())? {
+            return Ok(CanonicalClaim::Owner(guard));
+        }
+        busy();
+        if forward(&pipe, activation) {
+            return Ok(CanonicalClaim::Forwarded);
+        }
+        if Instant::now() >= deadline {
+            return Ok(CanonicalClaim::Busy);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 #[cfg(test)]
 fn claim_at(name: &str, directory: &Path, activation: Activation) -> Claim {
@@ -449,8 +490,11 @@ fn claim_guarded(
     {
         Ok(lock) => lock,
         Err(e) if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) => {
-            let _ = forward(name, activation);
-            return Claim::Forwarded;
+            return if forward(name, activation) {
+                Claim::Forwarded
+            } else {
+                Claim::Duplicate("profile_owner_unresponsive")
+            };
         }
         Err(e) => return Claim::Failed(e.to_string()),
     };
@@ -606,17 +650,41 @@ mod tests {
             assert!(bytes.len() <= 4096);
             let control: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             let mode = control["case"].as_str().unwrap().to_owned();
-            if mode == "mode_check" {
+            if matches!(mode.as_str(), "mode_check" | "mode_switch" | "mode_cancel") {
                 report_chain(std::process::id());
-                let invocation = zerus_client_core::Invocation {
-                    args: vec![
+                let mut args = vec![
+                    "desktop".into(),
+                    "registration".into(),
+                    "mode-check".into(),
+                    "--json".into(),
+                ];
+                if mode == "mode_switch" {
+                    let desired = control["desired"].as_str().unwrap();
+                    assert!(matches!(desired, "background" | "passive"));
+                    args = vec![
                         "desktop".into(),
                         "registration".into(),
-                        "mode-check".into(),
+                        "install".into(),
+                        "--mode".into(),
+                        desired.into(),
                         "--json".into(),
-                    ],
+                    ];
+                } else if mode == "mode_cancel" {
+                    let id = control["request_id"].as_str().unwrap();
+                    assert!(uuid::Uuid::parse_str(id).is_ok());
+                    args = vec![
+                        "desktop".into(),
+                        "registration".into(),
+                        "cancel-rollback".into(),
+                        "--json".into(),
+                        "--request-id".into(),
+                        id.into(),
+                    ];
+                }
+                let invocation = zerus_client_core::Invocation {
+                    args,
                     stdin: None,
-                    timeout: Duration::from_secs(8),
+                    timeout: Duration::from_secs(if mode == "mode_check" { 8 } else { 30 }),
                     request_id: None,
                 };
                 let environment: Vec<_> = std::env::vars()
@@ -686,9 +754,24 @@ mod tests {
             } else {
                 configuration.into()
             }));
-            let request = Request::AutomaticApprovals {
-                request_id: control["request_id"].as_str().unwrap().into(),
-                enabled: mode == "enable",
+            let request = if matches!(mode.as_str(), "ownership_grant" | "ownership_rearm") {
+                use zerus_client_core::desktop::ownership::{Action, Mode};
+                assert!(responder.configure_ownership_mode_once(Mode::Service));
+                Request::DesktopOwnership {
+                    request_id: control["request_id"].as_str().unwrap().into(),
+                    action: if mode == "ownership_grant" {
+                        Action::Grant
+                    } else {
+                        Action::Rearm
+                    },
+                    journal: Some(control["journal"].as_str().unwrap().into()),
+                    revision: control["revision"].as_u64().unwrap(),
+                }
+            } else {
+                Request::AutomaticApprovals {
+                    request_id: control["request_id"].as_str().unwrap().into(),
+                    enabled: mode == "enable",
+                }
             };
             let registration = responder
                 .prepare_ui_request(uuid::Uuid::new_v4().to_string(), request)

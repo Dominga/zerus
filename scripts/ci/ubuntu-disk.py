@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""Report hosted Ubuntu disk use and reclaim only fixed unused toolchains."""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+
+
+# These jobs do not use Android, .NET, Haskell or CodeQL. Never prune Docker here:
+# the relay's PostgreSQL service is already running when checkout starts.
+UNUSED_TOOLS = (
+    "/usr/local/lib/android",
+    "/usr/share/dotnet",
+    "/opt/ghc",
+    "/opt/hostedtoolcache/CodeQL",
+)
+RELAY_TARGETS = ("target", "services/mobile/relay/target", "services/mobile/crypto/target")
+REPORT_JOBS = ("quick", "relay", "client-native-linux")
+CLEANUP_JOBS = ("quick", "relay", "client-native-linux")
+NATIVE_MIN_FREE_BYTES = 24 * 1024**3
+
+
+def hosted_workspace():
+    required = {
+        "GITHUB_ACTIONS": "true",
+        "RUNNER_ENVIRONMENT": "github-hosted",
+        "RUNNER_OS": "Linux",
+    }
+    if any(os.environ.get(key) != value for key, value in required.items()):
+        raise ValueError("disk diagnostics are restricted to disposable hosted Linux jobs")
+    if os.environ.get("GITHUB_JOB") not in REPORT_JOBS:
+        raise ValueError("unexpected hosted job for disk diagnostics")
+    workspace = Path(os.environ["GITHUB_WORKSPACE"])
+    if not workspace.is_absolute() or workspace.resolve() != Path.cwd().resolve():
+        raise ValueError("run from the original checked-out workspace")
+    return workspace.resolve()
+
+
+def report(workspace, phase):
+    usage = shutil.disk_usage(workspace)
+    print(json.dumps({"phase": phase, "disk_bytes": {
+        "total": usage.total, "used": usage.used, "free": usage.free,
+    }}), flush=True)
+    native = os.environ.get("GITHUB_JOB") == "client-native-linux"
+    targets = ("target/client-native",) if native else RELAY_TARGETS
+    paths = [workspace / path for path in targets]
+    paths.append(Path.home() / ".cargo/registry")
+    if native:
+        paths.append(Path.home() / ".cargo/git")
+    existing = [str(path) for path in paths if path.exists()]
+    if existing:
+        try:
+            measured = subprocess.run(
+                ["du", "-sh", "--", *existing], capture_output=True, text=True, timeout=15,
+            )
+            print(measured.stdout[:8192], end="", flush=True)
+            if measured.returncode:
+                print("directory sizes unavailable: " + measured.stderr[:1024], flush=True)
+        except subprocess.TimeoutExpired:
+            print("directory size measurement exceeded 15 seconds", flush=True)
+
+
+def prepare(workspace):
+    if os.environ.get("GITHUB_JOB") not in CLEANUP_JOBS:
+        raise ValueError("unexpected hosted job for unused-tool cleanup")
+    report(workspace, "before-unused-tools")
+    subprocess.run(["sudo", "rm", "-rf", "--one-file-system", "--", *UNUSED_TOOLS], check=True)
+    report(workspace, "after-unused-tools")
+    if os.environ.get("GITHUB_JOB") == "client-native-linux":
+        # Measure again after cleanup and diagnostics, before dependencies or
+        # compilation. A healthy run (41624988657) used 17.7 GiB from checkout
+        # to the end of its checks; the core test links alone took 8.7 GiB.
+        # Reserve the rest for parallel link temporaries and growth, without
+        # changing build/test coverage. Fail clearly instead of in the linker.
+        actual = shutil.disk_usage(workspace).free
+        admitted = actual >= NATIVE_MIN_FREE_BYTES
+        print(json.dumps({"phase": "native-space-admission", "required_free_bytes": NATIVE_MIN_FREE_BYTES,
+                          "actual_free_bytes": actual, "admitted": admitted}), flush=True)
+        if not admitted:
+            message = (
+                f"native Linux disk admission failed: required_free_bytes={NATIVE_MIN_FREE_BYTES} "
+                f"({NATIVE_MIN_FREE_BYTES / 1024**3:.1f} GiB), actual_free_bytes={actual} "
+                f"({actual / 1024**3:.1f} GiB) after unused-tool cleanup; refusing dependencies and compilation"
+            )
+            print(f"::error title=Native Linux disk admission::{message}", flush=True)
+            raise SystemExit(message)
+
+
+def relay_before_image(workspace):
+    if os.environ.get("GITHUB_JOB") != "relay":
+        raise ValueError("only relay may retire its completed host builds")
+    report(workspace, "before-retiring-host-builds")
+    # HTTP/connector contracts have finished. The remaining memory-envelope
+    # tests use the newly built Docker image, not any host Cargo executable.
+    for relative in RELAY_TARGETS:
+        target = workspace / relative
+        if target.is_symlink() or target.resolve() != target:
+            raise ValueError("changed Cargo target path: " + relative)
+        if target.exists():
+            shutil.rmtree(target)
+    report(workspace, "before-deployment-image")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("operation", choices=("prepare", "report", "relay-before-image"))
+    parser.add_argument("phase", nargs="?", default="checkpoint")
+    args = parser.parse_args()
+    workspace = hosted_workspace()
+    if args.operation == "prepare":
+        prepare(workspace)
+    elif args.operation == "relay-before-image":
+        relay_before_image(workspace)
+    else:
+        report(workspace, args.phase)
+
+
+if __name__ == "__main__":
+    main()

@@ -111,9 +111,9 @@ pub(super) fn prepare_removal(common: &Path, row: &Value) -> Result<()> {
             return Ok(());
         }
         record["worktree_cleanup"] = json!({"owner":ownership,"head":row["head"],"branch":row["branch"],"status":"removal_pending"});
-        atomic(
+        atomic_record(
             &archive::path(string(&record, "archive_id"))?,
-            &format!("{record}\n"),
+            &mut record,
         )?;
         Ok(())
     })

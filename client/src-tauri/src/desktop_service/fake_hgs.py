@@ -22,7 +22,7 @@ projection = 'a' * 32
 abi = 'desktop-catalog-changes-v1'
 args = sys.argv[1:]
 watch_seq, watch_status = 0, None
-value = json.loads(sys.stdin.readline()) if args[:2] in [['desktop', 'request'], ['desktop', 'frontend-request']] else {}
+value = json.loads(sys.stdin.readline()) if args[:2] in [['desktop', 'request'], ['desktop', 'frontend-request']] or args[:1] == ['notifications'] else {}
 
 
 def wait(path):
@@ -54,6 +54,7 @@ def counter(name):
 
 def status():
     if config.get('produced_status') is not None:
+        (root / 'produced-status-read').touch()
         return config['produced_status']
     online = not config.get('offline', False)
     catalog_online = online and not config.get('coverage_offline', False)
@@ -76,6 +77,8 @@ def status():
                 'status': 'live' if online else 'reconnecting', 'accepting': online}]
     if config.get('peer_failure'):
         sources.append(dict(sources[0], computer='broken', incarnation=2))
+    if config.get('project_peer'):
+        sources.append(dict(sources[0], computer='studio', incarnation=2))
     return {'abi': 'desktop-v1', 'configuration': 'a' * 64, 'epoch': epoch, 'generation': 1, 'host': 'caption-only',
             'lifecycle': {'abi': 'desktop-lifecycle-v1', 'phase': 'serving', 'ipc_ready': True,
                           'configuration': 'a' * 64, 'epoch': epoch, 'generation': 1, 'background': background},
@@ -132,10 +135,16 @@ def detail_follow():
                        'cursor': 0, 'items': [{'id': 'task'}],
                        'value': {'project': {'id': key}, 'damaged': [], 'digest': 'task-digest'}})
     elif topic == 'organization':
+        organization = config.get('organization', {'projects': []})
+        projects = organization.get('projects', [])
         full = {'node_id': native_hello()['machine_id'], 'swarm_id': 'swarm', 'digest': 'org-digest',
-                'organization': {'projects': []}}
+                'initialized': True, 'organization': dict(organization, projects=[p['id'] for p in projects])}
+        items = [{'key': 'organization', 'row': full}]
+        for project in projects:
+            items.append({'key': 'project:' + project['id'], 'row': dict(project, session_chunks=1)})
+            items.append({'key': 'members:' + project['id'] + ':0', 'row': {'sessions': project.get('sessions', [])}})
         bodies.append({'t': 'snapshot', 'topic': topic, 'page': 0, 'last': True, 'cursor': 0,
-                       'items': [{'key': 'organization', 'row': full}]})
+                       'items': items})
     if config.get('native_gap') and topic == 'activity':
         bodies.extend([{'t': 'gap', 'topic': topic, 'key': key, 'reason': 'overflow'},
                        {'t': 'snapshot', 'topic': topic, 'key': key, 'page': 0, 'last': True,
@@ -165,17 +174,26 @@ def frame(seq, kind, body):
     print(json.dumps({'abi': 'desktop-v1', 'epoch': epoch, 'seq': seq, 't': kind, 'value': body}), flush=True)
 
 
-def hint(seq, revision, selected=projection, computer=''):
+def hint(seq, revision, selected=projection, computer='', staging=False, online=True):
+    settled = online and not staging
     frame(seq, 'catalog_changed', {'computer': computer, 'incarnation': 2 if computer else 1, 'generation': 1,
-          'projection': selected, 'revision': revision, 'online': True, 'last_known': False,
-          'complete': True, 'reset_required': False, 'changes_abi': abi, 'attention_counts': status()['attention_counts']})
+          'projection': selected, 'revision': revision, 'online': online, 'last_known': not settled,
+          'complete': settled, 'reset_required': not settled, 'changes_abi': abi, 'attention_counts': status()['attention_counts']})
     if config.get('replace_projection') and selected == 'b' * 32 and (config.get('projection_publication_gate') or os.environ.get('ZERUS_TEST_SERVICE_PROJECTION_PUBLICATION_GATE') == '1'):
         # Hold this exact publication boundary until the next page selects state.
         wait(root / 'replacement-page-selected')
 
 
 def row(key):
+    if config.get('notification_fixture'):
+        key = (root / 'notification-key').read_text() if (root / 'notification-key').exists() else key
+        return {'key': key, 'row': json.loads((root / 'notification-row').read_text())}
     return {'key': key, 'row': {'name': 'codex/example/' + key, 'agent': 'codex', 'state': 'running', 'status': 'ready'}}
+
+
+def resumed(key, run, state, conversation='conversation'):
+    return {'key': key, 'row': {'name': 'codex/example/review', 'agent': 'codex', 'state': state, 'status': 'ready',
+                                'run_id': run, 'conversation_id': conversation}}
 
 
 def change(key, revision, remove=False):
@@ -235,6 +253,8 @@ def desktop_request():
               'changes_abi': abi, 'epoch': epoch, 'computer': value.get('computer', ''), 'incarnation': 1,
               'generation': 1, 'projection': projection, 'display_only': True, 'authority': False,
               'complete': True, 'online': True, 'last_known': False, 'stale': False, 'next_cursor': None}
+    if config.get('project_peer') and value.get('computer') == 'studio':
+        common['incarnation'] = 2
     if config.get('peer_failure') and value.get('computer') == 'broken':
         common['incarnation'] = 2
         if (root / 'peer-scope-recovered').exists():
@@ -253,6 +273,18 @@ def desktop_request():
         print(json.dumps({'request_id': request_id, 'accepted': True, 'durable': False,
                           'lease': value['lease'], 'id': value['id'], 'state': 'unfollowed'}))
     elif op == 'detail_source':
+        if config.get('source_held') and not (root / 'source-identity-ready').exists():
+            print(json.dumps({'request_id': request_id, 'accepted': False, 'code': 'source_pending'}))
+            return
+        if config.get('source_warming') and counter('source-' + epoch + '-' + value['part']) == 1:
+            failure = config.get('source_failure', 'offline')
+            if failure == 'transport':
+                raise SystemExit('private metadata read interrupted')
+            print(json.dumps({'request_id': request_id, 'accepted': failure != 'refused', 'durable': False,
+                'lease': value['lease'], 'computer': value['computer'], 'generation': value['generation'],
+                'part': value['part'], 'native': failure != 'native', 'online': failure != 'offline',
+                'complete': False, 'value': None if failure == 'null' else native_hello()}))
+            return
         metadata = native_hello() if value['part'] == 'hello' else {'host': 'metadata-caption', 'ok': True,
                     'machine_id': '00000000-0000-4000-8000-000000000099', 'peers': [],
                     'metrics': {'platform': 'linux'}}
@@ -288,11 +320,41 @@ def desktop_request():
                         next_cursor=str(uuid.UUID(int=number + 100)) if offset + 128 < count else None)
         if config.get('replace_projection') and number == 2 and (config.get('projection_publication_gate') or os.environ.get('ZERUS_TEST_SERVICE_PROJECTION_PUBLICATION_GATE') == '1'):
             (root / 'replacement-page-selected').touch()
+        if config.get('offline_hint') and (root / 'release-offline').exists():
+            # The source went offline: only its retained rows, last known.
+            page.update(online=False, last_known=True, complete=False, start_revision=None)
+            (root / 'offline-page').touch()
+        if config.get('online_resync') and (root / 'resynced').exists():
+            page.update(projection='b' * 32, items=[row('replacement')])
+        elif config.get('online_resync') and number > 1:
+            # The source restages a snapshot while online: until it completes,
+            # the real service serves the retained view as last known.
+            page.update(start_revision='1', revision='1', last_known=True, complete=False)
+            (root / 'staging-page').touch()
+        if config.get('resume_delta'):
+            page.update(items=[resumed('run:0-old', 'old', 'paused'), row('run:9-ended')])
+        if config.get('paged_fresh'):
+            page.update(items=[resumed('run:0-old', 'old', 'paused')])
         print(json.dumps(page))
     elif op == 'catalog_changes':
         number = counter('delta-number')
+        if config.get('online_resync') and value['projection'] == projection and value['since_revision'] == '1':
+            # The real service refuses changes until a staged snapshot completes.
+            (root / 'changes-while-staging').touch()
+            print(json.dumps({'request_id': request_id, 'accepted': False, 'durable': False,
+                              'code': 'catalog_changes_reset', 'reset_required': True}))
+            return
         page = dict(common, projection=value['projection'], since_revision=value['since_revision'],
                     through_revision=value['since_revision'], revision=value['since_revision'], items=[])
+        if config.get('notification_fixture'):
+            revision = (root / 'notification-version').read_text() if (root / 'notification-version').exists() else '0'
+            page.update(through_revision=revision, revision=revision)
+            if int(revision) > int(value['since_revision']):
+                item = row('row')
+                page['items'] = [dict(op='upsert', key=item['key'], revision=revision, row=item['row'])]
+                if (root / 'notification-removed').exists():
+                    page['items'].append(dict(op='remove', key=(root / 'notification-removed').read_text(), revision=revision, row=None))
+                page['items'].sort(key=lambda item: item['key'])
         if config.get('peer_failure'):
             if value['computer'] == 'broken':
                 if not any((root / path).exists() for path in ['peer-recovered', 'peer-scope-recovered']):
@@ -338,11 +400,34 @@ def desktop_request():
                 wait(root / 'release-old-page')
         elif config.get('replace_projection') == 'exhausted' and number == 2:
             page.update(through_revision='1', revision='1')
+        if (config.get('online_resync') or config.get('offline_hint')) and number == 1:
+            (root / 'initial-complete').touch()
         if config.get('large'):
             if number == 1:
                 (root / 'initial-complete').touch()
             else:
                 page.update(through_revision='3', revision='3', items=[change('row-0', '1'), change('row-1', '2', True), change('new', '3')])
+        if config.get('resume_delta'):
+            # One native frame: the resumed run replaces its stopped run and an
+            # unrelated session ends. Its revision spans two change pages, and
+            # the replaced key sorts before its successor.
+            if number == 1:
+                (root / 'initial-complete').touch()
+            elif number == 2:
+                page.update(through_revision='1', revision='1', next_cursor=cursor, items=[change('run:0-old', '1', True)])
+            elif number == 3:
+                successor = dict(change('run:1-new', '1'), row=resumed('run:1-new', 'new', 'running')['row'])
+                page.update(through_revision='1', revision='1', items=[successor, change('run:9-ended', '1', True)])
+        if config.get('paged_fresh'):
+            # A Start fresh whose native delta paged its removal (with the
+            # journaled native reason) and its new-conversation successor
+            # into separate frames, hence separate revisions.
+            if number == 1:
+                (root / 'initial-complete').touch()
+            elif number == 2:
+                successor = dict(change('run:1-new', '2'), row=resumed('run:1-new', 'new', 'running', 'fresh')['row'])
+                page.update(through_revision='2', revision='2',
+                            items=[dict(change('run:0-old', '1', True), reason='replaced'), successor])
         print(json.dumps(page))
     elif op == 'read_intent':
         path = root / 'read-seen'
@@ -371,6 +456,8 @@ def desktop_request():
 
 
 if args == ['--help']:
+    if config.get('notification_fixture'):
+        print('session-notifications-v1')
     print('Desktop cache maintenance ABI: desktop-cache-maintenance-v1')
     if config.get('audit_help_hold') and counter('audit-help-number') > 1:
         (root / 'audit-help-held').touch()
@@ -388,6 +475,18 @@ if args == ['--help']:
         print('Desktop maintenance ABI: desktop-maintenance-v1')
     if config.get('audit_abi', True):
         print('Desktop approval audit ABI: desktop-approval-audit-v1')
+elif args[:1] == ['notifications'] and config.get('notification_fixture'):
+    if config.get('notification_hold'):
+        (root / 'notification-held').touch()
+        wait(root / 'notification-release')
+    assert set(value) == {'run_id', 'conversation_id', 'muted', 'expected_revision'}
+    preferences = dict(conversation_id=value['conversation_id'], muted=value['muted'],
+                       revision=value['expected_revision'] + 1, suppressed=config['notification_suppressed'])
+    answer = dict(ok=True, applied=True, run_id=value['run_id'],
+                  conversation_id=value['conversation_id'], preferences=preferences)
+    if config.get('notification_bad_receipt'):
+        answer['run_id'] = 'another-run'
+    print(json.dumps(answer))
 elif args == ['desktop', 'frontend-request', '--json']:
     request = value['request']
     assert value['abi'] == 'desktop-ui-request-v1'
@@ -509,6 +608,10 @@ elif args == ['desktop', 'frontend-request', '--json']:
 elif args == ['desktop', 'status', '--json']:
     print(json.dumps(status()))
 elif args == ['desktop', 'watch', '--json']:
+    cycle = counter('watch-cycle') if config.get('restart_watch') else 0
+    if cycle > 1:
+        (root / 'second-watch-held').touch()
+        wait(root / 'release-second-watch')
     initial = status()
     if config.get('details'):
         initial['details'] = {'abi': 'desktop-details-v1', 'epoch': epoch,
@@ -585,6 +688,24 @@ elif args == ['desktop', 'watch', '--json']:
     if config.get('large'):
         wait(root / 'initial-complete')
         hint(1, '3')
+    if config.get('offline_hint'):
+        wait(root / 'initial-complete')
+        wait(root / 'release-offline')
+        hint(1, '0', online=False)
+    if config.get('online_resync'):
+        wait(root / 'initial-complete')
+        wait(root / 'release-staging')
+        hint(1, '1', staging=True)
+        wait(root / 'staging-page')
+        wait(root / 'release-resync')
+        (root / 'resynced').touch()
+        hint(2, '0', 'b' * 32)
+    if config.get('resume_delta'):
+        wait(root / 'initial-complete')
+        hint(1, '1')
+    if config.get('paged_fresh'):
+        wait(root / 'initial-complete')
+        hint(1, '2')
     if config.get('peer_failure'):
         wait(root / 'peer-hints')
         hint(1, '1')
@@ -601,6 +722,8 @@ elif args == ['desktop', 'watch', '--json']:
     seq, seen = max(100, watch_seq), set()
     heartbeat = time.monotonic() + 1
     while not select.select([sys.stdin], [], [], .005 if config.get('details') else .1)[0]:
+        if cycle == 1 and (root / 'restart-watch').exists():
+            raise SystemExit(0)
         if config.get('details'):
             for path in sorted(root.glob('pending-*')):
                 if path.suffix == '.tmp' or path.name in seen:
@@ -664,6 +787,15 @@ elif args == ['desktop', 'catalog-relay', '--json']:
             desktop_request()
         response = json.loads(captured.getvalue())
         print(json.dumps({'abi': 'desktop-catalog-relay-v1', 'request_id': str(uuid.uuid4()) if fault == 'identity' else value['request_id'], 'value': response}), flush=True)
+        pause = int(config.get('recovered_response_pause_ms', 0))
+        assert 0 <= pause <= 2000
+        if pause and value['op'] == 'catalog_page' and response.get('start_revision') == '5':
+            # The baseline reply is flushed, but the final catch-up request
+            # has not been consumed by this private relay yet.
+            (root / 'recovered-baseline-flushed').touch()
+            until = time.monotonic() + pause / 1000
+            while not (root / 'release-recovered-response').exists() and time.monotonic() < until:
+                time.sleep(.005)
     relay_event('stdin-eof')
     # Every reply was flushed above. This private proxy has no shutdown work;
     # don't put interpreter finalizers inside the real child's bounded join.

@@ -275,6 +275,8 @@ impl Index {
 
     /// All validation precedes the transaction. A caller retains its input
     /// cursor on any failure, including SQLITE_FULL, and can evict one batch.
+    /// A savepoint commits alone, or joins a caller's open step transaction;
+    /// a failure rolls back only this batch.
     pub fn ingest(&mut self, key: &str, messages: &[Message]) -> Result<usize> {
         ensure!(
             messages.len() <= BATCH_DOCUMENTS,
@@ -296,7 +298,7 @@ impl Index {
             );
             encoded.push((message, body, grams));
         }
-        let tx = self.db.transaction()?;
+        let tx = self.db.savepoint()?;
         let active: Option<bool> = tx
             .query_row("SELECT active FROM sources WHERE id=?", [key], |r| r.get(0))
             .optional()?;
@@ -356,8 +358,9 @@ impl Index {
 
     /// Eviction preserves the hard file cap and explicitly makes coverage
     /// incomplete. Freed pages are reused; the disposable file need not shrink.
-    pub fn evict(&self) -> Result<usize> {
-        let tx = self.db.unchecked_transaction()?;
+    /// Like ingestion, it is a savepoint that can join a caller's open step.
+    pub fn evict(&mut self) -> Result<usize> {
+        let tx = self.db.savepoint()?;
         tx.execute("UPDATE totals SET evicted=1 WHERE id=1", [])?;
         let deleted = tx.execute(
             "DELETE FROM messages WHERE id IN

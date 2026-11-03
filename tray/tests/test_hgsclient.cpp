@@ -2275,7 +2275,7 @@ print((root/'reply.json').read_text())
     const QList<QJsonObject> refused{
         {{"stdout","old help\n"},{"stderr",""},{"code",0}},
         {{"stdout","notifications (session-notifications-v1)\n"},{"stderr",""},{"code",0}},
-        {{"stdout"," session-notifications-v1\n"},{"stderr",""},{"code",0}},
+        {{"stdout","       session-notifications-v1 x\n"},{"stderr",""},{"code",0}},
         {{"stdout","session-notifications-v1-extra\n"},{"stderr",""},{"code",0}},
         {{"stdout",""},{"stderr","session-notifications-v1\n"},{"code",0}},
         {{"stdout","session-notifications-v1\n"},{"stderr",""},{"code",1}},
@@ -2289,7 +2289,7 @@ print((root/'reply.json').read_text())
     QFile calls(dir.filePath("invocations.jsonl"));QVERIFY(calls.open(QIODevice::ReadOnly));
     const auto rows=calls.readAll().trimmed().split('\n');calls.close();QCOMPARE(rows.size(),refused.size()+1);
     for(int i=1;i<rows.size();++i)QCOMPARE(QJsonDocument::fromJson(rows[i]).array(),QJsonArray{"--help"});
-    QVERIFY(write("help.json",{{"stdout","help\r\nsession-notifications-v1\r\n"},{"stderr",""},{"code",0}}));
+    QVERIFY(write("help.json",{{"stdout","help\r\n       session-notifications-v1\r\n"},{"stderr",""},{"code",0}})); // Indented like the CLI help.
     QVERIFY(write("reply.json",{{"ok",true},{"applied",true},{"run_id","run"},{"conversation_id","conversation"},
         {"preferences",notificationValue("conversation",true,1)}}));
     const int before=done.size();client.requestNotifications("peer","codex/project/session",payload);

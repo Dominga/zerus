@@ -54,6 +54,26 @@ pub(super) async fn catalog_loop(
                 .epoch
                 .clone()
                 .ok_or("service_unavailable")?;
+            if shared.park_until_source_identity(&computer, &source) {
+                shared
+                    .dirty
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .running = None;
+                row(
+                    &shared,
+                    &computer,
+                    &source,
+                    &epoch,
+                    &stop,
+                    Change::Computer {
+                        computer: ComputerId::from(computer.as_str()),
+                        status: ComputerStatus::Reconnecting { attempt: 0 },
+                    },
+                )
+                .await?;
+                continue;
+            }
             let result = walk(
                 &shared,
                 &computer,
@@ -146,6 +166,46 @@ fn insert_key(
 }
 
 impl Shared {
+    /// Park only this local baseline; hold neither a relay nor an RPC slot.
+    /// Hello application takes the same hub/dirty lock order and wakes it.
+    fn park_until_source_identity(&self, computer: &str, source: &SourceVersion) -> bool {
+        if !computer.is_empty()
+            || !self
+                .snapshot
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .details_available
+        {
+            return false;
+        }
+        let hub = self.details.lock().unwrap_or_else(PoisonError::into_inner);
+        if hub.local_identity_ready(source.generation) {
+            return false;
+        }
+        let mut dirty = self.dirty.lock().unwrap_or_else(PoisonError::into_inner);
+        if dirty
+            .sources
+            .get(computer)
+            .is_some_and(|current| current.serial == source.serial)
+        {
+            dirty.pending.remove(computer);
+            dirty.halted.insert(computer.into());
+        }
+        true
+    }
+    pub(super) fn catalog_identity_ready(&self, computer: &str, generation: u64) {
+        let mut dirty = self.dirty.lock().unwrap_or_else(PoisonError::into_inner);
+        if dirty
+            .sources
+            .get(computer)
+            .is_some_and(|source| source.generation == generation)
+            && !dirty.progress.contains_key(computer)
+        {
+            dirty.halted.remove(computer);
+            dirty.pending.insert(computer.into());
+            self.changed.notify_one();
+        }
+    }
     fn page_source(
         &self,
         computer: &str,
@@ -248,6 +308,72 @@ async fn row(
     .await
 }
 
+/// One journal revision: the changes of one native watch delta frame (the
+/// journal records one revision per frame), held until the revision ends,
+/// even across change pages, so it is bounded by that frame. Its upserts go
+/// first, so a view batch boundary never leaves selection on a removed run.
+/// A service that journals the native removal reason supplies it, including
+/// for a replacement paged into another frame (zerus-ic13). An older service
+/// omits it; each such removal then learns which names this frame lists
+/// again: the native watch's `replaced` (zerus-uutz). The walk's key
+/// bookkeeping keeps the journal's order.
+#[derive(Default)]
+struct Frame {
+    upserts: Vec<Change>,
+    removals: Vec<(String, Option<String>)>,
+    names: BTreeSet<String>,
+}
+/// The removal reasons `Change::Remove` keeps; another one is no reason.
+const REASONS: [&str; 4] = [
+    zerus_watch_protocol::reason::REPLACED,
+    zerus_watch_protocol::reason::ARCHIVED,
+    zerus_watch_protocol::reason::FORGOTTEN,
+    zerus_watch_protocol::reason::ENDED,
+];
+impl Frame {
+    async fn deliver(
+        &mut self,
+        shared: &Arc<Shared>,
+        computer: &str,
+        source: &SourceVersion,
+        epoch: &str,
+        stop: &Arc<AtomicBool>,
+    ) -> Result<(), &'static str> {
+        let listed = Arc::new(std::mem::take(&mut self.names));
+        for change in std::mem::take(&mut self.upserts) {
+            row(shared, computer, source, epoch, stop, change).await?;
+        }
+        for (key, reason) in std::mem::take(&mut self.removals) {
+            let value = match reason {
+                Some(reason) => CatalogValue::Row(Box::new(Change::Remove {
+                    computer: ComputerId::from(computer),
+                    key,
+                    reason: Some(reason),
+                })),
+                None => CatalogValue::Removal {
+                    key,
+                    listed: listed.clone(),
+                },
+            };
+            deliver(shared, computer, source, epoch, stop, value).await?;
+        }
+        Ok(())
+    }
+}
+
+fn project(
+    shared: &Shared,
+    computer: &str,
+    source: &SourceVersion,
+    value: &Value,
+) -> zerus_client_core::ViewRow {
+    shared
+        .details
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .project_row(&ComputerId::from(computer), source.generation, value)
+}
+
 async fn walk(
     shared: &Arc<Shared>,
     computer: &str,
@@ -259,13 +385,20 @@ async fn walk(
 ) -> Result<(), &'static str> {
     let mut cursor = None::<String>;
     let mut relay = catalog_relay::Relay::default();
+    // Rebuilding the view of a source that stays online (a native resnapshot)
+    // is no connection change: a Live computer keeps Live (zerus-bkbb).
+    let refresh = source.online && shared.pump.live(computer);
     let result = async {
-        if since.is_none() {
+        if since.is_none() && !refresh {
             row(shared, computer, &source, epoch, &stop, Change::Computer { computer: ComputerId::from(computer), status: ComputerStatus::Reconnecting { attempt: 0 } }).await?;
         }
         let mut keys = since.is_none().then(BTreeSet::new);
         let mut key_bytes = 0;
         let mut start = since;
+        // A last-known baseline (its source still stages a snapshot) has no
+        // change range yet: the service refuses one until that snapshot is
+        // complete, and its completion hint starts the next baseline.
+        let mut staging = false;
         if since.is_none() {
             let mut first = true;
             loop {
@@ -277,7 +410,7 @@ async fn walk(
                 if !shared.current(computer, &source, epoch) { return Ok(()); }
                 if first {
                     let Some(bound) = shared.page_source(computer, &source, &page) else { return Ok(()); };
-                    source = bound; start = page.start_revision; first = false;
+                    source = bound; start = page.start_revision; staging = page.last_known; first = false;
                 } else if page.identity != source.identity() || page.online != source.online || page.start_revision != start {
                     return Err("catalog_scope_changed");
                 }
@@ -287,14 +420,15 @@ async fn walk(
                     if keys.contains(&item.key) { return Err("catalog_duplicate"); }
                     insert_key(keys, &mut key_bytes, item.key.clone())?;
                     row(shared, computer, &source, epoch, &stop, Change::Upsert { computer: ComputerId::from(computer),
-                        key: item.key, row: zerus_client_core::view::row(&item.row) }).await?;
+                        key: item.key, row: project(shared, computer, &source, &item.row) }).await?;
                 }
                 if cursor.is_none() { break; }
             }
         }
-        let through = if let Some(start) = start {
+        let through = if let Some(start) = start.filter(|_| !staging) {
             let mut through = None;
             let mut previous: Option<service::ChangeItem> = None;
+            let mut frame = Frame::default();
             loop {
                 if stop.load(Ordering::Acquire) || !shared.current(computer, &source, epoch) { return Ok(()); }
                 let id = uuid::Uuid::new_v4().to_string();
@@ -314,19 +448,23 @@ async fn walk(
                         let order = (item.revision, &item.key).cmp(&(old.revision, &old.key));
                         if order.is_lt() || (order.is_eq() && old != &item) { return Err("catalog_changes_order"); }
                         if order.is_eq() { continue; }
+                        if old.revision != item.revision { frame.deliver(shared, computer, &source, epoch, &stop).await?; }
                     }
-                    let change = if let Some(value) = &item.row {
+                    if let Some(value) = &item.row {
                         if let Some(keys) = keys.as_mut() { insert_key(keys, &mut key_bytes, item.key.clone())?; }
-                        Change::Upsert { computer: ComputerId::from(computer), key: item.key.clone(), row: zerus_client_core::view::row(value) }
+                        let row = project(shared, computer, &source, value);
+                        frame.names.insert(row.name.clone());
+                        frame.upserts.push(Change::Upsert { computer: ComputerId::from(computer), key: item.key.clone(), row });
                     } else {
                         if let Some(keys) = keys.as_mut() { if keys.remove(&item.key) { key_bytes -= item.key.len(); } }
-                        Change::Remove { computer: ComputerId::from(computer), key: item.key.clone(), reason: None }
-                    };
+                        let reason = item.reason.clone().filter(|r| REASONS.contains(&r.as_str()));
+                        frame.removals.push((item.key.clone(), reason));
+                    }
                     previous = Some(item);
-                    row(shared, computer, &source, epoch, &stop, change).await?;
                 }
                 if cursor.is_none() { break; }
             }
+            frame.deliver(shared, computer, &source, epoch, &stop).await?;
             through
         } else { None };
         relay.close().await?;

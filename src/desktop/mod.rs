@@ -41,6 +41,8 @@ mod producer_session;
 mod protocol;
 mod registration;
 mod revoke;
+#[cfg(any(windows, test))]
+pub(crate) mod startup_diagnostic;
 #[allow(dead_code)]
 mod startup_exclusion;
 mod startup_stdio;
@@ -70,7 +72,17 @@ use std::{
 use store::{Location, Store};
 use transport::{Listener, Stream, TIMEOUT};
 
-const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] [--background] | status [--json] | startup --json | owner-status --json | ownership-status --json | ownership-result --json | watch --json | feed --json | request --json | catalog-relay --json | registration --json | registration install|remove|status --json (Windows) | notification-registration install|status --json | notification-registration remove --json --request-id UUID (Windows) | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
+// Native token regression uses the actual Store/guards without exposing them
+// to another production caller or adding a mock ownership verdict.
+#[cfg(all(windows, test))]
+pub(crate) mod creation_test {
+    pub(crate) use super::store::{Location, Store};
+    pub(crate) fn database_files(location: &Location) -> anyhow::Result<()> {
+        super::store::database_files(location)
+    }
+}
+
+const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] [--background] | status [--json] | startup --json | owner-status --json | ownership-status --json | ownership-result --json | watch --json | feed --json | request --json | catalog-relay --json | registration --json [--background] | registration install|remove|status --json (Windows) | registration install --mode background|passive --json (Windows) | registration cancel-rollback --json --request-id UUID (Windows) | notification-registration install|status --json | notification-registration remove --json --request-id UUID (Windows) | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
 const HEARTBEAT: Duration = Duration::from_secs(10);
 pub const STARTUP_REFUSED: i32 = 78;
 
@@ -196,8 +208,8 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
             }
             ["registration", "--json", "--background"] => {
                 ensure!(
-                    cfg!(any(target_os = "linux", target_os = "macos")),
-                    "background registration switching is currently supported on Linux and macOS"
+                    cfg!(any(target_os = "linux", target_os = "macos", windows)),
+                    "background registration is supported on Linux, macOS and Windows"
                 );
                 println!("{}", registration::preview_mode(config, &location, true)?);
                 Ok(())
@@ -232,6 +244,38 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                     let _ = operation;
                     anyhow::bail!(
                         "desktop registration install/remove/status is available only on Windows; use the maintained platform installer"
+                    )
+                }
+            }
+            ["registration", "install", "--mode", mode, "--json"] => {
+                #[cfg(windows)]
+                {
+                    println!(
+                        "{}",
+                        windows_registration::mode_command(config, &location, mode)?
+                    );
+                    Ok(())
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = mode;
+                    anyhow::bail!("Use the maintained platform installer to select desktop mode.")
+                }
+            }
+            ["registration", "cancel-rollback", "--json", "--request-id", id] => {
+                #[cfg(windows)]
+                {
+                    println!(
+                        "{}",
+                        windows_registration::cancel_rollback(config, &location, id)?
+                    );
+                    Ok(())
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = id;
+                    anyhow::bail!(
+                        "Use the maintained platform installer to cancel rollback metadata."
                     )
                 }
             }
@@ -478,20 +522,26 @@ impl Drop for Permit {
 
 fn serve(config: &Config, location: Location, background_mode: bool) -> Result<()> {
     let (_signals, owner, listener, epoch, mut store) = (|| -> Result<_> {
-        let signals = platform::ShutdownGuard::install()?;
+        #[cfg(windows)]
+        crate::host::token::private_creation::prepare()
+            .context("select exact-user desktop creation owner")?;
+        let signals =
+            platform::ShutdownGuard::install().context("install desktop shutdown handler")?;
         // This dedicated service process has no workers yet. Make socket creation
         // private too, so a concurrent status probe never sees the pre-chmod mode.
         #[cfg(unix)]
         unsafe {
             libc::umask(0o077);
         }
-        location.prepare()?;
-        let lock = Arc::new(location.lock()?);
+        location
+            .prepare()
+            .context("prepare private desktop folders")?;
+        let lock = Arc::new(location.lock().context("acquire desktop owner lock")?);
         let epoch = uuid::Uuid::new_v4().to_string();
-        let store = Store::open(&location, &epoch)?;
+        let store = Store::open(&location, &epoch).context("open desktop store")?;
         // A status deadline must not start while startup still owns the actor
         // for migrations/recovery. Publish only once that work has completed.
-        let listener = Arc::new(Listener::bind(&location)?);
+        let listener = Arc::new(Listener::bind(&location).context("bind desktop listener")?);
         Ok((signals, lock, listener, epoch, store))
     })()
     .context(StartupRefused)?;
@@ -978,12 +1028,13 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                 Some("revoke" | "revoke_status")
                             ) {
                                 let handoff = runtime.handoff();
-                                let revoke_epoch = runtime.revocation_epoch(&epoch);
+                                let captured_writer = runtime.captured_writer_epoch();
                                 let result = revoke::request_with_runtime(
                                     &location,
                                     &mut store,
                                     request_value,
-                                    &revoke_epoch,
+                                    &epoch,
+                                    captured_writer.as_deref(),
                                     handoff.as_deref(),
                                     |store| runtime.drain(store, Duration::from_millis(750)),
                                 );

@@ -74,7 +74,8 @@ pub(super) fn pending(record: &Value) -> bool {
     pending_binding(record)
         && ((record.get("session_end").is_none()
             && record["last_event_at"].as_f64().unwrap_or(0.0) == 0.0)
-            || clear_context::ended_resume(record))
+            || clear_context::ended_resume(record)
+            || clear_context::observed_terminal_resume(record))
 }
 
 /// Binding shape only, never process/composer verification or input permission.
@@ -109,7 +110,7 @@ fn owns_rollout(record: &Value) -> Result<()> {
     Ok(())
 }
 
-fn checked_process(record: &Value) -> Result<u64> {
+pub(super) fn checked_process(record: &Value) -> Result<u64> {
     if !process_alive(record) || !matches(record, live()?.get(string(record, "name"))) {
         return Err("The tracked agent is no longer running".into());
     }

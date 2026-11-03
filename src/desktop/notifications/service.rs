@@ -148,7 +148,6 @@ impl Runtime {
         )?;
         self.owner = preparation.owner();
         self.preparing = Some(preparation);
-        self.grant = Some(grant);
         // Both original OS exclusions are now held. The notification SDK is
         // independent of read/approval readiness; failure to select a native
         // host cannot revoke their separately configured service work.
@@ -156,15 +155,12 @@ impl Runtime {
             store.operation_undrained()? == 0,
             "original operation resources remain owned"
         );
-        ensure!(
-            self.grant.as_ref().unwrap().current(store)?,
-            "notification grant changed"
-        );
-        zerus_desktop_ledger::authorize(
-            &mut store.db,
-            self.grant.as_ref().unwrap().writer_epoch(),
-            &self.epoch,
-        )?;
+        ensure!(grant.current(store)?, "notification grant changed");
+        zerus_desktop_ledger::authorize(&mut store.db, grant.writer_epoch(), &self.epoch)?;
+        // Publish only an epoch actually committed to the durable writer.
+        // A failed admission must retain its physical preparation without
+        // lending an uncommitted grant to revocation or publication.
+        self.grant = Some(grant);
         Ok(())
     }
     fn attach(&mut self, store: &Store, prepared: preparation::Prepared) -> Result<()> {
@@ -409,6 +405,17 @@ impl Runtime {
 
 #[cfg(test)]
 impl Runtime {
+    pub(in crate::desktop) fn begin_blocked_for_test(
+        &mut self,
+        store: &mut Store,
+        release: std::sync::mpsc::Receiver<()>,
+    ) -> Result<()> {
+        self.begin_with(store, |_, location, _, service| {
+            Ok(preparation::Preparation::blocked_for_test(
+                service, location, release,
+            ))
+        })
+    }
     #[cfg(target_os = "linux")]
     pub(in crate::desktop) fn begin_on_test_bus(&mut self, store: &mut Store, address: String) {
         self.test_bus = Some(address.clone());

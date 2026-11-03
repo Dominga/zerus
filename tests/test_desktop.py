@@ -691,6 +691,7 @@ finally:
         with closing(sqlite3.connect(database)) as db:
             # Rebuild the real predecessor so startup must take a write
             # transaction. Hold it until the read-only readiness probe returns.
+            self.remove_attention_retention_schema(db)
             db.executescript('DROP TRIGGER desktop_cache_effect_monotone; DROP TRIGGER desktop_cache_kept_original; '
                              'ALTER TABLE desktop_cache_operations DROP COLUMN effect_started; '
                              'ALTER TABLE desktop_cache_operations DROP COLUMN kept_receipt; PRAGMA user_version=18;')
@@ -840,6 +841,10 @@ finally:
         with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_attention_edges').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_intents').fetchone()[0], 0)
+            writer_epoch, bound_service = db.execute(
+                'SELECT epoch,service_epoch FROM desktop_writer WHERE id=1').fetchone()
+        self.assertEqual(bound_service, first['epoch'])
+        self.assertIsNone(writer_epoch, 'this fleet has no admitted notification writer')
         text = subprocess.run([str(HGS), 'desktop', 'status'], env=self.env,
                               capture_output=True, text=True, timeout=10)
         self.assertEqual(text.returncode, 0, text.stderr)
@@ -853,7 +858,13 @@ finally:
         request_id = str(uuid.uuid4())
         result = self.cli('desktop', 'revoke', '--json', '--request-id', request_id)
         self.assertTrue(result['revoked'])
-        self.assertEqual(result['writer_epoch'], first['epoch'])
+        self.assertEqual(result['writer_epoch'], writer_epoch)
+        with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
+            original_command = db.execute(
+                'SELECT writer_epoch,state,result FROM desktop_commands WHERE request_id=?',
+                (request_id,)).fetchone()
+        self.assertEqual(original_command[:2], (writer_epoch, 'settled'))
+        self.assertEqual(json.loads(original_command[2]), result)
         stopped = self.cli('desktop', 'status', '--json')
         self.assertTrue(stopped['background_runtime']['drained'])
         self.assertEqual(stopped['ownership'], 'revoked')
@@ -873,9 +884,32 @@ finally:
         self.assertEqual(second['background_start']['code'], 'explicit_handoff_required')
         self.assertNotIn('background_runtime', second)
         self.assertTrue(all(not component['ready'] for component in second['lifecycle']['background'].values()))
+        # A new service epoch alone does not change the optional writer.
+        # The SAME settled null-writer command retains its original receipt.
+        self.assertEqual(self.cli('desktop', 'revoke', '--json', '--request-id', request_id), result)
+
+        # Record an actual new imported writer, independently of either serve
+        # epoch. The old UUID must now refuse without adopting that target.
+        marker_path, import_record, marker = self.import_evidence()
+        self.assertNotEqual(marker['writer_epoch'], writer_epoch)
+        self.assertNotIn(marker['writer_epoch'], (first['epoch'], second['epoch']))
+        original_marker = marker_path.read_bytes()
+        original_import = import_record.read_bytes()
         stale = self.cli('desktop', 'revoke', '--json', '--request-id', request_id, ok=False)
         self.assertEqual(json.loads(stale.stdout)['code'], 'writer_epoch_changed')
+        self.assertEqual(marker_path.read_bytes(), original_marker, 'stale revoke cannot drain a new writer')
         self.assertEqual(self.cli('desktop', 'status', '--json')['ownership'], 'passive')
+        self.assertEqual(self.cli('desktop', 'status', '--json')['lifecycle']['pid'], replacement.pid)
+        fresh = self.cli('desktop', 'revoke', '--json', '--request-id', str(uuid.uuid4()))
+        self.assertTrue(fresh['revoked'])
+        self.assertTrue(fresh['checkpointed'])
+        self.assertEqual(fresh['writer_epoch'], marker['writer_epoch'])
+        self.assertEqual(json.loads(marker_path.read_bytes())['phase'], 'revoked')
+        self.assertEqual(import_record.read_bytes(), original_import)
+        with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
+            self.assertEqual(db.execute(
+                'SELECT writer_epoch,state,result FROM desktop_commands WHERE request_id=?',
+                (request_id,)).fetchone(), original_command, 'historical target and receipt never change')
 
     def test_frontend_policy_requires_a_registered_original_ui_child(self):
         self.serve()
@@ -1207,7 +1241,21 @@ finally:
             self.assertEqual(db.execute('SELECT configuration FROM service').fetchone()[0], configuration)
 
     @staticmethod
-    def remove_cache_schema(db):
+    def remove_catalog_reason_schema(db):
+        db.execute('ALTER TABLE desktop_catalog_changes DROP COLUMN reason')
+
+    @classmethod
+    def remove_attention_retention_schema(cls, db):
+        # Rewind the later schema-21 leaf too, never leaving it labelled older.
+        cls.remove_catalog_reason_schema(db)
+        db.execute('DROP TRIGGER desktop_attention_edge_remove')
+        db.execute('DROP INDEX desktop_attention_compact')
+        db.execute('DROP TABLE desktop_attention_tombstones')
+        db.execute('DROP TABLE desktop_attention_gc')
+
+    @classmethod
+    def remove_cache_schema(cls, db):
+        cls.remove_attention_retention_schema(db)
         for trigger in ('desktop_cache_unknown_preserve', 'desktop_cache_unknown_immutable'):
             db.execute(f'DROP TRIGGER {trigger}')
         for table in ('desktop_cache_unknown', 'desktop_cache_files', 'desktop_cache_operations', 'desktop_cache_roots'):
@@ -1273,6 +1321,7 @@ finally:
         self.stop(process)
         database = self.desktop / 'state.sqlite3'
         with closing(sqlite3.connect(database)) as db, db:
+            self.remove_attention_retention_schema(db)
             db.execute('DROP TRIGGER desktop_cache_effect_monotone')
             db.execute('DROP TRIGGER desktop_cache_kept_original')
             db.execute('ALTER TABLE desktop_cache_operations DROP COLUMN effect_started')

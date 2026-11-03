@@ -522,12 +522,33 @@ mod host {
                     r.get(0)
                 })
                 .optional()?;
-            let Some(encoded) = previous else {
+            let Some(mut encoded) = previous else {
                 return Ok(failure(&machine, id, "operation_not_found"));
             };
             let mut result: Value = serde_json::from_str(&encoded)?;
+            // Older readers mislabeled these uncertain job outcomes as failed.
+            // Preserve their review identity on upgrade, including an outage.
+            if result["state"] == "failed"
+                && matches!(
+                    result["error_code"].as_str(),
+                    Some("service_restarted" | "result_expired")
+                )
+            {
+                result["state"] = json!("uncertain");
+                let updated = result.to_string();
+                store.db.execute(
+                    "UPDATE operations SET result=? WHERE id=? AND result=?",
+                    params![updated, id, encoded],
+                )?;
+                encoded = updated;
+            }
             if result["state"] == "running" || result["state"] == "uncertain" {
                 if let Ok(job) = service(config, &json!({"action":"status","job_id":id})) {
+                    // Only the original job can reconcile this receipt. An
+                    // unrelated or malformed reply leaves it historical.
+                    if job["schema"].as_u64() != Some(1) || job["job_id"].as_str() != Some(id) {
+                        return Ok(result);
+                    }
                     match job["state"].as_str().unwrap_or("") {
                         "queued" | "running" => {
                             result["state"] = json!("running");
@@ -540,7 +561,9 @@ mod host {
                             result.as_object_mut().unwrap().remove("error");
                         }
                         "failed" | "uncertain" | "cancelled" => {
-                            result["state"] = json!(if job["error_code"] == "not_found" {
+                            result["state"] = json!(if job["state"] == "uncertain"
+                                || job["error_code"] == "not_found"
+                            {
                                 "uncertain"
                             } else {
                                 "failed"

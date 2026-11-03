@@ -13,7 +13,30 @@ const ENTRY: &str = "__desktop-registration-native";
 const ABI: &str = "desktop-native-registration-v1";
 
 pub(super) fn entry(args: &[String]) -> Option<i32> {
-    (args.first().map(String::as_str) == Some(ENTRY)).then(|| native::serve(&args[1..]))
+    match args.first().map(String::as_str) {
+        Some(ENTRY) => Some(native::serve(&args[1..])),
+        Some(native::mode::ENTRY) => Some(native::mode::serve(&args[1..])),
+        _ => None,
+    }
+}
+
+pub(super) fn mode_command(config: &Config, location: &Location, mode: &str) -> Result<Value> {
+    ensure!(
+        matches!(mode, "passive" | "background"),
+        "Mode must be background or passive."
+    );
+    native::mode::command(
+        config,
+        location,
+        json!({"schema":1,"operation":"switch","mode":mode}),
+    )
+}
+pub(super) fn cancel_rollback(config: &Config, location: &Location, id: &str) -> Result<Value> {
+    native::mode::command(
+        config,
+        location,
+        json!({"schema":1,"operation":"cancel_rollback","request_id":id}),
+    )
 }
 
 fn helper_environment(trace_path: &str) -> Result<Vec<(String, String)>> {
@@ -130,7 +153,7 @@ pub(super) fn command(config: &Config, location: &Location, operation: &str) -> 
     let mut plan = registration::windows_plan(config, location)?;
     // Complete the finite request preflight and reject foreign registrations
     // before changing the stable CLI. Registration itself never starts a task.
-    let checked = exchange(
+    let mut checked = exchange(
         if operation == "install" {
             "check"
         } else {
@@ -139,6 +162,23 @@ pub(super) fn command(config: &Config, location: &Location, operation: &str) -> 
         &plan,
     )?;
     if operation == "status" {
+        let record = native::mode::pending_status(location, &plan)?;
+        checked["pending_transition"] = record["pending_transition"].clone();
+        checked["cancelled_request_id"] = record["cancelled_request_id"].clone();
+        checked["completed_request_id"] = record["completed_request_id"].clone();
+        let status = super::status(location)?;
+        let lifecycle = &status["lifecycle"];
+        checked["running_mode"] = if lifecycle["configuration"] == location.configuration
+            && lifecycle["ipc_ready"] == true
+        {
+            lifecycle["mode"].clone()
+        } else {
+            Value::Null
+        };
+        checked["pending_restart"] = (checked["registered"] == true
+            && (checked["pending_transition"].is_object()
+                || checked["selected_mode"] != checked["running_mode"]))
+            .into();
         return Ok(checked);
     }
     let explicit = std::env::var_os("HGS_EXECUTABLE").is_some_and(|value| !value.is_empty());

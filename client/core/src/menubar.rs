@@ -421,7 +421,12 @@ impl Desk {
                 self.computers.remove(computer)?;
             }
             Change::Computer { computer, status } => {
-                self.entry(computer).status = *status;
+                let entry = self.entry(computer);
+                entry.status = *status;
+                // A completed service baseline is bounded upserts plus Live,
+                // not a second full Replace. Both current states follow a
+                // successful catalog; transport readiness alone is never Live.
+                entry.listed |= matches!(status, ComputerStatus::Live | ComputerStatus::Polled);
             }
             Change::Machine { computer, machine } => {
                 let entry = self.entry(computer);
@@ -801,6 +806,83 @@ mod tests {
             computer: ComputerId::from(computer),
             machine,
         });
+    }
+
+    #[test]
+    fn bounded_service_baselines_match_native_tray_counts_tooltip_badge_and_menu() {
+        let mut native = Desk::default();
+        let mut service = Desk::default();
+        for desk in [&mut native, &mut service] {
+            host(desk, "", "workstation", true);
+            status(desk, "", ComputerStatus::Reconnecting { attempt: 0 });
+            status(desk, "studio", ComputerStatus::Probing);
+        }
+        let mut muted = asking("claude/p/muted");
+        muted.muted = true;
+        let local = vec![
+            ("ask", asking("claude/p/ask")),
+            ("reply", older_reply("claude/p/reply")),
+            ("muted", muted),
+            ("old", row("claude/p/old", "archived")),
+        ];
+        let peer = vec![("peer", asking("claude/p/peer"))];
+        for (computer, rows) in [("", local), ("studio", peer), ("empty", vec![])] {
+            let id = ComputerId::from(computer);
+            native.observe(&Change::Replace {
+                computer: id.clone(),
+                rows: rows
+                    .iter()
+                    .map(|(k, r)| (k.to_string(), r.clone()))
+                    .collect(),
+            });
+            for (key, row) in rows {
+                service.observe(&Change::Upsert {
+                    computer: id.clone(),
+                    key: key.into(),
+                    row,
+                });
+            }
+            assert!(
+                service.computers().get(&id).is_none_or(|c| !c.listed),
+                "partial rows cannot finish a baseline"
+            );
+            for desk in [&mut native, &mut service] {
+                status(desk, computer, ComputerStatus::Live);
+            }
+        }
+        let same = |a: &Desk, b: &Desk| {
+            assert_eq!(a.total(), b.total());
+            assert_eq!(a.attention(), b.attention());
+            assert_eq!(a.face(), b.face());
+            assert_eq!(a.badge(), b.badge());
+            assert_eq!(tip(a), tip(b));
+            assert_eq!(a.menu(OpenMode::Automatic), b.menu(OpenMode::Automatic));
+        };
+        same(&native, &service);
+        assert_eq!((service.total(), service.attention()), (4, 3));
+        assert_eq!(service.badge().as_deref(), Some("3"));
+        assert!(!tip(&service).contains("not polled"));
+        assert!(tip(&service).contains("0 on empty"));
+        let marks = DeviceMarks::new(
+            BTreeMap::new(),
+            BTreeMap::from([(marks::reply_key("", "claude", "conv-1"), "r1".into())]),
+            vec![],
+        );
+        for desk in [&mut native, &mut service] {
+            desk.set_marks(marks.clone());
+        }
+        same(&native, &service);
+        assert_eq!(service.attention(), 2, "device read marks still apply");
+        for desk in [&mut native, &mut service] {
+            status(desk, "studio", ComputerStatus::Reconnecting { attempt: 1 });
+        }
+        same(&native, &service);
+        assert_eq!((service.total(), service.attention()), (4, 1));
+        assert!(service.face().dot && tip(&service).contains("studio: unreachable"));
+        for desk in [&mut native, &mut service] {
+            status(desk, "studio", ComputerStatus::Live);
+        }
+        same(&native, &service);
     }
 
     #[test]

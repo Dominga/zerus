@@ -1828,6 +1828,9 @@ earlier message and its answer does not. Old
 context and prompt-cache values are hidden until the new conversation reports
 native usage. The saved native identity changes only on the real hook, and an
 unconfirmed command does not reset counters.
+A resumed Codex session can also confirm a Terminal clear when its main end
+precedes that hook; the end alone never confirms a reset. Zerus keeps the process
+and run and observes the real successor without replaying the clear or message.
 A stopped session offers **Start fresh…** instead, with the same confirmation, and
 keeps **Send** available: it offers **Resume and send** with the full saved context,
 **Resume, compact and send**, or **Start fresh and send**. Zerus Next names the
@@ -2539,6 +2542,25 @@ without a verified outcome, or an error after Git may have started shows **Resul
 unknown** and never enables another removal in that operation. Files can still be
 inspected. The CLI preserves nonzero failure exits and stderr while adding a
 request-bound JSON outcome for clients that request `--json`.
+
+Git stops tracking a worktree before it deletes the files, so a removal can fail
+halfway, for example on a readonly ignored folder: Git forgets the worktree while
+some files remain. Before every `git worktree remove`, the owning computer
+reserves a private removal record. A confirmed outcome drops it, and an
+interruption or failure keeps it. A folder that Git no longer tracks but that
+still exists then appears in the repository review as a **leftover**
+(`worktree-leftovers-v1`), with a fresh bounded listing of the remaining files,
+the retained branch and current processes or sessions. A missing Git
+registration is never treated as proof of deletion, and the removal is never
+retried. **Keep folder, forget record** (`hgs worktrees keep-folder`) checks the
+reviewed leftover again under the repository lock and drops only its record;
+the folder, its files and the branch stay. A record resolves by itself once its
+folder is gone, or once a fresh worktree list taken under the repository lock shows
+that Git tracks the worktree again. A leftover whose repository is gone is listed
+by `hgs worktrees leftovers` and can still be kept; a record whose repository and
+folder are both gone resolves. At most 512 unresolved records
+are kept per computer; at that bound new removals are refused with a visible
+reason, and no record is evicted. Automatic cleanup never acts on these records.
 
 Confirmation lists the folders, the ignored data deleted with them (such as build
 output) and any branches that will be deleted. Each removal then repeats the
@@ -3470,6 +3492,13 @@ Recorded tool calls appear separately, with completed history collapsed. Equal
 command text does not prove that a tool record and OS tree are the same task.
 Rows expose owner, state, elapsed time and available folder/progress/output. OS
 trees show PID and child count; their stdout is not independently captured.
+Saved commands retain a UTF-8 preview of at most 512 bytes and a SHA-256 digest
+(`command_digest`); `command_truncated` identifies shortened previews. Processes
+and the CLI keep the preview in `command`. **Copy command** copies that displayed
+preview; command output and process identity/control are unchanged. Legacy full
+texts still load and are compacted on their next live or archive record write.
+For legacy jobs the digest covers the previously stored text, which older
+versions may already have clipped.
 The active count uses the maximum of confirmed tool records and OS trees, not
 the sum of overlapping sources. Unconfirmed records do not count as active.
 
@@ -4355,6 +4384,10 @@ Plain `serve` and fresh registrations stay passive. On Linux and macOS, the main
 installer supports explicit `--mode background|passive` after the authenticated
 frontend handoff; see [Linux mode selection](linux-distribution.md#select-the-desktop-service-mode)
 and [Mac mode selection](macos-distribution.md#explicit-desktop-service-mode).
+The Windows native route uses explicit `registration install --mode
+background|passive --json`; see [Windows mode selection](desktop-windows-mode.md)
+for caller admission, passive bootstrap, retained task-instance custody and
+unknown-result handling.
 Ordinary refreshes preserve the selected mode. Generic approval policy requests
 remain refused; ownership and each effect require their own authenticated grants.
 
@@ -4424,6 +4457,26 @@ restart. Recovery failure reports a component error and pauses admissions while
 the passive service keeps serving IPC. The ledger library has no native I/O,
 automatic-approval consent or read-mark authority. The current service exposes
 no reservation, native adapter or writer-takeover command yet.
+
+Schema 20 adds indexed attention retention. An enabled discovery turn examines
+at most 32 blocked, non-live mappings and compacts at most 256 KiB of mapping
+and baseline-intent data. Only mappings without any attempt record qualify;
+live mappings and all reserved, delivered, refused or unknown attempt identities
+stay intact. One transaction replaces each eligible mapping with its exact
+32-byte logical suppression hash, removes its unreferenced blocked baseline
+intent, and updates storage totals and the durable GC cursor. Interrupted
+compaction rolls back all of these changes together.
+
+Count or byte pressure defers the original discovery row while bounded GC
+advances; it does not permanently fail discovery or busy-loop the actor.
+Suppression hashes survive restart and prevent an old logical edge from posting
+again after rename, resume or Tracker history eviction. A hash hit remains
+blocked without recreating the discarded payload. These hashes are append-only,
+32 bytes each before SQLite overhead, with no time-based expiry. Owner-scoped
+reclamation requires proof that the owning conversation is absent from both its
+authoritative catalog and every restorable archive; that separate sweep is
+tracked in `zerus-n3qm`. Catalog absence or an offline source alone never proves
+that an edge cannot reappear.
 
 Schema 3 adds the indexed revocation command journal. Before a maintained Qt
 rollback or Qt installation starts its GUI, the installer must obtain a settled
@@ -4573,14 +4626,15 @@ per-component readiness. Its epoch changes on service restart. The registration'
 installers; it is a requirement, not a claim that the environment is present.
 
 `lifecycle.mode` reports the running command's `passive` or `background`
-selection independently of worker admission. On Linux/macOS, `registration --json
+selection independently of worker admission. On all three desktop platforms, `registration --json
 --background` renders the explicit background variant without installing it;
 `registration mode-check --json` checks the actual installer caller ancestry and
 foreground terminal or installed frontend on Linux, macOS and Windows, without
 granting service ownership. Windows requires a retained installed frontend
 ancestor or an already attached visible foreground classic console; unverified
 Windows Terminal/ConPTY and headless callers are directed to Settings. This
-preflight does not enable Windows background registration or change a task.
+preflight changes no task; explicit Windows task changes use the separately
+guarded [mode transition](desktop-windows-mode.md).
 The [macOS ancestry boundary](macos-distribution.md) verifies Terminal's system
 login bridge and launchd PID 1; SSH through a foreign session process refuses.
 The maintained Linux helper's `status --json` reports the durable selected mode

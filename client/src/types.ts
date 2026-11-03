@@ -72,6 +72,8 @@ export interface ViewRow {
   process_state?: string;
   /** `process_work.count`, -1 when unknown. */
   background?: number;
+  /** Listed optional-question count; null while unknown, retained by Rust for the same conversation. */
+  optional_question_count?: number | null;
   archive_id?: string | null;
   /** Native children by exact agent ID; never the hook-profile fallback. */
   subagents?: Record<string, Record<string, unknown>>;
@@ -178,6 +180,7 @@ export interface DesktopService {
     code: string;
   };
   connected: boolean;
+  reconnecting?: boolean;
   epoch: string | null;
   generation: number | null;
   background: Record<string, { ready: boolean; code: string }>;
@@ -191,7 +194,7 @@ export interface DesktopService {
   /** Native frozen-read transfer; completion is durable queueing, not host ACK. */
   pending_read_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; through: number; superseded: number; delivered: false };
   /** Best-effort Staged report only; its outcome never grants or gates service work. */
-  retained_source_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null; creations_capture?: { code: string; paused: boolean; capture_id: string | null } };
+  retained_source_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null; creations_capture?: { code: string; paused: boolean; capture_id: string | null }; creations_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null } };
   notification_ownership?: NotificationOwnership;
   code: string;
 }
@@ -622,6 +625,8 @@ export type CreationAdmission = { admitted: string } | { refused: string };
  * `can_resume` and `can_edit` from the core (`creation::caption`, `can_resume`, `Creations::can_edit`).
  */
 export interface CreationCard {
+  /** Current launch attempt, rotated on retry; absent on older hosts. */
+  launch_id?: string;
   id: string; tag: string;
   /** The operation's state (`saving` ... `failed`, `bound`). */
   state: string;

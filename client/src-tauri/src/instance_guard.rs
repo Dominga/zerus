@@ -112,3 +112,19 @@ impl Drop for Guard {
         let _ = self.file.unlock();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+    #[test]
+    fn canonical_lock_is_close_on_exec() {
+        let root = PathBuf::from("/tmp").join(format!("zguard-{}", uuid::Uuid::new_v4().simple()));
+        let guard = acquire(&root).unwrap().unwrap();
+        let flags = unsafe { libc::fcntl(guard.file.as_raw_fd(), libc::F_GETFD) };
+        assert!(flags >= 0);
+        assert_ne!(flags & libc::FD_CLOEXEC, 0);
+        drop(guard);
+        fs::remove_dir_all(root).unwrap();
+    }
+}

@@ -1,27 +1,30 @@
-import { Show, createMemo } from "solid-js";
-import { desktopService, pendingReadNotice, retainedSourceNotice, retryDesktopService, ownershipActions, ownershipNotice } from "../../store/desktopService";
+import { Show, createMemo, createSignal } from "solid-js";
+import { Portal } from "solid-js/web";
+import { desktopService, serviceStatus, retryDesktopService, ownershipActions } from "../../store/desktopService";
 import { toast } from "../../store/ui";
 import { tr } from "../../i18n";
+import { MigrationReportDialog } from "./MigrationReportDialog";
 
 export function DesktopServiceStatus(props: { counts?: boolean }) {
-  const notice = createMemo(() => {
-    const state = desktopService.state();
-    if (!state?.connected) return tr("Background service unavailable. Retry to reconnect.");
-    if (state.code === "explicit_handoff_required") return tr("Background service is waiting for an explicit handoff.");
-    if (state.code || !["fleet", "presence", "reads", "attention", "approvals"].every(desktopService.ready)) return tr("Background service is not ready. Some actions are unavailable.");
-    if (!state.details_available) return tr("Activity, processes and project tasks are unavailable with this background service connection.");
-    return "";
-  });
+  const [reviewOrigin, setReviewOrigin] = createSignal<HTMLElement>();
+  const [focused, setFocused] = createSignal(false);
+  const status = createMemo(() => serviceStatus(desktopService.state()));
   const counts = () => desktopService.state()?.attention_counts?.aggregate;
-  return <Show when={desktopService.enabled()}>
-    <div class="desktop-service-status" role="status">
-      <Show when={notice()} fallback={<span>{tr("Background service connected")}</span>}>{(text) => <span>{text()}</span>}</Show>
-      <Show when={pendingReadNotice(desktopService.state())}>{(text) => <span>{text()}</span>}</Show>
-      <Show when={retainedSourceNotice(desktopService.state())}>{(text) => <span>{text()}</span>}</Show>
-      <button type="button" class="btn small ghost" onClick={() => void retryDesktopService().catch(error => toast(tr("Background service"), String(error), "error", true))}>{tr("Retry now")}</button>
-      <Show when={ownershipNotice(desktopService.state()?.notification_ownership)}>{(text) => <span>{text()}</span>}</Show>
-      <Show when={desktopService.state()?.notification_ownership?.pending} fallback={
-        <Show when={desktopService.state()?.notification_ownership?.status?.rearm_required}>
+  const details = () => [status()?.details, props.counts ? `${tr("Shared host attention (excludes this device's review marks)")}: ${counts()?.attention ?? tr("Unknown")}${counts()?.complete ? "" : `; ${tr("Incomplete")}`}` : ""].filter(Boolean).join("\n");
+  return <Show when={status()}>{(view) => <>
+    <div class="desktop-service-status" role="status" classList={{ healthy: view().healthy }}>
+      <span class="service-summary" title={details()} aria-label={details()} tabIndex={0}
+        aria-describedby={focused() ? "service-status-details" : undefined}
+        onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+        onKeyDown={(event) => { if (event.key === "Escape") setFocused(false); }}>
+        <span class="state-dot" classList={{ ready: view().healthy, attention: !view().healthy }} />{view().label}
+      </span>
+      <Show when={view().review}>
+        <button type="button" class="btn small ghost" aria-label={tr("Review migration report")} onClick={(event) => setReviewOrigin(event.currentTarget)}>{tr("Review")}</button>
+      </Show>
+      <Show when={view().retry}><button type="button" class="btn small ghost" onClick={() => void retryDesktopService().catch(error => toast(tr("Background service"), String(error), "error", true))}>{tr("Retry now")}</button></Show>
+      <Show when={view().ownership === "check"} fallback={
+        <Show when={view().ownership === "rearm"}>
           <button type="button" class="btn small ghost"
             disabled={ownershipActions.busy() || desktopService.state()?.notification_ownership?.running}
             onClick={() => void ownershipActions.rearm().catch(error => toast(tr("Background service"), String(error), "error", true))}>{tr("Resume background work")}</button>
@@ -31,10 +34,8 @@ export function DesktopServiceStatus(props: { counts?: boolean }) {
           disabled={ownershipActions.busy() || desktopService.state()?.notification_ownership?.running}
           onClick={() => void ownershipActions.check().catch(error => toast(tr("Background service"), String(error), "error", true))}>{tr("Check result")}</button>
       </Show>
-      <Show when={props.counts}>
-        <span>{tr("Shared host attention (excludes this device's review marks)")}: {counts()?.attention ?? tr("Unknown")}</span>
-        <Show when={!counts()?.complete}><span>{tr("Incomplete")}</span></Show>
-      </Show>
     </div>
-  </Show>;
+    <Show when={focused()}><Portal><div id="service-status-details" class="service-status-details" role="tooltip">{details()}</div></Portal></Show>
+    <Show when={reviewOrigin()}>{(origin) => <MigrationReportDialog origin={origin()} close={() => setReviewOrigin(undefined)} />}</Show>
+  </>}</Show>;
 }

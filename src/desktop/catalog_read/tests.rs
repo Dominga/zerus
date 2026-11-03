@@ -335,6 +335,16 @@ impl Fixture {
         upsert: Vec<CatalogItem>,
         remove: Vec<String>,
     ) -> Value {
+        let remove = remove.into_iter().map(|key| (key, None)).collect();
+        self.reasoned_delta(seq, revision, upsert, remove)
+    }
+    fn reasoned_delta(
+        &mut self,
+        seq: u64,
+        revision: i64,
+        upsert: Vec<CatalogItem>,
+        remove: Vec<(String, Option<&str>)>,
+    ) -> Value {
         use zerus_watch_protocol::{Body, Delta, Frame, Removal};
         self.feed
             .apply(
@@ -352,7 +362,10 @@ impl Fixture {
                             upsert,
                             remove: remove
                                 .into_iter()
-                                .map(|key| Removal { key, reason: None })
+                                .map(|(key, reason)| Removal {
+                                    key,
+                                    reason: reason.map(str::to_owned),
+                                })
                                 .collect(),
                         }),
                     }),
@@ -539,4 +552,31 @@ fn actor_epoch_and_change_start_cannot_be_rebound_by_a_continuation() {
             false
         );
     }
+}
+#[test]
+fn change_items_carry_only_known_native_removal_reasons() {
+    // zerus-ic13: the replacement's successor may be in another native frame.
+    let (mut f, seq) = Fixture::watch(4);
+    let mut reader = Reader::default();
+    let now = Instant::now();
+    let first = f.read(&mut reader, None, now);
+    let removals = vec![
+        (item(0).key, Some("replaced")),
+        (item(1).key, Some("forgotten")),
+        (item(2).key, Some("unknown-future-reason")),
+        (item(3).key, None),
+    ];
+    f.reasoned_delta(seq, 1, vec![], removals);
+    f.delta(seq + 1, 2, vec![item(4)], vec![]);
+    let deltas = f.changes(&mut reader, &first, "0", None, now);
+    assert_eq!(deltas["accepted"], true, "{deltas}");
+    let items = deltas["items"].as_array().unwrap();
+    let expected = [
+        json!({"op":"remove","revision":"1","key":item(0).key,"row":null,"reason":"replaced"}),
+        json!({"op":"remove","revision":"1","key":item(1).key,"row":null,"reason":"forgotten"}),
+        json!({"op":"remove","revision":"1","key":item(2).key,"row":null}),
+        json!({"op":"remove","revision":"1","key":item(3).key,"row":null}),
+        json!({"op":"upsert","revision":"2","key":item(4).key,"row":item(4).row}),
+    ];
+    assert_eq!(items, &expected.to_vec());
 }

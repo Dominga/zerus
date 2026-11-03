@@ -200,12 +200,28 @@ save them.
 
 | Family | Job | Key after the prefix | Saved when | Bound |
 | --- | --- | --- | --- | --- |
-| `msrv-`, `cli-`, `windows-cli-` | Quick checks, CLI, Windows | OS/arch, hash of `rustc -Vv`, month, `Cargo.lock` hash | Exact key missed; Rust build passed | Monthly restart; about 200–250 MB each; the quick checks' `target/replica` (the replica crate's own lockfile) rides under the same key |
+| `msrv-v2-` | Quick checks | OS/arch, hash of `rustc -Vv`, month, `Cargo.lock` hash | Exact key missed; Rust checks passed | Shared Cargo target, incremental state and debug symbols disabled; monthly restart |
+| `cli-`, `windows-cli-` | CLI, Windows | OS/arch, hash of `rustc -Vv`, month, `Cargo.lock` hash | Exact key missed; Rust build passed | Monthly restart |
 | `connector-` | Rust mobile connector | OS/arch, hash of `rustc +1.99.1 -Vv`, month, `services/mobile/connector/Cargo.lock` hash | Exact key missed; connector tests passed | Monthly restart; about 400 MB before compression, without incremental state |
 | `client-native-` | Native desktop client | OS/arch, hash of `rustc +1.99.1 -Vv`, month, hashes of the three client lockfiles | Exact key missed; native checks passed | Monthly restart; Cargo registry and Git checkouts only, so multi-GB native target directories are never cached |
 | `arch-cargo-v1-` | Arch package | Month, hash of `Cargo.lock` and the connector's lock | Exact key missed; package built | Cargo registry only |
 | `android-gradle-v1-` | Android | Month, hash of the Gradle wrapper properties and `*.gradle.kts` | Exact key missed; tests and lint passed | Monthly restart; about 700 MB (`~/.gradle/caches` and `wrapper`) |
 | `arch-ccache-v1-`, `arch-package-ccache-v1-`, `mac-desktop-ccache-v1-` | Arch desktop, Arch package, macOS | Architecture (macOS), run ID | Build passed with ccache misses | `CCACHE_MAXSIZE` 150, 100 and 100 MB |
+
+Quick, relay and Linux native-client checks reclaim only unused Android, .NET, Haskell and CodeQL installations on disposable hosted Ubuntu runners. Disk checkpoints record free bytes and build-directory sizes. Quick shares one Cargo target across its crates; the new cache family avoids restoring the former duplicated debug and incremental trees. Relay removes its completed host Cargo targets before Docker compiles the deployment image; the remaining memory-envelope checks run that image. PostgreSQL containers and volumes, Cargo registries and the Python test environment stay available. Runner classes and the repository cache limit are unchanged.
+
+The hosted Linux native-client job reports disk use after checkout, dependency
+installation and cache restore, between its existing build phases, and after
+checks even when they fail. Reports include sizes for `target/client-native` and
+the Cargo registry/Git caches. After its fixed unused-tool cleanup, this job
+requires a fresh measurement of at least 24 GiB free before installing dependencies
+or compiling. A healthy run used 17.7 GiB from checkout to the end of its checks,
+8.7 GiB of it in the core test links, and the cleanup reclaimed 18.1 GiB; the
+remainder covers parallel link temporaries and growth. A refusal fails the job
+before any build with a run annotation naming the required and actual free bytes,
+instead of a linker crash on a full disk. Quick and relay do not use this minimum.
+Host build-target retirement remains relay-only. Local native-check script runs
+skip the hosted checkpoints and preparation.
 
 The Windows real-agent job restores the `windows-cli-` family of the Windows
 desktop job for its release build and never saves it, so two jobs cannot race to
@@ -905,7 +921,18 @@ identity transition, stale usage suppression, a single durable clear boundary,
 preserved process/run identity, unsent native drafts and foreign-directory
 rejection. A resumed conversation whose `SessionStart` is still deferred must
 pause, and clear from the GUI and from Terminal, where the next message's hook
-names the new conversation. A new session in a folder outside the fixture home,
+names the new conversation. A separate ordering fixture inserts a modeled main
+`SessionEnd`, unless the native agent already emitted it, immediately before
+forwarding the real clear `SessionStart` unchanged. The end ordering is controlled;
+the successor hook and native process/file ownership are real. It verifies an unrequested
+Terminal clear through the original supervised process, its held old rollout and
+the held successor's bounded native header, without inventing a clear request or
+replaying input. Process fixtures also require the complete owned reset before
+reopening the composer after that end; the end alone grants no input permission.
+They also refuse a nested interactive Codex even when the supervised process
+holds the successor, and an actually held successor outside the selected account's
+`sessions/` directory. The nearest native hook caller must be the supervised PID.
+A new session in a folder outside the fixture home,
 which Codex prints in full in its header, answers a first message from the localhost
 provider; idle polls must not treat that header above the history as a reset,
 and a later clear must still be confirmed. A separate fixture caches a newer
@@ -960,6 +987,14 @@ signed-in account can use it. For Kimi this workflow currently discovers
 versions only. Its separate native and approval workflows qualify one latest
 Kimi release for affected PRs or manual runs. DeepSeek's latest-release keyless
 contract fixture runs in full Linux CLI CI.
+
+The Kimi approval gate covers CreateGoal in both regular and fullscreen mode.
+The fullscreen panel shows only the selected choice's description; inspection
+checks that visible text without navigating. An explicit answer verifies every
+choice's description through guarded navigation before submitting the requested
+option. Changed or clipped descriptions, a changed request or a layout transition
+refuse further input. Both modes retain native decision, permission-mode and
+single goal-creation checks.
 
 The Kimi native inventory includes launching with an initial message, waiting
 at folder trust without sending it, then delivering it exactly once through

@@ -53,7 +53,8 @@ mod instance;
 #[cfg(windows)]
 #[path = "instance_windows.rs"]
 mod instance;
-mod lifecycle;
+#[doc(hidden)]
+pub mod lifecycle;
 #[cfg(feature = "live")]
 mod login_item;
 #[cfg(target_os = "macos")]
@@ -98,6 +99,7 @@ mod signals;
 mod speech_settings;
 #[cfg(feature = "live")]
 mod startup_error;
+mod startup_log;
 #[cfg(feature = "live")]
 mod task_details;
 #[cfg(feature = "live")]
@@ -123,7 +125,10 @@ mod watchdog;
 #[cfg(feature = "live")]
 mod window_geometry;
 #[cfg(feature = "live")]
-mod window_layer;
+#[doc(hidden)]
+pub mod window_layer;
+#[doc(hidden)]
+pub mod window_theme;
 mod window_visibility;
 #[cfg(any(windows, test))]
 mod windows_shell;
@@ -209,7 +214,6 @@ pub struct Startup {
 /// activation to the running instance and returns, and runs the app.
 pub fn run() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
     let options = match cli::parse(&args) {
         Ok(cli::Command::Run(options)) => options,
         Ok(cli::Command::Help) => {
@@ -222,6 +226,8 @@ pub fn run() {
         }
         Ok(cli::Command::BuildInfo) => {
             #[cfg(any(target_os = "linux", windows))]
+            let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+            #[cfg(any(target_os = "linux", windows))]
             let info = cli::build_info_for(&cli::BUILD, &context.config().identifier);
             #[cfg(not(any(target_os = "linux", windows)))]
             let info = cli::build_info(&cli::BUILD);
@@ -231,6 +237,7 @@ pub fn run() {
         Ok(cli::Command::LoginItem { enabled }) => {
             #[cfg(all(windows, feature = "live"))]
             {
+                let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
                 let identity = identity::current(&context.config().identifier);
                 if !identity.is_switch() {
                     eprintln!("Login registration requires the installed Zerus identity");
@@ -259,14 +266,19 @@ pub fn run() {
             }
         }
         Err(error) => {
+            startup_log::record("failed", "invalid_arguments", None);
             eprint!("zerus-client: {error}\n\n{}", cli::usage());
             std::process::exit(2);
         }
     };
+    startup_log::record("entered", "gui_entry", None);
+    startup_log::install_panic_hook();
+    let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
     #[cfg(all(feature = "live", target_os = "linux"))]
     let options = {
         let mut options = options;
         if let Err(error) = cli::take_navigation_environment(&mut options) {
+            startup_log::record("failed", "invalid_navigation_environment", None);
             eprint!("zerus-client: {error}\n\n{}", cli::usage());
             std::process::exit(2);
         }
@@ -300,6 +312,7 @@ pub fn run() {
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     let instance = match identity.instance_name(identity::flag("ZERUS_CLIENT_SINGLE_INSTANCE")) {
         None => {
+            startup_log::record("bypassed", "single_instance_not_requested", None);
             renderer::choose();
             None
         }
@@ -343,6 +356,7 @@ pub fn run() {
                         let settled = match desktop_hello::hold(identity.is_switch(), &responder) {
                             Ok(held) => held,
                             Err(_) => {
+                                startup_log::record("failed", "desktop_startup_unconfirmed", None);
                                 eprintln!("zerus-client: desktop startup is unconfirmed; writers remain stopped");
                                 startup_error::show(context);
                                 return;
@@ -359,11 +373,10 @@ pub fn run() {
                     Some(claimed)
                 }
                 instance::Claim::Forwarded => {
-                    eprintln!("zerus-client: already running");
                     return;
                 }
-                instance::Claim::Failed(error) => {
-                    eprintln!("zerus-client: cannot claim the socket: {error}");
+                instance::Claim::Duplicate(_) => return,
+                instance::Claim::Failed(_) => {
                     std::process::exit(3);
                 }
             }
@@ -386,6 +399,7 @@ pub fn run() {
                 ) {
                     Ok(proof) => Some(proof),
                     Err(code) => {
+                        startup_log::record("failed", "native_takeover_unconfirmed", Some(code));
                         eprintln!("zerus-client: native ownership takeover is unconfirmed: {code}");
                         startup_error::show(context);
                         return;
@@ -402,6 +416,7 @@ pub fn run() {
         .as_ref()
         .is_some_and(|proof| proof.helper().is_err())
     {
+        startup_log::record("failed", "native_ownership_helper_changed", None);
         eprintln!("zerus-client: native ownership helper changed before GUI startup");
         startup_error::show(context);
         return;
@@ -487,6 +502,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
         )
         .manage(commands::AppState::default())
         .manage(window_visibility::Visibility::default())
+        .manage(window_theme::Theme::default())
         .manage(lifecycle::Lifecycle { menu_bar })
         .manage(exit_flush::ExitFlush::default());
     #[cfg(target_os = "macos")]
@@ -1015,6 +1031,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
             }
             let display = display::display_name();
             if !display::headless_allowed(std::env::var("ZERUS_CLIENT_HEADLESS").is_ok_and(|v| v == "1"), display.as_deref()) {
+                startup_log::record("failed", "headless_display_unavailable", None);
                 eprintln!("zerus-client: ZERUS_CLIENT_HEADLESS=1 but the display is {display:?}, not an X server; no window opens (set GDK_BACKEND=x11)");
                 std::process::exit(3);
             }
@@ -1044,12 +1061,16 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
             Ok(())
         })
         .build(context)
+        .inspect_err(|error| {
+            startup_log::record("failed", "tauri_build", Some(&error.to_string()));
+        })
         .expect("Zerus Next failed to start");
     #[cfg(target_os = "macos")]
     lifecycle::prepare(&mut app, menu_bar, opens_sessions);
     app.run(|app, event| {
         lifecycle::on_event(app, &event);
     });
+    startup_log::record("exited", "event_loop_returned", None);
 }
 
 /// The Processes tab's hub (`processes.rs`): the topic through the data
@@ -1345,6 +1366,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::build_info,
         commands::voice_support,
         renderer::renderer_frame,
+        window_theme::window_theme,
         content_search::content_search,
         content_search::cancel_content_search,
         native_ui::runtime::native_ui_open,
@@ -1674,6 +1696,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::build_info,
         commands::voice_support,
         renderer::renderer_frame,
+        window_theme::window_theme,
         clipboard::copy_text,
         clipboard::copy_verbatim,
         desk_take_pending,
@@ -1720,6 +1743,7 @@ pub(crate) fn main_window(app: &AppHandle) -> Option<WebviewWindow> {
 /// macOS before the webview is built, Linux through its public settings API.
 pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     use tauri::Manager;
+    let generation = window_theme::register(app);
     // ZERUS_CLIENT_QUERY opens a given state (`select=<session name>`) for
     // headless screenshots and scripted measurements, as the mockup's URL
     // parameters do; ZERUS_CLIENT_PERF=auto adds `perf=auto`.
@@ -1743,8 +1767,15 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
         .title("Zerus Next")
         .visible(false)
+        .initialization_script(format!(
+            "Object.defineProperty(window, '__ZERUS_WINDOW_THEME__', {{value: {}}});",
+            serde_json::to_string(&generation).expect("window generation")
+        ))
         .inner_size(1440.0, 900.0)
         .min_inner_size(900.0, 560.0);
+    // Hidden until CSS supplies the exact native backgrounds. The initial
+    // fallback remains unseen even when the saved theme is light.
+    builder = builder.background_color(tauri::window::Color(22, 27, 33, 255));
     // Page rendering at the display rate, not near 60 fps: the preference is set
     // on the configuration before the webview exists (toggling a live page is
     // unreliable). The measurement's control run keeps WebKit's default.

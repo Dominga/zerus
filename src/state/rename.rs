@@ -100,7 +100,7 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
                 record.as_object_mut().unwrap().remove(key);
             }
             if let Some(scope)=scope {scope.changing();}
-            atomic(&archive::path(id)?, &format!("{record}\n"))?;
+            atomic_record(&archive::path(id)?, &mut record)?;
         }
         if let Some(scope)=scope {scope.result(new,string(&record,"run_id"),string(&record,"conversation_id"),Some(id));}
     } else {
@@ -136,6 +136,8 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
                     && record["supervisor"].is_object()
                     && !attempts::identities_gone(record)
             });
+            let mut record = record;
+            if let Some(record) = &mut record { processes::compact(record); }
             let transaction = json!({"version":1,"old":old,"new":new,"record":record,
                 "session_id":id,"legacy":legacy,
                 "source_routed":route_path(old).exists()});
@@ -226,7 +228,7 @@ fn commit(transaction: &Value) -> Result<()> {
         shadow["name"] = json!(old);
         shadow["rename_target"] = json!(new);
         shadow["rename_shadow"] = json!(true);
-        atomic(&legacy_record_path(old), &format!("{shadow}\n"))?;
+        atomic_record(&legacy_record_path(old), &mut shadow)?;
     } else {
         remove(&source)?;
     }
@@ -239,7 +241,7 @@ fn commit(transaction: &Value) -> Result<()> {
             archived["name"] = json!(new);
             archived.as_object_mut().unwrap().remove("rename_shadow");
             archived.as_object_mut().unwrap().remove("rename_target");
-            atomic(&path, &format!("{archived}\n"))?;
+            atomic_record(&path, &mut archived)?;
         }
     }
     Ok(())
@@ -292,7 +294,7 @@ pub(super) fn mirror_legacy(record: &Value) -> Result<()> {
     shadow["name"] = json!(old);
     shadow["rename_target"] = record["name"].clone();
     shadow["rename_shadow"] = json!(true);
-    atomic(&path, &format!("{shadow}\n"))
+    atomic_record(&path, &mut shadow)
 }
 
 pub(super) fn sync_legacy_locked() -> Result<()> {

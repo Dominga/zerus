@@ -7,6 +7,29 @@ import org.junit.Test
 
 class SessionDetailsPresentationTest {
     private val target = Target("computer","provider/project/tag","run","conversation","workspace")
+    @Test fun commandPreviewsKeepProcessIdentityControlsAndNotes() {
+        val contract = JSONObject(checkNotNull(javaClass.getResourceAsStream("/process-command-contract.json")).bufferedReader().use { it.readText() })
+        val cases = contract.getJSONArray("cases")
+        val selected = target.copy(run="run-a",conversation="conversation-a")
+        for (index in 0 until cases.length()) {
+            val processes = cases.getJSONObject(index).getJSONObject("processes")
+            val wire = processes.getJSONArray("items").getJSONObject(0)
+            val raw = JSONObject().put("processes",processes)
+            val view = SessionDetailsPresentation.parse(raw,selected,true)
+            val job = view.processes.single()
+            assertEquals("job-a",job.id)
+            assertEquals("run-a",job.run)
+            assertEquals("conversation-a",job.conversation)
+            assertEquals(wire.getString("command"),job.command)
+            assertEquals("running",job.status)
+            assertFalse(job.stale)
+            assertTrue(job.output)
+            assertFalse(job.stop)
+            assertEquals(wire.getBoolean("command_truncated"),view.processNotes.isNotEmpty())
+            if (wire.getBoolean("command_truncated")) assertTrue(view.processNotes.single().contains("displayed preview"))
+            assertTrue(SessionDetailsPresentation.parse(raw,selected,false).processes.single().stale)
+        }
+    }
     @Test fun detailsExposeExactIdentityIncludingArchives() {
         val view = SessionDetailsPresentation.parse(null, target.copy(archiveId="archive-one"), false)
         assertEquals("conversation", view.fields.single { it.label == "Session ID" }.value)

@@ -167,6 +167,34 @@ pub(super) fn service_granted(store: &Store, configuration: &str) -> Result<bool
     let current = status(store, configuration)?;
     Ok(current.state == State::Service && current.identity_current && !current.rearm_required)
 }
+
+/// Read the actual stored grant for an explicit registration transition. This
+/// is a prerequisite, never a runtime permit; startup still owns admission.
+#[cfg(windows)]
+pub(super) fn registration_granted(location: &Location) -> Result<bool> {
+    let status = registration_status(location)?;
+    Ok(status.state == State::Service && status.identity_current && !status.rearm_required)
+}
+
+#[cfg(windows)]
+pub(super) fn registration_status(location: &Location) -> Result<Status> {
+    let (db, _verification) = super::revoke::hold::database(location)?;
+    let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    ensure!(
+        (15..=super::store::SCHEMA).contains(&version),
+        "unsupported ownership schema"
+    );
+    let configuration: String = db.query_row(
+        "SELECT substr(configuration,1,65) FROM service WHERE id=1",
+        [],
+        |r| r.get(0),
+    )?;
+    ensure!(
+        configuration == location.configuration,
+        "ownership configuration changed"
+    );
+    Ok(row(&db, &location.configuration)?.status)
+}
 /// A retained grant read by the sole actor. It cannot be constructed from a
 /// status/receipt or caller JSON. Runtime preparations retain this exact owner
 /// incarnation through their original worker and recheck it before attachment.
@@ -400,7 +428,13 @@ fn apply_guarded(
     if (*action == Action::Rearm || replacing_image) && drain.take().unwrap()(store).is_err() {
         return refused(&request, old.status, "ownership_drain_pending");
     }
-    if *action != Action::NativeTakeover && store.operation_undrained()? != 0 {
+    // A reconnect to this exact Service incarnation neither replaces its
+    // runtime nor renews any operation authority. Retain its original custody;
+    // only an actual ownership change must wait for those resources to drain.
+    let refresh = *action == Action::Grant
+        && old.status.state == State::Service
+        && old.origin.as_ref() == Some(&origin);
+    if *action != Action::NativeTakeover && !refresh && store.operation_undrained()? != 0 {
         return refused(&request, old.status, "ownership_resources_pending");
     }
     ensure!(origin.current(), "ownership frontend image changed");
@@ -415,10 +449,7 @@ fn apply_guarded(
     } else {
         State::Service
     };
-    let keep_epoch = takeover
-        || (*action == Action::Grant
-            && old.status.state == State::Service
-            && old.origin.as_ref() == Some(&origin));
+    let keep_epoch = takeover || refresh;
     let owner_epoch = if keep_epoch {
         old.status.owner_epoch.clone()
     } else {

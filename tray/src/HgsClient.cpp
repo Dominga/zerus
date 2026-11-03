@@ -2420,9 +2420,10 @@ quint64 HgsClient::requestNotifications(const QString &host, const QString &name
     capability.maximumOutputBytes = 256 * 1024;
     ProcessRunner::run(std::move(capability), this, [this, request, executable, host, name, payload, expected](const ProcessRunner::Result &help) {
         bool marker = false;
-        for (auto line : help.standardOutput.split('\n')) {
-            if (line.endsWith('\r')) line.chop(1); // Permit only the CRLF line ending.
-            if (line == "session-notifications-v1") marker = true;
+        for (const auto &line : help.standardOutput.split('\n')) {
+            // The CLI indents the marker; trim surrounding ASCII whitespace (and a
+            // CRLF ending) but require the exact token as the whole line.
+            if (line.trimmed() == "session-notifications-v1") marker = true;
         }
         if (help.outcome != ProcessRunner::Result::Finished || help.exitStatus != QProcess::NormalExit || help.exitCode != 0 || !marker) {
             emit notificationsFinished(request, false, {}, tr("Update the configured local hgs to support shared notification preferences."));

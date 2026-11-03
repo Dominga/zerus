@@ -2,6 +2,7 @@ import { nativeRoute } from "./native-entry";
 import { tr } from "../../i18n";
 import { createActivityScroll } from "./activity-scroll";
 import { activityReadingRows, createActivityAnchor } from "./activity-anchor";
+import { ACTIVITY_OVERSCAN, ACTIVITY_RESIZE_OVERSCAN, ActivityHeights, activityMeasureWindow } from "./activity-heights";
 import { searchPreview, clearSearchPreview } from "../../store/searchSelection";
 import { SearchHighlight } from "./SearchHighlight";
 import { For, Show, batch, createContext, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack, useContext, type JSX } from "solid-js";
@@ -773,6 +774,10 @@ export function ActivityView(props: { source?: ActivitySource }) {
   const [measuring, setMeasuring] = createSignal<number[]>([]);
   const [selectionIndexes, setSelectionIndexes] = createSignal<number[]>([]);
   let measuredContent = new Map<string, string>();
+  const heights = new ActivityHeights();
+  let measurementWidth = 0;
+  const [resizing, setResizing] = createSignal(false);
+  const overscan = () => resizing() ? ACTIVITY_RESIZE_OVERSCAN : ACTIVITY_OVERSCAN;
   // Items keep their identity while events append, including across the virtual window.
   const [view, setView] = createStore<{ items: TranscriptItem[]; expired: boolean; loaded: boolean; pane: ReturnType<typeof paneStates>; tool: string }>({ items: [], expired: false, loaded: false, pane: paneStates(source(), s()), tool: "" });
   const local = createMemo(() => localRows(source(), s()), undefined, { equals: (a, b) => a === b || (a.length === 0 && b.length === 0) });
@@ -794,6 +799,8 @@ export function ActivityView(props: { source?: ActivitySource }) {
     motion.update(() => untrack(() => {
       settleReading(true);
       const content = new Map(items.map((item) => [item.id, JSON.stringify(item)]));
+      for (const [key, value] of content) if (value !== measuredContent.get(key)) heights.invalidate(key);
+      heights.retain(new Set(content.keys()));
       const pending = new Set(measuring().map((index) => view.items[index]?.id));
       setMeasuring(items.flatMap((item, index) => pending.has(item.id) || content.get(item.id) !== measuredContent.get(item.id) ? [index] : []));
       measuredContent = content;
@@ -838,11 +845,15 @@ export function ActivityView(props: { source?: ActivitySource }) {
       queueMicrotask(() => { if (target === source().target()?.id) write(); });
     },
     getScrollElement: () => (scroller?.isConnected ? scroller : null),
-    estimateSize: () => 96,
-    measureElement: (element) => element.getBoundingClientRect().height,
+    estimateSize: (index) => heights.get(view.items[index]?.id, measurementWidth) ?? 96,
+    measureElement: (element) => {
+      const rect = element.getBoundingClientRect(), item = view.items[Number(element.getAttribute("data-index"))];
+      if (item) heights.set(item.id, rect.width, rect.height);
+      return rect.height;
+    },
     get getItemKey() { return itemKey(); },
     get rangeExtractor() { return rangeExtractor(); },
-    overscan: 8,
+    get overscan() { return overscan(); },
     gap: 10,
   });
   virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => {
@@ -890,7 +901,12 @@ export function ActivityView(props: { source?: ActivitySource }) {
       // considers the initial end-placement scroll active. Finish this explicit
       // premeasure before dropping retained rows; otherwise its RO never sees
       // offscreen nodes and estimates change the range on a later gesture.
-      measureActivityRows(scroller.querySelectorAll<HTMLElement>(".act-virtual-row"), virtualizer.resizeItem);
+      const indexes = new Set(pending);
+      measureActivityRows([...scroller.querySelectorAll<HTMLElement>(".act-virtual-row")].filter(row => indexes.has(Number(row.dataset.index))), (index, height, width) => {
+        const item = view.items[index];
+        if (item) heights.set(item.id, width, height);
+        virtualizer.resizeItem(index, height);
+      });
       setMeasuring([]);
       end.settle(); reading.changed();
     });
@@ -966,16 +982,39 @@ export function ActivityView(props: { source?: ActivitySource }) {
     const changed = () => { end.changed(); settleReading(); };
     // Resizes settle before the frame paints, so opening a session never shows
     // its content shifted by a late card, image or Markdown height for a frame.
-    let measuredWidth = scroller.clientWidth;
+    const column = scroller.querySelector<HTMLElement>(".act-col");
+    measurementWidth = column?.getBoundingClientRect().width ?? scroller.clientWidth;
+    const measureWindow = () => {
+      // Off-screen rows keep their last height as an estimate until mounted.
+      // Restoring a width must not clear the entire virtual layout or mount it.
+      const pending = activityMeasureWindow(virtualizer.range, view.items.length, overscan());
+      batch(() => {
+        for (const index of pending) {
+          const size = heights.get(view.items[index].id, measurementWidth);
+          if (size !== undefined) virtualizer.resizeItem(index, size);
+        }
+        setMeasuring(pending);
+      });
+    };
+    let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+    const resizingWidth = () => {
+      setResizing(true);
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        resizeTimer = undefined;
+        setResizing(false); // Restore scroll overscan only after width changes stop.
+        end.settle(); settleReading();
+      }, 250);
+    };
     const resize = new ResizeObserver(() => {
-      if (scroller.clientWidth !== measuredWidth) {
-        measuredWidth = scroller.clientWidth;
-        setMeasuring(view.items.map((_, index) => index));
+      const width = column?.getBoundingClientRect().width ?? scroller.clientWidth;
+      if (Math.abs(width - measurementWidth) > .5) {
+        measurementWidth = width;
+        if (placed()) { resizingWidth(); measureWindow(); }
       }
       end.settle(); settleReading();
     });
     resize.observe(scroller);
-    const column = scroller.querySelector(".act-col");
     const mutations = new MutationObserver(changed);
     if (column) {
       resize.observe(column);
@@ -984,11 +1023,12 @@ export function ActivityView(props: { source?: ActivitySource }) {
     scroller.addEventListener("load", changed, true);
     scroller.addEventListener("contentvisibilityautostatechange", changed, true);
     const fontChanged = () => {
-      setMeasuring(view.items.map((_, index) => index));
+      heights.clear();
+      if (placed()) measureWindow();
       changed();
     };
     document.fonts?.addEventListener("loadingdone", fontChanged);
-    onCleanup(() => { document.removeEventListener("selectionchange", selectionChanged); resize.disconnect(); mutations.disconnect(); scroller.removeEventListener("load", changed, true); scroller.removeEventListener("contentvisibilityautostatechange", changed, true); document.fonts?.removeEventListener("loadingdone", fontChanged); });
+    onCleanup(() => { clearTimeout(resizeTimer); document.removeEventListener("selectionchange", selectionChanged); resize.disconnect(); mutations.disconnect(); scroller.removeEventListener("load", changed, true); scroller.removeEventListener("contentvisibilityautostatechange", changed, true); document.fonts?.removeEventListener("loadingdone", fontChanged); });
   });
   onCleanup(() => {
     end.dispose(); reading.dispose(); motion.dispose();
@@ -1028,6 +1068,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
     activityAll.delete(scroller);
     setExpanded(reconcile({}));
     measuredContent.clear(); setMeasuring([]); setSelectionIndexes([]);
+    heights.clear();
     virtualizer.measure();
     setFollowing(true); setUnseen(0); reading.reset(); newest = undefined;
     // Selection changes must place even when the next page has the same row count.
@@ -1141,9 +1182,15 @@ export function ActivityView(props: { source?: ActivitySource }) {
                     // Solid writes data-index after this ref, so supply it before measuring.
                     return (
                       <div class="act-virtual-row" data-index={indexOf().get(id) ?? 0} data-start={flow().starts.get(id) ?? 0}
-                        ref={(node) => { node.dataset.index = String(indexOf().get(id) ?? 0); virtualizer.measureElement(node); }}
+                        ref={(node) => {
+                          const index = indexOf().get(id) ?? 0;
+                          node.dataset.index = String(index);
+                          const size = heights.get(id, measurementWidth);
+                          if (size !== undefined) virtualizer.resizeItem(index, size);
+                          virtualizer.measureElement(node);
+                        }}
                         style={{ "margin-top": `${flow().margins.get(id) ?? 0}px` }}>
-                        <Show when={item()}>{(it) => <Item item={it()} scope={scope()} sourceId={source().target()?.id} postersEnabled={placed() && !pageHidden()} expanded={!!expanded[id]} onExpanded={(open) => setExpanded(id, open)} />}</Show>
+                        <Show when={item()}>{(it) => <Item item={it()} scope={scope()} sourceId={source().target()?.id} postersEnabled={placed() && !pageHidden()} expanded={!!expanded[id]} onExpanded={(open) => { heights.invalidate(id); setExpanded(id, open); }} />}</Show>
                       </div>
                     );
                   }}</For>

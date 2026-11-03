@@ -33,7 +33,8 @@ fn main() {
     {
         std::process::exit(code);
     }
-    // Fixed native implementation worker: bounded frame, no config/owner load.
+    // Native implementation workers validate a fixed bounded frame before
+    // selecting configuration or any ownership/manager operation.
     #[cfg(windows)]
     if let Some(code) =
         desktop::windows_registration_entry(&std::env::args().skip(1).collect::<Vec<_>>())
@@ -53,6 +54,12 @@ fn main() {
     let code = match cli::dispatch(std::env::args().skip(1).collect()) {
         Ok(code) => code,
         Err(err) => {
+            #[cfg(windows)]
+            desktop::startup_diagnostic::record(
+                &std::env::args().skip(1).collect::<Vec<_>>(),
+                err.code,
+                &err.message,
+            );
             // One write (eprintln! writes each piece on its own), so that no
             // frame a pseudoconsole paints shows the prefix without the message.
             let line = format!("hgs: {}\n", err.message);

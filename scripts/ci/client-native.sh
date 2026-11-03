@@ -6,6 +6,14 @@ platform="${1:?usage: scripts/ci/client-native.sh linux|macos|windows [core|medi
 stage="${2:-all}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target/client-native}"
 
+disk_checkpoint() {
+    if [[ "$platform" == linux && "${GITHUB_ACTIONS:-}" == true \
+        && "${RUNNER_ENVIRONMENT:-}" == github-hosted && "${RUNNER_OS:-}" == Linux \
+        && "${GITHUB_JOB:-}" == client-native-linux ]]; then
+        python3 scripts/ci/ubuntu-disk.py report "$1"
+    fi
+}
+
 core_tests() {
     presence_tests
     cargo +1.99.1 test --locked --manifest-path client/core/Cargo.toml --no-fail-fast
@@ -41,14 +49,20 @@ tauri_clippy() {
 case "$platform:$stage" in
     linux:all)
         presence_tests
+        disk_checkpoint after-native-presence-tests
         cargo +1.99.1 test --locked --manifest-path client/media/Cargo.toml --features video
+        disk_checkpoint after-native-media-tests
         env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 ZERUS_CLIENT_HEADLESS=1 \
             xvfb-run -a -s "-screen 0 1440x900x24" \
             cargo +1.99.1 test --locked --manifest-path client/src-tauri/Cargo.toml
+        disk_checkpoint after-native-tauri-tests
         cargo +1.99.1 clippy --locked --manifest-path client/src-tauri/Cargo.toml --all-targets --features video -- -D warnings
+        disk_checkpoint after-native-tauri-clippy
         # The default-off Linux notification transport compiles nowhere else.
         cargo +1.99.1 clippy --locked --manifest-path client/core/Cargo.toml --all-targets --features linux-native-notify -- -D warnings
+        disk_checkpoint before-native-core-test-linking
         dbus-run-session -- cargo +1.99.1 test --locked --manifest-path client/core/Cargo.toml --features linux-native-notify linux_notify
+        disk_checkpoint after-native-core-tests
         ;;
     macos:all)
         core_tests

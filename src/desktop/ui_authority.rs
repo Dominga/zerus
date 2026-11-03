@@ -482,7 +482,7 @@ impl Authorized {
                 self.frontend.identity.birth.clone(),
                 self.instance,
             ),
-            self.envelope.request.operation(),
+            OrderedOperation::from(&self.envelope.request),
             self.serial,
             Instant::now(),
         )?;
@@ -686,10 +686,40 @@ fn dev_number(version: &str) -> Option<u64> {
     }
 }
 
+// Exhaustively map the closed native request DTO. A new Request variant must
+// choose its ordering lane here before it can compile; there is no second
+// string allowlist that can silently reject an otherwise authenticated read.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum OrderedOperation {
+    ActivationWait,
+    AutomaticApprovals,
+    MaintenanceConfigure,
+    ImportPendingReads,
+    DesktopOwnership,
+    NotificationPreferences,
+    NotificationFocus,
+}
+impl From<&Request> for OrderedOperation {
+    fn from(request: &Request) -> Self {
+        use zerus_client_core::desktop::notification_control::Command;
+        match request {
+            Request::ActivationWait { .. } => Self::ActivationWait,
+            Request::AutomaticApprovals { .. } => Self::AutomaticApprovals,
+            Request::MaintenanceConfigure { .. } => Self::MaintenanceConfigure,
+            Request::ImportPendingReads { .. } => Self::ImportPendingReads,
+            Request::DesktopOwnership { .. } => Self::DesktopOwnership,
+            Request::NotificationControl { control, .. } => match control {
+                Command::Configure { .. } => Self::NotificationPreferences,
+                Command::Focus { .. } => Self::NotificationFocus,
+            },
+        }
+    }
+}
+
 type Instance = (u32, String, String);
 #[derive(Default)]
 pub(super) struct Order {
-    current: Option<(Instance, BTreeMap<&'static str, u64>)>,
+    current: Option<(Instance, BTreeMap<OrderedOperation, u64>)>,
     retired: BTreeMap<Instance, Instant>,
 }
 impl Order {
@@ -698,22 +728,10 @@ impl Order {
     fn observe(
         &mut self,
         instance: Instance,
-        operation: &'static str,
+        operation: OrderedOperation,
         serial: u64,
         now: Instant,
     ) -> Result<()> {
-        ensure!(
-            matches!(
-                operation,
-                "automatic_approvals"
-                    | "maintenance_configure"
-                    | "import_pending_reads"
-                    | "desktop_ownership"
-                    | "notification_preferences"
-                    | "notification_focus"
-            ),
-            "unknown frontend operation"
-        );
         self.retired.retain(|_, until| now < *until);
         ensure!(
             serial != 0 && !self.retired.contains_key(&instance),
@@ -722,7 +740,7 @@ impl Order {
         if let Some((old, previous)) = &mut self.current {
             if *old == instance {
                 ensure!(
-                    serial > previous.get(operation).copied().unwrap_or(0),
+                    serial > previous.get(&operation).copied().unwrap_or(0),
                     "stale frontend intent"
                 );
                 previous.insert(operation, serial);
@@ -1101,19 +1119,39 @@ mod tests {
         let instance = (42, "birth".to_string(), id(95));
         let now = Instant::now();
         order
-            .observe(instance.clone(), "notification_preferences", 2, now)
+            .observe(
+                instance.clone(),
+                OrderedOperation::NotificationPreferences,
+                2,
+                now,
+            )
             .unwrap();
         order
-            .observe(instance.clone(), "notification_focus", 1, now)
+            .observe(
+                instance.clone(),
+                OrderedOperation::NotificationFocus,
+                1,
+                now,
+            )
             .unwrap();
         assert!(order
-            .observe(instance.clone(), "notification_preferences", 1, now)
+            .observe(
+                instance.clone(),
+                OrderedOperation::NotificationPreferences,
+                1,
+                now
+            )
             .is_err());
         assert!(order
-            .observe(instance.clone(), "notification_focus", 1, now)
+            .observe(
+                instance.clone(),
+                OrderedOperation::NotificationFocus,
+                1,
+                now
+            )
             .is_err());
         order
-            .observe(instance, "notification_focus", 2, now)
+            .observe(instance, OrderedOperation::NotificationFocus, 2, now)
             .unwrap();
     }
 
@@ -1272,6 +1310,98 @@ mod tests {
         assert!(ancestry(8, Instant::now(), |_| panic!("expired before inspection")).is_err());
     }
 
+    // Isolate the post-authentication ordering boundary while using actual
+    // kernel process currentness. Canonical/original-child auth is exercised
+    // separately by the private CLI frontend-request integration fixture.
+    #[cfg(unix)]
+    fn live_authorized(request: Request, serial: u64) -> Authorized {
+        Authorized {
+            envelope: Envelope {
+                abi: zerus_client_core::desktop::ui_requests::ABI.into(),
+                attempt: id(101),
+                request,
+            },
+            caller: Process::read(std::process::id()).unwrap(),
+            frontend: Process::read(std::process::id()).unwrap(),
+            until: Instant::now() + WAIT,
+            instance: id(102),
+            serial,
+            ownership_origin: None,
+            notification: None,
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn activation_admission_uses_real_order_after_ownership_without_relaxing_freshness() {
+        let mut order = Order::default();
+        let grant = Request::DesktopOwnership {
+            request_id: id(103),
+            action: zerus_client_core::desktop::ownership::Action::Grant,
+            journal: None,
+            revision: 0,
+        };
+        live_authorized(grant, 5).into_request(&mut order).unwrap();
+        live_authorized(
+            Request::AutomaticApprovals {
+                request_id: id(107),
+                enabled: false,
+            },
+            7,
+        )
+        .into_request(&mut order)
+        .unwrap();
+        let activation = Request::ActivationWait {
+            request_id: id(104),
+        };
+        let first = live_authorized(activation.clone(), 1)
+            .into_request(&mut order)
+            .unwrap();
+        assert_eq!(first.activation_wait().unwrap().0, id(104));
+        assert!(live_authorized(activation.clone(), 1)
+            .into_request(&mut order)
+            .is_err());
+        assert!(live_authorized(activation.clone(), 0)
+            .into_request(&mut order)
+            .is_err());
+        let mut expired = live_authorized(activation.clone(), 2);
+        expired.until = Instant::now();
+        assert!(expired.into_request(&mut order).is_err());
+        let mut changed = live_authorized(activation.clone(), 2);
+        changed.caller.identity.birth.push_str("-replaced");
+        assert!(changed.into_request(&mut order).is_err());
+        let mut changed = live_authorized(activation.clone(), 2);
+        changed.frontend.identity.birth.push_str("-replaced");
+        assert!(changed.into_request(&mut order).is_err());
+        live_authorized(activation, 2)
+            .into_request(&mut order)
+            .unwrap()
+            .activation_wait()
+            .unwrap();
+        let mut delayed = live_authorized(
+            Request::ActivationWait {
+                request_id: id(108),
+            },
+            3,
+        )
+        .into_request(&mut order)
+        .unwrap();
+        if let Freshness::Native { until, .. } = &mut delayed.1 {
+            *until = Instant::now();
+        }
+        assert!(delayed.activation_wait().is_err());
+    }
+
+    #[test]
+    fn unknown_frontend_operations_stay_closed_before_ordering() {
+        let value = serde_json::json!({
+            "abi": zerus_client_core::desktop::ui_requests::ABI,
+            "attempt": id(105),
+            "request": {"op": "unknown_operation", "request_id": id(106)}
+        });
+        assert!(serde_json::from_value::<Envelope>(value).is_err());
+    }
+
     #[test]
     fn native_order_refuses_replay_and_slow_earlier_intents() {
         let mut order = Order::default();
@@ -1279,28 +1409,30 @@ mod tests {
         let a = (7, "100".into(), id(1));
         let b = (7, "200".into(), id(2));
         order
-            .observe(a.clone(), "automatic_approvals", 2, now)
+            .observe(a.clone(), OrderedOperation::AutomaticApprovals, 2, now)
             .unwrap();
         assert!(order
-            .observe(a.clone(), "automatic_approvals", 1, now)
+            .observe(a.clone(), OrderedOperation::AutomaticApprovals, 1, now)
             .is_err());
         assert!(order
-            .observe(a.clone(), "automatic_approvals", 2, now)
+            .observe(a.clone(), OrderedOperation::AutomaticApprovals, 2, now)
             .is_err());
         order
-            .observe(a.clone(), "automatic_approvals", 3, now)
+            .observe(a.clone(), OrderedOperation::AutomaticApprovals, 3, now)
             .unwrap();
         order
-            .observe(b.clone(), "automatic_approvals", 1, now)
+            .observe(b.clone(), OrderedOperation::AutomaticApprovals, 1, now)
             .unwrap();
         assert!(order
-            .observe(a.clone(), "automatic_approvals", 4, now)
+            .observe(a.clone(), OrderedOperation::AutomaticApprovals, 4, now)
             .is_err());
-        order.observe(b, "automatic_approvals", 2, now).unwrap();
+        order
+            .observe(b, OrderedOperation::AutomaticApprovals, 2, now)
+            .unwrap();
         // An already authenticated request cannot survive WAIT, so the old
         // instance entry may expire without retaining unbounded history.
         order
-            .observe(a, "automatic_approvals", 5, now + WAIT)
+            .observe(a, OrderedOperation::AutomaticApprovals, 5, now + WAIT)
             .unwrap();
     }
 
@@ -1322,12 +1454,17 @@ mod tests {
                 revision: 0,
             };
             order
-                .observe(instance.clone(), request.operation(), serial as u64, now)
+                .observe(
+                    instance.clone(),
+                    OrderedOperation::from(&request),
+                    serial as u64,
+                    now,
+                )
                 .unwrap();
             assert!(order
                 .observe(
                     instance.clone(),
-                    request.operation(),
+                    OrderedOperation::from(&request),
                     (serial - 1) as u64,
                     now
                 )
@@ -1347,16 +1484,31 @@ mod tests {
         let now = Instant::now();
         let instance = (7, "100".into(), id(1));
         order
-            .observe(instance.clone(), "maintenance_configure", 2, now)
+            .observe(
+                instance.clone(),
+                OrderedOperation::MaintenanceConfigure,
+                2,
+                now,
+            )
             .unwrap();
         order
-            .observe(instance.clone(), "automatic_approvals", 1, now)
+            .observe(
+                instance.clone(),
+                OrderedOperation::AutomaticApprovals,
+                1,
+                now,
+            )
             .unwrap();
         order
-            .observe(instance.clone(), "automatic_approvals", 3, now)
+            .observe(
+                instance.clone(),
+                OrderedOperation::AutomaticApprovals,
+                3,
+                now,
+            )
             .unwrap();
         assert!(order
-            .observe(instance, "automatic_approvals", 1, now)
+            .observe(instance, OrderedOperation::AutomaticApprovals, 1, now)
             .is_err());
     }
 

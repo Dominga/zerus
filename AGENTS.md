@@ -1,8 +1,9 @@
 # Agent instructions
 
 Zerus provides a desktop UI and the `hgs` CLI for persistent local and remote
-agent sessions. The CLI lives in `src/`; the Qt GUI lives in `tray/src/`;
-replicated documents (Loro) live in `crates/replica/`, the only code that
+agent sessions. The CLI lives in `src/`; the released GUI lives in `client/`. `tray/` retains
+compatible installers, the guarded updater and shared artwork, not a Qt build.
+Read-only Qt migration decoders remain in the Rust client. Replicated documents (Loro) live in `crates/replica/`, the only code that
 imports Loro.
 The Rust mobile relay lives in `services/mobile/relay/` and the Rust outbound
 connector in `services/mobile/connector/`; the legacy Python connector remains in
@@ -18,10 +19,11 @@ only from trusted main; see `docs/ios-distribution.md`.
 `design/` contains prototypes and original artwork, not runtime dependencies.
 The Tauri desktop client lives in `client/`: the SolidJS frontend in
 `client/src`, a pure-Rust core in `client/core` and the Tauri app in
-`client/src-tauri`, each its own Cargo package and lock. It grows beside the
-Qt GUI; see `docs/superpowers/specs/2026-10-27-tauri-web-ui-design.md`. Its UI
+`client/src-tauri`, each its own Cargo package and lock. It is the Zerus Next GUI; see the
+[retirement acceptance checklist](docs/qt-release-acceptance.md) and
+`docs/superpowers/specs/2026-10-27-tauri-web-ui-design.md`. Its UI
 never separates values with dots; `scripts/check-ui-separators.py` enforces it
-in CI (the Qt GUI and mobile clients are out of that rule's scope).
+in CI (mobile clients are out of that rule's scope).
 
 The repository language is English. Write documentation and other project-facing
 text in English; conversations may use the user's preferred language.

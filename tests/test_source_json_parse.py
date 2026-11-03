@@ -18,8 +18,8 @@ class CurrentTreeTest(unittest.TestCase):
     def test_json_parse_has_no_gui_thread_exception(self):
         # Owner decision, 2026-10-27: the JsonParse::local() list is empty at the end of M2.
         self.assertFalse(hasattr(check, "LOCAL_JSON_CALLS"))
-        header = check.code_only((ROOT / "tray/src/JsonParse.h").read_text(encoding="utf-8"))
-        self.assertNotRegex(header, r"\blocal\w*\s*\(")
+        self.assertFalse((ROOT / "tray/src/JsonParse.h").exists(), "the Qt parser is retired")
+
 
 
 class RuleTest(unittest.TestCase):

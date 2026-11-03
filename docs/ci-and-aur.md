@@ -379,13 +379,9 @@ Native agent CLIs are not included in the product package.
 
 The CI CLI jobs set `ZERUS_PYTHON_JOBS` to twice the runner vCPUs (8 on Ubuntu,
 6 on macOS): the Python test classes mostly wait on terminals and subprocesses.
-The desktop jobs keep per-function QtTest JUnit results in `qt-functions/` of
-their test-results artifacts. The `test_sessionswindow` shards are balanced by
-`tray/tests/qt-shard-durations.txt`, the largest duration of each function, or
-data row of its slowest functions, across the measured runs. After tests are
-added or become slower, download the Arch, macOS and Windows desktop artifacts
-of one main run and rebuild that file with `scripts/ci/qt-shard-seed.py`; its
-usage lists the commands. A test the file does not list still runs exactly once.
+The retired Qt desktop jobs and their shard/sampler tools are no longer part of
+CI. Historical Qt artifacts stay immutable; use the maintained `client-native-*`
+jobs and the platform package jobs for new desktop source qualification.
 
 `tests/test_claude_input_native.py` checks exact message acceptance by the real
 Claude TUI with a private home/socket and a localhost fake API; it never reads a

@@ -183,11 +183,6 @@ class InspectTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not a valid zip"):
             portable.inspect(self.directory / "broken.zip")
 
-    def test_every_shipped_license_text_is_required(self):
-        texts = sorted(path.stem for path in (ROOT / "packaging/windows/licenses").glob("*.txt"))
-        self.assertEqual(texts, sorted(portable.QT_LICENSE_TEXTS))
-        for name in texts:
-            self.assertGreater((ROOT / "packaging/windows/licenses" / f"{name}.txt").stat().st_size, 200, name)
 
     def test_limits_match_the_release_mirror_and_candidate_bounds(self):
         import update_feed

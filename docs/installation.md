@@ -24,12 +24,11 @@ native agents as part of a Zerus GUI/package update.
 
 For the Linux desktop: Rust, Node.js/npm, GTK3, WebKitGTK 4.1, ALSA and
 GStreamer. The source installer and AUR packages build Zerus Next by default;
-standard autostart uses user systemd. `HGS_LINUX_GUI=qt` keeps the explicit
-Qt fallback until Linux acceptance and needs CMake, a C++17 compiler, Qt 6
-Widgets/Multimedia/SVG and KDE Frameworks KStatusNotifierItem, KWindowSystem
-and KIdleTime. Qt WebEngine is optional for that fallback's embedded DeepSeek
-[Native UI](reference.md#deepseek). On macOS, the Qt source-build path uses
-Homebrew Qt and requires macOS 14 or later.
+standard autostart uses user systemd. Qt/KF6/WebEngine are not build or runtime
+requirements. On macOS, source installs build Zerus Next and require macOS 14
+or later. `HGS_LINUX_GUI` and `HGS_MAC_GUI` accept `client`; the former `qt`
+selection is retired after platform acceptance. Read-only legacy imports and
+immutable old package validation remain available.
 
 ## Local installation
 
@@ -43,7 +42,7 @@ cd zerus
 On macOS, install the dependencies first:
 
 ```sh
-brew install rust python tmux cmake qt qtmultimedia
+brew install rust python tmux node pkg-config gstreamer gst-plugins-base
 ```
 
 The macOS source installer also needs a valid application-signing certificate
@@ -61,8 +60,8 @@ Compatible certificate signatures keep the privacy identity across local
 rebuilds. The installer verifies both designated requirements before replacing
 an existing certificate-signed app and stops if they are incompatible. It never
 falls back to ad hoc signing. Moving from an older ad hoc installation can require
-fresh consent once; no permissions are reset automatically. Source builds link
-Homebrew Qt and are signed locally without the hardened runtime or notarization;
+fresh consent once; no permissions are reset automatically. Source builds use
+Tauri and WebKit and are signed locally without notarization;
 use the published app for distribution. See [macOS signing](macos-distribution.md#local-source-builds).
 
 On Arch Linux, install the Next build and runtime dependencies before a source

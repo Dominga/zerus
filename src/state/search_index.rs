@@ -264,8 +264,8 @@ impl Store {
                 break;
             }
             let record = match binding(state, identity, &mut progress, budget, reader, 0) {
-                Ok(Some(record)) => record,
-                Ok(None) => {
+                Ok(metadata::Record::Ready(record)) => record,
+                Ok(metadata::Record::Deferred | metadata::Record::OverBudget) => {
                     progress.stopped = true;
                     break;
                 }
@@ -788,10 +788,10 @@ impl Store {
                 archive_id: target.archive_id,
             };
             match binding(state, &identity, progress, budget, reader, 0) {
-                Ok(Some(_)) => (),
+                Ok(metadata::Record::Ready(_)) => (),
                 // Keep this source active and revisit it on a later sweep;
                 // an expensive record must not fence every following source.
-                Ok(None) => (),
+                Ok(metadata::Record::Deferred | metadata::Record::OverBudget) => (),
                 Err(_) => self.retire(&key)?,
             }
             next = key;
@@ -828,7 +828,7 @@ fn binding(
     budget: &Budget,
     reader: &mut metadata::Reader,
     reserve: usize,
-) -> Result<Option<Value>> {
+) -> Result<metadata::Record> {
     let path = if identity.archive_id.is_empty() {
         let basename = format!("{:x}.json", Sha256::digest(identity.name.as_bytes()));
         if state.join("name_routes").join(&basename).exists() {
@@ -842,8 +842,9 @@ fn binding(
             .join("archives")
             .join(format!("{}.json", identity.archive_id))
     };
-    let Some(mut record) = reader.read(&path, progress, budget, reserve)? else {
-        return Ok(None);
+    let mut record = match reader.read(&path, progress, budget, reserve)? {
+        metadata::Record::Ready(record) => record,
+        other => return Ok(other),
     };
     if !identity.archive_id.is_empty() {
         rename::normalize_archive(&mut record)?;
@@ -857,7 +858,7 @@ fn binding(
     {
         return Err("Binding identity changed".into());
     }
-    Ok(Some(record))
+    Ok(metadata::Record::Ready(record))
 }
 fn sample(
     file: &mut fs::File,

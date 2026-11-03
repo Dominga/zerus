@@ -13,6 +13,7 @@ enum SourceProof {
     Current(Value),
     Appended,
     Deferred,
+    Unavailable,
 }
 
 pub(in crate::state) fn read(query: &str, limit: usize, cursor: Option<&str>) -> Result<Value> {
@@ -168,16 +169,24 @@ impl Store {
                 };
                 let proof = binding(state, &identity, &mut progress, budget, &mut reader, 512)
                     .and_then(|record| match record {
-                        Some(record) => {
+                        metadata::Record::Ready(record) => {
                             self.verify_source(record, &key, &mut progress, budget, cancel)
                         }
-                        None => Ok(SourceProof::Deferred),
+                        metadata::Record::Deferred => Ok(SourceProof::Deferred),
+                        metadata::Record::OverBudget => Ok(SourceProof::Unavailable),
                     });
                 let target = match proof {
                     Ok(SourceProof::Current(target)) => Some(target),
                     Ok(SourceProof::Deferred) => {
                         next = before;
                         break;
+                    }
+                    Ok(SourceProof::Unavailable) => {
+                        // Keep the source/queue pending for a future read with
+                        // another budget, but do not fence this page's cursor.
+                        self.revisit(&key)?;
+                        rejected += 1;
+                        None
                     }
                     Ok(SourceProof::Appended) => {
                         self.revisit(&key)?;

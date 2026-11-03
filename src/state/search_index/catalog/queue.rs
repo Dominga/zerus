@@ -95,8 +95,8 @@ impl Store {
                 &mut reader,
             );
             let mut record = match record {
-                Ok(Some(record)) => record,
-                Ok(None) => {
+                Ok(metadata::Record::Ready(record)) => record,
+                Ok(metadata::Record::Deferred | metadata::Record::OverBudget) => {
                     progress.ingestion.stopped = true;
                     // Leave it pending, but let later bounded slices reach
                     // other paths even when this record needs a larger slice.
@@ -322,7 +322,7 @@ fn queued_record(
     progress: &mut Progress,
     budget: &Budget,
     reader: &mut metadata::Reader,
-) -> Result<Option<Value>> {
+) -> Result<metadata::Record> {
     let parents = match kind {
         "binding" => vec![state.to_owned(), state.join("bindings")],
         "archive" => vec![state.join("archives")],
@@ -332,8 +332,9 @@ fn queued_record(
     if !parents.iter().any(|parent| path.parent() == Some(parent)) || !candidate(path, kind) {
         return Err("Queued source is outside this state configuration".into());
     }
-    let Some(record) = reader.read(path, progress, budget, 0)? else {
-        return Ok(None);
+    let record = match reader.read(path, progress, budget, 0)? {
+        metadata::Record::Ready(record) => record,
+        other => return Ok(other),
     };
     if !record.is_object() || (kind != "native" && record["version"] != 1) {
         return Err("Queued source is not a binding".into());
@@ -341,7 +342,7 @@ fn queued_record(
     if kind == "native" && record["backend"] != "dsh" {
         return Err("Native source identity changed".into());
     }
-    Ok(Some(record))
+    Ok(metadata::Record::Ready(record))
 }
 
 #[cfg(test)]

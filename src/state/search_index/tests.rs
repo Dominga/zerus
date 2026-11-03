@@ -230,8 +230,8 @@ fn large_shell_job_bindings_stay_searchable_and_are_reverified() {
         fixture.append(&Fixture::event(2, "another public needle", "final"));
         fixture.consume_records(&mut store, 128, 1);
         assert_eq!(store.index.query("needle", 50, None).unwrap().hits.len(), 2);
-        // A caller that cannot afford the raw record yields without retiring
-        // it or consuming its query cursor. A later full slice can prove it.
+        // Ingestion keeps it pending. A publication budget that cannot fit it
+        // even on a fresh page reports it unavailable without retiring it.
         let mut small = fixture.budget(128);
         small.bytes = RECORD_BYTES;
         let deferred = store
@@ -255,13 +255,14 @@ fn large_shell_job_bindings_stay_searchable_and_are_reverified() {
             )
             .unwrap();
         assert!(deferred["results"].as_array().unwrap().is_empty());
-        assert_eq!(deferred["unavailable_sessions"], 0);
+        assert_eq!(deferred["unavailable_sessions"], 1);
+        assert!(deferred["next_cursor"].is_null());
         let resumed = store
             .publish(
                 &fixture.state,
                 "needle",
                 50,
-                Some(deferred["next_cursor"].as_str().unwrap()),
+                None,
                 &fixture.budget(128),
                 &AtomicBool::new(false),
             )
@@ -281,6 +282,43 @@ fn large_shell_job_bindings_stay_searchable_and_are_reverified() {
             .unwrap();
         assert!(page["results"].as_array().unwrap().is_empty());
     }
+}
+
+#[test]
+fn sweep_keeps_a_source_active_when_only_the_remaining_slice_is_too_small() {
+    let mut fixture = Fixture::new();
+    fixture.record["shell_jobs"] = json!({"command":"private-shell-command ".repeat(70_000)});
+    fs::write(&fixture.binding, fixture.record.to_string()).unwrap();
+    fixture.append(&Fixture::event(1, "public needle", "final"));
+    let mut store = fixture.store();
+    fixture.consume_records(&mut store, 128, 1);
+    store
+        .index
+        .connection()
+        .execute("DELETE FROM meta WHERE key='source_sweep'", [])
+        .unwrap();
+    let mut progress = Progress {
+        bytes: 3 << 20,
+        ..Progress::default()
+    };
+    store
+        .sweep(
+            &fixture.state,
+            &fixture.budget(128),
+            &mut progress,
+            &AtomicBool::new(false),
+            &mut metadata::Reader::default(),
+        )
+        .unwrap();
+    assert_eq!(progress.bytes, 3 << 20);
+    assert_eq!(progress.files, 1);
+    assert_eq!(store.index.query("needle", 50, None).unwrap().hits.len(), 1);
+    let active: bool = store
+        .index
+        .connection()
+        .query_row("SELECT active FROM sources", [], |row| row.get(0))
+        .unwrap();
+    assert!(active);
 }
 
 #[test]

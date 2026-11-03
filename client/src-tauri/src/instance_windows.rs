@@ -510,6 +510,51 @@ mod tests {
             assert!(bytes.len() <= 4096);
             let control: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             let mode = control["case"].as_str().unwrap().to_owned();
+            if mode == "mode_check" {
+                report_chain(std::process::id());
+                let invocation = zerus_client_core::Invocation {
+                    args: vec![
+                        "desktop".into(),
+                        "registration".into(),
+                        "mode-check".into(),
+                        "--json".into(),
+                    ],
+                    stdin: None,
+                    timeout: Duration::from_secs(8),
+                    request_id: None,
+                };
+                let environment: Vec<_> = std::env::vars()
+                    .filter(|(key, _)| {
+                        !key.eq_ignore_ascii_case("HGS_SESSION")
+                            && !key.eq_ignore_ascii_case("HGS_RUN_ID")
+                    })
+                    .collect();
+                let environment: Vec<_> = environment
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str()))
+                    .collect();
+                let result = zerus_client_core::run::run_hidden_limited(
+                    Path::new(control["cli"].as_str().unwrap()),
+                    &invocation,
+                    &environment,
+                    65536,
+                )
+                .unwrap();
+                let zerus_client_core::actions::Exit::Code {
+                    code,
+                    stdout,
+                    stderr,
+                } = result
+                else {
+                    panic!("original mode-check fixture child did not settle")
+                };
+                println!(
+                    "\nMODE_CALLER_RESULT {}",
+                    serde_json::json!({"code":code,
+                    "stdout":String::from_utf8(stdout).unwrap(),"stderr":stderr})
+                );
+                return;
+            }
             if mode == "observe" {
                 // Private test observation only. This PID never supplies a
                 // request peer, cached confirmation or mutation permit.

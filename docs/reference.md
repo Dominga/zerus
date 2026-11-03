@@ -4548,9 +4548,12 @@ installers; it is a requirement, not a claim that the environment is present.
 `lifecycle.mode` reports the running command's `passive` or `background`
 selection independently of worker admission. On Linux/macOS, `registration --json
 --background` renders the explicit background variant without installing it;
-On Linux and macOS, `registration mode-check --json` checks the actual installer
-caller ancestry and foreground terminal or installed frontend, without granting
-service ownership.
+`registration mode-check --json` checks the actual installer caller ancestry and
+foreground terminal or installed frontend on Linux, macOS and Windows, without
+granting service ownership. Windows requires a retained installed frontend
+ancestor or an already attached visible foreground classic console; unverified
+Windows Terminal/ConPTY and headless callers are directed to Settings. This
+preflight does not enable Windows background registration or change a task.
 The [macOS ancestry boundary](macos-distribution.md) verifies Terminal's system
 login bridge and launchd PID 1; SSH through a foreign session process refuses.
 The maintained Linux helper's `status --json` reports the durable selected mode

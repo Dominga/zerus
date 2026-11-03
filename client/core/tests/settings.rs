@@ -1432,6 +1432,12 @@ fn the_preference_report_names_keys_and_never_values() {
         assert!(!text.contains(value), "{value} in {text}");
     }
     drop(settings);
+    // The report-only family is never a family row (no "no-consumer" label).
+    assert!(report["families"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|f| f["family"] != "no-consumer"));
     // A family that waits records no outcome; it is reported from its quarantine.
     let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert!(saved["g3_outcome"].get("session-splitter").is_none());

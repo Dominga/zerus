@@ -1137,6 +1137,21 @@ mod hidden_tests {
 
     #[test]
     fn a_hidden_helper_has_no_console_and_receives_exact_input_through_eof() {
+        const CASE: &str = "run::hidden_tests::a_hidden_helper_has_no_console_and_receives_exact_input_through_eof";
+        const MARKER: &str = "ZERUS_TEST_HIDDEN_HELPER_CASE";
+        const FIXTURE_WAIT: Duration = Duration::from_secs(15);
+        if std::env::var(MARKER).as_deref() == Ok(CASE) {
+            use windows_sys::Win32::System::Console::GetConsoleWindow;
+            // The exact-filter child is native: no PowerShell startup or C#
+            // compilation runs inside the console/EOF fixture's deadline.
+            // SAFETY: GetConsoleWindow has no preconditions.
+            assert!(unsafe { GetConsoleWindow() }.is_null());
+            let mut input = Vec::new();
+            std::io::stdin().take(1025).read_to_end(&mut input).unwrap();
+            assert_eq!(input, b"exact helper input");
+            println!("\n0:exact helper input");
+            return;
+        }
         let system_root = std::env::var("SystemRoot").expect("Windows has Unicode SystemRoot");
         let program = std::path::PathBuf::from(&system_root)
             .join("System32/WindowsPowerShell/v1.0/powershell.exe");
@@ -1155,36 +1170,34 @@ mod hidden_tests {
             ("TEMP", temp.as_str()),
             ("TMP", temp.as_str()),
         ];
-        let script = r#"$ErrorActionPreference='Stop'
-[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false,$true)
-Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class QuietHelper { [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); }'
-[Console]::WriteLine(('{0}:{1}' -f [QuietHelper]::GetConsoleWindow().ToInt64(),([IO.StreamReader]::new([Console]::OpenStandardInput(),[Text.UTF8Encoding]::new($false,$true))).ReadToEnd()))
-"#;
+        let mut native_environment = environment.to_vec();
+        native_environment.push((MARKER, CASE));
         let call = Invocation {
             args: vec![
-                "-NoLogo".into(),
-                "-NoProfile".into(),
-                "-NonInteractive".into(),
-                "-EncodedCommand".into(),
-                STANDARD.encode(
-                    script
-                        .encode_utf16()
-                        .flat_map(u16::to_le_bytes)
-                        .collect::<Vec<_>>(),
-                ),
+                "--exact".into(),
+                CASE.into(),
+                "--nocapture".into(),
+                "--test-threads=1".into(),
             ],
             stdin: Some(b"exact helper input".to_vec()),
-            timeout: Duration::from_secs(15),
+            timeout: FIXTURE_WAIT,
             request_id: None,
         };
-        let result = run_hidden_limited(&program, &call, &environment, 1024).unwrap();
+        let result = run_hidden_limited(
+            &std::env::current_exe().unwrap(),
+            &call,
+            &native_environment,
+            1024,
+        )
+        .unwrap();
         match result {
             Exit::Code {
                 code: 0, stdout, ..
-            } => assert_eq!(
-                String::from_utf8(stdout).unwrap().trim_end(),
-                "0:exact helper input"
-            ),
+            } => {
+                let output = String::from_utf8(stdout).unwrap();
+                assert!(output.lines().any(|line| line == "0:exact helper input"));
+                assert!(output.contains("test result: ok. 1 passed; 0 failed; 0 ignored;"));
+            }
             other => panic!("{other:?}"),
         }
 
@@ -1203,7 +1216,7 @@ Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; pu
                 ),
             ],
             stdin: Some(Vec::new()),
-            timeout: Duration::from_secs(15),
+            timeout: FIXTURE_WAIT,
             request_id: None,
         };
         let inherited = run_limited(

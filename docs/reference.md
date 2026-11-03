@@ -4022,12 +4022,22 @@ finishes. A timeout or uncertain result is shown for review and never retried
 automatically. Enabling local Windows sessions has its own confirmation and
 rechecks the original local machine identity and current host status.
 
-**Swarm worker.** Windows has no user service manager. The desktop app runs one
-hidden `hgs.exe swarm worker` and restarts it after an exit. The delay doubles
-from one second up to five minutes and resets after a run of a minute or more. A
-kill-on-close job ends the worker with the app, also after a crash. Without the
-desktop app, run `hgs swarm worker` in a terminal or `hgs swarm sync` when needed.
-`hgs swarm get` reports `worker: {running, current}` as elsewhere.
+**Swarm worker.** In background mode, the durable Windows desktop service runs
+one hidden `hgs.exe swarm worker`, including while the GUI is closed or consumes
+the service. It restarts its own child after an exit, with a delay from one second
+up to five minutes, reset after a run of at least a minute. The child starts
+suspended in its own job before running. Stop and restart retain the original
+process/job and service owner until physical exit and job drain are confirmed;
+unknown cleanup is reported in `swarm_runtime` and prevents a replacement.
+
+`hgs desktop swarm-restart --json` asks an already-running background service to
+restart only its own worker. Passive, stopping and offline services refuse it;
+it never starts the service or GUI, or stops a PID from `worker.json`. Stale-worker
+checks use this same bounded request, with the existing ten-minute attempt limit
+and default-configuration restriction. `hgs swarm get` still reports
+`worker: {running, current}`. The standalone GUI retains its compatibility
+supervisor outside desktop-service mode; `hgs swarm worker` and `hgs swarm sync`
+remain available for manual use.
 
 **Desktop app.** It uses the `hgs.exe` next to `hgs-tray.exe`, then the one on
 `PATH`; `--hgs` or `hgs=` in `tray.conf` overrides both, and the Linux and macOS

@@ -47,6 +47,8 @@ pub(crate) mod startup_diagnostic;
 mod startup_exclusion;
 mod startup_stdio;
 mod store;
+#[cfg(windows)]
+mod swarm_windows;
 mod transport;
 mod ui_authority;
 #[cfg(windows)]
@@ -82,7 +84,7 @@ pub(crate) mod creation_test {
     }
 }
 
-const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] [--background] | status [--json] | startup --json | owner-status --json | ownership-status --json | ownership-result --json | watch --json | feed --json | request --json | catalog-relay --json | registration --json [--background] | registration install|remove|status --json (Windows) | registration install --mode background|passive --json (Windows) | registration cancel-rollback --json --request-id UUID (Windows) | notification-registration install|status --json | notification-registration remove --json --request-id UUID (Windows) | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
+const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] [--background] | status [--json] | startup --json | owner-status --json | ownership-status --json | ownership-result --json | swarm-restart --json (Windows) | watch --json | feed --json | request --json | catalog-relay --json | registration --json [--background] | registration install|remove|status --json (Windows) | registration install --mode background|passive --json (Windows) | registration cancel-rollback --json --request-id UUID (Windows) | notification-registration install|status --json | notification-registration remove --json --request-id UUID (Windows) | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
 const HEARTBEAT: Duration = Duration::from_secs(10);
 pub const STARTUP_REFUSED: i32 = 78;
 
@@ -346,6 +348,11 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                 println!("{}", status(&location)?);
                 Ok(())
             }
+            #[cfg(windows)]
+            ["swarm-restart", "--json"] => {
+                println!("{}", restart_swarm(config)?);
+                Ok(())
+            }
             ["status"] => {
                 let status = status(&location)?;
                 println!(
@@ -509,6 +516,8 @@ enum Event {
     ApprovalAudit(Hello, mpsc::SyncSender<approval_audit::worker::Reply>),
     ImportOwner(String, mpsc::SyncSender<import_evidence::held::Loan>),
     Command(Hello, Arc<Queue>, Option<Box<ui_authority::Authorized>>),
+    #[cfg(windows)]
+    SwarmRestart(Arc<Queue>, zerus_client_core::desktop::windows::Peer),
     FeedOpen(Hello, mpsc::SyncSender<feed::Opened>),
     FeedData(feed::Data),
     ListenerFailed,
@@ -725,6 +734,18 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                     // Only bounded validation/admission occurs here. The same
                     // original client worker owns query I/O and transport cleanup.
                     let _ = reply.try_send(audit.admit(hello, owner.clone(), seq));
+                }
+                #[cfg(windows)]
+                Ok(Event::SwarmRestart(queue, peer)) => {
+                    let result = if peer.current() {
+                        background.as_ref().map(|runtime| runtime.restart_swarm())
+                            .unwrap_or_else(|| json!({"schema":1,"accepted":false,"code":"background_service_required"}))
+                    } else {
+                        json!({"schema":1,"accepted":false,"code":"swarm_requester_exited"})
+                    };
+                    let _ = queue
+                        .offer(protocol::encode(&frame(&epoch, seq, "response", result))?.into());
+                    queue.close();
                 }
                 Ok(Event::Command(hello, queue, authority)) => {
                     let mut value = projection(
@@ -1183,8 +1204,11 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     let _ = acceptor.join();
     drop(fanout);
     for event in receive.try_iter() {
-        if let Event::Command(_, queue, _) = event {
-            queue.close();
+        match event {
+            Event::Command(_, queue, _) => queue.close(),
+            #[cfg(windows)]
+            Event::SwarmRestart(queue, _) => queue.close(),
+            _ => {}
         }
     }
     let deadline = Instant::now() + TIMEOUT + Duration::from_secs(1);
@@ -1268,12 +1292,28 @@ fn client(
         None
     };
     let queue = Arc::new(Queue::default());
-    send.try_send(Event::Command(
-        hello,
-        queue.clone(),
-        authority.map(Box::new),
-    ))
-    .map_err(|_| anyhow::anyhow!("desktop admission is full"))?;
+    let event = Event::Command(hello, queue.clone(), authority.map(Box::new));
+    #[cfg(windows)]
+    let event = match event {
+        Event::Command(hello, _, _) if hello.op == swarm_windows::OP => {
+            use zerus_client_core::desktop::windows::{verify_own_client_until, Server};
+            ensure!(
+                hello.abi == ABI
+                    && hello.configuration == location.configuration
+                    && hello.request.is_none(),
+                "invalid swarm restart scope"
+            );
+            let pipe = stream.verification_handle()?;
+            let peer = match verify_own_client_until(&pipe, Instant::now() + TIMEOUT) {
+                Server::Verified(peer) => peer,
+                _ => anyhow::bail!("swarm requester could not be verified"),
+            };
+            Event::SwarmRestart(queue.clone(), peer)
+        }
+        event => event,
+    };
+    send.try_send(event)
+        .map_err(|_| anyhow::anyhow!("desktop admission is full"))?;
     // Close even if a timeout change or thread creation fails after admission.
     struct CloseQueue(Arc<Queue>);
     impl Drop for CloseQueue {
@@ -1381,6 +1421,92 @@ fn exchange(location: &Location, op: &str, request: Option<Value>) -> Result<Opt
         "desktop service refused the request"
     );
     Ok(Some(response["value"].clone()))
+}
+/// Restart only the worker retained by an already-running background service.
+/// Offline/passive/revoked owners are refused; this never starts a service or GUI.
+#[cfg(windows)]
+pub(crate) fn restart_swarm(config: &Config) -> Result<Value> {
+    bounded_swarm_restart(config, Instant::now() + TIMEOUT, restart_swarm_until)
+}
+#[cfg(windows)]
+fn bounded_swarm_restart(
+    config: &Config,
+    until: Instant,
+    request: impl FnOnce(&Config, Instant) -> Result<Value> + Send + 'static,
+) -> Result<Value> {
+    // Path/state discovery can involve filesystem I/O. Only one
+    // acquisition/request worker may outlive this caller's total deadline.
+    static ACQUIRING: AtomicBool = AtomicBool::new(false);
+    ensure!(
+        ACQUIRING
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok(),
+        "desktop swarm restart acquisition is still owned"
+    );
+    let config = config.clone();
+    let (send, receive) = mpsc::sync_channel(1);
+    let spawned = thread::Builder::new()
+        .name("swarm-restart-request".into())
+        .spawn(move || {
+            struct Admission;
+            impl Drop for Admission {
+                fn drop(&mut self) {
+                    ACQUIRING.store(false, Ordering::Release);
+                }
+            }
+            let _admission = Admission;
+            let result = request(&config, until);
+            drop(config);
+            let _ = send.try_send(result);
+        });
+    if let Err(error) = spawned {
+        ACQUIRING.store(false, Ordering::Release);
+        return Err(error.into());
+    }
+    receive
+        .recv_timeout(until.saturating_duration_since(Instant::now()))
+        .context("desktop swarm restart outcome is unconfirmed; do not repeat this attempt")?
+}
+#[cfg(windows)]
+fn restart_swarm_until(config: &Config, until: Instant) -> Result<Value> {
+    use zerus_client_core::desktop::windows::{verify_own_server_until, Server};
+    let location = Location::new(config)?;
+    location.check_existing()?;
+    let mut stream = transport::connect(&location)?
+        .context("the Windows desktop background service is not running")?;
+    let pipe = stream.verification_handle()?;
+    let peer = match verify_own_server_until(&pipe, until) {
+        Server::Verified(peer) => peer,
+        _ => anyhow::bail!("the desktop swarm owner could not be verified"),
+    };
+    ensure!(peer.current(), "desktop swarm owner exited");
+    let remaining = || {
+        until
+            .checked_duration_since(Instant::now())
+            .filter(|duration| !duration.is_zero())
+            .context("desktop swarm restart deadline expired")
+    };
+    stream.set_write_timeout(Some(remaining()?))?;
+    stream.write_all(&protocol::encode(&json!({"abi":ABI,"configuration":location.configuration,"op":swarm_windows::OP,"request":null}))?)?;
+    stream.set_read_timeout(Some(remaining()?))?;
+    let bytes = protocol::line(&mut BufReader::new(stream), protocol::FRAME_BYTES)?
+        .context("desktop swarm owner disconnected")?;
+    ensure!(
+        peer.current() && Instant::now() < until,
+        "desktop swarm restart outcome is unconfirmed"
+    );
+    let response: Value = serde_json::from_slice(&bytes)?;
+    ensure!(
+        response["abi"] == ABI && response["t"] == "response",
+        "invalid desktop swarm restart response"
+    );
+    let value = response["value"].clone();
+    ensure!(
+        value["accepted"] == true,
+        "desktop swarm restart refused: {}",
+        value["code"]
+    );
+    Ok(value)
 }
 fn status(location: &Location) -> Result<Value> {
     Ok(exchange(location, "status", None)?.unwrap_or_else(|| json!({"abi":ABI,"running":false,"ownership":"unavailable","configuration":location.configuration,"writers_enabled":false,

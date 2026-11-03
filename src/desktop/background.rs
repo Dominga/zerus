@@ -30,6 +30,8 @@ pub(super) struct Runtime {
     activations: activation::Router,
     drained: bool,
     stopping: bool,
+    #[cfg(windows)]
+    swarm: super::swarm_windows::Runtime,
     notifications: notification_service::Runtime,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     creation: super::creation_clone::Runtime,
@@ -75,6 +77,8 @@ impl Runtime {
                 activations: activation::Router::new(&location.configuration, epoch),
                 drained: false,
                 stopping: false,
+                #[cfg(windows)]
+                swarm: super::swarm_windows::Runtime::new(config, owner.clone()),
                 notifications: notification_service::Runtime::new(config, &location, epoch, owner),
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 creation,
@@ -103,6 +107,8 @@ impl Runtime {
             let _ = self.poll_drain(store);
             return (Vec::new(), false);
         }
+        #[cfg(windows)]
+        self.swarm.poll();
         let fleet = &self.fleet;
         self.details.tick(
             &mut |computer, generation, controls| fleet.controls(computer, generation, controls),
@@ -222,6 +228,11 @@ impl Runtime {
     }
 
     pub fn decorate(&self, value: &mut Value) {
+        #[cfg(windows)]
+        {
+            value["swarm_runtime"] = self.swarm.status();
+            value["lifecycle"]["background"]["swarm"] = self.swarm.status();
+        }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             value["creation_clone_runtime"] = self.creation.status();
@@ -262,7 +273,12 @@ impl Runtime {
             value["lifecycle"]["background"]["approvals"]["code"].clone();
         value["lifecycle"]["background"]["delivery"] = delivery.clone();
         value["delivery_runtime"] = delivery.clone();
+        #[cfg(windows)]
+        let swarm_done = self.swarm.confirmed_drained();
+        #[cfg(not(windows))]
+        let swarm_done = true;
         value["ownership"] = if code == "drained"
+            && swarm_done
             && delivery["drained"] == true
             && self.maintenance.drained()
             && self.cache.drained()
@@ -315,6 +331,14 @@ impl Runtime {
     pub fn drained(&self) -> bool {
         self.drained
     }
+    #[cfg(windows)]
+    pub fn restart_swarm(&self) -> Value {
+        if self.stopping || self.drained {
+            json!({"schema":1,"accepted":false,"code":"background_service_stopping"})
+        } else {
+            self.swarm.restart()
+        }
+    }
 
     pub fn drain(&mut self, store: &mut Store, timeout: Duration) -> Result<()> {
         self.stopping = true;
@@ -328,6 +352,8 @@ impl Runtime {
         let cache_stop = self.cache.request_stop(store);
         self.attention.set_policy(attention::Policy::default());
         self.notifications.request_stop();
+        #[cfg(windows)]
+        self.swarm.request_stop();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.creation.request_stop();
         if let Some(presence) = &self.presence {
@@ -376,6 +402,10 @@ impl Runtime {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             self.drained = self.drained && self.creation.drained();
+        }
+        #[cfg(windows)]
+        {
+            self.drained = self.swarm.drained() && self.drained;
         }
         Ok(self.drained)
     }

@@ -385,13 +385,20 @@ async fn walk(
 ) -> Result<(), &'static str> {
     let mut cursor = None::<String>;
     let mut relay = catalog_relay::Relay::default();
+    // Rebuilding the view of a source that stays online (a native resnapshot)
+    // is no connection change: a Live computer keeps Live (zerus-bkbb).
+    let refresh = source.online && shared.pump.live(computer);
     let result = async {
-        if since.is_none() {
+        if since.is_none() && !refresh {
             row(shared, computer, &source, epoch, &stop, Change::Computer { computer: ComputerId::from(computer), status: ComputerStatus::Reconnecting { attempt: 0 } }).await?;
         }
         let mut keys = since.is_none().then(BTreeSet::new);
         let mut key_bytes = 0;
         let mut start = since;
+        // A last-known baseline (its source still stages a snapshot) has no
+        // change range yet: the service refuses one until that snapshot is
+        // complete, and its completion hint starts the next baseline.
+        let mut staging = false;
         if since.is_none() {
             let mut first = true;
             loop {
@@ -403,7 +410,7 @@ async fn walk(
                 if !shared.current(computer, &source, epoch) { return Ok(()); }
                 if first {
                     let Some(bound) = shared.page_source(computer, &source, &page) else { return Ok(()); };
-                    source = bound; start = page.start_revision; first = false;
+                    source = bound; start = page.start_revision; staging = page.last_known; first = false;
                 } else if page.identity != source.identity() || page.online != source.online || page.start_revision != start {
                     return Err("catalog_scope_changed");
                 }
@@ -418,7 +425,7 @@ async fn walk(
                 if cursor.is_none() { break; }
             }
         }
-        let through = if let Some(start) = start {
+        let through = if let Some(start) = start.filter(|_| !staging) {
             let mut through = None;
             let mut previous: Option<service::ChangeItem> = None;
             let mut frame = Frame::default();

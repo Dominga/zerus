@@ -740,6 +740,16 @@ impl Pump {
             })
     }
 
+    /// Whether the view currently shows the computer Live, exactly.
+    pub fn live(&self, computer: &str) -> bool {
+        self.lock()
+            .mirror
+            .computers
+            .get(computer)
+            .and_then(|rows| rows.status)
+            == Some(ComputerStatus::Live)
+    }
+
     /// Drains a change sink on its own thread until every sender is gone,
     /// running `observe` on each change just before it is queued.
     #[cfg_attr(

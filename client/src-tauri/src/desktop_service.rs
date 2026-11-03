@@ -231,12 +231,15 @@ impl CatalogDelivery {
                 if let (Some(keys), Some(_)) = (keys, through) {
                     pump.service_catalog_finish(&computer, &keys);
                 }
+                // A contiguous delta range remains live even when a newer head
+                // needs another catch-up. Pending display changes do not mean
+                // this computer lost its connection, and neither does a still
+                // staging view of an online source that was already Live: its
+                // completion hint re-baselines it (zerus-bkbb).
+                let live = through.is_some() || (self.source.online && pump.live(&computer.0));
                 let change = Change::Computer {
                     computer,
-                    // A contiguous delta range remains live even when a newer
-                    // head needs another catch-up. Pending display changes do
-                    // not mean this computer lost its connection.
-                    status: if through.is_some() {
+                    status: if live {
                         ComputerStatus::Live
                     } else {
                         ComputerStatus::Reconnecting { attempt: 0 }
@@ -1457,9 +1460,16 @@ async fn connection(
                                     { let mut dirty = shared.dirty.lock().unwrap_or_else(PoisonError::into_inner); dirty.progress.remove(&computer); dirty.heads.remove(&computer); dirty.sources.remove(&computer); dirty.pending.remove(&computer); dirty.halted.remove(&computer); }
                                     emit(&shared, Change::Computer { computer: ComputerId(computer.clone()), status: ComputerStatus::Ended }, &stop).await?;
                                     emit(&shared, Change::Replace { computer: ComputerId(computer), rows: vec![] }, &stop).await?;
-                                } else if shared.catalog_hint(&computer, SourceVersion::from(&frame["value"]),
-                                    serde_json::from_value(frame["value"]["revision"].clone()).map_err(|_| "invalid_catalog_revision")?, frame["value"]["reset_required"] == true)? {
-                                    emit(&shared, Change::Computer { computer: ComputerId(computer), status: ComputerStatus::Probing }, &stop).await?;
+                                } else {
+                                    let source = SourceVersion::from(&frame["value"]);
+                                    // A rebuilt view of a source that stays online (a native
+                                    // resnapshot) is no connection change: a Live computer keeps
+                                    // Live while it re-baselines, so its rows never blink (zerus-bkbb).
+                                    let refresh = source.online && shared.pump.live(&computer);
+                                    if shared.catalog_hint(&computer, source,
+                                        serde_json::from_value(frame["value"]["revision"].clone()).map_err(|_| "invalid_catalog_revision")?, frame["value"]["reset_required"] == true)? && !refresh {
+                                        emit(&shared, Change::Computer { computer: ComputerId(computer), status: ComputerStatus::Probing }, &stop).await?;
+                                    }
                                 }
                             }
                             service::Update::Other => (),

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the real menu components in WebKitGTK against synthetic, delayed IPC.
+"""Run a synthetic WebKitGTK component regression (default: the real menu components) against synthetic, delayed IPC.
 
 Start Vite first. Default: run this under dbus-run-session and xvfb-run.
 For the Arch desktop, use flock -w 1800 /tmp/zerus-arch-display.lock and
@@ -16,6 +16,7 @@ import tempfile
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--url", default="http://127.0.0.1:1437/scripts/menu-smoke.html")
 parser.add_argument("--real-display", action="store_true")
+parser.add_argument("--title", default="Zerus menu regression (synthetic)")
 args = parser.parse_args()
 if not args.url.startswith("http://127.0.0.1:"):
     parser.error("use the local Vite server")
@@ -49,7 +50,7 @@ with tempfile.TemporaryDirectory(prefix="zerus-menu-") as scratch:
     manager = WebKit2.UserContentManager()
     manager.register_script_message_handler("result")
     view = WebKit2.WebView(user_content_manager=manager, web_context=WebKit2.WebContext.new_ephemeral())
-    window = Gtk.Window(title="Zerus menu regression (synthetic)")
+    window = Gtk.Window(title=args.title)
     window.set_default_size(1000, 800)
     window.add(view)
     result = {"failures": ["No regression result received"]}
@@ -64,7 +65,7 @@ with tempfile.TemporaryDirectory(prefix="zerus-menu-") as scratch:
         finish(json.loads(value.get_js_value().to_string()))
 
     def deadline():
-        finish({"failures": ["Menu regression exceeded 30 seconds"]})
+        finish({"failures": [f"{args.title} exceeded 30 seconds"]})
         return False
 
     def check_screen():

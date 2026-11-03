@@ -174,10 +174,10 @@ def frame(seq, kind, body):
     print(json.dumps({'abi': 'desktop-v1', 'epoch': epoch, 'seq': seq, 't': kind, 'value': body}), flush=True)
 
 
-def hint(seq, revision, selected=projection, computer=''):
+def hint(seq, revision, selected=projection, computer='', staging=False):
     frame(seq, 'catalog_changed', {'computer': computer, 'incarnation': 2 if computer else 1, 'generation': 1,
-          'projection': selected, 'revision': revision, 'online': True, 'last_known': False,
-          'complete': True, 'reset_required': False, 'changes_abi': abi, 'attention_counts': status()['attention_counts']})
+          'projection': selected, 'revision': revision, 'online': True, 'last_known': staging,
+          'complete': not staging, 'reset_required': staging, 'changes_abi': abi, 'attention_counts': status()['attention_counts']})
     if config.get('replace_projection') and selected == 'b' * 32 and (config.get('projection_publication_gate') or os.environ.get('ZERUS_TEST_SERVICE_PROJECTION_PUBLICATION_GATE') == '1'):
         # Hold this exact publication boundary until the next page selects state.
         wait(root / 'replacement-page-selected')
@@ -316,6 +316,13 @@ def desktop_request():
                         next_cursor=str(uuid.UUID(int=number + 100)) if offset + 128 < count else None)
         if config.get('replace_projection') and number == 2 and (config.get('projection_publication_gate') or os.environ.get('ZERUS_TEST_SERVICE_PROJECTION_PUBLICATION_GATE') == '1'):
             (root / 'replacement-page-selected').touch()
+        if config.get('online_resync') and (root / 'resynced').exists():
+            page.update(projection='b' * 32, items=[row('replacement')])
+        elif config.get('online_resync') and number > 1:
+            # The source restages a snapshot while online: until it completes,
+            # the real service serves the retained view as last known.
+            page.update(start_revision='1', revision='1', last_known=True, complete=False)
+            (root / 'staging-page').touch()
         if config.get('resume_delta'):
             page.update(items=[resumed('run:0-old', 'old', 'paused'), row('run:9-ended')])
         if config.get('paged_fresh'):
@@ -323,6 +330,12 @@ def desktop_request():
         print(json.dumps(page))
     elif op == 'catalog_changes':
         number = counter('delta-number')
+        if config.get('online_resync') and value['projection'] == projection and value['since_revision'] == '1':
+            # The real service refuses changes until a staged snapshot completes.
+            (root / 'changes-while-staging').touch()
+            print(json.dumps({'request_id': request_id, 'accepted': False, 'durable': False,
+                              'code': 'catalog_changes_reset', 'reset_required': True}))
+            return
         page = dict(common, projection=value['projection'], since_revision=value['since_revision'],
                     through_revision=value['since_revision'], revision=value['since_revision'], items=[])
         if config.get('peer_failure'):
@@ -370,6 +383,8 @@ def desktop_request():
                 wait(root / 'release-old-page')
         elif config.get('replace_projection') == 'exhausted' and number == 2:
             page.update(through_revision='1', revision='1')
+        if config.get('online_resync') and number == 1:
+            (root / 'initial-complete').touch()
         if config.get('large'):
             if number == 1:
                 (root / 'initial-complete').touch()
@@ -642,6 +657,14 @@ elif args == ['desktop', 'watch', '--json']:
     if config.get('large'):
         wait(root / 'initial-complete')
         hint(1, '3')
+    if config.get('online_resync'):
+        wait(root / 'initial-complete')
+        wait(root / 'release-staging')
+        hint(1, '1', staging=True)
+        wait(root / 'staging-page')
+        wait(root / 'release-resync')
+        (root / 'resynced').touch()
+        hint(2, '0', 'b' * 32)
     if config.get('resume_delta'):
         wait(root / 'initial-complete')
         hint(1, '1')

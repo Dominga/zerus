@@ -1049,6 +1049,61 @@ fn a_journaled_native_reason_keeps_a_paged_start_fresh_replaced() {
     });
 }
 #[test]
+fn an_online_resnapshot_keeps_a_live_computer_live_and_asks_no_refused_changes() {
+    // zerus-bkbb: an online source restaging its snapshot (a native overflow
+    // resync) is no connection change. Probing or Reconnecting here repaints
+    // every row of the computer as offline and back: the list-wide blink.
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({"online_resync":true}));
+        let pump = crate::pump::Pump::default();
+        let statuses = Arc::new(Mutex::new(Vec::new()));
+        let observe = statuses.clone();
+        pump.tap(Box::new(move |change| {
+            if let Change::Computer { computer, status } = change {
+                if computer.is_local() {
+                    observe.lock().unwrap().push(*status);
+                }
+            }
+        }));
+        let (service, pump) = fixture.start_with_pump(true, pump, None);
+        eventually("initial live baseline", || {
+            pump.live("") && pump.row("", "row").is_some()
+        })
+        .await;
+        statuses.lock().unwrap().clear();
+        fs::write(fixture.0.join("release-staging"), []).unwrap();
+        eventually("staging view walked", || {
+            fixture.0.join("staging-page").exists()
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(pump.live(""), "{:?}", statuses.lock().unwrap());
+        assert!(
+            pump.row("", "row").is_some(),
+            "staging keeps last-known rows"
+        );
+        fs::write(fixture.0.join("release-resync"), []).unwrap();
+        eventually("completed snapshot's membership", || {
+            pump.row("", "replacement").is_some() && pump.row("", "row").is_none()
+        })
+        .await;
+        service.join().await.unwrap();
+        let statuses = statuses.lock().unwrap().clone();
+        assert!(!statuses.is_empty(), "no walk finished");
+        assert!(
+            statuses
+                .iter()
+                .all(|status| *status == ComputerStatus::Live),
+            "{statuses:?}"
+        );
+        assert!(
+            !fixture.0.join("changes-while-staging").exists(),
+            "a staging view has no change range to ask for"
+        );
+    });
+}
+#[test]
 fn stuck_view_callback_cannot_hold_the_quit_completion_past_its_deadline() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {

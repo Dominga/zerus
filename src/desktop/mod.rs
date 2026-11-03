@@ -40,6 +40,8 @@ mod producer_session;
 mod protocol;
 mod registration;
 mod revoke;
+#[cfg(any(windows, test))]
+pub(crate) mod startup_diagnostic;
 #[allow(dead_code)]
 mod startup_exclusion;
 mod startup_stdio;
@@ -508,18 +510,21 @@ impl Drop for Permit {
 
 fn serve(config: &Config, location: Location, background_mode: bool) -> Result<()> {
     let (_signals, owner, listener, epoch, mut store) = (|| -> Result<_> {
-        let signals = platform::ShutdownGuard::install()?;
+        let signals =
+            platform::ShutdownGuard::install().context("install desktop shutdown handler")?;
         // This dedicated service process has no workers yet. Make socket creation
         // private too, so a concurrent status probe never sees the pre-chmod mode.
         #[cfg(unix)]
         unsafe {
             libc::umask(0o077);
         }
-        location.prepare()?;
-        let lock = Arc::new(location.lock()?);
-        let listener = Arc::new(Listener::bind(&location)?);
+        location
+            .prepare()
+            .context("prepare private desktop folders")?;
+        let lock = Arc::new(location.lock().context("acquire desktop owner lock")?);
+        let listener = Arc::new(Listener::bind(&location).context("bind desktop listener")?);
         let epoch = uuid::Uuid::new_v4().to_string();
-        let store = Store::open(&location, &epoch)?;
+        let store = Store::open(&location, &epoch).context("open desktop store")?;
         Ok((signals, lock, listener, epoch, store))
     })()
     .context(StartupRefused)?;

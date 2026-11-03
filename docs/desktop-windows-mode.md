@@ -56,6 +56,16 @@ lifecycle epoch. `EnginePID` alone is insufficient. A separate/shared engine
 that cannot be bound to that exact service process refuses before stopping it.
 The native Windows round-trip fixture must qualify the supported SDK topology.
 
+A registered CLI that refuses startup with exit code 78 retains its last bounded
+error in the existing private desktop state's `startup-failure.json`, when that
+state is safe and writable. The record includes configuration, PID/birth and the
+original guard reason; it creates no state folders, changes no grant and never
+retries startup. It is historical diagnostic data, never current readiness,
+task-instance identity, authority or proof that resources drained. An unavailable
+diagnostic leaves the original stderr and failure exit unchanged. Task Scheduler's
+last-run result and this private record can explain an early exit after RunEx;
+an absent running instance never permits issuing RunEx again.
+
 Passive rollback saves one UUID before offering the original rollback revoke.
 Only a known committed prepared command can reconcile its original drain with
 that same UUID and original process. An absent or uncertain command is never

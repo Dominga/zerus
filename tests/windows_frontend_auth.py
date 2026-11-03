@@ -16,6 +16,7 @@ import unittest
 import uuid
 import base64
 import tempfile
+import time
 import test_desktop as kernel
 
 
@@ -150,6 +151,45 @@ class WindowsFrontend(unittest.TestCase):
 
     def test_wrong_cached_configuration_is_not_native_authority(self):
         self.assertEqual(self.invoke('wrong_config')['code'], 'frontend_authentication_refused')
+
+    def test_registered_startup_refusal_retains_the_guard_reason_without_replacing_the_owner(self):
+        original, status = self.serve()
+        result = self.cli('desktop', 'serve', '--config-dir', str(self.config),
+                          '--state-dir', str(self.state), ok=False)
+        self.assertEqual(result.returncode, 78, result.stderr)
+        path = self.desktop / 'startup-failure.json'
+        data = path.read_bytes()
+        self.assertLessEqual(len(data), 4096)
+        diagnostic = json.loads(data)
+        self.assertEqual(diagnostic['abi'], 'desktop-startup-failure-v1')
+        self.assertEqual(diagnostic['exit_code'], 78)
+        self.assertEqual(diagnostic['configuration'], status['configuration'])
+        self.assertIn('acquire desktop owner lock', diagnostic['message'])
+        self.assertIn('another desktop service owns this state', diagnostic['message'])
+        self.assertIsNone(original.poll())
+        self.assertEqual(self.cli('desktop', 'status', '--json')['lifecycle']['pid'], original.pid)
+
+    def test_registered_passive_start_without_a_console_keeps_the_original_startup_reason(self):
+        # Separate private configuration: this diagnoses the no-console launch
+        # class before any Scheduler test, never retries an uncertain RunEx.
+        self.desktop.mkdir(parents=True)
+        original = subprocess.Popen([str(kernel.HGS), 'desktop', 'serve', '--config-dir', str(self.config),
+                                     '--state-dir', str(self.state)], env=self.env,
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        self.addCleanup(self.stop, original)
+        until = time.monotonic() + 10
+        while time.monotonic() < until:
+            if original.poll() is not None:
+                _, stderr = original.communicate(timeout=1)
+                self.fail('private no-console registered startup refused: ' + stderr[-4096:])
+            status = self.cli('desktop', 'status', '--json')
+            if status.get('lifecycle', {}).get('ipc_ready'):
+                self.assertEqual(status['lifecycle']['pid'], original.pid)
+                self.assertEqual(status['lifecycle']['mode'], 'passive')
+                return
+            time.sleep(.02)
+        self.fail('private no-console registered startup did not reach readiness')
 
     def test_wrong_native_request_fingerprint_refuses_before_actor_admission(self):
         self.assertEqual(self.invoke('wrong_fingerprint')['code'], 'frontend_authentication_refused')
@@ -425,6 +465,27 @@ $items=@();foreach($i in $t.GetInstances(0)) {
 last_run_utc=$t.LastRunTime.ToUniversalTime().ToString('o')}|ConvertTo-Json -Compress -Depth 4
 ''', dict(task=self.task))
 
+    def task_history(self, started):
+        # Read only this fixture's task and retain events for the recorded
+        # original GUID. A disabled/unavailable history is explicit data,
+        # never permission to rerun a task or infer its process has drained.
+        return self.powershell(r'''
+$task='\'+$x.task;
+$xpath="*[EventData[Data[@Name='TaskName']='"+$task+"']]";
+try {$events=@(Get-WinEvent -LogName 'Microsoft-Windows-TaskScheduler/Operational' -FilterXPath $xpath -MaxEvents 32 -ErrorAction Stop)}
+catch {@{available=$false;error=$_.Exception.GetType().Name;events=@()}|ConvertTo-Json -Compress;exit 0};
+$items=@();foreach($e in $events) {
+ $xml=[xml]$e.ToXml();$data=@{};foreach($d in $xml.Event.EventData.Data) {
+  if($d.Name-in @('InstanceId','TaskInstanceId','ResultCode','ErrorCode','ProcessID','ProcessId','EnginePID')) {
+   $text=[string]$d.'#text';if($text.Length-gt 96) {$text=$text.Substring(0,96)};$data[[string]$d.Name]=$text
+  }
+ };
+ if($data.InstanceId-ieq $x.started -or $data.TaskInstanceId-ieq $x.started) {
+  $items+=@{id=[int]$e.Id;record=[int64]$e.RecordId;data=$data};if($items.Count-ge 8) {break}
+ }
+};@{available=$true;events=$items}|ConvertTo-Json -Compress -Depth 5
+''', dict(task=self.task, started=started))
+
     def stop_exact_passive(self, expected, *, wrong_birth=False):
         return self.powershell(r'''
 $s=New-Object -ComObject Schedule.Service;$s.Connect();$t=$s.GetFolder('\').GetTask($x.task);
@@ -542,6 +603,26 @@ if(@($t.GetInstances(0)).Count-ne 0) {throw 'fixture instance remains'};
                         status = self.cli('desktop', 'status', '--json')
                         print('MODE_TASK_SERVICE ' + json.dumps({key: status.get(key) for key in
                               ('configuration', 'running', 'lifecycle')}), file=sys.stderr)
+                        # Fixed known leaves only: this read-only footprint
+                        # narrows a guard failure even if it cannot log safely.
+                        print('MODE_TASK_STARTUP_FILES ' + json.dumps({name: (
+                            (self.state / 'desktop' / name).stat().st_size
+                            if (self.state / 'desktop' / name).is_file() else None)
+                            for name in ('owner.lock', 'state.sqlite3', 'state.sqlite3-wal',
+                                         'state.sqlite3-shm', 'startup-failure.json')}), file=sys.stderr)
+                        diagnostic = self.state / 'desktop' / 'startup-failure.json'
+                        if diagnostic.exists():
+                            self.assertLessEqual(diagnostic.stat().st_size, 4096)
+                            data = json.loads(diagnostic.read_bytes())
+                            self.assertEqual(data['abi'], 'desktop-startup-failure-v1')
+                            self.assertEqual(data['configuration'], status['configuration'])
+                            print('MODE_TASK_STARTUP_REFUSAL ' + json.dumps(data), file=sys.stderr)
+                        record = json.loads((self.state / 'desktop' / 'windows-registration-mode.json')
+                                            .read_text(encoding='utf-8'))
+                        started = (record.get('pending') or {}).get('started')
+                        if started:
+                            print('MODE_TASK_ORIGINAL_HISTORY ' + json.dumps(self.task_history(started)),
+                                  file=sys.stderr)
                     except Exception as error:
                         print('MODE_TASK_OBSERVATION_UNAVAILABLE ' + type(error).__name__, file=sys.stderr)
                 print('MODE_TASK_PRIVATE_ROOT_RETAINED ' + str(self.root), file=sys.stderr)

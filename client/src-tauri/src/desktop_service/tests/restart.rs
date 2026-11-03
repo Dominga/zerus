@@ -348,3 +348,128 @@ fn real_service_native_resync_keeps_a_live_computer_live() {
         mark("client-finished");
     });
 }
+
+#[test]
+#[ignore = "run client/scripts/test-service-reconnect.py --scenario parity with private binaries"]
+fn real_service_matches_native_delivery_of_lifecycle_frames() {
+    // zerus-pc6h.1: recorded native frames (rename, a stopped run, archive)
+    // through native CatalogState and through a real private service and this
+    // adapter must leave the same rows after every catalog frame, and the same
+    // removal reasons.
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    let root =
+        PathBuf::from(std::env::var_os("ZERUS_TEST_SERVICE_RESTART").expect("private harness"));
+    let mark = |name: &str| fs::write(root.join(name), []).unwrap();
+    let peer = ComputerId("peer".into());
+    // Native delivery: the rows after each catalog frame, and all removals.
+    let native = crate::pump::Pump::default();
+    let mut state = zerus_client_core::CatalogState::new();
+    let (mut steps, mut native_removed) = (Vec::new(), Vec::new());
+    for (index, line) in include_str!("fixtures/lifecycle-parity.ndjson")
+        .lines()
+        .enumerate()
+    {
+        let entry: Value = serde_json::from_str(line).unwrap();
+        let frame: zerus_watch_protocol::Frame =
+            serde_json::from_value(entry["frame"].clone()).unwrap();
+        for change in state.apply(&peer, &frame) {
+            if let Change::Remove { key, reason, .. } = &change {
+                native_removed.push((key.clone(), reason.clone()));
+            }
+            native.push(change);
+        }
+        let catalog = entry["frame"]["topic"] == "catalog"
+            && (entry["frame"]["t"] == "delta" || entry["frame"]["last"] == true);
+        if catalog {
+            let rows: BTreeMap<String, Value> = state
+                .rows()
+                .keys()
+                .map(|key| {
+                    (
+                        key.clone(),
+                        serde_json::to_value(native.row("peer", key).unwrap()).unwrap(),
+                    )
+                })
+                .collect();
+            steps.push((index, rows));
+        }
+    }
+    assert!(
+        steps.len() >= 4
+            && native_removed
+                .iter()
+                .any(|(_, r)| r.as_deref() == Some("archived"))
+    );
+    tauri::async_runtime::block_on(async {
+        let pump = crate::pump::Pump::default();
+        let removed = Arc::new(Mutex::new(Vec::new()));
+        let observe = removed.clone();
+        pump.tap(Box::new(move |change| {
+            if let Change::Remove {
+                computer,
+                key,
+                reason,
+            } = change
+            {
+                if computer.0 == "peer" {
+                    observe.lock().unwrap().push((key.clone(), reason.clone()));
+                }
+            }
+        }));
+        let (sink, rx) = std::sync::mpsc::sync_channel(256);
+        let drain = pump.drain_service(rx, |_| {});
+        let service = Service::start(
+            root.join("relay"),
+            pump.clone(),
+            sink,
+            true,
+            drain,
+            None,
+            vec![],
+        );
+        eventually("private service connected", || service.snapshot().connected).await;
+        mark("client-connected");
+        // Every field the view reads, except the machine label: native mode
+        // labels a peer by its hello host, the service by the configured alias.
+        let differences = |expected: &BTreeMap<String, Value>| {
+            let mut out = Vec::new();
+            for (key, native_row) in expected {
+                let Some(row) = pump.row("peer", key) else {
+                    out.push(format!("{key}: missing"));
+                    continue;
+                };
+                let service_row = serde_json::to_value(row).unwrap();
+                for (field, value) in native_row.as_object().unwrap() {
+                    if field != "machine" && service_row.get(field) != Some(value) {
+                        out.push(format!(
+                            "{key}.{field}: native {value} service {}",
+                            service_row.get(field).unwrap_or(&Value::Null)
+                        ));
+                    }
+                }
+            }
+            out
+        };
+        for (index, expected) in &steps {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                let stale = native_removed
+                    .iter()
+                    .any(|(key, _)| !expected.contains_key(key) && pump.row("peer", key).is_some());
+                if pump.live("peer") && !stale && differences(expected).is_empty() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "frame {index}: {:#?}",
+                    differences(expected)
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            mark(&format!("parity-{index}"));
+        }
+        service.join().await.unwrap();
+        assert_eq!(*removed.lock().unwrap(), native_removed);
+        mark("client-finished");
+    });
+}

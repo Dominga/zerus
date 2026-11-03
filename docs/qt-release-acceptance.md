@@ -263,7 +263,19 @@ A complete exact negative permits explicit Retry of the same record after fresh
 snapshot validation. A confirmed local callback failure before the final record
 write has its own durable `before_record` state: no final record was sent, so
 explicit Retry may prepare that same identity again without inventing a receipt.
-Missing, partial or lost child output never establishes this state. The native
+Missing, partial or lost child output never establishes this state. New records
+use journal version 2, which also keeps `recorded_attempt`: before its final frame,
+an attempt's callback durably records its receipt and `recorded_attempt`, under
+the native lock and against that attempt's exact stored hash. An Attempted record
+whose `recorded_attempt` is below its attempt, like a version 1 Attempted record
+without a receipt, therefore proves that no final frame was sent, even after a
+second metadata failure. Only an explicit Retry recovers it. It first looks up the
+original ID: a matching record settles as published, and any other answer stays
+lookup-only. It then revalidates the same snapshot and configuration, and fences
+the record to `before_record` at the same attempt before reserving the next. The
+fence changes the record's hash, so a still-pending original callback can no
+longer record or send. A recorded gate, Unknown and every ambiguous state stay
+lookup-only; a changed snapshot is quarantined. The native
 metadata lock is explicitly unlocked before close, so a forked child's inherited
 descriptor cannot prolong it. Retained SDK/helper/pipe resources
 keep the shared report admission charged until actual completion. Publication

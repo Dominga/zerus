@@ -33,6 +33,19 @@ def wait(path):
         time.sleep(.005)
 
 
+def signal_ready():
+    # Opt-in test wakeup, separate from desktop-v1. A full datagram queue can
+    # coalesce notifications: conditions are read from the retained fixture/GUI.
+    path = root / 'ready.sock'
+    if path.exists():
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as wake:
+            wake.setblocking(False)
+            try:
+                wake.sendto(b'w', str(path))
+            except OSError:
+                pass  # The test may already have joined its private listener.
+
+
 # Delay only this fixture's first watch before it records startup. This models
 # a process that has spawned but has not been scheduled through its greeting.
 if args == ['desktop', 'watch', '--json'] and config.get('audit_first_watch_hold'):
@@ -43,6 +56,7 @@ if args == ['desktop', 'watch', '--json'] and config.get('audit_first_watch_hold
 
 with (root / 'calls').open('a') as log:
     log.write(json.dumps({'args': args, 'value': value, 'pid': os.getpid()}) + '\n')
+signal_ready()
 
 
 def counter(name):
@@ -55,6 +69,7 @@ def counter(name):
 def status():
     if config.get('produced_status') is not None:
         (root / 'produced-status-read').touch()
+        signal_ready()
         return config['produced_status']
     online = not config.get('offline', False)
     catalog_online = online and not config.get('coverage_offline', False)
@@ -611,6 +626,7 @@ elif args == ['desktop', 'watch', '--json']:
     cycle = counter('watch-cycle') if config.get('restart_watch') else 0
     if cycle > 1:
         (root / 'second-watch-held').touch()
+        signal_ready()
         wait(root / 'release-second-watch')
     initial = status()
     if config.get('details'):

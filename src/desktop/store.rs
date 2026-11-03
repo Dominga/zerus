@@ -12,7 +12,7 @@ use zerus_desktop_migration::{canonical, configuration, HANDOFF_LOCK};
 #[path = "maintenance.rs"]
 pub(crate) mod maintenance;
 
-pub const SCHEMA: i64 = super::creation_worktree::SCHEMA;
+pub const SCHEMA: i64 = super::creation_launch::SCHEMA;
 pub struct HandoffLock {
     _lock: platform::FileLock,
     root: PathBuf,
@@ -257,9 +257,15 @@ pub(super) fn operation_undrained(db: &Connection) -> Result<u64> {
     } else {
         0
     };
+    let launches = if version >= super::creation_launch::SCHEMA {
+        super::creation_launch::undrained(db)?
+    } else {
+        0
+    };
     task.checked_add(clones)
         .and_then(|count| count.checked_add(cache))
         .and_then(|count| count.checked_add(worktrees))
+        .and_then(|count| count.checked_add(launches))
         .context("operation resource total overflow")
 }
 
@@ -277,6 +283,8 @@ pub struct Store {
     creation_custody: super::creation_clone::Recovery,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     worktree_custody: super::creation_worktree::Recovery,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    launch_custody: super::creation_launch::Recovery,
 }
 impl Store {
     pub fn open(location: &Location, epoch: &str) -> Result<Self> {
@@ -462,6 +470,12 @@ impl Store {
             tx.pragma_update(None, "user_version", super::creation_worktree::SCHEMA)?;
             tx.commit()?;
         }
+        if version < super::creation_launch::SCHEMA {
+            let tx = db.transaction()?;
+            super::creation_launch::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", super::creation_launch::SCHEMA)?;
+            tx.commit()?;
+        }
         // Opening Store follows acquisition of the real exclusive serve owner.
         // Cache workers are in-process and retain it through all actual I/O.
         let tx = db.transaction()?;
@@ -481,7 +495,8 @@ impl Store {
             zerus_desktop_ledger::operations::recover_batch(&mut db, epoch).is_err();
         // Either creation kind failing recovery pauses creation admission.
         let creation_recovery_error = super::creation_clone::startup(&mut db).is_err()
-            | super::creation_worktree::startup(&mut db).is_err();
+            | super::creation_worktree::startup(&mut db).is_err()
+            | super::creation_launch::startup(&mut db).is_err();
         let tx = db.transaction()?;
         tx.execute(
             "UPDATE service SET generation=generation+1, epoch=?1 WHERE id=1",
@@ -506,6 +521,8 @@ impl Store {
             creation_custody: super::creation_clone::Recovery::default(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             worktree_custody: super::creation_worktree::Recovery::default(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            launch_custody: super::creation_launch::Recovery::default(),
         })
     }
     pub fn checkpoint(&self) -> Result<()> {
@@ -539,23 +556,26 @@ impl Store {
     pub fn operation_status(&self) -> serde_json::Value {
         let clone = super::creation_clone::summary(&self.db);
         let worktree = super::creation_worktree::summary(&self.db);
+        let launch = super::creation_launch::summary(&self.db);
         let mut status = match zerus_desktop_ledger::operations::totals(&self.db).and_then(
             |totals| {
+                let summary = |value: &Result<serde_json::Value>| match value {
+                    Ok(value) => Ok(value.clone()),
+                    Err(_) => Err(anyhow::anyhow!("creation summary unavailable")),
+                };
                 Ok((
                     totals,
                     operation_undrained(&self.db)?,
-                    clone
-                        .as_ref()
-                        .map_err(|_| anyhow::anyhow!("creation summary unavailable"))?,
-                    worktree
-                        .as_ref()
-                        .map_err(|_| anyhow::anyhow!("creation summary unavailable"))?,
+                    summary(&clone)?,
+                    summary(&worktree)?,
+                    summary(&launch)?,
                 ))
             },
         ) {
-            Ok((totals, undrained, clone, worktree)) => {
-                serde_json::json!({"unsettled":totals.unsettled+clone["unsettled"].as_u64().unwrap_or(0)+worktree["unsettled"].as_u64().unwrap_or(0),"undrained":undrained,
-                "kinds":{"task_start_reconcile":{"unsettled":totals.unsettled,"undrained":totals.undrained},"creation_clone":clone,"creation_worktree":worktree},
+            Ok((totals, undrained, clone, worktree, launch)) => {
+                let unsettled = |v: &serde_json::Value| v["unsettled"].as_u64().unwrap_or(0);
+                serde_json::json!({"unsettled":totals.unsettled+unsettled(&clone)+unsettled(&worktree)+unsettled(&launch),"undrained":undrained,
+                "kinds":{"task_start_reconcile":{"unsettled":totals.unsettled,"undrained":totals.undrained},"creation_clone":clone,"creation_worktree":worktree,"creation_launch":launch},
                 "admissions_paused":true,"recovery_error":self.operation_recovery_error || self.creation_recovery_error})
             }
             Err(_) => {
@@ -602,10 +622,10 @@ impl Store {
                 .ok()
                 .is_some_and(|v| v["undrained"].as_u64().is_some_and(|n| n > 0))
         };
-        if retained(&clone) || retained(&worktree) {
+        if retained(&clone) || retained(&worktree) || retained(&launch) {
             let task = status["resource_custody"].take();
             status["resource_custody"] = serde_json::json!({"state":"retained","creation_clone":clone.ok(),
-                "creation_worktree":worktree.ok(),
+                "creation_worktree":worktree.ok(),"creation_launch":launch.ok(),
                 "task_start_reconcile":task,"remediation":super::revoke::OPERATION_REMEDIATION});
         }
         status
@@ -632,6 +652,10 @@ impl Store {
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         if self.worktree_custody.tick(location, &mut self.db).is_err() {
+            self.creation_recovery_error = true;
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if self.launch_custody.tick(location, &mut self.db).is_err() {
             self.creation_recovery_error = true;
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]

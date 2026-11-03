@@ -95,8 +95,19 @@ mod workspace;
 mod git_status;
 pub(crate) mod repositories;
 mod launch_observation;
-#[allow(unused_imports)] // Used by the launch actor slice.
-pub(crate) use launch_observation::observe as observe_launch;
+/// Evidence about original launch `launch` under this process's own state
+/// root (`HGS_STATE_DIR` or its default), read within `deadline`. A root that
+/// cannot be resolved without creating it is Unknown.
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+pub(crate) fn observe_own_launch(
+    launch: &str,
+    deadline: std::time::Instant,
+) -> zerus_client_core::desktop::creation_launch::Observation {
+    match crate::platform::canonical(storage::root()) {
+        Ok(root) => launch_observation::observe(&root, launch, deadline),
+        Err(_) => zerus_client_core::desktop::creation_launch::Observation::Unknown,
+    }
+}
 mod worktrees;
 mod worktree_requests;
 // The creation worktree actor's only entry into the owned effect.

@@ -237,7 +237,7 @@ finally:
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_operations').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_operation_attempts').fetchone()[0], 0)
 
-    def test_creation_launch_is_closed_and_not_yet_advertised(self):
+    def test_creation_launch_is_a_closed_native_intent_with_scoped_read_only_lookup(self):
         self.serve()
         status = self.cli('desktop', 'status', '--json')
         scope = dict(configuration=status['configuration'], service_epoch=status['epoch'])
@@ -250,8 +250,73 @@ finally:
         refused = self.cli('desktop', 'request', '--json', data=dict(op='creation_launch', intent=intent))
         self.assertFalse(refused['accepted'])
         self.assertEqual(refused['code'], 'frontend_authentication_required')
+        query = dict(request_id=str(uuid.uuid4()), scope=scope, creation_id=creation, launch_id=creation,
+                     plan_sha256='a' * 64)
+        result = self.cli('desktop', 'request', '--json', data=dict(op='creation_launch_result', query=query))
+        self.assertEqual(result['abi'], 'desktop-creation-launch-v1')
+        self.assertEqual(result['scope'], scope)
+        self.assertTrue(result['read_only'])
+        self.assertFalse(result['found'])
+        self.assertIsNone(result['receipt'])
+        self.assertIsNone(result['observation'], 'no evidence without an original')
+        bad = dict(query, scope=dict(scope, service_epoch=str(uuid.uuid4())))
+        self.assertEqual(self.cli('desktop', 'request', '--json', data=dict(op='creation_launch_result', query=bad))['code'], 'creation_result_unavailable')
+        with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_creation_launches').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT rows,bytes,active FROM desktop_creation_launch_budget').fetchone(), (0, 0, 0))
+        status = self.cli('desktop', 'status', '--json')
+        self.assertEqual(status['operation_queue']['kinds']['creation_launch']['undrained'], 0)
         help_text = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True).stdout
-        self.assertNotIn('desktop-creation-launch', help_text)
+        if sys.platform.startswith('linux') or sys.platform == 'darwin':
+            self.assertIn('Desktop creation launch ABI: desktop-creation-launch-v1', help_text)
+        else:
+            self.assertNotIn('desktop-creation-launch', help_text)
+
+    @unittest.skipUnless(sys.platform.startswith('linux') or sys.platform == 'darwin', 'POSIX launch custody')
+    def test_a_launch_child_holds_custody_but_no_program_it_starts_inherits_it(self):
+        # The real binary's main() marks the inherited custody descriptor
+        # close-on-exec before anything else: the Git (or tmux) it starts, and
+        # their own children, never hold the creation's custody lock.
+        import fcntl
+        fake = self.root / 'custody-bin'
+        fake.mkdir(mode=0o700)
+        record = self.root / 'custody-record'
+        git = fake / 'git'
+        git.write_text('#!/bin/sh\n'
+                       'python3 -c "import os,sys\ntry:\n os.fstat(int(sys.argv[1]))\n print(\'open\')\n'
+                       'except OSError:\n print(\'closed\')" "$CUSTODY_PROBE_FD" >> "$CUSTODY_RECORD"\n'
+                       # A child that outlives the command, as a tmux server would.
+                       'sleep 3 </dev/null >/dev/null 2>&1 &\n'
+                       'exit 128\n')
+        git.chmod(0o700)
+        lock_path = self.root / 'custody.lock'
+        held = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        os.set_inheritable(held, True)
+        repo = self.root / 'not-a-repository'
+        repo.mkdir()
+        env = dict(self.env, PATH=f"{fake}{os.pathsep}{self.env.get('PATH', '')}",
+                   HGS_CREATION_LAUNCH_CUSTODY_FD=str(held), CUSTODY_PROBE_FD=str(held),
+                   CUSTODY_RECORD=str(record))
+        try:
+            result = subprocess.run([str(HGS), 'worktrees', '--path', str(repo), '--json'], env=env,
+                                    pass_fds=(held,), capture_output=True, text=True, timeout=20)
+        finally:
+            os.close(held)
+        self.assertIn('closed', record.read_text().split(), result.stderr)
+        self.assertNotIn('open', record.read_text().split())
+        # The command and its programs have exited: nothing holds the lock,
+        # although the program's own child is still running.
+        probe = os.open(lock_path, os.O_RDWR)
+        try:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(probe)
+        # A malformed descriptor refuses before anything starts.
+        bad = dict(self.env, HGS_CREATION_LAUNCH_CUSTODY_FD='not-a-descriptor')
+        refused = subprocess.run([str(HGS), '--help'], env=bad, capture_output=True, text=True, timeout=10)
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn('Invalid creation launch custody', refused.stderr)
 
     @unittest.skipUnless(sys.platform.startswith('linux') or sys.platform == 'darwin', 'Unix registration mode')
     def test_registration_variant_is_read_only_and_service_reports_its_requested_mode(self):
@@ -1311,8 +1376,11 @@ finally:
 
     @staticmethod
     def remove_catalog_reason_schema(db):
-        # Rewind the later leaves too, never leaving either labelled older:
-        # the schema-23 creation worktree, then the schema-22 catalog approval.
+        # Rewind the later leaves too, never leaving one labelled older: the
+        # schema-24 creation launch, the schema-23 creation worktree, then the
+        # schema-22 catalog approval.
+        db.execute('DROP TABLE desktop_creation_launches')
+        db.execute('DROP TABLE desktop_creation_launch_budget')
         db.execute('DROP TABLE desktop_creation_worktrees')
         db.execute('DROP TABLE desktop_creation_worktree_budget')
         db.execute('DROP INDEX desktop_catalog_approval')

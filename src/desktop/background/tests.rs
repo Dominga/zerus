@@ -90,6 +90,9 @@ impl Fixture {
             )
             .unwrap(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
+            launch: crate::desktop::creation_launch::Runtime::new(&config, &epoch, owner.clone())
+                .unwrap(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             task_start: crate::desktop::task_start_reconcile::Runtime::new(
                 &config,
                 &epoch,

@@ -10,6 +10,7 @@ mod catalog_relay;
 mod counts;
 mod creation_clone;
 mod creation_worktree;
+pub(crate) mod creation_launch;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod custody;
 mod delivery;
@@ -1026,6 +1027,12 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                             .is_some_and(|v| v["op"] == "creation_worktree_result")
                         {
                             creation_worktree::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "creation_launch_result")
+                        {
+                            creation_launch::query(&store, hello.request.as_ref().unwrap())
                         } else if hello
                             .request
                             .as_ref()

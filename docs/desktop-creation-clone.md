@@ -83,4 +83,6 @@ within the same cleanup deadline. If cleanup remains unconfirmed, the fixture
 fails with a bounded PID/birth record; permission denial never counts as exit.
 
 Worktree creation, placement, launch and remote creation remain separate leaves
-of the creation migration. The desktop-service switch remains default-off.
+of the creation migration; the worktree leaf is specified in
+[desktop-creation-worktree.md](desktop-creation-worktree.md). The
+desktop-service switch remains default-off.

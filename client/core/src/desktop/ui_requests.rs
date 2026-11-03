@@ -25,6 +25,9 @@ pub enum Request {
     CreationClone {
         intent: Box<super::creation_clone::Intent>,
     },
+    CreationWorktree {
+        intent: Box<super::creation_worktree::Intent>,
+    },
     NotificationControl {
         scope: super::notification_control::Scope,
         control: super::notification_control::Command,
@@ -77,6 +80,7 @@ impl Request {
     pub fn id(&self) -> &str {
         match self {
             Self::CreationClone { intent } => &intent.clone_request_id,
+            Self::CreationWorktree { intent } => &intent.worktree_request_id,
             Self::NotificationControl { control, .. } => control.request_id(),
             Self::ActivationWait { request_id }
             | Self::DesktopOwnership { request_id, .. }
@@ -89,6 +93,7 @@ impl Request {
     pub fn operation(&self) -> &'static str {
         match self {
             Self::CreationClone { .. } => "creation_clone",
+            Self::CreationWorktree { .. } => "creation_worktree",
             Self::NotificationControl { control, .. } => control.operation(),
             Self::DesktopOwnership { .. } => "desktop_ownership",
             Self::ImportPendingReads { .. } => "import_pending_reads",
@@ -101,6 +106,7 @@ impl Request {
     fn valid(&self) -> bool {
         match self {
             Self::CreationClone { intent } => intent.as_ref().clone().verify().is_ok(),
+            Self::CreationWorktree { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::NotificationControl { scope, control } => scope.valid() && control.valid(),
             Self::DesktopOwnership {
                 journal, revision, ..
@@ -227,7 +233,9 @@ impl Cache {
             }
         } else if matches!(
             envelope.request,
-            Request::CacheMaintenance { .. } | Request::CreationClone { .. }
+            Request::CacheMaintenance { .. }
+                | Request::CreationClone { .. }
+                | Request::CreationWorktree { .. }
         ) {
             if ownership_mode != Some(super::ownership::Mode::Service) {
                 return Err(io::ErrorKind::PermissionDenied.into());
@@ -355,6 +363,14 @@ impl Responder {
                 mode
             }
             Request::CreationClone { intent } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
+                    || self.configuration.get() != Some(&intent.scope.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
+            }
+            Request::CreationWorktree { intent } => {
                 if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
                     || self.configuration.get() != Some(&intent.scope.configuration)
                 {
@@ -675,6 +691,40 @@ mod tests {
         assert_eq!(evidence.fingerprint, slot.envelope().request.fingerprint());
         for field in ["mode", "confirmed", "role", "execution_consent"] {
             let mut request = serde_json::to_value(&slot.envelope().request).unwrap();
+            request[field] = true.into();
+            assert!(serde_json::from_value::<Request>(request).is_err());
+        }
+    }
+
+    #[test]
+    fn worktree_evidence_requires_cached_service_mode_and_the_same_configuration() {
+        use crate::desktop::ownership::Mode;
+        let intent = crate::desktop::creation_worktree::test_intent();
+        let cache = Cache::default();
+        let mut value = envelope(1);
+        value.request = Request::CreationWorktree {
+            intent: Box::new(intent.clone()),
+        };
+        assert_eq!(value.request.operation(), "creation_worktree");
+        assert_eq!(value.request.id(), intent.worktree_request_id);
+        assert!(cache.prepare(value.clone()).is_err());
+        assert!(cache
+            .prepare_with_mode(value.clone(), Some(Mode::Native))
+            .is_err());
+        let slot = cache
+            .prepare_with_mode(value.clone(), Some(Mode::Service))
+            .unwrap();
+        *slot.0.child.lock().unwrap() = Some((25, "synthetic-birth".into()));
+        let evidence = cache.evidence(&id(1)).unwrap();
+        assert_eq!(evidence.ownership_mode, Some(Mode::Service));
+        assert_eq!(evidence.request_id, intent.worktree_request_id);
+        // A clone-shaped body never deserializes as this kind, and no
+        // authority claim can ride along.
+        let mut request = serde_json::to_value(&value.request).unwrap();
+        request["op"] = "creation_clone".into();
+        assert!(serde_json::from_value::<Request>(request).is_err());
+        for field in ["mode", "confirmed", "role", "execution_consent"] {
+            let mut request = serde_json::to_value(&value.request).unwrap();
             request[field] = true.into();
             assert!(serde_json::from_value::<Request>(request).is_err());
         }

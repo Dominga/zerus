@@ -45,7 +45,8 @@ macOS, `$XDG_STATE_HOME/hgs/hgs-tray.log` (default `~/.local/state`) on Linux,
 and `%LOCALAPPDATA%/hgdev/hgs-tray/hgs-tray.log` on Windows. Entry, final teardown,
 startup refusals and Rust panics also leave bounded records; panic payloads are
 omitted. If the file is unwritable, macOS records a fixed reason in the unified
-log as well as stderr.
+log. The fallback never writes to inherited stderr, so a full pipe or a failed
+stderr write cannot block or panic during startup or teardown.
 
 The installed Linux and Windows switch uses the same identifier,
 `com.hgdev.hgs-tray`, and the `hgs-tray` executable/instance name. Settings seed

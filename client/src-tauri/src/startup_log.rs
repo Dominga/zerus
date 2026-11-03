@@ -114,9 +114,9 @@ pub(crate) fn record(outcome: &'static str, reason: &'static str, detail: Option
         .ok_or_else(|| io::Error::other("startup log path unavailable"))
         .and_then(|path| append(&path, &bytes));
     if let Err(error) = result {
-        // Logging failure must not prevent a valid GUI launch. Finder discards
-        // stderr too, so macOS also gets a fixed public unified-log fallback.
-        eprint!("{}", String::from_utf8_lossy(&bytes));
+        // Never touch inherited stderr here: an unread pipe can block startup
+        // and a write error can panic, including from inside the panic hook.
+        // macOS retains a fixed public unified-log fallback.
         #[cfg(target_os = "macos")]
         {
             unsafe extern "C" {
@@ -269,5 +269,141 @@ mod tests {
         assert!(text.contains("outcome=failed reason=rust_panic"));
         assert!(!text.contains("private fixture sentinel"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    mod unavailable {
+        use super::*;
+        use std::{
+            fs::File,
+            os::fd::{AsRawFd, FromRawFd, OwnedFd},
+            process::{Command, Stdio},
+            time::{Duration, Instant},
+        };
+
+        #[test]
+        #[ignore = "exact-filter unavailable-log child; never launches another test"]
+        fn unavailable_log_child() {
+            assert_eq!(
+                std::env::var("ZERUS_TEST_UNAVAILABLE_STARTUP_LOG").as_deref(),
+                Ok("1")
+            );
+            // Prove the fixture made the actual GUI log unavailable before
+            // exercising the production entry and guard diagnostics.
+            assert!(append(&path().unwrap(), &line("entered", "fixture", None)).is_err());
+            record("entered", "gui_entry", None);
+            guard(&crate::instance::Claim::Duplicate(
+                "canonical_owner_unresponsive",
+            ));
+            record("failed", "instance_claim_failed", None);
+            std::fs::write(
+                std::env::var_os("ZERUS_TEST_STARTUP_LOG_RETURNED").unwrap(),
+                b"returned",
+            )
+            .unwrap();
+        }
+
+        fn assert_returns_with(stderr: impl Into<Stdio>) {
+            struct Scratch(PathBuf);
+            impl Drop for Scratch {
+                fn drop(&mut self) {
+                    let _ = std::fs::remove_dir_all(&self.0);
+                }
+            }
+            let root = Scratch(std::env::temp_dir().join(format!(
+                "zerus-startup-unavailable-{}",
+                uuid::Uuid::new_v4()
+            )));
+            std::fs::create_dir(&root.0).unwrap();
+            let blocked = root.0.join("not-a-directory");
+            std::fs::write(&blocked, b"fixture").unwrap();
+            let returned = root.0.join("returned");
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "startup_log::tests::unavailable::unavailable_log_child",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("ZERUS_TEST_UNAVAILABLE_STARTUP_LOG", "1")
+                .env("ZERUS_TEST_STARTUP_LOG_RETURNED", &returned)
+                .env("HOME", &blocked)
+                .env("XDG_STATE_HOME", &blocked)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(stderr)
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                if Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("unavailable log must not wait for inherited stderr");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            assert!(status.success(), "unavailable log must not panic: {status}");
+            assert_eq!(std::fs::read(returned).unwrap(), b"returned");
+        }
+
+        #[test]
+        fn a_full_unread_stderr_pipe_does_not_block_an_unavailable_log() {
+            let _process = crate::PROCESS_TREE.read().unwrap();
+            let mut descriptors = [-1; 2];
+            assert_eq!(unsafe { libc::pipe(descriptors.as_mut_ptr()) }, 0);
+            // SAFETY: pipe returned two new, distinct owned descriptors.
+            let reader = unsafe { OwnedFd::from_raw_fd(descriptors[0]) };
+            let mut writer = File::from(unsafe { OwnedFd::from_raw_fd(descriptors[1]) });
+            for fd in [reader.as_raw_fd(), writer.as_raw_fd()] {
+                assert_eq!(
+                    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+                    0
+                );
+            }
+            let flags = unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_GETFL) };
+            assert!(flags >= 0);
+            assert_eq!(
+                unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) },
+                0
+            );
+            let mut filled = 0;
+            for bytes in [&[b'x'; 4096][..], b"x"] {
+                loop {
+                    match writer.write(bytes) {
+                        Ok(n) => {
+                            assert!(n > 0);
+                            filled += n;
+                            assert!(filled <= 8 * 1024 * 1024, "bounded fixture pipe fill");
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(error) => panic!("fixture pipe fill: {error}"),
+                    }
+                }
+            }
+            assert!(filled > 0);
+            // The child inherits a full BLOCKING pipe. Keep its reader open
+            // without draining it until the bounded child has returned.
+            assert_eq!(
+                unsafe {
+                    libc::fcntl(writer.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK)
+                },
+                0
+            );
+            assert_returns_with(writer);
+            drop(reader);
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_failing_stderr_write_does_not_panic_on_an_unavailable_log() {
+            let _process = crate::PROCESS_TREE.read().unwrap();
+            let full = OpenOptions::new().write(true).open("/dev/full").unwrap();
+            assert_returns_with(full);
+        }
     }
 }

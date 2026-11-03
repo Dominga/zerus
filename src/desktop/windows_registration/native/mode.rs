@@ -69,6 +69,8 @@ pub(in crate::desktop::windows_registration) fn command(
 ) -> Result<Value> {
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+    // The one mode-helper spawn: refuse a unit-test image before caller capture.
+    let helper = crate::self_exec::current()?;
     let scope = ui_authority::Scope::new(config, location);
     // Capture the real caller BEFORE the helper environment is sanitized.
     let caller = ui_authority::registration::Caller::capture(&scope)?;
@@ -95,7 +97,7 @@ pub(in crate::desktop::windows_registration) fn command(
     let child_env = env.clone();
     let references: Vec<_> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let output = zerus_client_core::run::run_owned(
-        &std::env::current_exe()?, &invocation, &references, &AtomicBool::new(false),
+        &helper, &invocation, &references, &AtomicBool::new(false),
         move |command| {
             proof.check().map_err(std::io::Error::other)?;
             command.env_clear().envs(child_env).creation_flags(if attached { 0 } else { CREATE_NO_WINDOW }).spawn()
@@ -704,5 +706,40 @@ pub(in crate::desktop::windows_registration) fn serve(args: &[String]) -> i32 {
         1
     } else {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_test_image_refuses_the_mode_helper_before_caller_capture() {
+        let root = tempfile::tempdir().unwrap();
+        let config = Config {
+            home: root.path().to_str().unwrap().into(),
+            dir: root.path().join("config"),
+            state: root.path().join("state"),
+            selves: vec![],
+            peers: vec![],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: Default::default(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        let location = Location {
+            root: root.path().join("state").join("desktop"),
+            configuration: "a".repeat(64),
+        };
+        for request in [
+            json!({"schema":1,"operation":"switch","mode":"passive"}),
+            json!({"schema":1,"operation":"cancel_rollback","request_id":"11111111-1111-4111-8111-111111111111"}),
+        ] {
+            let error = command(&config, &location, request).unwrap_err();
+            assert_eq!(error.to_string(), crate::self_exec::TEST_IMAGE);
+        }
+        // Refused before any record, plan or helper environment was touched.
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
 }

@@ -2071,7 +2071,12 @@ fn remove(args: &[String], attempted: &mut bool, observed: &mut Option<Value>) -
     if crate::platform::canonical(text(actual)).ok().as_ref() != Some(&common) {
         return Err(changed.into());
     }
-    if target.exists() {
+    // An unreadable folder is not a missing one: its ownership is checked or
+    // the removal refused.
+    if target
+        .try_exists()
+        .map_err(|e| format!("Worktree folder: {e}"))?
+    {
         let own = git(
             target,
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],

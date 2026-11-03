@@ -2510,8 +2510,9 @@ the branch is kept, and shows the unchecked **Delete even if some running
 programs cannot be checked** box only when the review offered that acceptance.
 Each confirmation sends the fingerprint of the review on screen exactly once.
 The outcome stays on the row until a fresh review: **Files deleted**, **Folder
-kept**, **Nothing changed** with the reason, or **Result unknown** with **Review
-again**. Nothing is retried automatically. A row whose repository is gone shows
+kept**, **Record already gone** (another action may have resolved it, so the
+row asks for a fresh review instead of claiming the files stayed), **Nothing
+changed** with the reason, or **Result unknown** with **Review again**. Nothing is retried automatically. A row whose repository is gone shows
 **Repository missing** and offers Keep folder only.
 
 Integration evidence distinguishes ancestor commits, identical file trees and

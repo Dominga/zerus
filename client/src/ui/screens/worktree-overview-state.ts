@@ -10,7 +10,7 @@ export const LEFTOVERS = 5;
 export const selectable = (category: number) => category < 4;
 export interface Filter { search: string; project: string; computer: string; category: number | null; show_main: boolean; sort: "size" | "activity" | "name" }
 export const emptyFilter = (): Filter => ({ search: "", project: "", computer: "", category: null, show_main: false, sort: "size" });
-export type Settled = { outcome: "deleted" } | { outcome: "forgotten" } | { outcome: "refused"; detail: string } | { outcome: "unknown"; detail: string };
+export type Settled = { outcome: "deleted" } | { outcome: "forgotten" } | { outcome: "resolved" } | { outcome: "refused"; detail: string } | { outcome: "unknown"; detail: string };
 /** A reviewed leftover as the native side shows it; the folder and repository stay native. */
 export interface Leftover { branch: string; branch_retained: boolean | null; bytes: number | null; complete: boolean; stopped: string; interrupted: boolean; reasons: string[]; sessions: string[]; processes: number; fingerprint: string; consent: boolean; deletable: boolean; repository: boolean; reserved_at: number | null; outcome: Settled | null }
 export interface OverviewRow { id: string; path: string; branch: string; kind: string; machine: string; computer: string; category: number; state: string; remains: string; size: string; fresh: boolean; sessions: string[]; leftover: Leftover | null }

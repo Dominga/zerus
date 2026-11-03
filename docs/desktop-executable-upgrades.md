@@ -37,7 +37,10 @@ service alive for the maintained explicit registration/instance transition. It
 does not adopt another task, call RunEx or replay manager operations.
 The Service consumer shows this state in the footer and Settings > About,
 including after a watch refusal or revoked background access. Its bounded
-projection stays attached to the original checked service epoch. A status check
+projection stays attached to the original checked service epoch. Its checked
+epoch and configuration are stored independently of display snapshots; failed
+checks keep the manual notice, and retries/backoff refuse a different service.
+A status check
 does not repeat startup Grant/import handling or refresh the task. About directs
 the user to read `hgs desktop registration status --json` from a foreground
 Command Prompt outside Zerus using the same CLI and configuration, keeping the

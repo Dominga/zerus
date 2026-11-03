@@ -320,6 +320,14 @@ impl CatalogDelivery {
     }
 }
 
+/// Immutable checked read identity, independent of transient display state.
+/// It grants no manager, process or writer authority.
+struct ReadOnlyOriginal {
+    configuration: String,
+    epoch: String,
+    generation: u64,
+}
+
 struct Shared {
     creation_rpc: Gate,
     notification_controls: Arc<crate::desktop_notification_controls::Controller>,
@@ -355,6 +363,7 @@ struct Shared {
     stopped: AtomicBool,
     /// Once observed, connection checks cannot retry imports or startup Grant.
     read_only_reconnect: AtomicBool,
+    read_only_original: OnceLock<ReadOnlyOriginal>,
     cancellation: Mutex<Option<Arc<AtomicBool>>>,
     responder: Option<Arc<zerus_client_core::desktop::Responder>>,
     reads: Mutex<BTreeMap<String, ReadIntent>>,
@@ -528,6 +537,7 @@ impl Service {
             allowed,
             stopped: AtomicBool::new(false),
             read_only_reconnect: AtomicBool::new(false),
+            read_only_original: OnceLock::new(),
             cancellation: Mutex::new(None),
             configuration: Mutex::new(None),
             audit_help: audit::help::Cache::default(),
@@ -654,7 +664,7 @@ impl Service {
             .clone()
     }
     pub fn retry(&self) {
-        if !self.shared.read_only_reconnect.load(Ordering::Acquire) && !startup_recovery() {
+        if !self.shared.read_checks_only() && !startup_recovery() {
             if let Some(report) = &self.shared.retained_import {
                 report.request_retry();
             }
@@ -664,13 +674,15 @@ impl Service {
     /// A check belongs to the displayed original service and starts no source.
     pub fn check_status(&self, epoch: &str) -> Result<(), String> {
         if self.shared.stopped.load(Ordering::Acquire)
-            || self.snapshot().epoch.as_deref() != Some(epoch)
+            || self
+                .shared
+                .original_read_scope()
+                .ok()
+                .flatten()
+                .is_none_or(|original| original.epoch != epoch)
         {
             return Err("The original background service connection changed. Reopen Settings to check its status.".into());
         }
-        self.shared
-            .read_only_reconnect
-            .store(true, Ordering::Release);
         self.retry_connection();
         Ok(())
     }
@@ -679,7 +691,7 @@ impl Service {
         if self.shared.stopped.load(Ordering::Acquire) {
             return;
         }
-        if !self.shared.read_only_reconnect.load(Ordering::Acquire) && !startup_recovery() {
+        if !self.shared.read_checks_only() && !startup_recovery() {
             read_import::retry(self.shared.clone());
         }
         if let Some(cancel) = self
@@ -990,6 +1002,49 @@ fn admission<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Shared {
+    fn read_checks_only(&self) -> bool {
+        self.read_only_original.get().is_some() || self.read_only_reconnect.load(Ordering::Acquire)
+    }
+
+    fn original_read_scope(&self) -> Result<Option<&ReadOnlyOriginal>, &'static str> {
+        if let Some(original) = self.read_only_original.get() {
+            return Ok(Some(original));
+        }
+        if !self.read_only_reconnect.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        Err("original_service_changed")
+    }
+
+    /// Only checked preflight/stream status can bind the original read scope.
+    fn observe_manual_refresh(
+        &self,
+        configuration: &str,
+        snapshot: &Snapshot,
+    ) -> Result<(), &'static str> {
+        if snapshot.executable_upgrade != Some(service::ExecutableUpgrade::ManualRefreshRequired) {
+            return Ok(());
+        }
+        let epoch = snapshot
+            .epoch
+            .as_deref()
+            .ok_or("original_service_changed")?;
+        let generation = snapshot.generation.ok_or("original_service_changed")?;
+        // A missing binding after the latch is set is never rebuilt from a
+        // later reply, even if that reply presents a healthy replacement.
+        self.original_read_scope()?;
+        let original = self.read_only_original.get_or_init(|| ReadOnlyOriginal {
+            configuration: configuration.into(),
+            epoch: epoch.into(),
+            generation,
+        });
+        if original.configuration != configuration || original.epoch != epoch {
+            return Err("original_service_changed");
+        }
+        self.read_only_reconnect.store(true, Ordering::Release);
+        Ok(())
+    }
+
     fn publish_retained_import(&self) {
         let report = self.retained_import.as_ref().map(|report| report.status());
         let mut snapshot = self.snapshot.lock();
@@ -1046,9 +1101,6 @@ impl Shared {
         self.pump.service(current.clone());
     }
     fn publish(&self, mut snapshot: Snapshot) {
-        if snapshot.executable_upgrade == Some(service::ExecutableUpgrade::ManualRefreshRequired) {
-            self.read_only_reconnect.store(true, Ordering::Release);
-        }
         snapshot.notification_preferences = self
             .notification_controls
             .view()
@@ -1070,21 +1122,25 @@ impl Shared {
         for projection in &self.projections {
             projection(None);
         }
-        let original = self.snapshot.copy();
-        let manual = code == "manual_refresh_required";
+        let last = self.snapshot.copy();
+        let manual = self.read_checks_only();
+        let original = manual.then(|| self.read_only_original.get()).flatten();
         self.publish(Snapshot {
-            executable_upgrade: if manual {
-                original.executable_upgrade
-            } else {
-                None
-            },
-            epoch: if manual { original.epoch } else { None },
-            generation: if manual { original.generation } else { None },
+            executable_upgrade: manual.then_some(service::ExecutableUpgrade::ManualRefreshRequired),
+            epoch: original.map(|scope| scope.epoch.clone()),
+            generation: original.map(|scope| {
+                if last.epoch.as_deref() == Some(scope.epoch.as_str()) {
+                    last.generation.unwrap_or(scope.generation)
+                } else {
+                    scope.generation
+                }
+            }),
             code: code.into(),
             reconnecting,
             ..Snapshot::default()
         });
     }
+
     fn dirty(&self, computer: &str, source: SourceVersion) -> Result<bool, &'static str> {
         self.catalog_hint(computer, source, None, false)
     }
@@ -1303,16 +1359,7 @@ async fn request(
 }
 
 async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String, &'static str> {
-    let original = shared.read_only_reconnect.load(Ordering::Acquire).then(|| {
-        (
-            shared.snapshot.copy().epoch,
-            shared
-                .configuration
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone(),
-        )
-    });
+    let original = shared.original_read_scope()?;
     let help = command(shared, vec!["--help".into()], None, stop.clone()).await?;
     shared.notification_supported.store(
         std::str::from_utf8(&help).ok().is_some_and(|text| {
@@ -1367,9 +1414,9 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
     }
     let mut state = service::State::new(configuration.into())?;
     state.status(&value)?;
-    if original.is_some_and(|(epoch, config)| {
-        epoch.is_some_and(|epoch| state.snapshot().epoch.as_deref() != Some(epoch.as_str()))
-            || config.is_some_and(|config| config != configuration)
+    if original.is_some_and(|scope| {
+        state.snapshot().epoch.as_deref() != Some(scope.epoch.as_str())
+            || scope.configuration != configuration
     }) {
         return Err("original_service_changed");
     }
@@ -1381,6 +1428,7 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
     if let Some(responder) = &shared.responder {
         responder.configure_once(configuration.into());
     }
+    shared.observe_manual_refresh(configuration, state.snapshot())?;
     shared.publish(state.snapshot().clone());
     Ok(configuration.into())
 }
@@ -1403,7 +1451,7 @@ async fn run(shared: Arc<Shared>, mut control: watch::Receiver<Control>) {
             shared.clone(),
             &mut control,
             stop.clone(),
-            automatic || shared.read_only_reconnect.load(Ordering::Acquire),
+            automatic || shared.read_checks_only(),
             &mut greeted,
         )
         .await;
@@ -1634,6 +1682,7 @@ async fn connection(
                         details::frame(&shared,&frame,&stop).await?;
                         for projection in &shared.projections { projection(Some(&frame)); }
                         last_frame = tokio::time::Instant::now();
+                        shared.observe_manual_refresh(&configuration, state.snapshot())?;
                         shared.publish(state.snapshot().clone());
                         if state.snapshot().executable_upgrade == Some(service::ExecutableUpgrade::ManualRefreshRequired) {
                             return Err("manual_refresh_required");

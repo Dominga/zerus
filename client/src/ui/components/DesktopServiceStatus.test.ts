@@ -28,8 +28,8 @@ describe("service status in the footer", () => {
     expect(serviceStatus(healthy({ notification_ownership: { ...rearm, pending: true } }))).toMatchObject({ healthy: false, retry: false, ownership: "check" });
     expect(serviceStatus(healthy({ code: "background_unready", notification_ownership: rearm }))).toMatchObject({ retry: true, ownership: "rearm" });
   });
-  it("keeps Windows manual refresh visible after revoke without offering Resume or Retry", () => {
-    const manual = healthy({ connected: false, code: "manual_refresh_required",
+  it.each(["manual_refresh_required", "service_unavailable", "original_service_changed"])("keeps Windows manual refresh visible after revoke and %s without offering Resume or Retry", (code) => {
+    const manual = healthy({ connected: false, code,
       executable_upgrade: { state: "manual_refresh_required" }, notification_ownership: rearm });
     expect(serviceStatus(manual)).toMatchObject({ healthy: false, manualRefresh: true,
       label: "Service refresh required", retry: false, ownership: undefined });

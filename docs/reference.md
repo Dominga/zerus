@@ -2581,7 +2581,12 @@ and macOS. A record resolves by itself once its
 folder is gone, or once a fresh worktree list taken under the repository lock shows
 that Git tracks the worktree again. A leftover whose repository is gone is listed
 by `hgs worktrees leftovers` and can still be kept; a record whose repository and
-folder are both gone resolves. At most 512 unresolved records
+folder are both gone resolves. One review or listing reports at most 32 leftovers
+within 1 MiB and marks the rest with `leftovers_partial` (review) or `partial`
+(listing); they stay recorded for a later review. The folder catalog
+(`hgs worktrees --path`) reports a repository's record count as `leftovers`, read
+through its index on every call, so a reader reviews that repository even when no
+linked worktree is left. At most 512 unresolved records
 are kept per computer; at that bound new removals are refused with a visible
 reason, and no record is evicted. Automatic cleanup never acts on these records.
 

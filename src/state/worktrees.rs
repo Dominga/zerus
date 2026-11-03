@@ -315,6 +315,11 @@ pub(super) fn catalog_until(path: &Path, refresh: bool, deadline: Instant) -> Va
             .map(|branch|json!(branch.trim_end_matches('\n'))).unwrap_or(Value::Null);
         snapshot["path"] = json!(path);
         snapshot["stale"] = json!(false);
+        // Partial-removal records of this repository, read fresh and never
+        // cached with the listing: a reader reviews the repository for them.
+        if let Ok(count) = super::worktree_maintenance::removal_count(&common) {
+            snapshot["leftovers"] = json!(count);
+        }
         Ok::<_, GitError>(snapshot)
     })();
     match result {

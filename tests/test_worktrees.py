@@ -609,6 +609,28 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         self.assertIn('changed since the review',keep('0'*64).stderr)
         kept=keep(orphan['fingerprint']);self.assertEqual(kept.returncode,0,kept.stderr);self.assertEqual(json.loads(kept.stdout)['status'],'kept')
         self.assertEqual((tree/'target'/'readonly'/'out').read_text(),'build');self.assertEqual(self.records(),[])
+    def test_many_leftovers_stay_bounded_and_the_catalog_counts_them(self):
+        import sqlite3
+        tree,_,_=self.partial('counted')
+        self.assertEqual(self.catalog()['leftovers'],1)
+        data=self.review();self.assertEqual(len(data['leftovers']),1);self.assertFalse(data['leftovers_partial'])
+        database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3';common=str((self.repo/'.git').resolve())
+        extra=self.root/'extra';gone=self.root/'gone'
+        for n in range(40):(extra/str(n)).mkdir(parents=True);(gone/str(n)).mkdir(parents=True)
+        with contextlib.closing(sqlite3.connect(database)) as db,db:
+            db.executemany("INSERT INTO removals VALUES (?,?,?,?,?,?,?,?,?)",
+                [(str(extra/str(n)),common,'b','0'*40,'f'*64,'',1.0,'partial','') for n in range(40)]
+                +[(str(gone/str(n)),str(self.root/'gone-repository/.git'),'b','0'*40,'f'*64,'',1.0,'partial','') for n in range(40)])
+        self.assertEqual(self.catalog()['leftovers'],41)
+        data=self.review();self.assertEqual(len(data['leftovers']),32);self.assertTrue(data['leftovers_partial'])
+        listed=subprocess.run([str(HGS),'worktrees','leftovers','--json'],env=self.env,text=True,capture_output=True,timeout=60)
+        self.assertEqual(listed.returncode,0,listed.stderr);value=json.loads(listed.stdout)
+        self.assertEqual(len(value['leftovers']),32);self.assertTrue(value['partial'])
+        # Nothing beyond the bound is forgotten; vanished folders still resolve.
+        self.assertEqual(len(self.records()),81)
+        shutil.rmtree(extra)
+        data=self.review();self.assertEqual([r['path'] for r in data['leftovers']],[str(tree.resolve())])
+        self.assertFalse(data['leftovers_partial']);self.assertEqual(self.catalog()['leftovers'],1)
     def delete(self,path,fingerprint,confirm=True,extra=()):
         return subprocess.run([str(HGS),'worktrees','delete-leftover','--path',str(path),'--common-dir',str(self.repo/'.git'),'--fingerprint',fingerprint,
             *(['--confirm-delete'] if confirm else []),'--request-id','test-delete','--json',*extra],env=self.env,text=True,capture_output=True,timeout=60)

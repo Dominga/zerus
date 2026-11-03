@@ -467,6 +467,21 @@ pub(super) fn removals(common: &Path) -> Result<Vec<Removal>> {
         .map_err(|e| e.to_string())
 }
 
+/// How many records one repository has, through its index and at most
+/// `MAX_REMOVALS`. Reading never creates the private database.
+pub(super) fn removal_count(common: &Path) -> Result<i64> {
+    if !directory().join("queue.sqlite3").exists() {
+        return Ok(0);
+    }
+    database()?
+        .query_row(
+            "SELECT count(*) FROM (SELECT 1 FROM removals WHERE common_dir=?1 LIMIT ?2)",
+            params![common.to_string_lossy(), MAX_REMOVALS],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())
+}
+
 pub(super) fn forget_removal(path: &str) -> Result<bool> {
     let db = database()?;
     let changed = db

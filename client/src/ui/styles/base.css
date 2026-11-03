@@ -163,7 +163,7 @@
     position: fixed; z-index: 50; min-width: 200px; max-width: 320px; padding: 4px;
     background: var(--z-color-raised); border: 1px solid var(--z-color-border); border-radius: var(--z-radius-lg);
     box-shadow: var(--z-shadow-popover); font-size: var(--fs-sm);
-    animation: drop var(--z-motion-fast) var(--ease) both;
+    /* Menus appear at their measured final geometry on the first paint. */
   }
   .menu-agent { flex: none; display: inline-grid; place-items: center; width: 14px; height: 14px; }
   .menu-item {

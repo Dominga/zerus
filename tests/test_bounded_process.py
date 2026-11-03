@@ -74,6 +74,73 @@ sys.exit(b.supervise([sys.executable,'-c','import os,time;print(os.getpid(),flus
         self.assertEqual(result.returncode, 124, result.stderr)
         self.assertFalse(Path('/proc', result.stdout.strip()).exists())
 
+    def test_prune_retains_original_grandchild_when_parent_cannot_be_revisited(self):
+        # A later collect must not mask a lost prune entry by re-adopting it.
+        # Both generations are real children inside two bounded supervisors.
+        parent = "import subprocess,sys,time; child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)']); print(child.pid,flush=True); time.sleep(30)"
+        code = f'''import importlib.util,sys,signal,subprocess
+spec=importlib.util.spec_from_file_location('bounded', {str(RUNNER)!r})
+b=importlib.util.module_from_spec(spec);spec.loader.exec_module(b)
+assert b.ctypes.CDLL(None,use_errno=True).prctl(36,1,0,0,0)==0
+parent=subprocess.Popen([sys.executable,'-c',{parent!r}],stdout=subprocess.PIPE,text=True)
+tree=b.Tree(8)
+original=b.signal.pidfd_send_signal
+try:
+ grandchild=int(parent.stdout.readline())
+ tree.collect()
+ retained=tree.owned[grandchild]
+ assert parent.pid in tree.owned and parent.poll() is None
+ phase='prune'
+ denials={{'prune':0,'collect':0}}
+ def transient(fd,sig,*args):
+  denied=(phase=='prune' and fd==retained[1]) or (phase=='collect' and fd==tree.owned[parent.pid][1])
+  if sig==0 and denied:
+   denials[phase]+=1
+   raise PermissionError(1,'synthetic transient custody denial')
+  return original(fd,sig,*args)
+ b.signal.pidfd_send_signal=transient
+ tree.prune()
+ phase='collect'
+ tree.collect()
+ assert denials=={{'prune':1,'collect':1}},denials
+ assert tree.owned.get(grandchild)==retained,'prune discarded the original grandchild pidfd'
+ print('original grandchild custody retained',flush=True)
+finally:
+ b.signal.pidfd_send_signal=original
+ assert tree.cleanup(),'private original descendants remain'
+ tree.close()
+ parent.stdout.close()
+ parent.returncode=-signal.SIGKILL
+'''
+        result = self.run_fixture(code)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'original grandchild custody retained')
+
+    def test_cleanup_cannot_report_clean_when_proc_hides_a_live_child(self):
+        # Hide discovery, not the kernel child. Restore discovery in finally so
+        # even the old false-clean implementation leaves no fixture behind.
+        code = f'''import importlib.util,sys,signal,subprocess
+spec=importlib.util.spec_from_file_location('bounded', {str(RUNNER)!r})
+b=importlib.util.module_from_spec(spec);spec.loader.exec_module(b)
+assert b.ctypes.CDLL(None,use_errno=True).prctl(36,1,0,0,0)==0
+child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'])
+tree=b.Tree(8)
+original=b.children
+try:
+ b.children=lambda pid:set()
+ assert not tree.cleanup(),'unreadable proc children falsely proved clean'
+ assert child.poll() is None
+ print('kernel child prevents clean',flush=True)
+finally:
+ b.children=original
+ assert tree.cleanup(),'private original child remains'
+ tree.close()
+ child.returncode=-signal.SIGKILL
+'''
+        result = self.run_fixture(code, seconds=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'kernel child prevents clean')
+
     def test_unconfirmed_cleanup_fails_with_original_identities_and_outer_owner_reaps(self):
         code = f'''import importlib.util,sys,signal
 spec=importlib.util.spec_from_file_location('bounded', {str(RUNNER)!r})

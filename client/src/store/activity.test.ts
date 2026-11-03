@@ -17,6 +17,50 @@ function setup() {
 }
 
 describe("activity store", () => {
+  it("changes routing immediately but waits for the native composer before subscribing", async () => {
+    const { store, calls } = setup();
+    store.follow({ ...target, conversationId: "conversation" });
+    store.applyActivity([out("events", { events: [ev(10)], cursor: 10 })]);
+    let opened!: () => void;
+    const ready = new Promise<void>((resolve) => { opened = resolve; });
+    const next = { ...target, id: "\nrun:b", key: "run:b", conversationId: "conversation" };
+    store.follow(next, ready);
+    expect(store.target()).toBe(next);
+    expect(store.events().map(e => e.seq)).toEqual([10]);
+    expect(store.summary()).toBeUndefined();
+    expect(calls.map(call => call.key)).toEqual(["run:a"]);
+    store.loadOlder();
+    expect(calls).toHaveLength(1);
+    opened();
+    await ready;
+    expect(calls.map(call => call.key)).toEqual(["run:a", "run:b"]);
+    expect(calls[1]).toMatchObject({ after: 10, tail: 100 });
+    store.follow(undefined);
+  });
+
+  it("never subscribes an obsolete target whose composer finishes opening late", async () => {
+    const { store, calls } = setup();
+    let opened!: () => void;
+    const ready = new Promise<void>((resolve) => { opened = resolve; });
+    store.follow(target, ready);
+    const next = { ...target, id: "\nrun:b", key: "run:b" };
+    store.follow(next, Promise.resolve());
+    await Promise.resolve();
+    opened();
+    await ready;
+    expect(calls.map(call => call.key)).toEqual(["run:b"]);
+    store.follow(undefined);
+  });
+
+  it("still reads Activity after a composer open fails, without retrying the open", async () => {
+    const { store, calls } = setup();
+    const failed = Promise.reject(new Error("native open refused"));
+    store.follow(target, failed);
+    await failed.catch(() => {});
+    expect(calls.map(call => call.key)).toEqual(["run:a"]);
+    store.follow(undefined);
+  });
+
   it("retains loaded history and its display key while the same conversation resumes", () => {
     createRoot((dispose) => {
       const { store, calls, unfollows } = setup();

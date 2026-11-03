@@ -36,6 +36,13 @@ impl Fixture {
         let report = Report::new(Inputs {
             creations: zerus_client_core::migration::preload::Capture::new(root.clone()),
             local_reads: zerus_client_core::migration::preload::Capture::local_reads(root.clone()),
+            // Synthetic roots only: never this computer's Qt or dev stores.
+            drafts: Arc::new(zerus_client_core::migration::draft_preload::Capture::new(
+                root.clone(),
+                root.join(zerus_client_core::drafts::dir(false)),
+                None,
+                Vec::new(),
+            )),
             data: root.clone(),
             settings: Settings::open(settings_path, None),
             qt: Some(QtStore::Ini(qt)),
@@ -573,4 +580,54 @@ fn paused_creation_capture_is_visible_beside_a_successful_independent_qt_report(
         "creation_source_unsupported"
     );
     assert_eq!(status["complete"], true);
+}
+
+/// G3 drafts (zerus-5wmh.66.5.2.1.2): a recorded capture failure is visible in
+/// the report beside the Qt report, and the report's Retry runs the store's
+/// waiting import without changing the recorded outcome.
+#[test]
+fn a_paused_draft_import_is_visible_and_the_report_retry_resumes_it() {
+    use zerus_client_core::drafts::{self, DraftStore, ImportSource};
+    let f = Fixture::new("success");
+    let next = f.root.join(drafts::dir(false));
+    let big = next.join("a".repeat(64));
+    fs::create_dir_all(&big).unwrap();
+    fs::write(big.join("draft.json"), vec![b' '; (1 << 20) + 1]).unwrap();
+    let capture = f.report.inputs.drafts.clone();
+    let published = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = published.clone();
+    f.report.hook_drafts(Arc::new(move || {
+        count.fetch_add(1, Ordering::SeqCst);
+    }));
+    let store = Arc::new(DraftStore::open_captured(next.clone(), capture.clone()));
+    let weak = Arc::downgrade(&store);
+    capture.hook_retry(Arc::new(move || {
+        if let Some(store) = weak.upgrade() {
+            store.retry_import();
+        }
+    }));
+    // An empty source folder: the import has nothing to copy, but runs.
+    let qt = f.root.join("qt-drafts");
+    fs::create_dir_all(&qt).unwrap();
+    let sources = vec![ImportSource {
+        name: "qt".into(),
+        root: qt,
+    }];
+    store.import(sources, |_| {});
+    store.flush();
+    let status = f.report.status();
+    assert_eq!(status["drafts_capture"]["code"], "draft_capture_too_large");
+    assert_eq!(status["drafts_capture"]["writes"], true);
+    assert_eq!(status["drafts_capture"]["paused"], true);
+    assert!(!next.join(drafts::IMPORT_MARKER).exists());
+    assert!(
+        published.load(Ordering::SeqCst) >= 2,
+        "outcome and pause republish"
+    );
+    f.report.request_retry();
+    store.flush();
+    let status = f.report.status();
+    assert_eq!(status["drafts_capture"]["code"], "draft_capture_too_large");
+    assert_eq!(status["drafts_capture"]["paused"], false);
+    assert!(next.join(drafts::IMPORT_MARKER).exists());
 }

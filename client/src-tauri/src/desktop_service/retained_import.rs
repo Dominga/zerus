@@ -21,6 +21,9 @@ pub(crate) struct Inputs {
     qt: Option<QtStore>,
     pub(crate) creations: Arc<zerus_client_core::migration::preload::Capture>,
     pub(crate) local_reads: Arc<zerus_client_core::migration::preload::Capture>,
+    /// The G3 drafts capture (zerus-5wmh.66.5.2.1.2): the Next draft store
+    /// runs it as its first job; its status and Retry go through this report.
+    pub(crate) drafts: Arc<zerus_client_core::migration::draft_preload::Capture>,
 }
 impl Inputs {
     pub(crate) fn native(
@@ -32,6 +35,7 @@ impl Inputs {
         (identifier == crate::identity::SWITCH_ID && !replay).then(|| Self {
             creations: zerus_client_core::migration::preload::Capture::new(data.clone()),
             local_reads: zerus_client_core::migration::preload::Capture::local_reads(data.clone()),
+            drafts: Arc::new(zerus_client_core::migration::draft_preload::Capture::native(&data)),
             data,
             settings,
             qt: QtStore::here(),
@@ -113,10 +117,14 @@ impl Report {
         self.inputs.creations.hook(notify.clone());
         self.inputs.local_reads.hook(notify);
     }
+    pub fn hook_drafts(&self, notify: Arc<dyn Fn() + Send + Sync>) {
+        self.inputs.drafts.hook(notify);
+    }
     pub fn request_retry(&self) {
         self.retry_creations();
         self.inputs.creations.request_retry();
         self.inputs.local_reads.request_retry();
+        self.inputs.drafts.request_retry();
         self.state().retry_requested = true;
     }
     pub fn take_retry(&self) -> bool {
@@ -124,7 +132,7 @@ impl Report {
     }
     pub fn status(&self) -> Value {
         let state = self.state();
-        json!({"creations_report":self.creation_status(),"creations_capture":self.inputs.creations.status(),"local_read_capture":self.inputs.local_reads.status(),"scope":SCOPE,"running":state.running,"code":state.code,
+        json!({"creations_report":self.creation_status(),"creations_capture":self.inputs.creations.status(),"local_read_capture":self.inputs.local_reads.status(),"drafts_capture":self.inputs.drafts.status(),"scope":SCOPE,"running":state.running,"code":state.code,
             "required":!state.not_applicable,
             "complete":state.stored.as_ref().is_some_and(|s| s.record.phase == Phase::Published),
             "import_id":state.stored.as_ref().map(|s|&s.record.import_id),

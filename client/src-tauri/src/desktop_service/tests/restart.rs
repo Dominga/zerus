@@ -352,10 +352,29 @@ fn real_service_native_resync_keeps_a_live_computer_live() {
 #[test]
 #[ignore = "run client/scripts/test-service-reconnect.py --scenario parity with private binaries"]
 fn real_service_matches_native_delivery_of_lifecycle_frames() {
-    // zerus-pc6h.1: recorded native frames (rename, a stopped run, archive)
-    // through native CatalogState and through a real private service and this
-    // adapter must leave the same rows after every catalog frame, and the same
-    // removal reasons.
+    // zerus-pc6h.1: rename, a stopped run and archive.
+    assert_service_parity(
+        include_str!("fixtures/lifecycle-parity.ndjson"),
+        &["archived"],
+    );
+}
+
+#[test]
+#[ignore = "run client/scripts/test-service-reconnect.py --scenario session-parity with private binaries"]
+fn real_service_matches_native_delivery_of_session_lifecycle_frames() {
+    // zerus-pc6h.1: launch, pause, resume, fork, Start fresh, forget,
+    // terminate and restore from Archive.
+    assert_service_parity(
+        include_str!("fixtures/session-lifecycle-parity.ndjson"),
+        &["replaced", "forgotten", "archived"],
+    );
+}
+
+/// Recorded native watch frames through native CatalogState and through a
+/// real private service and this adapter must leave the same rows after every
+/// catalog frame, and the same removals with their reasons (`reasons` must
+/// all occur, so a recording cannot silently lose its lifecycle step).
+fn assert_service_parity(frames: &str, reasons: &[&str]) {
     let _process = crate::PROCESS_TREE.read().unwrap();
     let root =
         PathBuf::from(std::env::var_os("ZERUS_TEST_SERVICE_RESTART").expect("private harness"));
@@ -365,10 +384,7 @@ fn real_service_matches_native_delivery_of_lifecycle_frames() {
     let native = crate::pump::Pump::default();
     let mut state = zerus_client_core::CatalogState::new();
     let (mut steps, mut native_removed) = (Vec::new(), Vec::new());
-    for (index, line) in include_str!("fixtures/lifecycle-parity.ndjson")
-        .lines()
-        .enumerate()
-    {
+    for (index, line) in frames.lines().enumerate() {
         let entry: Value = serde_json::from_str(line).unwrap();
         let frame: zerus_watch_protocol::Frame =
             serde_json::from_value(entry["frame"].clone()).unwrap();
@@ -394,12 +410,15 @@ fn real_service_matches_native_delivery_of_lifecycle_frames() {
             steps.push((index, rows));
         }
     }
-    assert!(
-        steps.len() >= 4
-            && native_removed
+    assert!(steps.len() >= 4);
+    for reason in reasons {
+        assert!(
+            native_removed
                 .iter()
-                .any(|(_, r)| r.as_deref() == Some("archived"))
-    );
+                .any(|(_, r)| r.as_deref() == Some(*reason)),
+            "{reason}"
+        );
+    }
     tauri::async_runtime::block_on(async {
         let pump = crate::pump::Pump::default();
         let removed = Arc::new(Mutex::new(Vec::new()));

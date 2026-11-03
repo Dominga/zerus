@@ -14,10 +14,14 @@ TESTS = {
     'paged-fresh': 'desktop_service::tests::restart::real_service_paged_start_fresh_keeps_the_journaled_replaced_reason',
     'resync': 'desktop_service::tests::restart::real_service_native_resync_keeps_a_live_computer_live',
     'parity': 'desktop_service::tests::restart::real_service_matches_native_delivery_of_lifecycle_frames',
+    'session-parity': 'desktop_service::tests::restart::real_service_matches_native_delivery_of_session_lifecycle_frames',
 }
-# Real native watch frames of rename, a stopped run and archive, recorded from
-# an isolated hgs with a fake agent and sanitized to example paths.
-PARITY_FRAMES = Path(__file__).resolve().parents[1] / 'src-tauri/src/desktop_service/tests/fixtures/lifecycle-parity.ndjson'
+# Real native watch frames recorded from an isolated hgs with scripted agents
+# and sanitized to example paths: rename, a stopped run and archive; launch,
+# pause, resume, fork, Start fresh, forget, terminate and restore.
+FIXTURES = Path(__file__).resolve().parents[1] / 'src-tauri/src/desktop_service/tests/fixtures'
+PARITY_FRAMES = {'parity': FIXTURES / 'lifecycle-parity.ndjson',
+                 'session-parity': FIXTURES / 'session-lifecycle-parity.ndjson'}
 
 
 def main():
@@ -28,7 +32,9 @@ def main():
                         help='restart: service loss and automatic reconnect; resume: a native resume delta; '
                              'paged-fresh: a Start fresh whose native delta pages the removal and successor apart; '
                              'resync: a native catalog overflow resync of an online source; '
-                             'parity: recorded native lifecycle frames, compared with native delivery')
+                             'parity: recorded native rename/stop/archive frames, compared with native delivery; '
+                             'session-parity: recorded native launch/pause/resume/fork/fresh/forget/terminate/restore '
+                             'frames, likewise')
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(repo / 'tests'))
@@ -87,12 +93,12 @@ def main():
                                                    agent='codex', state=state))
 
         wait('client-connected')
-        if args.scenario == 'parity':
+        if args.scenario in PARITY_FRAMES:
             # The recorded native stream, in order. After each catalog frame the
             # GUI test compares the service rows with native delivery and
             # acknowledges that step before the next frame.
             feed, _, frames = fixture.feed()
-            for index, line in enumerate(PARITY_FRAMES.read_text().splitlines()):
+            for index, line in enumerate(PARITY_FRAMES[args.scenario].read_text().splitlines()):
                 frame = json.loads(line)['frame']
                 fixture.send(feed, frames, dict(t='watch', computer='peer', generation=1, frame=frame))
                 if frame.get('topic') == 'catalog' and (frame['t'] == 'delta' or frame.get('last')):
@@ -173,7 +179,9 @@ def main():
                'resume': 'PASS: real service resume delta; successor first; native replaced reason restored',
                'paged-fresh': 'PASS: real service paged Start fresh; journaled native replaced reason',
                'resync': 'PASS: real service native resync; a live computer stays live; new membership',
-               'parity': 'PASS: real service delivers recorded native lifecycle frames as native mode does'}[args.scenario])
+               'parity': 'PASS: real service delivers recorded native lifecycle frames as native mode does',
+               'session-parity': 'PASS: real service delivers recorded native session lifecycle frames as native mode does',
+               }[args.scenario])
     finally:
         if child is not None and child.poll() is None:
             child.terminate()  # Only our original private libtest subprocess.

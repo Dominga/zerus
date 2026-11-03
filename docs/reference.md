@@ -2616,8 +2616,12 @@ completion is confirmed through that parent. Only after those checks does deleti
 owner write access to their own folders inside the reviewed tree, which is what
 blocked Git; it never touches the branch. If it
 stops partway, the record stays with the reason and the deletion is never
-retried; review the folder again. Deleting leftover files is available on Linux
-and macOS. A record resolves by itself once its
+retried; review the folder again. Each confirmation is consumed by a durable,
+unique attempt reference before filesystem changes begin. If that reference
+cannot be saved, deletion refuses without changing files. Even if no file
+changed and saving the stopped outcome fails, the old confirmation is no longer
+valid; another attempt needs a fresh review. Deleting leftover files is available
+on Linux and macOS. A record resolves by itself once its
 folder is gone, or once a fresh worktree list taken under the repository lock shows
 that Git tracks the worktree again. On Linux and macOS the Git that removes a
 worktree inherits the repository lock (an flock belongs to the open file, and only
@@ -2628,7 +2632,9 @@ Windows the lock ends with hgs. A leftover whose repository is gone is listed
 by `hgs worktrees leftovers` and can still be kept; a record whose repository and
 folder are both gone resolves. One review or listing reports at most 32 leftovers
 within 1 MiB and marks the rest with `leftovers_partial` (review) or `partial`
-(listing); they stay recorded for a later review. The folder catalog
+(listing); they stay recorded for a later review. Verified resolutions of vanished
+records stay committed even if the remaining unresolved records still prevent
+a new removal at the 512-record bound. The folder catalog
 (`hgs worktrees --path`) reports a repository's record count as `leftovers`, read
 through its index on every call, so a reader reviews that repository even when no
 linked worktree is left. At most 512 unresolved records

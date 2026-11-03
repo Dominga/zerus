@@ -121,7 +121,7 @@ fn stale_compare_partial_future_and_replaced_snapshot_do_not_reset_identity() {
     assert!(j.save(stale.record, Some(&stale.sha256)).is_err());
     let bytes = fs::read(s.0.join(FILE)).unwrap();
     let mut changed = attempted.record.clone();
-    changed.source = Scratch::new().reference();
+    changed.source = Scratch::new().reference().into();
     assert!(j.save(changed, Some(&attempted.sha256)).is_err());
     assert_eq!(fs::read(s.0.join(FILE)).unwrap(), bytes);
     crate::fsx::write_private_durable(&s.0.join(FILE), b"{partial").unwrap();
@@ -460,4 +460,18 @@ fn local_read_attempt_recovery_fences_the_old_callback_and_unknown_stays_lookup_
     replay.phase = Phase::Attempted;
     assert!(j.save(replay, Some(&unknown.sha256)).is_err());
     assert_eq!(j.load().unwrap().unwrap().sha256, unknown.sha256);
+}
+
+/// A preload record's serialized source is exactly its reference, as before
+/// the download group was added: the untagged source adds nothing.
+#[test]
+fn a_preload_source_serializes_exactly_as_its_reference() {
+    let s = Scratch::new();
+    let reference = s.reference();
+    assert_eq!(
+        serde_json::to_vec(&Source::Preload(reference.clone())).unwrap(),
+        serde_json::to_vec(&reference).unwrap()
+    );
+    let back: Source = serde_json::from_slice(&serde_json::to_vec(&reference).unwrap()).unwrap();
+    assert_eq!(back, Source::Preload(reference));
 }

@@ -537,6 +537,62 @@ pub enum Evidence {
     Unreadable,
 }
 
+/// A folder's committed original with the folder it binds, for publication:
+/// the receipt and exact bytes from [`Snapshot::open`], bound to the current
+/// folder object. `Ok(None)`: no receipt (Next has not changed the folder).
+pub struct Captured {
+    /// The folder's canonical path now.
+    pub folder: PathBuf,
+    /// The folder object and birth the slot's seed binds.
+    pub directory: String,
+    pub birth: Option<String>,
+    /// The receipt file's exact bytes and the snapshot they describe.
+    pub receipt: Vec<u8>,
+    pub snapshot: Snapshot,
+}
+
+/// The folder at `root`'s committed original, read in full and checked
+/// against its own receipt. An unsupported or unreadable folder is an error
+/// naming that state: never published as complete.
+pub fn captured(root: &Path) -> Result<Option<Captured>, Evidence> {
+    if fs::symlink_metadata(root).is_err_and(|error| error.kind() == io::ErrorKind::NotFound) {
+        return Ok(None);
+    }
+    let canonical = fs::canonicalize(root).map_err(|_| Evidence::Unreadable)?;
+    match place(&canonical) {
+        Place::Local => {}
+        Place::Unsupported => return Err(Evidence::Unsupported),
+        Place::Unknown => return Err(Evidence::Unreadable),
+    }
+    let (canonical, object, birth) = folder(&canonical).map_err(|_| Evidence::Unreadable)?;
+    let slot = slot(&canonical, &object, birth.as_deref());
+    if !slot.exists() {
+        return Ok(None);
+    }
+    let receipt = match disk::read(&slot.join("receipt.json"), META) {
+        Ok(None) => return Ok(None),
+        Ok(Some((bytes, _))) => bytes,
+        Err(_) => return Err(Evidence::Unreadable),
+    };
+    let snapshot =
+        Snapshot::open(&slot, &object, birth.as_deref()).map_err(|_| Evidence::Unreadable)?;
+    if serde_json::to_vec(&snapshot.receipt).ok().as_deref()
+        != serde_json::from_slice::<Original>(&receipt)
+            .ok()
+            .and_then(|r| serde_json::to_vec(&r).ok())
+            .as_deref()
+    {
+        return Err(Evidence::Unreadable);
+    }
+    Ok(Some(Captured {
+        folder: canonical,
+        directory: object,
+        birth,
+        receipt,
+        snapshot,
+    }))
+}
+
 /// [`evidence`] by bounded stats only, for a status shown often: the seed
 /// and receipt (64 KiB each) and each part's stamp, never the original's
 /// bytes. A receipt it reports Captured still passes every check a change

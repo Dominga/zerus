@@ -107,6 +107,7 @@ pub(super) struct Report {
     state: Mutex<State>,
     creations: Mutex<creations::CreationState>,
     local_reads: Mutex<creations::CreationState>,
+    downloads_report: Mutex<creations::CreationState>,
     capture: Gate,
     work: Gate,
 }
@@ -133,6 +134,9 @@ impl Report {
             )),
             local_reads: Mutex::new(creations::CreationState::new(
                 migration::creation_report::Group::LocalReads,
+            )),
+            downloads_report: Mutex::new(creations::CreationState::new(
+                migration::creation_report::Group::Downloads,
             )),
             capture: Gate::new(1).unwrap(),
             work: Gate::new(1).unwrap(),
@@ -192,7 +196,7 @@ impl Report {
     pub fn status(&self) -> Value {
         let downloads = self.downloads_status();
         let state = self.state();
-        json!({"creations_report":self.group_status(migration::creation_report::Group::Creations),"local_reads_report":self.group_status(migration::creation_report::Group::LocalReads),"creations_capture":self.inputs.creations.status(),"local_read_capture":self.inputs.local_reads.status(),"drafts_capture":self.inputs.drafts.status(),"downloads_capture":downloads,"worktree_cache_capture":self.inputs.worktree_cache.status(),"scope":SCOPE,"running":state.running,"code":state.code,
+        json!({"creations_report":self.group_status(migration::creation_report::Group::Creations),"local_reads_report":self.group_status(migration::creation_report::Group::LocalReads),"creations_capture":self.inputs.creations.status(),"local_read_capture":self.inputs.local_reads.status(),"drafts_capture":self.inputs.drafts.status(),"downloads_capture":downloads,"downloads_report":self.group_status(migration::creation_report::Group::Downloads),"worktree_cache_capture":self.inputs.worktree_cache.status(),"scope":SCOPE,"running":state.running,"code":state.code,
             "required":!state.not_applicable,
             "complete":state.stored.as_ref().is_some_and(|s| s.record.phase == Phase::Published),
             "import_id":state.stored.as_ref().map(|s|&s.record.import_id),

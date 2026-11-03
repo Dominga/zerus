@@ -3,7 +3,8 @@
 //! Reuses desktop-import-v1 and never carries Qt/Settings hashes, worker
 //! authority, consent or a mutable operation.
 use super::{
-    journal::MAX_ATTEMPTS, preload::Reference, transport::StagedReceipt, SourceError, SourceResult,
+    download_report::Binding, journal::MAX_ATTEMPTS, preload::Reference, transport::StagedReceipt,
+    SourceError, SourceResult,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -20,25 +21,64 @@ const FILE: &str = "creations-retained-import-v1.json";
 pub enum Group {
     Creations,
     LocalReads,
+    /// The download folder's committed original index
+    /// (`download_report`, zerus-5wmh.66.5.2.1.3.1).
+    Downloads,
 }
 impl Group {
     pub fn scope(self) -> &'static str {
         match self {
             Self::Creations => SCOPE,
             Self::LocalReads => "next-local-read-marks-preload-v1",
+            Self::Downloads => "next-download-index-preload-v1",
         }
     }
     fn file(self) -> &'static str {
         match self {
             Self::Creations => FILE,
             Self::LocalReads => "local-read-retained-import-v1.json",
+            Self::Downloads => "download-index-retained-import-v1.json",
         }
     }
     fn lock(self) -> &'static str {
         match self {
             Self::Creations => "creations-retained-import-v1.lock",
             Self::LocalReads => "local-read-retained-import-v1.lock",
+            Self::Downloads => "download-index-retained-import-v1.lock",
         }
+    }
+}
+/// What a record publishes: a preload capture's reference, or the download
+/// folder's evidence binding. Untagged, so a preload record's serialized
+/// bytes are exactly as before; the two shapes share no field set.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Source {
+    Preload(Reference),
+    Downloads(Binding),
+}
+impl Source {
+    pub fn capture_id(&self) -> &str {
+        match self {
+            Self::Preload(reference) => reference.capture_id(),
+            Self::Downloads(binding) => binding.capture_id(),
+        }
+    }
+    pub fn valid(&self) -> bool {
+        match self {
+            Self::Preload(reference) => reference.valid(),
+            Self::Downloads(binding) => binding.valid(),
+        }
+    }
+}
+impl From<Reference> for Source {
+    fn from(reference: Reference) -> Self {
+        Self::Preload(reference)
+    }
+}
+impl From<Binding> for Source {
+    fn from(binding: Binding) -> Self {
+        Self::Downloads(binding)
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,7 +107,7 @@ pub struct Record {
     pub configuration: String,
     pub import_id: String,
     pub created_at: u64,
-    pub source: Reference,
+    pub source: Source,
     pub attempt: u32,
     pub phase: Phase,
     pub expected: Option<StagedReceipt>,
@@ -75,7 +115,12 @@ pub struct Record {
     pub recorded_attempt: Option<u32>,
 }
 impl Record {
-    pub fn new(configuration: String, source: Reference, created_at: u64) -> SourceResult<Self> {
+    pub fn new(
+        configuration: String,
+        source: impl Into<Source>,
+        created_at: u64,
+    ) -> SourceResult<Self> {
+        let source = source.into();
         let record = Self {
             version: 1,
             scope: SCOPE.into(),
@@ -93,7 +138,11 @@ impl Record {
         }
         Ok(record)
     }
-    pub fn new_v2(configuration: String, source: Reference, created_at: u64) -> SourceResult<Self> {
+    pub fn new_v2(
+        configuration: String,
+        source: impl Into<Source>,
+        created_at: u64,
+    ) -> SourceResult<Self> {
         let mut record = Self::new(configuration, source, created_at)?;
         record.version = 2;
         record.recorded_attempt = Some(0);
@@ -102,11 +151,25 @@ impl Record {
     pub fn new_group(
         group: Group,
         configuration: String,
-        source: Reference,
+        source: impl Into<Source>,
         created_at: u64,
     ) -> SourceResult<Self> {
-        let mut record = Self::new_v2(configuration, source, created_at)?;
-        record.scope = group.scope().into();
+        let source = source.into();
+        let record = Self {
+            version: 2,
+            scope: group.scope().into(),
+            configuration,
+            import_id: source.capture_id().into(),
+            created_at,
+            source,
+            attempt: 0,
+            phase: Phase::Reserved,
+            expected: None,
+            recorded_attempt: Some(0),
+        };
+        if !record.valid() {
+            return Err(SourceError::InvalidMetadata);
+        }
         Ok(record)
     }
     /// Durable evidence that this Attempted record has not passed its commit
@@ -156,7 +219,15 @@ impl Record {
                     && (self.phase != Phase::NotCommitted || n == self.attempt)
             }),
             _ => false,
-        }) && [Group::Creations.scope(), Group::LocalReads.scope()].contains(&self.scope.as_str())
+        }) && [
+            Group::Creations.scope(),
+            Group::LocalReads.scope(),
+            Group::Downloads.scope(),
+        ]
+        .contains(&self.scope.as_str())
+            // The download scope holds only download bindings, and only it.
+            && matches!(self.source, Source::Downloads(_))
+                == (self.scope == Group::Downloads.scope())
             && digest(&self.configuration)
             && self.source.valid()
             && self.import_id == self.source.capture_id()

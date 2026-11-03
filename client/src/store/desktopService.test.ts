@@ -184,6 +184,19 @@ describe("desktop service presentation", () => {
     expect(retainedSourceDetails(unsupported)!.downloads!.reason).toContain("cannot be recorded, so it is not part of the migration report");
     expect(retainedSourceDetails(unsupported)!.downloads!.next).toContain("stays incomplete");
   });
+  it("presents the historical downloaded files report as evidence only", () => {
+    const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
+    const view = (patch: object) => serviceView({ retained_source_import: { ...report, downloads_report: { required: true, complete: false, running: false, code: "downloads_import_waiting", phase: null, ...patch } } });
+    expect(retainedSourceNotice(view({ running: true }))).toContain("Preparing the historical downloaded files report");
+    expect(retainedSourceNotice(view({}))).toContain("is deferred");
+    const unknown = view({ code: "downloads_import_original_result_unconfirmed", phase: "unknown" });
+    expect(retainedSourceNotice(unknown)).toContain("needs review");
+    expect(retainedSourceDetails(unknown)!.downloadsReport!.next).toContain("checks the original report result");
+    const done = view({ complete: true, code: "downloads_import_staged", phase: "published" });
+    expect(retainedSourceNotice(done)).toBe("");
+    expect(retainedSourceDetails(done)!.downloadsReport!.next).toContain("never downloads, removes or cleans up files");
+    expect(retainedSourceDetails(view({ required: false, complete: true }))).toBeUndefined();
+  });
   it("explains the archive and data-directory refusals without changing readiness", () => {
     const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
     const view = (code: string) => serviceView({ retained_source_import: { ...report, creations_capture: { code, paused: true, capture_id: null } } });

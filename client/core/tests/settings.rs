@@ -1381,3 +1381,104 @@ fn a_malformed_inspector_value_leaves_the_whole_family_for_a_retry() {
     assert_eq!(settings.number("workspace/inspectorWidth"), 520.0);
     assert!(settings.flush_within(FLUSH));
 }
+
+/// zerus-5wmh.66.5.3: the Migration report's Qt preferences section lists
+/// key names only: what imported, what kept a Next value, what waits to
+/// retry and why, and the Qt keys Next has no use for. Never a value.
+#[test]
+fn the_preference_report_names_keys_and_never_values() {
+    let scratch = Scratch::new("preference-report");
+    let qt = scratch.0.join("qt.ini");
+    fs::write(
+        &qt,
+        b"[workspace]\ninspectorVisible=true\ninspectorWidth=613\ninspectorTab=2\nsplitter=@ByteArray(bad)\n\
+          expandedSessions=secret-row\nworktreeCleanupDeleteBranches=true\n",
+    )
+    .unwrap();
+    let path = scratch.0.join("settings.json");
+    legacy_switch(&path, json!({"workspace/inspectorOpen": false}));
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert!(settings.flush_within(FLUSH));
+    let report = settings.preference_report();
+    let family = |name: &str| {
+        report["families"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["family"] == name)
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    let inspector = family("inspector-panel");
+    assert_eq!(inspector["state"], "imported");
+    assert_eq!(
+        inspector["imported"],
+        json!(["workspace/inspectorTab", "workspace/inspectorWidth"])
+    );
+    assert_eq!(inspector["kept"], json!(["workspace/inspectorVisible"]));
+    let splitter = family("session-splitter");
+    assert_eq!(splitter["state"], "waiting");
+    assert_eq!(splitter["reason"], "invalid Qt splitter");
+    assert_eq!(splitter["keys"], json!(["workspace/splitter"]));
+    assert_eq!(
+        report["unused"],
+        json!([
+            "workspace/expandedSessions",
+            "workspace/worktreeCleanupDeleteBranches"
+        ])
+    );
+    let text = report.to_string();
+    for value in ["613", "secret-row", "bad"] {
+        assert!(!text.contains(value), "{value} in {text}");
+    }
+    drop(settings);
+    // The report-only family is never a family row (no "no-consumer" label).
+    assert!(report["families"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|f| f["family"] != "no-consumer"));
+    // A family that waits records no outcome; it is reported from its quarantine.
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(saved["g3_outcome"].get("session-splitter").is_none());
+    assert!(saved["g3_outcome"].get("no-consumer").is_none());
+    // The same after a restart, from the saved journal.
+    let restarted = Settings::open(path, Some(QtStore::Ini(qt)));
+    assert_eq!(
+        restarted.preference_report()["families"],
+        report["families"]
+    );
+    assert!(restarted.flush_within(FLUSH));
+}
+
+/// #1243 review Q4: an install whose earlier families were all handled
+/// before the report existed still gains the "Not imported" keys, once,
+/// through the report-only no-consumer family.
+#[test]
+fn unused_qt_keys_are_reported_after_every_other_family_was_handled() {
+    let scratch = Scratch::new("preference-report-upgrade");
+    let qt = scratch.0.join("qt.ini");
+    fs::write(
+        &qt,
+        b"[workspace]\nexpandedSessions=row\nsessionsCollapsed=true\n",
+    )
+    .unwrap();
+    let path = scratch.0.join("settings.json");
+    legacy_switch(&path, json!({}));
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    // As saved by a build without the report: every other family handled.
+    let mut saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    saved["g3"]["families"]
+        .as_object_mut()
+        .unwrap()
+        .remove("no-consumer");
+    fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let upgraded = Settings::open(path, Some(QtStore::Ini(qt)));
+    assert!(upgraded.flush_within(FLUSH));
+    assert_eq!(
+        upgraded.preference_report()["unused"],
+        json!(["workspace/expandedSessions", "workspace/sessionsCollapsed"])
+    );
+}

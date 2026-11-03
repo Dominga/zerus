@@ -1,7 +1,7 @@
 use super::super::tests::Fixture;
 use super::*;
 use std::fs;
-fn source(f: &Fixture) {
+pub(super) fn source(f: &Fixture) {
     zerus_client_core::fsx::write_private_durable(
         &f.root.join("creations.json"),
         br#"{"schema":1,"operations":{},"opaque":"before-load"}"#,
@@ -9,7 +9,7 @@ fn source(f: &Fixture) {
     .unwrap();
     assert!(f.report.inputs.creations.prepare().is_ok());
 }
-fn run(f: &Fixture, explicit: bool) -> Result<(), &'static str> {
+pub(super) fn run(f: &Fixture, explicit: bool) -> Result<(), &'static str> {
     let charge = f.report.work.admit(Role::Operations).unwrap();
     f.report.run_creation(
         f.relay.clone(),
@@ -71,7 +71,7 @@ fn advance(
     change(&mut record);
     journal(f).save(record, Some(&stored.sha256)).unwrap()
 }
-fn receipt_for(record: &CreationRecord) -> migration::transport::StagedReceipt {
+pub(super) fn receipt_for(record: &CreationRecord) -> migration::transport::StagedReceipt {
     serde_json::from_value(
         json!({"abi":"desktop-import-v1","published":true,"evidence":"staged",
         "configuration":record.configuration,"import_id":record.import_id,

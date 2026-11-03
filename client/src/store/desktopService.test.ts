@@ -37,6 +37,36 @@ describe("desktop service presentation", () => {
     expect(state).toEqual(before);
   });
 
+  it("reviews local capture and historical publication independently, without host ACK or hidden retries", () => {
+    const report = { required: true, complete: false, running: false, code: "retained_import_qt_unavailable", phase: null,
+      local_read_capture: { code: "local_read_source_unsupported", paused: true, capture_id: "original" },
+      local_reads_report: { required: true, complete: false, running: false, code: "local_reads_import_before_record", phase: "before_record" },
+      creations_report: { required: true, complete: false, running: false, code: "creations_import_original_result_unconfirmed", phase: "unknown" } };
+    const state = serviceView({ retained_source_import: report });
+    const before = structuredClone(state);
+    const details = retainedSourceDetails(state)!;
+    expect(details.settings?.code).toBe("retained_import_qt_unavailable");
+    expect(details.localReads?.code).toBe("local_read_source_unsupported");
+    expect(details.localReadsReport?.reason).toContain("not sent because local preparation failed");
+    expect(details.creations?.next).toContain("checks the original report");
+    const unknown = serviceView({ retained_source_import: { ...report, local_reads_report: { ...report.local_reads_report, phase: "unknown" } } });
+    expect(retainedSourceDetails(unknown)!.localReadsReport?.next).toContain("checks the original report");
+    expect(state).toEqual(before);
+    const settled = serviceView({ retained_source_import: { ...report, local_reads_report: { ...report.local_reads_report, complete: true, code: "local_reads_import_staged", phase: "published" } } });
+    expect(retainedSourceDetails(settled)!.localReadsReport?.next).toContain("does not confirm delivery to a host");
+    expect(settled.pending_read_import).toBeUndefined();
+  });
+  it("keeps the local historical report visible independently of Qt, creation and read-transfer readiness", () => {
+    const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
+    const local = { required: true, complete: false, running: false, code: "local_reads_import_handoff_busy", phase: "not_committed" };
+    const view = (patch = {}) => serviceView({ retained_source_import: { ...report, local_reads_report: { ...local, ...patch } } });
+    expect(retainedSourceNotice(view())).toContain("keeps the original report identity");
+    expect(retainedSourceNotice(view({ running: true }))).toContain("Preparing the historical local read-mark report");
+    expect(retainedSourceNotice(view({ phase: "unknown", code: "local_reads_import_before_record" }))).toContain("never resent");
+    expect(retainedSourceNotice(view({ complete: true }))).toBe("");
+    expect(view().connected).toBe(true);
+  });
+
   it("reviews the actual migration reason and gives a read-only next step", () => {
     const report = { required: true, complete: false, running: false, code: "retained_import_qt_unavailable", phase: null };
     const state = serviceView({ retained_source_import: report, background: { fleet: { ready: true, code: "ready" } } });

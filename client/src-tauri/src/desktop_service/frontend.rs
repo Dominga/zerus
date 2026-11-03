@@ -23,6 +23,8 @@ pub enum Operation {
     CreationClone,
     #[serde(skip)] // Native creation owner only; never generic policy dispatch or receipts.
     CreationWorktree,
+    #[serde(skip)] // Native creation owner only; never generic policy dispatch or receipts.
+    CreationLaunch,
     #[serde(skip)] // Native TaskStart boundary only, never generic renderer JSON.
     TaskStartReconcile,
     #[serde(skip)] // Separate native notification controller, never generic policy JSON.
@@ -42,6 +44,7 @@ impl Operation {
             Request::CacheMaintenance { .. } => Self::CacheMaintenance,
             Request::CreationClone { .. } => Self::CreationClone,
             Request::CreationWorktree { .. } => Self::CreationWorktree,
+            Request::CreationLaunch { .. } => Self::CreationLaunch,
             Request::TaskStartReconcile { .. } => Self::TaskStartReconcile,
             Request::NotificationControl { .. } => Self::NotificationControl,
             Request::DesktopOwnership { .. } => Self::DesktopOwnership,
@@ -56,6 +59,7 @@ impl Operation {
             Self::CacheMaintenance => "cache_maintenance",
             Self::CreationClone => "creation_clone",
             Self::CreationWorktree => "creation_worktree",
+            Self::CreationLaunch => "creation_launch",
             Self::TaskStartReconcile => "task_start_reconcile",
             Self::NotificationControl => "notification_controls",
             Self::DesktopOwnership => "desktop_ownership",
@@ -555,6 +559,7 @@ fn submission_ready(snapshot: &Snapshot, request: &Request) -> bool {
         Request::NotificationControl { .. }
             | Request::CreationClone { .. }
             | Request::CreationWorktree { .. }
+            | Request::CreationLaunch { .. }
             | Request::TaskStartReconcile { .. }
     ) {
         return false;
@@ -702,6 +707,7 @@ fn lookup(
         Request::NotificationControl { .. }
             | Request::CreationClone { .. }
             | Request::CreationWorktree { .. }
+            | Request::CreationLaunch { .. }
             | Request::TaskStartReconcile { .. }
     ) {
         return Err("frontend_receipt_unconfirmed");
@@ -738,6 +744,7 @@ fn lookup_receipt(request: &Request, id: &str, value: Value) -> Result<Receipt, 
         Request::NotificationControl { .. }
             | Request::CreationClone { .. }
             | Request::CreationWorktree { .. }
+            | Request::CreationLaunch { .. }
             | Request::TaskStartReconcile { .. }
     ) {
         return Err("frontend_receipt_unconfirmed");
@@ -798,6 +805,7 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
             | Request::NotificationControl { .. }
             | Request::CreationClone { .. }
             | Request::CreationWorktree { .. }
+            | Request::CreationLaunch { .. }
             | Request::TaskStartReconcile { .. }
     ) {
         // Their separate consumers validate different receipts and completion rules.
@@ -860,6 +868,7 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
         | Request::NotificationControl { .. }
         | Request::CreationClone { .. }
         | Request::CreationWorktree { .. }
+        | Request::CreationLaunch { .. }
         | Request::TaskStartReconcile { .. } => return None,
         Request::AutomaticApprovals { enabled, .. } => {
             if value["op"] != "automatic_approvals" || value["enabled"] != *enabled {

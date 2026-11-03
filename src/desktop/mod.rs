@@ -934,7 +934,10 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                             matches!(
                                 v["op"].as_str(),
                                 Some(
-                                    "creation_clone" | "creation_worktree" | "task_start_reconcile"
+                                    "creation_clone"
+                                        | "creation_worktree"
+                                        | "creation_launch"
+                                        | "task_start_reconcile"
                                 )
                             )
                         }) {

@@ -11,6 +11,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
+mod parts;
+pub use parts::Part;
 
 pub const DOCUMENT_BYTES: usize = 128 << 10;
 pub const BATCH_BYTES: usize = 512 << 10;
@@ -265,6 +267,13 @@ impl Index {
     }
 
     pub fn source_progress(&self, key: &str, complete: bool, unavailable: bool) -> Result<()> {
+        let complete = complete
+            && (!self.has_parts()?
+                || !self.db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM message_groups WHERE source=? AND state=0)",
+                    [key],
+                    |r| r.get::<_, bool>(0),
+                )?);
         let changed = self.db.execute(
             "UPDATE sources SET complete=?,unavailable=? WHERE id=? AND active=1",
             params![complete, unavailable, key],
@@ -298,6 +307,7 @@ impl Index {
             );
             encoded.push((message, body, grams));
         }
+        let has_parts = self.has_parts()?;
         let tx = self.db.savepoint()?;
         let active: Option<bool> = tx
             .query_row("SELECT active FROM sources WHERE id=?", [key], |r| r.get(0))
@@ -305,6 +315,13 @@ impl Index {
         ensure!(active == Some(true), "source is missing or retired");
         let mut inserted = 0;
         for (message, body, grams) in encoded {
+            if has_parts {
+                tx.execute(
+                    "UPDATE message_groups SET state=2,publication=0
+                    WHERE source=? AND message=? AND state<>2",
+                    params![key, message.id],
+                )?;
+            }
             let old: Option<(i64, String)> = tx
                 .query_row(
                     "SELECT id,body FROM messages WHERE source=? AND message=?",
@@ -349,24 +366,32 @@ impl Index {
             .query_row("SELECT active FROM sources WHERE id=?", [key], |r| r.get(0))
             .optional()?;
         ensure!(active == Some(false), "only a retired source can be purged");
-        Ok(self.db.execute(
+        let mut count = self.db.execute(
             "DELETE FROM messages WHERE id IN
             (SELECT id FROM messages WHERE source=? ORDER BY id LIMIT ?)",
             params![key, PURGE_ROWS],
-        )?)
+        )?;
+        if self.has_parts()? {
+            count += parts::purge(&self.db, Some(key), PURGE_ROWS - count)?;
+        }
+        Ok(count)
     }
 
     /// Eviction preserves the hard file cap and explicitly makes coverage
     /// incomplete. Freed pages are reused; the disposable file need not shrink.
     /// Like ingestion, it is a savepoint that can join a caller's open step.
     pub fn evict(&mut self) -> Result<usize> {
+        let has_parts = self.has_parts()?;
         let tx = self.db.savepoint()?;
         tx.execute("UPDATE totals SET evicted=1 WHERE id=1", [])?;
-        let deleted = tx.execute(
+        let mut deleted = tx.execute(
             "DELETE FROM messages WHERE id IN
             (SELECT id FROM messages ORDER BY id LIMIT ?)",
             [PURGE_ROWS],
         )?;
+        if has_parts {
+            deleted += parts::purge(&tx, None, PURGE_ROWS - deleted)?;
+        }
         tx.commit()?;
         Ok(deleted)
     }

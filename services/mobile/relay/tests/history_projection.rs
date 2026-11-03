@@ -128,9 +128,9 @@ async fn projection_retention_fixture() {
     for state in ["completed", "failed", "uncertain"] {
         let body = command(&f.node.id);
         complete(&f, &body, state).await;
-        // Keep this control well inside the one-hour retention threshold.
-        // Its 30-minute headroom exceeds the whole fixture's 60-second bound.
-        age(&f, &body, 1800.0).await;
+        // Stay near the one-hour boundary to catch shortened retention.
+        // The 100-second headroom exceeds the whole fixture's 60-second bound.
+        age(&f, &body, 3500.0).await;
         reads.push(body);
     }
     let mutation = f.command("send");

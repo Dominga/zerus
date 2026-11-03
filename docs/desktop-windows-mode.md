@@ -119,9 +119,23 @@ discard any pre-manager record for either mode, including stale background
 preparation after a restart. Passive rollback additionally requires a current
 Service grant twice; background cancellation requires no grant. It changes no
 task, grant or revoke receipt and does not contact Task Scheduler. It also covers
-a saved rollback that never took effect. Cancellation refuses after any manager
-effect was offered. A later separately confirmed choice receives a new UUID;
-there is no automatic UUID rotation or unknown-effect replay.
+a saved rollback that never took effect.
+
+For a `start_offered` or `ready` record, the same explicit cancellation instead
+uses read-only Task Scheduler and native service observations. It requires the
+recorded started GUID to bind to the exact owned definition, retained service
+process/pipe and requested running mode, with fresh readiness and caller checks
+through the metadata save. Other offered phases, a missing GUID, changed task or
+unready original instance remain pending. This branch reports
+`observed_start_cancelled`, preserves the previous completed UUID, and records
+the cancelled UUID. It performs no Stop, Update, RunEx, revoke or hold acquisition.
+
+This allows a completed passive start whose reply was lost to be abandoned after
+a later Rearm or revoke prevents the old rollback hold from being reacquired.
+The later authority is left untouched; this post-readiness metadata cancellation
+requires no current Service grant and confers no authority. A later separately
+confirmed choice receives a new UUID; there is no automatic UUID rotation or
+unknown-effect replay.
 
 ## Private qualification
 
@@ -138,6 +152,8 @@ disposable hosted Windows VMs.
 It uses private configuration/state, a real authenticated frontend Grant,
 passive/background/passive transitions, unchanged runtime on ordinary refresh,
 observe-only completion and explicit cancellation without manual record resets,
+including Rearm or a later revoke after a lost passive-start reply and a
+separately explicit new choice after read-only cancellation,
 and a retained unrelated child. Cleanup targets only the exact verified fixture
 instance and checks its real process birth and exit; changed-birth cleanup
 refuses. Only then are its private images/state removed. A failure preserves

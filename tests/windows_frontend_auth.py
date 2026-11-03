@@ -226,10 +226,10 @@ class WindowsTaskMode(unittest.TestCase):
         self.assertEqual(result['code'], 0, result)
         return json.loads(result['stdout'])
 
-    def grant(self):
+    def grant(self, case='ownership_grant'):
         status = self.cli('desktop', 'status', '--json')
         ownership = self.cli('desktop', 'ownership-status', '--json')
-        result = self.frontend_call(dict(case='ownership_grant', configuration=status['configuration'],
+        result = self.frontend_call(dict(case=case, configuration=status['configuration'],
                                         journal=ownership['journal'], revision=ownership['revision'],
                                         request_id=str(uuid.uuid4())), 'FRONTEND_RESULT ')
         self.assertTrue(result['accepted'], result)
@@ -337,6 +337,69 @@ class WindowsTaskMode(unittest.TestCase):
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_commands').fetchone()[0], 0)
         return request_id
 
+    def cancel_ready_rollback_after_authority_moves(self, background, rollback, *, later_revoke=False):
+        path = self.state / 'desktop' / 'windows-registration-mode.json'
+        record = json.loads(path.read_text(encoding='utf-8'))
+        # The actual passive RunEx completed, but simulate an overrun before
+        # its reply/completed metadata save. Keep the REAL rollback receipt,
+        # UUID and started GUID. No manual reset follows: the supported cancel
+        # must resolve this record after authority has moved on.
+        record['completed'] = background['request_id']
+        record['pending'] = dict(request_id=rollback['request_id'], desired='passive',
+                                 phase='ready' if later_revoke else 'start_offered', original=background['instance'],
+                                 started=rollback['instance']['guid'])
+        path.write_text(json.dumps(record), encoding='utf-8')
+        if later_revoke:
+            # A separately explicit fixture revoke supersedes the old receipt.
+            # Cancellation itself must neither send it nor require a new grant.
+            receipt = self.cli('desktop', 'revoke', '--json', '--request-id',
+                               str(uuid.uuid4()), '--reason', 'rollback')
+            self.assertTrue(receipt['accepted'], receipt)
+            self.assertTrue(receipt['durable'], receipt)
+            self.assertTrue(receipt['checkpointed'], receipt)
+        else:
+            self.grant('ownership_rearm')
+        ownership = self.cli('desktop', 'ownership-status', '--json')
+        self.assertEqual(ownership['state'], 'revoked' if later_revoke else 'service')
+
+        def journal():
+            with closing(sqlite3.connect((self.state / 'desktop' / 'state.sqlite3').as_uri()
+                                         + '?mode=ro', uri=True)) as db:
+                receipt = db.execute('SELECT * FROM desktop_commands WHERE request_id=?',
+                                     (rollback['request_id'],)).fetchone()
+                self.assertIsNotNone(receipt)
+                count = db.execute('SELECT count(*) FROM desktop_commands').fetchone()[0]
+                return receipt, count
+
+        original_receipt = journal()
+        before = self.observe()
+        denied = self.mode('background')
+        self.assertFalse(denied['ok'], denied)
+        self.assertEqual(denied['unknown']['code'], 'different_explicit_choice')
+        settlement = self.mode('passive')
+        self.assertFalse(settlement['ok'], settlement)
+        self.assertEqual(settlement['unknown']['code'], 'original_completion_unverified')
+        pending = path.read_bytes()
+        wrong = self.cancel(str(uuid.uuid4()))
+        self.assertFalse(wrong['ok'], wrong)
+        self.assertEqual(path.read_bytes(), pending)
+        cancelled = self.cancel(rollback['request_id'])
+        self.assertTrue(cancelled['ok'], cancelled)
+        self.assertEqual(cancelled['code'], 'observed_start_cancelled')
+        self.assertTrue(cancelled['metadata_changed'])
+        self.assertFalse(cancelled['manager_changed'])
+        self.assertFalse(cancelled['authority_changed'])
+        self.assertEqual(cancelled['observed_instance'], rollback['instance'])
+        self.assertEqual(cancelled['cancelled_request_id'], rollback['request_id'])
+        saved = json.loads(path.read_text(encoding='utf-8'))
+        self.assertIsNone(saved['pending'])
+        self.assertEqual(saved['cancelled'], rollback['request_id'])
+        self.assertEqual(saved['completed'], background['request_id'])
+        self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), ownership)
+        self.assertEqual(journal(), original_receipt)
+        self.assertEqual(self.observe(), before)
+        self.assertEqual(self.cli('desktop', 'status', '--json')['lifecycle']['pid'], rollback['instance']['pid'])
+
     def powershell(self, script, data):
         # Fixture-only native COM observation/cleanup. No task-name-wide Stop,
         # schtasks /End, PID kill or executable-pattern cleanup is used.
@@ -358,7 +421,8 @@ $s=New-Object -ComObject Schedule.Service;$s.Connect();$t=$s.GetFolder('\').GetT
 $items=@();foreach($i in $t.GetInstances(0)) {
  $p=$null;try {$p=[Diagnostics.Process]::GetProcessById($i.EnginePID).ProcessName} catch {}
  $items+=@{guid=$i.InstanceGuid;engine_pid=$i.EnginePID;engine_image=$p;state=[int]$i.State}
-};@{instances=$items;state=[int]$t.State}|ConvertTo-Json -Compress -Depth 4
+};@{instances=$items;state=[int]$t.State;last_task_result=[int64]$t.LastTaskResult;
+last_run_utc=$t.LastRunTime.ToUniversalTime().ToString('o')}|ConvertTo-Json -Compress -Depth 4
 ''', dict(task=self.task))
 
     def stop_exact_passive(self, expected, *, wrong_birth=False):
@@ -444,6 +508,17 @@ if(@($t.GetInstances(0)).Count-ne 0) {throw 'fixture instance remains'};
             self.assertEqual(status['running_mode'], 'passive')
             self.assertIsNone(status['pending_transition'])
             self.assertEqual(status['completed_request_id'], rollback['request_id'])
+            self.cancel_ready_rollback_after_authority_moves(background, rollback)
+            # A separately explicit new choice is admitted after cancellation;
+            # the original manager effects and revoke are never replayed.
+            next_background = self.mode('background')
+            self.assertTrue(next_background['ok'], next_background)
+            self.assertNotEqual(next_background['request_id'], rollback['request_id'])
+            self.latest = next_background['instance']
+            final_passive = self.mode('passive')
+            self.assertTrue(final_passive['ok'], final_passive)
+            self.latest = final_passive['instance']
+            self.cancel_ready_rollback_after_authority_moves(next_background, final_passive, later_revoke=True)
             self.assertFalse(self.stop_exact_passive(self.latest, wrong_birth=True)['stopped'])
             self.assertTrue(self.cli('desktop', 'status', '--json')['running'])
             self.assertTrue(self.stop_exact_passive(self.latest)['stopped'])

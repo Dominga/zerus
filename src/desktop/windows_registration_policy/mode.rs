@@ -255,6 +255,22 @@ impl Record {
         self.pending = None;
         Ok(())
     }
+    /// Select metadata for a read-only native observation, never permission to
+    /// discard it. The caller must bind this GUID to the ready requested mode.
+    pub fn ready_cancellation(&self, request_id: &str) -> Result<&Pending> {
+        let pending = self
+            .pending
+            .as_ref()
+            .context("No original transition is pending.")?;
+        ensure!(
+            canonical_id(request_id) && pending.request_id == request_id,
+            "Pending transition UUID changed."
+        );
+        ensure!(matches!(pending.phase, Phase::StartOffered | Phase::Ready)
+            && pending.started.is_some(),
+            "An offered transition can be cancelled only after its recorded original start is verified ready.");
+        Ok(pending)
+    }
 }
 
 #[cfg(test)]
@@ -402,6 +418,43 @@ mod tests {
             let saved = record.clone();
             assert!(record.cancel(&id).is_err());
             assert_eq!(record, saved);
+        }
+    }
+    #[test]
+    fn offered_cancellation_selects_only_the_exact_recorded_start_for_native_observation() {
+        for mode in [Mode::Passive, Mode::Background] {
+            for phase in [
+                Phase::Prepared,
+                Phase::RevokeOffered,
+                Phase::Held,
+                Phase::StopOffered,
+                Phase::Stopped,
+                Phase::UpdateOffered,
+                Phase::Updated,
+                Phase::StartOffered,
+                Phase::Ready,
+            ] {
+                let mut record = Record::empty(&plan()).unwrap();
+                let id = record.begin(mode, None).unwrap().request_id.clone();
+                record.pending.as_mut().unwrap().phase = phase;
+                assert!(
+                    record.ready_cancellation(&id).is_err(),
+                    "missing GUID: {phase:?}"
+                );
+                record.pending.as_mut().unwrap().started = Some(uuid::Uuid::new_v4().to_string());
+                let saved = record.clone();
+                assert!(record
+                    .ready_cancellation(&uuid::Uuid::new_v4().to_string())
+                    .is_err());
+                assert_eq!(
+                    record.ready_cancellation(&id).is_ok(),
+                    matches!(phase, Phase::StartOffered | Phase::Ready)
+                );
+                assert_eq!(
+                    record, saved,
+                    "observation selection cannot cancel metadata"
+                );
+            }
         }
     }
 }

@@ -587,27 +587,37 @@ fn operation(args: &[String]) -> Result<Value> {
     let sid = crate::host::token::user_sid()?;
     let (passive, background) = plans(&config, &location, &sid)?;
     let _lock = Lock::acquire(&sid)?;
+    let mut offered_cancel = None;
     if op == "cancel_rollback" {
         admission.check()?;
         let mut record = load(&location, &passive)?;
         let id = request["request_id"]
             .as_str()
             .context("Original transition UUID required.")?;
-        let needs_grant = record.cancellation_requires_grant(id)?;
-        let mut check = || {
-            admission.check()?;
-            if needs_grant {
-                ensure!(ownership::registration_granted(&location)?,"Passive rollback cancellation requires a fresh Service Grant/Rearm; it changes metadata only.");
-            }
-            Ok(())
-        };
-        check()?;
-        record.cancel(id)?;
-        save(&location, &passive, &record, &mut check)?;
-        return Ok(
-            json!({"abi":MODE_ABI,"schema":1,"configuration":location.configuration,"task_name":passive.name,
+        if !record
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.phase.pre_manager())
+        {
+            record.ready_cancellation(id)?;
+            offered_cancel = Some((record, id));
+        } else {
+            let needs_grant = record.cancellation_requires_grant(id)?;
+            let mut check = || {
+                admission.check()?;
+                if needs_grant {
+                    ensure!(ownership::registration_granted(&location)?,"Passive rollback cancellation requires a fresh Service Grant/Rearm; it changes metadata only.");
+                }
+                Ok(())
+            };
+            check()?;
+            record.cancel(id)?;
+            save(&location, &passive, &record, &mut check)?;
+            return Ok(
+                json!({"abi":MODE_ABI,"schema":1,"configuration":location.configuration,"task_name":passive.name,
             "selected_mode":null,"pending":null,"cancelled_request_id":id,"changed":true,"manager_changed":false}),
-        );
+            );
+        }
     }
     let _apartment = Apartment::new()?;
     let scheduler: ITaskService =
@@ -623,6 +633,22 @@ fn operation(args: &[String]) -> Result<Value> {
     let mut native = Native {
         folder: unsafe { scheduler.GetFolder(&BSTR::from("\\")) }?,
     };
+    if let Some((mut record, id)) = offered_cancel {
+        // This read-only lane returns before the effect path. It cannot stop,
+        // update, start, revoke or acquire a later runtime's rollback hold.
+        return recovery::cancel_ready(
+            recovery::Inputs {
+                config: &config,
+                location: &location,
+                native: &mut native,
+                admission: &admission,
+                passive: &passive,
+                background: &background,
+            },
+            &mut record,
+            id,
+        );
+    }
     let desired = Mode::parse(request["mode"].as_str().unwrap_or(""))?;
     effect(
         Runtime {

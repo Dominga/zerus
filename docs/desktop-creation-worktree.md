@@ -16,9 +16,47 @@ refuses it, and it has its own ordering lane. On Linux the service advertises
 admitted desktop actor executes it. The owned checkout binds Git to the pinned
 common directory through `/proc/self/fd`, which macOS lacks, so macOS and
 Windows answer `creation_worktree_unsupported` before admission and advertise
-nothing. The client keeps its
-existing direct `worktrees create --receipt` path until a separate
-default-off service path lands.
+nothing.
+
+On Linux in desktop-service mode only (default-off), the native creation host
+routes a local, receipt-backed `CreateWorktree` and its `status` reads to the
+service
+(`client/src-tauri/src/desktop_service/creation_worktree.rs`):
+- **Fresh intent.** Only native consent in the current host sends a fresh
+  intent, each consumed once and separately from clone's:
+  - a Submit, direct or from the task executor's Start (the same New session
+    button, with a reserved identity);
+  - an explicit Continue setup that the reducer applies, for exactly its next
+    service step (zerus-5wmh.66.4.3.9). The reducer allows it only after
+    definite predecessors: an Unknown original refuses Continue and stays
+    lookup-only. The consent is process-local, never persisted or supplied
+    by the renderer, and binds the creation and the Resume's revision. It
+    authorizes only a request reserved after that Resume. The first service
+    admission after the Resume consumes it, whatever its kind; clone and
+    launch do not honour it yet. A restart, recovery or replayed Continue
+    grants nothing.
+- **Never sent.** The reducer emits a create only for a request it reserved
+  and persisted in this process. A create without fresh consent, or one that
+  stops before its admission request is written, was never sent: it fails as
+  definitely effect-free, its UUID is retired, and the creation stays
+  resumable, never Unknown.
+- **Lookup results.** A missing or Unknown lookup of a sent original is
+  unconfirmed. It never resends and never falls back to the direct path.
+- **Older CLI.** When a completed probe finds that the selected service does
+  not advertise the kind, the create and its status reads take the unchanged
+  direct `worktrees` path, as before the service; nothing of this kind reached
+  that service. A probe that fails is not such proof.
+- **Stable plan.** When it reserves the request, the reducer records its
+  source folder as `worktree_source`. Preparation later moves `target` to the
+  checkout, and the final receipt read, a resume or a restart still derive the
+  exact admitted plan and hash from that source.
+- **Status reads.** A settled Failed original answers a status read as the
+  direct `worktrees status` read does, with the failed receipt as its data, so
+  a definitely effect-free failure is recorded as Failed and its UUID retired.
+  The original create still answers it as an error.
+
+Cancel, remote creations, macOS and every creation outside desktop-service
+mode keep the existing direct `worktrees` calls.
 
 ## Actor
 

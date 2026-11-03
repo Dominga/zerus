@@ -31,8 +31,11 @@ fn interrupted(detail: &str) -> String {
 }
 
 type Job = Box<dyn FnOnce() + Send>;
+/// A service transport for one creation kind. `None` sends the call down the
+/// unchanged direct path: only a completed probe that finds no support for
+/// that kind on the selected service answers it.
 type ServiceClone =
-    Arc<dyn Fn(&str, &Value, bool, bool, &AtomicBool) -> creation::Answer + Send + Sync>;
+    Arc<dyn Fn(&str, &Value, bool, bool, &AtomicBool) -> Option<creation::Answer> + Send + Sync>;
 type JournalWriter = Arc<dyn Fn(&Path, &[u8]) -> bool + Send + Sync>;
 type LaunchSession = Arc<dyn Fn(&Value) -> Result<(), String> + Send + Sync>;
 type ReadBinding = Arc<dyn Fn(&ComputerId) -> Result<BindingListing, String> + Send + Sync>;
@@ -156,6 +159,8 @@ struct Services {
     write: JournalWriter,
     call: Arc<dyn Fn(&creation::Call) -> creation::Answer + Send + Sync>,
     service_clone: Option<ServiceClone>,
+    /// The same native intent shape for the worktree leaf, never shared state.
+    service_worktree: Option<ServiceClone>,
     launch: LaunchSession,
     binding: ReadBinding,
     watch: WatchBinding,
@@ -290,6 +295,8 @@ impl CreationHost {
                     quitting: false,
                     loaded: false,
                     fresh_creations: BTreeSet::new(),
+                    fresh_worktrees: BTreeSet::new(),
+                    resumed: BTreeMap::new(),
                     #[cfg(all(test, unix))]
                     barrier: None,
                 };
@@ -536,8 +543,35 @@ struct Worker {
     quitting: bool,
     loaded: bool,
     fresh_creations: BTreeSet<String>,
+    /// Consumed once by a fresh worktree intent, separately from clone's.
+    fresh_worktrees: BTreeSet<String>,
+    /// One explicit Continue setup's fresh consent for exactly its next
+    /// service step (zerus-5wmh.66.4.3.9). It is process-local, never
+    /// persisted or renderer-supplied, and binds the creation, the revision
+    /// the Resume produced and the step identity it resumed past. The first
+    /// service admission dispatched after it consumes it, whatever its kind;
+    /// only a worktree create honours it here (clone and launch follow).
+    resumed: BTreeMap<String, Resumed>,
     #[cfg(all(test, unix))]
     barrier: Option<SyncSender<()>>,
+}
+
+/// What an applied Continue setup resumed: its revision, and the worktree
+/// request it found (empty, or a finished one), which no consented create may
+/// reuse.
+struct Resumed {
+    revision: i64,
+    worktree: String,
+}
+
+/// Whether a consumed Continue consent authorizes this worktree create: one
+/// the reducer reserved after that Resume, under a later revision.
+fn consented(resumed: Option<Resumed>, operation: &Value, request: &str) -> bool {
+    resumed.is_some_and(|resumed| {
+        operation["revision"].as_i64().unwrap_or(-1) > resumed.revision
+            && !request.is_empty()
+            && request != resumed.worktree
+    })
 }
 
 struct Placement(Resolve);
@@ -555,6 +589,8 @@ impl Worker {
             self.queue.quit();
             self.pending.clear();
             self.fresh_creations.clear();
+            self.fresh_worktrees.clear();
+            self.resumed.clear();
         }
     }
 
@@ -562,8 +598,10 @@ impl Worker {
         self.stop_if_requested();
         match message {
             Input::Submit(plan, id, answer) => {
-                // Reserved task/import identities are not direct native Start
-                // consent for this creation leaf. They retain their own kind.
+                // A reserved identity comes only from the task executor's
+                // Start (the same New session button, an explicit native
+                // command): fresh consent for its worktree like a direct
+                // Submit. Clone keeps direct Submits only until its own rule.
                 let direct = id.is_none();
                 let (result, effects) = if self.quitting || !self.loaded || !self.services.allowed {
                     (
@@ -586,6 +624,11 @@ impl Worker {
                 if direct && self.services.service_clone.is_some() {
                     if let Ok(id) = &result {
                         self.fresh_creations.insert(id.clone());
+                    }
+                }
+                if self.services.service_worktree.is_some() {
+                    if let Ok(id) = &result {
+                        self.fresh_worktrees.insert(id.clone());
                     }
                 }
                 self.effects(effects);
@@ -622,9 +665,35 @@ impl Worker {
                         .force = true;
                 }
                 let effects = match action {
-                    CreationAction::Resume => self.queue.resume(&id),
+                    CreationAction::Resume => {
+                        // Only a Resume the reducer applies, which requires a
+                        // definite clone and worktree predecessor and no
+                        // dispatched launch, grants the next step's consent.
+                        // A replayed or refused Resume grants nothing.
+                        let before = self.queue.operation(&id).map(|o| o["revision"].clone());
+                        let effects = self.queue.resume(&id);
+                        match self.queue.operation(&id) {
+                            Some(operation)
+                                if text(operation, "state") == "queued"
+                                    && before.as_ref() != Some(&operation["revision"]) =>
+                            {
+                                self.resumed.insert(
+                                    id.clone(),
+                                    Resumed {
+                                        revision: operation["revision"].as_i64().unwrap_or(-1),
+                                        worktree: text(operation, "worktree_id").into(),
+                                    },
+                                );
+                            }
+                            _ => {}
+                        }
+                        effects
+                    }
                     CreationAction::Check => self.queue.check(&id),
-                    CreationAction::Stop => self.queue.stop(&id),
+                    CreationAction::Stop => {
+                        self.resumed.remove(&id);
+                        self.queue.stop(&id)
+                    }
                     CreationAction::Hide => self.queue.hide(&id),
                     CreationAction::Show => self.queue.show(&id),
                 };
@@ -688,6 +757,8 @@ impl Worker {
                 }
                 Effect::Removed { id } => {
                     self.fresh_creations.remove(&id);
+                    self.fresh_worktrees.remove(&id);
+                    self.resumed.remove(&id);
                     self.pending.remove(&id);
                     let mut cache = lock(&self.cache);
                     cache.operations.remove(&id);
@@ -733,6 +804,48 @@ impl Worker {
                         // Consume BEFORE scheduling any helper. Even a lost
                         // response or later Resume never sends this ID again.
                         let fresh = wait && self.fresh_creations.remove(&id);
+                        // The clone admission is the next step: it consumes a
+                        // Continue consent without honouring it yet.
+                        if wait {
+                            self.resumed.remove(&id);
+                        }
+                        Some(Ok((sender.clone(), id, value, fresh, wait)))
+                    });
+                    // A local receipt-backed checkout and its status reads go
+                    // to the service; cancel and remote calls stay direct.
+                    let clone_call = clone_call.or_else(|| {
+                        let sender = self.services.service_worktree.as_ref()?;
+                        let (request_id, wait) = match &call {
+                            creation::Call::CreateWorktree {
+                                host,
+                                request_id,
+                                receipt: true,
+                                ..
+                            } if host.is_empty() => (request_id, true),
+                            creation::Call::WorktreeReceipt {
+                                host,
+                                action,
+                                request_id,
+                                ..
+                            } if host.is_empty() && action == "status" => (request_id, false),
+                            _ => return None,
+                        };
+                        let mut originals =
+                            self.queue.operations().iter().filter(|(_, value)| {
+                                value["worktree_id"].as_str() == Some(request_id)
+                            });
+                        let original = originals
+                            .next()
+                            .map(|(id, value)| (id.clone(), value.clone()));
+                        if originals.next().is_some() {
+                            return Some(Err(()));
+                        }
+                        let Some((id, value)) = original else {
+                            return Some(Err(()));
+                        };
+                        let fresh = wait
+                            && (self.fresh_worktrees.remove(&id)
+                                | consented(self.resumed.remove(&id), &value, request_id));
                         Some(Ok((sender.clone(), id, value, fresh, wait)))
                     });
                     (self.services.spawn)(Box::new(move || {
@@ -743,6 +856,7 @@ impl Worker {
                             match clone_call {
                                 Some(Ok((sender, id, operation, fresh, wait))) => {
                                     sender(&id, &operation, fresh, wait, &shutdown)
+                                        .unwrap_or_else(|| (services.call)(&call))
                                 }
                                 Some(Err(())) => creation::Answer {
                                     ok: false,
@@ -761,7 +875,9 @@ impl Worker {
                         let _ = done.send(Done::Called(flight, answer));
                     }));
                 }
-                Effect::Launch { operation, .. } => {
+                Effect::Launch { id, operation } => {
+                    // The launch is the next step: it ends any Continue consent.
+                    self.resumed.remove(&id);
                     if self.shutdown.load(Ordering::Acquire) || !self.services.allowed {
                         continue;
                     }
@@ -1230,10 +1346,34 @@ fn detached(hgs: &Path, invocation: &zerus_client_core::Invocation) -> Result<()
 /// calls and the same terminal launcher Qt's New session uses.
 pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> CreationHost {
     let clone_app = app.clone();
+    let worktree_app = app.clone();
+    // The service's owned checkout binds Git through /proc/self/fd, so only
+    // Linux routes worktrees to it; macOS keeps the direct path.
+    let service_worktree =
+        (cfg!(target_os = "linux") && crate::desktop_service::mode()).then(|| {
+            Arc::new(
+                move |id: &str,
+                      operation: &Value,
+                      fresh: bool,
+                      wait: bool,
+                      shutdown: &AtomicBool| {
+                    crate::desktop_service::creation_worktree::call(
+                        worktree_app
+                            .state::<crate::commands::AppState>()
+                            .desktop_service(),
+                        id,
+                        operation,
+                        fresh,
+                        wait,
+                        shutdown,
+                    )
+                },
+            ) as ServiceClone
+        });
     let service_clone = crate::desktop_service::mode().then(|| {
         Arc::new(
             move |id: &str, operation: &Value, fresh: bool, wait: bool, shutdown: &AtomicBool| {
-                crate::desktop_service::creation_clone::call(
+                Some(crate::desktop_service::creation_clone::call(
                     clone_app
                         .state::<crate::commands::AppState>()
                         .desktop_service(),
@@ -1242,7 +1382,7 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
                     fresh,
                     wait,
                     shutdown,
-                )
+                ))
             },
         ) as ServiceClone
     });
@@ -1285,6 +1425,7 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
             }),
             call: Arc::new(move |call| creation::run_call(&call_hgs, call)),
             service_clone,
+            service_worktree,
             binding: Arc::new(move |computer| {
                 creation::binding_listing(
                     zerus_client_core::run_limited(
@@ -1462,6 +1603,16 @@ mod tests {
         serde_json::to_value(launch::plan(&choices())).unwrap()
     }
 
+    /// The automatic checkout of a new branch: a receipt-backed worktree.
+    fn worktree_plan() -> Value {
+        serde_json::to_value(launch::plan(&Choices {
+            auto_preferred: true,
+            automatic_available: true,
+            ..choices()
+        }))
+        .unwrap()
+    }
+
     impl Fake {
         fn new() -> Self {
             let tree = crate::PROCESS_TREE
@@ -1527,6 +1678,7 @@ mod tests {
                 }),
                 call: Arc::new(move |step| creation::run_call(&call, step)),
                 service_clone: None,
+                service_worktree: None,
                 launch: Arc::new(move |operation| detached(&launch, &launch_invocation(operation))),
                 binding: Arc::new(move |_| {
                     binding.reads.fetch_add(1, Ordering::SeqCst);
@@ -1809,11 +1961,11 @@ mod tests {
                 if fresh { "clone" } else { "status" }
             );
             lock(&calls).push(fresh);
-            creation::Answer {
+            Some(creation::Answer {
                 ok: false,
                 data: Value::Null,
                 error: zerus_client_core::repository::UNCONFIRMED_OPERATION.into(),
-            }
+            })
         }));
         services
     }
@@ -1865,12 +2017,12 @@ mod tests {
         let mut services = fake.services();
         services.service_clone = Some(Arc::new(|_, operation, fresh, _, _| {
             assert!(fresh);
-            creation::Answer {
+            Some(creation::Answer {
                 ok: true,
                 error: String::new(),
                 data: json!({"status":"failed", "request_id":operation["clone_id"],
                     "path":operation["target"], "detail":crate::desktop_service::creation_clone::UNAVAILABLE}),
-            }
+            })
         }));
         let host = CreationHost::new(fake.dir.join("creations.json"), services);
         let id = admitted(&host, repository_plan());
@@ -1883,6 +2035,436 @@ mod tests {
             crate::desktop_service::creation_clone::UNAVAILABLE
         );
         fake.stop(host);
+    }
+
+    fn service_worktree_probe(fake: &Fake, calls: Arc<Mutex<Vec<(bool, bool)>>>) -> Services {
+        let mut services = fake.services();
+        let journal = fake.dir.join("creations.json");
+        services.service_worktree = Some(Arc::new(move |id, operation, fresh, wait, _| {
+            // The exact reducer checkpoint is durable before the original
+            // service intent. Presentation/recovery never supplies fresh Start.
+            let saved: Value = serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+            if fresh {
+                assert_eq!(saved["operations"][id], *operation);
+                assert!(wait);
+            } else {
+                assert_eq!(
+                    saved["operations"][id]["worktree_id"],
+                    operation["worktree_id"]
+                );
+            }
+            lock(&calls).push((fresh, wait));
+            Some(creation::Answer {
+                ok: false,
+                data: Value::Null,
+                error: zerus_client_core::repository::UNCONFIRMED_OPERATION.into(),
+            })
+        }));
+        services
+    }
+    #[test]
+    fn service_worktree_uses_only_direct_start_once_after_durable_checkpoint_and_checks_without_replay(
+    ) {
+        let fake = Fake::new();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let host = CreationHost::new(
+            fake.dir.join("creations.json"),
+            service_worktree_probe(&fake, calls.clone()),
+        );
+        let id = admitted(&host, worktree_plan());
+        state(&host, &id, "unknown");
+        assert_eq!(*lock(&calls), [(true, true)]);
+        let original = operation(&host, &id)["worktree_id"].clone();
+        host.action(id.clone(), CreationAction::Check).unwrap();
+        wait("service worktree lookup", || lock(&calls).len() == 2);
+        state(&host, &id, "unknown");
+        assert_eq!(*lock(&calls), [(true, true), (false, false)]);
+        assert_eq!(
+            operation(&host, &id)["worktree_id"],
+            original,
+            "never a new UUID"
+        );
+        // Neither the original create nor its receipt went to the direct CLI.
+        assert!(!fake.log().iter().any(|args| {
+            args.iter().any(|v| v == "worktrees")
+                && args.iter().any(|v| v == "create" || v == "status")
+        }));
+        fake.stop(host);
+        let host = CreationHost::new(
+            fake.dir.join("creations.json"),
+            service_worktree_probe(&fake, calls.clone()),
+        );
+        state(&host, &id, "recover");
+        host.action(id.clone(), CreationAction::Resume).unwrap();
+        assert!(host.flush_journal_for_test());
+        assert_eq!(
+            lock(&calls).len(),
+            2,
+            "Resume cannot restart an unknown worktree"
+        );
+        host.action(id.clone(), CreationAction::Check).unwrap();
+        wait("recovered service worktree lookup", || {
+            lock(&calls).len() == 3
+        });
+        state(&host, &id, "unknown");
+        assert_eq!(
+            *lock(&calls),
+            [(true, true), (false, false), (false, false)]
+        );
+        fake.stop(host);
+    }
+    /// A service stand-in with the transport's own checks: the fresh intent
+    /// is verified and its original stored once; every read derives the plan
+    /// from the current operation, and only a lookup of the exact admitted
+    /// plan answers, through the transport's `settled`.
+    struct Original {
+        /// Each fresh create's outcome in order; "created" once they run out.
+        statuses: Mutex<std::collections::VecDeque<&'static str>>,
+        /// Cleared: the selected service lacks the worktree kind (an older
+        /// CLI), so the transport routes every call to the direct path.
+        supported: AtomicBool,
+        /// Call indexes whose replies are lost.
+        lost: Vec<usize>,
+        receipt: Mutex<Option<zerus_client_core::desktop::creation_worktree::Receipt>>,
+        calls: Mutex<Vec<(bool, bool)>>,
+    }
+    fn faithful_service(fake: &Fake, original: Arc<Original>) -> Services {
+        use zerus_client_core::desktop::creation_worktree as wire;
+        const EPOCH: &str = "33333333-3333-4333-8333-333333333333";
+        let mut services = fake.services();
+        services.service_worktree = Some(Arc::new(move |id, operation, fresh, wait, _| {
+            let index = {
+                let mut calls = lock(&original.calls);
+                calls.push((fresh, wait));
+                calls.len() - 1
+            };
+            let unconfirmed = creation::Answer {
+                ok: false,
+                data: Value::Null,
+                error: zerus_client_core::repository::UNCONFIRMED_OPERATION.into(),
+            };
+            // The transport's routing: a completed probe without the kind
+            // goes direct; a create without fresh consent is never sent.
+            if !original.supported.load(Ordering::Acquire) {
+                return None;
+            }
+            if wait && !fresh {
+                return Some(
+                    crate::desktop_service::creation_worktree::unsent(operation)
+                        .unwrap_or(unconfirmed),
+                );
+            }
+            let scope = wire::Scope {
+                configuration: "a".repeat(64),
+                service_epoch: EPOCH.into(),
+            };
+            let Some(plan) = wire::Plan::from_operation(id, operation) else {
+                return Some(unconfirmed);
+            };
+            if fresh {
+                let status = lock(&original.statuses).pop_front().unwrap_or("created");
+                let verified = wire::Intent {
+                    scope: scope.clone(),
+                    creation_id: id.into(),
+                    worktree_request_id: plan.worktree_request_id.clone(),
+                    revision: operation["revision"].as_u64().unwrap(),
+                    original: operation.to_string(),
+                }
+                .verify()
+                .unwrap();
+                let created = status == "created";
+                let mut receipt = json!({"schema":1,"request_id":plan.worktree_request_id,
+                    "fingerprint":plan.request_fingerprint().unwrap(),"status":status,
+                    "path":plan.destination,"common_dir":plan.common_dir,"branch":plan.branch,
+                    "effects_started":created});
+                if !created {
+                    receipt["detail"] = json!("The destination already exists.");
+                }
+                *lock(&original.receipt) = Some(wire::Receipt {
+                    binding: verified.binding,
+                    admission_epoch: EPOCH.into(),
+                    revision: 3,
+                    phase: if created {
+                        wire::Phase::Created
+                    } else {
+                        wire::Phase::Failed
+                    },
+                    drained: true,
+                    code: String::new(),
+                    worktree: wire::project(&receipt),
+                });
+            }
+            if original.lost.contains(&index) {
+                return Some(unconfirmed);
+            }
+            let query = wire::Query::for_plan(scope.clone(), id.into(), &plan).unwrap();
+            let receipt = lock(&original.receipt).clone();
+            let lookup = wire::Lookup {
+                abi: wire::ABI.into(),
+                request_id: query.request_id.clone(),
+                scope,
+                read_only: true,
+                found: receipt.is_some(),
+                receipt,
+            };
+            if !lookup.matches(&query) {
+                return Some(unconfirmed);
+            }
+            Some(
+                lookup
+                    .receipt
+                    .and_then(|r| {
+                        crate::desktop_service::creation_worktree::settled(&r, &plan, wait)
+                    })
+                    .unwrap_or(unconfirmed),
+            )
+        }));
+        services
+    }
+    fn original(status: &'static str, lost: &[usize]) -> Arc<Original> {
+        Arc::new(Original {
+            statuses: Mutex::new([status].into()),
+            supported: AtomicBool::new(true),
+            lost: lost.to_vec(),
+            receipt: Mutex::new(None),
+            calls: Mutex::new(Vec::new()),
+        })
+    }
+    fn launched_in_checkout(fake: &Fake) {
+        let commands = fake.log();
+        assert!(commands.iter().any(
+            |args| args.contains(&"codex".into()) && args.contains(&"/srv/repo-work-1".into())
+        ));
+        // Neither the original create nor its receipt went to the direct CLI.
+        assert!(!commands.iter().any(|args| {
+            args.iter().any(|v| v == "worktrees")
+                && args.iter().any(|v| v == "create" || v == "status")
+        }));
+    }
+    #[test]
+    fn a_created_service_worktree_verifies_its_exact_original_and_launches_in_the_checkout() {
+        let fake = Fake::new();
+        let original = original("created", &[]);
+        let host = CreationHost::new(
+            fake.dir.join("creations.json"),
+            faithful_service(&fake, original.clone()),
+        );
+        let id = admitted(&host, worktree_plan());
+        state(&host, &id, "confirming");
+        // The original create, then the final status read after preparation
+        // moved the target: both bound to the one admitted plan.
+        assert_eq!(*lock(&original.calls), [(true, true), (false, false)]);
+        let value = operation(&host, &id);
+        assert!(flag(&value, "worktree_done"));
+        assert_eq!(value["worktree_source"], json!("/srv/repo"));
+        assert_eq!(value["target"], json!("/srv/repo-work-1"));
+        launched_in_checkout(&fake);
+        fake.stop(host);
+    }
+    #[test]
+    fn a_prepared_service_worktree_resumes_after_restart_through_its_exact_original() {
+        let fake = Fake::new();
+        // The final status read's reply is lost once.
+        let original = original("created", &[1]);
+        let host = CreationHost::new(
+            fake.dir.join("creations.json"),
+            faithful_service(&fake, original.clone()),
+        );
+        let id = admitted(&host, worktree_plan());
+        state(&host, &id, "unknown");
+        assert!(flag(&operation(&host, &id), "worktree_done"));
+        fake.stop(host);
+        let host = CreationHost::new(
+            fake.dir.join("creations.json"),
+            faithful_service(&fake, original.clone()),
+        );
+        state(&host, &id, "recover");
+        host.action(id.clone(), CreationAction::Resume).unwrap();
+        state(&host, &id, "confirming");
+        assert_eq!(
+            *lock(&original.calls),
+            [(true, true), (false, false), (false, false)],
+            "one original create; recovery only reads it"
+        );
+        launched_in_checkout(&fake);
+        fake.stop(host);
+    }
+    #[test]
+    fn a_lost_reply_then_check_records_a_definite_failure_and_frees_its_request() {
+        let fake = Fake::new();
+        // The original failed before any effect; its admission reply is lost.
+        let original = original("failed", &[0]);
+        let host = CreationHost::new(
+            fake.dir.join("creations.json"),
+            faithful_service(&fake, original.clone()),
+        );
+        let id = admitted(&host, worktree_plan());
+        state(&host, &id, "unknown");
+        let request = operation(&host, &id)["worktree_id"].clone();
+        // An Unknown original is never resumed: Continue grants nothing, and
+        // its only service contact stays a read of that original.
+        let _ = host.action(id.clone(), CreationAction::Resume);
+        host.action(id.clone(), CreationAction::Check).unwrap();
+        state(&host, &id, "failed");
+        assert_eq!(*lock(&original.calls), [(true, true), (false, false)]);
+        let value = operation(&host, &id);
+        assert!(value.get("worktree_id").is_none(), "{value}");
+        assert!(value["worktree_previous"]
+            .as_array()
+            .unwrap()
+            .contains(&request));
+        fake.stop(host);
+    }
+    #[test]
+    fn a_definitely_unsent_service_worktree_fails_and_frees_its_request() {
+        let fake = Fake::new();
+        let mut services = fake.services();
+        services.service_worktree = Some(Arc::new(|_, operation, fresh, _, _| {
+            assert!(fresh);
+            crate::desktop_service::creation_worktree::unsent(operation)
+        }));
+        let host = CreationHost::new(fake.dir.join("creations.json"), services);
+        let id = admitted(&host, worktree_plan());
+        state(&host, &id, "failed");
+        let value = operation(&host, &id);
+        assert_eq!(value["failed_stage"], "worktree");
+        assert_eq!(
+            value["error"],
+            crate::desktop_service::creation_worktree::NOT_SENT
+        );
+        // Only a definitely effect-free original is retired for a later retry.
+        assert!(value.get("worktree_id").is_none());
+        assert_eq!(value["worktree_previous"].as_array().unwrap().len(), 1);
+        fake.stop(host);
+    }
+
+    fn originals(statuses: &[&'static str]) -> Arc<Original> {
+        let original = original("created", &[]);
+        *lock(&original.statuses) = statuses.iter().copied().collect();
+        original
+    }
+    /// The direct CLI's own worktree `create` and `status` calls.
+    fn direct_worktree_calls(fake: &Fake) -> (usize, usize) {
+        let log = fake.log();
+        let count = |verb: &str| {
+            log.iter()
+                .filter(|args| {
+                    args.iter().any(|v| v == "worktrees") && args.iter().any(|v| v == verb)
+                })
+                .count()
+        };
+        (count("create"), count("status"))
+    }
+    #[test]
+    fn continue_after_a_definite_service_failure_sends_one_fresh_create() {
+        let fake = Fake::new();
+        // The first original fails before any effect; the next is created.
+        let original = originals(&["failed"]);
+        let host = CreationHost::new(
+            fake.dir.join("creations.json"),
+            faithful_service(&fake, original.clone()),
+        );
+        let id = admitted(&host, worktree_plan());
+        state(&host, &id, "failed");
+        let retired = operation(&host, &id)["worktree_previous"][0].clone();
+        assert_eq!(*lock(&original.calls), [(true, true)]);
+        // The explicit Continue grants one fresh consent for the next step:
+        // one create of a new request, then only its final read.
+        host.action(id.clone(), CreationAction::Resume).unwrap();
+        state(&host, &id, "confirming");
+        assert_eq!(
+            *lock(&original.calls),
+            [(true, true), (true, true), (false, false)]
+        );
+        let value = operation(&host, &id);
+        assert!(flag(&value, "worktree_done"));
+        assert_ne!(value["worktree_id"], retired);
+        launched_in_checkout(&fake);
+        // A replayed Continue is refused and sends nothing.
+        let _ = host.action(id.clone(), CreationAction::Resume);
+        assert!(host.arrange_for_test(|| {}));
+        assert_eq!(lock(&original.calls).len(), 3);
+        fake.stop(host);
+    }
+    #[test]
+    fn an_older_service_sends_every_worktree_call_down_the_direct_path() {
+        let fake = Fake::new();
+        let original = original("created", &[]);
+        original.supported.store(false, Ordering::Release);
+        let host = CreationHost::new(
+            fake.dir.join("creations.json"),
+            faithful_service(&fake, original.clone()),
+        );
+        let id = admitted(&host, worktree_plan());
+        state(&host, &id, "confirming");
+        // Both the probe-refused create and its final read ran directly, as
+        // before the service; nothing became Unknown.
+        assert_eq!(*lock(&original.calls), [(true, true), (false, false)]);
+        assert_eq!(direct_worktree_calls(&fake), (1, 1));
+        assert!(flag(&operation(&host, &id), "worktree_done"));
+        fake.stop(host);
+    }
+    #[test]
+    fn continue_after_the_service_lost_the_kind_retries_on_the_direct_path() {
+        let fake = Fake::new();
+        let original = originals(&["failed"]);
+        let host = CreationHost::new(
+            fake.dir.join("creations.json"),
+            faithful_service(&fake, original.clone()),
+        );
+        let id = admitted(&host, worktree_plan());
+        state(&host, &id, "failed");
+        // The selected service no longer offers the kind (an older CLI).
+        original.supported.store(false, Ordering::Release);
+        host.action(id.clone(), CreationAction::Resume).unwrap();
+        state(&host, &id, "confirming");
+        assert_eq!(
+            *lock(&original.calls),
+            [(true, true), (true, true), (false, false)]
+        );
+        assert_eq!(direct_worktree_calls(&fake), (1, 1));
+        fake.stop(host);
+    }
+    #[test]
+    fn a_task_started_local_worktree_sends_one_fresh_intent() {
+        let fake = Fake::new();
+        let original = original("created", &[]);
+        let host = CreationHost::new(
+            fake.dir.join("creations.json"),
+            faithful_service(&fake, original.clone()),
+        );
+        // The task executor's Start: the same explicit native Submit with a
+        // reserved identity.
+        let id = "99999999-9999-4999-8999-999999999999".to_owned();
+        assert!(matches!(
+            host.submit_reserved(worktree_plan(), id.clone()).unwrap(),
+            Admission::Admitted { .. }
+        ));
+        state(&host, &id, "confirming");
+        assert_eq!(*lock(&original.calls), [(true, true), (false, false)]);
+        launched_in_checkout(&fake);
+        fake.stop(host);
+    }
+    #[test]
+    fn a_continue_consent_binds_its_revision_and_a_new_worktree_request() {
+        let operation = json!({"revision": 9});
+        let resumed = |revision, worktree: &str| {
+            Some(Resumed {
+                revision,
+                worktree: worktree.into(),
+            })
+        };
+        assert!(consented(resumed(4, ""), &operation, "new"));
+        assert!(!consented(None, &operation, "new"), "no Continue");
+        assert!(
+            !consented(resumed(9, ""), &operation, "new"),
+            "not reserved after the Continue"
+        );
+        assert!(
+            !consented(resumed(4, "old"), &operation, "old"),
+            "the request it resumed past"
+        );
+        assert!(!consented(resumed(4, ""), &operation, ""), "no request");
     }
 
     #[test]
@@ -1899,11 +2481,11 @@ mod tests {
             assert_eq!(saved["operations"][id], *operation);
             assert!(!fresh);
             lock(&captured).push(fresh);
-            creation::Answer {
+            Some(creation::Answer {
                 ok: false,
                 data: Value::Null,
                 error: zerus_client_core::repository::UNCONFIRMED_OPERATION.into(),
-            }
+            })
         }));
         let host = CreationHost::new(fake.dir.join("creations.json"), services);
         let id = "88888888-8888-4888-8888-888888888888".to_owned();

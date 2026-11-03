@@ -54,10 +54,13 @@ thread_local! {
 }
 /// One Git command for another admitted creation effect: anchored in a pinned
 /// directory, run by the deadline-owning worker and held by that effect's
-/// original close-only custody and cancellation.
+/// original close-only custody and cancellation. `share` stays open, at its
+/// own descriptor number, in Git's process: an argument may then name it as
+/// `/proc/self/fd/N`.
 #[cfg(unix)]
 pub(in crate::state) fn owned_git(
     directory: &directory::Directory,
+    share: Option<&directory::Directory>,
     args: &[&str],
     seconds: u64,
     cancelled: &std::sync::atomic::AtomicBool,
@@ -66,7 +69,7 @@ pub(in crate::state) fn owned_git(
     #[cfg(test)]
     if OWNED_GIT_DIRECT.with(std::cell::Cell::get) {
         directory.verify()?;
-        let result = run_git(Some(directory), args, seconds, &|| {
+        let result = run_git(Some(directory), share, args, seconds, &|| {
             cancelled.load(std::sync::atomic::Ordering::Acquire)
         });
         directory.verify()?;
@@ -77,17 +80,21 @@ pub(in crate::state) fn owned_git(
         cancelled,
         custody,
     };
-    git(directory, args, seconds, Some(&control))
+    directory.verify()?;
+    let result = worker::run(directory, share, args, seconds, Some(&control));
+    directory.verify()?;
+    result
 }
 /// Test-only: the anchored Git argv without identity checks, to prove that
 /// Git's own writes follow the pinned directory object.
-#[cfg(all(test, unix))]
+#[cfg(all(test, target_os = "linux"))]
 pub(in crate::state) fn owned_git_unverified_for_test(
     directory: &directory::Directory,
+    share: Option<&directory::Directory>,
     args: &[&str],
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> Result<Vec<u8>> {
-    run_git(Some(directory), args, 30, &|| {
+    run_git(Some(directory), share, args, 30, &|| {
         cancelled.load(std::sync::atomic::Ordering::Acquire)
     })
 }
@@ -224,11 +231,11 @@ fn git(
 ) -> Result<Vec<u8>> {
     directory.verify()?;
     #[cfg(unix)]
-    let result = worker::run(directory, args, seconds, control);
+    let result = worker::run(directory, None, args, seconds, control);
     #[cfg(windows)]
     let result = {
         let _ = control; // The first admitted service clone leaf is POSIX-only.
-        run_git(Some(directory), args, seconds, &|| false)
+        run_git(Some(directory), None, args, seconds, &|| false)
     };
     directory.verify()?;
     result
@@ -236,6 +243,7 @@ fn git(
 
 fn run_git(
     directory: Option<&directory::Directory>,
+    share: Option<&directory::Directory>,
     args: &[&str],
     seconds: u64,
     cancelled: &dyn Fn() -> bool,
@@ -259,6 +267,14 @@ fn run_git(
     cmd.env(worker::CONTEXT, "1");
     if let Some(directory) = directory {
         directory.anchor(&mut cmd)?;
+    }
+    #[cfg(unix)]
+    if let Some(share) = share {
+        share.share(&mut cmd);
+    }
+    #[cfg(windows)]
+    if share.is_some() {
+        return Err("creation_worktree_unsupported".into());
     }
     cmd.args(["--no-pager", "-c", "core.fsmonitor=false"])
         .args(args)

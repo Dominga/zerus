@@ -25,9 +25,9 @@ pub(super) fn created(common: &Path, path: &Path, branch: &str, head: &str) -> R
     created_at(common, path, branch, head, &metadata).map(drop)
 }
 
-/// `metadata` is the checkout's `rev-parse --absolute-git-dir` output, read by
-/// the caller (an owned effect reads it under its own custody).
-pub(super) fn created_at(
+/// `metadata` is the checkout's `rev-parse --absolute-git-dir` output. The
+/// owned effect writes through its pinned entry instead.
+fn created_at(
     common: &Path,
     path: &Path,
     branch: &str,
@@ -39,8 +39,24 @@ pub(super) fn created_at(
     if !metadata.starts_with(common.join("worktrees")) {
         return Err("Cannot verify linked worktree metadata".into());
     }
-    let value = json!({"version":1,"id":uuid::Uuid::new_v4().to_string(),"common_dir":common,"path":path,"branch":branch,"head":head,"metadata":metadata,"created_at":now()});
+    let value = owner_value(common, path, branch, head, &metadata);
     atomic(&metadata.join("zerus-owner.json"), &format!("{value}\n"))?;
+    record_owner(common, path, value)
+}
+
+/// A new checkout's ownership record, for its metadata entry `metadata`.
+pub(super) fn owner_value(
+    common: &Path,
+    path: &Path,
+    branch: &str,
+    head: &str,
+    metadata: &Path,
+) -> Value {
+    json!({"version":1,"id":uuid::Uuid::new_v4().to_string(),"common_dir":common,"path":path,"branch":branch,"head":head,"metadata":metadata,"created_at":now()})
+}
+
+/// After the entry's owner file: the private receipt and maintenance record.
+pub(super) fn record_owner(common: &Path, path: &Path, value: Value) -> Result<Value> {
     atomic(&receipt_path(common, path), &format!("{value}\n"))?;
     super::worktree_maintenance::register(&value)?;
     Ok(value)

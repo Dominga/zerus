@@ -52,6 +52,15 @@ thread_local! {
     pub(in crate::state) static OWNED_GIT_DIRECT: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
 }
+/// Test-only: `run` with this thread's owned Git commands run directly, for
+/// actor tests of the real owned executor inside a private probe.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn with_direct_owned_git<T>(run: impl FnOnce() -> T) -> T {
+    OWNED_GIT_DIRECT.with(|direct| direct.set(true));
+    let result = run();
+    OWNED_GIT_DIRECT.with(|direct| direct.set(false));
+    result
+}
 /// One Git command for another admitted creation effect: anchored in a pinned
 /// directory, run by the deadline-owning worker and held by that effect's
 /// original close-only custody and cancellation. `share` stays open, at its

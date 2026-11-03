@@ -139,6 +139,17 @@ request fingerprint match the plan. A created receipt then passes the same
 `worktrees::created` check as the direct path, and its path must equal the
 destination. Queued, running and Unknown never mean success or failure.
 
+A result carries a bounded projection of that receipt (`project`): only the
+fields the reducer checks (request ID, fingerprint, status, path, common
+directory, branch, `effects_started`, `detail` and `resource_error`), with each
+free text bounded to 2 KiB of encoded JSON. The full receipt, including its
+ownership record, stays in the CLI receipt store. Admission (`Intent::verify`)
+refuses, before anything starts, a plan whose projection with its own paths and
+the longest texts would exceed the 16 KiB result bound. If an original still
+cannot be represented, its result is Unknown with
+`worktree_result_unrepresentable`. Storing a result therefore never fails on
+size, and a physically released charge always drains.
+
 `Query` and `Lookup` form a bounded read-only original-result lookup bound to
 the fresh configuration and service epoch. A missing or Unknown result never
 authorizes a resend or a fall back to the direct worker in Service mode.

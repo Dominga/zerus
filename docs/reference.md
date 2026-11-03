@@ -1960,7 +1960,10 @@ in a project that no longer exists or with an unresolved project choice gives th
 fork an explicit Inbox membership. A source without a membership leaves the fork
 without one, so both follow the same default project. A fork name that already
 has a membership keeps it. Without a catalog, or if the catalog stays busy for
-3 seconds, the fork still starts in the default project.
+3 seconds, the fork still starts in the default project. The desktop then places
+the fork right after its original and opens it, once its inspection names the
+source conversation as its parent, even before a Codex fork has a conversation ID
+of its own. With an hgs that predates the parent field it waits for that ID.
 
 Codex may defer `SessionStart` until the fork's first message. Activity enables
 Send once Zerus verifies that the supervised process owns an independent child

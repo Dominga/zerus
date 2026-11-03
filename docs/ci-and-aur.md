@@ -905,7 +905,15 @@ identity transition, stale usage suppression, a single durable clear boundary,
 preserved process/run identity, unsent native drafts and foreign-directory
 rejection. A resumed conversation whose `SessionStart` is still deferred must
 pause, and clear from the GUI and from Terminal, where the next message's hook
-names the new conversation. A new session in a folder outside the fixture home,
+names the new conversation. A separate ordering fixture inserts a modeled main
+`SessionEnd`, unless the native agent already emitted it, immediately before
+forwarding the real clear `SessionStart` unchanged. The end ordering is controlled;
+the successor hook and native process/file ownership are real. It verifies an unrequested
+Terminal clear through the original supervised process, its held old rollout and
+the held successor's bounded native header, without inventing a clear request or
+replaying input. Process fixtures also require the complete owned reset before
+reopening the composer after that end; the end alone grants no input permission.
+A new session in a folder outside the fixture home,
 which Codex prints in full in its header, answers a first message from the localhost
 provider; idle polls must not treat that header above the history as a reset,
 and a later clear must still be confirmed. A separate fixture caches a newer

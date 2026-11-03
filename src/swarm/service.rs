@@ -16,6 +16,9 @@ use serde_json::{json, Value};
 use std::{
     fs::{self, File},
     path::{Path, PathBuf},
+};
+#[cfg(not(windows))]
+use std::{
     process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -119,6 +122,9 @@ pub fn supervise(config: &Config) -> Status {
     if status.running && !status.current && crate::self_exec::ensure().is_ok() {
         let default = std::env::var_os("HGS_CONFIG_DIR").is_none();
         restart(&config.dir.join("swarm"), default, now(), || {
+            #[cfg(windows)]
+            let _ = crate::desktop::restart_swarm(config);
+            #[cfg(not(windows))]
             if let Some((program, args)) = command() {
                 run(program, &args);
             }
@@ -178,13 +184,23 @@ fn command() -> Option<(&'static str, Vec<String>)> {
         ],
     ))
 }
-/// No service manager runs the worker here: the Windows desktop app supervises it.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// The command addresses the existing background owner, never a marker PID or
+/// the whole desktop registration. Automatic stale-worker recovery uses the
+/// same bounded IPC directly, without another helper process or GUI launch.
+#[cfg(windows)]
+fn command() -> Option<(PathBuf, Vec<String>)> {
+    Some((
+        std::env::current_exe().ok()?,
+        vec!["desktop".into(), "swarm-restart".into(), "--json".into()],
+    ))
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn command() -> Option<(&'static str, Vec<String>)> {
     None
 }
 
 /// Waits briefly; a hung service manager never holds up the command.
+#[cfg(not(windows))]
 fn run(program: &str, args: &[String]) {
     let Ok(mut child) = crate::platform::spawn(
         Command::new(program)
@@ -364,6 +380,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn only_the_swarm_worker_unit_is_restarted() {
         match command() {
             Some(("systemctl", args)) => assert_eq!(
@@ -376,6 +393,13 @@ mod tests {
             }
             other => assert!(other.is_none()),
         }
+    }
+    #[test]
+    #[cfg(windows)]
+    fn windows_restart_addresses_only_the_existing_service_worker() {
+        let (program, args) = command().unwrap();
+        assert_eq!(program, std::env::current_exe().unwrap());
+        assert_eq!(args, ["desktop", "swarm-restart", "--json"]);
     }
 
     #[test]

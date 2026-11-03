@@ -17,7 +17,7 @@ const MAX_STRING: usize = 64 << 10;
 
 static ENTRY: OnceLock<Capture> = OnceLock::new();
 
-/// Preserve the first entry's raw OS inputs. Call as the first main statement.
+/// Preserve raw OS inputs at main entry, before parsing, loaders or workers.
 /// Repeated calls never replace an earlier capture, including a failed one.
 /// Library entry points that did not pass through main remain unavailable.
 pub fn capture_process_entry() {

@@ -3,7 +3,7 @@
 //! to remove a folder. The native caller must resolve and review it afresh.
 use crate::{
     swarm::{self, Folder},
-    worktree_review as review,
+    worktree_leftover as leftover, worktree_review as review,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -18,6 +18,19 @@ pub const ROWS: usize = 8192;
 pub const SOURCE_BYTES: usize = 4 * 1024 * 1024;
 pub const ROW_BYTES: usize = 16 * 1024 * 1024;
 const ITEM_BYTES: usize = 64 * 1024;
+/// Partially removed folders: shown first, never part of a cleanup selection.
+pub const LEFTOVERS: u8 = 5;
+const ORDER: [u8; 6] = [LEFTOVERS, 0, 1, 2, 3, 4];
+fn rank(category: u8) -> usize {
+    ORDER
+        .iter()
+        .position(|c| *c == category)
+        .unwrap_or(ORDER.len())
+}
+/// Whether a row may join a cleanup selection: not main folders or leftovers.
+pub fn selectable(category: u8) -> bool {
+    category < 4
+}
 
 /// Exact folder references retained on the native side, never deserialized as
 /// executable source authority from the webview.
@@ -164,6 +177,7 @@ pub struct Row {
     pub fresh: bool,
     pub sessions: Vec<String>,
     pub sampled_at: u64,
+    pub leftover: Option<leftover::Leftover>,
 }
 fn text<'a>(row: &'a Value, key: &str) -> &'a str {
     row[key].as_str().unwrap_or("")
@@ -265,6 +279,68 @@ pub fn project(
         fresh: verified,
         sessions,
         sampled_at,
+        leftover: None,
+    };
+    bytes(&result, ITEM_BYTES).map(|_| result)
+}
+
+/// A reviewed leftover's display row. `scope` names the computer, so the same
+/// folder from a review and from the vanished-repository listing is one row.
+/// A vanished repository's row carries no project.
+pub fn project_leftover(
+    scope: &str,
+    source_index: usize,
+    source: &Source,
+    row: &Value,
+    repository: bool,
+    sampled_at: u64,
+) -> Option<Row> {
+    if scope.len() > 512 {
+        return None;
+    }
+    bytes(row, ITEM_BYTES)?;
+    let item = leftover::leftover(row, repository)?;
+    let path = text(row, "path");
+    let id = zerus_desktop_migration::sha256(
+        &serde_json::to_vec(&(scope, &source.computer, path)).ok()?,
+    );
+    let names = |f: fn(&Reference) -> &String| -> Vec<String> {
+        let mut seen = BTreeSet::new();
+        source
+            .references
+            .iter()
+            .filter(|_| repository)
+            .map(f)
+            .filter(|s| seen.insert(s.as_str()))
+            .cloned()
+            .collect()
+    };
+    let state = if repository {
+        "Partially removed"
+    } else {
+        "Repository missing"
+    };
+    let result = Row {
+        id,
+        source: source_index,
+        path: path.into(),
+        branch: item.branch.clone(),
+        kind: "leftover".into(),
+        machine: source.machine.clone(),
+        computer: source.computer.clone(),
+        projects: names(|r| &r.project),
+        project_names: names(|r| &r.name),
+        category: LEFTOVERS,
+        state: state.into(),
+        remains: leftover::summary(&item),
+        size: leftover::size(&item),
+        bytes: item.bytes,
+        complete: item.complete,
+        activity: item.reserved_at,
+        fresh: true,
+        sessions: item.sessions.clone(),
+        sampled_at,
+        leftover: Some(item),
     };
     bytes(&result, ITEM_BYTES).map(|_| result)
 }
@@ -326,7 +402,8 @@ impl Model {
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             || row.activity.is_some_and(|n| !n.is_finite())
-            || row.category > 4
+            || row.category > LEFTOVERS
+            || (row.category == LEFTOVERS) != row.leftover.is_some()
             || row.source >= SOURCES
         {
             self.partial = true;
@@ -358,6 +435,35 @@ impl Model {
     pub fn row(&self, id: &str) -> Option<&Row> {
         self.rows.get(id)
     }
+    /// Records an explicit leftover action's outcome on its row until a
+    /// fresh review replaces it. Only a row without an outcome takes one.
+    pub fn settle(&mut self, id: &str, settled: leftover::Settled) -> bool {
+        let Some(row) = self.rows.get_mut(id) else {
+            return false;
+        };
+        let Some(item) = row.leftover.as_mut().filter(|l| l.outcome.is_none()) else {
+            return false;
+        };
+        let (state, remains) = match &settled {
+            leftover::Settled::Deleted => (
+                "Files deleted",
+                "The remaining files were deleted. The branch is kept.".to_owned(),
+            ),
+            leftover::Settled::Forgotten => (
+                "Folder kept",
+                "Zerus no longer tracks this folder. Its files and the branch stay.".to_owned(),
+            ),
+            leftover::Settled::Refused { detail } => ("Nothing changed", detail.clone()),
+            leftover::Settled::Unknown { detail } => (
+                "Result unknown",
+                format!("{detail} An unknown result will not be retried."),
+            ),
+        };
+        item.outcome = Some(settled);
+        row.state = state.into();
+        row.remains = remains.chars().take(4096).collect();
+        true
+    }
     pub fn retained_bytes(&self) -> usize {
         self.used
     }
@@ -369,7 +475,7 @@ impl Model {
         self.used = self.sizes.values().sum();
     }
     pub fn select(&mut self, id: &str, value: bool) -> bool {
-        if !self.rows.get(id).is_some_and(|r| r.category != 4) {
+        if !self.rows.get(id).is_some_and(|r| selectable(r.category)) {
             return false;
         }
         if value {
@@ -389,7 +495,7 @@ impl Model {
         if ids.len() > ROWS
             || ids
                 .iter()
-                .any(|id| !self.rows.get(id).is_some_and(|r| r.category != 4))
+                .any(|id| !self.rows.get(id).is_some_and(|r| selectable(r.category)))
         {
             return false;
         }
@@ -404,7 +510,7 @@ impl Model {
         if filter.search.len() > 4096
             || filter.project.len() > 320
             || filter.computer.len() > 320
-            || filter.category.is_some_and(|n| n > 4)
+            || filter.category.is_some_and(|n| n > LEFTOVERS)
         {
             return Err("Invalid worktree filter.");
         }
@@ -442,7 +548,8 @@ impl Model {
             })
             .collect();
         rows.sort_by(|(a, ac, _, an), (b, bc, _, bn)| {
-            ac.cmp(bc)
+            rank(*ac)
+                .cmp(&rank(*bc))
                 .then_with(|| match filter.sort {
                     Sort::Size => b.bytes.cmp(&a.bytes),
                     Sort::Activity => a
@@ -483,7 +590,7 @@ impl Model {
         let total = rows.len();
         let index = page.min(total.saturating_sub(1) / PAGE);
         let mut groups = Vec::new();
-        for category in 0..=4 {
+        for category in ORDER {
             let total = rows.iter().filter(|(_, c, _, _)| *c == category).count();
             let page_rows: Vec<_> = rows
                 .iter()

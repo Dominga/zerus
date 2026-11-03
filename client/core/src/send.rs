@@ -508,16 +508,25 @@ impl StartSend {
                     .into(),
             );
         }
+        // Without a conversation (a fresh start, or a cleared one) Codex
+        // creates it only with the first message and reports no status
+        // before it, so the CLI's verified first-message prompt is the
+        // readiness, as for any send (`block_reason`); waiting for an idle
+        // status would never end (zerus-dhnd). The send names the empty
+        // conversation, never the cleared one.
+        let input_ready = if conversation.is_empty() {
+            flag(details, "first_message_can_send")
+        } else {
+            text(details, "phase") == "idle" && text(details, "activity") == "idle"
+        };
         let ready = flag(details, "tracked")
             && text(details, "runtime_state") == "live"
             && text(details, "process_state") == "running"
             && text(details, "error").is_empty()
-            && text(details, "phase") == "idle"
-            && text(details, "activity") == "idle"
+            && input_ready
             && !terminating
             && (text(details, "expected_id").is_empty()
-                || flag(details, "resume_message_can_send"))
-            && (!conversation.is_empty() || flag(details, "first_message_can_send"));
+                || flag(details, "resume_message_can_send"));
         if !ready {
             return Step::Idle;
         }
@@ -1167,6 +1176,97 @@ mod continuation_tests {
                 compaction_id: None
             }
         );
+    }
+
+    /// zerus-dhnd: Codex after Clear or Start fresh, as `hgs inspect` showed it.
+    /// It reports no status before its first message, which creates the
+    /// conversation.
+    fn cleared_codex() -> Value {
+        json!({"tracked": true, "run_id": "run-2", "conversation_id": null,
+               "runtime_state": "live", "process_state": "running",
+               "phase": "unknown", "activity": "unknown", "activity_summary": "Status unavailable",
+               "cleared_conversations": ["conv-1"],
+               "first_message_can_send": true, "first_message_reason": "",
+               "clear_context_supported": false, "clear_context_reason": "Wait for a confirmed conversation"})
+    }
+
+    #[test]
+    fn a_cleared_conversation_takes_the_waiting_message_as_its_first() {
+        for choice in [StartChoice::Fresh, StartChoice::Resume] {
+            let mut start = begun(choice);
+            // The first-message path, never the cleared conversation.
+            assert_eq!(
+                start.inspected(&cleared_codex(), &draft(), false, false, 1.0),
+                Step::Send {
+                    run_id: "run-2".into(),
+                    conversation_id: String::new(),
+                    compaction_id: None
+                },
+                "{choice:?}"
+            );
+            // Until the CLI verifies the native prompt, the message waits.
+            let mut unverified = cleared_codex();
+            unverified["first_message_can_send"] = json!(false);
+            assert_eq!(
+                start.inspected(&unverified, &draft(), false, false, 1.0),
+                Step::Idle
+            );
+            // A conversation of its own (a new one for Fresh, the saved one
+            // for Resume) still needs a confirmed idle status.
+            let mut opened = cleared_codex();
+            opened["conversation_id"] = json!(if choice == StartChoice::Fresh {
+                "conv-2"
+            } else {
+                "conv-1"
+            });
+            assert_eq!(
+                start.inspected(&opened, &draft(), false, false, 1.0),
+                Step::Idle
+            );
+            // The exact guards stay: the same run, a stop or another state.
+            let mut same_run = cleared_codex();
+            same_run["run_id"] = json!("run-1");
+            assert_eq!(
+                start.inspected(&same_run, &draft(), false, false, 1.0),
+                Step::Idle
+            );
+            assert_eq!(
+                start.inspected(&cleared_codex(), &draft(), false, true, 1.0),
+                Step::Idle
+            );
+            for (key, value) in [
+                ("tracked", json!(false)),
+                ("runtime_state", json!("ended")),
+                ("process_state", json!("exited")),
+                ("error", json!("synthetic failure")),
+                ("expected_id", json!("conv-1")),
+            ] {
+                let mut other = cleared_codex();
+                other[key] = value;
+                assert_eq!(
+                    start.inspected(&other, &draft(), false, false, 1.0),
+                    Step::Idle,
+                    "{key}"
+                );
+            }
+        }
+        // A fresh start that brings back the cleared conversation never sends.
+        let mut back = cleared_codex();
+        back["conversation_id"] = json!("conv-1");
+        back["phase"] = json!("idle");
+        back["activity"] = json!("idle");
+        assert!(matches!(
+            begun(StartChoice::Fresh).inspected(&back, &draft(), false, false, 1.0),
+            Step::Cancelled(_)
+        ));
+        // A running session in this state is sendable at once, as before.
+        let facts = BlockFacts {
+            online: true,
+            state: "running".into(),
+            cmd: "codex".into(),
+            ..BlockFacts::default()
+        };
+        assert_eq!(block_reason(&facts, Some(&cleared_codex())), None);
     }
 
     #[test]

@@ -96,6 +96,7 @@ pub mod views;
 pub mod voice;
 pub mod voice_composer;
 pub mod voice_driver;
+pub mod worktree_leftover;
 pub mod worktree_overview;
 pub mod worktree_policy;
 pub mod worktree_review;

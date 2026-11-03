@@ -189,7 +189,7 @@ pub fn local_data(row: &Value) -> bool {
 }
 
 /// A row's group: 0 cleanup candidates, 1 review work, 2 in use, 3 not
-/// checked, 4 main folders.
+/// checked, 4 main folders. Partially removed folders (5) are not review rows.
 pub fn category(row: &Value, verified: bool) -> u8 {
     if text(row, "kind") != "linked" {
         return 4;
@@ -229,6 +229,7 @@ pub fn category_name(category: u8) -> &'static str {
         1 => "Review work",
         2 => "In use",
         3 => "Not checked",
+        5 => "Partially removed",
         _ => "Main folders",
     }
 }

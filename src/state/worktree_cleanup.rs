@@ -18,6 +18,21 @@ const WALK_TIME: Duration = Duration::from_secs(2);
 const MAX_IGNORED: usize = 20;
 const MAX_SAMPLES: usize = 5;
 const PROCESS_CONSENT_SECONDS: u64 = 300;
+/// Leftover rows in one reply, and their bytes: the rest stay recorded and
+/// the reply is marked partial, so many records never blank a bounded reply.
+const LEFTOVER_ROWS: usize = 32;
+const LEFTOVER_BYTES: usize = 1024 * 1024;
+
+fn admit_leftover(used: &mut usize, row: &Value) -> bool {
+    let size = serde_json::to_vec(row).map_or(usize::MAX, |bytes| bytes.len());
+    match used.checked_add(size).filter(|n| *n <= LEFTOVER_BYTES) {
+        Some(total) => {
+            *used = total;
+            true
+        }
+        None => false,
+    }
+}
 
 fn process_consent(row: &Value, common: &Path, issued: u64) -> String {
     let proof = fingerprint(json!({"scope":"manual-process-uncertainty-v2",
@@ -1001,14 +1016,18 @@ fn repository_lock(common: &Path) -> Result<std::fs::File> {
 /// retained branch and current occupants. Records whose folder is gone are
 /// resolved; a record whose worktree is still registered is resolved only when
 /// no removal holds the repository lock. Nothing here deletes or retries.
+/// At most `LEFTOVER_ROWS` rows within `LEFTOVER_BYTES`; `true` when more
+/// records remain unreviewed.
 fn leftovers(
     common: &Path,
     trees: &[Value],
     listing_partial: bool,
     context: &Context,
     total: Instant,
-) -> Result<Vec<Value>> {
+) -> Result<(Vec<Value>, bool)> {
     let mut rows = Vec::new();
+    let mut used = 0;
+    let mut cut = false;
     for record in super::worktree_maintenance::removals(common)? {
         let path = PathBuf::from(&record.path);
         let registered = trees.iter().any(|tree| tree["path"] == json!(path));
@@ -1016,6 +1035,10 @@ fn leftovers(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound);
         if !present && !registered {
             super::worktree_maintenance::forget_removal(&record.path)?;
+            continue;
+        }
+        if cut || rows.len() >= LEFTOVER_ROWS {
+            cut = true;
             continue;
         }
         if registered {
@@ -1037,9 +1060,14 @@ fn leftovers(
                 continue;
             }
         }
-        rows.push(leftover(&record, common, listing_partial, context, total));
+        let row = leftover(&record, common, listing_partial, context, total);
+        if admit_leftover(&mut used, &row) {
+            rows.push(row);
+        } else {
+            cut = true;
+        }
     }
-    Ok(rows)
+    Ok((rows, cut))
 }
 
 fn leftover(
@@ -1315,7 +1343,10 @@ pub(super) fn review(path: &Path, only: Option<&Path>, total: Instant) -> Value 
             "partial":partial || cut,"worktrees":rows,"machine":machine,"sampled_at":now()});
         if only.is_none() {
             match leftovers(&common, &trees, partial, &context, total) {
-                Ok(rows) => value["leftovers"] = json!(rows),
+                Ok((rows, cut)) => {
+                    value["leftovers"] = json!(rows);
+                    value["leftovers_partial"] = json!(cut);
+                }
                 Err(detail) => {
                     value["leftovers"] = json!([]);
                     value["leftovers_unavailable"] = json!(detail);
@@ -1378,7 +1409,8 @@ fn orphan_row(
 }
 
 /// `hgs worktrees leftovers`: records whose repository is gone. Those whose
-/// folder is gone too are resolved first.
+/// folder is gone too are resolved first. Bounded like a review's leftovers;
+/// `partial` when more records remain.
 pub(super) fn leftovers_command(args: &[String]) -> Result<Value> {
     if !args.iter().all(|arg| arg == "--json") {
         return Err("usage: hgs worktrees leftovers [--json]".into());
@@ -1386,12 +1418,25 @@ pub(super) fn leftovers_command(args: &[String]) -> Result<Value> {
     let total = Instant::now() + Duration::from_secs(20);
     let records = super::worktree_maintenance::orphan_removals()?;
     let context = context(Path::new("/"), &[], step(total, 3));
-    let rows: Vec<_> = records
-        .iter()
-        .map(|record| orphan_row(record, &context, total))
-        .collect();
-    Ok(json!({"schema":1,"leftovers":rows,"sampled_at":now(),
-        "machine":crate::config::Config::load().map(|c| c.host().to_owned()).unwrap_or_default()}))
+    let mut rows = Vec::new();
+    let mut used = 0;
+    let mut partial = false;
+    for record in &records {
+        if rows.len() >= LEFTOVER_ROWS {
+            partial = true;
+            break;
+        }
+        let row = orphan_row(record, &context, total);
+        if !admit_leftover(&mut used, &row) {
+            partial = true;
+            break;
+        }
+        rows.push(row);
+    }
+    let machine = crate::config::Config::load()
+        .map(|c| c.host().to_owned())
+        .unwrap_or_default();
+    Ok(json!({"schema":1,"leftovers":rows,"partial":partial,"sampled_at":now(),"machine":machine}))
 }
 
 /// Explicit, guarded deletion of a leftover's remaining files. Requires the
@@ -1827,8 +1872,15 @@ fn delete_tree(_path: &Path, _expected: &RootIdentity, _deadline: Instant) -> st
 
 /// "Keep folder, forget record": the leftover folder and its files stay as
 /// they are; only the private removal record goes. Bound under the repository
-/// lock to the fresh review the owner confirmed.
-pub(super) fn keep_folder_command(args: &[String]) -> Result<Value> {
+/// lock to the fresh review the owner confirmed. `true` once forgetting the
+/// record may have started: a later failure is not a refusal.
+pub(super) fn keep_folder_command(args: &[String]) -> (Result<Value>, bool) {
+    let mut attempted = false;
+    let result = keep_folder(args, &mut attempted);
+    (result, attempted)
+}
+
+fn keep_folder(args: &[String], attempted: &mut bool) -> Result<Value> {
     const USAGE: &str = "usage: hgs worktrees keep-folder --path FOLDER --common-dir DIR --fingerprint HASH [--request-id ID] [--json]";
     let mut options = BTreeMap::new();
     let mut i = 0;
@@ -1913,6 +1965,7 @@ pub(super) fn keep_folder_command(args: &[String]) -> Result<Value> {
     if row["fingerprint"] != expected {
         return Err("The leftover folder changed since the review. Review it again.".into());
     }
+    *attempted = true;
     super::worktree_maintenance::forget_removal(&record.path)?;
     Ok(json!({"status":"kept","path":path,"common_dir":common,
         "request_id":options.get("--request-id"),"machine":crate::config::Config::load()

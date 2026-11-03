@@ -258,7 +258,8 @@ int main(int argc, char **argv) {
         self.assertEqual(current['conversation_state'], 'active')
         self.assertIn('original-call', current['active_tools'])
         self.assertEqual(current['cleared_conversations'], [self.conversation_id])
-        self.assertEqual(Path(current['transcript']), self.transcript)
+        # The stored proof is canonical even when TMPDIR uses macOS's /var alias.
+        self.assertEqual(Path(current['transcript']), self.transcript.resolve())
         events = self.inspect()['events']
         self.assertEqual([e['type'] for e in events], ['SessionCleared', 'PreToolUse'])
         self.emit(dict(self.event, hook_event_name='PostToolUse'))

@@ -230,3 +230,142 @@ fn estimate_refuses_overflow_and_never_includes_filtered_or_stale_candidates() {
         Some(0)
     );
 }
+fn leftover_row(path: &str, repository: bool) -> serde_json::Value {
+    let mut raw = json!({"path":path,"kind":"leftover","verdict":"partially_removed",
+        "common_dir":"/srv/example/.git","branch":"feature/left","branch_retained":true,
+        "size":4096,"size_complete":false,"sessions":["codex/example/probe"],"process_count":0,
+        "reasons":[{"code":"sessions","message":"Zerus sessions use this folder."}],
+        "deletable":false,"fingerprint":"ab".repeat(32),
+        "removal":{"path":path,"status":"partial","reserved_at":50.0,"detail":"Permission denied"}});
+    if !repository {
+        raw["repository_available"] = json!(false);
+    }
+    raw
+}
+#[test]
+fn leftovers_form_their_own_first_group_and_never_join_a_cleanup_selection() {
+    let source = source();
+    let mut model = Model::default();
+    assert!(model.put(row(1, 0)));
+    let left = project_leftover(
+        "scope",
+        0,
+        &source,
+        &leftover_row("/srv/example/left", true),
+        true,
+        1000,
+    )
+    .unwrap();
+    assert_eq!((left.category, left.kind.as_str()), (LEFTOVERS, "leftover"));
+    assert_eq!(left.state, "Partially removed");
+    assert_eq!(left.remains, "Zerus sessions use this folder.");
+    assert_eq!(left.size, "≥ 4.00 KiB");
+    assert_eq!(left.projects, ["a"]);
+    // A malformed or mismatched row is not shown.
+    assert!(project_leftover(
+        "scope",
+        0,
+        &source,
+        &leftover_row("/srv/example/left", false),
+        true,
+        1000
+    )
+    .is_none());
+    let mut linked = leftover_row("/srv/example/left", true);
+    linked["kind"] = json!("linked");
+    assert!(project_leftover("scope", 0, &source, &linked, true, 1000).is_none());
+    let id = left.id.clone();
+    assert!(model.put(left));
+    // A vanished repository's row is the same folder's row: same scope, same ID.
+    let orphan = project_leftover(
+        "scope",
+        0,
+        &source,
+        &leftover_row("/srv/example/left", false),
+        false,
+        1000,
+    )
+    .unwrap();
+    assert_eq!(orphan.id, id);
+    assert_eq!(orphan.state, "Repository missing");
+    assert!(
+        orphan.projects.is_empty() && orphan.remains == "Keep the folder or clean it up yourself."
+    );
+    // A leftover category needs leftover data, and leftover data its category.
+    let mut forged = row(2, LEFTOVERS);
+    assert!(!model.put(forged.clone()));
+    forged.category = 1;
+    forged.leftover = model.row(&id).unwrap().leftover.clone();
+    assert!(!model.put(forged));
+    let page = model.page(&Filter::default(), 0, 1001).unwrap();
+    assert_eq!(
+        page.groups.iter().map(|g| g.category).collect::<Vec<_>>(),
+        [LEFTOVERS, 0]
+    );
+    assert_eq!(page.groups[0].name, "Partially removed");
+    assert_eq!(page.candidates, 1);
+    assert!(!model.select(&id, true));
+    assert!(!model.replace_selection(std::slice::from_ref(&id)));
+    model.select_candidates(&Filter::default(), 1001).unwrap();
+    assert!(!model.is_selected(&id));
+    let only = Filter {
+        category: Some(LEFTOVERS),
+        ..Filter::default()
+    };
+    assert_eq!(model.page(&only, 0, 1001).unwrap().total, 1);
+    assert!(model
+        .page(
+            &Filter {
+                category: Some(6),
+                ..Filter::default()
+            },
+            0,
+            1001
+        )
+        .is_err());
+}
+#[test]
+fn a_leftover_outcome_is_recorded_once_until_a_fresh_review() {
+    use zerus_client_core::worktree_leftover::Settled;
+    let source = source();
+    let mut model = Model::default();
+    let left = project_leftover(
+        "scope",
+        0,
+        &source,
+        &leftover_row("/srv/example/left", true),
+        true,
+        1000,
+    )
+    .unwrap();
+    let id = left.id.clone();
+    assert!(model.put(left.clone()));
+    assert!(!model.settle(&row(3, 0).id, Settled::Deleted));
+    assert!(model.settle(
+        &id,
+        Settled::Unknown {
+            detail: "Timed out.".into()
+        }
+    ));
+    let shown = model.row(&id).unwrap();
+    assert_eq!(shown.state, "Result unknown");
+    assert_eq!(
+        shown.remains,
+        "Timed out. An unknown result will not be retried."
+    );
+    // A second outcome never overwrites the first in the same review.
+    assert!(!model.settle(&id, Settled::Deleted));
+    assert_eq!(model.row(&id).unwrap().state, "Result unknown");
+    // The fresh review's row replaces it and may be acted on again.
+    assert!(model.put(left));
+    assert!(model
+        .row(&id)
+        .unwrap()
+        .leftover
+        .as_ref()
+        .unwrap()
+        .outcome
+        .is_none());
+    assert!(model.settle(&id, Settled::Forgotten));
+    assert_eq!(model.row(&id).unwrap().state, "Folder kept");
+}

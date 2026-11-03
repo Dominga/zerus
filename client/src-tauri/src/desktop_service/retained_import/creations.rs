@@ -30,7 +30,7 @@ impl Held {
         }
     }
 }
-/// Both historical groups use the same bounded executor and receipt rules.
+/// Closed historical groups use the same bounded executor and receipt rules.
 macro_rules! codes {
     ($($variant:ident => $suffix:literal),* $(,)?) => {
         enum Code { $($variant),* }
@@ -39,6 +39,7 @@ macro_rules! codes {
                 match group {
                     Group::Creations => match self { $(Self::$variant => concat!("creations_import_", $suffix)),* },
                     Group::LocalReads => match self { $(Self::$variant => concat!("local_reads_import_", $suffix)),* },
+                    Group::WorktreeCache => match self { $(Self::$variant => concat!("worktree_cache_import_", $suffix)),* },
                     Group::Downloads => match self { $(Self::$variant => concat!("downloads_import_", $suffix)),* },
                 }
             }
@@ -64,7 +65,12 @@ codes! {
     Waiting => "waiting",
     WorkerUnavailable => "worker_unavailable",
 }
-const GROUPS: [Group; 3] = [Group::Creations, Group::LocalReads, Group::Downloads];
+const GROUPS: [Group; 4] = [
+    Group::Creations,
+    Group::LocalReads,
+    Group::WorktreeCache,
+    Group::Downloads,
+];
 #[cfg(test)]
 type BeforeRecordHook =
     Box<dyn FnOnce(&migration::transport::StagedReceipt) -> Box<dyn Send> + Send>;
@@ -104,6 +110,7 @@ impl Report {
         match group {
             Group::Creations => &self.creations,
             Group::LocalReads => &self.local_reads,
+            Group::WorktreeCache => &self.worktree_cache,
             Group::Downloads => &self.downloads_report,
         }
         .lock()
@@ -126,6 +133,7 @@ impl Report {
         match group {
             Group::Creations => Some(&self.inputs.creations),
             Group::LocalReads => Some(&self.inputs.local_reads),
+            Group::WorktreeCache => Some(&self.inputs.worktree_cache),
             Group::Downloads => None,
         }
     }
@@ -154,6 +162,18 @@ impl Report {
     /// the managed data folder, its evidence being read on demand.
     fn source_ready(&self, group: Group) -> bool {
         match self.capture_for(group) {
+            // A paused live cache writer cannot hide its committed historical
+            // archive. retained_for still validates that archive off the GUI.
+            Some(capture) if group == Group::WorktreeCache => matches!(
+                capture.status().code,
+                "worktree_cache_source_captured"
+                    | "worktree_cache_source_not_applicable"
+                    | "worktree_cache_source_unsupported"
+                    | "worktree_cache_source_too_large"
+                    | "worktree_cache_source_changed"
+                    | "worktree_cache_source_writer_unavailable"
+                    | "worktree_cache_source_owner_unavailable"
+            ),
             Some(capture) => matches!(
                 capture.status().code,
                 "creation_source_captured"
@@ -620,3 +640,5 @@ mod downloads_tests;
 mod local_reads_tests;
 #[cfg(all(test, unix))]
 mod tests;
+#[cfg(all(test, unix))]
+mod worktree_cache_tests;

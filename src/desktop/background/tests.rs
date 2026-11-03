@@ -83,6 +83,16 @@ impl Fixture {
             creation: crate::desktop::creation_clone::Runtime::new(&config, &epoch, owner.clone())
                 .unwrap(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
+            worktree: crate::desktop::creation_worktree::Runtime::new(
+                &config,
+                &epoch,
+                owner.clone(),
+            )
+            .unwrap(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            launch: crate::desktop::creation_launch::Runtime::new(&config, &epoch, owner.clone())
+                .unwrap(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             task_start: crate::desktop::task_start_reconcile::Runtime::new(
                 &config,
                 &epoch,
@@ -253,6 +263,8 @@ fn a_cache_stop_database_error_still_stops_every_other_component() {
     assert_eq!(f.runtime.notifications.status()["stopping"], true);
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     assert_eq!(f.runtime.creation.status()["code"], "draining");
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    assert_eq!(f.runtime.worktree.status()["code"], "draining");
     let presence = f.runtime.presence.as_ref().unwrap();
     assert_eq!(presence.status()["code"], "draining");
     // Restore only this fixture connection. Subsequent original actor polling

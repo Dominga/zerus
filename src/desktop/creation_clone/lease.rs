@@ -166,6 +166,12 @@ impl Lease {
     pub fn invalidate(&self) {
         self.alive.store(false, Ordering::Release);
     }
+    pub fn alive(&self) -> bool {
+        self.alive.load(Ordering::Acquire)
+    }
+    pub fn machine_id(&self) -> &str {
+        &self.machine.id
+    }
 }
 impl Drop for Lease {
     fn drop(&mut self) {

@@ -169,6 +169,10 @@ fn only_this_legacy_cache_can_read_owned_0644_without_chmod_or_relaxing_archives
     );
     let archive = s.0.join("worktree-cache-preload-v1/original.bin");
     assert_eq!(fs::metadata(&archive).unwrap().mode() & 0o777, 0o600);
+    // The general private reader must refuse the ORIGINAL 0644 source;
+    // the scoped legacy-cache reader accepts it without changing its mode.
+    assert!(disk::read_source(&file, 16 << 20).is_err());
+    assert!(disk::read_legacy_cache(&file, 16 << 20).is_ok());
     fs::set_permissions(&archive, fs::Permissions::from_mode(0o644)).unwrap();
     assert!(snap.bytes().is_err());
     fs::set_permissions(&archive, fs::Permissions::from_mode(0o600)).unwrap();
@@ -183,8 +187,6 @@ fn only_this_legacy_cache_can_read_owned_0644_without_chmod_or_relaxing_archives
     )
     .unwrap();
     assert!(s.capture().prepare().is_err());
-    // The shared private-source entrypoint stays private.
-    assert!(disk::read_source(&file, 16 << 20).is_ok());
     crate::fsx::write_private_durable(
         &s.0.join("attention-marks.json"),
         br#"{"version":1,"marks":[],"replies":[]}"#,

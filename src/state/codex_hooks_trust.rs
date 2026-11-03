@@ -135,7 +135,7 @@ mod tests {
         assert_eq!(card(&record(), &parse(SCREEN).unwrap()), card(&record(), &parse(&narrow).unwrap()));
         assert!(parse(&SCREEN.replace("4 hooks are", "1 hook is")).is_some());
         for invalid in [SCREEN.replace(HINT, "enter confirm"), SCREEN.replace("  2.", "› 2."),
-            SCREEN.replace("won't run)", "..."), format!("Agent said:\n{SCREEN}"), format!("{SCREEN}\n› composer"),
+            SCREEN.replace("won't run)", "..."), format!("Agent said:\n{SCREEN}"), format!("{SCREEN}\n› composer"), format!("{SCREEN}\n›"), format!("{SCREEN}\n› Ask Codex to do anything"),
             SCREEN.replace("Hooks can run", "Hooks…"), SCREEN.replace("  4 hooks are new or changed.\n  Hooks can run outside the sandbox after you trust them.\n", "")] {
             assert!(parse(&invalid).is_none(), "{invalid}");
         }

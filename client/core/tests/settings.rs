@@ -1482,3 +1482,155 @@ fn unused_qt_keys_are_reported_after_every_other_family_was_handled() {
         json!(["workspace/expandedSessions", "workspace/sessionsCollapsed"])
     );
 }
+
+/// zerus-5wmh.66.5.3.12: Qt's explicit sessions dock width imports once and
+/// wins over the legacy splitter, without replacing a width chosen in Next.
+#[test]
+fn the_explicit_sessions_dock_width_wins_over_the_legacy_splitter() {
+    let scratch = Scratch::new("sessions-width");
+    let qt = scratch.0.join("qt.ini");
+    let layout = String::from_utf8(qt_layout_ini()).unwrap();
+    let with_width = |width: &str| {
+        layout
+            .replace(
+                "[workspace]\n",
+                &format!("[workspace]\nsessionsWidth={width}\n"),
+            )
+            .into_bytes()
+    };
+    let width_of = |values: Value, families: Value, outcome: Value, bytes: &[u8]| {
+        fs::write(&qt, bytes).unwrap();
+        let path = scratch.0.join("settings.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "version": 1, "seed": {"source":"qt-ini", "at":1, "keys":["workspace/theme"]},
+                "values": values, "g3": {"version":1, "families": families, "quarantine": {}},
+                "g3_outcome": outcome,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+        assert!(settings.flush_within(FLUSH));
+        let width = settings.number("workspace/sessionsWidth");
+        let report = settings.preference_report();
+        drop(settings);
+        let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        fs::remove_file(&path).unwrap();
+        (width, report, saved)
+    };
+    let splitter = |bytes: &[u8]| {
+        json!({"session-splitter": {"version":1, "family":"session-splitter", "schema":1, "source":"qt-ini",
+            "source_path": qt.to_string_lossy(), "at":1, "keys":["workspace/splitter"],
+            "sha256": zerus_desktop_migration::sha256(bytes), "source_mtime_after_switch": null}})
+    };
+    let family = |report: &Value, name: &str| {
+        report["families"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["family"] == name)
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    let bytes = with_width("540");
+    // A new install: the dock width imports. The splitter neither imported
+    // nor kept a choice, since the width came from Qt in the same pass.
+    let (width, report, _) = width_of(json!({}), json!({}), json!({}), &bytes);
+    assert_eq!(width, 540.0);
+    assert_eq!(
+        family(&report, "sessions-width")["imported"],
+        json!(["workspace/sessionsWidth"])
+    );
+    let legacy = family(&report, "session-splitter");
+    assert_eq!(
+        (&legacy["imported"], &legacy["kept"]),
+        (&json!([]), &json!([]))
+    );
+    // A malformed splitter beside an imported dock width is neither kept nor waiting.
+    let malformed = String::from_utf8(bytes.clone())
+        .unwrap()
+        .lines()
+        .map(|line| {
+            if line.starts_with("splitter=") {
+                "splitter=@ByteArray(bad)".to_owned()
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let (width, report, saved) = width_of(json!({}), json!({}), json!({}), malformed.as_bytes());
+    assert_eq!(width, 540.0);
+    let legacy = family(&report, "session-splitter");
+    assert_eq!(
+        (&legacy["imported"], &legacy["kept"]),
+        (&json!([]), &json!([]))
+    );
+    assert!(saved["g3"]["quarantine"].get("session-splitter").is_none());
+    // The splitter import wrote the width from these same bytes: replaced,
+    // and its import no longer holds the width. A record from before
+    // outcomes has value equality as its only evidence.
+    for outcome in [
+        json!({"session-splitter": {"imported":["workspace/splitter"], "kept":[]}}),
+        json!({}),
+    ] {
+        let (width, report, saved) = width_of(
+            json!({"workspace/sessionsWidth": 380}),
+            splitter(&bytes),
+            outcome.clone(),
+            &bytes,
+        );
+        assert_eq!(width, 540.0, "{outcome}");
+        assert_eq!(
+            family(&report, "sessions-width")["imported"],
+            json!(["workspace/sessionsWidth"])
+        );
+        if outcome.get("session-splitter").is_some() {
+            assert_eq!(
+                saved["g3_outcome"]["session-splitter"]["imported"],
+                json!([])
+            );
+        }
+    }
+    // The splitter recorded the person's own width (kept): never replaced,
+    // even when it equals the splitter's value (probe PB).
+    let (width, _, _) = width_of(
+        json!({"workspace/sessionsWidth": 380}),
+        splitter(&bytes),
+        json!({"session-splitter": {"imported":[], "kept":["workspace/splitter"]}}),
+        &bytes,
+    );
+    assert_eq!(width, 380.0);
+    // A width chosen in Next, or Qt bytes changed since that import: kept.
+    let (width, report, _) = width_of(
+        json!({"workspace/sessionsWidth": 600}),
+        splitter(&bytes),
+        json!({}),
+        &bytes,
+    );
+    assert_eq!(width, 600.0);
+    assert_eq!(
+        family(&report, "sessions-width")["kept"],
+        json!(["workspace/sessionsWidth"])
+    );
+    let (width, _, _) = width_of(
+        json!({"workspace/sessionsWidth": 380}),
+        splitter(b"[workspace]\n"),
+        json!({}),
+        &bytes,
+    );
+    assert_eq!(width, 380.0);
+    // Qt's 0 is its default: nothing imports and the splitter applies.
+    let (width, _, saved) = width_of(json!({}), json!({}), json!({}), &with_width("0"));
+    assert_eq!(width, 380.0);
+    assert!(saved["g3"]["families"].get("sessions-width").is_some());
+    // Outside Qt's 32-bit toInt(): the family waits.
+    let (_, _, saved) = width_of(json!({}), json!({}), json!({}), &with_width("2147483648"));
+    assert_eq!(
+        saved["g3"]["quarantine"]["sessions-width"]["reason"],
+        "invalid sessions width"
+    );
+}

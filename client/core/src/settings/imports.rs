@@ -16,6 +16,8 @@ const FAMILIES: &[&str] = &[
     "termination-default",
     "project-vivid",
     "window-geometry",
+    // Before the legacy splitter: Qt's explicit dock width wins over it.
+    "sessions-width",
     "session-splitter",
     "project-folder-splitter",
     "inspector-panel",
@@ -282,6 +284,7 @@ fn matches(family: &str, key: &str) -> bool {
         "termination-default" => key == "workspace/removeWorktreeAfterTermination",
         "task-preferences" => key == "tasks/onlySession",
         "window-geometry" => key == "sessions/geometry",
+        "sessions-width" => key == "workspace/sessionsWidth",
         "session-splitter" => key == "workspace/splitter",
         "project-folder-splitter" => key == "workspace/projectFolderSplit",
         "no-consumer" => NO_CONSUMER.contains(&key),
@@ -411,6 +414,87 @@ fn project_vivid(
     Ok((values, kept))
 }
 
+/// What Qt's explicit sessions dock width does in Next.
+#[derive(Clone)]
+enum Width {
+    /// Qt keeps no explicit width (0 is its default).
+    None,
+    /// Next has no width yet.
+    Import(Value),
+    /// Next's width is the one the legacy splitter import wrote from these same
+    /// Qt bytes, so the explicit dock width wins over it.
+    Replace(Value),
+    /// Next's width is the person's own choice.
+    Kept,
+}
+
+/// Qt restores the dock with `workspace/sessionsWidth` read by a 32-bit
+/// toInt(), 0 meaning its default (SessionsWindow.cpp:1633, 5873). A value
+/// outside the i32 domain, or not a number, waits. The explicit width
+/// replaces a Next width only when that width is exactly the one the
+/// handled session-splitter family imported from the same Qt bytes (its
+/// record's source hash); any other Next width is the person's and stays.
+fn sessions_width(
+    value: &QtValue,
+    contents: &Contents,
+    splitter: Option<&FamilyRecord>,
+    snapshot: Option<&QtSnapshot>,
+) -> Result<Width, &'static str> {
+    // When the splitter family recorded what it did, only its own import counts;
+    // a record from before outcomes leaves value equality as the only evidence.
+    let splitter_imported = match contents
+        .extra
+        .get(OUTCOME)
+        .and_then(|outcome| outcome.get("session-splitter"))
+    {
+        Some(outcome) => names_include(&outcome["imported"], "workspace/splitter"),
+        None => true,
+    };
+    let width = match value.to_long() {
+        (width, true) if i32::try_from(width).is_ok() => width,
+        _ => return Err("invalid sessions width"),
+    };
+    if width <= 0 {
+        return Ok(Width::None);
+    }
+    let kind = super::find("workspace/sessionsWidth")
+        .ok_or("invalid preference identity")?
+        .kind;
+    let imported = super::from_qt(kind, value);
+    let Some(current) = contents.values.get("workspace/sessionsWidth") else {
+        return Ok(Width::Import(imported));
+    };
+    let written_by_splitter = splitter_imported
+        && splitter.zip(snapshot).is_some_and(|(record, snapshot)| {
+            record.sha256.as_deref() == Some(snapshot.sha256.as_str())
+                && snapshot
+                    .values
+                    .get("workspace/splitter")
+                    .and_then(|splitter| converted("workspace/splitter", splitter).ok())
+                    .is_some_and(|legacy| &legacy == current)
+        });
+    Ok(if written_by_splitter {
+        Width::Replace(imported)
+    } else {
+        Width::Kept
+    })
+}
+
+fn names_include(names: &Value, key: &str) -> bool {
+    names
+        .as_array()
+        .is_some_and(|names| names.iter().any(|name| name == key))
+}
+
+/// Whether the sessions-width family imported Next's width from Qt's dock.
+fn dock_width_imported(contents: &Contents) -> bool {
+    contents
+        .extra
+        .get(OUTCOME)
+        .and_then(|outcome| outcome.get("sessions-width"))
+        .is_some_and(|outcome| names_include(&outcome["imported"], "workspace/sessionsWidth"))
+}
+
 /// A Qt key the family imports: Next has no value for it and the original
 /// switch seed never handled it.
 fn candidate_key(contents: &Contents, handled_keys: &BTreeSet<String>, key: &str) -> bool {
@@ -501,10 +585,30 @@ pub(super) fn apply(
             .collect();
         let mut candidate = contents.clone();
         let mut vivid_kept = false;
+        let mut width = Width::None;
         let converted: Result<Map<String, Value>, _> = if entries.len() > MAX_KEYS {
             Err("family exceeds its key limit")
         } else if *family == "no-consumer" {
             Ok(Map::new())
+        } else if *family == "sessions-width" {
+            match entries.first() {
+                Some((_, value)) => sessions_width(
+                    value,
+                    contents,
+                    journal.families.get("session-splitter"),
+                    snapshot,
+                )
+                .map(|found| {
+                    width = found.clone();
+                    match found {
+                        Width::Import(value) | Width::Replace(value) => {
+                            Map::from_iter([("workspace/sessionsWidth".to_owned(), value)])
+                        }
+                        _ => Map::new(),
+                    }
+                }),
+                None => Ok(Map::new()),
+            }
         } else if *family == "project-vivid" {
             match entries.first() {
                 Some((key, value)) if !handled_keys.contains(*key) => {
@@ -559,15 +663,29 @@ pub(super) fn apply(
         };
         // The project fill is one Qt key for many projects: imported when some
         // project's fill imported, kept when some project kept a Next value.
-        let (imported, kept) = if *family == "project-vivid" {
+        let (imported, kept) = if *family == "sessions-width" {
+            let key = entries.first().map(|(key, _)| key.as_str());
+            match width {
+                Width::Import(_) | Width::Replace(_) => (key.into_iter().collect(), vec![]),
+                Width::Kept => (vec![], key.into_iter().collect()),
+                Width::None => (vec![], vec![]),
+            }
+        } else if *family == "project-vivid" {
             let key = entries.first().map(|(key, _)| key.as_str());
             (
                 key.filter(|_| !values.is_empty()).into_iter().collect(),
                 key.filter(|_| vivid_kept).into_iter().collect(),
             )
+        } else if *family == "session-splitter" && dock_width_imported(contents) {
+            // The width came from Qt's explicit dock width, not the person's choice.
+            (vec![], vec![])
         } else {
             (imported, kept)
         };
+        // The splitter import's own value gives way to the explicit dock width.
+        if matches!(width, Width::Replace(_)) {
+            candidate.values.remove("workspace/sessionsWidth");
+        }
         for (key, value) in values {
             candidate.values.entry(key).or_insert(value);
         }
@@ -582,6 +700,12 @@ pub(super) fn apply(
                 (*family).into(),
                 json!({"imported": imported, "kept": kept}),
             );
+            // The splitter's earlier import no longer holds the width.
+            if matches!(width, Width::Replace(_)) {
+                if let Some(splitter) = outcome.get_mut("session-splitter") {
+                    splitter["imported"] = json!([]);
+                }
+            }
             candidate
                 .extra
                 .insert(OUTCOME.into(), Value::Object(outcome));

@@ -475,3 +475,47 @@ fn a_preload_source_serializes_exactly_as_its_reference() {
     let back: Source = serde_json::from_slice(&serde_json::to_vec(&reference).unwrap()).unwrap();
     assert_eq!(back, Source::Preload(reference));
 }
+
+#[test]
+fn cache_journal_isolated_from_existing_groups_and_legacy_versions() {
+    let s = Scratch::new();
+    let original = s.initial();
+    let j = Journal::for_group(Group::WorktreeCache, &s.0, &"a".repeat(64)).unwrap();
+    let local_journal = Journal::for_group(Group::LocalReads, &s.0, &"a".repeat(64)).unwrap();
+    let local_record =
+        Record::new_group(Group::LocalReads, "a".repeat(64), s.reference(), 1).unwrap();
+    let local_original = local_journal.save(local_record, None).unwrap();
+    let local_bytes = fs::read(s.0.join(Group::LocalReads.file())).unwrap();
+    let creation_bytes = fs::read(s.0.join(Group::Creations.file())).unwrap();
+    assert!(j.load().unwrap().is_none());
+    assert!(j.save(local_original.record, None).is_err());
+    assert!(j.save(original.record.clone(), None).is_err());
+    let local = Record::new_group(Group::WorktreeCache, "a".repeat(64), s.reference(), 1).unwrap();
+    assert_eq!(local.version, 2);
+    assert_ne!(local.scope, original.record.scope);
+    let local = j.save(local, None).unwrap();
+    assert_eq!(s.journal().load().unwrap().unwrap().sha256, original.sha256);
+    assert_ne!(local.sha256, original.sha256);
+    assert!(s
+        .journal()
+        .save(local.record.clone(), Some(&original.sha256))
+        .is_err());
+    let mut v1 = local.record.clone();
+    v1.version = 1;
+    v1.recorded_attempt = None;
+    assert!(!v1.valid());
+    assert!(j.save(v1, Some(&local.sha256)).is_err());
+    let mut other = local.record.clone();
+    other.scope = SCOPE.into();
+    assert!(other.valid()); // Structural validity does not change the selected journal.
+    assert!(j.save(other, Some(&local.sha256)).is_err());
+    assert_eq!(j.load().unwrap().unwrap().sha256, local.sha256);
+    assert_eq!(
+        fs::read(s.0.join(Group::LocalReads.file())).unwrap(),
+        local_bytes
+    );
+    assert_eq!(
+        fs::read(s.0.join(Group::Creations.file())).unwrap(),
+        creation_bytes
+    );
+}

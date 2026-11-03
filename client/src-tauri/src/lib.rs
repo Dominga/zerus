@@ -1633,6 +1633,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         organization::overview::worktree_overview_candidates,
         organization::overview::worktree_overview_close,
         organization::overview::worktree_overview_inspect,
+        organization::overview::worktree_leftover_open_folder,
         organization::overview::worktree_leftover_keep,
         organization::overview::worktree_leftover_delete,
         organization::clones::project_clone_open,

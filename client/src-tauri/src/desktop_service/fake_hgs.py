@@ -169,6 +169,9 @@ def hint(seq, revision, selected=projection, computer=''):
     frame(seq, 'catalog_changed', {'computer': computer, 'incarnation': 2 if computer else 1, 'generation': 1,
           'projection': selected, 'revision': revision, 'online': True, 'last_known': False,
           'complete': True, 'reset_required': False, 'changes_abi': abi, 'attention_counts': status()['attention_counts']})
+    if config.get('replace_projection') and selected == 'b' * 32 and (config.get('projection_publication_gate') or os.environ.get('ZERUS_TEST_SERVICE_PROJECTION_PUBLICATION_GATE') == '1'):
+        # Hold this exact publication boundary until the next page selects state.
+        wait(root / 'replacement-page-selected')
 
 
 def row(key):
@@ -573,8 +576,6 @@ elif args == ['desktop', 'watch', '--json']:
         # The next request must see the state announced by this hint.
         (root / 'projection-replaced').touch()
         hint(1, '0', 'b' * 32)
-        if config.get('projection_publication_gate') or os.environ.get('ZERUS_TEST_SERVICE_PROJECTION_PUBLICATION_GATE') == '1':
-            wait(root / 'replacement-page-selected')
     if config.get('delta_live'):
         wait(root / 'send-delta')
         hint(1, '1')

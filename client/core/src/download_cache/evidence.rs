@@ -236,6 +236,17 @@ fn folder(root: &Path) -> io::Result<(PathBuf, String, Option<String>)> {
     Ok((canonical, object, birth))
 }
 
+/// A slot whose seed is verified absent: the writer made it and stopped
+/// before publishing anything, a prefix it recovers from. That is "no
+/// evidence" only if the receipt is verified absent too; anything else stays
+/// fenced as Unreadable.
+fn unpublished(slot: &Path) -> Evidence {
+    match missing(&slot.join("receipt.json")) {
+        Ok(true) => Evidence::None,
+        _ => Evidence::Unreadable,
+    }
+}
+
 /// Whether `path` is verified missing: only NotFound says so. Any other
 /// error (a permission, an unreadable parent) is an error, never "missing".
 fn missing(path: &Path) -> io::Result<bool> {
@@ -620,6 +631,7 @@ pub fn status(root: &Path) -> Evidence {
     }
     let seed = match read_json::<Seed>(&slot.join("identity.json")) {
         Ok(Some(seed)) if seed.binds(&object, birth.as_deref()) => seed,
+        Ok(None) => return unpublished(&slot),
         _ => return Evidence::Unreadable,
     };
     match read_json::<Original>(&slot.join("receipt.json")) {
@@ -651,6 +663,11 @@ pub fn evidence(root: &Path) -> Evidence {
     match missing(&slot) {
         Ok(true) => return Evidence::None,
         Ok(false) => {}
+        Err(_) => return Evidence::Unreadable,
+    }
+    match read_json::<Seed>(&slot.join("identity.json")) {
+        Ok(Some(_)) => {}
+        Ok(None) => return unpublished(&slot),
         Err(_) => return Evidence::Unreadable,
     }
     match Snapshot::open(&slot, &object, birth.as_deref()) {

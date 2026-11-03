@@ -634,3 +634,25 @@ fn an_inaccessible_evidence_folder_is_unreadable_not_missing() {
         assert_eq!(trimmed.as_deref(), Some(NOT_RECORDED));
     }
 }
+
+/// review-n P2 on #1256: a slot the writer made but had not yet published
+/// (no seed, no receipt) is "no evidence", as the writer treats it; a
+/// receipt without its seed stays Unreadable.
+#[test]
+fn an_unpublished_slot_is_none_and_a_receipt_without_its_seed_is_unreadable() {
+    let folder = Folder::new();
+    folder.plain("old.txt", b"old cache", 90_000);
+    let (canonical, object, birth) = super::folder(&folder.0).unwrap();
+    let slot = slot(&canonical, &object, birth.as_deref());
+    private_dir(&folder.0.join(DIR));
+    private_dir(&slot);
+    assert_eq!(status(&folder.0), Evidence::None);
+    assert_eq!(evidence(&folder.0), Evidence::None);
+    // The writer recovers that prefix and captures.
+    assert_eq!(ON.trim(&folder.0, 0, NOW).error, None);
+    assert!(matches!(status(&folder.0), Evidence::Captured(_)));
+    // A receipt whose seed is gone is fenced, never "none".
+    fs::remove_file(slot.join("identity.json")).unwrap();
+    assert_eq!(status(&folder.0), Evidence::Unreadable);
+    assert_eq!(evidence(&folder.0), Evidence::Unreadable);
+}

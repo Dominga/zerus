@@ -36,6 +36,26 @@ fn long_commands_have_byte_bounded_previews_and_full_text_digests() {
 }
 
 #[test]
+fn command_previews_back_up_inside_multibyte_utf8_code_points() {
+    let r = record("codex");
+    for (character, count, kept) in [("é", 257, 254), ("€", 172, 169), ("🦀", 129, 127)] {
+        let command = character.repeat(count);
+        assert!(
+            !command.is_char_boundary(509),
+            "fixture must cut inside a code point"
+        );
+        let job = new_job(&r, "main", "call", &command, 1.);
+        assert_eq!(job["command"], format!("{}…", character.repeat(kept)));
+        assert!(string(&job, "command").len() <= 512);
+        assert_eq!(job["command_truncated"], true);
+        assert_eq!(
+            job["command_digest"],
+            format!("{:x}", Sha256::digest(command.as_bytes()))
+        );
+    }
+}
+
+#[test]
 fn legacy_commands_load_and_migrate_on_a_record_write_without_changing_job_state() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("record.json");

@@ -570,6 +570,17 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         paths=[path for path,_ in self.records()]
         self.assertIn(str(link),paths);self.assertNotIn(str(missing),paths)
         self.assertIn(str(link),[row['path'] for row in json.loads(listed.stdout)['leftovers']])
+    # zerus-ty94 #2: a targeted review reports that worktree's own leftover
+    # and nothing about any other record.
+    def test_a_targeted_review_reports_only_its_own_leftover(self):
+        tree,_,_=self.partial('targeted');other,_,_=self.partial('untargeted')
+        data=self.review(worktree=tree)
+        self.assertEqual(data['worktrees'],[])
+        self.assertEqual([row['path'] for row in data['leftovers']],[str(tree.resolve())])
+        self.assertEqual(data['leftovers'][0]['verdict'],'partially_removed');self.assertFalse(data['leftovers_partial'])
+        live=self.linked('still-live');data=self.review(worktree=live)
+        self.assertEqual([row['path'] for row in data['worktrees']],[str(live.resolve())]);self.assertEqual(data['leftovers'],[])
+        self.assertEqual(len(self.records()),2)
     def test_an_interrupted_removal_stays_pending_for_review(self):
         self.fake("if any(sys.argv[i:i+2]==['worktree','remove'] for i in range(len(sys.argv)-1)):\n import signal,subprocess\n subprocess.run(["+repr(GIT)+",*sys.argv[1:]])\n os.kill(os.getppid(),signal.SIGKILL);sys.exit(1)\nelse: os.execv("+repr(GIT)+",["+repr(GIT)+",*sys.argv[1:]])\n")
         tree,row,result=self.partial('interrupted')

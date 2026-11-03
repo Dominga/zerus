@@ -1017,19 +1017,24 @@ fn repository_lock(common: &Path) -> Result<std::fs::File> {
 /// resolved; a record whose worktree is still registered is resolved only when
 /// no removal holds the repository lock. Nothing here deletes or retries.
 /// At most `LEFTOVER_ROWS` rows within `LEFTOVER_BYTES`; `true` when more
-/// records remain unreviewed.
+/// records remain unreviewed. A targeted review (`only`, as given and
+/// resolved) looks at that worktree's own record alone.
 fn leftovers(
     common: &Path,
     trees: &[Value],
     listing_partial: bool,
     context: &Context,
     total: Instant,
+    only: Option<&(PathBuf, PathBuf)>,
 ) -> Result<(Vec<Value>, bool)> {
     let mut rows = Vec::new();
     let mut used = 0;
     let mut cut = false;
     for record in super::worktree_maintenance::removals(common)? {
         let path = PathBuf::from(&record.path);
+        if only.is_some_and(|(raw, resolved)| &path != raw && &path != resolved) {
+            continue;
+        }
         let registered = trees.iter().any(|tree| tree["path"] == json!(path));
         let present = !matches!(fs::symlink_metadata(&path),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound);
@@ -1341,16 +1346,16 @@ pub(super) fn review(path: &Path, only: Option<&Path>, total: Instant) -> Value 
         let base: Vec<_> = context.bases.iter().map(|(name, _)| name.clone()).collect();
         let mut value = json!({"state":"ok","path":path,"common_dir":common,"base":base,
             "partial":partial || cut,"worktrees":rows,"machine":machine,"sampled_at":now()});
-        if only.is_none() {
-            match leftovers(&common, &trees, partial, &context, total) {
-                Ok((rows, cut)) => {
-                    value["leftovers"] = json!(rows);
-                    value["leftovers_partial"] = json!(cut);
-                }
-                Err(detail) => {
-                    value["leftovers"] = json!([]);
-                    value["leftovers_unavailable"] = json!(detail);
-                }
+        // A targeted review reports only that worktree's leftover, so a
+        // removal that stopped partway is visible where it was asked about.
+        match leftovers(&common, &trees, partial, &context, total, wanted.as_ref()) {
+            Ok((rows, cut)) => {
+                value["leftovers"] = json!(rows);
+                value["leftovers_partial"] = json!(cut);
+            }
+            Err(detail) => {
+                value["leftovers"] = json!([]);
+                value["leftovers_unavailable"] = json!(detail);
             }
         }
         Ok::<_, GitError>(value)

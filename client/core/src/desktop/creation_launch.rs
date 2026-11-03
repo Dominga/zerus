@@ -480,15 +480,19 @@ pub enum Observation {
         binding_unresolved: bool,
     },
 }
-/// A session name as the launch records hold it: two or three nonempty parts.
-fn session_name(value: &str) -> bool {
+/// A session name as the launch records hold it: two or three parts, each
+/// under the shared naming rule of new sessions, rename and fork (nonempty,
+/// no `:` or `.`, no surrounding whitespace, no control characters). Internal
+/// spaces are valid, as in a launch's own `tag`.
+pub fn session_name(value: &str) -> bool {
     let parts: Vec<_> = value.split('/').collect();
     value.len() <= NAME_BYTES
         && (2..=3).contains(&parts.len())
         && parts.iter().all(|part| {
             !part.is_empty()
                 && !part.contains([':', '.'])
-                && !part.chars().any(|c| c.is_control() || c.is_whitespace())
+                && part.trim() == *part
+                && !part.chars().any(char::is_control)
         })
 }
 impl Observation {
@@ -919,6 +923,66 @@ mod tests {
             !lookup.matches(&query),
             "a worktree reply is not a launch reply"
         );
+    }
+
+    #[test]
+    fn evidence_for_a_tag_with_internal_spaces_matches_its_launch() {
+        let mut intent = checkpoint();
+        let mut raw: Value = serde_json::from_str(&intent.original).unwrap();
+        raw["tag"] = json!("my task");
+        intent.original = serde_json::to_string(&raw).unwrap();
+        let verified = intent.verify().unwrap();
+        let arguments = verified.plan.arguments();
+        let at = arguments.iter().position(|a| a == "-n").unwrap();
+        assert_eq!(arguments[at + 1], "my task");
+        let query =
+            Query::for_plan(verified.intent.scope.clone(), ID.into(), &verified.plan).unwrap();
+        let mut receipt = exited(&verified, 0, "");
+        receipt.phase = Phase::Unknown;
+        receipt.launch = None;
+        for observation in [
+            Observation::ObservedBinding {
+                name: "codex/repo/my task".into(),
+                agent: "codex".into(),
+                run_id: OTHER.into(),
+                conversation_id: EPOCH.into(),
+            },
+            Observation::ObservedEnd {
+                name: "codex/repo/my task".into(),
+                code: 0,
+                ended_at: 2.0,
+                binding_unresolved: true,
+            },
+        ] {
+            assert!(observation.valid(), "{observation:?}");
+            let lookup = Lookup {
+                abi: ABI.into(),
+                request_id: query.request_id.clone(),
+                scope: query.scope.clone(),
+                read_only: true,
+                found: true,
+                receipt: Some(receipt.clone()),
+                observation: Some(observation),
+            };
+            assert!(lookup.matches(&query));
+        }
+        // The shared per-part rule still holds every other bound.
+        for name in [
+            "codex/repo/ my task",
+            "codex/repo/my task ",
+            "codex/repo/my.task",
+            "codex/repo/my:task",
+            "codex/repo/my\ttask",
+            "codex/repo//task",
+            "codex",
+            "codex/a/b/c",
+        ] {
+            assert!(!session_name(name), "{name:?}");
+        }
+        assert!(!session_name(&format!(
+            "codex/repo/{}",
+            "x".repeat(NAME_BYTES)
+        )));
     }
 
     #[test]

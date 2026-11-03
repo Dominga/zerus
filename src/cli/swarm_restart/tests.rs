@@ -2,6 +2,9 @@ use super::*;
 #[cfg(target_os = "linux")]
 use std::sync::atomic::AtomicBool;
 
+#[cfg(target_os = "linux")]
+mod identity;
+
 fn args(words: &[&str]) -> Vec<String> {
     words.iter().map(|s| (*s).to_owned()).collect()
 }
@@ -57,6 +60,10 @@ fn full_cli_child() {
     assert!(env::var_os("HGS_SESSION").is_none());
     assert!(env::var_os("HGS_RUN_ID").is_none());
     let mode = env::var("HGS_SWARM_ENTRY_MODE").unwrap();
+    if mode.starts_with("identity-") {
+        identity::child(&mode);
+        return;
+    }
     let mut command = args(&["desktop", "swarm-restart", "--json"]);
     match mode.as_str() {
         "dry" => command.insert(0, "--dry-run".into()),

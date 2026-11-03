@@ -5,6 +5,7 @@ use crate::desktop::SWARM_RESTART_ACQUIRING as ACQUIRING;
 use serde_json::{json, Value};
 use std::{
     env,
+    io::Read,
     sync::{atomic::Ordering, mpsc},
     thread,
     time::{Duration, Instant},
@@ -114,8 +115,7 @@ impl Request {
             ));
         }
         if let Some(expected) = self.expected {
-            let actual =
-                crate::swarm::local_node_id(&config).map_err(|e| Error::new(1, e.to_string()))?;
+            let actual = existing_machine_until(&config, until)?;
             if actual != expected {
                 return Err(Error::new(
                     1,
@@ -134,6 +134,32 @@ impl Request {
             Err(Error::new(2, "Windows desktop restart is unavailable"))
         }
     }
+}
+/// Writers replace this snapshot atomically. Identity admission only reads an
+/// existing catalog: it must never initialize, lock, refresh or save the store,
+/// including when an abandoned filesystem read finishes after the deadline.
+fn existing_machine_until(config: &Config, until: Instant) -> Result<String> {
+    const MAX_BYTES: usize = 128 * 1024 * 1024;
+    check_deadline(until)?;
+    let mut file = std::fs::File::open(config.dir.join("swarm/catalog.json"))?;
+    let mut bytes = Vec::new();
+    let mut chunk = [0; 64 * 1024];
+    loop {
+        check_deadline(until)?;
+        let count = file.read(&mut chunk)?;
+        check_deadline(until)?;
+        if count == 0 {
+            break;
+        }
+        if bytes.len() + count > MAX_BYTES {
+            return Err(Error::new(1, "Shared project catalog is too large"));
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+    }
+    let actual =
+        crate::swarm::existing_node_id(&bytes).map_err(|e| Error::new(1, e.to_string()))?;
+    check_deadline(until)?;
+    Ok(actual)
 }
 fn check_deadline(until: Instant) -> Result<()> {
     if Instant::now() >= until {

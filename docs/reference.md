@@ -4041,6 +4041,8 @@ remain available for manual use.
 
 The explicit restart command has one two-second deadline from process entry,
 including Windows PATH preparation, configuration reads and the pipe exchange.
+An expected-machine guard reads only the existing catalog identity; it never
+initializes or refreshes the store, takes its write lock, or saves metadata.
 On timeout it prints one JSON result with `outcome: "unknown"` and
 `retry_allowed: false`, then exits with code 3. Inspect service status before
 another attempt; the timed-out request is never replayed automatically.

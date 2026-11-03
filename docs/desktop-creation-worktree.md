@@ -79,9 +79,10 @@ a pinned directory object.
   rename; Git then creates the checkout inside that published object.
 - **Steps.** Destination, Checkout, Verify, Track and Own are separate actor
   checks, so no write after `worktree add` goes unchecked.
-- **Track.** The upstream writes run inside the pinned common directory
-  (`--git-dir=.`, so Git resolves the held object's own path), with no
-  checkout or path indirection.
+- **Track.** Always a checked step. With a safe inherited upstream, its
+  writes run inside the pinned common directory (`--git-dir=.`, so Git
+  resolves the held object's own path), with no checkout or path indirection.
+  Without one it writes nothing, so every repository passes the same six steps.
 - **Metadata entry.** Right after `worktree add`, the entry Git made is pinned
   by descriptor: named by the gitfile read through the pinned destination,
   opened through the pinned common directory's `worktrees`, and accepted only

@@ -559,6 +559,31 @@ mod tests {
             std::path::PathBuf::from(receipt["creation_owner"]["metadata"].as_str().unwrap());
         assert!(metadata.join("zerus-owner.json").is_file());
 
+        // A repository without an inherited upstream passes the same six
+        // checked steps; Track writes nothing there.
+        let calls = std::sync::Mutex::new(Vec::new());
+        let repo = repository(&base.join("no-upstream"), false);
+        let (destination, receipt) = owned_git_create(&repo, &id(), |step| {
+            calls.lock().unwrap().push(step);
+            Ok(())
+        });
+        assert_eq!(receipt["status"], "created", "{receipt}");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                Step::Reserve,
+                Step::Destination,
+                Step::Checkout,
+                Step::Verify,
+                Step::Track,
+                Step::Own
+            ]
+        );
+        assert!(destination.join(".git").is_file() && branch_exists(&repo));
+        assert!(config(&repo, "branch.zerus-owned.remote").is_none());
+        assert!(receipt["upstream"].is_null(), "{receipt}");
+        assert!(receipt["creation_owner"]["id"].is_string(), "{receipt}");
+
         // A refused Track or Own leaves its write undone and the result unconfirmed.
         for (name, refused) in [("track", Step::Track), ("own", Step::Own)] {
             let repo = repository(&base.join(name), true);

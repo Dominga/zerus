@@ -1932,11 +1932,38 @@ retain the `+` uncertainty marker. OpenCode child sessions are not shown in this
 version ([OpenCode controls](opencode.md#controls-and-limits)). Inspection reports native
 tracking evidence without changing reply/read identities or restarting agents.
 
+<a id="fork-session"></a>
+
 **Fork session…** creates an independent native conversation in the same folder,
 next to the original session in its group. Files remain shared. The CLI is
 `hgs [@host] fork SESSION [-n NAME] [-d] [--archive ID]`; support depends on the agent.
 DeepSeek uses the native fork of a supported resident host
-([DeepSeek](#deepseek)).
+([DeepSeek](#deepseek)). A session name is a label: an archived session never
+blocks a new session or a fork from its name. Without `-n` the fork is named
+`TAG-fork`; a name a live or saved session already uses gets the first free `-2`,
+`-3`… instead of failing, with or without `-n`. The fork dialog shows the name the
+fork will get, and the new session is recognized by its fork parent, never by a
+name another session took meanwhile. Inspection reports `fork_parent_id` and
+`fork_source_name` as null for a session that is not a fork; only an hgs that
+predates these fields is trusted for the exact name. A failed inspection never
+adopts a session and is retried, at most three times, as the list changes. A
+fork the desktop has not recognized within two minutes is reported as not
+confirmed and Fork is available again; the session may still be starting.
+An hgs older than this behaviour still refuses a name that only an archived
+session holds; update that computer or choose another name.
+
+A fork starts in its source session's project, including a fork of an archived
+session. Once the fork's binding exists, the CLI writes that membership through
+the same catalog owner as other project changes, for the desktop action,
+`hgs fork` and DeepSeek forks alike, and never moves other rows. A source in Inbox,
+in a project that no longer exists or with an unresolved project choice gives the
+fork an explicit Inbox membership. A source without a membership leaves the fork
+without one, so both follow the same default project. A fork name that already
+has a membership keeps it. Without a catalog, or if the catalog stays busy for
+3 seconds, the fork still starts in the default project. The desktop then places
+the fork right after its original and opens it, once its inspection names the
+source conversation as its parent, even before a Codex fork has a conversation ID
+of its own. With an hgs that predates the parent field it waits for that ID.
 
 Codex may defer `SessionStart` until the fork's first message. Activity enables
 Send once Zerus verifies that the supervised process owns an independent child
@@ -2019,8 +2046,9 @@ that remain outside the POSIX shared catalog. It does not resolve saved aliases
 or infer from a parent folder. A native project hint must name the same known
 Swarm catalog; a foreign hint never selects a same-ID local project.
 A new tracked CLI session also infers its initial project from that computer's
-existing catalog; resume, fork, adoption,
-manual assignments and explicit unassignment are never reassigned. This optional
+existing catalog; resume, adoption,
+manual assignments and explicit unassignment are never reassigned. A fork
+takes its source's project instead ([Fork session…](#fork-session)). This optional
 metadata step does not initialize a catalog, join a swarm or create a repository.
 The general **New session** action inherits the selected session's project,
 computer and matching project folder. For a linked worktree, a verified catalog
@@ -2573,7 +2601,11 @@ that worktree, such as the cleanup after Terminate) as a **leftover**
 (`worktree-leftovers-v1`), with a fresh bounded listing of the remaining files,
 the retained branch and current processes or sessions. The cleanup after
 Terminate keeps such a folder with "Git no longer tracks this folder, but files
-remain" instead of an unverified-folder error. A missing Git
+remain" instead of an unverified-folder error. A targeted review matches the
+worktree's whole path, as given or resolved through links, never a prefix. The
+targeted reviews behind `hgs worktrees inspect` and `remove` therefore also
+resolve that worktree's own record under the rules below, so inspection, otherwise
+read-only, may drop a record whose folder is gone or that Git tracks again. A missing Git
 registration is never treated as proof of deletion, and the removal is never
 retried. **Keep folder, forget record** (`hgs worktrees keep-folder`) checks the
 reviewed leftover again under the repository lock and drops only its record;
@@ -2604,19 +2636,47 @@ completion is confirmed through that parent. Only after those checks does deleti
 owner write access to their own folders inside the reviewed tree, which is what
 blocked Git; it never touches the branch. If it
 stops partway, the record stays with the reason and the deletion is never
-retried; review the folder again. Deleting leftover files is available on Linux
-and macOS. A record resolves by itself once its
+retried; review the folder again. Each confirmation is consumed by a durable,
+unique attempt reference before filesystem changes begin. If that reference
+cannot be saved, deletion refuses without changing files. Even if no file
+changed and saving the stopped outcome fails, the old confirmation is no longer
+valid; another attempt needs a fresh review. Deleting leftover files is available
+on Linux and macOS. A record resolves by itself once its
 folder is gone, or once a fresh worktree list taken under the repository lock shows
 that Git tracks the worktree again. On Linux and macOS the Git that removes a
 worktree inherits the repository lock (an flock belongs to the open file, and only
 that Git receives it), and hgs releases the lock by closing it, never by an explicit
 unlock. The lock therefore stays taken while that Git, or anything it started, still
 runs, even after hgs is killed, and no review resolves the record in that time. On
-Windows the lock ends with hgs. A leftover whose repository is gone is listed
+Windows the lock ends with hgs. If worktree operations keep reporting that another
+one is running (for example because a custom `git` wrapper left a helper behind),
+`fuser -v` or `lsof` on the repository's `worktree-cache/repo-*.lock` file in the
+hgs state folder shows which process still holds it. A leftover whose repository is gone is listed
 by `hgs worktrees leftovers` and can still be kept; a record whose repository and
-folder are both gone resolves. One review or listing reports at most 32 leftovers
+folder are both gone resolves.
+
+A missing folder or repository counts as gone only on the filesystem that held it.
+Each reservation records that filesystem in a separate private table that older
+CLIs never read: on Linux the device and the `statfs` filesystem ID (derived from
+the filesystem UUID on ext4, btrfs and xfs), on macOS the filesystem ID and mount
+point. A missing path is gone only when the nearest existing folder above it is on
+that same filesystem. A volume that is unmounted, replaced by another one at the
+same place, or that cannot be identified (for example a zero filesystem ID, as on
+some tmpfs and network filesystems) leaves the record uncertain: it stays visible
+and can be kept by hand, and it never resolves by itself. So does a folder or
+repository that was already missing when its removal was reserved, since no
+filesystem could be recorded for it. On btrfs the device is a per-subvolume number that can change
+across remounts and reboots; such records also stay uncertain until kept. A
+block-level clone of a filesystem shares its ID, but mounted at the same place it
+normally has another device, so it is not taken for the original. A bind mount
+whose source is on the same filesystem as the folder above it is the exception:
+once it is unmounted, the missing path is on that same filesystem and counts as
+gone. Records written by an older CLI have no volume row and keep the plain
+missing-path check, as does every record on Windows. One review or listing reports at most 32 leftovers
 within 1 MiB and marks the rest with `leftovers_partial` (review) or `partial`
-(listing); they stay recorded for a later review. The folder catalog
+(listing); they stay recorded for a later review. Verified resolutions of vanished
+records stay committed even if the remaining unresolved records still prevent
+a new removal at the 512-record bound. The folder catalog
 (`hgs worktrees --path`) reports a repository's record count as `leftovers`, read
 through its index on every call, so a reader reviews that repository even when no
 linked worktree is left. At most 512 unresolved records

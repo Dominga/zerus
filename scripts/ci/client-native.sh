@@ -16,6 +16,10 @@ disk_checkpoint() {
 
 core_tests() {
     presence_tests
+    if [ "$platform" = windows ]; then
+        # Exact hosted parent only, with mandatory one-test completion evidence.
+        bash scripts/ci/windows-frontend-adversary.sh core
+    fi
     cargo +1.99.1 test --locked --manifest-path client/core/Cargo.toml --no-fail-fast
     if [ "$platform" = macos ]; then
         cargo +1.99.1 clippy --locked --manifest-path client/core/Cargo.toml \

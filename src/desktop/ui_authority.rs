@@ -277,6 +277,7 @@ impl Validated {
                     | Request::CacheMaintenance { .. }
                     | Request::CreationClone { .. }
                     | Request::CreationWorktree { .. }
+                    | Request::CreationLaunch { .. }
                     | Request::TaskStartReconcile { .. }
             ),
             "native controls require their typed boundary"
@@ -761,6 +762,14 @@ fn validate(
             "creation does not match the native service frontend"
         );
     }
+    if let Request::CreationLaunch { intent } = &envelope.request {
+        ensure!(
+            reply.request.ownership_mode
+                == Some(zerus_client_core::desktop::ownership::Mode::Service)
+                && intent.scope.configuration == configuration,
+            "creation does not match the native service frontend"
+        );
+    }
     if let Request::TaskStartReconcile { intent } = &envelope.request {
         ensure!(
             reply.request.ownership_mode
@@ -831,6 +840,7 @@ enum OrderedOperation {
     CacheMaintenance,
     CreationClone,
     CreationWorktree,
+    CreationLaunch,
     TaskStartReconcile,
     ActivationWait,
     AutomaticApprovals,
@@ -847,6 +857,7 @@ impl From<&Request> for OrderedOperation {
             Request::CacheMaintenance { .. } => Self::CacheMaintenance,
             Request::CreationClone { .. } => Self::CreationClone,
             Request::CreationWorktree { .. } => Self::CreationWorktree,
+            Request::CreationLaunch { .. } => Self::CreationLaunch,
             Request::TaskStartReconcile { .. } => Self::TaskStartReconcile,
             Request::ActivationWait { .. } => Self::ActivationWait,
             Request::AutomaticApprovals { .. } => Self::AutomaticApprovals,
@@ -1318,6 +1329,56 @@ mod tests {
             .into_request()
             .is_err());
         if let Request::CreationWorktree { intent } = &mut envelope.request {
+            intent.scope.configuration = "b".repeat(64);
+        }
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+    }
+    #[test]
+    fn creation_launch_has_its_own_lane_and_never_passes_the_generic_boundary() {
+        use zerus_client_core::desktop::{
+            creation_launch::{Intent, Scope},
+            ownership::Mode,
+        };
+        let (mut envelope, caller, frontend, mut reply) = fixture();
+        let original = serde_json::json!({"id":id(80),"creation_schema":1,"created":1,"revision":6,
+            "cmd":"codex","tag":"example","host":"","state":"launching","auto":false,
+            "target":"/srv/repo","launch_id":id(2),"launch_dispatched":true,
+            "expected_machine":id(81)});
+        envelope.request = Request::CreationLaunch {
+            intent: Box::new(Intent {
+                scope: Scope {
+                    configuration: "a".repeat(64),
+                    service_epoch: id(91),
+                },
+                creation_id: id(80),
+                launch_id: id(2),
+                revision: 6,
+                original: original.to_string(),
+            }),
+        };
+        assert_eq!(
+            OrderedOperation::from(&envelope.request),
+            OrderedOperation::CreationLaunch
+        );
+        for other in [
+            OrderedOperation::CreationClone,
+            OrderedOperation::CreationWorktree,
+            OrderedOperation::TaskStartReconcile,
+        ] {
+            assert_ne!(OrderedOperation::CreationLaunch, other);
+        }
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Native);
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Service);
+        validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).unwrap();
+        // Only a future typed actor accessor may consume it.
+        assert!(Validated::fixture(&serde_json::json!(envelope.request))
+            .into_request()
+            .is_err());
+        if let Request::CreationLaunch { intent } = &mut envelope.request {
             intent.scope.configuration = "b".repeat(64);
         }
         reply.request.fingerprint = envelope.request.fingerprint();

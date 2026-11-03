@@ -1036,9 +1036,10 @@ fn leftovers(
             continue;
         }
         let registered = trees.iter().any(|tree| tree["path"] == json!(path));
-        let present = !matches!(fs::symlink_metadata(&path),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound);
-        if !present && !registered {
+        // A missing folder resolves only when it is gone for good; on an
+        // unmounted or unidentifiable volume it stays as an uncertain row.
+        let folder = record.volumes.as_ref().map(|v| v.folder.as_str());
+        if !registered && super::worktree_maintenance::vanished(&record.path, folder) {
             super::worktree_maintenance::forget_removal(&record.path)?;
             continue;
         }
@@ -1560,6 +1561,15 @@ fn delete_leftover(args: &[String], attempted: &mut bool) -> Result<Value> {
     }
     let expected = RootIdentity::from_json(&row["root_identity"])
         .ok_or("The leftover folder cannot be identified. Review it again.")?;
+    // The confirmation is single-use even if deletion changes no files and
+    // recording its stopped outcome fails. Keep this in the existing record
+    // so older readers also see a changed fingerprint. Failure to reserve it
+    // refuses before any filesystem change.
+    let attempt = uuid::Uuid::new_v4();
+    let pending = format!(
+        "Deleting remaining files started: attempt {attempt}. Review the folder again if the outcome is unknown."
+    );
+    super::worktree_maintenance::settle_removal(&record, Some(&pending))?;
     *attempted = true;
     // Completion is confirmed through the parent's descriptor, never by path.
     match delete_tree(&path, &expected, Instant::now() + Duration::from_secs(300)) {
@@ -1571,7 +1581,10 @@ fn delete_leftover(args: &[String], attempted: &mut bool) -> Result<Value> {
         }
         Err(e) => {
             let detail = format!("Deleting the leftover stopped: {e}");
-            let _ = super::worktree_maintenance::settle_removal(&record, Some(&detail));
+            // Keep the unique reference before any possibly long error text:
+            // the bounded detail must never restore a previous confirmation.
+            let stored = format!("Deleting the leftover stopped: attempt {attempt}; {e}");
+            let _ = super::worktree_maintenance::settle_removal(&record, Some(&stored));
             Err(format!(
                 "{detail}\nSome files may remain; review the folder again. The deletion is never retried."
             ))
@@ -2260,6 +2273,7 @@ fn remove(args: &[String], attempted: &mut bool, observed: &mut Option<Value>) -
         reserved_at: now(),
         status: "pending".into(),
         detail: String::new(),
+        volumes: None,
     };
     super::worktree_maintenance::reserve_removal(&removal)?;
     if automatic || preserve_restore {

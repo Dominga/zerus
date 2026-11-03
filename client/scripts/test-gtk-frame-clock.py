@@ -49,7 +49,7 @@ def main():
         flags = shlex.split(subprocess.check_output(
             ['pkg-config', '--cflags', '--libs', 'gdk-3.0'], text=True, timeout=5))
         subprocess.run(['cc', '-O2', '-Wall', '-Wextra', '-Wno-unused-parameter',
-                        '-I' + str(header.parent), str(source), *flags, '-o', str(binary)],
+                        '-I' + str(header.parent), str(source), *flags, '-ldl', '-o', str(binary)],
                        check=True, timeout=30)
         env = {'PATH': os.environ['PATH'], 'LANG': 'C.UTF-8', 'HOME': str(root),
                'XDG_CONFIG_HOME': str(root), 'DBUS_SESSION_BUS_ADDRESS':
@@ -80,6 +80,11 @@ def main():
                                         capture_output=True, text=True, timeout=6)
                 report = json.loads(result.stdout)
                 results[name] = report
+                loaded = Path(report['gdk_library'])
+                assert loaded.is_absolute() and loaded.parent.resolve() == directory, (
+                    f'{name}: libgdk loaded outside selected directory: {loaded}')
+                assert loaded.resolve(strict=True) == (directory / 'libgdk-3.so.0').resolve(strict=True), (
+                    f'{name}: unexpected libgdk: {loaded}')
                 assert not report['expired'], report
                 assert report['paints'] == 32, report
                 if name == 'control':

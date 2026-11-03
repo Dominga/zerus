@@ -114,6 +114,25 @@ def validate(events, minimum):
                 after_paint_median=statistics.median(after) if after else 0, failures=failures)
 
 
+def loaded_libraries(child, prefix):
+    """Verify the retained child's mappings, including resolved prefix symlinks."""
+    maps = Path('/proc', str(child.pid), 'maps').read_text()
+    libraries = {}
+    for name in ('libgtk-3.so.0', 'libgdk-3.so.0', 'libwebkit2gtk-4.1.so.0',
+                 'libjavascriptcoregtk-4.1.so.0'):
+        paths = {line.split(maxsplit=5)[-1] for line in maps.splitlines()
+                 if name in line and len(line.split(maxsplit=5)) == 6}
+        if len(paths) != 1:
+            return None  # Wait until GTK and WebKit have both loaded.
+        loaded = Path(paths.pop())
+        directory = (prefix / 'gtk/lib' if (prefix / 'gtk').exists() else Path('/usr/lib')) \
+            if name.startswith(('libgtk-', 'libgdk-')) else prefix / 'lib'
+        assert loaded.resolve(strict=True) == (directory / name).resolve(strict=True), (
+            f'Unexpected {name} mapping: {loaded}')
+        libraries[name] = str(loaded)
+    return libraries
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--fixture', type=Path, required=True)
@@ -184,9 +203,14 @@ def main():
             try:
                 deadline = time.monotonic() + 35
                 step = -1
+                libraries = None
                 while child.poll() is None:
                     safety.unlocked()
                     assert time.monotonic() < deadline, 'Fixture exceeded its deadline'
+                    if libraries is None:
+                        libraries = loaded_libraries(child, prefix)
+                        if libraries:
+                            (output / 'loaded-libraries.json').write_text(json.dumps(libraries, indent=2))
                     command_file = output / 'trace/command.json'
                     if command_file.exists():
                         command = json.loads(command_file.read_text())
@@ -200,6 +224,7 @@ def main():
                 assert not reader.is_alive(), 'Fixture diagnostic pipe did not close'
                 child.stdout.close()
             assert child.returncode == 0, f'Fixture exited {child.returncode}'
+            assert libraries, 'Fixture exited before its GTK/WebKit mappings were verified'
         backend = (output / 'trace/backend.txt').read_text()
         assert backend == 'GdkWaylandDisplay', backend
         result = validate(json.loads((output / 'trace/trace.json').read_text()), args.min_fps)

@@ -1,13 +1,28 @@
 /* Exercise the real GTK3 clock through its backend vtable. Run only through
  * test-gtk-frame-clock.py, which creates and retains a private Xvfb process.
  * The uninstalled header comes from the exact GTK source being tested. */
+#define _GNU_SOURCE
 // Keep the public umbrella before GTK's uninstalled header.
 // clang-format off
 #include <gdk/gdk.h>
 #include "gdkframeclockprivate.h"
 // clang-format on
+#include <dlfcn.h>
 #include <stdio.h>
 #include <string.h>
+
+static void json_string(const char *value) {
+  putchar('"');
+  for (const unsigned char *p = (const unsigned char *)value; *p; p++) {
+    if (*p == '"' || *p == '\\')
+      printf("\\%c", *p);
+    else if (*p < 32)
+      printf("\\u%04x", *p);
+    else
+      putchar(*p);
+  }
+  putchar('"');
+}
 
 typedef struct {
   GMainLoop *loop;
@@ -55,6 +70,10 @@ int main(int argc, char **argv) {
     return 2;
   if (!gdk_init_check(NULL, NULL))
     return 2;
+  Dl_info library;
+  if (!dladdr((void *)gdk_frame_clock_request_phase, &library) ||
+      !library.dli_fname)
+    return 2;
   GdkWindowAttr attributes = {0};
   attributes.window_type = GDK_WINDOW_TOPLEVEL;
   attributes.wclass = GDK_INPUT_OUTPUT;
@@ -81,7 +100,9 @@ int main(int argc, char **argv) {
   }
   gboolean passed =
       !p.expired && p.paints == 32 && p.layouts == 32 && p.after_paints == 32;
-  printf("{\"paints\":%u,\"layouts\":%u,\"after_paints\":%u,\"expired\":%s,"
+  printf("{\"gdk_library\":");
+  json_string(library.dli_fname);
+  printf(",\"paints\":%u,\"layouts\":%u,\"after_paints\":%u,\"expired\":%s,"
          "\"passed\":%s}\n",
          p.paints, p.layouts, p.after_paints, p.expired ? "true" : "false",
          passed ? "true" : "false");

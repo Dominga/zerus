@@ -83,7 +83,9 @@ mod telemetry;
 mod terminate;
 mod untracked_shell;
 mod session_action;
-pub(crate) use session_action::status_machine as lifecycle_receipt_machine;
+pub(crate) use session_action::{
+    observe_original as observe_lifecycle_receipt, status_machine as lifecycle_receipt_machine,
+};
 mod shown_path;
 mod startup_choice;
 mod terminal;

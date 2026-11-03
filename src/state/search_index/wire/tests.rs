@@ -70,48 +70,76 @@ impl Fixture {
             )
             .unwrap()
     }
-    fn prepare_publication(&self, store: &mut Store) -> Value {
-        // A bounded indexing slice may expire before it reaches this source.
-        // Use the same 32-pass preparation fence as the other index fixtures,
-        // retaining the original per-slice budgets and committed cursors.
+    fn finish_step_with(
+        &self,
+        store: &mut Store,
+        mut next_budget: impl FnMut() -> Budget,
+    ) -> Progress {
         for _ in 0..32 {
-            let slice = budget();
+            let slice = next_budget();
             let progress = self.step(store, &slice);
-            if Instant::now() >= slice.deadline {
-                continue;
+            assert!(progress.files <= slice.files && progress.records <= slice.records);
+            assert!(progress.bytes <= slice.bytes);
+            assert!(progress.directory_entries <= slice.directory_entries);
+            assert!(progress.locator_probes <= slice.directory_entries);
+            // Logical errors reach the caller immediately, including one
+            // observed in a slice that subsequently ran out of time.
+            if !progress.stopped || !progress.errors.is_empty() {
+                return progress;
             }
-            assert!(!progress.stopped, "fixture work bound exhausted");
-            assert!(progress.errors.is_empty(), "{:?}", progress.errors);
-            let slice = budget();
+            assert!(
+                Instant::now() >= slice.deadline,
+                "fixture ingestion stopped before its deadline"
+            );
+        }
+        panic!("fixture ingestion did not finish within 32 bounded slices");
+    }
+    fn prepare_publication(&self, store: &mut Store) -> Value {
+        let progress = self.finish_step_with(store, budget);
+        assert!(progress.errors.is_empty(), "{:?}", progress.errors);
+        self.publish(store)
+    }
+    fn publish_with_slices(
+        &self,
+        store: &mut Store,
+        mut next_budget: impl FnMut() -> Budget,
+    ) -> Value {
+        let mut next = None;
+        for _ in 0..32 {
+            let slice = next_budget();
             let reply = store
                 .publish(
                     &self.state,
                     "needle",
                     100,
-                    None,
+                    next.as_deref(),
                     &slice,
                     &AtomicBool::new(false),
                 )
                 .unwrap();
-            if Instant::now() < slice.deadline {
-                // Return the first completed publication, even if wrong. A
-                // genuine lookup/invalidation failure must not be retried away.
+            assert!(reply["proof"]["files"].as_u64().unwrap() <= slice.files as u64);
+            assert!(reply["proof"]["bytes"].as_u64().unwrap() <= slice.bytes as u64);
+            assert!(
+                reply["proof"]["directory_entries"].as_u64().unwrap()
+                    <= slice.directory_entries as u64
+            );
+            // Resume only an expired zero-candidate slice on its exact cursor.
+            // A terminal/wrong/empty reply must reach the original assertions;
+            // never run ingestion or poll for the expected hit count here.
+            if Instant::now() < slice.deadline
+                || reply["candidates"] != 0
+                || reply["proof"]["files"] != 0
+                || !reply["results"].as_array().unwrap().is_empty()
+                || reply["next_cursor"].is_null()
+            {
                 return reply;
             }
+            next = Some(reply["next_cursor"].as_str().unwrap().to_owned());
         }
-        panic!("fixture preparation did not finish within 32 bounded passes");
+        panic!("fixture publication did not finish within 32 bounded slices");
     }
     fn publish(&self, store: &mut Store) -> Value {
-        store
-            .publish(
-                &self.state,
-                "needle",
-                100,
-                None,
-                &budget(),
-                &AtomicBool::new(false),
-            )
-            .unwrap()
+        self.publish_with_slices(store, budget)
     }
 }
 fn budget() -> Budget {
@@ -188,9 +216,13 @@ fn partial_or_cancelled_workspace_discovery_never_admits_a_locator_or_message() 
 
 #[test]
 fn a_duplicate_under_an_existing_workspace_invalidates_the_saved_root_fingerprint() {
+    duplicate_invalidation_with(budget);
+}
+fn duplicate_invalidation_with(next_budget: impl FnMut() -> Budget) {
     let fixture = Fixture::new();
     let mut store = fixture.store();
-    fixture.step(&mut store, &budget());
+    let initial = fixture.prepare_publication(&mut store);
+    assert_eq!(initial["results"].as_array().unwrap().len(), 1);
     let root = fixture.home.join("sessions");
     let before = directory_id(&root).unwrap();
     let duplicate = root
@@ -206,12 +238,95 @@ fn a_duplicate_under_an_existing_workspace_invalidates_the_saved_root_fingerprin
     );
     let reply = fixture.publish(&mut store);
     assert!(reply["results"].as_array().unwrap().is_empty());
-    fixture.step(&mut store, &budget());
+    fixture.finish_step_with(&mut store, next_budget);
     assert_eq!(store.index.status().unwrap().unavailable_sources, 1);
     assert!(fixture.publish(&mut store)["results"]
         .as_array()
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn expired_duplicate_invalidation_slices_resume_before_the_unavailable_assertion() {
+    let mut slices = 0;
+    duplicate_invalidation_with(|| {
+        slices += 1;
+        let mut slice = budget();
+        if slices <= 2 {
+            slice.deadline = Instant::now();
+        }
+        slice
+    });
+    assert!((3..=32).contains(&slices));
+}
+
+#[test]
+#[should_panic(expected = "fixture ingestion did not finish within 32 bounded slices")]
+fn expired_invalidation_preparation_has_a_fixed_slice_bound() {
+    let fixture = Fixture::new();
+    let mut store = fixture.store();
+    fixture.finish_step_with(&mut store, || {
+        let mut slice = budget();
+        slice.deadline = Instant::now();
+        slice
+    });
+}
+
+#[test]
+fn a_logical_binding_failure_is_returned_without_waiting_for_a_good_result() {
+    let fixture = Fixture::new();
+    let mut store = fixture.store();
+    assert_eq!(
+        fixture.prepare_publication(&mut store)["results"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    fs::remove_file(&fixture.binding).unwrap();
+    let progress = fixture.finish_step_with(&mut store, budget);
+    assert!(!progress.errors.is_empty());
+    assert_eq!(store.index.status().unwrap().messages, 0);
+}
+
+#[test]
+fn expired_wire_publication_slices_resume_the_original_cursor() {
+    let fixture = Fixture::new();
+    let mut store = fixture.store();
+    fixture.prepare_publication(&mut store);
+    let mut slices = 0;
+    let reply = fixture.publish_with_slices(&mut store, || {
+        slices += 1;
+        let mut slice = budget();
+        if slices <= 2 {
+            slice.deadline = Instant::now();
+        }
+        slice
+    });
+    assert!((3..=32).contains(&slices));
+    assert_eq!(reply["results"].as_array().unwrap().len(), 1);
+    assert_eq!(reply["results"][0]["message_id"], "native-one");
+}
+
+#[test]
+fn a_completed_empty_wire_publication_is_not_retried_for_a_hit() {
+    let fixture = Fixture::new();
+    let mut store = fixture.store();
+    let reply = fixture.publish(&mut store);
+    assert!(reply["results"].as_array().unwrap().is_empty());
+    assert!(reply["next_cursor"].is_null());
+}
+
+#[test]
+#[should_panic(expected = "fixture publication did not finish within 32 bounded slices")]
+fn expired_wire_publication_has_a_fixed_slice_bound() {
+    let fixture = Fixture::new();
+    let mut store = fixture.store();
+    fixture.publish_with_slices(&mut store, || {
+        let mut slice = budget();
+        slice.deadline = Instant::now();
+        slice
+    });
 }
 
 #[test]

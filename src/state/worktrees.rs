@@ -503,16 +503,94 @@ impl Owned<'_> {
         args: &[&str],
         seconds: u64,
     ) -> Result<Vec<u8>> {
+        self.git_sharing(directory, None, args, seconds)
+    }
+    /// Git in `directory` that also holds `share` as its own descriptor.
+    fn git_sharing(
+        &self,
+        directory: &super::repositories::directory::Directory,
+        share: Option<&super::repositories::directory::Directory>,
+        args: &[&str],
+        seconds: u64,
+    ) -> Result<Vec<u8>> {
         self.source.verify()?;
         self.parent.verify()?;
         super::repositories::owned_git(
             directory,
+            share,
             args,
             seconds,
             self.control.cancelled,
             self.control.custody,
         )
     }
+}
+
+#[cfg(all(test, unix))]
+type Hook = std::cell::RefCell<Option<Box<dyn FnOnce()>>>;
+#[cfg(all(test, unix))]
+thread_local! {
+    /// Runs after the checkout's final identity checks, just before Git
+    /// starts: the window where only a descriptor-bound Git is safe.
+    pub(super) static BEFORE_OWNED_CHECKOUT: Hook = const { std::cell::RefCell::new(None) };
+}
+#[cfg(all(test, unix))]
+fn hook(slot: &'static std::thread::LocalKey<Hook>) {
+    if let Some(hook) = slot.with(|hook| hook.borrow_mut().take()) {
+        hook()
+    }
+}
+
+/// The metadata entry Git just made for the pinned checkout, pinned before any
+/// later check or write: named by the gitfile read through the pinned
+/// destination, opened through the pinned common directory, and accepted only
+/// when its own backlink, branch and common link are that checkout's.
+#[cfg(unix)]
+fn owned_metadata(
+    destination: &super::repositories::directory::Directory,
+    common: &super::repositories::directory::Directory,
+    branch: &str,
+) -> Result<super::repositories::directory::Directory> {
+    let invalid = || "Cannot verify linked worktree metadata".to_string();
+    let gitfile = destination.read_file(".git", 4096)?;
+    let gitfile = std::str::from_utf8(&gitfile).map_err(|_| invalid())?;
+    let named = gitfile
+        .strip_prefix("gitdir: ")
+        .and_then(|value| value.strip_suffix('\n'))
+        .map(Path::new)
+        .ok_or_else(invalid)?;
+    if named.parent() != Some(common.path.join("worktrees").as_path()) {
+        return Err(invalid());
+    }
+    let name = named
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(invalid)?;
+    let entry = common.child("worktrees")?.child(name)?;
+    check_metadata(&entry, destination, branch)?;
+    Ok(entry)
+}
+
+/// The pinned entry's own backlink, branch and common link, read through it.
+#[cfg(unix)]
+fn check_metadata(
+    entry: &super::repositories::directory::Directory,
+    destination: &super::repositories::directory::Directory,
+    branch: &str,
+) -> Result<()> {
+    let read = |file: &str| {
+        entry
+            .read_file(file, 4096)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+    };
+    if read("gitdir") != Some(format!("{}\n", destination.path.join(".git").display()))
+        || read("HEAD") != Some(format!("ref: refs/heads/{branch}\n"))
+        || read("commondir").as_deref() != Some("../..\n")
+    {
+        return Err("Cannot verify linked worktree metadata".into());
+    }
+    Ok(())
 }
 
 pub(super) fn create(args: &[String]) -> Result<Value> {
@@ -524,9 +602,10 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
     if mobile && control.is_some() {
         return Err("An owned worktree creation has no mobile form".into());
     }
-    // The first owned worktree executor is POSIX-only, like the clone leaf.
-    #[cfg(not(unix))]
-    if control.is_some() {
+    // Git binds the pinned common directory through its own descriptor
+    // (/proc/self/fd), which only Linux offers: elsewhere the owned effect is
+    // refused before anything starts.
+    if control.is_some() && !cfg!(target_os = "linux") {
         return Err("creation_worktree_unsupported".into());
     }
     let _signals = mobile.then(MobileSignals::install);
@@ -712,15 +791,22 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
             let (Some(pinned), Some(common_pin)) = (&pinned, &common_pin) else {
                 return Err("Owned worktree pins are missing".into());
             };
-            // Git writes the checkout into the admitted destination object
-            // itself (its working directory, path "."), with the pinned common
-            // directory verified immediately before and after.
-            let git_dir = format!("--git-dir={}", common.display());
+            // Git is bound to both objects it writes: the admitted destination
+            // is its working directory (path "."), and the pinned common
+            // directory is its own inherited descriptor. Neither is a pathname
+            // a later swap can redirect. Absolute links keep the backlinks
+            // that Own checks exact.
+            let git_dir = format!("--git-dir=/proc/self/fd/{}", common_pin.descriptor());
             common_pin.verify()?;
             pinned.verify()?;
-            owned.git(
+            #[cfg(test)]
+            hook(&BEFORE_OWNED_CHECKOUT);
+            owned.git_sharing(
                 pinned,
+                Some(common_pin),
                 &[
+                    "-c",
+                    "worktree.useRelativePaths=false",
                     git_dir.as_str(),
                     "worktree",
                     "add",
@@ -734,14 +820,17 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
                 300,
             )?;
             common_pin.verify()?;
-            pinned.verify()
+            pinned.verify()?;
+            // Pin the metadata entry this checkout just made, by descriptor;
+            // Own later writes only through this pinned object.
+            owned_metadata(pinned, common_pin, branch).map(Some)
         }),
         None => git(
             &source,
             &add,
             total_deadline.min(Instant::now() + Duration::from_secs(if mobile { 15 } else { 300 })),
         )
-        .map(drop)
+        .map(|_| None)
         .map_err(|e| e.detail),
     };
     #[cfg(not(unix))]
@@ -753,7 +842,11 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
     .map(drop)
     .map_err(|e| e.detail);
     let _ = fs::remove_file(cache);
-    outcome.map_err(|e| format!("{e}\nCheck {} and branch '{branch}' before retrying. Any created files and branch have been kept.", destination.display()))?;
+    let failed = |e: String| format!("{e}\nCheck {} and branch '{branch}' before retrying. Any created files and branch have been kept.", destination.display());
+    #[cfg(unix)]
+    let entry = outcome.map_err(failed)?;
+    #[cfg(not(unix))]
+    outcome.map_err(failed)?;
     // Confirm the resulting checkout, not merely the exit code (hooks may fail
     // after creation, or another process may have changed the destination).
     let deadline = total_deadline.min(Instant::now() + Duration::from_secs(5));
@@ -815,7 +908,13 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
             }
             Some((remote, merge))
         }
-        (Some(_), _, None) => None,
+        // Track is always a checked step, so the actor's step sequence is the
+        // same for every repository: without a safe inherited upstream it
+        // writes nothing.
+        (Some(owned), _, None) => {
+            owned.before(Step::Track)?;
+            None
+        }
         (None, _, upstream) => direct_track(upstream),
         (Some(_), None, Some(_)) => return Err("Owned worktree pins are missing".into()),
     };
@@ -831,31 +930,35 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
     let managed = match &owned {
         Some(owned) => {
             owned.before(Step::Own)?;
-            let (Some(pinned), Some(common_pin)) = (&pinned, &common_pin) else {
+            let (Some(pinned), Some(common_pin), Some(entry)) = (&pinned, &common_pin, &entry)
+            else {
                 return Err("Owned worktree pins are missing".into());
             };
-            // The checkout's metadata must be an entry of the pinned common
-            // directory; it stays pinned while the ownership record is written.
-            // Any pin, read or write failure propagates: never Created.
+            // The entry pinned right after the checkout: its links are checked
+            // again through that descriptor, Git's own view of the checkout must
+            // name the same object, and the owner file is written only through
+            // it. Any pin, read or write failure propagates: never Created.
+            check_metadata(entry, pinned, branch)?;
             let metadata = in_checkout(&["rev-parse", "--absolute-git-dir"])?;
             let path = crate::platform::canonical(String::from_utf8_lossy(&metadata).trim())
                 .map_err(|e| e.to_string())?;
-            if path.parent() != Some(common.join("worktrees").as_path()) {
+            if path != entry.path {
                 return Err("Cannot verify linked worktree metadata".into());
             }
-            let metadata_pin = super::repositories::directory::Directory::open(&path)?;
-            common_pin.verify()?;
-            let value = super::worktree_lifecycle::created_at(
+            entry.verify()?;
+            let value = super::worktree_lifecycle::owner_value(
                 &common,
                 &destination,
                 branch,
                 &head,
-                &metadata,
-            )?;
-            metadata_pin.verify()?;
+                &entry.path,
+            );
+            // No replacement: an existing owner file is never overwritten.
+            entry.write_new("zerus-owner.json", format!("{value}\n").as_bytes())?;
+            entry.verify()?;
             common_pin.verify()?;
             pinned.verify()?;
-            Ok(value)
+            super::worktree_lifecycle::record_owner(&common, &destination, value)
         }
         None => super::worktree_lifecycle::created(&common, &destination, branch, &head)
             .map(|()| Value::Null),

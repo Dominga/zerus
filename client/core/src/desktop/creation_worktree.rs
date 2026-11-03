@@ -125,6 +125,18 @@ impl Plan {
             hash(&serde_json::to_vec(&self.arguments()).expect("fixed worktree arguments"))
         })
     }
+    /// Whether every original receipt this plan can produce is representable:
+    /// its [`project`]ion with this plan's own paths and the longest retained
+    /// texts fits [`RESULT_BYTES`]. Admission refuses any other plan before
+    /// anything starts.
+    pub fn result_fits(&self) -> bool {
+        let text = "x".repeat(TEXT_BYTES - 2);
+        let longest = serde_json::json!({"schema":1,"request_id":self.worktree_request_id,
+            "fingerprint":"0".repeat(64),"status":"unconfirmed","path":self.destination,
+            "common_dir":self.common_dir,"branch":self.branch,"effects_started":true,
+            "detail":text,"resource_error":text});
+        serde_json::to_vec(&longest).is_ok_and(|bytes| bytes.len() <= RESULT_BYTES)
+    }
     /// `worktrees status --request-id ID`: the read-only direct receipt.
     pub fn status_invocation(&self) -> Invocation {
         worktrees::receipt_invocation(
@@ -260,6 +272,9 @@ impl Intent {
         if !plan.valid() {
             return Err("invalid_worktree_plan");
         }
+        if !plan.result_fits() {
+            return Err("worktree_result_unrepresentable");
+        }
         let encoded = serde_json::to_vec(&plan).map_err(|_| "invalid_worktree_plan")?;
         let mut consent = b"desktop-creation-worktree-consent-v1\0".to_vec();
         consent.extend_from_slice(self.original.as_bytes());
@@ -316,6 +331,61 @@ impl Binding {
 
 pub const REPLY_BYTES: usize = 24 << 10;
 pub const RESULT_BYTES: usize = 16 << 10;
+/// The retained bound of each free text in a result, as encoded JSON.
+pub const TEXT_BYTES: usize = 2048;
+/// The original receipt fields the creation reducer checks. Everything else,
+/// such as the ownership record and its repeated paths, stays in the CLI
+/// receipt store.
+const RESULT_FIELDS: [&str; 10] = [
+    "schema",
+    "request_id",
+    "fingerprint",
+    "status",
+    "path",
+    "common_dir",
+    "branch",
+    "effects_started",
+    "detail",
+    "resource_error",
+];
+/// The longest prefix of `text` whose JSON encoding fits `limit` bytes.
+fn bounded_text(text: &str, limit: usize) -> String {
+    let mut size = 2;
+    let mut kept = String::new();
+    let mut buffer = [0u8; 4];
+    for c in text.chars() {
+        let encoded =
+            serde_json::to_string(&*c.encode_utf8(&mut buffer)).map_or(6, |e| e.len() - 2);
+        if size + encoded > limit {
+            break;
+        }
+        size += encoded;
+        kept.push(c);
+    }
+    kept
+}
+/// The bounded projection of an original CLI worktree receipt that a result
+/// carries: the fields the reducer checks, with free texts bounded. `None`
+/// when even that does not fit [`RESULT_BYTES`]; such an original stays in
+/// the CLI receipt store and its result is Unknown.
+pub fn project(receipt: &Value) -> Option<Value> {
+    let original = receipt.as_object()?;
+    let mut kept = serde_json::Map::new();
+    for key in RESULT_FIELDS {
+        if let Some(value) = original.get(key) {
+            kept.insert(key.into(), value.clone());
+        }
+    }
+    for key in ["detail", "resource_error"] {
+        if let Some(Value::String(text)) = kept.get_mut(key) {
+            *text = bounded_text(text, TEXT_BYTES);
+        }
+    }
+    let projected = Value::Object(kept);
+    serde_json::to_vec(&projected)
+        .is_ok_and(|bytes| bytes.len() <= RESULT_BYTES)
+        .then_some(projected)
+}
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Admission {
@@ -712,6 +782,65 @@ mod tests {
         let mut changed = verified.intent.clone();
         changed.worktree_request_id = "44444444-4444-4444-8444-444444444444".into();
         assert!(changed.verify().is_err());
+    }
+
+    #[test]
+    fn a_result_carries_a_bounded_projection_and_admission_matches_its_bound() {
+        // Long but valid paths: the full receipt repeats them in its ownership
+        // record and exceeds the wire bound; the projection fits.
+        let long = |base: &str| {
+            let mut path = String::from(base);
+            while path.len() < 3400 {
+                path.push_str("/segment-of-a-long-but-valid-worktree-path");
+            }
+            path
+        };
+        let mut intent = checkpoint();
+        let mut raw: Value = serde_json::from_str(&intent.original).unwrap();
+        let (target, destination) = (long("/srv/repo"), long("/srv/repo-zerus-example"));
+        let common = format!("{target}/.git");
+        raw["target"] = json!(target);
+        raw["worktree_common"] = json!(common);
+        raw["destination"] = json!(destination);
+        intent.original = serde_json::to_string(&raw).unwrap();
+        let verified = intent.verify().unwrap();
+        let plan = &verified.plan;
+        let mut original = completed(&verified).worktree.unwrap();
+        original["creation_owner"] = json!({"version":1,"id":ID,"common_dir":common,
+            "path":destination,"branch":plan.branch,"head":"a".repeat(40),
+            "metadata":format!("{common}/worktrees/-"),"created_at":1});
+        original["machine"] = json!("example");
+        original["cleanup_note"] = Value::Null;
+        assert!(serde_json::to_vec(&original).unwrap().len() > RESULT_BYTES);
+        let projected = project(&original).unwrap();
+        assert!(projected.get("creation_owner").is_none());
+        let mut receipt = completed(&verified);
+        receipt.worktree = Some(projected);
+        assert!(receipt.valid());
+        assert_eq!(
+            receipt.result(plan).unwrap().unwrap()["path"],
+            json!(destination)
+        );
+        // Free texts are bounded by their encoded size, on a character boundary.
+        let mut failed = original.clone();
+        failed["status"] = json!("failed");
+        failed["detail"] = json!("\"é\n".repeat(4000));
+        let projected = project(&failed).unwrap();
+        let detail = projected["detail"].as_str().unwrap();
+        assert!(serde_json::to_string(detail).unwrap().len() <= TEXT_BYTES);
+        assert!("\"é\n".repeat(4000).starts_with(detail));
+        // A plan whose longest result cannot be represented is refused before
+        // anything starts; one that fits is admitted.
+        let mut intent = checkpoint();
+        let mut raw: Value = serde_json::from_str(&intent.original).unwrap();
+        raw["destination"] = json!(format!("/srv/{}", "\"".repeat(4000)));
+        raw["worktree_common"] = json!(format!("/srv/repo/{}", "\\".repeat(4000)));
+        intent.original = serde_json::to_string(&raw).unwrap();
+        assert_eq!(
+            intent.verify().err(),
+            Some("worktree_result_unrepresentable")
+        );
+        assert!(project(&json!({"path":"\"".repeat(9000)})).is_none());
     }
 
     #[test]

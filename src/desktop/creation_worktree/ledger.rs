@@ -378,10 +378,22 @@ pub(super) fn result(
     let mut next = row.receipt.clone();
     next.phase = Phase::Unknown;
     next.revision += 1;
-    next.worktree = worktree;
     next.code = code.into();
+    // Only the bounded projection travels. An original that cannot be
+    // represented stays in the CLI receipt store and this result is Unknown,
+    // so storing it never fails on size and drain never waits on it.
+    next.worktree = match worktree.as_ref().map(wire::project) {
+        Some(None) => {
+            next.code = UNREPRESENTABLE.into();
+            None
+        }
+        projected => projected.flatten(),
+    };
     state(tx, row, &next)
 }
+
+/// The original receipt exists but no bounded projection of it fits.
+pub(super) const UNREPRESENTABLE: &str = "worktree_result_unrepresentable";
 
 /// Takes the transaction and exact acquired lock so it cannot be released
 /// before commit. Process exit or missing PIDs never calls this in its place.
@@ -413,7 +425,7 @@ pub(super) fn drained(
     }
     if next.phase != Phase::Unknown {
         next.code.clear();
-    } else {
+    } else if next.code != UNREPRESENTABLE {
         next.code = "worktree_result_unconfirmed".into();
     }
     state(&tx, &row, &next)?;

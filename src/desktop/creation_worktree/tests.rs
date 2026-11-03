@@ -393,6 +393,104 @@ fn only_the_original_acquired_custody_lock_settles_a_worktree_result() {
     assert!(ledger::reserve(&tx, &old, &ticket, &record).is_err());
 }
 
+/// Recovery stores the original receipt it reads before recording drain.
+/// An original over the wire bound is stored as its bounded projection, or as
+/// Unknown when even that does not fit; storage never fails on size, and the
+/// released charge always drains.
+#[test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn an_oversized_original_is_stored_bounded_and_its_released_charge_drains() {
+    use crate::desktop::custody;
+    use zerus_desktop_ledger::operations::{custody::Record, Ticket};
+    for unrepresentable in [false, true] {
+        let (_temp, location, mut store, epoch) = fixture();
+        let mut intent = original(&location.configuration, &epoch).intent;
+        let mut value: serde_json::Value = serde_json::from_str(&intent.original).unwrap();
+        let long = |base: &str| {
+            let mut path = String::from(base);
+            while path.len() < 3400 {
+                path.push_str("/segment-of-a-long-but-valid-worktree-path");
+            }
+            path
+        };
+        let target = long("/srv/repo");
+        value["target"] = json!(target);
+        value["worktree_common"] = json!(format!("{target}/.git"));
+        value["destination"] = json!(long("/srv/repo-zerus-example"));
+        intent.original = value.to_string();
+        let verified = intent.verify().unwrap();
+        let writer = uuid::Uuid::new_v4().to_string();
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let row = ledger::admit(&tx, &verified, &writer, 1).unwrap();
+        tx.commit().unwrap();
+        let ticket = Ticket {
+            operation_id: verified.binding.operation_id().unwrap(),
+            attempt_id: uuid::Uuid::new_v4().to_string(),
+            revision: 2,
+            admission_id: verified.plan.worktree_request_id.clone(),
+            binding_sha256: verified.binding.fingerprint().unwrap(),
+            writer_epoch: writer,
+            service_epoch: epoch,
+            lease: uuid::Uuid::new_v4().to_string(),
+        };
+        let (prepared, held) = custody::prepare(&location, &ticket).unwrap();
+        let record = Record {
+            prepared,
+            helper: None,
+        };
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        ledger::reserve(&tx, &row, &ticket, &record).unwrap();
+        tx.commit().unwrap();
+        let row = ledger::pending(&store.db).unwrap().unwrap();
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        ledger::running(&tx, &row).unwrap();
+        tx.commit().unwrap();
+        let row = ledger::pending(&store.db).unwrap().unwrap();
+        let plan = &verified.plan;
+        let mut worktree = created(plan);
+        worktree["creation_owner"] = json!({"version":1,
+            "id":"44444444-4444-4444-8444-444444444444","common_dir":plan.common_dir,
+            "path":plan.destination,"branch":plan.branch,"head":"a".repeat(40),
+            "metadata":format!("{}/worktrees/-",plan.common_dir),"created_at":1});
+        if unrepresentable {
+            worktree["path"] = json!("\"".repeat(9000));
+        }
+        assert!(serde_json::to_vec(&worktree).unwrap().len() > wire::RESULT_BYTES);
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        ledger::result(&tx, &row, Some(worktree), "awaiting_resource_drain").unwrap();
+        tx.commit().unwrap();
+        drop(held);
+        let row = ledger::pending(&store.db).unwrap().unwrap();
+        let observation = custody::probe(&location, &record);
+        assert!(matches!(observation, custody::Observation::Released { .. }));
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let settled = ledger::drained(tx, row, observation).unwrap();
+        if unrepresentable {
+            assert_eq!(settled.phase, Phase::Unknown);
+            assert_eq!(settled.code, ledger::UNREPRESENTABLE);
+        } else {
+            assert_eq!(settled.phase, Phase::Created);
+            assert!(settled.result(plan).unwrap().is_ok());
+        }
+        assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod actor {
     use super::*;
@@ -474,6 +572,17 @@ mod actor {
             value["target"] = json!(parent.join("repo"));
             value["worktree_common"] = json!(parent.join("repo/.git"));
             value["destination"] = json!(parent.join("repo-zerus-example"));
+            intent.original = value.to_string();
+            intent.verify().unwrap()
+        }
+        /// The same original at other (synthetic) paths.
+        fn original_at(&self, target: &str, destination: &str) -> Verified {
+            let mut intent = super::original(&self.location.configuration, &self.epoch).intent;
+            let mut value: serde_json::Value = serde_json::from_str(&intent.original).unwrap();
+            value["parent"] = json!(std::path::Path::new(destination).parent().unwrap());
+            value["target"] = json!(target);
+            value["worktree_common"] = json!(format!("{target}/.git"));
+            value["destination"] = json!(destination);
             intent.original = value.to_string();
             intent.verify().unwrap()
         }
@@ -581,6 +690,114 @@ mod actor {
             child.join().unwrap();
         }
     }
+    /// Valid paths of about 3.4 KiB: the full original receipt repeats them in
+    /// its ownership record and exceeds the wire's result bound.
+    #[test]
+    fn a_long_path_original_settles_through_its_bounded_projection_and_drains() {
+        for unrepresentable in [false, true] {
+            let full = Arc::new(AtomicUsize::new(0));
+            let size = full.clone();
+            let mut f = Fixture::new(move |plan, control| {
+                for step in [
+                    Step::Reserve,
+                    Step::Destination,
+                    Step::Checkout,
+                    Step::Verify,
+                    Step::Track,
+                    Step::Own,
+                ] {
+                    (control.before)(step)?;
+                }
+                let mut receipt = super::created(plan);
+                receipt["creation_owner"] = json!({"version":1,
+                    "id":"44444444-4444-4444-8444-444444444444","common_dir":plan.common_dir,
+                    "path":plan.destination,"branch":plan.branch,"head":"a".repeat(40),
+                    "metadata":format!("{}/worktrees/-",plan.common_dir),"created_at":1});
+                if unrepresentable {
+                    // Not this plan's checkout, and too large for any projection.
+                    receipt["path"] = json!("\"".repeat(9000));
+                }
+                size.store(serde_json::to_vec(&receipt).unwrap().len(), Ordering::SeqCst);
+                Ok(receipt)
+            });
+            let root = f._temp.path().canonicalize().unwrap();
+            let long = |name: &str| {
+                let mut path = root.join(name).to_string_lossy().into_owned();
+                while path.len() < 3400 {
+                    path.push_str("/segment-of-a-long-but-valid-worktree-path");
+                }
+                path
+            };
+            let original = f.original_at(&long("repo"), &long("repo-zerus-example"));
+            assert!(f.admit(&original).matches(&original.intent));
+            f.until("original drain", |f| f.row(&original).receipt.drained);
+            assert!(full.load(Ordering::SeqCst) > wire::RESULT_BYTES);
+            let receipt = f.row(&original).receipt;
+            if unrepresentable {
+                assert_eq!(receipt.phase, Phase::Unknown);
+                assert_eq!(receipt.code, ledger::UNREPRESENTABLE);
+                assert!(receipt.worktree.is_none());
+            } else {
+                assert_eq!(receipt.phase, Phase::Created);
+                let created = receipt.result(&original.plan).unwrap().unwrap();
+                assert_eq!(created["path"], json!(original.plan.destination));
+                assert!(receipt.worktree.unwrap().get("creation_owner").is_none());
+            }
+            f.runtime.request_stop();
+            f.until("stopped runtime drain", |f| f.runtime.drained());
+            assert_eq!(f.store.operation_undrained().unwrap(), 0);
+        }
+    }
+
+    /// The real owned executor, through the actor's own step checks, for a
+    /// repository without an inherited upstream.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn real_owned_executor_creates_a_no_upstream_checkout_through_every_actor_step() {
+        crate::self_exec::private_probe_with(
+            "desktop::creation_worktree::tests::actor::real_git_no_upstream_probe",
+            120,
+            96,
+        );
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "run by real_owned_executor_creates_a_no_upstream_checkout_through_every_actor_step"]
+    fn real_git_no_upstream_probe() {
+        crate::self_exec::probe_child(
+            "desktop::creation_worktree::tests::actor::real_git_no_upstream_probe",
+        );
+        let mut f = Fixture::new(|plan, control| {
+            crate::state::repositories::with_direct_owned_git(|| {
+                crate::state::create_worktree_owned(&plan.arguments(), control)
+            })
+        });
+        let root = f._temp.path().canonicalize().unwrap();
+        for args in [
+            &["init", "-q", "-b", "main", "repo"][..],
+            &["-C", "repo", "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+                "commit", "-q", "--allow-empty", "-m", "fixture"][..],
+        ] {
+            let status = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "{args:?}");
+        }
+        let original = f.original();
+        assert!(f.admit(&original).matches(&original.intent));
+        f.until("original drain", |f| f.row(&original).receipt.drained);
+        let row = f.row(&original);
+        assert_eq!(row.receipt.phase, Phase::Created, "{:?}", row.receipt);
+        assert_eq!(row.next_step, 6, "every step, Track included, was checked");
+        assert!(row.receipt.result(&original.plan).unwrap().is_ok());
+        assert!(root.join("repo-zerus-example/.git").is_file());
+        f.runtime.request_stop();
+        f.until("stopped runtime drain", |f| f.runtime.drained());
+        assert_eq!(f.store.operation_undrained().unwrap(), 0);
+    }
+
     #[test]
     fn revoke_between_steps_refuses_verify_and_new_admission_without_replaying_the_worktree() {
         let effects = Arc::new(AtomicUsize::new(0));

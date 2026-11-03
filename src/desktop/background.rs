@@ -203,11 +203,14 @@ impl Runtime {
             return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"creation_clone_unsupported"});
         }
         if authority.operation() == "creation_worktree" {
+            // Its Git binds the pinned common directory through /proc/self/fd,
+            // which only Linux offers; macOS refuses before admission.
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            return self
-                .worktree
-                .frontend(store, authority, self.notifications.handoff());
-            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            if cfg!(target_os = "linux") {
+                return self
+                    .worktree
+                    .frontend(store, authority, self.notifications.handoff());
+            }
             return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"creation_worktree_unsupported"});
         }
         if authority.operation() == "automatic_approvals" {

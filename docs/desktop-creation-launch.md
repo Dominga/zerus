@@ -22,9 +22,28 @@ The closed `CreationLaunch` frontend request and its wire types live in
 native Service mode and the exact configuration authenticate it. Generic
 `into_request` refuses it, and it has its own ordering lane. No service
 advertises `Desktop creation launch ABI: desktop-creation-launch-v1` yet, and
-an authenticated request is answered `creation_launch_unsupported`. The
-client keeps its direct launch until the actor and a separate default-off
-service path land.
+an authenticated request is answered `creation_launch_unsupported`.
+
+On Linux and macOS in desktop-service mode only (default-off), the native
+creation host sends a local detached launch of the closed agent set to the
+service (`client/src-tauri/src/desktop_service/creation_launch.rs`):
+- **Fresh intent.** Only a direct Submit's first launch, consumed once and
+  separately from clone and worktree, sends a fresh intent, built from the
+  exact durable launch checkpoint. Recovered and task-reserved creations get
+  read-only lookups only, as for clone and worktree; a resumed creation is not
+  a fresh Submit either.
+- **Results.** A Launched original reports launch success, and the session
+  listing still binds it. A failed, missing or Unknown original reports the
+  launch as unconfirmed, as the direct path's failure does today. It is never
+  sent again and never falls back to the direct launch.
+- **Older service.** Only when a completed capability probe shows the
+  selected service lacks the kind does a fresh launch count as never sent: the
+  reducer's `launch_unsent` retires the unused launch ID into the history,
+  reserves a new one and marks the creation failed, so only an explicit
+  Resume starts the agent. A probe that fails or is uncertain is unconfirmed.
+
+External-terminal launches, remote hosts, DeepSeek hosts, OpenCode and every
+launch outside desktop-service mode keep the direct launch.
 
 ## Wire
 

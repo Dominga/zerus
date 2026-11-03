@@ -33,6 +33,14 @@ fn interrupted(detail: &str) -> String {
 type Job = Box<dyn FnOnce() + Send>;
 type ServiceClone =
     Arc<dyn Fn(&str, &Value, bool, bool, &AtomicBool) -> creation::Answer + Send + Sync>;
+/// A local detached launch through the desktop service: its id, the exact
+/// durable launch checkpoint, whether it is this host's fresh Submit, and the
+/// shutdown flag.
+type ServiceLaunch = Arc<
+    dyn Fn(&str, &Value, bool, &AtomicBool) -> crate::desktop_service::creation_launch::LaunchAnswer
+        + Send
+        + Sync,
+>;
 type JournalWriter = Arc<dyn Fn(&Path, &[u8]) -> bool + Send + Sync>;
 type LaunchSession = Arc<dyn Fn(&Value) -> Result<(), String> + Send + Sync>;
 type ReadBinding = Arc<dyn Fn(&ComputerId) -> Result<BindingListing, String> + Send + Sync>;
@@ -158,6 +166,9 @@ struct Services {
     service_clone: Option<ServiceClone>,
     /// The same native intent shape for the worktree leaf, never shared state.
     service_worktree: Option<ServiceClone>,
+    /// Local detached launches of the closed agent set, in desktop-service
+    /// mode only; every other launch keeps `launch`.
+    service_launch: Option<ServiceLaunch>,
     launch: LaunchSession,
     binding: ReadBinding,
     watch: WatchBinding,
@@ -189,6 +200,8 @@ enum Done {
     Written(u64, bool),
     Called(u64, creation::Answer),
     Launched(String, String, bool, Result<(), String>),
+    /// A fresh launch the selected service definitively does not offer.
+    LaunchUnsent(String, String),
     Binding(String, Result<BindingListing, String>),
 }
 
@@ -293,6 +306,7 @@ impl CreationHost {
                     loaded: false,
                     fresh_creations: BTreeSet::new(),
                     fresh_worktrees: BTreeSet::new(),
+                    fresh_launches: BTreeSet::new(),
                     #[cfg(all(test, unix))]
                     barrier: None,
                 };
@@ -541,6 +555,8 @@ struct Worker {
     fresh_creations: BTreeSet<String>,
     /// Consumed once by a fresh worktree intent, separately from clone's.
     fresh_worktrees: BTreeSet<String>,
+    /// Direct Submits whose first launch may be a fresh service intent.
+    fresh_launches: BTreeSet<String>,
     #[cfg(all(test, unix))]
     barrier: Option<SyncSender<()>>,
 }
@@ -561,6 +577,7 @@ impl Worker {
             self.pending.clear();
             self.fresh_creations.clear();
             self.fresh_worktrees.clear();
+            self.fresh_launches.clear();
         }
     }
 
@@ -597,6 +614,11 @@ impl Worker {
                 if direct && self.services.service_worktree.is_some() {
                     if let Ok(id) = &result {
                         self.fresh_worktrees.insert(id.clone());
+                    }
+                }
+                if direct && self.services.service_launch.is_some() {
+                    if let Ok(id) = &result {
+                        self.fresh_launches.insert(id.clone());
                     }
                 }
                 self.effects(effects);
@@ -700,6 +722,7 @@ impl Worker {
                 Effect::Removed { id } => {
                     self.fresh_creations.remove(&id);
                     self.fresh_worktrees.remove(&id);
+                    self.fresh_launches.remove(&id);
                     self.pending.remove(&id);
                     let mut cache = lock(&self.cache);
                     cache.operations.remove(&id);
@@ -808,15 +831,54 @@ impl Worker {
                         let _ = done.send(Done::Called(flight, answer));
                     }));
                 }
-                Effect::Launch { operation, .. } => {
+                Effect::Launch { id, operation } => {
                     if self.shutdown.load(Ordering::Acquire) || !self.services.allowed {
                         continue;
                     }
+                    // A local detached launch of the closed agent set goes to
+                    // the service; only a direct Submit's first launch is fresh.
+                    let service = self.services.service_launch.clone().filter(|_| {
+                        text(&operation, "host").is_empty()
+                            && !flag(&operation, "terminal")
+                            && zerus_client_core::desktop::creation_launch::supported(text(
+                                &operation, "cmd",
+                            ))
+                    });
+                    let fresh = service.is_some() && self.fresh_launches.remove(&id);
                     let shutdown = Arc::clone(&self.shutdown);
                     let services = Arc::clone(&self.services);
                     let done = self.done.clone();
                     (self.services.spawn)(Box::new(move || {
                         if shutdown.load(Ordering::Acquire) {
+                            return;
+                        }
+                        if let Some(service) = service {
+                            use crate::desktop_service::creation_launch::LaunchAnswer;
+                            let answer =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    service(&id, &operation, fresh, &shutdown)
+                                }))
+                                .unwrap_or_else(|_| {
+                                    LaunchAnswer::Unconfirmed(interrupted(
+                                        "The session launch worker panicked.",
+                                    ))
+                                });
+                            let launch = text(&operation, "launch_id").to_owned();
+                            let _ = done.send(match answer {
+                                LaunchAnswer::Unsent(error) => Done::LaunchUnsent(launch, error),
+                                LaunchAnswer::Launched => Done::Launched(
+                                    text(&operation, "host").into(),
+                                    launch,
+                                    false,
+                                    Ok(()),
+                                ),
+                                LaunchAnswer::Unconfirmed(error) => Done::Launched(
+                                    text(&operation, "host").into(),
+                                    launch,
+                                    false,
+                                    Err(error),
+                                ),
+                            });
                             return;
                         }
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -853,6 +915,7 @@ impl Worker {
                     self.queue.launch_finished(&launch, result)
                 }
             }
+            Done::LaunchUnsent(launch, error) => self.queue.launch_unsent(&launch, &error),
             Done::Binding(host, result) => {
                 if let Some(poll) = self.polls.get_mut(&host) {
                     poll.running = false;
@@ -1301,6 +1364,23 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
                 },
             ) as ServiceClone
         });
+    // Launches go to the service on Linux and macOS in desktop-service mode.
+    let launch_app = app.clone();
+    let service_launch = (cfg!(unix) && crate::desktop_service::mode()).then(|| {
+        Arc::new(
+            move |id: &str, operation: &Value, fresh: bool, shutdown: &AtomicBool| {
+                crate::desktop_service::creation_launch::call(
+                    launch_app
+                        .state::<crate::commands::AppState>()
+                        .desktop_service(),
+                    id,
+                    operation,
+                    fresh,
+                    shutdown,
+                )
+            },
+        ) as ServiceLaunch
+    });
     let service_clone = crate::desktop_service::mode().then(|| {
         Arc::new(
             move |id: &str, operation: &Value, fresh: bool, wait: bool, shutdown: &AtomicBool| {
@@ -1357,6 +1437,7 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
             call: Arc::new(move |call| creation::run_call(&call_hgs, call)),
             service_clone,
             service_worktree,
+            service_launch,
             binding: Arc::new(move |computer| {
                 creation::binding_listing(
                     zerus_client_core::run_limited(
@@ -1610,6 +1691,7 @@ mod tests {
                 call: Arc::new(move |step| creation::run_call(&call, step)),
                 service_clone: None,
                 service_worktree: None,
+                service_launch: None,
                 launch: Arc::new(move |operation| detached(&launch, &launch_invocation(operation))),
                 binding: Arc::new(move |_| {
                     binding.reads.fetch_add(1, Ordering::SeqCst);
@@ -2220,6 +2302,140 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&request));
+        fake.stop(host);
+    }
+    /// A launch service stand-in: it records each call, checks that a fresh
+    /// intent carries the exact durable checkpoint, and answers as told.
+    fn service_launch_probe(
+        fake: &Fake,
+        calls: Arc<Mutex<Vec<bool>>>,
+        answer: fn() -> crate::desktop_service::creation_launch::LaunchAnswer,
+    ) -> Services {
+        let mut services = fake.services();
+        let journal = fake.dir.join("creations.json");
+        services.service_launch = Some(Arc::new(move |id, operation, fresh, _| {
+            let saved: Value = serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+            if fresh {
+                assert_eq!(saved["operations"][id], *operation, "durable checkpoint");
+                assert_eq!(text(operation, "state"), "launching");
+                assert!(flag(operation, "launch_dispatched"));
+            }
+            lock(&calls).push(fresh);
+            answer()
+        }));
+        services
+    }
+    fn launched_directly(fake: &Fake) -> bool {
+        fake.log().iter().any(|args| {
+            args.iter().any(|v| v == "--new") && args.iter().any(|v| v == "--launch-id")
+        })
+    }
+    #[test]
+    fn a_fresh_service_launch_runs_once_after_its_durable_checkpoint() {
+        use crate::desktop_service::creation_launch::LaunchAnswer;
+        let fake = Fake::new();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let host = CreationHost::new(
+            fake.dir.join("creations.json"),
+            service_launch_probe(&fake, calls.clone(), || LaunchAnswer::Launched),
+        );
+        let id = admitted(&host, plan());
+        state(&host, &id, "confirming");
+        assert_eq!(*lock(&calls), [true]);
+        assert!(
+            !launched_directly(&fake),
+            "the GUI never launches it itself"
+        );
+        fake.stop(host);
+    }
+    #[test]
+    fn a_service_without_launch_support_fails_the_launch_and_retires_its_unused_id() {
+        use crate::desktop_service::creation_launch::{LaunchAnswer, UNAVAILABLE};
+        let fake = Fake::new();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let host = CreationHost::new(
+            fake.dir.join("creations.json"),
+            service_launch_probe(&fake, calls.clone(), || {
+                LaunchAnswer::Unsent(UNAVAILABLE.into())
+            }),
+        );
+        let id = admitted(&host, plan());
+        state(&host, &id, "failed");
+        let value = operation(&host, &id);
+        assert_ne!(value["launch_id"], json!(id), "a new launch ID is reserved");
+        assert!(value["previous_launches"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(id)));
+        assert!(!flag(&value, "launch_dispatched"));
+        assert_eq!(*lock(&calls), [true]);
+        assert!(!launched_directly(&fake), "never the direct path instead");
+        fake.stop(host);
+    }
+    #[test]
+    fn an_unconfirmed_service_launch_is_unknown_and_never_sent_again() {
+        use crate::desktop_service::creation_launch::LaunchAnswer;
+        let fake = Fake::new();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let host = CreationHost::new(
+            fake.dir.join("creations.json"),
+            service_launch_probe(&fake, calls.clone(), || {
+                LaunchAnswer::Unconfirmed(
+                    zerus_client_core::repository::UNCONFIRMED_OPERATION.into(),
+                )
+            }),
+        );
+        let id = admitted(&host, plan());
+        state(&host, &id, "unknown");
+        let original = operation(&host, &id)["launch_id"].clone();
+        host.action(id.clone(), CreationAction::Check).unwrap();
+        assert!(host.flush_journal_for_test());
+        assert_eq!(*lock(&calls), [true], "Check never starts it again");
+        assert_eq!(operation(&host, &id)["launch_id"], original);
+        assert!(!launched_directly(&fake));
+        fake.stop(host);
+    }
+    #[test]
+    fn other_agents_and_task_reserved_creations_never_get_a_fresh_service_launch() {
+        use crate::desktop_service::creation_launch::LaunchAnswer;
+        // OpenCode is outside the closed detached agent set: the direct path.
+        let fake = Fake::new();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let host = CreationHost::new(
+            fake.dir.join("creations.json"),
+            service_launch_probe(&fake, calls.clone(), || LaunchAnswer::Launched),
+        );
+        let mut opencode = plan();
+        opencode["cmd"] = json!("opencode");
+        let id = admitted(&host, opencode);
+        // The fake CLI has no OpenCode reply, so its direct launch ends unknown.
+        state(&host, &id, "unknown");
+        assert!(lock(&calls).is_empty(), "never the service");
+        assert!(launched_directly(&fake), "the direct launch ran");
+        fake.stop(host);
+        // A reserved (task/import) identity is not this host's fresh Submit.
+        let fake = Fake::new();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let host = CreationHost::new(
+            fake.dir.join("creations.json"),
+            service_launch_probe(&fake, calls.clone(), || {
+                LaunchAnswer::Unconfirmed(
+                    zerus_client_core::repository::UNCONFIRMED_OPERATION.into(),
+                )
+            }),
+        );
+        let reserved = "33333333-3333-4333-8333-333333333333".to_string();
+        match host.submit_reserved(plan(), reserved.clone()).unwrap() {
+            Admission::Admitted { admitted } => assert_eq!(admitted, reserved),
+            other => panic!("refused: {other:?}"),
+        }
+        state(&host, &reserved, "unknown");
+        assert_eq!(
+            *lock(&calls),
+            [false],
+            "a lookup only, never a fresh intent"
+        );
+        assert!(!launched_directly(&fake));
         fake.stop(host);
     }
     #[test]

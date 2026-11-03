@@ -46,6 +46,7 @@ mod cache;
 mod catalog;
 mod catalog_relay;
 pub(crate) mod creation_clone;
+pub(crate) mod creation_launch;
 pub(crate) mod creation_worktree;
 use catalog::catalog_loop;
 mod details;

@@ -70,6 +70,7 @@
   "Agent chips": "Значки агентов",
   "Agent glyphs": "Символы агентов",
   "Agent is running": "Агент работает:",
+  "Agent launch is not available from this desktop service.": "Запуск агента недоступен в этой службе рабочего стола.",
   "Agent notification": "Уведомление агента",
   "Agent's own web UI": "Собственный веб-интерфейс агента",
   "Aggregate diagnostics": "Сводная диагностика",

@@ -292,6 +292,7 @@
   "Agent has a new reply": "Агент ответил",
   "Agent is active. Pause becomes available after the response and subagents finish.": "Агент активен. Пауза становится доступной после завершения ответа и субагентов.",
   "Agent is running": "Агент работает:",
+  "Agent launch is not available from this desktop service.": "Запуск агента недоступен в этой службе рабочего стола.",
   "Agent needs attention": "Агент требует внимания",
   "Agent needs your answer": "Агент ждёт вашего ответа",
   "Agent needs your approval": "Агент запрашивает разрешение",

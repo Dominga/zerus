@@ -197,6 +197,19 @@ and uses its own fallback. Router status counts `foreground.lent` and
 `foreground.refused`. The reply wire is unchanged; Windows has no platform
 context.
 
+Windows frontend-server verification uses the caller's already selected
+executable handle. The shared `desktop::windows::image::PinnedImage` holds the
+file with read/execute access and read-only sharing, and pins both the input
+and normalized ancestor chains without write/delete sharing. Selection rejects
+UNC/remote volumes and reparse ancestors before opening the executable.
+`ProcessImageFileMapping` compares that held file with the original process's
+loaded image; no server-reported filename is opened during verification.
+`Peer` retains duplicate file and ancestor handles through the consuming
+exchange, alongside the original process's birth/liveness checks. Unavailable
+mapping proof is Unknown. The deadline wrapper allows at most one in-flight
+read-only verifier; timeout returns Unknown while the original worker retains
+its pins, and late results never grant foreground, forward bytes or launch.
+
 The service's `Router::closed_frontend` checks a fresh canonical instance
 observation made off actor. Absence alone cannot authorize a launch: the Linux
 mechanics force service mode and would also freeze/import the native read store.

@@ -155,10 +155,19 @@ class HostedDiskTests(unittest.TestCase):
                 remove.assert_not_called()
             self.assertEqual(events, ["before-unused-tools", "measure", "cleanup",
                                       "after-unused-tools", "measure", "measure"])
-            self.assertEqual(json.loads(output.getvalue()), {
+            lines = output.getvalue().splitlines()
+            self.assertEqual(json.loads(lines[0]), {
                 "phase": "native-space-admission", "required_free_bytes": threshold,
                 "actual_free_bytes": actual, "admitted": actual >= threshold,
             })
+            if actual >= threshold:
+                self.assertEqual(len(lines), 1)
+            else:
+                # One annotation names both measurements on the run summary.
+                self.assertEqual(len(lines), 2)
+                self.assertTrue(lines[1].startswith("::error title=Native Linux disk admission::"))
+                self.assertIn(f"required_free_bytes={threshold} (24.0 GiB)", lines[1])
+                self.assertIn(f"actual_free_bytes={actual} ({actual / 1024**3:.1f} GiB)", lines[1])
 
     def test_failed_cleanup_never_passes_native_space_admission(self):
         with patch.dict(os.environ, {"GITHUB_JOB": "client-native-linux"}), \

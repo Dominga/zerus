@@ -215,8 +215,11 @@ installation and cache restore, between its existing build phases, and after
 checks even when they fail. Reports include sizes for `target/client-native` and
 the Cargo registry/Git caches. After its fixed unused-tool cleanup, this job
 requires a fresh measurement of at least 24 GiB free before installing dependencies
-or compiling. That reserve covers measured build growth plus a margin; failure
-reports required and actual free bytes. Quick and relay do not use this minimum.
+or compiling. A healthy run used 17.7 GiB from checkout to the end of its checks,
+8.7 GiB of it in the core test links, and the cleanup reclaimed 18.1 GiB; the
+remainder covers parallel link temporaries and growth. A refusal fails the job
+before any build with a run annotation naming the required and actual free bytes,
+instead of a linker crash on a full disk. Quick and relay do not use this minimum.
 Host build-target retirement remains relay-only. Local native-check script runs
 skip the hosted checkpoints and preparation.
 

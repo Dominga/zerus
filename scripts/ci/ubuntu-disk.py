@@ -71,17 +71,22 @@ def prepare(workspace):
     report(workspace, "after-unused-tools")
     if os.environ.get("GITHUB_JOB") == "client-native-linux":
         # Measure again after cleanup and diagnostics, before dependencies or
-        # compilation. The native job measured about 20 GiB of total growth;
-        # reserve another 4 GiB without changing its build/test coverage.
+        # compilation. A healthy run (41624988657) used 17.7 GiB from checkout
+        # to the end of its checks; the core test links alone took 8.7 GiB.
+        # Reserve the rest for parallel link temporaries and growth, without
+        # changing build/test coverage. Fail clearly instead of in the linker.
         actual = shutil.disk_usage(workspace).free
         admitted = actual >= NATIVE_MIN_FREE_BYTES
         print(json.dumps({"phase": "native-space-admission", "required_free_bytes": NATIVE_MIN_FREE_BYTES,
                           "actual_free_bytes": actual, "admitted": admitted}), flush=True)
         if not admitted:
-            raise SystemExit(
+            message = (
                 f"native Linux disk admission failed: required_free_bytes={NATIVE_MIN_FREE_BYTES} "
-                f"(24 GiB), actual_free_bytes={actual}; refusing dependencies and compilation"
+                f"({NATIVE_MIN_FREE_BYTES / 1024**3:.1f} GiB), actual_free_bytes={actual} "
+                f"({actual / 1024**3:.1f} GiB) after unused-tool cleanup; refusing dependencies and compilation"
             )
+            print(f"::error title=Native Linux disk admission::{message}", flush=True)
+            raise SystemExit(message)
 
 
 def relay_before_image(workspace):

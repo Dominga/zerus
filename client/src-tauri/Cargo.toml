@@ -44,7 +44,7 @@ tauri-plugin-dialog = "2"
 # no capability lets the webview reach it.
 tauri-plugin-opener = "2"
 # A queued attachment read is awaited on a oneshot, holding no thread (composer/fetch.rs).
-tokio = { version = "1", default-features = false, features = ["sync", "process", "io-util", "time", "macros"] }
+tokio = { version = "1", default-features = false, features = ["sync", "process", "io-util", "time", "macros", "rt", "rt-multi-thread"] }
 # Windows canonical paths lose their \\?\ prefix before a notice or an opener sees them.
 dunce = "1"
 zerus-watch-protocol = { path = "../../crates/watch-protocol" }

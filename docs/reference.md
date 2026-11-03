@@ -2495,6 +2495,26 @@ After complete success the dialog closes and the overview shows the result.
 Partial results and errors remain open; uncertain replies are not replayed. **Stop after this folder**
 lets the current operation finish and leaves the remaining folders untouched.
 
+Folders a removal left behind (see partial removal below) appear first, in a
+separate **Partially removed** group shown only when there are any. A repository
+with partial-removal records is reviewed even when no linked worktree remains,
+and each computer's vanished-repository leftovers come from one bounded
+`hgs worktrees leftovers` call; there is no per-row call. These rows never join a
+cleanup selection. The panel shows the remaining size (a lower bound when the
+listing was incomplete), whether the branch is kept, moved or unchecked, why the
+removal stopped, and the sessions and programs that use the folder. It offers no
+file browsing. **Keep folder…** asks for a simple confirmation and forgets only
+the record. **Delete remaining files…** opens an explicit confirmation whose
+default focus is Cancel: it states that the files cannot be restored and that
+the branch is kept, and shows the unchecked **Delete even if some running
+programs cannot be checked** box only when the review offered that acceptance.
+Each confirmation sends the fingerprint of the review on screen exactly once.
+The outcome stays on the row until a fresh review: **Files deleted**, **Folder
+kept**, **Record already gone** (another action may have resolved it, so the
+row asks for a fresh review instead of claiming the files stayed), **Nothing
+changed** with the reason, or **Result unknown** with **Review again**. Nothing is retried automatically. A row whose repository is gone shows
+**Repository missing** and offers Keep folder only.
+
 Integration evidence distinguishes ancestor commits, identical file trees and
 cherry-pick-equivalent patches. Equivalent content is useful when reviewing
 squash/cherry-pick workflows, but only Git ancestry permits optional branch
@@ -2548,13 +2568,20 @@ halfway, for example on a readonly ignored folder: Git forgets the worktree whil
 some files remain. Before every `git worktree remove`, the owning computer
 reserves a private removal record. A confirmed outcome drops it, and an
 interruption or failure keeps it. A folder that Git no longer tracks but that
-still exists then appears in the repository review as a **leftover**
+still exists then appears in the repository review (and in a review targeted at
+that worktree, such as the cleanup after Terminate) as a **leftover**
 (`worktree-leftovers-v1`), with a fresh bounded listing of the remaining files,
-the retained branch and current processes or sessions. A missing Git
+the retained branch and current processes or sessions. The cleanup after
+Terminate keeps such a folder with "Git no longer tracks this folder, but files
+remain" instead of an unverified-folder error. A missing Git
 registration is never treated as proof of deletion, and the removal is never
 retried. **Keep folder, forget record** (`hgs worktrees keep-folder`) checks the
 reviewed leftover again under the repository lock and drops only its record;
-the folder, its files and the branch stay. **Delete remaining files**
+the folder, its files and the branch stay. With `--json`, a failure prints a
+request-bound outcome (`worktree-leftover-keep-v1`): `kept` before the record is
+touched, `unconfirmed` once forgetting it may have started. A client reports
+**Nothing changed** only for `kept`; an unreachable computer, a crash or any
+other reply is **Result unknown**. **Delete remaining files**
 (`hgs worktrees delete-leftover`, `worktree-leftover-delete-v1`) needs an
 explicit confirmation and the fingerprint of the fresh review the owner saw. It
 checks everything again under the repository and session locks and refuses
@@ -2571,17 +2598,28 @@ the macOS filesystem ID and mount point), so a link, a mount or a same-device bi
 mount that appears after the review stops the deletion before anything in it
 changes. A filesystem whose mount cannot be identified is refused. The reviewed
 folder itself is part of the confirmed fingerprint (device, inode and mount): it
-is reopened through its parent without following links, and completion is
-confirmed through that parent. Only after those checks does deletion grant the
+is reopened through its parent without following links (folders above it need
+only search permission: Linux opens them as paths and macOS for search), and
+completion is confirmed through that parent. Only after those checks does deletion grant the
 owner write access to their own folders inside the reviewed tree, which is what
 blocked Git; it never touches the branch. If it
 stops partway, the record stays with the reason and the deletion is never
 retried; review the folder again. Deleting leftover files is available on Linux
 and macOS. A record resolves by itself once its
 folder is gone, or once a fresh worktree list taken under the repository lock shows
-that Git tracks the worktree again. A leftover whose repository is gone is listed
+that Git tracks the worktree again. On Linux and macOS the Git that removes a
+worktree inherits the repository lock (an flock belongs to the open file, and only
+that Git receives it), and hgs releases the lock by closing it, never by an explicit
+unlock. The lock therefore stays taken while that Git, or anything it started, still
+runs, even after hgs is killed, and no review resolves the record in that time. On
+Windows the lock ends with hgs. A leftover whose repository is gone is listed
 by `hgs worktrees leftovers` and can still be kept; a record whose repository and
-folder are both gone resolves. At most 512 unresolved records
+folder are both gone resolves. One review or listing reports at most 32 leftovers
+within 1 MiB and marks the rest with `leftovers_partial` (review) or `partial`
+(listing); they stay recorded for a later review. The folder catalog
+(`hgs worktrees --path`) reports a repository's record count as `leftovers`, read
+through its index on every call, so a reader reviews that repository even when no
+linked worktree is left. At most 512 unresolved records
 are kept per computer; at that bound new removals are refused with a visible
 reason, and no record is evicted. Automatic cleanup never acts on these records.
 
@@ -4933,6 +4971,17 @@ choosers and status lines of sessions that already reported hooks. Followed
 summaries are re-read when their journal rows or catalog row change, at most
 every 500 ms, and otherwise every 2 s while the agent is busy and every 15 s
 while it is idle; DeepSeek and OpenCode every 2 s.
+
+The stream also checks every 5 s whether an update put another file at the path
+of the `hgs` it runs. That file must differ in device, inode, modification time
+or size, and be a regular executable file. A missing path, or a file not yet
+executable, does not count. When the next check finds the same file, the stream
+sends a fatal `error` with code `hgs_replaced` and exits 0. Without this check,
+a stream left running after a CLI-only update, or after a peer's update, would
+keep sending the old code's summaries (such as Clear's reason) while new
+commands run the new code. A client starts the new stream at once and keeps its
+rows. Only one such restart a minute skips the delay; another within that minute
+waits like any failure.
 
 A frame is at most 1 MiB including its newline. An event too large for a frame
 is cut with `"truncated": true`, and an oversized summary loses the oldest items

@@ -13,7 +13,7 @@ pub(super) async fn catalog_loop(
             return Ok(());
         }
         let work = {
-            let mut dirty = shared.dirty.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut dirty = admission(&shared.dirty);
             failures.retain(|computer, _| dirty.sources.contains_key(computer));
             // One walker, with round-robin admission so a failed baseline's
             // single retry cannot repeatedly jump ahead of another computer.
@@ -50,16 +50,11 @@ pub(super) async fn catalog_loop(
             let epoch = shared
                 .snapshot
                 .lock()
-                .unwrap_or_else(PoisonError::into_inner)
                 .epoch
                 .clone()
                 .ok_or("service_unavailable")?;
             if shared.park_until_source_identity(&computer, &source) {
-                shared
-                    .dirty
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .running = None;
+                admission(&shared.dirty).running = None;
                 row(
                     &shared,
                     &computer,
@@ -84,20 +79,13 @@ pub(super) async fn catalog_loop(
                 &configuration,
             )
             .await;
-            shared
-                .dirty
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .running = None;
+            admission(&shared.dirty).running = None;
             match result {
                 Ok(()) => {
                     failures.remove(&computer);
                 }
                 Err(_)
-                    if shared
-                        .dirty
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
+                    if admission(&shared.dirty)
                         .sources
                         .get(&computer)
                         .is_some_and(|current| current.serial == source.serial)
@@ -109,7 +97,7 @@ pub(super) async fn catalog_loop(
                     // or an actual source scope change, never a global EOF.
                     let count = failures.get(&computer).map_or(1, |(_, count)| count + 1);
                     let current = {
-                        let mut dirty = shared.dirty.lock().unwrap_or_else(PoisonError::into_inner);
+                        let mut dirty = admission(&shared.dirty);
                         // Retry/removal/hint can race the completed RPC.
                         if !dirty
                             .sources
@@ -168,14 +156,14 @@ fn insert_key(
 impl Shared {
     /// Park only this local baseline; hold neither a relay nor an RPC slot.
     /// Hello application takes the same hub/dirty lock order and wakes it.
+    ///
+    /// `dirty` is taken with a plain wait while the details hub is held
+    /// (reviewed for zerus-hj2s). The hub-then-dirty order is what keeps the
+    /// identity wakeup from being lost, and no std lock may be held across
+    /// `block_in_place`. The wait lasts only while a view callback holds
+    /// `dirty`, and only while the local identity is not ready yet.
     fn park_until_source_identity(&self, computer: &str, source: &SourceVersion) -> bool {
-        if !computer.is_empty()
-            || !self
-                .snapshot
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .details_available
-        {
+        if !computer.is_empty() || !self.snapshot.lock().details_available {
             return false;
         }
         let hub = self.details.lock().unwrap_or_else(PoisonError::into_inner);
@@ -193,6 +181,9 @@ impl Shared {
         }
         true
     }
+    /// Called with the details hub held (the same order as
+    /// `park_until_source_identity`), only after a source's hello; its plain
+    /// wait for `dirty` was reviewed with that one for zerus-hj2s.
     pub(super) fn catalog_identity_ready(&self, computer: &str, generation: u64) {
         let mut dirty = self.dirty.lock().unwrap_or_else(PoisonError::into_inner);
         if dirty
@@ -212,7 +203,7 @@ impl Shared {
         old: &SourceVersion,
         page: &CatalogPage,
     ) -> Option<SourceVersion> {
-        let mut dirty = self.dirty.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut dirty = admission(&self.dirty);
         let current = dirty.sources.get(computer)?;
         if !old.matches(current) {
             return None;
@@ -256,7 +247,7 @@ impl Shared {
         Some(source)
     }
     fn catalog_head(&self, computer: &str, source: &SourceVersion, head: Revision) {
-        let mut dirty = self.dirty.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut dirty = admission(&self.dirty);
         if dirty.sources.get(computer) == Some(source) {
             dirty
                 .heads

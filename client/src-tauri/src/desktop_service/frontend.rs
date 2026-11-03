@@ -21,6 +21,10 @@ pub enum Operation {
     CacheMaintenance,
     #[serde(skip)] // Native creation owner only; never generic policy dispatch or receipts.
     CreationClone,
+    #[serde(skip)] // Native creation owner only; never generic policy dispatch or receipts.
+    CreationWorktree,
+    #[serde(skip)] // Native TaskStart boundary only, never generic renderer JSON.
+    TaskStartReconcile,
     #[serde(skip)] // Separate native notification controller, never generic policy JSON.
     NotificationControl,
     #[serde(skip)] // Separate native ownership controller, never a generic policy request.
@@ -37,6 +41,8 @@ impl Operation {
         match request {
             Request::CacheMaintenance { .. } => Self::CacheMaintenance,
             Request::CreationClone { .. } => Self::CreationClone,
+            Request::CreationWorktree { .. } => Self::CreationWorktree,
+            Request::TaskStartReconcile { .. } => Self::TaskStartReconcile,
             Request::NotificationControl { .. } => Self::NotificationControl,
             Request::DesktopOwnership { .. } => Self::DesktopOwnership,
             Request::ImportPendingReads { .. } => Self::ImportPendingReads,
@@ -49,6 +55,8 @@ impl Operation {
         match self {
             Self::CacheMaintenance => "cache_maintenance",
             Self::CreationClone => "creation_clone",
+            Self::CreationWorktree => "creation_worktree",
+            Self::TaskStartReconcile => "task_start_reconcile",
             Self::NotificationControl => "notification_controls",
             Self::DesktopOwnership => "desktop_ownership",
             Self::ImportPendingReads => "import_pending_reads",
@@ -544,7 +552,10 @@ fn help(
 fn submission_ready(snapshot: &Snapshot, request: &Request) -> bool {
     if matches!(
         request,
-        Request::NotificationControl { .. } | Request::CreationClone { .. }
+        Request::NotificationControl { .. }
+            | Request::CreationClone { .. }
+            | Request::CreationWorktree { .. }
+            | Request::TaskStartReconcile { .. }
     ) {
         return false;
     }
@@ -577,11 +588,7 @@ fn execute(
             return Err("frontend_route_unavailable");
         }
         if !reservation.lookup && operation != Operation::ImportPendingReads {
-            let snapshot = shared
-                .snapshot
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone();
+            let snapshot = shared.snapshot.lock().clone();
             if !submission_ready(&snapshot, &reservation.request) {
                 return Err("desktop_background_unavailable");
             }
@@ -692,7 +699,10 @@ fn lookup(
 ) -> Result<Receipt, &'static str> {
     if matches!(
         request,
-        Request::NotificationControl { .. } | Request::CreationClone { .. }
+        Request::NotificationControl { .. }
+            | Request::CreationClone { .. }
+            | Request::CreationWorktree { .. }
+            | Request::TaskStartReconcile { .. }
     ) {
         return Err("frontend_receipt_unconfirmed");
     }
@@ -725,7 +735,10 @@ fn lookup(
 fn lookup_receipt(request: &Request, id: &str, value: Value) -> Result<Receipt, &'static str> {
     if matches!(
         request,
-        Request::NotificationControl { .. } | Request::CreationClone { .. }
+        Request::NotificationControl { .. }
+            | Request::CreationClone { .. }
+            | Request::CreationWorktree { .. }
+            | Request::TaskStartReconcile { .. }
     ) {
         return Err("frontend_receipt_unconfirmed");
     }
@@ -784,6 +797,8 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
             | Request::ActivationWait { .. }
             | Request::NotificationControl { .. }
             | Request::CreationClone { .. }
+            | Request::CreationWorktree { .. }
+            | Request::TaskStartReconcile { .. }
     ) {
         // Their separate consumers validate different receipts and completion rules.
         return None;
@@ -843,7 +858,9 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
         | Request::ActivationWait { .. }
         | Request::CacheMaintenance { .. }
         | Request::NotificationControl { .. }
-        | Request::CreationClone { .. } => return None,
+        | Request::CreationClone { .. }
+        | Request::CreationWorktree { .. }
+        | Request::TaskStartReconcile { .. } => return None,
         Request::AutomaticApprovals { enabled, .. } => {
             if value["op"] != "automatic_approvals" || value["enabled"] != *enabled {
                 return None;

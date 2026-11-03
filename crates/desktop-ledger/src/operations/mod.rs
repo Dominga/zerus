@@ -326,6 +326,86 @@ pub fn migrate(tx: &Transaction<'_>) -> Result<()> {
         UPDATE desktop_operation_totals SET undrained=undrained+(NEW.drained=0)-(OLD.drained=0) WHERE id=1; END;")?;
     Ok(())
 }
+// Each storage call is independently error-atomic, even when the actor records
+// a refusal and commits its surrounding transaction. Names are fixed internal
+// literals; custody nests a distinct reserve savepoint in its own savepoint.
+/// SQLite rolled back the entire outer transaction. The caller must abandon
+/// that Transaction: subsequent direct writes would otherwise autocommit.
+/// The returned anyhow error retains the original storage failure as its cause.
+#[derive(Debug)]
+pub struct OuterTransactionRolledBack;
+impl std::fmt::Display for OuterTransactionRolledBack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("operation outer transaction rolled back; abandon this transaction")
+    }
+}
+impl std::error::Error for OuterTransactionRolledBack {}
+
+fn outer_rollback(error: anyhow::Error) -> anyhow::Error {
+    if error.is::<OuterTransactionRolledBack>() {
+        error
+    } else {
+        error.context(OuterTransactionRolledBack)
+    }
+}
+
+fn transaction_error(tx: &Transaction<'_>, error: anyhow::Error) -> anyhow::Error {
+    if tx.is_autocommit() {
+        outer_rollback(error)
+    } else {
+        error
+    }
+}
+
+fn protected_in<T>(
+    tx: &Transaction<'_>,
+    name: &'static str,
+    apply: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if tx.is_autocommit() {
+        return Err(OuterTransactionRolledBack.into());
+    }
+    ensure!(
+        tx.transaction_state(Some(rusqlite::DatabaseName::Main))
+            .map_err(|error| transaction_error(tx, error.into()))?
+            == rusqlite::TransactionState::Write,
+        "operation requires an acquired main write transaction"
+    );
+    tx.execute_batch(&format!("SAVEPOINT {name}"))
+        .map_err(|error| transaction_error(tx, error.into()))?;
+    let outcome = apply();
+    match outcome {
+        Ok(value) => match tx.execute_batch(&format!("RELEASE {name}")) {
+            Ok(()) => Ok(value),
+            Err(error) => Err(rollback_call(tx, name, error.into())),
+        },
+        Err(error) => Err(rollback_call(tx, name, error)),
+    }
+}
+
+fn rollback_call(
+    tx: &Transaction<'_>,
+    name: &'static str,
+    mut error: anyhow::Error,
+) -> anyhow::Error {
+    if tx.is_autocommit() {
+        // RAISE(ROLLBACK), interruption and some I/O failures remove every
+        // savepoint. Preserve that cause instead of replacing it with cleanup.
+        return outer_rollback(error);
+    }
+    if let Err(cleanup) = tx.execute_batch(&format!("ROLLBACK TO {name}; RELEASE {name}")) {
+        error = error.context(format!("operation savepoint cleanup failed: {cleanup}"));
+        if !tx.is_autocommit() {
+            // Invalidate the outer transaction rather than leave partial work
+            // eligible for the caller's commit, retaining both failure causes.
+            if let Err(rollback) = tx.execute_batch("ROLLBACK") {
+                error = error.context(format!("outer transaction rollback failed: {rollback}"));
+            }
+        }
+    }
+    transaction_error(tx, error)
+}
+
 fn allowed(tx: &Connection, writer: &str, service: &str) -> Result<()> {
     uuid(writer)?;
     uuid(service)?;
@@ -367,6 +447,25 @@ const ATTEMPT: &str = "seq,ticket,state,outcome_json,drained";
 /// Requires already verified explicit G2 Original and current actor guard.
 /// Exact duplicates coalesce without changing bodies or providing execution.
 pub fn admit(db: &mut Connection, request: &Admission<'_>) -> Result<Admitted> {
+    let fields = admission_fields(request)?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let original = protected_in(&tx, "hgs_operation_admit", || {
+        admit_original(&tx, request, fields)
+    })?;
+    tx.commit()?;
+    Ok(original)
+}
+
+/// Freeze inside an already-acquired main write transaction, after the actor's
+/// native proof/current guard has been rechecked under its writer lock. Errors
+/// roll back this call's savepoint; success still requires the actor's commit.
+pub fn admit_in(tx: &Transaction<'_>, request: &Admission<'_>) -> Result<Admitted> {
+    protected_in(tx, "hgs_operation_admit", || {
+        admit_original(tx, request, admission_fields(request)?)
+    })
+}
+
+fn admission_fields(request: &Admission<'_>) -> Result<(String, String, String, String)> {
     uuid(request.admission_id)?;
     let operation_id = request.binding.validate()?;
     ensure!(
@@ -385,9 +484,17 @@ pub fn admit(db: &mut Connection, request: &Admission<'_>) -> Result<Admitted> {
     let binding = json(request.binding, METADATA_BYTES)?;
     let provenance = json(request.provenance, METADATA_BYTES)?;
     let binding_sha256 = hash(binding.as_bytes());
+    Ok((operation_id, binding, provenance, binding_sha256))
+}
+
+fn admit_original(
+    tx: &Transaction<'_>,
+    request: &Admission<'_>,
+    fields: (String, String, String, String),
+) -> Result<Admitted> {
+    let (operation_id, binding, provenance, binding_sha256) = fields;
     let key = &request.binding.key;
     let executor = &request.binding.executor;
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let prior_id: Option<String> = tx
         .query_row(
             "SELECT operation_id FROM desktop_operations WHERE admission_id=?1",
@@ -403,7 +510,7 @@ pub fn admit(db: &mut Connection, request: &Admission<'_>) -> Result<Admitted> {
         ensure!(old.operation_id==operation_id && old.admission_id==request.admission_id && old_binding==binding && old_provenance==provenance,"operation admission identity changed");
         return Ok(old);
     }
-    allowed(&tx, request.writer_epoch, request.service_epoch)?;
+    allowed(tx, request.writer_epoch, request.service_epoch)?;
     let unsettled: i64 = tx.query_row(
         "SELECT unsettled FROM desktop_operation_totals WHERE id=1",
         [],
@@ -412,7 +519,6 @@ pub fn admit(db: &mut Connection, request: &Admission<'_>) -> Result<Admitted> {
     ensure!(unsettled < UNSETTLED, "operation admission capacity");
     tx.execute("INSERT INTO desktop_operations(operation_id,admission_id,kind,schema,configuration,project,task,original_request_id,key_json,binding_json,binding_sha256,raw_record,retained_input,source_record_sha256,ui_snapshot_sha256,task_start_reconcile_input_v1_sha256,plan_sha256,consent_sha256,executor_machine,executor_session_id,executor_run_id,executor_conversation_id,provenance_json,policy_state,revision) VALUES(?1,?2,'task_start_reconcile',1,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?14,?15,?16,?17,?18,?19,?20,'ready',1)",
       params![operation_id,request.admission_id,key.configuration,key.project,key.task,key.request_id,json(key,4096)?,binding,binding_sha256,request.raw_record,request.retained_input,request.binding.source_record_sha256,request.binding.ui_snapshot_sha256,request.binding.task_start_reconcile_input_v1_sha256,consent_sha256(request.retained_input),executor.machine,executor.session_id,executor.run_id,executor.conversation_id,provenance])?;
-    tx.commit()?;
     Ok(Admitted {
         operation_id,
         admission_id: request.admission_id.into(),
@@ -425,16 +531,41 @@ pub fn admit(db: &mut Connection, request: &Admission<'_>) -> Result<Admitted> {
 /// original, after actor guard validation. Never call this from a retry timer.
 /// fresh=false carries the exact existing ticket and is status-only.
 pub fn reserve(db: &mut Connection, request: &Reserve) -> Result<Reservation> {
+    validate_reserve(request)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let result = reserve_in(&tx, request)?;
     tx.commit()?;
     Ok(result)
 }
 
-fn reserve_in(tx: &Transaction<'_>, request: &Reserve) -> Result<Reservation> {
+/// Reserve in an already-acquired main write transaction after the actor's
+/// native checks. Errors undo only this call; success does not commit or grant
+/// execution. An exact coalesced ticket remains observation only.
+pub fn reserve_in(tx: &Transaction<'_>, request: &Reserve) -> Result<Reservation> {
+    protected_in(tx, "hgs_operation_reserve", || {
+        reserve_original(tx, request)
+    })
+}
+
+fn validate_reserve(request: &Reserve) -> Result<()> {
     digest(&request.operation_id)?;
-    uuid(&request.attempt_id)?;
-    uuid(&request.lease)?;
+    for value in [
+        &request.attempt_id,
+        &request.writer_epoch,
+        &request.service_epoch,
+        &request.lease,
+    ] {
+        uuid(value)?;
+    }
+    ensure!(
+        (1..=i64::MAX as u64).contains(&request.revision),
+        "invalid operation revision"
+    );
+    Ok(())
+}
+
+fn reserve_original(tx: &Transaction<'_>, request: &Reserve) -> Result<Reservation> {
+    validate_reserve(request)?;
     let original = tx.query_row(
         &format!("SELECT {ADMITTED} FROM desktop_operations WHERE operation_id=?1"),
         [&request.operation_id],

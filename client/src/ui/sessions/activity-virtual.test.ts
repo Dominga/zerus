@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { Virtualizer } from "@tanstack/solid-virtual";
 import { activityFlow, activityGeometryValid, activityRange, activityText, checkActivityGeometry, type ActivityGeometryRow } from "./activity-virtual";
 import { loadMarkdown } from "./markdown";
 import type { TranscriptItem } from "./types";
+import { ACTIVITY_RESIZE_OVERSCAN } from "./activity-heights";
 
 const geometryRow = (index: number, top: number, bottom: number, start = top): ActivityGeometryRow => ({
   index, key: `item-${index}`, top, bottom, height: bottom - top, start, domStart: top,
@@ -31,6 +33,17 @@ describe("Activity copy and virtual retention", () => {
 
   it("keeps a loading or playing media row mounted while it is scrolled out", () => {
     expect(activityRange({ startIndex: 6, endIndex: 7, overscan: 1, count: 12 }, 1)).toEqual([1, 5, 6, 7, 8]);
+  });
+
+  it("keeps the playing and selected rows and a resize margin around its visible window", () => {
+    const virtualizer = new Virtualizer<HTMLElement, HTMLElement>({
+      count: 100, getScrollElement: () => null, estimateSize: () => 100,
+      initialRect: { width: 400, height: 300 }, initialOffset: 5000,
+      observeElementRect: () => undefined, observeElementOffset: () => undefined,
+      scrollToFn: () => {}, overscan: ACTIVITY_RESIZE_OVERSCAN,
+      rangeExtractor: range => activityRange(range, 0, [49, 90]),
+    });
+    expect(virtualizer.getVirtualItems().map(item => item.index)).toEqual([0, 49, 50, 51, 52, 53, 90]);
   });
 
   it("copies the current CommonMark tree without losing nested text or table cells", async () => {
@@ -71,7 +84,22 @@ describe("Activity virtual geometry", () => {
     expect(activityGeometryValid(report)).toBe(false);
   });
 
-  it("rejects a first-visible gap over the 96 px estimate and empty samples", () => {
+  it("rejects a missing partly visible top row even below the old 96 px estimate", () => {
+    for (const pixels of [2, 5, 22, 96]) {
+      const report = checkActivityGeometry([geometryRow(8, 100 + pixels, 350)], 100, 500);
+      expect(report.firstVisibleGap).toBe(pixels);
+      expect(activityGeometryValid(report)).toBe(false);
+    }
+    expect(activityGeometryValid(checkActivityGeometry([geometryRow(8, 100.5, 350)], 100, 500))).toBe(true);
+  });
+
+  it("allows the history header and an actual inter-row gap, without hiding missing rows", () => {
+    expect(activityGeometryValid(checkActivityGeometry([geometryRow(0, 146, 350)], 100, 500))).toBe(true);
+    expect(activityGeometryValid(checkActivityGeometry([geometryRow(7, 40, 98), geometryRow(8, 108, 350)], 100, 500))).toBe(true);
+    expect(activityGeometryValid(checkActivityGeometry([geometryRow(6, 40, 98), geometryRow(8, 108, 350)], 100, 500))).toBe(false);
+  });
+
+  it("rejects a large first-visible gap and empty samples", () => {
     const gap = checkActivityGeometry([geometryRow(8, 220, 350, 120)], 100, 500);
     expect(gap.firstVisibleGap).toBe(120);
     expect(activityGeometryValid(gap)).toBe(false);

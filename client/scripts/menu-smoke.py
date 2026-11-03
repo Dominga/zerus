@@ -24,8 +24,9 @@ parser.add_argument("--probe-display", action="store_true", help="verify the iso
 parser.add_argument("--xvfb-child", action="store_true", help=argparse.SUPPRESS)
 parser.add_argument("--paint-column", type=int, metavar="X",
                     help="check the presented frames of a page that reports `morphs` (a 4 px column at X through "
-                         "a magenta collapsing card must never grow again, row-collapse-smoke) or `landings` (a magenta "
-                         "reading anchor must keep its top while an older page lands, activity-older-smoke)")
+                         "a magenta collapsing card must never grow again, row-collapse-smoke), `landings` (a magenta "
+                         "reading anchor must keep its top while an older page lands, activity-older-smoke) or `opens` "
+                         "(the magenta loading heading and the cyan placed heading never in one frame, activity-open-smoke)")
 parser.add_argument("--paint-row", type=int, metavar="Y",
                     help="check the presented frames of a page that reports `slides`: the right edge of a "
                          "magenta panel on a 4 px row at Y must only move with each slide (panel-slide-smoke)")
@@ -200,6 +201,28 @@ def painted_anchor(frames, landings, height):
     return {"paint": cases, "paint_failures": failures}
 
 
+def painted_once(frames, opens, height):
+    """While sessions open, the Activity heading is drawn once: no presented
+    frame shows the loading heading (magenta) and the placed one (cyan)."""
+    def kinds(data):
+        stride = len(data) // height
+        found = set()
+        for y in range(height):
+            b, g, r = data[y * stride + 4], data[y * stride + 5], data[y * stride + 6]
+            if r > 200 and g < 60 and b > 200:
+                found.add("M")
+            elif r < 60 and g > 200 and b > 200:
+                found.add("C")
+        return found
+    start = opens[0] / 1000 if opens else 0
+    seen = [(t, kinds(data)) for t, data in frames if t >= start]
+    both = [round((t - start) * 1000) for t, found in seen if found == {"M", "C"}]
+    failures = [f"{len(both)} painted frames showed both Activity headings (ms after the first open: {both[:5]})"] if both else []
+    return {"paint": {"frames": len(seen), "loading": sum("M" in f for _, f in seen),
+                      "placed": sum("C" in f for _, f in seen), "both": len(both)},
+            "paint_failures": failures}
+
+
 with tempfile.TemporaryDirectory(prefix="zerus-menu-") as scratch:
     for variable, directory in [("HOME", "home"), ("XDG_CONFIG_HOME", "config"),
                                 ("XDG_DATA_HOME", "data"), ("XDG_CACHE_HOME", "cache")]:
@@ -293,7 +316,10 @@ with tempfile.TemporaryDirectory(prefix="zerus-menu-") as scratch:
     view.load_uri(args.url)
     window.show_all()
     Gtk.main()
-    if args.paint_column is not None and "landings" in result:
+    if args.paint_column is not None and "opens" in result:
+        result = {**result, **painted_once(painted, result["opens"], PAINT_HEIGHT)}
+        result["failures"] = result.get("failures", []) + result.pop("paint_failures")
+    elif args.paint_column is not None and "landings" in result:
         result = {**result, **painted_anchor(painted, result["landings"], PAINT_HEIGHT)}
         result["failures"] = result.get("failures", []) + result.pop("paint_failures")
     elif args.paint_column is not None:

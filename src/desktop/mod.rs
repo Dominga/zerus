@@ -930,11 +930,14 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                             .is_some_and(|v| v["op"] == "creation_clone_result")
                         {
                             creation_clone::query(&store, hello.request.as_ref().unwrap())
-                        } else if hello
-                            .request
-                            .as_ref()
-                            .is_some_and(|v| v["op"] == "creation_clone")
-                        {
+                        } else if hello.request.as_ref().is_some_and(|v| {
+                            matches!(
+                                v["op"].as_str(),
+                                Some(
+                                    "creation_clone" | "creation_worktree" | "task_start_reconcile"
+                                )
+                            )
+                        }) {
                             frontend_refused(
                                 hello.request.as_ref(),
                                 "frontend_authentication_required",

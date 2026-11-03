@@ -690,6 +690,14 @@ mod tests {
             zerus_client_core::desktop::windows::image::file_id(&open(right)).unwrap()
         );
     }
+    fn assert_normalized_path(path: &Path) {
+        use std::os::windows::ffi::OsStringExt;
+        let canonical = fs::canonicalize(path).unwrap();
+        let units: Vec<u16> = canonical.as_os_str().encode_wide().collect();
+        let prefix: Vec<u16> = r"\\?\".encode_utf16().collect();
+        let normalized = units.strip_prefix(prefix.as_slice()).unwrap();
+        assert_eq!(path.as_os_str(), std::ffi::OsString::from_wide(normalized));
+    }
 
     #[test]
     fn selection_refuses_other_names_and_relative_paths() {
@@ -705,7 +713,10 @@ mod tests {
         let selected = SelectedFrontend::capture(&cli, &image, "c".into()).unwrap();
         assert!(selected.image().is_absolute());
         assert_eq!(selected.directory(), selected.image().parent().unwrap());
-        assert_eq!(selected.service_image(), cli);
+        assert_same_file(selected.service_image(), &cli);
+        // Compare normalization independently of the input's short-name spelling.
+        assert_normalized_path(selected.service_image());
+        assert_normalized_path(selected.image());
     }
 
     #[test]
@@ -799,14 +810,15 @@ mod tests {
         junction(&alias, &real);
         assert!(SelectedFrontend::capture(&alias.join("hgs.exe"), &image, "c".into()).is_err());
         let selected = SelectedFrontend::capture(&real_cli, &image, "c".into()).unwrap();
-        assert_eq!(selected.service_image(), real_cli);
+        assert_same_file(selected.service_image(), &real_cli);
+        assert_normalized_path(selected.service_image());
         assert!(fs::rename(&real, root.0.join("moved-cli")).is_err());
         assert!(fs::write(&real_cli, b"replacement").is_err());
         // Rebinding the original alias must not rebind the GUI's --hgs argument.
         fs::remove_dir(&alias).unwrap();
         junction(&alias, &other);
         selected.revalidate().unwrap();
-        assert_eq!(selected.service_image(), real_cli);
+        assert_same_file(selected.service_image(), &real_cli);
         assert_ne!(
             zerus_client_core::desktop::windows::image::file_id(
                 &File::open(alias.join("hgs.exe")).unwrap()
@@ -941,20 +953,22 @@ mod tests {
         let token = zerus_client_core::attention::encode_token(
             serde_json::json!({
             "host":target.computer, "run":target.run, "conversation":target.conversation,
-            "notice":"fixture" })
+            "name":"fixture-session", "notice":"fixture" })
             .as_object()
             .unwrap(),
         );
-        Launch::fixture(
-            wire::Open {
-                activation_id: uuid::Uuid::new_v4().to_string(),
-                post_request_id: uuid::Uuid::new_v4().to_string(),
-                target,
-                token,
-                platform_context: None,
-            },
-            "c".into(),
-        )
+        let open = wire::Open {
+            activation_id: uuid::Uuid::new_v4().to_string(),
+            post_request_id: uuid::Uuid::new_v4().to_string(),
+            target,
+            token,
+            platform_context: None,
+        };
+        assert!(
+            open.valid(),
+            "launch fixture must pass the real Open validator"
+        );
+        Launch::fixture(open, "c".into())
     }
     fn runtime_fixture(root: &Path) -> super::super::closed::Runtime {
         let config = crate::config::Config {

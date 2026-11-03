@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import queue
+import shutil
 import sqlite3
 import subprocess
 import threading
@@ -30,9 +31,9 @@ def steady(row):
 class Stream:
     """One running `hgs watch --json` and the frames it has written."""
 
-    def __init__(self, test, *args):
+    def __init__(self, test, *args, executable=HGS):
         self.test = test
-        self.process = subprocess.Popen([str(HGS), *args, 'watch', '--json'], env=test.env,
+        self.process = subprocess.Popen([str(executable), *args, 'watch', '--json'], env=test.env,
                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE, text=True)
         self.frames = queue.Queue()
@@ -636,6 +637,55 @@ class WatchStream(unittest.TestCase):
         self.assertEqual(process.stderr.read(), b'')
         process.stdin.close()
         process.stderr.close()
+
+    def install(self, path, mode=0o755):
+        """Puts a copy of the built CLI at `path` the way install.sh does:
+        a staged file renamed over it, so the running file stays as it was."""
+        staged = path.with_name(path.name + '.new')
+        shutil.copy2(HGS, staged)
+        staged.chmod(mode)
+        os.replace(staged, path)
+
+    def assert_replaced_ends(self, stream, installed):
+        """Only a ready replacement ends the stream: a missing path or a file
+        that is not executable yet keeps it running (two checks each)."""
+        stream.quiet(lambda f: f['t'] == 'error', 6)
+        installed.unlink()
+        stream.quiet(lambda f: f['t'] == 'error', 11)
+        self.assertIsNone(stream.process.poll())
+        self.install(installed, 0o644)
+        stream.quiet(lambda f: f['t'] == 'error', 11)
+        self.assertIsNone(stream.process.poll())
+        installed.chmod(0o755)
+        ready = time.monotonic()
+        error = stream.next(lambda f: f['t'] == 'error', timeout=15)
+        self.assertEqual((error['code'], error['fatal']), ('hgs_replaced', True), error)
+        # The same file read twice, 5 s apart: at most two checks after it.
+        self.assertLess(time.monotonic() - ready, 12)
+        self.assertEqual(stream.process.wait(timeout=5), 0)
+        self.assertEqual(stream.process.stderr.read(), '')
+
+    def test_a_replaced_executable_ends_the_stream_so_the_client_starts_the_new_one(self):
+        # zerus-5wmh.66.2.46: an update renames a new file over the CLI, as
+        # install.sh does; a stream left running would keep the old code's
+        # summaries (Clear's reason among them) beside the new CLI's commands.
+        installed = self.root / 'installed' / 'hgs'
+        installed.parent.mkdir()
+        self.install(installed)
+        stream = Stream(self, executable=installed)
+        stream.next(lambda f: f['t'] == 'snapshot' and f['topic'] == 'catalog.meta')
+        self.assert_replaced_ends(stream, installed)
+
+    def test_a_peer_whose_executable_is_replaced_ends_its_stream_through_ssh(self):
+        self.script('ssh', '#!/bin/sh\nfor argument do last="$argument"; done\nexec /bin/sh -c "$last"\n')
+        peer = self.root / '.local/bin/hgs'
+        peer.unlink()
+        self.install(peer)
+        stream = Stream(self, '@remote')
+        stream.next(lambda f: f['t'] == 'snapshot' and f['topic'] == 'catalog' and f['last'])
+        # The local `hgs @remote watch` only waits on ssh; the peer's own
+        # watcher sees its file replaced, and its last frame reaches the client.
+        self.assert_replaced_ends(stream, peer)
 
     def test_usage_marker_and_dry_run(self):
         result = subprocess.run([str(HGS), '-h'], env=self.env, text=True, capture_output=True, timeout=10)

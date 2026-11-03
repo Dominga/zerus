@@ -29,6 +29,12 @@ export function retainedSourceNotice(state: DesktopService | undefined): string 
   if (report?.creations_capture?.paused && report.creations_capture.code === "creation_source_data_directory") return tr("Session creation is paused. Check that the desktop data folder is available and owned by your user, then retry.");
   if (report?.creations_capture?.paused && report.creations_capture.code === "creation_source_unavailable") return tr("Session creation is paused. Check journal and archive access, ownership and private file permissions (0600 on Unix); review retained partial files before retrying.");
   if (report?.creations_capture?.paused) return tr("Session creation is paused while its original journal is preserved. Review migration status or retry.");
+  const creations = report?.creations_report;
+  if (creations?.required && !creations.complete) {
+    if (creations.running) return tr("Preparing the saved creation report. Your sessions remain available.");
+    if (["creations_import_waiting", "creations_import_source_resources_pending", "creations_import_handoff_busy"].includes(creations.code)) return tr("The saved creation report is deferred. Your sessions remain available; Retry keeps the original report identity.");
+    return tr("The saved creation report needs review. An unconfirmed publication will only be looked up, never resent.");
+  }
   if (!report?.required || !report.code || report.code === "retained_import_staged") return "";
   if (report.running) return tr("Preparing the migration report. Your sessions remain available.");
   if (report.code === "retained_import_handoff_busy") return tr("The migration report is deferred while background work is running.");

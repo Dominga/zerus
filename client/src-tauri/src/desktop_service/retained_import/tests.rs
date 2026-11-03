@@ -5,13 +5,13 @@ use std::{
     path::Path,
 };
 
-struct Fixture {
-    root: PathBuf,
-    report: Arc<Report>,
-    relay: Arc<zerus_client_core::desktop::relay::Connection>,
+pub(super) struct Fixture {
+    pub(super) root: PathBuf,
+    pub(super) report: Arc<Report>,
+    pub(super) relay: Arc<zerus_client_core::desktop::relay::Connection>,
 }
 impl Fixture {
-    fn new(mode: &str) -> Self {
+    pub(super) fn new(mode: &str) -> Self {
         let root =
             std::env::temp_dir().join(format!("zerus-retained-report-{}", uuid::Uuid::new_v4()));
         fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
@@ -46,7 +46,7 @@ impl Fixture {
             relay,
         }
     }
-    fn run(&self, explicit: bool) -> Result<(), &'static str> {
+    pub(super) fn run(&self, explicit: bool) -> Result<(), &'static str> {
         let charge = self.report.work.admit(Role::Operations).unwrap();
         self.report.run(
             self.relay.clone(),
@@ -56,10 +56,10 @@ impl Fixture {
             Arc::new(charge),
         )
     }
-    fn mode(&self, value: &str) {
+    pub(super) fn mode(&self, value: &str) {
         fs::write(self.root.join("mode"), value).unwrap();
     }
-    fn attempts(&self) -> usize {
+    pub(super) fn attempts(&self) -> usize {
         fs::read_to_string(self.root.join("publications"))
             .unwrap_or_default()
             .lines()
@@ -179,7 +179,7 @@ fn a_bad_lazy_source_keeps_original_bytes_without_a_final_manifest() {
 
 #[cfg(target_os = "linux")]
 impl Fixture {
-    fn service(
+    pub(super) fn service(
         &self,
     ) -> (
         Arc<Service>,
@@ -224,7 +224,7 @@ impl Fixture {
         );
         (service, cache)
     }
-    fn calls(&self) -> Vec<Value> {
+    pub(super) fn calls(&self) -> Vec<Value> {
         fs::read_to_string(self.root.join("calls"))
             .unwrap_or_default()
             .lines()

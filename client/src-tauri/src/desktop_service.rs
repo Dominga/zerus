@@ -380,6 +380,7 @@ impl Service {
             report.hook_creations(Arc::new(move || {
                 if let Some(shared) = weak.upgrade() {
                     shared.publish_retained_import();
+                    retained_import::creations::schedule_current(&shared);
                 }
             }));
         }
@@ -1325,6 +1326,7 @@ async fn connection(
                         for projection in &shared.projections { projection(Some(&frame)); }
                         last_frame = tokio::time::Instant::now();
                         shared.publish(state.snapshot().clone());
+                        retained_import::creations::schedule_current(&shared);
                         if frame["t"] == "hello" && notification_worker.is_none()
                             && shared.notification_supported.load(Ordering::Acquire)
                             && shared.notification_controls.enabled() {

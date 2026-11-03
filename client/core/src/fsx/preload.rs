@@ -295,7 +295,13 @@ pub(crate) struct Lock {
 }
 impl Lock {
     pub fn take(path: &Path) -> io::Result<Self> {
-        let parents = parent(path)?;
+        Self::take_with(path, true)
+    }
+    pub fn take_managed(path: &Path) -> io::Result<Self> {
+        Self::take_with(path, false)
+    }
+    fn take_with(path: &Path, private: bool) -> io::Result<Self> {
+        let parents = Parents::open_with(path.parent().ok_or_else(refused)?, false, private)?;
         #[cfg(unix)]
         let file = {
             use std::{

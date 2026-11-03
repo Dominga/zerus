@@ -232,7 +232,9 @@ impl CreationHost {
         }));
         let writing = Arc::clone(&services);
         let written = done.clone();
-        let path = file.clone();
+        let journal_path: Arc<std::sync::OnceLock<PathBuf>> = Arc::new(std::sync::OnceLock::new());
+        let path = journal_path.clone();
+        let writing_capture = capture.clone();
         std::thread::Builder::new()
             .name("zerus-creation-journal".into())
             .spawn(move || {
@@ -240,7 +242,16 @@ impl CreationHost {
                     match message {
                         Write::Journal(write, bytes, remember) => {
                             let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                (writing.write)(&path, &bytes)
+                                let Some(path) = path.get() else {
+                                    return false;
+                                };
+                                if writing_capture
+                                    .as_ref()
+                                    .is_some_and(|c| c.live_path().as_ref() != Ok(path))
+                                {
+                                    return false;
+                                }
+                                (writing.write)(path, &bytes)
                             }))
                             .unwrap_or(false);
                             if ok {
@@ -287,17 +298,24 @@ impl CreationHost {
                     if worker.loaded || worker.quitting {
                         return;
                     }
-                    if let Some(capture) = &capture {
+                    let selected = if let Some(capture) = &capture {
                         if !capture.take_retry() || capture.prepare().is_err() {
                             return;
                         }
-                    }
+                        let Ok(path) = capture.live_path() else {
+                            return;
+                        };
+                        path
+                    } else {
+                        file.clone()
+                    };
                     worker.stop_if_requested();
                     if worker.quitting {
                         return;
                     }
+                    let _ = journal_path.set(selected.clone());
                     worker.loaded = true;
-                    let effects = worker.queue.load(load(&file));
+                    let effects = worker.queue.load(load(&selected));
                     let loaded: Vec<_> = worker
                         .queue
                         .operations()
@@ -1929,6 +1947,57 @@ mod tests {
         state(&host, &id, "checking");
         fake.stop(host);
         (id, std::fs::read(fake.dir.join("creations.json")).unwrap())
+    }
+
+    #[test]
+    fn capture_and_legacy_load_and_writes_keep_the_original_canonical_data_folder() {
+        use std::os::unix::fs::symlink;
+        let fake = Fake::new();
+        let (id, original) = saved_creation(&fake);
+        let alias = fake.dir.join("data-alias");
+        symlink(&fake.dir, &alias).unwrap();
+        let other = fake.dir.join("other");
+        std::fs::create_dir(&other).unwrap();
+        let other_bytes = br#"{"schema":1,"operations":{}}"#;
+        zerus_client_core::fsx::write_private_durable(&other.join("creations.json"), other_bytes)
+            .unwrap();
+        let capture = zerus_client_core::migration::preload::Capture::new(alias.clone());
+        let (entered, answer) = mpsc::sync_channel(1);
+        let (release, resume) = mpsc::sync_channel(1);
+        let resume = Mutex::new(resume);
+        capture.hook(Arc::new(move || {
+            entered.send(()).unwrap();
+            lock(&resume).recv().unwrap();
+        }));
+        let mut services = fake.services();
+        services.allowed = false;
+        let expected = fake.dir.canonicalize().unwrap().join("creations.json");
+        let writes = Arc::new(AtomicUsize::new(0));
+        let count = writes.clone();
+        services.write = Arc::new(move |path, bytes| {
+            assert_eq!(path, expected);
+            count.fetch_add(1, Ordering::SeqCst);
+            zerus_client_core::fsx::write_private_atomic(path, bytes, true).is_ok()
+        });
+        let host =
+            CreationHost::new_with_capture(alias.join("creations.json"), services, Some(capture));
+        answer.recv_timeout(Duration::from_secs(2)).unwrap();
+        std::fs::remove_file(&alias).unwrap();
+        symlink(&other, &alias).unwrap();
+        release.send(()).unwrap();
+        state(&host, &id, "recover");
+        host.action(id, CreationAction::Hide).unwrap();
+        assert!(host.flush_journal_for_test());
+        assert!(writes.load(Ordering::SeqCst) > 0);
+        assert_eq!(
+            std::fs::read(other.join("creations.json")).unwrap(),
+            other_bytes
+        );
+        assert_eq!(
+            std::fs::read(fake.dir.join("creation-preload-v1/original.bin")).unwrap(),
+            original
+        );
+        fake.stop(host);
     }
 
     #[test]

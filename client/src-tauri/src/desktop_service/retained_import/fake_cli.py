@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 
 root = Path(os.path.abspath(__file__)).parent
 args = sys.argv[1:]
@@ -17,7 +18,7 @@ elif args[:2] == ['desktop', 'import-status']:
     if (root / 'mode').read_text() == 'lookup_error':
         raise SystemExit(1)
     target = args[-1]
-    path = root / 'committed.json'
+    path = root / ('committed-' + target + '.json')
     receipt = json.loads(path.read_text()) if path.exists() else None
     answer = {'abi': 'desktop-import-v1', 'configuration': configuration,
               'import_id': target, 'record_present': receipt is not None}
@@ -61,6 +62,13 @@ elif args == ['desktop', 'import-evidence', '--json']:
                'import_id': start['import_id'],
                'import_record': {'version': 1, 'sha256': hashlib.sha256(raw).hexdigest()},
                'bytes': total, 'snapshots': snapshots, 'pages': pages}
+    if mode == 'hold':
+        (root / 'holding').write_text(start['import_id'])
+        deadline = time.monotonic() + 15
+        while not (root / 'release').exists():
+            if time.monotonic() >= deadline:
+                raise SystemExit(1)
+            time.sleep(0.01)
     if mode == 'busy':
         print(json.dumps({key: receipt[key] for key in ['abi', 'configuration', 'import_id', 'import_record']} |
                          {'published': False, 'code': 'handoff_busy', 'this_attempt_not_committed': True}))
@@ -71,6 +79,8 @@ elif args == ['desktop', 'import-evidence', '--json']:
         print(json.dumps(receipt))
     else:
         (root / 'committed.json').write_text(json.dumps(receipt))
+        (root / ('committed-' + start['import_id'] + '.json')).write_text(json.dumps(receipt))
+        (root / ('record-' + start['import_id'] + '.json')).write_text(json.dumps(record))
         if mode != 'commit_lost':
             print(json.dumps(receipt))
 else:

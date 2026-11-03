@@ -106,6 +106,59 @@ impl Capture {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
+    /// Original native setup's canonical data object, never a caller path.
+    /// This accessor does not capture or initialize anything on the reporter.
+    pub fn data_path(&self) -> SourceResult<PathBuf> {
+        #[cfg(unix)]
+        {
+            let resolved = self.resolved.get().ok_or(SourceError::SourceUnreadable)?;
+            resolved.recheck().map_err(|_| SourceError::SourceChanged)?;
+            Ok(resolved.path().to_path_buf())
+        }
+        #[cfg(not(unix))]
+        {
+            if !self.data.is_absolute() {
+                return Err(SourceError::InvalidMetadata);
+            }
+            Ok(self.data.clone())
+        }
+    }
+    /// Use the same canonical directory for original legacy load AND writes.
+    pub fn live_path(&self) -> SourceResult<PathBuf> {
+        self.data_path()
+            .map(|path| path.join("creations.json"))
+            .inspect_err(|_| {
+                let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                state.paused = true;
+                state.code = "creation_source_changed";
+                drop(state);
+                let notify = self
+                    .notify
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
+                if let Some(notify) = notify {
+                    notify();
+                }
+            })
+    }
+    /// Read ONLY the already committed historical slot. No mutable source read,
+    /// capture, recovery, normalization or decoder/effect admission occurs here.
+    pub fn retained(&self) -> SourceResult<Prepared> {
+        let expected = self
+            .status()
+            .capture_id
+            .ok_or(SourceError::SourceUnreadable)?;
+        let root = self.data_path()?.join("creation-preload-v1");
+        let (seed, _) =
+            read_json::<Seed>(&root.join("identity.json"))?.ok_or(SourceError::SourceUnreadable)?;
+        if !seed.valid() || seed.capture_id != expected {
+            return Err(SourceError::SourceChanged);
+        }
+        let (receipt, _) = read_json::<Receipt>(&root.join("receipt.json"))?
+            .ok_or(SourceError::SourceUnreadable)?;
+        Snapshot::open(root, receipt, &seed, false)
+    }
     pub fn hook(&self, notify: Arc<dyn Fn() + Send + Sync>) {
         *self.notify.lock().unwrap_or_else(PoisonError::into_inner) = Some(notify);
     }
@@ -192,7 +245,7 @@ impl Capture {
             .capture_id = Some(seed.capture_id.clone());
         let ready = root.join("receipt.json");
         if let Some((receipt, _)) = read_json::<Receipt>(&ready)? {
-            let prepared = Snapshot::open(root, receipt, &seed)?;
+            let prepared = Snapshot::open(root, receipt, &seed, true)?;
             #[cfg(unix)]
             resolved.recheck().map_err(|_| SourceError::SourceChanged)?;
             return Ok(prepared);
@@ -264,7 +317,7 @@ impl Capture {
         create_json(&ready, &receipt)?;
         #[cfg(unix)]
         resolved.recheck().map_err(|_| SourceError::SourceChanged)?;
-        Snapshot::open(root, receipt, &seed).map_err(Into::into)
+        Snapshot::open(root, receipt, &seed, true).map_err(Into::into)
     }
 }
 fn unreadable(error: std::io::Error) -> SourceError {
@@ -296,6 +349,27 @@ pub enum Prepared {
     Missing { capture_id: String },
     Snapshot(Arc<Snapshot>),
 }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reference {
+    capture_id: String,
+    source_sha256: String,
+    receipt_sha256: String,
+    receipt_identity: Stamp,
+}
+impl Reference {
+    pub fn capture_id(&self) -> &str {
+        &self.capture_id
+    }
+    pub fn valid(&self) -> bool {
+        canonical_uuid(&self.capture_id)
+            && [&self.source_sha256, &self.receipt_sha256].iter().all(|s| {
+                s.len() == 64
+                    && s.bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+    }
+}
 /// An immutable historical version. The actual original source may now change.
 /// Every later reader validates THIS retained object and hash afresh; it never
 /// treats the live creation writer or an old status digest as a recheck.
@@ -305,7 +379,7 @@ pub struct Snapshot {
     receipt_stamp: Stamp,
 }
 impl Snapshot {
-    fn open(root: PathBuf, receipt: Receipt, seed: &Seed) -> SourceResult<Prepared> {
+    fn open(root: PathBuf, receipt: Receipt, seed: &Seed, decode: bool) -> SourceResult<Prepared> {
         if receipt.plan.seed != *seed || receipt.plan.bytes > RAW {
             return Err(SourceError::InvalidMetadata);
         }
@@ -346,8 +420,10 @@ impl Snapshot {
             });
         }
         // Decode for classification only. No Creations::load or effects.
-        for item in sources::creations(sources::Origin::Next, &bytes)?.into_chunks() {
-            item?;
+        if decode {
+            for item in sources::creations(sources::Origin::Next, &bytes)?.into_chunks() {
+                item?;
+            }
         }
         Ok(Prepared::Snapshot(Arc::new(snapshot)))
     }
@@ -377,6 +453,47 @@ impl Snapshot {
             return Err(SourceError::SourceChanged);
         }
         Ok(bytes)
+    }
+    pub fn reference(&self) -> SourceResult<Reference> {
+        self.bytes()?;
+        Ok(Reference {
+            capture_id: self.capture_id().into(),
+            source_sha256: self.receipt.plan.sha256.clone(),
+            receipt_sha256: sha256(
+                &serde_json::to_vec(&self.receipt).map_err(|_| SourceError::InvalidMetadata)?,
+            ),
+            receipt_identity: self.receipt_stamp.clone(),
+        })
+    }
+    fn provenance(&self) -> SourceResult<serde_json::Value> {
+        let reference = self.reference()?;
+        Ok(
+            serde_json::json!({"version":1,"boundary":BOUNDARY,"historical":true,
+            "current_source_complete":false,"drained":false,"reference":reference,
+            "original_source":self.receipt.plan.source,"original_bytes":self.receipt.plan.bytes,
+            "snapshot_identity":self.receipt.snapshot}),
+        )
+    }
+    pub fn report_sources(self: Arc<Self>) -> SourceResult<Vec<SourceStream>> {
+        let original = self.clone().source()?;
+        let value = self.provenance()?;
+        let hash = sha256(&serde_json::to_vec(&value).map_err(|_| SourceError::InvalidMetadata)?);
+        let source = SourceStream::new(
+            zerus_desktop_migration::SourceRecord {
+                family: "next-creations-preload-provenance".into(),
+                schema: 1,
+                format: "creation-preload-provenance-v1".into(),
+                sha256: hash,
+                build: None,
+            },
+            std::iter::once(Ok(value)),
+        )
+        .recheck(move || {
+            serde_json::to_vec(&self.provenance()?)
+                .map(|b| sha256(&b))
+                .map_err(|_| SourceError::InvalidMetadata)
+        });
+        Ok(vec![original, source])
     }
     pub fn source(self: Arc<Self>) -> SourceResult<SourceStream> {
         let source = sources::creations(sources::Origin::Next, &self.bytes()?)?;
@@ -641,6 +758,12 @@ mod tests {
         fs::rename(&data, s.0.join("old-data")).unwrap();
         fs::create_dir(&data).unwrap();
         crate::fsx::write_private_durable(&data.join("creations.json"), &raw()).unwrap();
+        assert!(matches!(
+            capture.live_path(),
+            Err(SourceError::SourceChanged)
+        ));
+        assert!(capture.status().paused);
+        assert_eq!(capture.status().code, "creation_source_changed");
         assert!(matches!(capture.prepare(), Err(SourceError::SourceChanged)));
         assert!(!data.join("creation-preload-v1").exists());
     }

@@ -20,10 +20,116 @@ import time
 import test_desktop as kernel
 
 
+def windows_process_metadata(pid, handle=None):
+    """Read-only diagnostics. Reopened PIDs never authorize cleanup."""
+    import ctypes as c
+    from ctypes import wintypes as w
+    dll = c.WinDLL('kernel32', use_last_error=True)
+    dll.OpenProcess.argtypes = (w.DWORD, w.BOOL, w.DWORD)
+    dll.OpenProcess.restype = w.HANDLE
+    dll.CloseHandle.argtypes = (w.HANDLE,)
+    dll.GetProcessTimes.argtypes = (w.HANDLE,) + (c.POINTER(w.FILETIME),) * 4
+    dll.QueryFullProcessImageNameW.argtypes = (w.HANDLE, w.DWORD, w.LPWSTR, c.POINTER(w.DWORD))
+    result = dict(pid=pid)
+    opened = handle is None
+    if opened:
+        handle = dll.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION only
+    if not handle:
+        return dict(result, error=c.get_last_error())
+    try:
+        created, exited, system, user = (w.FILETIME() for _ in range(4))
+        if dll.GetProcessTimes(handle, c.byref(created), c.byref(exited), c.byref(system), c.byref(user)):
+            result['birth'] = (created.dwHighDateTime << 32) | created.dwLowDateTime
+            result['exited'] = bool(exited.dwHighDateTime or exited.dwLowDateTime)
+        else:
+            result['times_error'] = c.get_last_error()
+        size = w.DWORD(32768)
+        image = c.create_unicode_buffer(size.value)
+        if dll.QueryFullProcessImageNameW(handle, 0, image, c.byref(size)):
+            result['image'] = image.value
+        else:
+            result['image_error'] = c.get_last_error()
+        return result
+    finally:
+        if opened:
+            dll.CloseHandle(handle)
+
+
+def windows_file_users(path):
+    """Bounded Restart Manager observation of ONE private image; no shutdown API."""
+    import ctypes as c
+    from ctypes import wintypes as w
+
+    class Unique(c.Structure):
+        _fields_ = [('pid', w.DWORD), ('birth', w.FILETIME)]
+
+    class Info(c.Structure):
+        _fields_ = [('process', Unique), ('application', w.WCHAR * 256),
+                    ('service', w.WCHAR * 64), ('kind', c.c_int), ('status', w.ULONG),
+                    ('session', w.DWORD), ('restartable', w.BOOL)]
+
+    dll = c.WinDLL('rstrtmgr', use_last_error=True)
+    dll.RmStartSession.argtypes = (c.POINTER(w.DWORD), w.DWORD, w.LPWSTR)
+    dll.RmRegisterResources.argtypes = (w.DWORD, w.UINT, c.POINTER(w.LPCWSTR),
+                                       w.UINT, c.POINTER(Unique), w.UINT, c.POINTER(w.LPCWSTR))
+    dll.RmGetList.argtypes = (w.DWORD, c.POINTER(w.UINT), c.POINTER(w.UINT),
+                            c.POINTER(Info), c.POINTER(w.DWORD))
+    dll.RmEndSession.argtypes = (w.DWORD,)
+    session, key = w.DWORD(), c.create_unicode_buffer(33)
+    code = dll.RmStartSession(c.byref(session), 0, key)
+    if code:
+        return dict(available=False, operation='start', code=code)
+    try:
+        paths = (w.LPCWSTR * 1)(str(path))
+        code = dll.RmRegisterResources(session, 1, paths, 0, None, 0, None)
+        if code:
+            return dict(available=False, operation='register', code=code)
+        until = time.monotonic() + 2
+        for _ in range(3):
+            needed, count, reasons = w.UINT(), w.UINT(32), w.DWORD()
+            values = (Info * 32)()
+            code = dll.RmGetList(session, c.byref(needed), c.byref(count), values, c.byref(reasons))
+            if needed.value > 32 or count.value > 32:
+                return dict(available=False, operation='bound', count=needed.value)
+            if code == 234 and time.monotonic() < until:  # ERROR_MORE_DATA, bounded churn only
+                continue
+            if code:
+                return dict(available=False, operation='list', code=code)
+            users = []
+            for item in values[:count.value]:
+                birth = (item.process.birth.dwHighDateTime << 32) | item.process.birth.dwLowDateTime
+                observed = windows_process_metadata(item.process.pid)
+                users.append(dict(observed, recorded_birth=birth,
+                                  same_birth=observed.get('birth') == birth))
+            return dict(available=True, users=users)
+        return dict(available=False, operation='churn')
+    finally:
+        dll.RmEndSession(session)
+
+
 class WindowsFrontend(unittest.TestCase):
     cli = kernel.Desktop.cli
     serve = kernel.Desktop.serve
-    stop = kernel.Desktop.stop
+
+    def stop(self, process):
+        # Windows-only fixture: keep the original Popen handle, drain its pipes
+        # even if poll already saw exit, and explicitly release it before rmtree.
+        if getattr(process, '_fixture_settled', False):
+            return
+        if process.poll() is None:
+            process.terminate()  # Only this original Popen/CreateProcess handle.
+        process.communicate(timeout=8)
+        self.assertIsNotNone(process.returncode)
+        process._handle.Close()
+        process._fixture_settled = True
+
+    def trace_file_users(self, phase):
+        try:
+            observed = windows_file_users(kernel.HGS)
+        except Exception as error:
+            # Diagnostic failure never skips the original-child joins.
+            observed = dict(available=False, error=type(error).__name__)
+        print('STARTUP_REFUSAL_IMAGE_USERS_' + phase + ' ' + json.dumps(observed), file=sys.stderr)
 
     def setUp(self):
         self.assertEqual(os.name, 'nt', 'run this native suite on Windows')
@@ -154,20 +260,42 @@ class WindowsFrontend(unittest.TestCase):
 
     def test_registered_startup_refusal_retains_the_guard_reason_without_replacing_the_owner(self):
         original, status = self.serve()
-        result = self.cli('desktop', 'serve', '--config-dir', str(self.config),
-                          '--state-dir', str(self.state), ok=False)
-        self.assertEqual(result.returncode, 78, result.stderr)
-        path = self.desktop / 'startup-failure.json'
-        data = path.read_bytes()
-        self.assertLessEqual(len(data), 4096)
-        diagnostic = json.loads(data)
-        self.assertEqual(diagnostic['abi'], 'desktop-startup-failure-v1')
-        self.assertEqual(diagnostic['exit_code'], 78)
-        self.assertEqual(diagnostic['configuration'], status['configuration'])
-        self.assertIn('acquire desktop owner lock', diagnostic['message'])
-        self.assertIn('another desktop service owns this state', diagnostic['message'])
-        self.assertIsNone(original.poll())
-        self.assertEqual(self.cli('desktop', 'status', '--json')['lifecycle']['pid'], original.pid)
+        refused = subprocess.Popen([str(kernel.HGS), 'desktop', 'serve', '--config-dir', str(self.config),
+                                    '--state-dir', str(self.state)], env=self.env, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(self.stop, refused)
+        try:
+            identities = dict(original=windows_process_metadata(original.pid, int(original._handle)),
+                              refused=windows_process_metadata(refused.pid, int(refused._handle)),
+                              selected_image=str(kernel.HGS))
+            print('STARTUP_REFUSAL_ORIGINAL_CHILDREN ' + json.dumps(identities), file=sys.stderr)
+            _, error = refused.communicate(timeout=10)
+            # Natural exit is required before cleanup can terminate anything.
+            self.assertEqual(refused.returncode, 78, error)
+            path = self.desktop / 'startup-failure.json'
+            data = path.read_bytes()
+            self.assertLessEqual(len(data), 4096)
+            diagnostic = json.loads(data)
+            self.assertEqual(diagnostic['abi'], 'desktop-startup-failure-v1')
+            self.assertEqual(diagnostic['exit_code'], 78)
+            self.assertEqual(diagnostic['pid'], refused.pid)
+            self.assertEqual(diagnostic['birth'], str(identities['refused']['birth']))
+            self.assertEqual(diagnostic['configuration'], status['configuration'])
+            self.assertIn('acquire desktop owner lock', diagnostic['message'])
+            self.assertIn('another desktop service owns this state', diagnostic['message'])
+            self.assertIsNone(original.poll())
+            self.assertEqual(self.cli('desktop', 'status', '--json')['lifecycle']['pid'], original.pid)
+        finally:
+            self.trace_file_users('BEFORE_JOIN')
+            try:
+                self.stop(refused)
+            finally:
+                try:
+                    self.stop(original)
+                finally:
+                    self.trace_file_users('AFTER_JOIN')
+        self.assertTrue(original._handle.closed)
+        self.assertTrue(refused._handle.closed)
 
     def test_registered_passive_start_without_a_console_keeps_the_original_startup_reason(self):
         # Separate private configuration: this diagnoses the no-console launch

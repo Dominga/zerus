@@ -81,12 +81,13 @@ pub enum Out {
         key: String,
         message: Value,
     },
-    /// Insert the transcript at the draft position recorded when Send or
-    /// Check was pressed, save the draft, and answer [`Input::Inserted`].
+    /// Recheck the exact draft revision and insertion UUID, save the inserted
+    /// transcript without sending it, and answer [`Input::Inserted`].
     Insert {
         token: u64,
         text: String,
         id: String,
+        revision: u64,
     },
     /// Open the microphone recovery dialog.
     PermissionRecovery,
@@ -484,7 +485,17 @@ impl Loop {
                 }
                 Effect::RememberProfile(profile) => (self.sink)(Out::RememberProfile { profile }),
                 Effect::Message { key, message } => (self.sink)(Out::Message { key, message }),
-                Effect::Insert { token, text, id } => (self.sink)(Out::Insert { token, text, id }),
+                Effect::Insert {
+                    token,
+                    text,
+                    id,
+                    revision,
+                } => (self.sink)(Out::Insert {
+                    token,
+                    text,
+                    id,
+                    revision,
+                }),
                 Effect::PollLater { token } => self
                     .timers
                     .push((Instant::now() + Duration::from_secs(1), token)),

@@ -257,32 +257,70 @@ fn root_host_refuses_native_setup_fault_and_still_joins_the_original_worker() {
     until(|| host.drained());
     assert_eq!(host.status()["joined"], true);
 }
-#[test]
-fn invalid_restore_stops_before_native_work_and_closes_real_worker() {
+fn invalid_restore_with_order(finish_before_invalid: bool) {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
     let scope = session();
-    let (actor, endpoint) = Outbox::new(scope.clone()).unwrap();
-    let mut runtime = Runtime::start_with(scope.clone(), endpoint, Arc::new(()), move |_, slot| {
-        Ok(Fake {
-            posts: Arc::new(AtomicUsize::new(0)),
-            close: Arc::new(AtomicBool::new(true)),
-            slot,
-            release: None,
-            entered: None,
-            close_event: None,
-            callback_allowed: true,
-        })
+    let mut store = store(&temp, &scope);
+    let (mut actor, endpoint) = Outbox::new(scope.clone()).unwrap();
+    queue(&mut store, &mut actor, &scope);
+    let posts = Arc::new(AtomicUsize::new(0));
+    let close = Arc::new(AtomicBool::new(false));
+    let (opened, slot_rx) = mpsc::sync_channel(1);
+    let (release, release_rx) = mpsc::channel();
+    let mut runtime = Runtime::start_with(scope.clone(), endpoint, Arc::new(()), {
+        let posts = posts.clone();
+        let close = close.clone();
+        move |_, slot| {
+            opened.send(slot.clone()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            Ok(Fake {
+                posts,
+                close,
+                slot,
+                release: None,
+                entered: None,
+                close_event: None,
+                callback_allowed: true,
+            })
+        }
     })
     .unwrap();
+    let slot = slot_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     let mut invalid = activation(&post(&scope, 1));
     invalid.request_id = "invalid".into();
     assert!(runtime.try_restore(invalid));
-    assert!(runtime.finish_restoration());
+    // Holding the constructor makes finish-before-consumption deterministic.
+    if finish_before_invalid {
+        assert!(runtime.finish_restoration());
+    }
+    release.send(()).unwrap();
+    // Observing stop also covers the opposite ordering: the accepted restore
+    // has been rejected before finish is attempted, so finish must now refuse.
+    until(|| runtime.stop.load(Ordering::Acquire));
+    let finished_after_invalid = runtime.finish_restoration();
+    assert_eq!(runtime.status()["fault"], "notification_restore_refused");
+    assert_eq!(posts.load(Ordering::Acquire), 0);
+    assert!(!slot.accepting_activations());
+    assert!(!runtime.try_restore(activation(&post(&scope, 2))));
+    assert!(!runtime.try_join());
+    assert!(!runtime.drained());
+    close.store(true, Ordering::Release);
+    runtime.wake.unpark();
     until(|| runtime.try_join());
     assert!(runtime.drained());
-    assert_eq!(runtime.status()["fault"], "notification_restore_refused");
-    assert!(!runtime.try_restore(activation(&post(&scope, 2))));
+    assert!(runtime.worker.is_none(), "the original worker was joined");
+    assert_eq!(posts.load(Ordering::Acquire), 0);
+    assert!(!finished_after_invalid);
     drop(actor);
+}
+#[test]
+fn invalid_restore_stops_before_native_work_and_closes_real_worker() {
+    invalid_restore_with_order(true);
+}
+#[test]
+fn invalid_restore_observed_before_finish_refuses_restoration_and_joins_worker() {
+    invalid_restore_with_order(false);
 }
 #[test]
 fn failed_native_setup_keeps_original_owner_until_last_native_reference_returns() {

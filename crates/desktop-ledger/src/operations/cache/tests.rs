@@ -17,6 +17,7 @@ fn database(db: &mut Connection) {
     let tx = db.transaction().unwrap();
     super::super::migrate(&tx).unwrap();
     migrate(&tx).unwrap();
+    migrate_effects(&tx).unwrap();
     tx.commit().unwrap();
 }
 fn original(n: usize) -> Original {
@@ -54,12 +55,27 @@ fn binding(original: &Original) -> Binding {
         }],
     }
 }
+fn kept(binding: &Binding) -> Receipt {
+    Receipt {
+        index_sha256: binding.index_sha256.clone(),
+        files: vec![FileState::Kept; binding.candidates.len()],
+        bytes: binding.candidates.iter().map(|c| c.bytes).sum(),
+        count: binding.candidates.len(),
+    }
+}
+fn start(db: &mut Connection, original: &Original, hash: &str) {
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    start_effects(&tx, original, hash).unwrap();
+    tx.commit().unwrap();
+}
 fn prepare(db: &mut Connection, original: &Original, binding: &Binding) -> String {
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .unwrap();
     assert!(begin(&tx, original, &"f".repeat(64)).unwrap());
-    let hash = prepared(&tx, original, binding).unwrap();
+    let hash = prepared(&tx, original, binding, &kept(binding)).unwrap();
     tx.commit().unwrap();
     hash
 }
@@ -90,7 +106,7 @@ fn preparation_has_no_execution_and_changed_originals_and_scopes_refuse() {
     assert!(reserve(&tx, &original, &"a".repeat(64)).is_err());
     assert!(!begin(&tx, &original, &"f".repeat(64)).unwrap());
     assert!(begin(&tx, &original, &"b".repeat(64)).is_err());
-    let hash = prepared(&tx, &original, &binding).unwrap();
+    let hash = prepared(&tx, &original, &binding, &kept(&binding)).unwrap();
     tx.commit().unwrap();
     let tx = db.transaction().unwrap();
     let mut changed = original.clone();
@@ -115,6 +131,7 @@ fn a_lost_destructive_result_fences_the_same_content_under_new_ids_and_index_gen
     let frozen = binding(&first);
     let hash = prepare(&mut db, &first, &frozen);
     assert_eq!(admit(&mut db, &first, &hash), [true]);
+    start(&mut db, &first, &hash);
     assert_eq!(undrained(&db).unwrap(), 1);
     join(&mut db, &first, None);
     assert_eq!(
@@ -184,6 +201,7 @@ fn committed_original_result_can_finish_after_revoke_but_cannot_finish_twice() {
     let binding = binding(&original);
     let hash = prepare(&mut db, &original, &binding);
     admit(&mut db, &original, &hash);
+    start(&mut db, &original, &hash);
     let tx = db.transaction().unwrap();
     revoke(&tx).unwrap();
     tx.commit().unwrap();
@@ -212,6 +230,7 @@ fn actual_database_reopen_recovers_reserved_work_as_unknown_without_replay() {
         database(&mut db);
         let hash = prepare(&mut db, &first, &binding(&first));
         admit(&mut db, &first, &hash);
+        start(&mut db, &first, &hash);
     }
     let mut db = Connection::open(&path).unwrap();
     let tx = db.transaction().unwrap();
@@ -280,5 +299,192 @@ fn explicit_policy_commit_is_separate_from_effects_and_refresh_cannot_change_it(
             .get::<_, u64>(0))
             .unwrap(),
         1
+    );
+}
+
+#[test]
+fn a_never_started_reservation_keeps_its_original_receipt_after_expiry_and_join() {
+    let mut db = Connection::open_in_memory().unwrap();
+    database(&mut db);
+    let first = original(1);
+    let frozen = binding(&first);
+    let mut saved = kept(&frozen);
+    saved.bytes = 73;
+    saved.count = 4;
+    let tx = db.transaction().unwrap();
+    begin(&tx, &first, &"f".repeat(64)).unwrap();
+    let hash = prepared(&tx, &first, &frozen, &saved).unwrap();
+    tx.commit().unwrap();
+    admit(&mut db, &first, &hash);
+    let tx = db.transaction().unwrap();
+    expire(&tx, &first).unwrap();
+    tx.commit().unwrap();
+    let pending = load(&db, &first.operation_id).unwrap().unwrap();
+    assert_eq!(pending.phase, Phase::Reserved);
+    assert!(!pending.effect_started);
+    assert!(pending.undrained);
+    let tx = db.transaction().unwrap();
+    assert!(start_effects(&tx, &first, &hash).is_err());
+    drop(tx);
+    join(&mut db, &first, None);
+    let row = load(&db, &first.operation_id).unwrap().unwrap();
+    assert_eq!(row.phase, Phase::Settled);
+    assert_eq!(row.receipt, Some(saved));
+    assert!(!row.undrained);
+    assert_eq!(
+        db.query_row::<i64, _, _>("SELECT count(*) FROM desktop_cache_unknown", [], |r| r
+            .get(0))
+            .unwrap(),
+        0
+    );
+    let mut next = original(2);
+    next.revision = 1;
+    let next_hash = prepare(&mut db, &next, &binding(&next));
+    assert_eq!(admit(&mut db, &next, &next_hash), [true]);
+}
+
+#[test]
+fn effect_start_checks_the_current_original_policy_hash_lease_and_revoke_and_is_monotone() {
+    let mut db = Connection::open_in_memory().unwrap();
+    database(&mut db);
+    let first = original(1);
+    let hash = prepare(&mut db, &first, &binding(&first));
+    let tx = db.transaction().unwrap();
+    assert!(start_effects(&tx, &first, &hash).is_err());
+    drop(tx);
+    admit(&mut db, &first, &hash);
+    for changed in 0..6 {
+        let tx = db.transaction().unwrap();
+        let mut selected = first.clone();
+        let mut selected_hash = hash.clone();
+        match changed {
+            0 => selected.lease = id(777),
+            1 => selected.writer_epoch = id(778),
+            2 => selected_hash = "0".repeat(64),
+            3 => {
+                tx.execute("UPDATE desktop_cache_roots SET revision=revision+1", [])
+                    .unwrap();
+            }
+            4 => {
+                revoke(&tx).unwrap();
+            }
+            _ => {
+                tx.execute("INSERT INTO desktop_commands VALUES('prepared')", [])
+                    .unwrap();
+            }
+        }
+        assert!(start_effects(&tx, &selected, &selected_hash).is_err());
+        tx.rollback().unwrap();
+        assert!(
+            !load(&db, &first.operation_id)
+                .unwrap()
+                .unwrap()
+                .effect_started
+        );
+    }
+    start(&mut db, &first, &hash);
+    assert!(
+        load(&db, &first.operation_id)
+            .unwrap()
+            .unwrap()
+            .effect_started
+    );
+    let tx = db.transaction().unwrap();
+    assert!(start_effects(&tx, &first, &hash).is_err());
+    drop(tx);
+    assert!(db
+        .execute("UPDATE desktop_cache_operations SET effect_started=0", [])
+        .is_err());
+    assert!(db
+        .execute("UPDATE desktop_cache_operations SET kept_receipt=NULL", [])
+        .is_err());
+    join(&mut db, &first, None);
+    assert_eq!(
+        load(&db, &first.operation_id).unwrap().unwrap().phase,
+        Phase::Unknown
+    );
+}
+
+#[test]
+fn a_rolled_back_start_cannot_turn_the_original_reservation_into_an_effect() {
+    let mut db = Connection::open_in_memory().unwrap();
+    database(&mut db);
+    let first = original(1);
+    let hash = prepare(&mut db, &first, &binding(&first));
+    admit(&mut db, &first, &hash);
+    let tx = db.transaction().unwrap();
+    start_effects(&tx, &first, &hash).unwrap();
+    tx.rollback().unwrap();
+    assert!(
+        !load(&db, &first.operation_id)
+            .unwrap()
+            .unwrap()
+            .effect_started
+    );
+    let contradicts = Receipt {
+        files: vec![FileState::Removed],
+        ..kept(&binding(&first))
+    };
+    let tx = db.transaction().unwrap();
+    assert!(finish_joined(&tx, &first, Some(&contradicts)).is_err());
+    tx.rollback().unwrap();
+    assert_eq!(undrained(&db).unwrap(), 1);
+    join(&mut db, &first, None);
+    assert_eq!(
+        load(&db, &first.operation_id).unwrap().unwrap().phase,
+        Phase::Settled
+    );
+}
+
+#[test]
+fn an_actual_legacy_eighteen_reservation_migrates_as_started_and_recovers_unknown() {
+    let mut db = Connection::open_in_memory().unwrap();
+    database(&mut db);
+    let first = original(1);
+    let hash = prepare(&mut db, &first, &binding(&first));
+    admit(&mut db, &first, &hash);
+    db.execute_batch(
+        "DROP TRIGGER desktop_cache_effect_monotone; DROP TRIGGER desktop_cache_kept_original;
+        ALTER TABLE desktop_cache_operations DROP COLUMN effect_started;
+        ALTER TABLE desktop_cache_operations DROP COLUMN kept_receipt;",
+    )
+    .unwrap();
+    let tx = db.transaction().unwrap();
+    migrate_effects(&tx).unwrap();
+    tx.commit().unwrap();
+    let legacy = load(&db, &first.operation_id).unwrap().unwrap();
+    assert!(legacy.effect_started);
+    assert!(legacy.kept_receipt.is_none());
+    assert_eq!(legacy.original, first);
+    let tx = db.transaction().unwrap();
+    recover(&tx).unwrap();
+    tx.commit().unwrap();
+    let row = load(&db, &first.operation_id).unwrap().unwrap();
+    assert_eq!(row.phase, Phase::Unknown);
+    assert!(!row.undrained);
+    assert_eq!(
+        db.query_row::<i64, _, _>("SELECT count(*) FROM desktop_cache_unknown", [], |r| r
+            .get(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn missing_original_kept_evidence_refuses_recovery_without_inventing_totals() {
+    let mut db = Connection::open_in_memory().unwrap();
+    database(&mut db);
+    let first = original(1);
+    let hash = prepare(&mut db, &first, &binding(&first));
+    admit(&mut db, &first, &hash);
+    // Deliberately model damaged evidence; ordinary writers cannot erase it.
+    db.execute_batch("DROP TRIGGER desktop_cache_kept_original; UPDATE desktop_cache_operations SET kept_receipt=NULL;").unwrap();
+    let tx = db.transaction().unwrap();
+    assert!(finish_joined(&tx, &first, None).is_err());
+    tx.rollback().unwrap();
+    assert_eq!(undrained(&db).unwrap(), 1);
+    assert_eq!(
+        load(&db, &first.operation_id).unwrap().unwrap().phase,
+        Phase::Reserved
     );
 }

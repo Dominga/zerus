@@ -70,6 +70,10 @@ fn native_takeover_waits_for_an_original_host_lock_that_outlives_the_root_runtim
         .open(f.location.root.join("notification-host.lock"))
         .unwrap();
     fs2::FileExt::try_lock_exclusive(&file).unwrap();
+    // Model another fixture's fork retaining this open file description while
+    // its exec is delayed. Closing our raw handle alone would leave it locked.
+    let inherited = file.try_clone().unwrap();
+    let file = platform::FileLock::held(file);
     let request = f.request(Action::NativeTakeover);
     let receipt = f.apply(request.clone());
     assert!(matches!(receipt.outcome, Outcome::Pending));
@@ -82,6 +86,7 @@ fn native_takeover_waits_for_an_original_host_lock_that_outlives_the_root_runtim
         .native_ready());
     // The same original request, never another takeover, now completes.
     assert_eq!(f.current().state, State::Native);
+    drop(inherited);
 }
 
 struct Fixture {

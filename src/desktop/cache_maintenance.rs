@@ -226,9 +226,15 @@ enum Command {
     },
 }
 enum Event {
-    Prepared(cache::Binding),
+    Prepared(cache::Binding, cache::Receipt),
+    StartEffects {
+        binding_sha256: String,
+        reply: mpsc::SyncSender<EffectPermit>,
+    },
     Done(Option<cache::Receipt>),
 }
+/// Only the original actor Job can release this after its committed mark.
+struct EffectPermit;
 struct Job {
     original: ledger::Original,
     cancel: Arc<AtomicBool>,
@@ -245,6 +251,18 @@ struct Job {
 struct TestHold {
     entered: mpsc::SyncSender<()>,
     release: std::sync::Mutex<mpsc::Receiver<()>>,
+    after_started: bool,
+}
+#[cfg(test)]
+impl TestHold {
+    fn wait(&self) {
+        let _ = self.entered.send(());
+        let _ = self
+            .release
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .recv();
+    }
 }
 pub(super) struct Runtime {
     configuration: String,
@@ -413,7 +431,9 @@ impl Runtime {
                     .ok()?;
                     let frozen = prepared.binding().clone();
                     let expected = hash(&binding(&frozen).ok()?).ok()?;
-                    send.send(Event::Prepared(frozen.clone())).ok()?;
+                    let kept = prepared.kept_receipt();
+                    send.send(Event::Prepared(frozen.clone(), kept.clone()))
+                        .ok()?;
                     let Command::Execute {
                         binding_sha256,
                         allowed,
@@ -427,16 +447,10 @@ impl Runtime {
                         return None;
                     }
                     #[cfg(test)]
-                    if let Some(hold) = &hold {
-                        let _ = hold.entered.send(());
-                        let _ = hold
-                            .release
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .recv();
+                    if let Some(hold) = hold.as_ref().filter(|h| !h.after_started) {
+                        hold.wait();
                     }
                     let prepared = if selected.defer_ms > 0 {
-                        let kept = prepared.kept_receipt();
                         drop(prepared); // release the Qt lock during the opening grace
                         let due = started + Duration::from_millis(selected.defer_ms);
                         if stop.load(Ordering::Acquire) {
@@ -478,6 +492,36 @@ impl Runtime {
                     } else {
                         prepared
                     };
+                    if stop.load(Ordering::Acquire) || !allowed.iter().any(|allow| *allow) {
+                        return Some(kept);
+                    }
+                    let (reply, permission) = mpsc::sync_channel(1);
+                    send.send(Event::StartEffects {
+                        binding_sha256: expected,
+                        reply,
+                    })
+                    .ok()?;
+                    let due = until + Duration::from_millis(selected.defer_ms);
+                    let _permit = loop {
+                        if stop.load(Ordering::Acquire) || Instant::now() >= due {
+                            return Some(kept);
+                        }
+                        match permission.recv_timeout(
+                            due.saturating_duration_since(Instant::now())
+                                .min(Duration::from_millis(50)),
+                        ) {
+                            Ok(permit) => break permit,
+                            Err(mpsc::RecvTimeoutError::Timeout) => (),
+                            Err(mpsc::RecvTimeoutError::Disconnected) => return Some(kept),
+                        }
+                    };
+                    if stop.load(Ordering::Acquire) || Instant::now() >= due {
+                        return Some(kept);
+                    }
+                    #[cfg(test)]
+                    if let Some(hold) = hold.as_ref().filter(|h| h.after_started) {
+                        hold.wait();
+                    }
                     Some(prepared.execute(&allowed, &stop))
                 })();
                 let _ = send.send(Event::Done(result));
@@ -518,7 +562,7 @@ impl Runtime {
         }
         for _ in 0..2 {
             match job.events.try_recv() {
-                Ok(Event::Prepared(frozen)) => {
+                Ok(Event::Prepared(frozen, kept)) => {
                     if self.stopping || job.timed_out {
                         job.cancel.store(true, Ordering::Release);
                         continue;
@@ -527,7 +571,7 @@ impl Runtime {
                     let tx = store
                         .db
                         .transaction_with_behavior(TransactionBehavior::Immediate)?;
-                    match ledger::prepared(&tx, &job.original, &value) {
+                    match ledger::prepared(&tx, &job.original, &value, &receipt(&kept)) {
                         Ok(hash) => {
                             tx.commit()?;
                             job.binding_sha256 = Some(hash);
@@ -535,6 +579,34 @@ impl Runtime {
                         Err(_) => {
                             job.cancel.store(true, Ordering::Release);
                         }
+                    }
+                }
+                Ok(Event::StartEffects {
+                    binding_sha256,
+                    reply,
+                }) => {
+                    let tx = store
+                        .db
+                        .transaction_with_behavior(TransactionBehavior::Immediate)?;
+                    // Recheck the CURRENT original after BEGIN, not a cached
+                    // readiness Boolean or an expired frontend permit.
+                    let current = !self.stopping
+                        && !self.error
+                        && !job.timed_out
+                        && !job.cancel.load(Ordering::Acquire)
+                        && Instant::now() < job.until
+                        && !job.joined
+                        && job.thread.as_ref().is_some_and(|t| !t.is_finished())
+                        && job.original.configuration == self.configuration
+                        && job.original.service_epoch == self.epoch
+                        && job.original.writer_epoch == self.writer
+                        && job.binding_sha256.as_deref() == Some(binding_sha256.as_str());
+                    if current && ledger::start_effects(&tx, &job.original, &binding_sha256).is_ok()
+                    {
+                        tx.commit()?;
+                        let _ = reply.try_send(EffectPermit);
+                    } else {
+                        job.cancel.store(true, Ordering::Release);
                     }
                 }
                 Ok(Event::Done(result)) => job.result = result,

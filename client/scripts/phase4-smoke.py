@@ -142,6 +142,11 @@ def main():
     replay = scratch / "replay.ndjson"
     replay.write_text("".join(json.dumps(frame, separators=(",", ":")) + "\n" for frame in frames), encoding="utf-8")
     config = fixture_config(replay)
+    if args.only == "start-poll":
+        config["resume_inspect_ready"] = copy.deepcopy(config["resume_ready"])
+        for value in config["resume_ready"].values():
+            value["phase"] = "starting"
+        config["finish_compaction"] = True
     for index in range(150):
         config["attachments"][f"req-bottom-{index}"] = {"name": "late-image.png", "mime": "image/png", "data_base64": PNG}
     if args.only == "activity-bottom":

@@ -138,9 +138,11 @@ fn shared_update_feed_catalogs_keep_scope_and_downloads_closed() {
     for case in contract["cases"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
         let catalog = &case["catalog"];
+        let mut changed = catalog.clone();
+        changed["channel"] = json!("nightly");
         assert!(
-            !parse_feed(&bytes(catalog), Channel::Nightly).valid,
-            "{name}"
+            !parse_feed(&bytes(&changed), Channel::Stable).valid,
+            "{name}: channel identity"
         );
         for (field, value) in [
             ("url", "https://updates.example.invalid/package.pkg.tar.zst"),
@@ -155,10 +157,7 @@ fn shared_update_feed_catalogs_keep_scope_and_downloads_closed() {
         }
         if catalog.get("macos").is_some() {
             let mut changed = catalog.clone();
-            changed["macos"]
-                .as_object_mut()
-                .unwrap()
-                .remove("qt_version");
+            changed["macos"]["qt_version"] = json!("6.x");
             assert!(
                 !parse_feed(&bytes(&changed), Channel::Stable).valid,
                 "{name}: retained compatibility metadata"

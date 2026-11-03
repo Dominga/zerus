@@ -78,7 +78,7 @@ class PreparedSpeechFixture(unittest.TestCase):
                     if expected == 0:
                         self.assertEqual(len(workers), 1)
                         self.assertLess(build, workers[0])
-                        self.assertIn('--target-dir ' + str(root / 'target/speech-recovery'), calls[build])
+                        self.assertIn('--target-dir target/speech-recovery', calls[build])
                     else:
                         self.assertEqual(workers, [])
                         self.assertNotIn('cargo:build --release --locked', calls)

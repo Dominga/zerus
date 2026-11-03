@@ -190,7 +190,7 @@ class CliPhases(unittest.TestCase):
                 results[phase]=log.read_text().splitlines() if log.exists() else []
             debug=['python3:-','cargo:test --locked','cargo:build --locked','cargo:build --locked --example fake_agent']
             remaining=['python3:-','bash:tests/test_hgs.sh',
-                       'cargo:+1.99.1 test --locked --test voice_recovery_fixture --no-run --target-dir '+str(root/'target/speech-recovery')+' --message-format=json',
+                       'cargo:+1.99.1 test --locked --test voice_recovery_fixture --no-run --target-dir target/speech-recovery --message-format=json',
                        'python3:scripts/ci/speech-recovery-executable.py artifacts/test-results/speech-recovery-build.jsonl',
                        'python3:scripts/ci/python-tests.py','cargo:build --release --locked']
             self.assertEqual(results['debug'],debug);self.assertEqual(results['remaining'],remaining)

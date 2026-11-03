@@ -31,7 +31,7 @@ bash tests/test_hgs.sh 2>&1 | tee artifacts/test-results/cli-smoke.log
 # Cold fixture compilation belongs to preparation, not a parallel test worker's
 # 240 s setup budget. Its own target directory keeps the verified debug CLI intact.
 cargo +1.99.1 test --locked --test voice_recovery_fixture --no-run \
-    --target-dir "$PWD/target/speech-recovery" --message-format=json \
+    --target-dir target/speech-recovery --message-format=json \
     > artifacts/test-results/speech-recovery-build.jsonl
 HGS_TEST_SPEECH_RECOVERY_BIN=$(python3 scripts/ci/speech-recovery-executable.py \
     artifacts/test-results/speech-recovery-build.jsonl)

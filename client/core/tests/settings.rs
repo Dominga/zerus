@@ -1319,6 +1319,36 @@ fn inspector_panel_family_imports_once_and_next_choices_win() {
     assert!(kept.flush_within(FLUSH));
 }
 
+/// #1239 review: Qt reads the tab with a 32-bit toInt(); a value outside it
+/// waits (the whole family) instead of importing a tab Qt never showed.
+#[test]
+fn an_inspector_tab_outside_qts_32_bit_domain_waits() {
+    let scratch = Scratch::new("inspector-tab-domain");
+    let qt = scratch.0.join("qt.ini");
+    let path = scratch.0.join("settings.json");
+    fs::write(
+        &qt,
+        b"[workspace]\ninspectorVisible=true\ninspectorTab=2147483648\n",
+    )
+    .unwrap();
+    legacy_switch(&path, json!({}));
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert!(!settings.contains("workspace/inspectorTab"));
+    assert!(!settings.contains("workspace/inspectorOpen"));
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        saved["g3"]["quarantine"]["inspector-panel"]["reason"],
+        "invalid inspector tab"
+    );
+    // The largest 32-bit index is one Qt bounds to its last tab.
+    fs::write(&qt, b"[workspace]\ninspectorTab=2147483647\n").unwrap();
+    let settings = Settings::open(path, Some(QtStore::Ini(qt)));
+    assert_eq!(settings.text("workspace/inspectorTab"), "tasks");
+    assert!(settings.flush_within(FLUSH));
+}
+
 #[test]
 fn a_malformed_inspector_value_leaves_the_whole_family_for_a_retry() {
     let scratch = Scratch::new("inspector-retry");

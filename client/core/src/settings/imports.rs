@@ -314,9 +314,13 @@ fn converted(key: &str, value: &QtValue) -> Result<Value, &'static str> {
             _ => Err("invalid inspector width"),
         };
     }
+    // Qt reads the tab with a 32-bit toInt() (SessionsWindow.cpp:1495): a
+    // value outside that domain is not one Qt shows, so the family waits.
     if key == "workspace/inspectorTab" {
         return match value.to_long() {
-            (index, true) => Ok(json!(INSPECTOR_TABS[index.clamp(0, 3) as usize])),
+            (index, true) if i32::try_from(index).is_ok() => {
+                Ok(json!(INSPECTOR_TABS[index.clamp(0, 3) as usize]))
+            }
             _ => Err("invalid inspector tab"),
         };
     }

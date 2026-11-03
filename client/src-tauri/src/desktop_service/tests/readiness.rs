@@ -66,9 +66,29 @@ impl Readiness {
         self.headers && self.group == "alpha" && self.pump.row("", "row").is_some()
     }
 
+    pub(super) fn checkpoint_grouped(&mut self) -> bool {
+        self.pump.resend();
+        let publication = self.pump.take(Duration::ZERO);
+        self.observe(publication);
+        let grouped = self.grouped();
+        if !grouped {
+            eprintln!(
+                "fresh project checkpoint: headers={}, group={:?}, row={}",
+                self.headers,
+                self.group,
+                self.pump.row("", "row").is_some()
+            );
+        }
+        grouped
+    }
+
     pub(super) async fn until(&mut self, label: &'static str, ready: impl Fn(&Self) -> bool) {
         let began = Instant::now();
         loop {
+            // External service state can change before this reader consumes
+            // its queued publication. Never accept a stale cached grouping.
+            let publication = self.pump.take(Duration::ZERO);
+            self.observe(publication);
             if ready(self) {
                 self.completed.push((label, began.elapsed()));
                 return;

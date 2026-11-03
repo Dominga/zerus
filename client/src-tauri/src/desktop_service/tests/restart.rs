@@ -86,7 +86,7 @@ fn reconnect_refollows_every_topic_and_keeps_projects_while_metadata_is_warming(
                 },
             )
             .await;
-        assert!(readiness.grouped());
+        assert!(readiness.checkpoint_grouped());
         assert_eq!(watch_calls(&fixture.calls()), 1);
         config.as_object_mut().unwrap().remove("produced_status");
         fs::write(fixture.0.join("fixture.json"), config.to_string()).unwrap();
@@ -97,7 +97,7 @@ fn reconnect_refollows_every_topic_and_keeps_projects_while_metadata_is_warming(
             .await;
         assert!(!pump.online(""));
         assert!(
-            readiness.grouped(),
+            readiness.checkpoint_grouped(),
             "project placement survives the unavailable organization topic"
         );
         fs::write(fixture.0.join("release-second-watch"), []).unwrap();
@@ -123,6 +123,10 @@ fn reconnect_refollows_every_topic_and_keeps_projects_while_metadata_is_warming(
             })
             .await;
         readiness.report();
+        assert!(
+            readiness.checkpoint_grouped(),
+            "the final current grouping must still match the GUI snapshot"
+        );
         assert_eq!(
             watch_calls(&fixture.calls()),
             2,

@@ -75,6 +75,40 @@ existing CLI receipt fingerprint over those arguments. That fingerprint
 identifies the original request and receipt. It is neither execution authority
 nor a physical repository or destination identity.
 
+## Owned effect
+
+`worktree_requests::create_owned` is the only owned entry. The actor's Reserve
+check runs before the original receipt is reserved. The same receipt store as
+the direct path (request UUID plus argument fingerprint) keeps an original
+from ever being replayed. The direct CLI path keeps its behavior.
+
+Every Git command runs through the repository worker under the effect's
+close-only custody lock and cancellation lifeline. Each command is anchored in
+a pinned directory object.
+
+- **Pins.** The repository folder, the destination's parent and the
+  repository's common Git directory are pinned by identity (no-follow
+  component walks). Each pin is re-verified around every Git command and step.
+- **Destination.** A private staging folder is published with a no-replace
+  rename. Git then creates the checkout from inside that published object:
+  its working directory is the pinned destination, the path is `.`, and the
+  explicit `--git-dir` is the pinned common directory, verified immediately
+  before and after. Because the path is `.`, Git names the linked-worktree
+  metadata entry `-` (then `-1`, ...); nothing derives meaning from that name.
+- **Steps.** Destination, Checkout, Verify, Track and Own are separate actor
+  checks, so no write after `worktree add` goes unchecked.
+- **Track.** The upstream writes run inside the pinned common directory
+  (`--git-dir=.`), with no checkout or path indirection.
+- **Own.** The ownership record is written only for metadata that is an entry
+  of the pinned common directory. That metadata stays pinned while the record
+  is written, and every pin is re-verified afterwards. The record itself is
+  returned as the receipt's ownership evidence; no later plain-Git lookup runs.
+
+After effects start, any refusal, pin or identity mismatch, or read or write
+failure records the original receipt as `unconfirmed`, never `created` or
+`failed`. Branches and partial files are kept, with no cleanup and no new
+UUID.
+
 ## Result and recovery
 
 The original CLI worktree request receipt is the original result and is never

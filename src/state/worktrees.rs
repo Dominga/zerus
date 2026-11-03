@@ -609,6 +609,13 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
     if destination.starts_with(&common) {
         return Err("Destination cannot be inside Git metadata".into());
     }
+    // The owned path also pins the repository's common Git directory. Every
+    // later Git write runs inside it or is verified against it.
+    #[cfg(unix)]
+    let common_pin = match &owned {
+        Some(_) => Some(super::repositories::directory::Directory::open(&common)?),
+        None => None,
+    };
     let branch = required("--branch")?;
     if branch.starts_with('-') {
         return Err("Branch name cannot start with '-'".into());
@@ -701,9 +708,34 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
     ];
     #[cfg(unix)]
     let outcome = match &owned {
-        Some(owned) => owned
-            .before(Step::Checkout)
-            .and_then(|()| owned.git(&owned.source, &add, 300).map(drop)),
+        Some(owned) => owned.before(Step::Checkout).and_then(|()| {
+            let (Some(pinned), Some(common_pin)) = (&pinned, &common_pin) else {
+                return Err("Owned worktree pins are missing".into());
+            };
+            // Git writes the checkout into the admitted destination object
+            // itself (its working directory, path "."), with the pinned common
+            // directory verified immediately before and after.
+            let git_dir = format!("--git-dir={}", common.display());
+            common_pin.verify()?;
+            pinned.verify()?;
+            owned.git(
+                pinned,
+                &[
+                    git_dir.as_str(),
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "-b",
+                    branch,
+                    "--",
+                    ".",
+                    head.as_str(),
+                ],
+                300,
+            )?;
+            common_pin.verify()?;
+            pinned.verify()
+        }),
         None => git(
             &source,
             &add,
@@ -727,10 +759,12 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
     let deadline = total_deadline.min(Instant::now() + Duration::from_secs(5));
     let in_checkout = |args: &[&str]| -> Result<Vec<u8>> {
         #[cfg(unix)]
-        if let (Some(owned), Some(pinned)) = (&owned, &pinned) {
+        if let (Some(owned), Some(pinned), Some(common_pin)) = (&owned, &pinned, &common_pin) {
+            common_pin.verify()?;
             pinned.verify()?;
             let bytes = owned.git(pinned, args, 5)?;
             pinned.verify()?;
+            common_pin.verify()?;
             return Ok(bytes);
         }
         git(&destination, args, deadline).map_err(|e| e.detail)
@@ -754,21 +788,39 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
     }
     // Best effort: the checkout exists either way, and a missing upstream only
     // leaves publication unverified. Never keep half of the tracking pair.
-    // An owned creation checks this write as its own step.
+    let direct_track = |upstream: Option<(String, String)>| {
+        upstream.filter(|(remote, merge)| {
+            let set = |key: &str, value: &str| {
+                in_checkout(&["config", &format!("branch.{branch}.{key}"), value]).is_ok()
+            };
+            let complete = set("remote", remote) && set("merge", merge);
+            if !complete {
+                let _ = in_checkout(&["config", "--unset", &format!("branch.{branch}.remote")]);
+            }
+            complete
+        })
+    };
+    // An owned creation checks this write as its own step and runs it inside
+    // the pinned common directory, with no checkout or path indirection; any
+    // failure leaves it unconfirmed instead of a silent best effort.
     #[cfg(unix)]
-    if let (Some(owned), Some(_)) = (&owned, &upstream) {
-        owned.before(Step::Track)?;
-    }
-    let upstream = upstream.filter(|(remote, merge)| {
-        let set = |key: &str, value: &str| {
-            in_checkout(&["config", &format!("branch.{branch}.{key}"), value]).is_ok()
-        };
-        let complete = set("remote", remote) && set("merge", merge);
-        if !complete {
-            let _ = in_checkout(&["config", "--unset", &format!("branch.{branch}.remote")]);
+    let upstream = match (&owned, &common_pin, upstream) {
+        (Some(owned), Some(common_pin), Some((remote, merge))) => {
+            owned.before(Step::Track)?;
+            for (key, value) in [("remote", &remote), ("merge", &merge)] {
+                let name = format!("branch.{branch}.{key}");
+                common_pin.verify()?;
+                owned.git(common_pin, &["--git-dir=.", "config", name.as_str(), value.as_str()], 5)?;
+                common_pin.verify()?;
+            }
+            Some((remote, merge))
         }
-        complete
-    });
+        (Some(_), _, None) => None,
+        (None, _, upstream) => direct_track(upstream),
+        (Some(_), None, Some(_)) => return Err("Owned worktree pins are missing".into()),
+    };
+    #[cfg(not(unix))]
+    let upstream = direct_track(upstream);
     let upstream = upstream.map(|(remote, merge)| {
         format!(
             "{remote}/{}",
@@ -779,24 +831,47 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
     let managed = match &owned {
         Some(owned) => {
             owned.before(Step::Own)?;
-            in_checkout(&["rev-parse", "--absolute-git-dir"]).and_then(|metadata| {
-                super::worktree_lifecycle::created_at(
-                    &common,
-                    &destination,
-                    branch,
-                    &head,
-                    &metadata,
-                )
-            })
+            let (Some(pinned), Some(common_pin)) = (&pinned, &common_pin) else {
+                return Err("Owned worktree pins are missing".into());
+            };
+            // The checkout's metadata must be an entry of the pinned common
+            // directory; it stays pinned while the ownership record is written.
+            // Any pin, read or write failure propagates: never Created.
+            let metadata = in_checkout(&["rev-parse", "--absolute-git-dir"])?;
+            let path = crate::platform::canonical(String::from_utf8_lossy(&metadata).trim())
+                .map_err(|e| e.to_string())?;
+            if path.parent() != Some(common.join("worktrees").as_path()) {
+                return Err("Cannot verify linked worktree metadata".into());
+            }
+            let metadata_pin = super::repositories::directory::Directory::open(&path)?;
+            common_pin.verify()?;
+            let value = super::worktree_lifecycle::created_at(
+                &common,
+                &destination,
+                branch,
+                &head,
+                &metadata,
+            )?;
+            metadata_pin.verify()?;
+            common_pin.verify()?;
+            pinned.verify()?;
+            Ok(value)
         }
-        None => super::worktree_lifecycle::created(&common, &destination, branch, &head),
+        None => super::worktree_lifecycle::created(&common, &destination, branch, &head)
+            .map(|()| Value::Null),
     };
     #[cfg(not(unix))]
-    let managed = super::worktree_lifecycle::created(&common, &destination, branch, &head);
-    Ok(
-        json!({"status":"created", "path":destination, "branch":branch, "base":base, "head":head,
+    let managed = super::worktree_lifecycle::created(&common, &destination, branch, &head)
+        .map(|()| Value::Null);
+    // An owned failure above has already returned: the owned path never
+    // reports Created without its ownership evidence.
+    let owned_evidence = control.is_some();
+    let mut created = json!({"status":"created", "path":destination, "branch":branch, "base":base, "head":head,
         "upstream":upstream, "common_dir":common, "request_id":options.get("--request-id"),
-        "managed_cleanup":managed.is_ok(), "cleanup_note":managed.err(),
-        "machine":crate::config::Config::load().map_err(|e|e.to_string())?.host()}),
-    )
+        "managed_cleanup":managed.is_ok(), "cleanup_note":managed.as_ref().err(),
+        "machine":crate::config::Config::load().map_err(|e|e.to_string())?.host()});
+    if owned_evidence {
+        created["creation_owner"] = managed.unwrap_or(Value::Null);
+    }
+    Ok(created)
 }

@@ -45,6 +45,13 @@ pub(crate) struct Control<'a> {
     #[cfg(unix)]
     pub custody: &'a std::sync::Arc<zerus_client_core::run::custody::InheritedLock>,
 }
+#[cfg(test)]
+thread_local! {
+    /// Owned-effect tests run the same anchored Git argv directly: a unit
+    /// image cannot self-exec the worker. Production always uses the worker.
+    pub(in crate::state) static OWNED_GIT_DIRECT: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
 /// One Git command for another admitted creation effect: anchored in a pinned
 /// directory, run by the deadline-owning worker and held by that effect's
 /// original close-only custody and cancellation.
@@ -56,12 +63,33 @@ pub(in crate::state) fn owned_git(
     cancelled: &std::sync::atomic::AtomicBool,
     custody: &std::sync::Arc<zerus_client_core::run::custody::InheritedLock>,
 ) -> Result<Vec<u8>> {
+    #[cfg(test)]
+    if OWNED_GIT_DIRECT.with(std::cell::Cell::get) {
+        directory.verify()?;
+        let result = run_git(Some(directory), args, seconds, &|| {
+            cancelled.load(std::sync::atomic::Ordering::Acquire)
+        });
+        directory.verify()?;
+        return result;
+    }
     let control = Control {
         before: &|_| Ok(()),
         cancelled,
         custody,
     };
     git(directory, args, seconds, Some(&control))
+}
+/// Test-only: the anchored Git argv without identity checks, to prove that
+/// Git's own writes follow the pinned directory object.
+#[cfg(all(test, unix))]
+pub(in crate::state) fn owned_git_unverified_for_test(
+    directory: &directory::Directory,
+    args: &[&str],
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<u8>> {
+    run_git(Some(directory), args, 30, &|| {
+        cancelled.load(std::sync::atomic::Ordering::Acquire)
+    })
 }
 fn before(control: Option<&Control<'_>>, step: Step) -> Result<()> {
     if let Some(control) = control {

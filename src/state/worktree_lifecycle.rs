@@ -22,7 +22,7 @@ pub(super) fn created(common: &Path, path: &Path, branch: &str, head: &str) -> R
         Instant::now() + Duration::from_secs(3),
     )
     .map_err(|e| e.detail)?;
-    created_at(common, path, branch, head, &metadata)
+    created_at(common, path, branch, head, &metadata).map(drop)
 }
 
 /// `metadata` is the checkout's `rev-parse --absolute-git-dir` output, read by
@@ -33,7 +33,7 @@ pub(super) fn created_at(
     branch: &str,
     head: &str,
     metadata: &[u8],
-) -> Result<()> {
+) -> Result<Value> {
     let metadata = crate::platform::canonical(String::from_utf8_lossy(metadata).trim())
         .map_err(|e| e.to_string())?;
     if !metadata.starts_with(common.join("worktrees")) {
@@ -42,7 +42,8 @@ pub(super) fn created_at(
     let value = json!({"version":1,"id":uuid::Uuid::new_v4().to_string(),"common_dir":common,"path":path,"branch":branch,"head":head,"metadata":metadata,"created_at":now()});
     atomic(&metadata.join("zerus-owner.json"), &format!("{value}\n"))?;
     atomic(&receipt_path(common, path), &format!("{value}\n"))?;
-    super::worktree_maintenance::register(&value)
+    super::worktree_maintenance::register(&value)?;
+    Ok(value)
 }
 
 pub(super) fn owned(common: &Path, path: &Path) -> Option<Value> {

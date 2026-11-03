@@ -54,6 +54,14 @@ pub(super) async fn catalog_loop(
                 .epoch
                 .clone()
                 .ok_or("service_unavailable")?;
+            if shared.park_until_source_identity(&computer, &source) {
+                shared.dirty.lock().unwrap_or_else(PoisonError::into_inner).running = None;
+                row(&shared, &computer, &source, &epoch, &stop, Change::Computer {
+                    computer: ComputerId::from(computer.as_str()),
+                    status: ComputerStatus::Reconnecting { attempt: 0 },
+                }).await?;
+                continue;
+            }
             let result = walk(
                 &shared,
                 &computer,
@@ -146,6 +154,32 @@ fn insert_key(
 }
 
 impl Shared {
+    /// Park only this local baseline; hold neither a relay nor an RPC slot.
+    /// Hello application takes the same hub/dirty lock order and wakes it.
+    fn park_until_source_identity(&self, computer: &str, source: &SourceVersion) -> bool {
+        if !computer.is_empty() || !self.snapshot.lock().unwrap_or_else(PoisonError::into_inner).details_available {
+            return false;
+        }
+        let hub = self.details.lock().unwrap_or_else(PoisonError::into_inner);
+        if hub.local_identity_ready(source.generation) {
+            return false;
+        }
+        let mut dirty = self.dirty.lock().unwrap_or_else(PoisonError::into_inner);
+        if dirty.sources.get(computer).is_some_and(|current| current.serial == source.serial) {
+            dirty.pending.remove(computer);
+            dirty.halted.insert(computer.into());
+        }
+        true
+    }
+    pub(super) fn catalog_identity_ready(&self, computer: &str, generation: u64) {
+        let mut dirty = self.dirty.lock().unwrap_or_else(PoisonError::into_inner);
+        if dirty.sources.get(computer).is_some_and(|source| source.generation == generation)
+            && !dirty.progress.contains_key(computer) {
+            dirty.halted.remove(computer);
+            dirty.pending.insert(computer.into());
+            self.changed.notify_one();
+        }
+    }
     fn page_source(
         &self,
         computer: &str,
@@ -248,6 +282,11 @@ async fn row(
     .await
 }
 
+fn project(shared: &Shared, computer: &str, source: &SourceVersion, value: &Value) -> zerus_client_core::ViewRow {
+    shared.details.lock().unwrap_or_else(PoisonError::into_inner)
+        .project_row(&ComputerId::from(computer), source.generation, value)
+}
+
 async fn walk(
     shared: &Arc<Shared>,
     computer: &str,
@@ -287,7 +326,7 @@ async fn walk(
                     if keys.contains(&item.key) { return Err("catalog_duplicate"); }
                     insert_key(keys, &mut key_bytes, item.key.clone())?;
                     row(shared, computer, &source, epoch, &stop, Change::Upsert { computer: ComputerId::from(computer),
-                        key: item.key, row: zerus_client_core::view::row(&item.row) }).await?;
+                        key: item.key, row: project(shared, computer, &source, &item.row) }).await?;
                 }
                 if cursor.is_none() { break; }
             }
@@ -317,7 +356,7 @@ async fn walk(
                     }
                     let change = if let Some(value) = &item.row {
                         if let Some(keys) = keys.as_mut() { insert_key(keys, &mut key_bytes, item.key.clone())?; }
-                        Change::Upsert { computer: ComputerId::from(computer), key: item.key.clone(), row: zerus_client_core::view::row(value) }
+                        Change::Upsert { computer: ComputerId::from(computer), key: item.key.clone(), row: project(shared, computer, &source, value) }
                     } else {
                         if let Some(keys) = keys.as_mut() { if keys.remove(&item.key) { key_bytes -= item.key.len(); } }
                         Change::Remove { computer: ComputerId::from(computer), key: item.key.clone(), reason: None }

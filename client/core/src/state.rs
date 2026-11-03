@@ -641,6 +641,12 @@ impl CatalogState {
         self.hello.as_ref()
     }
 
+    /// Project an indexed service row exactly like the native catalog: local
+    /// rows use the original Hello host; peers use their configured alias.
+    pub fn project_row(&self, computer: &ComputerId, row: &Value) -> ViewRow {
+        project(row, &self.machine(computer), computer)
+    }
+
     /// Indexed service bootstrap parts are original source metadata, not
     /// invented watch frames or a catalog snapshot. They carry no sequence.
     pub fn source_metadata(

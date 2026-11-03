@@ -76,6 +76,8 @@ def status():
                 'status': 'live' if online else 'reconnecting', 'accepting': online}]
     if config.get('peer_failure'):
         sources.append(dict(sources[0], computer='broken', incarnation=2))
+    if config.get('project_peer'):
+        sources.append(dict(sources[0], computer='studio', incarnation=2))
     return {'abi': 'desktop-v1', 'configuration': 'a' * 64, 'epoch': epoch, 'generation': 1, 'host': 'caption-only',
             'lifecycle': {'abi': 'desktop-lifecycle-v1', 'phase': 'serving', 'ipc_ready': True,
                           'configuration': 'a' * 64, 'epoch': epoch, 'generation': 1, 'background': background},
@@ -132,10 +134,16 @@ def detail_follow():
                        'cursor': 0, 'items': [{'id': 'task'}],
                        'value': {'project': {'id': key}, 'damaged': [], 'digest': 'task-digest'}})
     elif topic == 'organization':
+        organization = config.get('organization', {'projects': []})
+        projects = organization.get('projects', [])
         full = {'node_id': native_hello()['machine_id'], 'swarm_id': 'swarm', 'digest': 'org-digest',
-                'organization': {'projects': []}}
+                'initialized': True, 'organization': dict(organization, projects=[p['id'] for p in projects])}
+        items = [{'key': 'organization', 'row': full}]
+        for project in projects:
+            items.append({'key': 'project:' + project['id'], 'row': dict(project, session_chunks=1)})
+            items.append({'key': 'members:' + project['id'] + ':0', 'row': {'sessions': project.get('sessions', [])}})
         bodies.append({'t': 'snapshot', 'topic': topic, 'page': 0, 'last': True, 'cursor': 0,
-                       'items': [{'key': 'organization', 'row': full}]})
+                       'items': items})
     if config.get('native_gap') and topic == 'activity':
         bodies.extend([{'t': 'gap', 'topic': topic, 'key': key, 'reason': 'overflow'},
                        {'t': 'snapshot', 'topic': topic, 'key': key, 'page': 0, 'last': True,
@@ -235,6 +243,8 @@ def desktop_request():
               'changes_abi': abi, 'epoch': epoch, 'computer': value.get('computer', ''), 'incarnation': 1,
               'generation': 1, 'projection': projection, 'display_only': True, 'authority': False,
               'complete': True, 'online': True, 'last_known': False, 'stale': False, 'next_cursor': None}
+    if config.get('project_peer') and value.get('computer') == 'studio':
+        common['incarnation'] = 2
     if config.get('peer_failure') and value.get('computer') == 'broken':
         common['incarnation'] = 2
         if (root / 'peer-scope-recovered').exists():
@@ -253,6 +263,18 @@ def desktop_request():
         print(json.dumps({'request_id': request_id, 'accepted': True, 'durable': False,
                           'lease': value['lease'], 'id': value['id'], 'state': 'unfollowed'}))
     elif op == 'detail_source':
+        if config.get('source_held') and not (root / 'source-identity-ready').exists():
+            print(json.dumps({'request_id': request_id, 'accepted': False, 'code': 'source_pending'}))
+            return
+        if config.get('source_warming') and counter('source-' + epoch + '-' + value['part']) == 1:
+            failure = config.get('source_failure', 'offline')
+            if failure == 'transport':
+                raise SystemExit('private metadata read interrupted')
+            print(json.dumps({'request_id': request_id, 'accepted': failure != 'refused', 'durable': False,
+                'lease': value['lease'], 'computer': value['computer'], 'generation': value['generation'],
+                'part': value['part'], 'native': failure != 'native', 'online': failure != 'offline',
+                'complete': False, 'value': None if failure == 'null' else native_hello()}))
+            return
         metadata = native_hello() if value['part'] == 'hello' else {'host': 'metadata-caption', 'ok': True,
                     'machine_id': '00000000-0000-4000-8000-000000000099', 'peers': [],
                     'metrics': {'platform': 'linux'}}

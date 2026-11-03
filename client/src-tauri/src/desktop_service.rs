@@ -51,6 +51,7 @@ mod details;
 pub mod frontend;
 pub(crate) mod notification_controls;
 mod read_import;
+mod reconnect;
 pub(crate) mod retained_import;
 
 /// Registered at setup before start_source. Some contains a verified service
@@ -1362,7 +1363,7 @@ async fn connection(
                                         // This roster discovers sources. Catalog hints/pages
                                         // bind their scope and coverage; transport readiness
                                         // alone cannot repeatedly re-baseline cached rows.
-                                        shared.details.lock().unwrap_or_else(PoisonError::into_inner).source(name,computer.generation)?;
+                                        shared.details.lock().unwrap_or_else(PoisonError::into_inner).source_state(name,computer.generation,computer.online)?;
                                         shared.details_changed.notify_one();
                                     }
                                 }

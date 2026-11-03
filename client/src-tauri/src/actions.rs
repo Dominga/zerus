@@ -23,6 +23,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use tauri::State;
+mod local_read_capture;
 mod read_barrier;
 pub(crate) use read_barrier::{CapturedReads, FrozenReads};
 use zerus_client_core::actions::{
@@ -629,6 +630,8 @@ pub struct AttentionOrder {
 }
 
 struct AttentionShared {
+    listener: MarksListener,
+    capture: Option<Arc<zerus_client_core::migration::preload::Capture>>,
     state: Mutex<AttentionState>,
     /// Signals a load, a change, a finished write and the end.
     signal: Condvar,
@@ -636,6 +639,8 @@ struct AttentionShared {
 
 #[derive(Default)]
 struct AttentionState {
+    source_paused: bool,
+    source_loaded: bool,
     /// None until the writer thread has read the file.
     marks: Option<AttentionMarks>,
     /// A change the file does not have yet.
@@ -651,25 +656,59 @@ pub type MarkMaps = (u64, BTreeMap<String, Mark>, BTreeMap<String, String>);
 
 impl Attention {
     pub fn new(path: PathBuf) -> Self {
+        Self::new_with_capture(path, None)
+    }
+    pub(crate) fn new_with_capture(
+        path: PathBuf,
+        capture: Option<Arc<zerus_client_core::migration::preload::Capture>>,
+    ) -> Self {
+        Self::new_with_spawn(path, capture, |job| {
+            std::thread::Builder::new()
+                .name("zerus-attention-marks".into())
+                .spawn(job)
+                .map(|_| ())
+        })
+    }
+    fn new_with_spawn(
+        path: PathBuf,
+        capture: Option<Arc<zerus_client_core::migration::preload::Capture>>,
+        spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+    ) -> Self {
+        let listener = MarksListener::default();
         let shared = Arc::new(AttentionShared {
-            state: Mutex::new(AttentionState::default()),
+            listener: listener.clone(),
+            state: Mutex::new(AttentionState {
+                source_paused: capture.is_some(),
+                ..AttentionState::default()
+            }),
+            capture,
             signal: Condvar::new(),
         });
+        if let Some(capture) = &shared.capture {
+            let weak = Arc::downgrade(&shared);
+            capture.retry_hook(Arc::new(move || {
+                if let Some(shared) = weak.upgrade() {
+                    // Serialize the wake with the existing condition wait.
+                    let _state = shared.lock();
+                    shared.signal.notify_all();
+                }
+            }));
+        }
         let writer = Arc::clone(&shared);
         let file = path.clone();
-        let spawned = std::thread::Builder::new()
-            .name("zerus-attention-marks".into())
-            .spawn(move || writer.write_changes(file));
-        if let Err(error) = spawned {
-            // Kept in memory only: commands still answer.
+        if let Err(error) = spawn(Box::new(move || writer.write_changes(file))) {
             eprintln!("zerus-client: the attention-marks writer did not start: {error}");
-            shared.lock().marks = Some(AttentionMarks::load(path));
+            // Never perform a capture/write fallback on the GUI thread.
+            let view = if let Some(capture) = &shared.capture {
+                capture.local_read_owner_unavailable();
+                AttentionMarks::from_bytes(path, None)
+            } else {
+                AttentionMarks::load(path)
+            };
+            shared.lock().marks = Some(view);
             shared.signal.notify_all();
         }
-        Self {
-            shared,
-            listener: MarksListener::default(),
-        }
+        Self { shared, listener }
     }
 
     /// Both maps by key once the file has been read, with their version;
@@ -678,6 +717,9 @@ impl Attention {
     /// thread, so a reader copies them only after they changed.
     pub fn marks_since(&self, seen: Option<u64>) -> Option<MarkMaps> {
         let state = self.shared.loaded();
+        if self.shared.capture.is_some() && (state.source_paused || state.marks.is_none()) {
+            return None;
+        }
         if seen == Some(state.version) {
             return None;
         }
@@ -691,18 +733,26 @@ impl Attention {
 
     #[cfg(test)]
     pub fn snapshot(&self) -> AttentionSnapshot {
-        self.shared.snapshot()
+        self.shared.snapshot_checked().unwrap_or_default()
     }
 
     /// A delta: `Some` writes an entry, `None` removes it. Memory only; the
     /// writer thread saves a change.
-    pub fn update(
+    pub fn try_update(
         &self,
         marks: BTreeMap<String, Option<Mark>>,
         replies: BTreeMap<String, Option<String>>,
-    ) {
+    ) -> Result<(), String> {
         let changed = {
             let mut state = self.shared.loaded();
+            if state.closed
+                || self.shared.capture.is_some() && !state.source_loaded
+                || state.marks.is_none()
+            {
+                return Err(
+                    "Local read marks are paused. Review the migration report and retry.".into(),
+                );
+            }
             let changed = state
                 .marks
                 .as_mut()
@@ -717,6 +767,15 @@ impl Attention {
         if changed {
             self.listener.changed();
         }
+        Ok(())
+    }
+    #[cfg(test)]
+    pub fn update(
+        &self,
+        marks: BTreeMap<String, Option<Mark>>,
+        replies: BTreeMap<String, Option<String>>,
+    ) {
+        self.try_update(marks, replies).unwrap();
     }
 
     /// Waits at most `limit` until the file holds every change made so far,
@@ -729,10 +788,10 @@ impl Attention {
             .shared
             .signal
             .wait_timeout_while(state, limit, |state| {
-                state.marks.is_none() || state.dirty || state.writing
+                state.marks.is_none() || state.dirty || state.writing || state.source_paused
             })
             .unwrap_or_else(PoisonError::into_inner);
-        !(state.marks.is_none() || state.dirty || state.writing)
+        !(state.marks.is_none() || state.dirty || state.writing || state.source_paused)
     }
 
     /// Waits until the file holds every change made so far.
@@ -743,7 +802,7 @@ impl Attention {
             .shared
             .signal
             .wait_while(state, |state| {
-                state.marks.is_none() || state.dirty || state.writing
+                state.marks.is_none() || state.dirty || state.writing || state.source_paused
             })
             .unwrap_or_else(PoisonError::into_inner);
     }
@@ -763,32 +822,45 @@ impl AttentionShared {
 
     /// The state once the file has been read.
     fn loaded(&self) -> std::sync::MutexGuard<'_, AttentionState> {
+        // Source capture never blocks a GUI presentation read.
+        if self.capture.is_some() {
+            return self.lock();
+        }
         self.signal
             .wait_while(self.lock(), |state| state.marks.is_none())
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn snapshot(&self) -> AttentionSnapshot {
+    fn snapshot_checked(&self) -> Result<AttentionSnapshot, String> {
         let state = self.loaded();
+        if self.capture.is_some() && (state.source_paused || state.marks.is_none()) {
+            return Err(
+                "Local read marks are paused. Review the migration report and retry.".into(),
+            );
+        }
         let Some(store) = state.marks.as_ref() else {
-            return AttentionSnapshot::default();
+            return Ok(AttentionSnapshot::default());
         };
         let (marks, replies) = store.snapshot();
         let (mark_order, reply_order) = store.order();
-        AttentionSnapshot {
+        Ok(AttentionSnapshot {
             marks,
             replies,
             order: AttentionOrder {
                 marks: mark_order,
                 replies: reply_order,
             },
-        }
+        })
     }
 
     /// The writer thread: reads the file, then writes the latest state after
     /// each change (changes made meanwhile go into one write). A copy is taken
     /// under the lock and written without it.
     fn write_changes(&self, path: PathBuf) {
+        if let Some(capture) = &self.capture {
+            self.write_captured(path, capture);
+            return;
+        }
         let loaded = AttentionMarks::load(path);
         self.lock().marks = Some(loaded);
         self.signal.notify_all();
@@ -1901,9 +1973,9 @@ pub fn queue_read_marks(
 #[tauri::command]
 pub async fn attention_marks(state: State<'_, Attention>) -> Result<AttentionSnapshot, String> {
     let shared = Arc::clone(&state.shared);
-    tauri::async_runtime::spawn_blocking(move || shared.snapshot())
+    tauri::async_runtime::spawn_blocking(move || shared.snapshot_checked())
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?
 }
 
 /// Writes (`Some`) or removes (`None`) attention marks and read replies; each
@@ -1915,8 +1987,8 @@ pub fn update_attention_marks(
     state: State<'_, Attention>,
     marks: BTreeMap<String, Option<Mark>>,
     replies: BTreeMap<String, Option<String>>,
-) {
-    state.update(marks, replies);
+) -> Result<(), String> {
+    state.try_update(marks, replies)
 }
 
 #[cfg(test)]

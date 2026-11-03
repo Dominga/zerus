@@ -20,6 +20,7 @@ pub(crate) struct Inputs {
     settings: Settings,
     qt: Option<QtStore>,
     pub(crate) creations: Arc<zerus_client_core::migration::preload::Capture>,
+    pub(crate) local_reads: Arc<zerus_client_core::migration::preload::Capture>,
 }
 impl Inputs {
     pub(crate) fn native(
@@ -30,6 +31,7 @@ impl Inputs {
     ) -> Option<Self> {
         (identifier == crate::identity::SWITCH_ID && !replay).then(|| Self {
             creations: zerus_client_core::migration::preload::Capture::new(data.clone()),
+            local_reads: zerus_client_core::migration::preload::Capture::local_reads(data.clone()),
             data,
             settings,
             qt: QtStore::here(),
@@ -108,11 +110,13 @@ impl Report {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
     pub fn hook_creations(&self, notify: Arc<dyn Fn() + Send + Sync>) {
-        self.inputs.creations.hook(notify);
+        self.inputs.creations.hook(notify.clone());
+        self.inputs.local_reads.hook(notify);
     }
     pub fn request_retry(&self) {
         self.retry_creations();
         self.inputs.creations.request_retry();
+        self.inputs.local_reads.request_retry();
         self.state().retry_requested = true;
     }
     pub fn take_retry(&self) -> bool {
@@ -120,7 +124,7 @@ impl Report {
     }
     pub fn status(&self) -> Value {
         let state = self.state();
-        json!({"creations_report":self.creation_status(),"creations_capture":self.inputs.creations.status(),"scope":SCOPE,"running":state.running,"code":state.code,
+        json!({"creations_report":self.creation_status(),"creations_capture":self.inputs.creations.status(),"local_read_capture":self.inputs.local_reads.status(),"scope":SCOPE,"running":state.running,"code":state.code,
             "required":!state.not_applicable,
             "complete":state.stored.as_ref().is_some_and(|s| s.record.phase == Phase::Published),
             "import_id":state.stored.as_ref().map(|s|&s.record.import_id),

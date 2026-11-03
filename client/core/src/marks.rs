@@ -71,9 +71,14 @@ impl AttentionMarks {
     /// A missing or unreadable file gives no marks. A file over the cap keeps
     /// its newest entries.
     pub fn load(path: PathBuf) -> Self {
-        let file: File = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| decode_saved(&bytes).ok())
+        let bytes = std::fs::read(&path).ok();
+        Self::from_bytes(path, bytes.as_deref())
+    }
+    /// Same presentation decoder/cap over bytes already read by the native
+    /// source owner. None is an in-memory view, never a saved empty source.
+    pub fn from_bytes(path: PathBuf, bytes: Option<&[u8]>) -> Self {
+        let file: File = bytes
+            .and_then(|bytes| decode_saved(bytes).ok())
             .unwrap_or_default();
         let mut marks = Written::default();
         for (key, mark) in file.marks {
@@ -152,6 +157,14 @@ impl Contents {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+    pub(crate) fn encode_bounded(&self, limit: usize) -> io::Result<Vec<u8>> {
+        let mut out = crate::fsx::checkpoint::Bounded {
+            bytes: Vec::new(),
+            limit,
+        };
+        serde_json::to_writer(&mut out, &self.file)?;
+        Ok(out.bytes)
     }
 }
 

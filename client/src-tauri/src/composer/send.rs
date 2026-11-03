@@ -5990,6 +5990,56 @@ mod continuations {
         assert!(view.text.is_empty() && !view.cancel_send);
     }
 
+    /// zerus-dhnd: Start fresh opens Codex without a conversation, and Codex
+    /// reports no status before the first message creates one. The waiting
+    /// message must go through the first-message path, not wait forever.
+    #[test]
+    fn a_fresh_start_without_a_status_takes_the_waiting_message_as_its_first() {
+        let root = dir("fresh-first");
+        let (c, fake) = send_hub(&root);
+        stopped(&fake);
+        let view = opened(&c, ready());
+        let SendReply::Start { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "first".into(), 5, 5)
+        else {
+            panic!("no question")
+        };
+        let choice = StartChoice::Fresh;
+        assert_eq!(
+            c.answer(token, Answer::Start { choice }),
+            SendReply::Sending
+        );
+        until(&c, |v| v.waiting.as_deref() == Some(WAITING_START));
+        until(&c, |_| called(&fake, &Action::StartFresh));
+        {
+            let mut row = lock(&fake.row);
+            row.state = "running".into();
+            row.run_id = Some("run-2".into());
+            row.conversation_id = None;
+        }
+        // `hgs inspect` as the owner's session showed it after the clear.
+        let cleared = json!({"tracked": true, "run_id": "run-2", "conversation_id": null,
+            "runtime_state": "live", "process_state": "running",
+            "phase": "unknown", "activity": "unknown", "activity_summary": "Status unavailable",
+            "cleared_conversations": ["conv-1"],
+            "first_message_can_send": true, "first_message_reason": "",
+            "clear_context_supported": false, "clear_context_reason": "Wait for a confirmed conversation"});
+        c.observe(&state(cleared.clone()));
+        c.observe(&state(cleared));
+        until(&c, |v| v.waiting.is_none() && !v.sending);
+        let sends = sends(&fake);
+        assert_eq!(sends.len(), 1);
+        // The new run's first message, never the cleared conversation.
+        assert_eq!(
+            (
+                sends[0].0.run_id.as_str(),
+                sends[0].0.conversation_id.as_str()
+            ),
+            ("run-2", "")
+        );
+        assert!(c.current().unwrap().text.is_empty());
+    }
+
     #[test]
     fn a_compaction_must_complete_before_the_send() {
         let root = dir("compact");

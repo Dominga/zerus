@@ -59,7 +59,13 @@ and only then calls these APIs. Each call uses a
 its changes, even if the caller records a refusal and commits the outer
 transaction. Successful calls release only their savepoint; reservation and
 custody become durable together on the actor's outer commit. Savepoint-cleanup
-failure also requests outer rollback and propagates the cleanup error. A later native-guard refusal still requires actor rollback.
+failure also requests outer rollback, retaining the original error and cleanup
+diagnostics. If SQLite rolled back the whole transaction, the error carries
+`OuterTransactionRolledBack` as a typed context and preserves the original cause.
+The caller must abandon that `Transaction`, without writing even a refusal
+through it: direct SQLite writes would now autocommit independently. Further
+`_in` calls on it refuse before any write. A later native-guard refusal still
+requires actor rollback.
 These APIs create no runtime permit or physical drain proof. The existing
 connection-based calls validate inputs before acquiring their IMMEDIATE writer
 lock and delegate to the same protected bodies.

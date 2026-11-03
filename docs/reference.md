@@ -2568,9 +2568,12 @@ halfway, for example on a readonly ignored folder: Git forgets the worktree whil
 some files remain. Before every `git worktree remove`, the owning computer
 reserves a private removal record. A confirmed outcome drops it, and an
 interruption or failure keeps it. A folder that Git no longer tracks but that
-still exists then appears in the repository review as a **leftover**
+still exists then appears in the repository review (and in a review targeted at
+that worktree, such as the cleanup after Terminate) as a **leftover**
 (`worktree-leftovers-v1`), with a fresh bounded listing of the remaining files,
-the retained branch and current processes or sessions. A missing Git
+the retained branch and current processes or sessions. The cleanup after
+Terminate keeps such a folder with "Git no longer tracks this folder, but files
+remain" instead of an unverified-folder error. A missing Git
 registration is never treated as proof of deletion, and the removal is never
 retried. **Keep folder, forget record** (`hgs worktrees keep-folder`) checks the
 reviewed leftover again under the repository lock and drops only its record;

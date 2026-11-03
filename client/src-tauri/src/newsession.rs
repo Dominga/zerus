@@ -248,7 +248,10 @@ impl NewSession {
     /// Writes the snapshots when a file keeps them; a newer state already
     /// written makes an older one unnecessary.
     fn save(&self) {
-        if self.save_captured() {
+        // A captured owner never falls back to the legacy writer, including
+        // after Quit or a failed capture. Only an uncaptured owner uses it.
+        if self.0.capture.is_some() {
+            self.save_captured();
             return;
         }
         let Some(file) = &self.0.file else {

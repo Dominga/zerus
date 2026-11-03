@@ -248,3 +248,49 @@ fn the_ready_signal_is_sent_only_after_the_actual_model_can_be_read() {
     drop(owner);
     join.join().unwrap();
 }
+
+#[test]
+fn a_historical_receipt_never_allows_an_unsupported_current_file_to_be_rewritten() {
+    let over_cap = |scope: &str, value| {
+        serde_json::to_vec(&json!({scope:vec![json!([key(),value]);20_001]})).unwrap()
+    };
+    for bytes in [
+        over_cap("marks", json!({"review":true})),
+        over_cap("replies", json!("reply")),
+        br#"{"version":2,"marks":[],"replies":[]}"#.to_vec(),
+        b"{malformed".to_vec(),
+    ] {
+        let f = Fixture::new();
+        f.write(&raw());
+        let original = f.capture();
+        original.prepare().unwrap();
+        let receipt_path = f.root.join("local-read-preload-v1/receipt.json");
+        let receipt = fs::read(&receipt_path).unwrap();
+        drop(original);
+        f.write(&bytes);
+        let capture = f.capture();
+        let owner = Attention::new_with_capture(f.path(), Some(capture.clone()));
+        until(|| {
+            let state = owner.shared.lock();
+            !state.writing && state.marks.is_some()
+        });
+        assert!(capture.status().paused);
+        assert!(matches!(
+            capture.status().code,
+            "local_read_source_too_large" | "local_read_source_unsupported"
+        ));
+        assert!(!capture.status().view_ready.unwrap());
+        assert!(owner.shared.snapshot_checked().is_err());
+        assert!(owner
+            .try_update(Default::default(), [(key(), Some("unsaved".into()))].into())
+            .is_err());
+        assert!(!owner.flush_within(Duration::ZERO));
+        drop(owner);
+        assert_eq!(fs::read(f.path()).unwrap(), bytes);
+        assert_eq!(fs::read(receipt_path).unwrap(), receipt);
+        assert_eq!(
+            fs::read(f.root.join("local-read-preload-v1/original.bin")).unwrap(),
+            raw()
+        );
+    }
+}

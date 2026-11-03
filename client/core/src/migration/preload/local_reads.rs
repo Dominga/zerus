@@ -42,6 +42,14 @@ impl Capture {
         // The committed original is rechecked before opening today's view.
         self.retained()?;
         let (path, bytes) = self.local_current()?;
+        // An older receipt classifies only its historical original. Today's
+        // bytes must independently pass the non-normalizing schema/count checks
+        // before the presentation decoder can default, cap or deduplicate them.
+        if let Some((current, _)) = &bytes {
+            for part in sources::next_local_read_marks(current)?.into_chunks() {
+                part?;
+            }
+        }
         let view = AttentionMarks::from_bytes(path, bytes.as_ref().map(|(b, _)| b.as_slice()));
         let live = Live {
             capture: self.clone(),
@@ -54,6 +62,7 @@ impl Capture {
         self.pause_local(match error {
             SourceError::SourceChanged => 3,
             SourceError::TooLarge => 4,
+            SourceError::UnsupportedSource => 5,
             _ => 9,
         });
     }

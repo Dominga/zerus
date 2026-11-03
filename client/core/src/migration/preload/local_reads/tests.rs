@@ -210,3 +210,44 @@ fn view_ready_revision_keeps_the_original_capture_and_source_classification() {
     assert_eq!(capture.status().view_revision.as_deref(), Some("2"));
     assert_eq!(capture.status().code, "local_read_source_not_applicable");
 }
+
+fn refused_restart(bytes: &[u8], expected: SourceError) {
+    let s = Scratch::new();
+    s.put(&raw());
+    let original = snapshot(&s.capture());
+    let reference = original.reference().unwrap();
+    let receipt_path = s.0.join("local-read-preload-v1/receipt.json");
+    let receipt = fs::read(&receipt_path).unwrap();
+    // The historical receipt exists, but no presentation model was installed.
+    s.put(bytes);
+    let fresh = s.capture();
+    assert_eq!(snapshot(&fresh).reference().unwrap(), reference);
+    assert!(matches!(fresh.local_read_owner(), Err(error) if error == expected));
+    assert_eq!(fs::read(s.file()).unwrap(), bytes);
+    assert_eq!(fs::read(receipt_path).unwrap(), receipt);
+    assert_eq!(original.bytes().unwrap(), raw());
+    assert_eq!(snapshot(&fresh).reference().unwrap(), reference);
+}
+#[test]
+fn restart_with_a_receipt_refuses_over_cap_current_maps_before_normalization() {
+    for scope in ["marks", "replies"] {
+        let value = if scope == "marks" {
+            json!({"review":true})
+        } else {
+            json!("reply")
+        };
+        let bytes = serde_json::to_vec(&json!({scope:vec![json!([key(),value]);20_001]})).unwrap();
+        refused_restart(&bytes, SourceError::TooLarge);
+    }
+}
+#[test]
+fn restart_with_a_receipt_refuses_an_unsupported_current_version() {
+    refused_restart(
+        br#"{"version":2,"marks":[],"replies":[]}"#,
+        SourceError::UnsupportedSource,
+    );
+}
+#[test]
+fn restart_with_a_receipt_refuses_malformed_current_bytes() {
+    refused_restart(b"{malformed", SourceError::UnsupportedSource);
+}

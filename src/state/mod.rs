@@ -73,6 +73,8 @@ mod search;
 pub(crate) mod search_index;
 pub(crate) mod session_graph;
 mod storage;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod task_reconcile;
 mod subagents;
 mod native_subagents;
 mod supervisor;
@@ -90,6 +92,9 @@ mod usage;
 mod workspace;
 mod git_status;
 pub(crate) mod repositories;
+mod launch_observation;
+#[allow(unused_imports)] // Used by the launch actor slice.
+pub(crate) use launch_observation::observe as observe_launch;
 mod worktrees;
 mod worktree_requests;
 // The creation worktree actor's only entry into the owned effect.

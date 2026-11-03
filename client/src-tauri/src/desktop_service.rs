@@ -555,6 +555,12 @@ impl Service {
                     retained_import::creations::schedule_current(&shared);
                 }
             }));
+            let weak = Arc::downgrade(&shared);
+            report.hook_drafts(Arc::new(move || {
+                if let Some(shared) = weak.upgrade() {
+                    shared.publish_retained_import();
+                }
+            }));
         }
         let (control, receiver) = watch::channel(Control::Retry(0));
         let (finished, join) = oneshot::channel();

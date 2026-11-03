@@ -1,7 +1,7 @@
 //! Optional initial grouping. Never initialize a catalog, replace any explicit
 //! membership (including a tombstone), infer by a path prefix, or create Git data.
 use super::{
-    catalog::Key,
+    catalog::{Catalog, Key},
     store::{LockedStore, Store},
 };
 use crate::config::Config;
@@ -11,6 +11,8 @@ use std::{
     path::Path,
     time::{Duration, Instant},
 };
+
+const INBOX: &str = "ungrouped";
 
 /// Called only after a genuinely new native binding was created, never resume,
 /// fork, listing, GUI inspection or adoption. Failures leave normal launch alone.
@@ -41,6 +43,82 @@ pub(crate) fn infer_new_session(config: &Config, name: &str, directory: &Path) {
     // Contention, inaccessible folders and optional metadata failures never
     // become an agent start failure, an automatic retry, or a default assignment.
     let _ = attempt;
+}
+
+/// A fork's initial grouping, written once by this computer's catalog owner
+/// right after the fork's binding exists: the project of its source session
+/// (or of the archived source), or Inbox when that project no longer exists.
+/// Never initializes a catalog or replaces an explicit membership (including a
+/// tombstone); waits at most 3 s for the catalog lock, and a failure never
+/// fails the fork.
+pub(crate) fn inherit_fork_project(
+    config: &Config,
+    name: &str,
+    source: &str,
+    archive: Option<&str>,
+) {
+    if !config.dir.join("swarm/catalog.json").is_file() {
+        return;
+    }
+    let end = Instant::now() + Duration::from_secs(3);
+    let attempt = (|| -> anyhow::Result<()> {
+        let mut store = loop {
+            match LockedStore::try_load_scoped(config) {
+                Ok(store) => break store,
+                Err(_) if Instant::now() < end => std::thread::sleep(Duration::from_millis(50)),
+                Err(error) => return Err(error),
+            }
+        };
+        let Some(project) = inherited(&store.data, name, source, archive) else {
+            return Ok(());
+        };
+        let key = Key::Session {
+            machine: store.data.catalog.machine(&store.data.node_id),
+            session: name.into(),
+        };
+        let actor = store.data.node_id.clone();
+        store.data.catalog.set(&actor, key, json!(project))?;
+        store.save_catalog_only()?;
+        Ok(())
+    })();
+    let _ = attempt;
+}
+/// The fork's membership, or `None` to write nothing. A source without a
+/// membership (or explicitly unassigned) leaves the fork without one, so both
+/// follow the same default project. Inbox, a project that no longer exists and
+/// an unresolved concurrent choice all become an explicit Inbox membership.
+fn inherited(store: &Store, name: &str, source: &str, archive: Option<&str>) -> Option<String> {
+    if !store.imported {
+        return None;
+    }
+    let machine = store.catalog.machine(&store.node_id);
+    let key = Key::Session {
+        machine: machine.clone(),
+        session: name.into(),
+    };
+    if store.catalog.heads().contains_key(&key) {
+        return None;
+    }
+    let from = Key::Session {
+        machine,
+        session: match archive.filter(|id| !id.is_empty()) {
+            Some(id) => format!("archive\n{id}"),
+            None => source.into(),
+        },
+    };
+    let heads = store.catalog.effective_heads();
+    let [only] = heads.get(&from)?.as_slice() else {
+        return Some(INBOX.into());
+    };
+    let project = only.value.as_str()?;
+    let alive = |id: &str| {
+        let key = Key::project(id, "alive");
+        heads
+            .get(&key)
+            .and_then(|versions| Catalog::selected(&key, versions))
+            .is_some_and(|op| op.value == true)
+    };
+    Some(if alive(project) { project } else { INBOX }.into())
 }
 
 /// An additive hint for `dirs`: optional read of an existing catalog, never
@@ -193,6 +271,71 @@ mod tests {
             |_| evidence,
         )
     }
+    /// zerus-zjsj: a fork takes its source's live project, else an explicit
+    /// Inbox; an unplaced source leaves it unplaced. Nothing fails the fork.
+    #[test]
+    fn a_fork_inherits_its_sources_project_or_inbox() {
+        let mut store = store();
+        let local = store.node_id.clone();
+        let machine = store.catalog.machine(&local);
+        let member = |session: &str| Key::Session {
+            machine: machine.clone(),
+            session: session.into(),
+        };
+        let set = |store: &mut Store, key: Key, value: Value| {
+            store.catalog.set(&local, key, value).unwrap();
+        };
+        for project in ["work", "other"] {
+            set(&mut store, Key::project(project, "alive"), json!(true));
+        }
+        set(&mut store, member("codex/p/source"), json!("work"));
+        set(&mut store, member("archive\narchive-1"), json!("work"));
+        set(&mut store, member("codex/p/inbox"), json!("ungrouped"));
+        set(&mut store, member("codex/p/lost"), json!("never-created"));
+        set(&mut store, member("codex/p/cleared"), Value::Null);
+        // Two devices chose different projects; the desktop asks for a review.
+        let mut remote = store.catalog.clone();
+        remote
+            .set(&new_id(), member("codex/p/split"), json!("other"))
+            .unwrap();
+        set(&mut store, member("codex/p/split"), json!("work"));
+        store
+            .catalog
+            .merge(
+                &remote.swarm_id.clone(),
+                remote.operations.into_values().collect(),
+            )
+            .unwrap();
+        let from = |store: &Store, source: &str, archive: Option<&str>| {
+            inherited(store, "codex/p/fork", source, archive)
+        };
+        let work = Some("work".to_owned());
+        let inbox = Some("ungrouped".to_owned());
+        assert_eq!(from(&store, "codex/p/source", None), work);
+        assert_eq!(from(&store, "codex/p/gone", Some("archive-1")), work);
+        for source in ["codex/p/inbox", "codex/p/lost", "codex/p/split"] {
+            assert_eq!(from(&store, source, None), inbox, "{source}");
+        }
+        // No membership or an explicit unassignment: the same default project.
+        for source in ["codex/p/unplaced", "codex/p/cleared"] {
+            assert_eq!(from(&store, source, None), None, "{source}");
+        }
+        assert_eq!(from(&store, "codex/p/gone", Some("archive-2")), None);
+        // An explicit membership of the fork, even Inbox or a tombstone, stays.
+        for value in [json!("ungrouped"), Value::Null, json!("other")] {
+            let mut explicit = store.clone();
+            set(&mut explicit, member("codex/p/fork"), value);
+            assert_eq!(from(&explicit, "codex/p/source", None), None);
+        }
+        // A project deleted since: Inbox.
+        let mut retired = store.clone();
+        set(&mut retired, Key::project("work", "alive"), json!(false));
+        assert_eq!(from(&retired, "codex/p/source", None), inbox);
+        // An uninitialized catalog is never written.
+        store.imported = false;
+        assert_eq!(from(&store, "codex/p/source", None), None);
+    }
+
     #[cfg(unix)]
     #[test]
     fn canonical_exact_non_git_folder_is_initial_metadata_only() {

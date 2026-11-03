@@ -44,6 +44,17 @@ fn setup() -> (Connection, Reserve, store::Prepared) {
 }
 
 #[test]
+fn custody_automatic_rollback_preserves_its_original_failure() {
+    let (mut db, request, prepared) = setup();
+    db.execute_batch("CREATE TRIGGER refuse_custody BEFORE INSERT ON desktop_operation_custody BEGIN SELECT RAISE(ROLLBACK,'fixture automatic rollback'); END;").unwrap();
+    let tx = refusal_transaction(&mut db);
+    let error = store::reserve_in(&tx, &request, &prepared).err().unwrap();
+    assert_automatic_rollback(tx, error);
+    assert!(store::pending(&db).unwrap().is_none());
+    assert_eq!(totals(&db).unwrap().undrained, 0);
+}
+
+#[test]
 fn custody_error_cannot_survive_a_callers_refusal_commit() {
     let (mut db, request, prepared) = setup();
     db.execute_batch("CREATE TRIGGER refuse_custody BEFORE INSERT ON desktop_operation_custody BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();

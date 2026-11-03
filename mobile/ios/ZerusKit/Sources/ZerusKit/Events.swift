@@ -422,7 +422,9 @@ public enum NativeEvents {
             let shown = origin.isEmpty ? role : ActivityNotices.role
             let sourceValue = value.string("source")
             let source = sourceValue.isEmpty ? stream : sourceValue
-            let voice = source == "hgs_voice" ? value.object("voice").flatMap { try? VoiceProtocol.message($0) } : nil
+            // An inherited voice belongs to the source session: its text stays, but
+            // no voice card, playback or status acts on it through this fork.
+            let voice = source == "hgs_voice" && inheritedFrom.isEmpty ? value.object("voice").flatMap { try? VoiceProtocol.message($0) } : nil
             let files = value.objects("attachments").map { file -> DisplayedAttachment in
                 var index = -1
                 if case .int(let number)? = file["index"], let value = Int(exactly: number) { index = value }
@@ -460,9 +462,12 @@ public enum NativeEvents {
                 return nil
             }
             // A prompt Zerus sent to OpenCode names its request: OpenCode dates a queued prompt by its delivery, so text and time cannot match it.
+            // An inherited row is never this session's own send.
             var requestId = ""
-            if shown == "You" && inheritedFrom.isEmpty && ["hgs_delivery", "hgs_voice"].contains(source) { requestId = value.string("message_id") }
-            if shown == "You" && source == "opencode_native" && AttachmentPolicy.validId(value.string("request_id")) { requestId = value.string("request_id") }
+            if shown == "You" && inheritedFrom.isEmpty {
+                if ["hgs_delivery", "hgs_voice"].contains(source) { requestId = value.string("message_id") }
+                if source == "opencode_native" && AttachmentPolicy.validId(value.string("request_id")) { requestId = value.string("request_id") }
+            }
             return Event(id: historyId.isEmpty ? originalId : "history:\(historyId)", role: shown, text: text, time: value.string("at", "timestamp"), at: at,
                          requestId: requestId,
                          attachments: files, source: source, nativeType: type,

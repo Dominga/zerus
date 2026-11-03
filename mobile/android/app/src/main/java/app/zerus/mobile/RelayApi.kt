@@ -248,7 +248,9 @@ object NativeParser {
             // Identities keep the native role, so cached rows stay the same rows.
             val shown = if (origin.isNotEmpty()) ActivityNotices.ROLE else role
             val source = value.string("source").ifBlank { stream }
-            val voice = if (source == "hgs_voice") value.optJSONObject("voice")?.let {
+            // An inherited voice belongs to the source session: its text stays, but
+            // no voice card, playback or status acts on it through this fork.
+            val voice = if (source == "hgs_voice" && inheritedFrom.isEmpty()) value.optJSONObject("voice")?.let {
                 runCatching { VoiceProtocol.message(it) }.getOrNull()
             } else null
             val files = value.optJSONArray("attachments")?.objects().orEmpty().map {

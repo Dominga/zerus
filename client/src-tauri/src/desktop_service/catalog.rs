@@ -248,6 +248,36 @@ async fn row(
     .await
 }
 
+/// Metadata captions and UI-supplied row fields cannot mint a machine key.
+async fn project(
+    shared: &Shared,
+    computer: &str,
+    source: &SourceVersion,
+    value: &Value,
+    stop: &AtomicBool,
+) -> Result<zerus_client_core::ViewRow, &'static str> {
+    let identity = ComputerId::from(computer);
+    let until = tokio::time::Instant::now() + RPC_WAIT;
+    loop {
+        if stop.load(Ordering::Acquire) || shared.stopped.load(Ordering::Acquire) {
+            return Err("stopped");
+        }
+        let row = {
+            let hub = shared.details.lock().unwrap_or_else(PoisonError::into_inner);
+            hub.project_row(&identity, source.generation, value)
+        };
+        // Older services without source metadata keep their existing limited
+        // catalog. Current native sources wait for their verified local host.
+        if !row.machine.is_empty() || !shared.snapshot.lock().unwrap_or_else(PoisonError::into_inner).details_available {
+            return Ok(row);
+        }
+        if tokio::time::Instant::now() >= until {
+            return Err("catalog_source_identity_pending");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 async fn walk(
     shared: &Arc<Shared>,
     computer: &str,
@@ -287,7 +317,7 @@ async fn walk(
                     if keys.contains(&item.key) { return Err("catalog_duplicate"); }
                     insert_key(keys, &mut key_bytes, item.key.clone())?;
                     row(shared, computer, &source, epoch, &stop, Change::Upsert { computer: ComputerId::from(computer),
-                        key: item.key, row: zerus_client_core::view::row(&item.row) }).await?;
+                        key: item.key, row: project(shared, computer, &source, &item.row, &stop).await? }).await?;
                 }
                 if cursor.is_none() { break; }
             }
@@ -317,7 +347,7 @@ async fn walk(
                     }
                     let change = if let Some(value) = &item.row {
                         if let Some(keys) = keys.as_mut() { insert_key(keys, &mut key_bytes, item.key.clone())?; }
-                        Change::Upsert { computer: ComputerId::from(computer), key: item.key.clone(), row: zerus_client_core::view::row(value) }
+                        Change::Upsert { computer: ComputerId::from(computer), key: item.key.clone(), row: project(shared, computer, &source, value, &stop).await? }
                     } else {
                         if let Some(keys) = keys.as_mut() { if keys.remove(&item.key) { key_bytes -= item.key.len(); } }
                         Change::Remove { computer: ComputerId::from(computer), key: item.key.clone(), reason: None }

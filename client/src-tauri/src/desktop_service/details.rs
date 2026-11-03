@@ -38,6 +38,12 @@ struct Source {
     seen: BTreeSet<String>,
 }
 impl Hub {
+    pub(super) fn project_row(&self, computer: &ComputerId, generation: u64, value: &Value) -> zerus_client_core::ViewRow {
+        match self.sources.get(&computer.0).filter(|source| source.generation == generation) {
+            Some(source) => source.state.project_row(computer, value),
+            None => CatalogState::new().project_row(computer, value),
+        }
+    }
     fn follow(&mut self, computer: &str, spec: Subscription) -> Result<(), String> {
         let key = Key::new(computer, &spec).map_err(str::to_owned)?;
         if let Some(entry) = self
@@ -753,13 +759,22 @@ pub(super) async fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>) -> Result<()
                     &stop,
                     lease,
                     Target::Source {
-                        computer,
+                        computer: computer.clone(),
                         generation,
                         serial,
                     },
                     changes,
                 )
                 .await?;
+                if part == "hello" {
+                    let mut dirty = shared.dirty.lock().unwrap_or_else(PoisonError::into_inner);
+                    if dirty.sources.get(&computer).is_some_and(|source| source.generation == generation)
+                        && !dirty.progress.contains_key(&computer) {
+                        dirty.halted.remove(&computer);
+                        dirty.pending.insert(computer.clone());
+                        shared.changed.notify_one();
+                    }
+                }
             }
             Work::Follow { id, .. } => {
                 if response["id"] != id {

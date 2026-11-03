@@ -1016,6 +1016,36 @@ fn detail_spec(topic: &str, after: Option<i64>) -> zerus_watch_protocol::Subscri
         ..Default::default()
     }
 }
+
+#[test]
+fn service_catalog_rows_use_native_host_and_peer_alias_for_project_membership() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({"details":true,"project_peer":true,
+            "organization":{"default_project":"ungrouped","projects":[
+                {"id":"alpha","name":"Alpha","sessions":["untrusted-caption\ncodex/example/row"]},
+                {"id":"beta","name":"Beta","sessions":["studio\ncodex/example/row"]},
+                {"id":"ungrouped","name":"Inbox","sessions":[]}]}}));
+        let pump = crate::pump::Pump::default();
+        let grouped = pump.clone();
+        let (sink, rx) = std::sync::mpsc::sync_channel(256);
+        let drain = pump.drain_service(rx, move |change| {
+            if let Change::Organization { update: zerus_client_core::OrganizationUpdate::State { value, membership, .. }, .. } = change {
+                grouped.present(&value["organization"], membership.clone(), 1, zerus_client_core::swarm::grouping::SyncView::default());
+            }
+        });
+        let service = Service::start(fixture.0.join("hgs"), pump.clone(), sink, true, drain, None, vec![]);
+        service.follow_detail("", detail_spec("organization", None)).unwrap();
+        eventually("local and peer rows reach their projects", || {
+            pump.members_of("alpha").iter().map(|(member, _)| member.as_str()).collect::<Vec<_>>() == vec!["untrusted-caption\ncodex/example/row"]
+                && pump.members_of("beta").iter().map(|(member, _)| member.as_str()).collect::<Vec<_>>() == vec!["studio\ncodex/example/row"]
+        }).await;
+        assert_eq!(pump.row("", "row").unwrap().machine, "untrusted-caption");
+        assert_eq!(pump.row("studio", "row").unwrap().machine, "studio");
+        assert_ne!(pump.row("", "row").unwrap().machine, "metadata-caption");
+        service.join().await.unwrap();
+    });
+}
 #[test]
 fn one_service_lease_delivers_native_activity_processes_tasks_and_organization() {
     let _process = crate::PROCESS_TREE.read().unwrap();

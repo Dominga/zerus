@@ -488,15 +488,34 @@ function useRows(strip: boolean) {
   return { ref, rows, virtualizer, byId, keys, startOf, offsets, heights, heightOf: (id: string) => { const i = rows().findIndex((r) => r.id === id); return heights()[i] ?? 94; } };
 }
 
-/** Slides the full panel out from under the strip (transform only). */
+/** The panel slide in flight, and the timer that ends it. */
+let sliding: { animation: Animation; timer: number } | undefined;
+
+/**
+ * Slides the full panel out from under the strip (transform only). Like the
+ * row morph, the slide never ends by itself (zerus-attm): vblank-paced 144 Hz
+ * WebKitGTK presented the pre-slide layer for one frame when it did, a closed
+ * panel flashing back open. It holds its end until OPEN_MS + 40, then is
+ * cancelled with `done` (which hides a closed panel) in the same task. A new
+ * slide replaces the one in flight; that one's `done` is not run.
+ */
 function slide(el: HTMLElement | undefined, width: number, opening: boolean, done?: () => void) {
+  if (sliding) {
+    clearTimeout(sliding.timer);
+    sliding.animation.cancel();
+    sliding = undefined;
+  }
   if (!el || motionReduced()) { done?.(); return; }
-  const hidden = `translateX(${-(width - STRIP_WIDTH)}px)`;
-  const a = el.animate(
-    opening ? [{ transform: hidden, opacity: 0.6 }, { transform: "translateX(0)", opacity: 1 }] : [{ transform: "translateX(0)", opacity: 1 }, { transform: hidden, opacity: 0 }],
-    { duration: OPEN_MS, easing: OUT_CUBIC },
-  );
-  a.onfinish = () => done?.();
+  const hidden = { transform: `translateX(${-(width - STRIP_WIDTH)}px)`, opacity: opening ? 0.6 : 0 };
+  const shown = { transform: "translateX(0)", opacity: 1 };
+  const animation = opening ? hold(el, hidden, shown, 0, OPEN_MS, OUT_CUBIC) : hold(el, shown, hidden, 0, OPEN_MS, OUT_CUBIC);
+  const timer = window.setTimeout(() => {
+    if (sliding?.animation !== animation) return;
+    sliding = undefined;
+    animation.cancel();
+    done?.();
+  }, OPEN_MS + 40);
+  sliding = { animation, timer };
 }
 
 export function SessionList() {

@@ -1,6 +1,7 @@
 //! Actor-owned attention discovery. No host, writer or UI fallback is created.
 mod identity;
 mod projection;
+mod retention;
 mod state;
 #[cfg(test)]
 mod tests;
@@ -20,6 +21,19 @@ const FRESH: Duration = Duration::from_secs(15);
 const ROWS_PER_TURN: usize = 4;
 const EFFECTS_PER_TURN: usize = 8;
 const FOCUS_TTL: Duration = Duration::from_secs(5);
+pub(super) const SCHEMA: i64 = 20;
+pub(super) fn migrate_retention(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    retention::migrate(tx)
+}
+#[cfg(test)]
+pub(super) fn remove_retention_fixture(db: &rusqlite::Connection) {
+    db.execute_batch(
+        "DROP TRIGGER desktop_attention_edge_remove;
+        DROP INDEX desktop_attention_compact;
+        DROP TABLE desktop_attention_tombstones; DROP TABLE desktop_attention_gc;",
+    )
+    .unwrap();
+}
 pub(super) fn migrate(db: &rusqlite::Connection) -> Result<()> {
     state::migrate(db)
 }
@@ -59,6 +73,7 @@ pub struct Runtime {
     effect_after: i64,
     effect_through: i64,
     retirement: Option<Retirement>,
+    capacity_waiting: bool,
     #[cfg(test)]
     clock: Option<Instant>,
 }
@@ -77,6 +92,7 @@ impl Runtime {
             effect_after: 0,
             effect_through: 0,
             retirement: None,
+            capacity_waiting: false,
             #[cfg(test)]
             clock: None,
         }
@@ -214,7 +230,7 @@ impl Runtime {
         }
     }
     pub fn work_pending(&self) -> bool {
-        self.pending.as_ref().is_some_and(|p| !p.rows.is_empty())
+        !self.capacity_waiting && self.pending.as_ref().is_some_and(|p| !p.rows.is_empty())
     }
     fn current(&self, store: &Store, scope: &changes::Scope) -> Result<bool> {
         if !self.sources.get(&scope.source.computer).is_some_and(|s| {
@@ -249,6 +265,26 @@ impl Runtime {
         }
     }
     fn turn(&mut self, store: &mut Store, outbox: Option<&mut Outbox>) -> Result<()> {
+        if self.capacity_waiting {
+            let current = match self.pending.as_ref() {
+                Some(pending) => self.current(store, &pending.scope)?,
+                None => false,
+            };
+            if !current {
+                // A policy reset or expired/replaced source abandons this page;
+                // its old capacity wait must not hold a new baseline hostage.
+                self.pending = None;
+                self.capacity_waiting = false;
+            }
+        }
+        let compacted = retention::compact(&mut store.db)?;
+        if self.capacity_waiting && compacted.removed == 0 {
+            if let Some(outbox) = outbox {
+                self.effects(store, outbox, false)?;
+            }
+            return Ok(());
+        }
+        self.capacity_waiting = false;
         if self.pending.is_none() {
             self.fill(store)?;
         }
@@ -285,12 +321,12 @@ impl Runtime {
                     state::BaselineKey::Unchanged => {}
                 }
             }
-            if let Some(raw) = row.raw {
+            if let Some(ref raw) = row.raw {
                 ensure!(
                     raw.len() <= catalog::PAGE_BYTES,
                     "attention input exceeds frame cap"
                 );
-                let value: Value = serde_json::from_str(&raw)?;
+                let value: Value = serde_json::from_str(raw)?;
                 // Missing genuine identities are ineligible, without a name,
                 // generation or epoch fallback. They do not poison other rows.
                 let view = zerus_client_core::view::row(&value);
@@ -325,7 +361,10 @@ impl Runtime {
                         false,
                         true,
                     )?;
-                    state::consume_history(&mut store.db, history)?;
+                    if let Err(error) = state::consume_history(&mut store.db, history) {
+                        self.defer_capacity(row, error)?;
+                        break;
+                    }
                     continue;
                 }
                 // Multiple live rows are ambiguous; no candidate may post.
@@ -341,7 +380,7 @@ impl Runtime {
                 // Consume it as historical data, never post from it. The next
                 // delta carries the current edge; no cached row is permission.
                 let actual: Option<String>=store.db.query_row("SELECT r.json FROM desktop_catalog_rows r JOIN desktop_catalog_sources s ON s.visible=r.generation WHERE s.computer=?1 AND r.key=?2 AND length(CAST(r.json AS BLOB))<=?3",params![computer,row.key,catalog::PAGE_BYTES as i64],|r|r.get(0)).optional()?;
-                let stale = actual.as_deref() != Some(&raw);
+                let stale = actual.as_deref() != Some(raw.as_str());
                 let projection = projection::project(
                     computer,
                     &label,
@@ -351,7 +390,7 @@ impl Runtime {
                     self.foreground_until.is_some_and(|t| self.now() < t),
                     row.baseline || stale,
                 )?;
-                state::save(
+                if let Err(error) = state::save(
                     &mut store.db,
                     computer,
                     &row.key,
@@ -368,7 +407,10 @@ impl Runtime {
                     },
                     projection,
                     row.baseline || stale,
-                )?;
+                ) {
+                    self.defer_capacity(row, error)?;
+                    break;
+                }
             } else {
                 state::remove(&mut store.db, &scope.source.computer, &row.key)?;
             }
@@ -378,6 +420,20 @@ impl Runtime {
         if let Some(outbox) = outbox {
             self.effects(store, outbox, false)?;
         }
+        Ok(())
+    }
+    fn defer_capacity(&mut self, row: Row, error: anyhow::Error) -> Result<()> {
+        if !error.is::<retention::Pressure>() {
+            return Err(error);
+        }
+        self.pending
+            .as_mut()
+            .context("attention quota row lost its page")?
+            .rows
+            .push_front(row);
+        // The normal actor poll advances bounded GC. Do not busy-loop a full
+        // protected ledger or turn reclaimable pressure into a permanent error.
+        self.capacity_waiting = true;
         Ok(())
     }
     fn fill(&mut self, store: &Store) -> Result<()> {
@@ -574,6 +630,6 @@ impl Runtime {
         self.error.is_some()
     }
     pub fn status(&self) -> Value {
-        json!({"sources":self.sources.len(),"pending_rows":self.pending.as_ref().map_or(0,|p|p.rows.len()),"enabled":self.policy.enabled,"optional_questions":self.policy.optional_questions,"retiring":self.retiring(),"stopping":self.stopping,"error":self.error,"stopped_on_error":self.error.is_some(),"error_retryable":self.error.as_ref().map(|_|false),"source_limit":catalog::MAX_SOURCES,"rows_per_turn":ROWS_PER_TURN,"effects_per_turn":EFFECTS_PER_TURN})
+        json!({"sources":self.sources.len(),"pending_rows":self.pending.as_ref().map_or(0,|p|p.rows.len()),"enabled":self.policy.enabled,"optional_questions":self.policy.optional_questions,"retiring":self.retiring(),"stopping":self.stopping,"error":self.error,"stopped_on_error":self.error.is_some(),"error_retryable":self.error.as_ref().map(|_|false),"capacity_waiting":self.capacity_waiting,"gc_rows_per_turn":retention::ROWS,"gc_bytes_per_turn":retention::BYTES,"source_limit":catalog::MAX_SOURCES,"rows_per_turn":ROWS_PER_TURN,"effects_per_turn":EFFECTS_PER_TURN})
     }
 }

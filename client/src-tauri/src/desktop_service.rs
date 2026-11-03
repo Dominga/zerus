@@ -353,6 +353,8 @@ struct Shared {
     activation_permanent: AtomicBool,
     allowed: bool,
     stopped: AtomicBool,
+    /// Once observed, connection checks cannot retry imports or startup Grant.
+    read_only_reconnect: AtomicBool,
     cancellation: Mutex<Option<Arc<AtomicBool>>>,
     responder: Option<Arc<zerus_client_core::desktop::Responder>>,
     reads: Mutex<BTreeMap<String, ReadIntent>>,
@@ -525,6 +527,7 @@ impl Service {
             activation_permanent: AtomicBool::new(false),
             allowed,
             stopped: AtomicBool::new(false),
+            read_only_reconnect: AtomicBool::new(false),
             cancellation: Mutex::new(None),
             configuration: Mutex::new(None),
             audit_help: audit::help::Cache::default(),
@@ -651,18 +654,32 @@ impl Service {
             .clone()
     }
     pub fn retry(&self) {
-        if !startup_recovery() {
+        if !self.shared.read_only_reconnect.load(Ordering::Acquire) && !startup_recovery() {
             if let Some(report) = &self.shared.retained_import {
                 report.request_retry();
             }
         }
         self.retry_connection();
     }
+    /// A check belongs to the displayed original service and starts no source.
+    pub fn check_status(&self, epoch: &str) -> Result<(), String> {
+        if self.shared.stopped.load(Ordering::Acquire)
+            || self.snapshot().epoch.as_deref() != Some(epoch)
+        {
+            return Err("The original background service connection changed. Reopen Settings to check its status.".into());
+        }
+        self.shared
+            .read_only_reconnect
+            .store(true, Ordering::Release);
+        self.retry_connection();
+        Ok(())
+    }
+
     fn retry_connection(&self) {
         if self.shared.stopped.load(Ordering::Acquire) {
             return;
         }
-        if !startup_recovery() {
+        if !self.shared.read_only_reconnect.load(Ordering::Acquire) && !startup_recovery() {
             read_import::retry(self.shared.clone());
         }
         if let Some(cancel) = self
@@ -1029,6 +1046,9 @@ impl Shared {
         self.pump.service(current.clone());
     }
     fn publish(&self, mut snapshot: Snapshot) {
+        if snapshot.executable_upgrade == Some(service::ExecutableUpgrade::ManualRefreshRequired) {
+            self.read_only_reconnect.store(true, Ordering::Release);
+        }
         snapshot.notification_preferences = self
             .notification_controls
             .view()
@@ -1050,7 +1070,16 @@ impl Shared {
         for projection in &self.projections {
             projection(None);
         }
+        let original = self.snapshot.copy();
+        let manual = code == "manual_refresh_required";
         self.publish(Snapshot {
+            executable_upgrade: if manual {
+                original.executable_upgrade
+            } else {
+                None
+            },
+            epoch: if manual { original.epoch } else { None },
+            generation: if manual { original.generation } else { None },
             code: code.into(),
             reconnecting,
             ..Snapshot::default()
@@ -1274,6 +1303,16 @@ async fn request(
 }
 
 async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String, &'static str> {
+    let original = shared.read_only_reconnect.load(Ordering::Acquire).then(|| {
+        (
+            shared.snapshot.copy().epoch,
+            shared
+                .configuration
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
+        )
+    });
     let help = command(shared, vec!["--help".into()], None, stop.clone()).await?;
     shared.notification_supported.store(
         std::str::from_utf8(&help).ok().is_some_and(|text| {
@@ -1328,6 +1367,12 @@ async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String
     }
     let mut state = service::State::new(configuration.into())?;
     state.status(&value)?;
+    if original.is_some_and(|(epoch, config)| {
+        epoch.is_some_and(|epoch| state.snapshot().epoch.as_deref() != Some(epoch.as_str()))
+            || config.is_some_and(|config| config != configuration)
+    }) {
+        return Err("original_service_changed");
+    }
     *shared
         .configuration
         .lock()
@@ -1358,7 +1403,7 @@ async fn run(shared: Arc<Shared>, mut control: watch::Receiver<Control>) {
             shared.clone(),
             &mut control,
             stop.clone(),
-            automatic,
+            automatic || shared.read_only_reconnect.load(Ordering::Acquire),
             &mut greeted,
         )
         .await;
@@ -1463,6 +1508,11 @@ async fn connection(
     }
     *shared.relay.lock().unwrap_or_else(PoisonError::into_inner) = Some(relay.clone());
     let configuration = preflight(&shared, stop.clone()).await?;
+    if shared.snapshot.copy().executable_upgrade
+        == Some(service::ExecutableUpgrade::ManualRefreshRequired)
+    {
+        return Err("manual_refresh_required");
+    }
     if !automatic && !startup_recovery() {
         let explicit = shared
             .retained_import
@@ -1585,6 +1635,9 @@ async fn connection(
                         for projection in &shared.projections { projection(Some(&frame)); }
                         last_frame = tokio::time::Instant::now();
                         shared.publish(state.snapshot().clone());
+                        if state.snapshot().executable_upgrade == Some(service::ExecutableUpgrade::ManualRefreshRequired) {
+                            return Err("manual_refresh_required");
+                        }
                         retained_import::creations::schedule_current(&shared);
                         if frame["t"] == "hello" && notification_worker.is_none()
                             && !startup_recovery()
@@ -1788,6 +1841,20 @@ pub(crate) mod recovery_pause {
 #[tauri::command]
 pub fn desktop_service_mode() -> bool {
     mode()
+}
+
+#[tauri::command]
+pub fn desktop_service_check_status(
+    source: tauri::State<'_, crate::commands::AppState>,
+    epoch: String,
+) -> Result<(), String> {
+    if !mode() {
+        return Err("Background service mode is not enabled.".into());
+    }
+    source
+        .desktop_service()
+        .ok_or("The original background service connection is unavailable. Reopen Zerus to check status.")?
+        .check_status(&epoch)
 }
 
 #[tauri::command]

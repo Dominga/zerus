@@ -35,6 +35,15 @@ there stops admission, drains existing work and reports
 `manual_refresh_required`, but keeps the original
 service alive for the maintained explicit registration/instance transition. It
 does not adopt another task, call RunEx or replay manager operations.
+The Service consumer shows this state in the footer and Settings > About,
+including after a watch refusal or revoked background access. Its bounded
+projection stays attached to the original checked service epoch. A status check
+does not repeat startup Grant/import handling or refresh the task. About directs
+the user to read `hgs desktop registration status --json` from a foreground
+Command Prompt outside Zerus using the same CLI and configuration, keeping the
+selected mode and any original pending request. This build has no Windows
+original-instance refresh control; ordinary install and same-mode selection
+do not refresh a stale service. That explicit native callsite is tracked separately.
 If the actor itself fails, final cleanup waits only for actual owner loans;
 supervisor support never makes that loan wait permanent. A later shutdown signal
 also ends a replacement connection wait, preserving explicit termination.

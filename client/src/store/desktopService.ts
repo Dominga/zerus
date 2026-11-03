@@ -26,6 +26,7 @@ export function createDesktopService() {
 }
 export const desktopService = createDesktopService();
 export const retryDesktopService = () => invoke<void>("desktop_service_retry");
+export const checkDesktopServiceStatus = (epoch: string) => invoke<void>("desktop_service_check_status", { epoch });
 
 export function pendingReadNotice(state: DesktopService | undefined): string {
   const transfer = state?.pending_read_import;
@@ -275,8 +276,12 @@ export function ownershipNotice(view: NotificationOwnership | undefined): string
 /** Compact footer presentation; full reasons stay in its accessible tooltip. */
 export function serviceStatus(state: DesktopService | undefined) {
   if (!state) return;
+  const manualRefresh = state.executable_upgrade?.state === "manual_refresh_required";
   let notice = "", label = tr("Background service");
-  if (!state.connected) {
+  if (manualRefresh) {
+    label = tr("Service refresh required");
+    notice = tr("The CLI was updated. The Windows background service needs a manual refresh. See Settings > About.");
+  } else if (!state.connected) {
     label = tr("Background service unavailable");
     notice = state.reconnecting
       ? tr("Background service unavailable. Reconnecting automatically; showing last known sessions.")
@@ -293,13 +298,13 @@ export function serviceStatus(state: DesktopService | undefined) {
   }
   const pending = pendingReadNotice(state), retained = retainedSourceNotice(state), owner = ownershipNotice(state.notification_ownership);
   const ownership = state.notification_ownership?.pending ? "check"
-    : state.notification_ownership?.native_recovery || state.notification_ownership?.status?.rearm_required ? "rearm" : undefined;
+    : !manualRefresh && (state.notification_ownership?.native_recovery || state.notification_ownership?.status?.rearm_required) ? "rearm" : undefined;
   if (!notice) {
     if (pending) label = state.pending_read_import?.running ? tr("Transferring read marks") : tr("Read marks need attention");
     else if (retained) label = tr("Migration report");
     else if (owner) label = ownership === "check" ? tr("Background access unconfirmed") : ownership === "rearm" ? tr("Background access paused") : tr("Background access unavailable");
   }
-  const reasons = [notice, pending, retained, owner].filter(Boolean);
+  const reasons = [notice, pending, retained, manualRefresh ? "" : owner].filter(Boolean);
   return { label, details: reasons.join("\n") || tr("Background service connected"), healthy: !reasons.length,
-    retry: !!(notice || pending || retained || (owner && !ownership)), review: !!retained, ownership };
+    retry: !manualRefresh && !!(notice || pending || retained || (owner && !ownership)), review: !!retained, ownership, manualRefresh };
 }

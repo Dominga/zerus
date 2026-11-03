@@ -171,6 +171,8 @@ export interface NotificationOwnership {
 }
 /** Desktop service presentation has separate provenance from device-local marks. */
 export interface DesktopService {
+  /** Bounded display reason from the checked original service scope; no authority. */
+  executable_upgrade?: null | { state: "draining" | "manual_refresh_required" };
   /** Native intent/current-scope presentation, never a permission. */
   notification_preferences?: null | {
     status: null | { abi: string; scope: { configuration: string; service_epoch: string };

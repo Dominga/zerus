@@ -1,5 +1,7 @@
 import { DesktopServiceStatus } from "../../components/DesktopServiceStatus";
-import { createSignal, onMount } from "solid-js";
+import { Show, createSignal, onMount } from "solid-js";
+import { desktopService, checkDesktopServiceStatus } from "../../../store/desktopService";
+import { toast } from "../../../store/ui";
 import { invoke } from "@tauri-apps/api/core";
 import { inTauri } from "../../../bridge";
 import { Icon } from "../../lib/icons";
@@ -44,6 +46,20 @@ export function AboutSection() {
       <p class="selectable">{zerus()}</p>
       <p class="selectable">{cli()}</p>
       <DesktopServiceStatus counts />
+      <Show when={desktopService.state()?.executable_upgrade?.state === "manual_refresh_required"}>
+        <section aria-label={tr("Service refresh required")}>
+          <h2>{tr("Service refresh required")}</h2>
+          <p>{tr("The CLI was updated. The Windows background service needs a manual refresh.")}</p>
+          <p>{tr("Check the service registration from a foreground Command Prompt outside Zerus, using the same CLI and configuration:")}</p>
+          <p class="selectable"><code>hgs desktop registration status --json</code></p>
+          <p>{tr("Keep the selected service mode and any original pending request. Refresh controls are not available in this build.")}</p>
+          <p>{tr("Check service status only reconnects. It does not refresh the service or resume background access.")}</p>
+          <button type="button" class="btn" disabled={!desktopService.state()?.epoch} onClick={() => {
+            const epoch = desktopService.state()?.epoch;
+            if (epoch) void checkDesktopServiceStatus(epoch).catch(error => toast(tr("Background service"), String(error), "error", true));
+          }}>{tr("Check service status")}</button>
+        </section>
+      </Show>
       <div>
         <button class="btn" title="https://github.com/ufna/zerus" aria-label={tr("Open Zerus repository on GitHub")}
           onClick={() => { if (inTauri()) void invoke("open_repository").catch(() => {}); }}>

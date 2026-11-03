@@ -22,6 +22,11 @@ export function DesktopServiceStatus(props: { counts?: boolean }) {
       <Show when={view().review}>
         <button type="button" class="btn small ghost" aria-label={tr("Review migration report")} onClick={(event) => setReviewOrigin(event.currentTarget)}>{tr("Review")}</button>
       </Show>
+      <Show when={view().manualRefresh && !props.counts}>
+        <button type="button" class="btn small ghost" onClick={() => {
+          void import("../screens/settings/sections").then(({ openSettings }) => openSettings("about"));
+        }}>{tr("Review service update")}</button>
+      </Show>
       <Show when={view().retry}><button type="button" class="btn small ghost" onClick={() => void retryDesktopService().catch(error => toast(tr("Background service"), String(error), "error", true))}>{tr("Retry now")}</button></Show>
       <Show when={view().ownership === "check"} fallback={
         <Show when={view().ownership === "rearm"}>

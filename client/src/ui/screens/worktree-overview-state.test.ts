@@ -94,4 +94,21 @@ describe("bounded overview controller", () => {
     const state = createOverview(call); const waiting = state.open(); state.dispose(); release({ id: "late-view" }); await waiting;
     expect(requests).toEqual(["worktree_overview_open", "worktree_overview_close"]); expect(state.frame()).toBeUndefined();
   });
+  it("opens a blocked local leftover by opaque row only and leaves remote Finder work manual", async () => {
+    const requests: { command: string; args?: Record<string, unknown> }[] = [];
+    const call = async <T,>(command: string, args?: Record<string, unknown>): Promise<T> => {
+      requests.push({ command, args });
+      return (command === "worktree_overview_open" ? { id: "opaque-overview" } : command === "worktree_overview_page" ? frame() : undefined) as T;
+    };
+    const state = createOverview(call, () => 0); await state.open();
+    const row = { id: "opaque-left", path: "/srv/example/left", computer: "", leftover: { macos_deletion_blocked: true } } as OverviewRow;
+    await state.openLeftover(row);
+    expect(requests.filter((request) => request.command === "worktree_leftover_open_folder")).toEqual([{ command: "worktree_leftover_open_folder", args: { id: "opaque-overview", row: "opaque-left" } }]);
+    await state.openLeftover({ ...row, computer: "remote-mac" });
+    await state.openLeftover({ ...row, leftover: { ...row.leftover!, macos_deletion_blocked: false } });
+    expect(requests.filter((request) => request.command === "worktree_leftover_open_folder")).toHaveLength(1);
+    expect(requests.some((request) => request.command === "worktree_leftover_delete")).toBe(false);
+    state.dispose();
+  });
+
 });

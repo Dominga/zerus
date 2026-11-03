@@ -2617,7 +2617,20 @@ request-bound outcome (`worktree-leftover-keep-v1`): `kept` before the record is
 touched, `unconfirmed` once forgetting it may have started. A client reports
 **Nothing changed** only for `kept`; an unreachable computer, a crash or any
 other reply is **Result unknown**. **Delete remaining files**
-(`hgs worktrees delete-leftover`, `worktree-leftover-delete-v1`) needs an
+(`hgs worktrees delete-leftover`, `worktree-leftover-delete-v1`) is disabled on
+macOS pending a verified native guard: XNU may unlink ordinary `._*` files while
+retrying directory removal after an unreviewed folder replaces the checked name.
+A fresh `._*` listing cannot close that race. Review and **Keep folder** remain
+available. The desktop explains the refusal and offers **Open in Finder** for a
+local folder; for a remote Mac, open the displayed folder in Finder on that Mac.
+The CLI refuses before changing permissions, unlinking files or reserving an
+attempt and returns the existing request-bound `kept` / outcome-version 1 reply.
+The shared directory-removal wrapper also refuses both nested and root removals
+on macOS. A future authorized native window must run the ignored
+`state::worktree_cleanup::tests::macos_late_swap_preserves_appledouble_payload_at_root_and_nested_names`
+probe with `--exact --ignored` before re-enablement is considered.
+
+On Linux, deleting the remaining files needs an
 explicit confirmation and the fingerprint of the fresh review the owner saw. It
 checks everything again under the repository and session locks and refuses
 saved or running sessions, other running programs, nested Git repositories,
@@ -2660,8 +2673,8 @@ retried; review the folder again. Each confirmation is consumed by a durable,
 unique attempt reference before filesystem changes begin. If that reference
 cannot be saved, deletion refuses without changing files. Even if no file
 changed and saving the stopped outcome fails, the old confirmation is no longer
-valid; another attempt needs a fresh review. Deleting leftover files is available
-on Linux and macOS. A record resolves by itself once its
+valid; another attempt needs a fresh review. Deleting leftover files is currently
+available on Linux only. A record resolves by itself once its
 folder is gone, or once a fresh worktree list taken under the repository lock shows
 that Git tracks the worktree again. On Linux and macOS the Git that removes a
 worktree inherits the repository lock (an flock belongs to the open file, and only

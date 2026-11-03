@@ -229,7 +229,7 @@ fn probe(configuration: &str, image: &SelectedFrontend) -> Result<desktop::Obser
         &uuid::Uuid::new_v4().to_string(),
         configuration,
         Instant::now() + desktop::PROBE_WAIT,
-        image.image_id()?,
+        image.pinned_image(),
     ))
 }
 fn bounded(error: anyhow::Error) -> String {

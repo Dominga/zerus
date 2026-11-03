@@ -7,14 +7,12 @@ use crate::host::spawn as host;
 use anyhow::{ensure, Context, Result};
 use std::{
     ffi::c_void,
-    fs::{File, OpenOptions},
     io, mem,
     os::windows::{
         ffi::OsStrExt,
-        fs::{MetadataExt, OpenOptionsExt},
         io::{AsRawHandle, FromRawHandle, OwnedHandle},
     },
-    path::{Path, PathBuf},
+    path::Path,
     ptr,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -23,161 +21,33 @@ use std::{
     time::{Duration, Instant},
 };
 use windows_sys::Win32::{
-    Foundation::{
-        SetHandleInformation, ERROR_ACCESS_DENIED, HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0,
-    },
-    Storage::FileSystem::{
-        FileIdInfo, GetFileInformationByHandleEx, GetFinalPathNameByHandleW, ReadFile,
-        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_ID_INFO, FILE_NAME_NORMALIZED, FILE_SHARE_READ, FILE_SHARE_WRITE, VOLUME_NAME_DOS,
-    },
+    Foundation::{SetHandleInformation, ERROR_ACCESS_DENIED, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0},
+    Storage::FileSystem::ReadFile,
     System::{
         Pipes::{CreatePipe, PeekNamedPipe},
         Threading::{
             CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-            InitializeProcThreadAttributeList, QueryFullProcessImageNameW,
-            UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED,
-            CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST,
-            PROCESS_INFORMATION, PROCESS_NAME_WIN32, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-            STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
+            InitializeProcThreadAttributeList, UpdateProcThreadAttribute, WaitForSingleObject,
+            CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
+            EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
         },
     },
     UI::WindowsAndMessaging::AllowSetForegroundWindow,
 };
-use zerus_client_core::desktop::activation as wire;
+use zerus_client_core::desktop::{activation as wire, windows::image::PinnedImage as Pinned};
 
 const START: Duration = Duration::from_secs(10);
 const IMAGE: &str = "hgs-tray.exe";
 const HELP_BYTES: usize = 64 * 1024;
 const CLEANUP_WAIT: Duration = Duration::from_secs(5);
 
-/// Full volume/file identity, including filesystems with 128-bit file IDs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ImageId(u64, [u8; 16]);
-fn file_identity(file: &impl AsRawHandle) -> io::Result<ImageId> {
-    let mut info: FILE_ID_INFO = unsafe { mem::zeroed() };
-    // SAFETY: the held file handle and a writable information block of its size.
-    if unsafe {
-        GetFileInformationByHandleEx(
-            file.as_raw_handle(),
-            FileIdInfo,
-            (&mut info as *mut FILE_ID_INFO).cast(),
-            mem::size_of_val(&info) as u32,
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(ImageId(info.VolumeSerialNumber, info.FileId.Identifier))
-}
-
-/// A plain file held with read access and read-only sharing: nobody can write,
-/// rename or delete it while this handle is open.
-struct Pinned {
-    file: File,
-    identity: ImageId,
-    bytes: u64,
-}
-impl Pinned {
-    fn open(path: &Path) -> Result<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .share_mode(FILE_SHARE_READ)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(path)?;
-        let identity = file_identity(&file)?;
-        let metadata = file.metadata()?;
-        ensure!(
-            metadata.is_file() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0,
-            "frontend file is not a plain file"
-        );
-        Ok(Self {
-            file,
-            identity,
-            bytes: metadata.len(),
-        })
-    }
-    fn check(&self) -> Result<()> {
-        let identity = file_identity(&self.file)?;
-        let metadata = self.file.metadata()?;
-        ensure!(
-            identity == self.identity && metadata.len() == self.bytes,
-            "installed frontend changed"
-        );
-        Ok(())
-    }
-}
-/// A plain directory held without delete sharing: it cannot be renamed or
-/// removed, so no path below it can be rebound while it is held.
-fn pin_folder(path: &Path) -> Result<File> {
-    let folder = OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)?;
-    let metadata = folder.metadata()?;
-    ensure!(
-        metadata.is_dir() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0,
-        "frontend folder is not a plain directory"
-    );
-    Ok(folder)
-}
-/// The normalized local path the handle's file has now.
-fn final_path(file: &File) -> Result<PathBuf> {
-    let mut buffer = vec![0u16; 32_768];
-    // SAFETY: an open file handle and a writable buffer of the given length.
-    let length = unsafe {
-        GetFinalPathNameByHandleW(
-            file.as_raw_handle(),
-            buffer.as_mut_ptr(),
-            buffer.len() as u32,
-            FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
-        )
-    } as usize;
-    ensure!(
-        length > 0 && length < buffer.len(),
-        "frontend path unavailable"
-    );
-    let path = String::from_utf16(&buffer[..length])?;
-    let local = path
-        .strip_prefix(r"\\?\")
-        .filter(|rest| !rest.starts_with(r"UNC\"))
-        .context("frontend is not on a local volume")?;
-    Ok(PathBuf::from(local))
-}
-/// Resolve from the held file, pin its normalized ancestors, then prove that
-/// this path still reaches that file. Original junction aliases are never used
-/// as child arguments or working directories.
-fn pin_path(pinned: &Pinned) -> Result<(PathBuf, Vec<File>)> {
-    let entry = final_path(&pinned.file)?;
-    let mut folders = entry.ancestors().skip(1).collect::<Vec<_>>();
-    folders.reverse();
-    let folders = folders
-        .into_iter()
-        .map(pin_folder)
-        .collect::<Result<Vec<_>>>()?;
-    check_path(pinned, &entry)?;
-    Ok((entry, folders))
-}
-fn check_path(pinned: &Pinned, path: &Path) -> Result<()> {
-    pinned.check()?;
-    ensure!(final_path(&pinned.file)? == path, "frontend path changed");
-    ensure!(
-        Pinned::open(path)?.identity == pinned.identity,
-        "frontend path rebound"
-    );
-    Ok(())
-}
-
 /// Non-Clone/non-serde. Only select() binds the running service image and an
 /// installed image from the SAME scope used by inbound frontend authentication.
 /// The pins last until release() after the GUI process was verified.
 pub(in crate::desktop) struct SelectedFrontend {
     cli: Pinned,
-    cli_path: PathBuf,
     image: Pinned,
-    entry: PathBuf,
-    _folders: Vec<File>,
     configuration: String,
 }
 impl SelectedFrontend {
@@ -185,11 +55,20 @@ impl SelectedFrontend {
         let installed = scope
             .installed_frontend(image)
             .context("frontend is not a maintained installed image")?;
-        Self::capture(
+        let selected = Self::capture(
             &std::env::current_exe()?,
             installed,
             scope.configuration.clone(),
-        )
+        )?;
+        // Bind the CLI handle to this running service too; current_exe's name
+        // alone could have been replaced during an installed CLI update.
+        let process = unsafe {
+            std::os::windows::io::BorrowedHandle::borrow_raw(
+                windows_sys::Win32::System::Threading::GetCurrentProcess(),
+            )
+        };
+        selected.cli.matches_process(&process)?;
+        Ok(selected)
     }
     fn capture(cli: &Path, image: &Path, configuration: String) -> Result<Self> {
         ensure!(
@@ -197,7 +76,7 @@ impl SelectedFrontend {
             "frontend selection must be absolute"
         );
         let pinned = Pinned::open(image)?;
-        let (entry, mut folders) = pin_path(&pinned)?;
+        let entry = pinned.path();
         ensure!(
             entry
                 .file_name()
@@ -206,39 +85,35 @@ impl SelectedFrontend {
             "unrecognized frontend image"
         );
         let cli = Pinned::open(cli)?;
-        let (cli_path, cli_folders) = pin_path(&cli)?;
-        folders.extend(cli_folders);
         let result = Self {
             cli,
-            cli_path,
             image: pinned,
-            entry,
-            _folders: folders,
             configuration,
         };
         result.revalidate()?;
         Ok(result)
     }
     pub fn image(&self) -> &Path {
-        &self.entry
+        self.image.path()
     }
-    /// Volume serial and file index of the pinned image: the only image a
-    /// frontend pipe server may run (desktop::windows::verify_server).
-    pub fn image_id(&self) -> Result<(u64, u64)> {
-        zerus_client_core::desktop::windows::file_id(&self.image.file)
-            .context("frontend image identity unavailable")
+    /// The shared retained executable evidence consumed by pipe verification.
+    pub fn pinned_image(&self) -> &Pinned {
+        &self.image
     }
     pub fn service_image(&self) -> &Path {
-        &self.cli_path
+        self.cli.path()
     }
     /// The verified installed folder: both children start there, never in the
     /// service's own working directory, which can be any user folder.
     fn directory(&self) -> &Path {
-        self.entry.parent().expect("a file path has a folder")
+        self.image
+            .path()
+            .parent()
+            .expect("a file path has a folder")
     }
     pub fn revalidate(&self) -> Result<()> {
-        check_path(&self.cli, &self.cli_path)?;
-        check_path(&self.image, &self.entry)
+        self.cli.revalidate()?;
+        Ok(self.image.revalidate()?)
     }
     pub fn revalidate_for_launch(&self, launch: &Launch) -> Result<()> {
         ensure!(
@@ -451,33 +326,15 @@ fn wide(text: &std::ffi::OsStr) -> io::Result<Vec<u16>> {
     wide.push(0);
     Ok(wide)
 }
-fn process_image(process: HANDLE) -> io::Result<PathBuf> {
-    let mut path = vec![0u16; 32_768];
-    let mut size = path.len() as u32;
-    // SAFETY: a live process handle and a writable buffer of the given length.
-    if unsafe {
-        QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, path.as_mut_ptr(), &mut size)
-    } == 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    String::from_utf16(&path[..size as usize])
-        .map(PathBuf::from)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "process image is not Unicode"))
-}
-/// A suspended child runs only after its image is the expected pinned file.
+/// Bind the held expected image directly to the suspended child's original
+/// image section. No pathname or casing comparison supplies this proof.
 fn verified(child: &host::Child, expected: &Pinned) -> io::Result<()> {
-    let image = process_image(child.process.as_raw_handle())?;
-    // Open the reported path while the selected file/ancestors remain pinned.
-    // Hard links, 8.3 names and ordinary case aliases resolve by file identity;
-    // distinct files in a case-sensitive directory never compare equal.
-    let actual = Pinned::open(&image).map_err(io::Error::other)?;
-    if actual.identity != expected.identity {
-        return Err(io::Error::new(
+    expected.matches_process(&child.process).map_err(|error| {
+        io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "frontend child is not the pinned image",
-        ));
-    }
+            format!("frontend child is not the pinned image: {error}"),
+        )
+    })?;
     child.resume()
 }
 
@@ -780,8 +637,13 @@ impl Drop for AttributeList {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use std::{
+        fs::{self, File, OpenOptions},
+        os::windows::fs::OpenOptionsExt,
+        path::PathBuf,
+    };
     use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::*;
 
     struct Folder(PathBuf);
     impl Drop for Folder {
@@ -824,8 +686,8 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(
-            file_identity(&open(left)).unwrap(),
-            file_identity(&open(right)).unwrap()
+            zerus_client_core::desktop::windows::image::file_id(&open(left)).unwrap(),
+            zerus_client_core::desktop::windows::image::file_id(&open(right)).unwrap()
         );
     }
 
@@ -923,7 +785,7 @@ mod tests {
     }
 
     #[test]
-    fn cli_in_a_disjoint_junction_directory_uses_its_pinned_final_path() {
+    fn a_cli_reparse_ancestor_is_refused_and_its_direct_path_stays_pinned() {
         let root = folder();
         let (cli, image) = installed(&root.0);
         let real = root.0.join("cli-real");
@@ -935,8 +797,8 @@ mod tests {
         fs::copy(&real_cli, other.join("hgs.exe")).unwrap();
         let alias = root.0.join("cli-alias");
         junction(&alias, &real);
-        let selected =
-            SelectedFrontend::capture(&alias.join("hgs.exe"), &image, "c".into()).unwrap();
+        assert!(SelectedFrontend::capture(&alias.join("hgs.exe"), &image, "c".into()).is_err());
+        let selected = SelectedFrontend::capture(&real_cli, &image, "c".into()).unwrap();
         assert_eq!(selected.service_image(), real_cli);
         assert!(fs::rename(&real, root.0.join("moved-cli")).is_err());
         assert!(fs::write(&real_cli, b"replacement").is_err());
@@ -946,12 +808,18 @@ mod tests {
         selected.revalidate().unwrap();
         assert_eq!(selected.service_image(), real_cli);
         assert_ne!(
-            file_identity(&File::open(alias.join("hgs.exe")).unwrap()).unwrap(),
-            selected.cli.identity
+            zerus_client_core::desktop::windows::image::file_id(
+                &File::open(alias.join("hgs.exe")).unwrap()
+            )
+            .unwrap(),
+            selected.cli.id()
         );
         assert_eq!(
-            file_identity(&File::open(selected.service_image()).unwrap()).unwrap(),
-            selected.cli.identity
+            zerus_client_core::desktop::windows::image::file_id(
+                &File::open(selected.service_image()).unwrap()
+            )
+            .unwrap(),
+            selected.cli.id()
         );
         fs::remove_dir(alias).unwrap();
     }
@@ -1056,7 +924,7 @@ mod tests {
         fs::copy(system("cmd.exe"), &image).unwrap();
         fs::copy(system("cmd.exe"), &other).unwrap();
         let expected = Pinned::open(&image).unwrap();
-        assert_ne!(expected.identity, Pinned::open(&other).unwrap().identity);
+        assert_ne!(expected.id(), Pinned::open(&other).unwrap().id());
         let child = suspended(&other, &root.0);
         let _cleanup = EmergencyExit::new(&child);
         let error = verified(&child, &expected).unwrap_err();

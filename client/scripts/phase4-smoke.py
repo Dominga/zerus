@@ -115,6 +115,12 @@ def main():
     shutil.copy2(CLIENT / "src-tauri/tests/support/fake_hgs_phase4.py", hgs)
     hgs.chmod(0o755)
     frames = [json.loads(line) for line in (CLIENT / "fixtures/replay.ndjson").read_text(encoding="utf-8").splitlines()]
+    if args.only == "resume-history":
+        frames.append({"v": 1, "seq": max(frame["seq"] for frame in frames) + 1,
+                       "t": "events", "topic": "activity", "key": "run:000000-run", "cursor": 900002,
+                       "events": [
+                           {"seq": 900001, "type": "UserPromptSubmit", "source": "claude_hooks", "detail": "Earlier private conversation", "at": 1793000001},
+                           {"seq": 900002, "type": "Stop", "source": "claude_hooks", "detail": "Existing Activity reply before resume", "at": 1793000002}]})
     # Exercise both exact own-receipt rendering and an unmatched native entry.
     for frame in frames:
         value = frame.get("value", {})

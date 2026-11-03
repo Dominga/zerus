@@ -71,6 +71,8 @@ export function createActivity(port: ActivityPort) {
   const [target, setTarget] = createSignal<FollowTarget | undefined>();
   const [events, setEvents] = createSignal<readonly ActivityEvent[]>([]);
   const [summary, setSummary] = createSignal<Record<string, unknown> | undefined>();
+  const [transcriptSummary, setTranscriptSummary] = createSignal<Record<string, unknown> | undefined>();
+  const [displayKey, setDisplayKey] = createSignal<string | undefined>();
   const [ended, setEnded] = createSignal(false);
   const [loaded, setLoaded] = createSignal(false);
   const [loadingOlder, setLoadingOlder] = createSignal(false);
@@ -84,6 +86,24 @@ export function createActivity(port: ActivityPort) {
   let span = OLDER_SPAN;
   let olderFrom: number | undefined;
   let olderTimer: ReturnType<typeof setTimeout> | undefined;
+  // One display-only bridge across a run change; routing always uses target().
+  let resuming: { conversation: string; previous: Map<string, ActivityEvent>; incoming: Map<string, ActivityEvent>; page: boolean; confirmed: boolean } | undefined;
+
+  const settleResume = () => {
+    if (resuming?.confirmed && resuming.page) {
+      resuming = undefined;
+      setTranscriptSummary(summary());
+    }
+  };
+
+  const newestSeq = (given: Map<string, ActivityEvent>) => {
+    let newest: number | undefined;
+    for (const e of given.values()) {
+      const seq = seqOf(e);
+      if (seq !== undefined && (newest === undefined || seq > newest)) newest = seq;
+    }
+    return newest;
+  };
 
   const oldestSeq = () => {
     let oldest: number | undefined;
@@ -98,12 +118,15 @@ export function createActivity(port: ActivityPort) {
     byKey = new Map();
     stateRev = -1;
     revs.clear();
+    resuming = undefined;
     span = OLDER_SPAN;
     olderFrom = undefined;
     clearTimeout(olderTimer);
     batch(() => {
       setEvents([]);
       setSummary(undefined);
+      setTranscriptSummary(undefined);
+      setDisplayKey(undefined);
       setEnded(false);
       setLoaded(false);
       setLoadingOlder(false);
@@ -123,10 +146,35 @@ export function createActivity(port: ActivityPort) {
   function follow(next: FollowTarget | undefined) {
     const prev = target();
     if (prev?.id === next?.id) return;
+    const conversation = summary()?.conversation_id || prev?.conversationId;
+    const continuing = !!prev && !!next && prev.computer === next.computer && prev.name === next.name
+      && typeof conversation === "string" && !!conversation && next.conversationId === conversation;
+    // A second resume must not promote an unconfirmed intermediate run's
+    // incoming page into the retained conversation or its resume cursor.
+    const retained = resuming && !resuming.confirmed ? resuming.previous : byKey;
+    const after = continuing ? newestSeq(retained) : undefined;
     if (prev) void port.unfollow(prev.computer, prev.key).catch(() => {});
-    reset();
-    setTarget(next);
-    if (next) void port.follow(request(next)).catch((reason) => batch(() => { setError(String(reason)); setLoaded(true); }));
+    batch(() => {
+      if (continuing) {
+        if (retained !== byKey) { byKey = new Map(retained); setEvents(ordered(byKey)); }
+        resuming = { conversation, previous: new Map(retained), incoming: new Map(), page: false, confirmed: false };
+        stateRev = -1;
+        revs.clear();
+        clearTimeout(olderTimer);
+        olderFrom = undefined;
+        setSummary(undefined);
+        setEnded(false);
+        setLoadingOlder(false);
+        setError(undefined);
+      } else {
+        reset();
+        setDisplayKey(next?.id);
+      }
+      setTarget(next);
+    });
+    if (next) void port.follow(request(next, after)).catch((reason) => {
+      if (target() === next) batch(() => { setError(String(reason)); setLoaded(true); });
+    });
   }
 
   /** The finish of an older read: it either moved the oldest event back or doubles the reach. */
@@ -167,7 +215,8 @@ export function createActivity(port: ActivityPort) {
         switch (out.kind) {
           case "events": {
             const { events: list } = payloadEvents(out.payload);
-            for (const e of list) byKey.set(eventKey(e), e);
+            for (const e of list) { byKey.set(eventKey(e), e); resuming?.incoming.set(eventKey(e), e); }
+            if (resuming) { resuming.page = true; settleResume(); }
             changed = true;
             older = true;
             setLoaded(true);
@@ -175,7 +224,13 @@ export function createActivity(port: ActivityPort) {
           }
           case "replace": {
             const { events: list } = payloadEvents(out.payload);
-            byKey = new Map(list.map((e) => [eventKey(e), e]));
+            const incoming = new Map(list.map((e) => [eventKey(e), e]));
+            if (resuming) {
+              resuming.incoming = incoming;
+              resuming.page = list.length > 0;
+              byKey = new Map([...resuming.previous, ...incoming]);
+              settleResume();
+            } else byKey = incoming;
             changed = true;
             setLoaded(true);
             // A replaced window has no older pages to read by seq.
@@ -189,7 +244,9 @@ export function createActivity(port: ActivityPort) {
             if ((revs.get(p.id) ?? -1) >= rev) break;
             revs.set(p.id, rev);
             const existing = [...byKey.entries()].find(([, e]) => e.id === p.id || e.activity_key === p.id);
-            byKey.set(existing ? existing[0] : `i${p.id}`, p.event);
+            const key = existing ? existing[0] : `i${p.id}`;
+            byKey.set(key, p.event);
+            if (resuming) { resuming.incoming.set(key, p.event); resuming.page = true; settleResume(); }
             changed = true;
             break;
           }
@@ -199,6 +256,16 @@ export function createActivity(port: ActivityPort) {
             if (rev < stateRev) break;
             stateRev = rev;
             setSummary(p.value);
+            if (resuming && typeof p.value?.conversation_id === "string" && p.value.conversation_id) {
+              if (p.value.conversation_id !== resuming.conversation) {
+                byKey = resuming.incoming;
+                resuming = undefined;
+                setDisplayKey(t.id);
+                changed = true;
+              } else resuming.confirmed = true;
+            }
+            if (resuming) settleResume();
+            else setTranscriptSummary(p.value);
             break;
           }
           case "connection": {
@@ -235,7 +302,7 @@ export function createActivity(port: ActivityPort) {
     return { computer: t.computer, name: t.name, conversation_id: conversation, archive_id: null };
   };
 
-  return { target, events, summary, ended, loaded, loadingOlder, olderDone, error, follow, loadOlder, applyActivity, attachmentScope };
+  return { target, displayKey, events, summary, transcriptSummary, ended, loaded, loadingOlder, olderDone, error, follow, loadOlder, applyActivity, attachmentScope };
 }
 
 export type ActivityStore = ReturnType<typeof createActivity>;

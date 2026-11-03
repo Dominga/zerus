@@ -714,7 +714,7 @@ export function jumpToLatest() {
 }
 
 /** The transcript items of a source, with the open session's local rows. */
-export const transcriptOf = (source: ActivitySource, local: readonly LocalMessage[] = []) => buildTranscript(source.events(), source.summary(), local);
+export const transcriptOf = (source: ActivitySource, local: readonly LocalMessage[] = []) => buildTranscript(source.events(), source.transcriptSummary?.() ?? source.summary(), local);
 
 /**
  * Only the matching main or child composer's local rows reach the transcript.
@@ -778,10 +778,11 @@ export function ActivityView(props: { source?: ActivitySource }) {
   const local = createMemo(() => localRows(source(), s()), undefined, { equals: (a, b) => a === b || (a.length === 0 && b.length === 0) });
   const projection = createTranscriptProjection();
   let projectedTarget: string | undefined;
+  const displayTarget = () => source().displayKey?.() ?? source().target()?.id;
   const built = createMemo(() => {
-    const target = source().target()?.id;
+    const target = displayTarget();
     if (target !== projectedTarget) { projection.reset(); projectedTarget = target; }
-    return projection.build(source().events(), source().summary(), local());
+    return projection.build(source().events(), source().transcriptSummary?.() ?? source().summary(), local());
   });
   createEffect(() => {
     const items = built(), loaded = source().loaded();
@@ -1016,7 +1017,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
   let sendIds: Set<string> | undefined;
   let layoutTarget: string | undefined | null = null;
   const resetTarget = () => {
-    const target = source().target()?.id;
+    const target = displayTarget();
     if (layoutTarget === target) return;
     layoutTarget = target;
     // An explicit session switch ends its old selection. Do this before the
@@ -1032,7 +1033,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
     // Selection changes must place even when the next page has the same row count.
     end.pin();
   };
-  createEffect(on(() => source().target()?.id, resetTarget));
+  createEffect(on(displayTarget, resetTarget));
   createEffect(on(local, (rows) => {
     const sends = newLocalSends(sendIds, rows.map((row) => row.id));
     sendIds = sends.baseline;

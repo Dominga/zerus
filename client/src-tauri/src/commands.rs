@@ -105,7 +105,7 @@ impl AppState {
         self.live.register_service_projection(observer)
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     pub(crate) fn register_service_activation(
         &self,
         sink: crate::desktop_service::activation::Sink,
@@ -207,7 +207,7 @@ mod live {
         pub(super) retained_import_source:
             OnceLock<crate::desktop_service::retained_import::Inputs>,
         service_projections: Mutex<Vec<crate::desktop_service::Projection>>,
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         service_activation: OnceLock<crate::desktop_service::activation::Sink>,
         tasks_project: Mutex<Option<String>>,
         controls: zerus_client_core::desktop::drain::Gate,
@@ -229,7 +229,7 @@ mod live {
                 retained_import_source: OnceLock::new(),
                 service_projections: Mutex::new(Vec::new()),
                 notification_controls: OnceLock::new(),
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                 service_activation: OnceLock::new(),
                 tasks_project: Mutex::new(None),
                 controls: Gate::new(64).unwrap(),
@@ -272,7 +272,7 @@ mod live {
             })
         }
 
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         pub(super) fn register_service_activation(
             &self,
             sink: crate::desktop_service::activation::Sink,
@@ -502,7 +502,7 @@ mod live {
                             .lock()
                             .unwrap_or_else(PoisonError::into_inner)
                             .clone(),
-                        #[cfg(any(target_os = "linux", target_os = "macos"))]
+                        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                         activation: self.service_activation.get().cloned(),
                     },
                 );

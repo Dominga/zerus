@@ -258,9 +258,18 @@ impl Worker {
             if !crate::window_theme::can_show(&window) {
                 return;
             }
-            let _ = window.unminimize();
-            let _ = window.show();
-            let _ = window.set_focus();
+            #[cfg(not(windows))]
+            {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+            // Never Tao's set_focus here: it falls back to a synthetic Alt.
+            #[cfg(windows)]
+            {
+                let _ = window.show();
+                crate::platform::windows::foreground::present(&window);
+            }
             crate::lifecycle::sync_policy(&app);
         });
     }

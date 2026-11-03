@@ -29,7 +29,7 @@ const SOURCES: usize = 64;
 const KEY_BYTES: usize = 32 << 20;
 const CATALOG_KEYS: usize = 1_000_000;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub(crate) mod activation;
 
 #[derive(Default)]
@@ -37,7 +37,7 @@ pub(crate) struct Observers {
     pub projections: Vec<Projection>,
     pub notification_controls: Option<crate::desktop_notification_controls::Setup>,
     pub retained_sources: Option<retained_import::Inputs>,
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     pub activation: Option<activation::Sink>,
 }
 
@@ -344,13 +344,13 @@ struct Shared {
     cache_rpc: Gate,
     cache: Mutex<Option<cache::Pending>>,
     // Long activation reads never consume fleet/details admission capacity.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     activation_rpc: Gate,
-    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
     activation_retry: Mutex<Option<Duration>>,
-    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
     activation_backoffs: std::sync::atomic::AtomicUsize,
-    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
     activation_permanent: AtomicBool,
     allowed: bool,
     stopped: AtomicBool,
@@ -364,7 +364,7 @@ struct Shared {
     read_import: Mutex<read_import::State>,
     retained_import: Option<Arc<retained_import::Report>>,
     projections: Vec<Projection>,
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     activation: Option<activation::Sink>,
 }
 
@@ -486,7 +486,7 @@ impl Service {
                 projections,
                 notification_controls: None,
                 retained_sources: None,
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                 activation: None,
             },
         )
@@ -524,13 +524,13 @@ impl Service {
             rpc: Gate::new(4).unwrap(),
             cache_rpc: Gate::new(1).unwrap(),
             cache: Mutex::new(None),
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
             activation_rpc: Gate::new(1).unwrap(),
-            #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+            #[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
             activation_retry: Mutex::new(None),
-            #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+            #[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
             activation_backoffs: std::sync::atomic::AtomicUsize::new(0),
-            #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+            #[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
             activation_permanent: AtomicBool::new(false),
             allowed,
             stopped: AtomicBool::new(false),
@@ -546,7 +546,7 @@ impl Service {
             read_import: Mutex::new(read_import::State::default()),
             retained_import: observers.retained_sources.map(retained_import::Report::new),
             projections: observers.projections,
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
             activation: observers.activation,
         });
         let weak = Arc::downgrade(&shared);
@@ -865,7 +865,7 @@ impl Service {
         if let Some(report) = &self.shared.retained_import {
             report.close();
         }
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         self.shared.activation_rpc.close();
         let _ = self.control.send(Control::Stop);
     }
@@ -900,7 +900,7 @@ impl Service {
             .as_ref()
             .map(|report| report.close())
             .unwrap_or_default();
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         let activation_closed = self.shared.activation_rpc.close();
         let drained = tauri::async_runtime::spawn_blocking(move || {
             let until = std::time::Instant::now() + RPC_WAIT;
@@ -921,7 +921,7 @@ impl Service {
             let drained = retained_closed.iter().all(|closed| {
                 closed.wait_until(until) == zerus_client_core::desktop::drain::Observation::Idle
             }) && drained;
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
             let drained = (activation_closed.wait_until(until)
                 == zerus_client_core::desktop::drain::Observation::Idle)
                 && drained;
@@ -1525,7 +1525,7 @@ async fn connection(
     let detail_stop = stop.clone();
     let mut detail_worker =
         tauri::async_runtime::spawn(async move { details::run(detail_shared, detail_stop).await });
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     let activation_worker = {
         let (state, cancelled, configuration) =
             (shared.clone(), stop.clone(), configuration.clone());
@@ -1656,7 +1656,7 @@ async fn connection(
     if let Some(worker) = notification_worker {
         let _ = worker.await;
     }
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     let _ = activation_worker.await;
     // Only this owned local proxy is stopped; the desktop service and native agents remain untouched.
     if child.kill().await.is_err() && child.wait().await.is_err() {

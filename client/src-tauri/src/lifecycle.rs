@@ -132,11 +132,19 @@ pub fn show_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     if !crate::window_theme::can_show(&window) {
         return Ok(window);
     }
-    if window.is_minimized()? {
-        window.unminimize()?;
+    #[cfg(windows)]
+    {
+        window.show()?;
+        crate::platform::windows::foreground::present(&window);
     }
-    window.show()?;
-    window.set_focus()?;
+    #[cfg(not(windows))]
+    {
+        if window.is_minimized()? {
+            window.unminimize()?;
+        }
+        window.show()?;
+        window.set_focus()?;
+    }
     sync_policy(app);
     #[cfg(all(windows, feature = "live"))]
     crate::platform::windows::tray::apply_badge(app);

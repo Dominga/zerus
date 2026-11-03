@@ -76,7 +76,7 @@ pub enum DeskInput {
         token: String,
         activation: String,
     },
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     ServiceClicked(Box<crate::desktop_service::activation::Delivery>),
     /// Public launch/instance navigation data, not callback/writer authority.
     #[cfg(target_os = "linux")]
@@ -543,12 +543,12 @@ pub fn observe_round(
 struct Click {
     target: Map<String, Value>,
     deadline: Instant,
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     service: Option<Box<crate::desktop_service::activation::Delivery>>,
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     exact: Option<zerus_client_core::desktop::activation::Target>,
 }
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn resolve_service(
     target: &zerus_client_core::desktop::activation::Target,
     desk: &Desk,
@@ -603,9 +603,9 @@ pub struct Outcome {
     pub show: bool,
     #[cfg(target_os = "linux")]
     pub activation: Option<String>,
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     completion: Option<crate::desktop_service::activation::Completion>,
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     expected: Option<ExactSession>,
     /// Banners to withdraw, then post.
     pub changes: Changes,
@@ -709,9 +709,9 @@ impl DeskLoop {
                         self.click = Some(Click {
                             target,
                             deadline: cx.now + CLICK_WAIT,
-                            #[cfg(any(target_os = "linux", target_os = "macos"))]
+                            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                             service: None,
-                            #[cfg(any(target_os = "linux", target_os = "macos"))]
+                            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                             exact: None,
                         });
                         outcome.show = true;
@@ -732,7 +732,7 @@ impl DeskLoop {
                         outcome.activation = (!activation.is_empty()).then_some(activation);
                     }
                 }
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                 DeskInput::ServiceClicked(delivery)
                     if self.attention_completions && delivery.current() =>
                 {
@@ -784,7 +784,7 @@ impl DeskLoop {
                 DeskInput::Clicked(_) | DeskInput::Failed { .. } => {}
                 #[cfg(target_os = "linux")]
                 DeskInput::LinuxClicked { .. } | DeskInput::Navigate { .. } => {}
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                 DeskInput::ServiceClicked(_) => {}
             }
         }
@@ -825,7 +825,7 @@ impl DeskLoop {
         }
         // A live stream is the current listing Qt asks for at the click; a
         // stale one waits for its rows up to `CLICK_WAIT` (`TrayAgent.cpp:188-192`).
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         if self
             .click
             .as_ref()
@@ -837,18 +837,18 @@ impl DeskLoop {
         if let Some(click) = &self.click {
             let resolution =
                 attention::resolve(&click.target, &self.desk, cx.now >= click.deadline);
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
             let resolution = click.exact.as_ref().map_or(resolution, |target| {
                 resolve_service(target, &self.desk, cx.now >= click.deadline)
             });
             match resolution {
                 Resolution::Open { computer, key } => {
                     outcome.open = Some((computer, key));
-                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                     if let Some(delivery) = &click.service {
                         outcome.completion = Some(delivery.completion());
                     }
-                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                     if let Some(target) = &click.exact {
                         outcome.expected = Some(ExactSession {
                             run: target.run.clone(),
@@ -858,7 +858,7 @@ impl DeskLoop {
                     self.click = None;
                 }
                 Resolution::Gone(name) => {
-                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                     if let Some(delivery) = &click.service {
                         outcome.completion = Some(delivery.completion());
                     }
@@ -975,10 +975,10 @@ fn apply(app: &AppHandle, outcome: Outcome) {
     deliver(app, outcome.changes);
     if outcome.show {
         let handle = app.clone();
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         let completion = outcome.completion.clone();
         let _ = app.run_on_main_thread(move || {
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
             if completion
                 .as_ref()
                 .is_some_and(|completion| !completion.current())
@@ -994,7 +994,7 @@ fn apply(app: &AppHandle, outcome: Outcome) {
         });
     }
     if let Some((computer, key)) = outcome.open {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         let completion = outcome.completion.clone();
         open_if(
             app,
@@ -1002,13 +1002,13 @@ fn apply(app: &AppHandle, outcome: Outcome) {
                 computer: computer.0,
                 key,
                 attention: true,
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                 expected: outcome.expected,
-                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
                 expected: None,
             },
             move || {
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                 if completion
                     .as_ref()
                     .is_some_and(|completion| !completion.current())
@@ -1020,10 +1020,10 @@ fn apply(app: &AppHandle, outcome: Outcome) {
         );
     }
     for text in outcome.notices {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         let completion = outcome.completion.clone();
         window_notice_if(app, "Zerus", &text, move || {
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
             if completion
                 .as_ref()
                 .is_some_and(|completion| !completion.current())
@@ -2302,7 +2302,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
     fn service_click_requires_both_original_run_and_conversation_without_name_fallback() {
         let mut desk = Desk::default();

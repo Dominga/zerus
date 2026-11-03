@@ -5,7 +5,11 @@ use super::{
     journal::MAX_ATTEMPTS, preload::Reference, transport::StagedReceipt, SourceError, SourceResult,
 };
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
 use zerus_desktop_migration::{sha256, Evidence};
 pub const SCOPE: &str = "next-creations-preload-v1";
 const BYTES: usize = 64 << 10;
@@ -199,6 +203,30 @@ pub struct Journal {
     data: PathBuf,
     configuration: String,
 }
+/// How long a save waits for another run's compare/write on the same journal.
+/// That write is bounded metadata only, so this is never a long wait.
+const LOCK_WAIT: Duration = Duration::from_secs(2);
+/// Another holder of the journal lock: `flock` refuses on Unix; Windows
+/// refuses the exclusive open with a sharing or lock violation.
+fn contended(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock
+        || (cfg!(windows) && matches!(error.raw_os_error(), Some(32 | 33)))
+}
+/// The journal lock, waiting a bounded time for a concurrent run (a recovery
+/// fence and the original's final write may overlap). Any other failure, or a
+/// holder that outlasts the wait, stays unreadable: never a write without it.
+fn lock(path: &Path) -> SourceResult<crate::fsx::preload::Lock> {
+    let until = Instant::now() + LOCK_WAIT;
+    loop {
+        match crate::fsx::preload::Lock::take_managed(path) {
+            Ok(lock) => return Ok(lock),
+            Err(e) if contended(&e) && Instant::now() < until => {
+                std::thread::sleep(Duration::from_millis(5))
+            }
+            Err(_) => return Err(SourceError::SourceUnreadable),
+        }
+    }
+}
 impl Journal {
     pub fn new(data: &Path, configuration: &str) -> SourceResult<Self> {
         if !data.is_absolute() || !digest(configuration) {
@@ -233,11 +261,9 @@ impl Journal {
             return Err(SourceError::InvalidMetadata);
         }
         // Serialize only this bounded metadata compare/write. No original
-        // creation-worker lease or SDK work runs under this native lock.
-        let _lock = crate::fsx::preload::Lock::take_managed(
-            &self.data.join("creations-retained-import-v1.lock"),
-        )
-        .map_err(|_| SourceError::SourceUnreadable)?;
+        // creation-worker lease or SDK work runs under this native lock, so a
+        // concurrent run's save waits for it instead of failing spuriously.
+        let _lock = lock(&self.data.join("creations-retained-import-v1.lock"))?;
         let current = self.load()?;
         if current.as_ref().map(|s| s.sha256.as_str()) != previous
             || current.as_ref().is_some_and(|s| !record.follows(&s.record))

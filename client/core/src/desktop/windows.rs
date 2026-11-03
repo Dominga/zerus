@@ -278,11 +278,32 @@ impl Drop for Verification {
 pub fn verify_server_until(pipe: &OwnedHandle, image: &PinnedImage, until: Instant) -> Server {
     verify_until(pipe, image, until, verify_server)
 }
+/// Forwarding to this process's own frontend build: select and pin our loaded
+/// image on the same bounded worker, so even expected-image acquisition is part
+/// of the caller's deadline. There is no dependency on a server filename.
+pub fn verify_own_server_until(pipe: &OwnedHandle, until: Instant) -> Server {
+    acquire_until(pipe, until, |pipe| {
+        let Ok(image) = PinnedImage::for_process(&own_process()) else {
+            return Server::Unknown;
+        };
+        verify_server(pipe, &image)
+    })
+}
 fn verify_until(
     pipe: &OwnedHandle,
     image: &PinnedImage,
     until: Instant,
     verify: impl FnOnce(&OwnedHandle, &PinnedImage) -> Server + Send + 'static,
+) -> Server {
+    let Ok(image) = image.try_clone() else {
+        return Server::Unknown;
+    };
+    acquire_until(pipe, until, move |pipe| verify(pipe, &image))
+}
+fn acquire_until(
+    pipe: &OwnedHandle,
+    until: Instant,
+    verify: impl FnOnce(&OwnedHandle) -> Server + Send + 'static,
 ) -> Server {
     use std::sync::{atomic::Ordering, mpsc};
     if Instant::now() >= until
@@ -293,7 +314,7 @@ fn verify_until(
         return Server::Unknown;
     }
     let admission = Verification;
-    let (Ok(pipe), Ok(image)) = (pipe.try_clone(), image.try_clone()) else {
+    let Ok(pipe) = pipe.try_clone() else {
         return Server::Unknown;
     };
     let (sender, receiver) = mpsc::sync_channel(1);
@@ -301,7 +322,7 @@ fn verify_until(
         .name("frontend-verification".into())
         .spawn(move || {
             let _admission = admission;
-            let _ = sender.send(verify(&pipe, &image));
+            let _ = sender.send(verify(&pipe));
         })
         .is_err()
     {
@@ -489,6 +510,10 @@ mod tests {
             Server::Verified(peer) => assert_eq!(peer.pid, std::process::id()),
             _ => panic!("this process's own server must verify"),
         }
+        assert!(matches!(
+            verify_own_server_until(&client, Instant::now() + Duration::from_secs(1)),
+            Server::Verified(_)
+        ));
         let other =
             std::env::temp_dir().join(format!("zerus-other-image-{}.exe", uuid::Uuid::new_v4()));
         std::fs::copy(std::env::current_exe().unwrap(), &other).unwrap();

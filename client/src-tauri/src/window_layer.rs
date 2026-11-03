@@ -258,20 +258,17 @@ impl Worker {
             if !crate::window_theme::can_show(&window) {
                 return;
             }
-            let _ = window.unminimize();
-            let _ = window.show();
-            let _ = window.set_focus();
-            // Windows may refuse foreground to a process without the right
-            // (a toast click grants it to the service, which passes it on).
-            // When another window stays in front, flash the taskbar button.
+            #[cfg(not(windows))]
+            {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+            // Never Tao's set_focus here: it falls back to a synthetic Alt.
             #[cfg(windows)]
-            if window.hwnd().is_ok_and(|hwnd| {
-                !std::ptr::eq(hwnd.0, unsafe {
-                    windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow()
-                })
-            }) {
-                let _ =
-                    window.request_user_attention(Some(tauri::UserAttentionType::Informational));
+            {
+                let _ = window.show();
+                crate::platform::windows::foreground::present(&window);
             }
             crate::lifecycle::sync_policy(&app);
         });

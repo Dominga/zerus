@@ -222,6 +222,31 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
     return next && successor.name === nameKey(row) && nameKey(next) === successor.name
       && !next.archiveId && next.state !== "archived" ? next : undefined;
   };
+  // A removal without a reason (the background service's journal and its
+  // baselines keep only each key's final row) hands selection over only as a
+  // coalesced full catalog does: to the unique, known same-conversation run of
+  // that name, in either delivery order. Insertion order is age order.
+  type Orphan = { id: string; computer: ComputerId; name: string; runId: string; conversationId: string; at: number };
+  const orphans = new Map<string, Orphan>();
+  const conversationKey = (row: Pick<Orphan, "computer" | "name" | "conversationId">) => JSON.stringify([row.computer, row.name, row.conversationId]);
+  const knownRun = (row: Session | undefined): row is Session & { runId: string; conversationId: string } =>
+    !!row?.runId && !!row.conversationId && !row.archiveId && row.state !== "archived";
+  const uniqueSuccessor = (from: Orphan, gone: ReadonlySet<string>): string | undefined => {
+    let found: string | undefined;
+    for (const id of currentNames.get(JSON.stringify([from.computer, from.name])) ?? []) {
+      const next = catalog.rows[id];
+      if (id === from.id || gone.has(id) || !knownRun(next) || next.conversationId !== from.conversationId || next.runId === from.runId) continue;
+      if (found) return undefined;
+      found = id;
+    }
+    return found;
+  };
+  const pruneOrphans = (now: number) => {
+    for (const [identity, orphan] of orphans) {
+      if (now - orphan.at <= REPLACED_MS) break;
+      orphans.delete(identity);
+    }
+  };
   /** The draft keys of the nonempty drafts (Rust's `draft_keys`): a row's `draft` mark. */
   let drafts = new Set<string>(), childDraftParents = new Set<string>();
   const drafted = (row: Pick<Session, "computer" | "name">) => {
@@ -288,14 +313,18 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
           if (next && next.runId !== previous.runId) resumed.set(id, next.key);
         }
       }
+      const reasonless: Orphan[] = [];
+      const now = Date.now();
       for (const k of b.removes) {
         const id = rowId(k.computer, k.key);
         const row = catalog.rows[id];
         if (!row) continue;
         if (k.reason === "replaced") {
-          replaced.set(`${k.computer}\n${row.name}`, { id, at: Date.now() });
+          replaced.set(`${k.computer}\n${row.name}`, { id, at: now });
           const next = currentSuccessor(id, row);
           if (next) resumed.set(id, next.key);
+        } else if (!k.reason && knownRun(row)) {
+          reasonless.push({ id, computer: row.computer, name: row.name, runId: row.runId, conversationId: row.conversationId, at: now });
         }
         gone.add(id);
       }
@@ -305,6 +334,27 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
         gone.delete(id);
         put(id, next, fresh);
         upserted.push(next);
+      }
+      // After this batch's upserts, so a successor in the same batch counts.
+      pruneOrphans(now);
+      const adopted: [string, string][] = [];
+      for (const from of reasonless) {
+        if (!gone.has(from.id)) continue;
+        const to = uniqueSuccessor(from, gone);
+        const identity = conversationKey(from);
+        orphans.delete(identity);
+        if (to) resumed.set(from.id, to);
+        else orphans.set(identity, from);
+      }
+      for (const next of upserted) {
+        if (!orphans.size) break;
+        if (!knownRun(next)) continue;
+        const identity = conversationKey(next), from = orphans.get(identity);
+        if (!from || catalog.rows[from.id]) continue;
+        const to = uniqueSuccessor(from, gone);
+        if (!to) continue;
+        orphans.delete(identity);
+        adopted.push([from.id, to]);
       }
       if (gone.size || fresh.length) {
         for (const id of gone) { forgetCurrent(id, catalog.rows[id]); appearedAfter.delete(id); }
@@ -321,6 +371,10 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
         if (!next || !gone.has(from) || gone.has(to)) continue;
         const identity = `${next.computer}\n${next.name}`;
         if (replaced.get(identity)?.id === from) replaced.delete(identity);
+        for (const listener of replacedListeners) listener(from, to);
+      }
+      for (const [from, to] of adopted) {
+        if (catalog.rows[from] || !catalog.rows[to]) continue;
         for (const listener of replacedListeners) listener(from, to);
       }
       for (const next of upserted) inheritReplaced(next);

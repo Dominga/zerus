@@ -959,6 +959,62 @@ fn twenty_thousand_rows_need_only_one_three_key_delta_after_the_baseline() {
     });
 }
 #[test]
+fn a_resumed_run_in_one_service_revision_keeps_the_native_replaced_reason() {
+    // zerus-uutz: the service journal keeps only each key's final row. One
+    // revision is one native frame, so its own upserts say which removed
+    // names are listed again; they arrive first, even across change pages.
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({"resume_delta":true}));
+        let pump = crate::pump::Pump::default();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let observe = seen.clone();
+        pump.tap(Box::new(move |change| match change {
+            Change::Upsert { key, .. } => observe.lock().unwrap().push((key.clone(), "upsert")),
+            Change::Remove { key, reason, .. } => observe.lock().unwrap().push((
+                key.clone(),
+                if reason.as_deref() == Some("replaced") {
+                    "replaced"
+                } else if reason.is_none() {
+                    "removed"
+                } else {
+                    "other"
+                },
+            )),
+            _ => {}
+        }));
+        let (service, pump) = fixture.start_with_pump(true, pump, None);
+        eventually("resumed run and its ended neighbor", || {
+            pump.row("", "run:1-new").is_some()
+                && pump.row("", "run:0-old").is_none()
+                && pump.row("", "run:9-ended").is_none()
+        })
+        .await;
+        service.join().await.unwrap();
+        let seen = seen.lock().unwrap().clone();
+        let expected = [
+            ("run:0-old", "upsert"),
+            ("run:9-ended", "upsert"),
+            ("run:1-new", "upsert"),
+            ("run:0-old", "replaced"),
+            ("run:9-ended", "removed"),
+        ];
+        assert_eq!(
+            seen,
+            expected.map(|(key, kind)| (key.to_owned(), kind)).to_vec()
+        );
+        assert_eq!(
+            fixture
+                .calls()
+                .iter()
+                .filter(|c| c["value"]["op"] == "catalog_changes")
+                .count(),
+            3,
+            "the replaced key and its successor arrive on separate pages"
+        );
+    });
+}
+#[test]
 fn stuck_view_callback_cannot_hold_the_quit_completion_past_its_deadline() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {

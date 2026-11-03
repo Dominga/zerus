@@ -187,6 +187,11 @@ def row(key):
     return {'key': key, 'row': {'name': 'codex/example/' + key, 'agent': 'codex', 'state': 'running', 'status': 'ready'}}
 
 
+def resumed(key, run, state):
+    return {'key': key, 'row': {'name': 'codex/example/review', 'agent': 'codex', 'state': state, 'status': 'ready',
+                                'run_id': run, 'conversation_id': 'conversation'}}
+
+
 def change(key, revision, remove=False):
     return {'op': 'remove' if remove else 'upsert', 'key': key, 'revision': revision,
             'row': None if remove else row(key)['row']}
@@ -311,6 +316,8 @@ def desktop_request():
                         next_cursor=str(uuid.UUID(int=number + 100)) if offset + 128 < count else None)
         if config.get('replace_projection') and number == 2 and (config.get('projection_publication_gate') or os.environ.get('ZERUS_TEST_SERVICE_PROJECTION_PUBLICATION_GATE') == '1'):
             (root / 'replacement-page-selected').touch()
+        if config.get('resume_delta'):
+            page.update(items=[resumed('run:0-old', 'old', 'paused'), row('run:9-ended')])
         print(json.dumps(page))
     elif op == 'catalog_changes':
         number = counter('delta-number')
@@ -366,6 +373,17 @@ def desktop_request():
                 (root / 'initial-complete').touch()
             else:
                 page.update(through_revision='3', revision='3', items=[change('row-0', '1'), change('row-1', '2', True), change('new', '3')])
+        if config.get('resume_delta'):
+            # One native frame: the resumed run replaces its stopped run and an
+            # unrelated session ends. Its revision spans two change pages, and
+            # the replaced key sorts before its successor.
+            if number == 1:
+                (root / 'initial-complete').touch()
+            elif number == 2:
+                page.update(through_revision='1', revision='1', next_cursor=cursor, items=[change('run:0-old', '1', True)])
+            elif number == 3:
+                successor = dict(change('run:1-new', '1'), row=resumed('run:1-new', 'new', 'running')['row'])
+                page.update(through_revision='1', revision='1', items=[successor, change('run:9-ended', '1', True)])
         print(json.dumps(page))
     elif op == 'read_intent':
         path = root / 'read-seen'
@@ -612,6 +630,9 @@ elif args == ['desktop', 'watch', '--json']:
     if config.get('large'):
         wait(root / 'initial-complete')
         hint(1, '3')
+    if config.get('resume_delta'):
+        wait(root / 'initial-complete')
+        hint(1, '1')
     if config.get('peer_failure'):
         wait(root / 'peer-hints')
         hint(1, '1')

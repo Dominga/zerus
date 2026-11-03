@@ -153,6 +153,13 @@ pub struct CatalogDelivery {
 }
 enum CatalogValue {
     Row(Box<Change>),
+    /// A delta removal after its revision's upserts. One revision is one
+    /// native catalog frame, whose removal is `replaced` when that frame lists
+    /// the session's name again (`listed`); the journal drops the reason.
+    Removal {
+        key: String,
+        listed: Arc<BTreeSet<String>>,
+    },
     Finish {
         through: Option<Revision>,
         keys: Option<BTreeSet<String>>,
@@ -182,6 +189,21 @@ impl CatalogDelivery {
             CatalogValue::Row(change) => {
                 observe(&change);
                 pump.push(*change);
+            }
+            CatalogValue::Removal { key, listed } => {
+                // The serial drain's mirror holds exactly the rows delivered
+                // before this removal, so the removed run's name is current.
+                let reason = pump
+                    .row(&self.computer, &key)
+                    .filter(|old| listed.contains(&old.name))
+                    .map(|_| "replaced".to_owned());
+                let change = Change::Remove {
+                    computer: ComputerId(self.computer),
+                    key,
+                    reason,
+                };
+                observe(&change);
+                pump.push(change);
             }
             CatalogValue::Finish {
                 through,

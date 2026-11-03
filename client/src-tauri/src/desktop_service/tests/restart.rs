@@ -204,3 +204,66 @@ fn real_service_restart_retains_catalog_and_recovers_without_retry() {
         mark("client-finished");
     });
 }
+
+#[test]
+#[ignore = "run client/scripts/test-service-reconnect.py --scenario resume with private binaries"]
+fn real_service_resume_delta_keeps_the_native_replaced_reason() {
+    // zerus-uutz: the real journal drops removal reasons. Its revision for the
+    // native resume frame must still reach the view successor first, with the
+    // stopped run removed as `replaced`, so selection and Activity follow it.
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    let root =
+        PathBuf::from(std::env::var_os("ZERUS_TEST_SERVICE_RESTART").expect("private harness"));
+    let mark = |name: &str| fs::write(root.join(name), []).unwrap();
+    tauri::async_runtime::block_on(async {
+        let pump = crate::pump::Pump::default();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let observe = seen.clone();
+        pump.tap(Box::new(move |change| match change {
+            Change::Upsert { computer, key, .. } if computer.0 == "peer" => {
+                observe.lock().unwrap().push((key.clone(), None))
+            }
+            Change::Remove {
+                computer,
+                key,
+                reason,
+            } if computer.0 == "peer" => observe
+                .lock()
+                .unwrap()
+                .push((key.clone(), Some(reason.clone()))),
+            _ => {}
+        }));
+        let (sink, rx) = std::sync::mpsc::sync_channel(256);
+        let drain = pump.drain_service(rx, |_| {});
+        let service = Service::start(
+            root.join("relay"),
+            pump.clone(),
+            sink,
+            true,
+            drain,
+            None,
+            vec![],
+        );
+        eventually("private service connected", || service.snapshot().connected).await;
+        mark("client-connected");
+        eventually("stopped run baseline", || {
+            pump.row("peer", "run:run-1").is_some() && pump.online("peer")
+        })
+        .await;
+        mark("baseline-ready");
+        eventually("resumed run replaces the stopped run", || {
+            pump.row("peer", "run:run-2").is_some() && pump.row("peer", "run:run-1").is_none()
+        })
+        .await;
+        service.join().await.unwrap();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                ("run:run-1".to_owned(), None),
+                ("run:run-2".to_owned(), None),
+                ("run:run-1".to_owned(), Some(Some("replaced".to_owned()))),
+            ]
+        );
+        mark("client-finished");
+    });
+}

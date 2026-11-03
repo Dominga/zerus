@@ -131,10 +131,10 @@ backend classes when a behaviour must hold for both.
 On Arch, `bash scripts/ci/arch.sh` also builds and validates the pacman package
 as an unprivileged user. It substitutes a local Git source only in its disposable
 build directory; it never installs the package or enables services.
-Hosted Dev CI runs shared Rust/protocol checks, Linux CLI, Arch desktop/package,
+Hosted Dev CI runs shared Rust/protocol checks, Linux CLI, Arch package,
 macOS and Android on main. PRs retain Windows/iOS for affected or unknown paths;
 Nightly and Stable require the full matrix. Manual runs default to all platforms,
-with independent macOS-desktop and iOS flags. Validate workflow
+with independent macOS and iOS flags. Validate workflow
 edits locally before pushing. Daily nightlies publish a verified binary to GitHub and
 AUR, and the Windows portable zip to GitHub, only after every check passes; stable
 releases, which carry the zip their own candidate run tested, remain manually published.
@@ -202,7 +202,7 @@ You need:
 
 - Visual Studio 2022 with the x64 C++ tools and Windows SDK;
 - Rust for MSVC: stable, and the pinned 1.99.1 with clippy;
-- Python 3.11 or later, Node/npm, Git for Windows with Git Bash, and 7-Zip;
+- Python 3.11 or later, Node.js 24/npm, Git for Windows with Git Bash, and 7-Zip;
 - Evergreen WebView2 for interactive Zerus Next checks (no Qt SDK/runtime).
 
 Clone with `git clone -c core.autocrlf=false`, as CI does: test fixtures and
@@ -235,9 +235,15 @@ HGS_TEST_FAKE_AGENT="$(cygpath -w "$PWD/target/debug/examples/fake_agent.exe")" 
   python scripts/ci/outside-job.py --custody-only --timeout 900 \
     --log artifacts/test-results/windows-mobile-gateway.log -- \
     python -m unittest discover -s tests -p test_windows_mobile_gateway.py -v </dev/null
+export CARGO_TARGET_DIR="$PWD/target/windows-next"
+(cd client && npm ci --no-audit --no-fund && \
+    npm run tauri -- build --ci --no-bundle --config src-tauri/tauri.windows.conf.json --features video)
+python client/scripts/collect-notices.py artifacts/windows-frontend-licenses
+unset CARGO_TARGET_DIR
 python scripts/package-windows.py --cli target/release/hgs.exe \
     --connector services/mobile/connector/target/release/zerus-mobile-connector.exe \
-    --gui client/src-tauri/target/release/hgs-tray.exe --conpty target/conpty \
+    --gui target/windows-next/release/hgs-tray.exe --conpty target/conpty \
+    --frontend-licenses artifacts/windows-frontend-licenses \
     --output artifacts/zerus-windows-x86_64.zip
 python scripts/check-windows-portable.py artifacts/zerus-windows-x86_64.zip --run --selftest
 ```

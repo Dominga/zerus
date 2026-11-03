@@ -11,7 +11,6 @@ import os
 from pathlib import Path
 import plistlib
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -96,21 +95,6 @@ def unresolved_references(bundle, binary, commands, inherited_rpaths=()):
                 candidates.append(Path(expand(value)))
         if not any(os.path.isfile(candidate) for candidate in candidates):
             findings.append(f"{label}: unresolved {value}")
-    return findings
-
-
-def plist_findings(plist, version, release=None):
-    # ZerusReleaseVersion names the stable or nightly release; the GUI uses it to notice
-    # a replaced bundle even when the product version stays the same.
-    expected = {"CFBundleIdentifier": BUNDLE_ID, "CFBundleExecutable": "hgs-tray", "CFBundleName": "Zerus",
-                "CFBundleDisplayName": "Zerus", "CFBundleShortVersionString": version,
-                "CFBundleVersion": version, "LSMinimumSystemVersion": MINIMUM_SYSTEM,
-                "ZerusReleaseVersion": release or version}
-    findings = [f"Info.plist {key} is {plist.get(key)!r}, expected {value!r}"
-                for key, value in expected.items() if plist.get(key) != value]
-    # Terminal integration runs osascript; TCC attributes its Apple Events to Zerus.
-    if not str(plist.get("NSAppleEventsUsageDescription", "")).strip():
-        findings.append("Info.plist lacks NSAppleEventsUsageDescription")
     return findings
 
 

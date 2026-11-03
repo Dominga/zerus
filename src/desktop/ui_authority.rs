@@ -104,8 +104,7 @@ impl Scope {
     }
     /// Bind an explicit maintained-image choice; this never discovers one from
     /// PATH or turns an inbound path check into a launch/worker permission.
-    #[cfg(target_os = "linux")]
-    #[allow(dead_code)] // Consumed by the following Linux UI-closed launch slice.
+    #[cfg(any(target_os = "linux", windows))]
     pub fn select_frontend(
         &self,
         image: &Path,

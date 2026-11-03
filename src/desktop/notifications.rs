@@ -19,9 +19,12 @@ use zerus_client_core::{
 };
 use zerus_desktop_ledger::{self as ledger, Attempt, Identity, Kind, Reserve, State, Target};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 mod closed;
 #[cfg(target_os = "linux")]
+pub(super) mod frontend;
+#[cfg(windows)]
+#[path = "notifications/frontend_windows.rs"]
 pub(super) mod frontend;
 #[cfg(target_os = "linux")]
 pub(super) mod linux;

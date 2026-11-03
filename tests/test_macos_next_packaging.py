@@ -79,6 +79,8 @@ class NextPackaging(unittest.TestCase):
             cli = root / "hgs"; cli.write_bytes(MAGIC)
             for name in ("rust", "client-rust", "frontend"):
                 inventory(root / name)
+            input_files = {str(p.relative_to(app)): (p.read_bytes(), p.stat().st_mode)
+                           for p in app.rglob('*') if p.is_file()}
             commands = []
             def run(*args):
                 commands.append(args)
@@ -104,6 +106,20 @@ class NextPackaging(unittest.TestCase):
             for name in ("rust", "client-rust", "frontend"):
                 self.assertTrue((bundle / "Contents/Resources/licenses" / name / "inventory.json").is_file())
             self.assertEqual(commands[-1][0], "codesign")
+            self.assertEqual({str(p.relative_to(app)): (p.read_bytes(), p.stat().st_mode)
+                              for p in app.rglob('*') if p.is_file()}, input_files)
+            for identifier in ("dev.zerus.next", "example.foreign"):
+                foreign = dict(info, CFBundleIdentifier=identifier)
+                info_path.write_bytes(plistlib.dumps(foreign))
+                foreign_output = root / identifier
+                foreign_argv = list(argv)
+                foreign_argv[-1] = str(foreign_output)
+                with mock.patch.object(sys, "argv", foreign_argv), \
+                        mock.patch.object(package, "run") as execute, self.assertRaises(SystemExit):
+                    package.main()
+                execute.assert_not_called()
+                self.assertFalse(foreign_output.exists())
+                self.assertEqual(info_path.read_bytes(), plistlib.dumps(foreign))
 
     def distribution(self, root):
         bundle = root / "Zerus.app"

@@ -310,6 +310,17 @@ Capture/report success alone does not complete G3 or installed acceptance.
 
 ## macOS
 
+For a coordinator-approved private click fixture, opt in to actual GUI selection
+readback with `ZERUS_CLIENT_ACCEPTANCE_SELECTION=1` and a canonical, owned 0700
+`XDG_STATE_HOME`. The main webview records its current page, detail tab and selected
+computer/name/run/conversation in `hgs/client-selection-diagnostic.json` below that
+private state directory (atomic 0600, at most 2 KiB, timestamp and source commit).
+Only one write and the latest pending observation are retained. Match this actual
+selection against the original Delivered mapping after the owner's click; a native
+intended target or a visible project alone does not prove the selected Activity.
+The opt-in is off by default and accepts no navigation, permission or service
+command. Readback is observation only and never supplies authority.
+
 Use the signed/notarized Next bundle/cask and the maintained local installer for
 the owner's main-account evaluation. **Run Mac first after the source admission
 gates merge; GUI/native acceptance may run at any time without a separate owner
@@ -331,6 +342,40 @@ existing privacy identity, signature, installed path and one verified rollback c
 | [ ] Voice/video | Exercise real microphone/camera consent, short preview/transcription, cancel/hide and exit recovery. Check public privacy identity; never import an old device ID or replay uncertain delivery. | G2 `.66.4.5`, inventory media/privacy rows |
 | [ ] UI/durable parity | Apply the same complete inventory responsibility walk as Linux, including bounded details/tasks, archived reads, creation recovery and default-off approvals with authenticated frontend-only enablement. Use the [installed client cutover runbook](#installed-client-cutover-on-linux-and-macos). | G1–G4/G7, `.66.3.31/.32/.35/.38` |
 | [ ] Qt rollback | Use the retained complete Qt copy and original maintained updater before deletion; desktop revoke must settle before Qt starts. Verify settings/drafts/agents, then switch back to Next without a second import. | `.66.3.31`, updater rollback and defaults-snapshot checks |
+
+### Recorded Mac native-host subchecks — source `f1833dec`
+
+macbundle-u reported the maintained main-account installation
+`f1833decd99e503b4ee48314df298894006c8062`. migrate-u checked the three bounded
+summary/receipt/status files below against their supplied hashes. Owner sensory
+observations and the private fixture-to-target comparison remain attributed to
+macbundle-u; this was not an independent rerun. **Mac acceptance remains open
+(`.66.3.30.2.4`); no platform checkbox or #906a merge gate is satisfied here.**
+
+| Subcheck | Result | Actual evidence and limit |
+|---|---|---|
+| One service-host Post | PASS, one synthetic target | One controlled synthetic reply produced one Delivered Post. The retained receipt/native-token hash matched the producer's reserved private run/conversation fixture. The original callback was host/default, one callback with zero GUI callbacks. This does not establish delivery for other targets or a second attempt. |
+| Owner banner and click | PASS, owner-reported scope | The owner reported one new banner and one click into the fixture project. **Actual selected Activity remains UNQUALIFIED:** the run exported no exact selected-session readback. Project visibility alone is not exact-target selection proof. |
+| Normal revoke/drain | FAILED | The retained status has one pending native Post hold, `notification_cleanup_deadline`, `notification_host_unresponsive`, `drained:false`, `operation_drained:false` and no observed host exit. `background_drained:true` does not establish the missing physical drain. The original revoke remains unsettled. |
+| Original withdrawal | UNKNOWN, no replay | The asynchronous Withdraw receipt is `unknown` / `native_error`; it is not a completed withdrawal or a retry grant. Keep its original identity and uncertainty. |
+| Exceptional physical cleanup and owner restore | Separate recovery, not normal-drain PASS | The coordinator separately authorized one TERM to the test host and one to the private service, with zero KILLs. The test GUI/host/service were absent afterward; owner LaunchAgent, native agents and rollout agent were untouched. The owner reopened the ordinary installed GUI, Native ownership revision 15, and the watcher resumed. The supervisor, fixture/data and checkout were deliberately retained. Cleanup does not settle the original revoke or unknown Withdraw. |
+
+P0 `.66.3.30.2.8` / [#1210](https://github.com/ufna/zerus/pull/1210) addresses
+the native host lifetime and provides an opt-in bounded exact-selection readback.
+Its source/component tests are not the required rerun. A reviewed installed
+candidate must establish normal drain and actual selected Activity under the
+coordinator's next admitted route. Do not replay the original unknown operations.
+Import/upgrade, tray, terminal, voice/video and the rest of G6 remain unqualified.
+
+The selected evidence is retained privately by macbundle-u under
+`.ci-build/mac-native-acceptance/installed-4u7n-bounded-summary/`. These hashes
+identify the checked summary bytes, not public SDK metadata or owner content:
+
+| Evidence file | Bytes | SHA-256 |
+|---|---|---|
+| `summary.json` | 833 | `d5f29374b8de0a3a894150ba3fabc7366f0839264dec8f08b9508a1c40d2ffed` |
+| `selected-receipts.json` | 664 | `95ad49391c527b69082ffea7f7f51868e4acdde8b77a87612f53985a9e97f3ca` |
+| `selected-cleanup-status.json` | 406 | `73bcf6e34d938b088268497978f57855e3150d8198502e1edce53aa88581d308` |
 
 ## Installed client cutover on Linux and macOS
 
@@ -771,6 +816,14 @@ this split on **2026-11-03**:
   Qt archive installer, comparison programs and obsolete documentation. Audit
   non-CI rollback/build dependencies before deleting the tree. Historical immutable
   Qt ZIP validation and old-client update compatibility remain supported.
+
+Coordinator rollback decision (2026-11-03): after #906a, the replaced verified
+Next always becomes `desktop-previous`. The first Next-to-Next update moves the
+Qt image once to a separate `desktop-qt-legacy` retained location; it is never
+deleted or offered as rollback, and remains manual-recovery material only. Its
+settings export remains at its compatible path. A collision/unsafe retained
+location keeps the original in a named recovery path; it never overwrites a
+retained image. Draft/native-process checks and failed-upgrade recovery remain.
 
 Windows PC testing is deferred and is not a merge gate for #906a. The ready state
 of #906a is not an acceptance result or a merge authorization. Each part must be rebased on the final installer/consumer/notification/packaging PRs and pass

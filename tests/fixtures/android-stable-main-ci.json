@@ -45,20 +45,6 @@
       "run_attempt": 1
     },
     {
-      "id": 120153349223,
-      "name": "Trusted main checks / Arch desktop",
-      "status": "completed",
-      "conclusion": "success",
-      "run_attempt": 1
-    },
-    {
-      "id": 120153349235,
-      "name": "Trusted main checks / macOS desktop",
-      "status": "completed",
-      "conclusion": "success",
-      "run_attempt": 1
-    },
-    {
       "id": 120153349239,
       "name": "Trusted main checks / Android unit tests and lint",
       "status": "completed",

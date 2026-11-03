@@ -145,6 +145,8 @@ pub(crate) fn guard(claim: &crate::instance::Claim) {
         Claim::Forwarded => record("forwarded", "activation_written", None),
         Claim::Duplicate(reason) => record("duplicate", reason, None),
         Claim::Failed(error) => record("failed", "instance_claim_failed", Some(error)),
+        #[cfg(windows)]
+        Claim::Untrusted => record("failed", "activation_pipe_untrusted", None),
     }
 }
 

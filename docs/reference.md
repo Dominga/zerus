@@ -3774,12 +3774,11 @@ for a GUI that is not running, by its signature and its own `--build-info`) and
 only then becomes the one rollback copy in `~/.local/share/hgs/desktop-previous`;
 a new GUI that does not start is replaced by it again. A replaced bundle without
 its identity, executable or valid signature never becomes the rollback copy, and
-a Zerus process started during the update stops the change. After the Mac switch,
-Qt stays the rollback copy; if it cannot be verified as complete, including when
-its signature check times out, the replaced client is kept too. Those cases and an
-interrupted update keep the replaced GUI in a `.hgs-tray-kept-*` folder beside
-the installed one and print where; later updates list such folders and never
-remove them. Links at the
+a Zerus process started during the update stops the change. After a Qt switch, the first successful Next-to-Next update moves the Qt image
+once to `~/.local/share/hgs/desktop-qt-legacy` for manual recovery only; the
+replaced Next then takes `desktop-previous`. Qt is never deleted or offered by
+`--rollback`. Its settings export remains at its compatible path. Interrupted or
+unverifiable replacements remain in a named kept folder. Links at the
 installed path or in the rollback folder are refused. The update confirms the
 running image, unchanged nonempty drafts and native agent and tmux processes. It records the
 installed builds in `~/.local/share/hgs/build-provenance.json`, then removes hidden
@@ -3812,7 +3811,7 @@ Linux installs the binary under `~/.local/bin`, a systemd user service under
 `~/.config/systemd/user` and a launcher under `~/.local/share/applications`.
 The launcher is not a second autostart entry. Fresh installs and upgrades default
 to Zerus Next; `HGS_LINUX_GUI=client` selects it explicitly.
-`HGS_LINUX_GUI=qt` keeps the Qt source-build fallback until Linux acceptance. `HGS_INSTALL_PREFIX` redirects the binary, launch files and
+Qt source builds and the Qt installer selection are retired. `HGS_INSTALL_PREFIX` redirects the binary, launch files and
 updater state into a scratch prefix and performs no service-manager action; see
 [Linux packages and source installation](linux-distribution.md).
 The service belongs to `graphical-session.target`, restarts after crashes and
@@ -3877,19 +3876,21 @@ No reverse connection is created by default. Explicit peer setup uses
 | `--open-mode MODE` | Linux auto/tab/window/clipboard; macOS terminal/clipboard; Windows auto/tab/window/console/clipboard |
 | `--selftest` | Headless hgs connectivity check |
 | `--sessions` | Open the workspace; on Windows also the default |
-| `--desktop-target JSON` | Zerus Next on Linux: open the exact `computer`, `run` and `conversation`; implies `--sessions`. Navigation data only, with no notification or writer authority |
+| `--desktop-target JSON` | Zerus Next on Linux and Windows: open the exact `computer`, `run` and `conversation`; implies `--sessions`. Navigation data only, with no notification or writer authority |
 | `--background` | Start in the tray only; the default on Linux and macOS. Not together with `--sessions` |
 
 A single-instance socket forwards repeated launches to the running GUI: one that
 would open the workspace opens it there.
-The Linux target value is bounded to 8192 bytes and accepts only those three
+The target value is bounded to 8192 bytes and accepts only those three
 fields. It follows the exact run and conversation through a session rename and
 refuses an archived or replaced session. The service's selected-child launcher
 requires the separate environment-input capability and passes the same target
 as `ZERUS_CLIENT_DESKTOP_TARGET` in that child only, keeping the identifiers out
-of its command line. An ephemeral Wayland activation token also travels only in
-that child's environment. The new GUI consumes both values before starting its
+of its command line. On Linux, an ephemeral Wayland activation token also travels
+only in that child's environment. The new GUI consumes both values before starting its
 workers; forwarding navigation to an already running GUI carries no token.
+On Windows the per-user activation pipe forwards the target as a `target` line
+and the forwarding start exits successfully.
 Conflicting argument/environment targets and target/background starts refuse.
 On Linux and macOS, concurrent launches take turns on it, and a launch such as
 `hgs-tray --sessions` leaves it to the `hgs-tray` systemd or launchd service
@@ -4070,6 +4071,12 @@ app's workspace, unless with `--background`. After a main-thread watchdog abort,
 Windows Error Reporting restarts the app with the same settings in the background
 (`--background`, never `--sessions`): a window that opens by itself after a crash
 would be a surprise.
+When the desktop service receives a toast click and no Zerus window runs, it
+starts the installed `hgs-tray.exe` (the per-user installation or the copy next
+to the service's `hgs.exe`) for the exact session, after checking that its
+`--help` lists the desktop target environment marker. It starts the window
+outside the service's job when Windows allows that, so a service restart does
+not close it, and passes it the right to come to the front.
 
 **Updates.** The portable zip has no installer or self-update. Stable releases
 after 0.42.2 and nightly releases carry the same tested zip. A portable

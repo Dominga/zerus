@@ -50,11 +50,11 @@ impl Launch {
     pub fn configuration(&self) -> &str {
         &self.configuration
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     pub fn current(&self) -> bool {
         Instant::now() < self.until && !self.cancelled.load(std::sync::atomic::Ordering::Acquire)
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     pub fn bind_preparation(
         &mut self,
         resources: Arc<dyn Send + Sync>,
@@ -63,11 +63,11 @@ impl Launch {
         self.preparation = Some(resources);
         self.cancelled = cancelled;
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     pub fn preparation_resources(&self) -> Option<Arc<dyn Send + Sync>> {
         self.preparation.clone()
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     pub fn release_preparation(&mut self) {
         self.preparation = None;
     }

@@ -886,9 +886,10 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertNotIn("scripts/ci/gui.sh", checks)
         self.assertEqual(checks.count("name: arch-x86_64-"), 1)
         upload = next(step for step in self.checks_steps("arch-package") if "name: arch-x86_64-" in step)
-        self.assertIn("if: always()", upload)
-        self.assertIn("name: arch-x86_64-${{ needs.source.outputs.commit }}", upload)
-        for line in ("ZERUS_DEV_BUILD_NUMBER", "fetch-depth: 0", "scripts/build-arch-package.sh",
+        self.assertIn("\n        if: always()\n", upload)
+        self.assertIn("name: arch-x86_64-${{ needs.source.outputs.commit }}\n          path: artifacts\n", upload)
+        for line in ("ZERUS_DEV_BUILD_NUMBER: ${{ github.repository == 'ufna/zerus'", "fetch-depth: 0",
+                     "run: runuser -u user -- bash scripts/build-arch-package.sh",
                      "runuser -u user -- python3 scripts/check-installed-package.py"):
             self.assertIn(line, package)
         self.assertLess(package.index("build-arch-package.sh"), package.index("name: arch-x86_64-"))

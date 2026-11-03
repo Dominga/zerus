@@ -18,9 +18,9 @@ tray/install.sh runs this whenever its build differs from the installed GUI.
    (~/.local/share/hgs/desktop-previous) does not change, until the new GUI
    was verified: running, or, when no GUI was running and none is started,
    by its signature and its own --build-info. Then the replaced GUI becomes
-   the rollback copy, or, once the Tauri client replaced the Qt GUI, goes
-   while a verified complete Qt stays that copy. When Qt's rollback copy
-   cannot be verified as complete, the replaced client is kept too. A replaced
+   the usable rollback copy. A Qt image already in the slot moves once to
+   desktop-qt-legacy for manual recovery, never deletion or offered rollback.
+   An unclassified old slot is retained conservatively too. A replaced
    bundle without its identity, executable or valid signature never becomes
    the rollback copy, and a Zerus process started meanwhile stops the change;
    both keep the replaced GUI. A
@@ -110,7 +110,7 @@ DEFAULTS = 'defaults'
 # Qt's QSettings domain, which is also the NSUserDefaults domain of any bundle
 # with this identifier (the Tauri switch bundle included).
 PREFERENCES = 'com.hgdev.hgs-tray'
-# Kept beside the Qt rollback copy at the switch (docs/macos-distribution.md).
+# Kept at this compatible path even after the Qt image leaves for manual recovery.
 SETTINGS_SNAPSHOT = ROLLBACK / f'{PREFERENCES}.plist'
 # Keys AppKit and WebKit write into a bundle's defaults domain; every other key is Qt's.
 COCOA_PREFIXES = ('NS', 'Apple', 'Web', 'com.apple.', '_')
@@ -432,14 +432,6 @@ def bundle_kind(bundle):
     return kind if kind == 'qt' or info.get('CFBundleIdentifier') else None
 
 
-def keeps_slot(installed_kind, slot_kind, new_kind):
-    """Whether the one rollback copy stays. Once it holds Qt, it stays the
-    switch's rollback target while the client replaces anything but Qt
-    itself: a client, an incomplete bundle or nothing. The replaced client
-    waits only for this update's own restore."""
-    return slot_kind == 'qt' and new_kind == 'tauri' and installed_kind != 'qt'
-
-
 def client_drafts_root(identifier):
     """The Tauri client's drafts root, `<app data>/drafts`: Tauri's
     app_data_dir formula with the running bundle's identifier."""
@@ -709,6 +701,7 @@ def take_slot(previous, progress):
                 shutil.copy2(previous, incoming)
         if slot.exists():
             replaced = Path(tempfile.mkdtemp(prefix='.replaced-', dir=ROLLBACK)) / slot.name
+            say(f'the prior rollback copy stays in {slot} or {replaced} until replacement settles')
             os.rename(slot, replaced)
         os.rename(incoming, slot)
     except BaseException:
@@ -735,7 +728,24 @@ def take_slot(previous, progress):
         progress['removing'] = True
         remove(previous)
     if replaced is not None:
-        shutil.rmtree(replaced.parent)
+        if bundle_kind(replaced) != 'tauri':
+            # Never delete or offer the retired Qt image as a rollback. The
+            # settings export stays at its compatible path beside the new slot.
+            legacy = ROLLBACK.parent / 'desktop-qt-legacy'
+            if legacy.is_symlink() or (legacy.exists() and not legacy.is_dir()):
+                raise UpdateError(f'{legacy} is not a private retained directory; Qt remains in {replaced}')
+            legacy.mkdir(mode=0o700, exist_ok=True)
+            if legacy.stat().st_uid != os.getuid() or legacy.stat().st_mode & 0o077:
+                raise UpdateError(f'{legacy} is not private; Qt remains in {replaced}')
+            target = legacy / replaced.name
+            if target.exists() or target.is_symlink():
+                raise UpdateError(f'{target} is already occupied; Qt remains in {replaced}')
+            say(f'preserving retired Qt for manual recovery: {replaced} -> {target}')
+            os.rename(replaced, target)
+            replaced.parent.rmdir()
+            say(f'the retired Qt image is kept for manual recovery in {target}')
+        else:
+            shutil.rmtree(replaced.parent)
 
 
 def verify_signature(path):
@@ -773,27 +783,14 @@ def complete_gui(gui):
     return True
 
 
-def settle(previous, keep, progress):
-    """Only after the new GUI was verified: the GUI it replaced becomes the
-    rollback copy, or goes when the slot keeps a complete Qt (a superseded
-    client). An incomplete bundle never takes the slot and stays where the
-    update keeps it, as does a client the slot's incomplete Qt cannot
-    replace. Says which; `progress` notes a removal under way, which an
-    interrupt leaves partial."""
+def settle(previous, progress):
+    """A verified replaced GUI becomes the usable rollback copy. A retired Qt
+    image leaves that slot for a separately retained manual-recovery copy."""
     if previous is None:
         return 'nothing was installed before'
     if not complete_gui(previous):
-        # Never removed: a check that failed for another reason must not cost a GUI.
         return ('the replaced bundle could not be verified as complete (identity, executable or signature check), '
                 'so it did not become the rollback copy')
-    if keep:
-        if not complete_gui(ROLLBACK / previous.name):
-            # take_slot would set the slot's copy aside for good: keep both.
-            return (f'the rollback copy in {ROLLBACK} could not be verified as complete, so the replaced GUI was kept '
-                    'rather than removed')
-        progress['removing'] = True
-        remove(previous)
-        return f'the Qt GUI stays the rollback copy in {ROLLBACK}'
     take_slot(previous, progress)
     return f'the replaced GUI is the rollback copy in {ROLLBACK}'
 
@@ -1080,7 +1077,6 @@ def update(built, installed, rollback=False):
     built, installed = built.resolve(), installed.absolute()
     refuse_links(installed)
     info = build_info(built)
-    slot = ROLLBACK / installed.name
     new_info = bundle_info(built) if MAC else info
     old_info = (bundle_info(installed) if MAC else installed_build_info(installed) or {}) if installed.exists() else {}
     old_kind = bundle_kind(installed)
@@ -1098,7 +1094,6 @@ def update(built, installed, rollback=False):
     to_qt = MAC and old_kind == 'tauri' and new_kind == 'qt'
     to_client = MAC and new_kind == 'tauri'
     # A rollback installs from the slot, whose copy stays until the new GUI runs.
-    keep = not rollback and keeps_slot(old_kind, bundle_kind(slot), new_kind)
     roots = draft_roots(old_info, new_info)
     name = info.get('versionName', info['version'])
     report_kept(installed)
@@ -1150,7 +1145,7 @@ def update(built, installed, rollback=False):
                 # The installer skips its second refresh after this successful
                 # opt-in update, even when no GUI needed restarting here.
                 refresh_mac_desktop(installed)
-            settled = settle(aside if aside.exists() else None, keep, progress)
+            settled = settle(aside if aside.exists() else None, progress)
             done = True
             say(f'installed {name} without starting it; {settled}')
             sweep(installed.parent, folder)
@@ -1209,7 +1204,7 @@ def update(built, installed, rollback=False):
         if problems[len(early):]:
             done = True
             raise UpdateError('the new GUI runs, but ' + '; '.join(problems) + '; the replaced GUI was kept')
-        settled = settle(aside if aside.exists() else None, keep, progress)
+        settled = settle(aside if aside.exists() else None, progress)
         done = True
         preserved, draft_problems = changed_drafts(saved, roots)
         problems += draft_problems
@@ -1249,8 +1244,8 @@ def update(built, installed, rollback=False):
 
 
 def roll_back_installed(installed):
-    """Reinstall the one rollback copy (after the switch: the last Qt GUI)
-    through the same quit, snapshot, start and verification as an update."""
+    """Reinstall the verified previous Next copy through the same checks.
+    The command entrypoint refuses a retired Qt rollback image."""
     installed = installed.absolute()
     refuse_links(installed)
     previous = ROLLBACK / installed.name

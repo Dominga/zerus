@@ -91,7 +91,7 @@ def validate_ci(run, workflow, jobs, request):
              'Rust mobile connector (Rust 1.99 and black-box suites)',
              'Rust mobile connector on macOS (smoke)', 'iOS core tests and simulator build',
              'Android unit tests and lint', 'CLI (ubuntu-24.04)', 'CLI (macos-15)',
-             'Arch desktop', 'Arch package', 'macOS desktop',
+             'Arch package',
              'Windows client, desktop and portable zip', 'Windows real agents through the session host',
              'Suite results']
     required = [prefix + ' / ' + name for name in names]

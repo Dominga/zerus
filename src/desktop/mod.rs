@@ -47,6 +47,8 @@ pub(crate) mod startup_diagnostic;
 mod startup_exclusion;
 mod startup_stdio;
 mod store;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod task_start_reconcile;
 mod transport;
 mod ui_authority;
 mod upgrade;
@@ -904,6 +906,27 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                                 hello.request.as_ref(),
                                                 "activation_receiver_unavailable",
                                             ),
+                                        }
+                                    }
+                                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                                    Ok(request)
+                                        if request.operation() == "task_start_reconcile" =>
+                                    {
+                                        let request_id = request.id().to_owned();
+                                        match runtime.task_start_request(
+                                            &mut store,
+                                            request,
+                                            queue.clone(),
+                                            seq,
+                                        ) {
+                                            Ok(()) => {
+                                                streaming = true;
+                                                activation_waiting = true;
+                                                Value::Null
+                                            }
+                                            Err(_) => {
+                                                json!({"request_id":request_id,"accepted":false,"durable":false,"code":"task_start_reconcile_unavailable"})
+                                            }
                                         }
                                     }
                                     Ok(request) => runtime.frontend_request(&mut store, request),

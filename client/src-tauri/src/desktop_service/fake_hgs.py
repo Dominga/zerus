@@ -500,6 +500,11 @@ elif args == ['desktop', 'watch', '--json']:
                               'lease': '00000000-0000-4000-8000-000000000003',
                               'limits': {'demands_per_subscriber': 64}}
     frame(0, 'hello', initial)
+    if config.get('silent_watch'):
+        # Keep the original watch alive, but send no further frame at all.
+        # EOF still belongs to the subscriber that owns this stdin pipe.
+        sys.stdin.read()
+        raise SystemExit(0)
     if config.get('peer_choices'):
         for seq, stage in enumerate(['known', 'invalid', 'warming', 'stopping', 'removed', 'empty'], 1):
             wait(root / ('roster-' + stage))

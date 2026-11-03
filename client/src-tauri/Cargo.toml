@@ -101,6 +101,10 @@ tauri-build = { version = "2", features = [] }
 # The manifest must also reach the library's Windows unit-test executable.
 embed-resource = "3"
 
+[dev-dependencies]
+# The subscriber's silence deadline is tested without thirty wall-clock seconds.
+tokio = { version = "1", default-features = false, features = ["test-util"] }
+
 # Dependencies optimised once keep the debug app responsive.
 [profile.dev.package."*"]
 opt-level = 2

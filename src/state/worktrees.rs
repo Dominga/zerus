@@ -908,7 +908,13 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
             }
             Some((remote, merge))
         }
-        (Some(_), _, None) => None,
+        // Track is always a checked step, so the actor's step sequence is the
+        // same for every repository: without a safe inherited upstream it
+        // writes nothing.
+        (Some(owned), _, None) => {
+            owned.before(Step::Track)?;
+            None
+        }
         (None, _, upstream) => direct_track(upstream),
         (Some(_), None, Some(_)) => return Err("Owned worktree pins are missing".into()),
     };

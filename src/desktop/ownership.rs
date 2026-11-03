@@ -400,7 +400,13 @@ fn apply_guarded(
     if (*action == Action::Rearm || replacing_image) && drain.take().unwrap()(store).is_err() {
         return refused(&request, old.status, "ownership_drain_pending");
     }
-    if *action != Action::NativeTakeover && store.operation_undrained()? != 0 {
+    // A reconnect to this exact Service incarnation neither replaces its
+    // runtime nor renews any operation authority. Retain its original custody;
+    // only an actual ownership change must wait for those resources to drain.
+    let refresh = *action == Action::Grant
+        && old.status.state == State::Service
+        && old.origin.as_ref() == Some(&origin);
+    if *action != Action::NativeTakeover && !refresh && store.operation_undrained()? != 0 {
         return refused(&request, old.status, "ownership_resources_pending");
     }
     ensure!(origin.current(), "ownership frontend image changed");
@@ -415,10 +421,7 @@ fn apply_guarded(
     } else {
         State::Service
     };
-    let keep_epoch = takeover
-        || (*action == Action::Grant
-            && old.status.state == State::Service
-            && old.origin.as_ref() == Some(&origin));
+    let keep_epoch = takeover || refresh;
     let owner_epoch = if keep_epoch {
         old.status.owner_epoch.clone()
     } else {

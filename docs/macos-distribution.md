@@ -552,6 +552,23 @@ change: pairing alone enables neither notifications nor a new permission.
 `update-installed.py` still saves drafts, checks native processes and keeps one
 rollback app; an old Qt copy continues to use the stable CLI.
 
+During a live source update, the updater refreshes the selected installed desktop
+backend and confirms its IPC readiness **before** starting the replacement GUI.
+It uses the maintained macOS service helper and the installer's independent
+runner selection; a failed refresh leaves GUI startup refused. Restored GUI
+starts use the same ordering. This preserves the selected passive/background
+mode and does not perform a new Grant or Rearm.
+
+If native takeover remains unconfirmed, the GUI opens as a service consumer
+without native writers. It retains the original uncertain takeover and its child
+and pipe resources. Startup and Retry do not grant or resume background work;
+the owner can use **Resume background work**, or **Check result** for an uncertain
+explicit recovery. Each responder keeps an immutable native mode; recovery uses
+a fresh responder epoch. A normal native launch can succeed while the stored
+`rearm_required` bit remains set: that bit fences background grants, not an
+authenticated native takeover.
+
+
 When a certificate-signed app is already installed, selection follows its team
 and signing class. A local rebuild of the published app therefore needs a
 compatible Developer ID Application identity. Apple Development can retain its

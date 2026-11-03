@@ -201,7 +201,9 @@ fi
 echo "[4/4] Loading ${LABEL}..."
 if [ "${UPDATE}" = "1" ]; then
     # Quits a running GUI, swaps the bundle and bootstraps the current LaunchAgent.
-    python3 "${SCRIPT_DIR}/update-installed.py" "${BUILD_APP}" "${APP_DEST}"
+    # The updater refreshes the installed paired backend BEFORE starting the
+    # GUI, including rollback/recovery starts. Keep the selected runner intact.
+    python3 "${SCRIPT_DIR}/update-installed.py" --refresh-macos-desktop "${HGS_BIN}" "${BUILD_APP}" "${APP_DEST}"
     RELOAD=0
 fi
 # The selected signed service image is in the INSTALLED pair, never the staging

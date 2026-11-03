@@ -379,7 +379,7 @@ fn expiry_after_the_first_withdrawal_batch_drains_without_replaying_remaining_po
 }
 
 #[test]
-fn revoke_waits_for_begun_post_receipt_and_resources_before_exact_withdrawal() {
+fn revoke_uses_begun_post_receipt_but_keeps_resources_through_exact_withdrawal() {
     for delivered in [true, false] {
         let mut f = Fixture::new();
         let state = Arc::new(Mutex::new(State {
@@ -425,12 +425,7 @@ fn revoke_waits_for_begun_post_receipt_and_resources_before_exact_withdrawal() {
         for _ in 0..4 {
             runtime.poll(&mut f.store, &mut attention);
         }
-        assert!(runtime.host.endpoint.try_next().is_err());
         assert!(!state.lock().unwrap().stopping);
-        drop(hold);
-        for _ in 0..4 {
-            runtime.poll(&mut f.store, &mut attention);
-        }
         if delivered {
             let close = runtime.host.endpoint.try_next().unwrap().begin().unwrap();
             assert!(
@@ -442,6 +437,18 @@ fn revoke_waits_for_begun_post_receipt_and_resources_before_exact_withdrawal() {
                 runtime.host.endpoint.try_next().is_err(),
                 "unknown post is never replayed or guessed delivered"
             );
+        }
+        for _ in 0..4 {
+            runtime.poll(&mut f.store, &mut attention);
+        }
+        assert!(
+            !state.lock().unwrap().stopping,
+            "completed receipts do not release the original post resources"
+        );
+        assert!(!runtime.outbox.operations_idle());
+        drop(hold);
+        for _ in 0..4 {
+            runtime.poll(&mut f.store, &mut attention);
         }
         state.lock().unwrap().joined = true;
         settle_cleanup(&mut f, &mut runtime, &mut attention);

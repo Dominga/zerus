@@ -476,11 +476,14 @@ try {$events=@(Get-WinEvent -LogName 'Microsoft-Windows-TaskScheduler/Operationa
 catch {@{available=$false;error=$_.Exception.GetType().Name;events=@()}|ConvertTo-Json -Compress;exit 0};
 $items=@();foreach($e in $events) {
  $xml=[xml]$e.ToXml();$data=@{};foreach($d in $xml.Event.EventData.Data) {
-  if($d.Name-in @('InstanceId','TaskInstanceId','ResultCode','ErrorCode','ProcessID','ProcessId','EnginePID')) {
-   $text=[string]$d.'#text';if($text.Length-gt 96) {$text=$text.Substring(0,96)};$data[[string]$d.Name]=$text
+  if($d.Name-in @('InstanceId','TaskInstanceId','ResultCode','ReturnCode','ErrorCode','ErrorValue','ProcessID','ProcessId','EnginePID')) {
+   $text=[string]$d.'#text';if($text.Length-gt 64) {$text=$text.Substring(0,64)};$data[[string]$d.Name]=$text
   }
  };
- if($data.InstanceId-ieq $x.started -or $data.TaskInstanceId-ieq $x.started) {
+ $matches=$false;foreach($key in @('InstanceId','TaskInstanceId')) {
+  try {if([Guid]$data[$key]-eq [Guid]$x.started) {$matches=$true}} catch {}
+ };
+ if($matches) {
   $items+=@{id=[int]$e.Id;record=[int64]$e.RecordId;data=$data};if($items.Count-ge 8) {break}
  }
 };@{available=$true;events=$items}|ConvertTo-Json -Compress -Depth 5

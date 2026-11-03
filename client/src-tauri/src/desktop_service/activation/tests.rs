@@ -94,7 +94,10 @@ fn only_identity_and_invalid_input_preparation_errors_are_permanent() {
         ErrorKind::Other,
         ErrorKind::Interrupted,
     ] {
-        assert_eq!(ReadError::preparation(kind.into()), ReadError::Retryable);
+        assert_eq!(
+            ReadError::preparation(kind.into()),
+            ReadError::Retryable(Reason::Preparation)
+        );
     }
 }
 
@@ -189,6 +192,7 @@ fn start(
         Observers {
             projections: vec![],
             notification_controls: None,
+            retained_sources: None,
             activation: Some(Arc::new(move |delivery| {
                 tx.try_send(delivery).ok();
             })),

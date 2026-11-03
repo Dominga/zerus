@@ -639,6 +639,12 @@ pub struct Ancestry {
     boundary: Boundary,
 }
 impl Ancestry {
+    /// Borrow the actual retained ancestors, excluding the inspected process.
+    /// Selection still requires validate(); these references grant no role.
+    pub fn ancestors(&self) -> impl Iterator<Item = &Original> {
+        self.chain.iter().skip(1).map(Arc::as_ref)
+    }
+
     pub fn inspect(pid: u32, until: Instant) -> io::Result<Self> {
         require(Instant::now() < until)?;
         let mut current =
@@ -771,6 +777,23 @@ mod tests {
         reader.join().unwrap();
         assert!(ready.unwrap().ends_with(b"START\r\n"));
         child
+    }
+    #[test]
+    fn retained_ancestor_view_excludes_the_inspected_child_and_preserves_its_actual_parent() {
+        let child = child();
+        let until = Instant::now() + Duration::from_secs(2);
+        let proof = Ancestry::inspect(child.0.id(), until).unwrap();
+        let parent = Original::open(std::process::id()).unwrap();
+        assert!(proof
+            .ancestors()
+            .all(|original| original.pid != child.0.id()));
+        let first = proof.ancestors().next().unwrap();
+        assert_eq!((first.pid, first.birth), (parent.pid, parent.birth));
+        proof.validate(until).unwrap();
+        drop(child);
+        assert!(proof
+            .validate(Instant::now() + Duration::from_secs(2))
+            .is_err());
     }
     #[test]
     fn native_agent_parent_fixture() {

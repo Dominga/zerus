@@ -21,6 +21,7 @@ cursor = '00000000-0000-4000-8000-000000000002'
 projection = 'a' * 32
 abi = 'desktop-catalog-changes-v1'
 args = sys.argv[1:]
+watch_seq, watch_status = 0, None
 value = json.loads(sys.stdin.readline()) if args[:2] in [['desktop', 'request'], ['desktop', 'frontend-request']] else {}
 with (root / 'calls').open('a') as log:
     log.write(json.dumps({'args': args, 'value': value, 'pid': os.getpid()}) + '\n')
@@ -147,6 +148,10 @@ def detail_follow():
 
 
 def frame(seq, kind, body):
+    global watch_seq, watch_status
+    watch_seq = seq
+    if kind in ('hello', 'status', 'heartbeat'):
+        watch_status = body
     print(json.dumps({'abi': 'desktop-v1', 'epoch': epoch, 'seq': seq, 't': kind, 'value': body}), flush=True)
 
 
@@ -569,10 +574,13 @@ elif args == ['desktop', 'watch', '--json']:
         frame(6, 'status', repeated)
         wait(root / 'peer-scope-recovered')
         hint(7, '0', selected='b' * 32, computer='broken')
-    if config.get('details'):
-        seq = 100
-        seen = set()
-        while not select.select([sys.stdin], [], [], .005)[0]:
+    # A live service keeps sending heartbeats while its subscriber is idle.
+    # Keep the latest scripted status (including intentional lease omissions),
+    # not a fresh default that could undo a generation/counts change.
+    seq, seen = max(100, watch_seq), set()
+    heartbeat = time.monotonic() + 1
+    while not select.select([sys.stdin], [], [], .005 if config.get('details') else .1)[0]:
+        if config.get('details'):
             for path in sorted(root.glob('pending-*')):
                 if path.suffix == '.tmp' or path.name in seen:
                     continue
@@ -580,9 +588,11 @@ elif args == ['desktop', 'watch', '--json']:
                 for kind, body in json.loads(path.read_text()):
                     seq += 7  # Outer targeted sequences are monotone, not contiguous.
                     frame(seq, kind, body)
-        sys.stdin.read()
-    else:
-        sys.stdin.read()  # Detaches only when the owning subscriber closes stdin.
+        if time.monotonic() >= heartbeat:
+            seq += 1
+            frame(seq, 'heartbeat', watch_status)
+            heartbeat = time.monotonic() + 1
+    sys.stdin.read()  # Detaches only when the owning subscriber closes stdin.
 elif args == ['desktop', 'request', '--json']:
     desktop_request()
 elif args == ['desktop', 'catalog-relay', '--json']:

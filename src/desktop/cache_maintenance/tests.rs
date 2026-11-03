@@ -216,13 +216,25 @@ fn closed_raw_requests_and_foreign_configuration_never_prepare_or_execute() {
 }
 
 #[test]
-fn schema_upgrades_exactly_from_real_controls_sixteen_without_a_placeholder() {
+fn schema_upgrades_exactly_from_real_creation_seventeen_without_a_placeholder() {
     let f = Fixture::new();
     // Reconstruct the exact prior version by removing only this leaf's DDL;
-    // the real notification-controls16 tables remain present and unchanged.
+    // the real creation17 and notification-controls16 tables remain unchanged.
     f.store.db.execute_batch("DROP TRIGGER desktop_cache_unknown_preserve; DROP TRIGGER desktop_cache_unknown_immutable;
         DROP TABLE desktop_cache_unknown; DROP TABLE desktop_cache_files; DROP TABLE desktop_cache_operations;
-        DROP TABLE desktop_cache_roots; PRAGMA user_version=16;").unwrap();
+        DROP TABLE desktop_cache_roots; PRAGMA user_version=17;").unwrap();
+    let creation_before: Vec<(String, String)> = f
+        .store
+        .db
+        .prepare(
+            "SELECT name,sql FROM sqlite_schema WHERE name LIKE 'desktop_creation_%' ORDER BY name",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(!creation_before.is_empty());
     drop(f.store);
     let epoch = id();
     let store = Store::open(&f.location, &epoch).unwrap();
@@ -233,7 +245,19 @@ fn schema_upgrades_exactly_from_real_controls_sixteen_without_a_placeholder() {
             .unwrap(),
         SCHEMA
     );
-    assert_eq!(SCHEMA, 16 + 1);
+    assert_eq!(SCHEMA, 18);
+    assert_eq!(super::super::creation_clone::SCHEMA, 17);
+    let creation_after: Vec<(String, String)> = store
+        .db
+        .prepare(
+            "SELECT name,sql FROM sqlite_schema WHERE name LIKE 'desktop_creation_%' ORDER BY name",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(creation_before, creation_after);
     assert_eq!(store.operation_undrained().unwrap(), 0);
 }
 

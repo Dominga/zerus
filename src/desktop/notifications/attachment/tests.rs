@@ -250,6 +250,8 @@ fn unready_cleanup_has_one_overall_deadline_that_repeated_stop_cannot_extend() {
     runtime.request_stop();
     let original = runtime.retirement_until.unwrap();
     for _ in 0..20 {
+        runtime.retirement_clock =
+            Some(runtime.retirement_clock.unwrap() + std::time::Duration::from_millis(1));
         runtime.request_stop();
         runtime.poll(&mut f.store, &mut attention);
         assert_eq!(runtime.retirement_until, Some(original));

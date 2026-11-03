@@ -3,6 +3,28 @@ use std::{fs, path::Path, time::Instant};
 
 pub(super) struct Fixture(pub(super) PathBuf);
 
+struct ReleaseView(std::sync::mpsc::Sender<()>);
+impl Drop for ReleaseView {
+    fn drop(&mut self) {
+        // Release on assertions/unwind too; the callback cannot outlive its
+        // test owner or expire before a descheduled test can signal it.
+        let _ = self.0.send(());
+    }
+}
+
+fn injected_delay(variable: &str) -> Duration {
+    let milliseconds = std::env::var(variable)
+        .ok()
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .expect("fixture delay must be milliseconds")
+        })
+        .unwrap_or(0);
+    assert!(milliseconds <= 90_000, "fixture delay exceeds its bound");
+    Duration::from_millis(milliseconds)
+}
+
 pub(super) fn private_root(parent: &Path) -> PathBuf {
     use std::os::unix::{ffi::OsStrExt, fs::DirBuilderExt};
     // Darwin's sun_path has 104 bytes, including the terminating NUL. Hosted
@@ -100,11 +122,44 @@ fn a_long_temp_parent_still_gets_a_private_bindable_socket_root() {
 
 pub(super) async fn eventually(label: &str, check: impl Fn() -> bool) {
     // A loaded hosted macOS runner missed 10 s for an initial live baseline.
-    let until = Instant::now() + Duration::from_secs(30);
+    eventually_within(label, Duration::from_secs(30), check).await;
+}
+async fn eventually_within(label: &str, wait: Duration, check: impl Fn() -> bool) {
+    let until = Instant::now() + wait;
+    let mut pause = Some(injected_delay("ZERUS_TEST_SERVICE_POLL_DELAY_MS"));
     while !check() {
-        assert!(Instant::now() < until, "{label}");
+        // Model descheduling after an unsuccessful observation. The service
+        // workers and their product deadlines continue normally meanwhile.
+        if let Some(delay) = pause.take() {
+            std::thread::sleep(delay);
+        }
+        if Instant::now() >= until {
+            // The test may have been descheduled after its false sample.
+            // Use a fresh observation before declaring the fixture timed out.
+            assert!(check(), "{label}");
+            return;
+        }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+}
+
+#[test]
+fn readiness_gets_a_fresh_observation_at_the_fixture_deadline() {
+    let observed = std::cell::Cell::new(false);
+    tauri::async_runtime::block_on(eventually_within("fresh sample", Duration::ZERO, || {
+        observed.replace(true)
+    }));
+    assert!(observed.get());
+}
+
+#[test]
+#[should_panic(expected = "fixture still unavailable")]
+fn an_unready_fixture_remains_bounded() {
+    tauri::async_runtime::block_on(eventually_within(
+        "fixture still unavailable",
+        Duration::ZERO,
+        || false,
+    ));
 }
 fn watch_calls(calls: &[Value]) -> usize {
     calls
@@ -572,17 +627,38 @@ fn exit_waits_for_the_owned_proxy_and_blocked_view_callback_before_finishing() {
         let fixture = Fixture::new(json!({}));
         let pump = crate::pump::Pump::default();
         let (sink, rx) = std::sync::mpsc::sync_channel(256);
+        let view_input = sink.clone();
         let (entered, observed) = std::sync::mpsc::channel();
         let (release, resume) = std::sync::mpsc::channel();
-        let first = AtomicBool::new(true);
+        let release = ReleaseView(release);
         let drain = pump.drain_service(rx, move |change| {
-            if matches!(change, Change::Upsert { .. }) && first.swap(false, Ordering::AcqRel) {
+            if matches!(change, Change::Upsert { key, .. } if key == "blocked-view-fixture") {
                 entered.send(()).unwrap();
-                // A loaded runner may starve the test task; the release still arrives.
-                resume.recv_timeout(Duration::from_secs(60)).unwrap();
+                let _ = resume.recv();
             }
         });
-        let service = Service::start(fixture.0.join("hgs"), pump, sink, true, drain, None, vec![]);
+        let service = Service::start(
+            fixture.0.join("hgs"),
+            pump.clone(),
+            sink,
+            true,
+            drain,
+            None,
+            vec![],
+        );
+        eventually("baseline before blocked view", || {
+            pump.row("", "row").is_some()
+        })
+        .await;
+        // Delay the view itself, outside a catalog's held admission locks.
+        view_input
+            .send(Data::Change(Box::new(Change::Upsert {
+                computer: ComputerId::local(),
+                key: "blocked-view-fixture".into(),
+                row: zerus_client_core::ViewRow::default(),
+            })))
+            .unwrap();
+        drop(view_input);
         eventually("view callback entered", || observed.try_recv().is_ok()).await;
         let finished = Arc::new(AtomicBool::new(false));
         let ended = finished.clone();
@@ -593,7 +669,7 @@ fn exit_waits_for_the_owned_proxy_and_blocked_view_callback_before_finishing() {
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert!(!finished.load(Ordering::Acquire));
         assert!(!exiting.inner().is_finished());
-        release.send(()).unwrap();
+        drop(release);
         exiting.await.unwrap();
         assert!(finished.load(Ordering::Acquire));
     });
@@ -796,17 +872,37 @@ fn stuck_view_callback_cannot_hold_the_quit_completion_past_its_deadline() {
         let fixture = Fixture::new(json!({}));
         let pump = crate::pump::Pump::default();
         let (sink, rx) = std::sync::mpsc::sync_channel(256);
+        let view_input = sink.clone();
         let (entered, observed) = std::sync::mpsc::channel();
         let (release, resume) = std::sync::mpsc::channel();
-        let first = AtomicBool::new(true);
+        let release = ReleaseView(release);
         let drain = pump.drain_service(rx, move |change| {
-            if matches!(change, Change::Upsert { .. }) && first.swap(false, Ordering::AcqRel) {
+            if matches!(change, Change::Upsert { key, .. } if key == "blocked-view-fixture") {
                 entered.send(()).unwrap();
-                // A loaded runner may starve the test task; the release still arrives.
-                resume.recv_timeout(Duration::from_secs(60)).unwrap();
+                let _ = resume.recv();
             }
         });
-        let service = Service::start(fixture.0.join("hgs"), pump, sink, true, drain, None, vec![]);
+        let service = Service::start(
+            fixture.0.join("hgs"),
+            pump.clone(),
+            sink,
+            true,
+            drain,
+            None,
+            vec![],
+        );
+        eventually("baseline before blocked quit view", || {
+            pump.row("", "row").is_some()
+        })
+        .await;
+        view_input
+            .send(Data::Change(Box::new(Change::Upsert {
+                computer: ComputerId::local(),
+                key: "blocked-view-fixture".into(),
+                row: zerus_client_core::ViewRow::default(),
+            })))
+            .unwrap();
+        drop(view_input);
         eventually("blocked callback", || observed.try_recv().is_ok()).await;
         let finished = AtomicBool::new(false);
         let started = Instant::now();
@@ -818,7 +914,8 @@ fn stuck_view_callback_cannot_hold_the_quit_completion_past_its_deadline() {
         .await;
         assert!(finished.load(Ordering::Acquire));
         assert!(started.elapsed() < Duration::from_secs(1));
-        release.send(()).unwrap();
+        std::thread::sleep(injected_delay("ZERUS_TEST_SERVICE_RELEASE_DELAY_MS"));
+        drop(release);
         service.join().await.unwrap();
     });
 }

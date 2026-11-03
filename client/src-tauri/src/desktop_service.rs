@@ -1,4 +1,4 @@
-//! One read-only desktop subscriber. No daemon launch, legacy fallback or writer admission.
+//! One owned desktop subscriber and closed native intents. No daemon launch or legacy fallback.
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -36,6 +36,7 @@ pub(crate) mod activation;
 pub(crate) struct Observers {
     pub projections: Vec<Projection>,
     pub notification_controls: Option<crate::desktop_notification_controls::Setup>,
+    pub retained_sources: Option<retained_import::Inputs>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub activation: Option<activation::Sink>,
 }
@@ -44,11 +45,13 @@ pub(crate) mod audit;
 mod cache;
 mod catalog;
 mod catalog_relay;
+pub(crate) mod creation_clone;
 use catalog::catalog_loop;
 mod details;
 pub mod frontend;
 pub(crate) mod notification_controls;
 mod read_import;
+pub(crate) mod retained_import;
 
 /// Registered at setup before start_source. Some contains a verified service
 /// watch frame; None invalidates the prior projection. Callbacks must not block.
@@ -223,6 +226,7 @@ impl CatalogDelivery {
 }
 
 struct Shared {
+    creation_rpc: Gate,
     notification_controls: Arc<crate::desktop_notification_controls::Controller>,
     notification_supported: AtomicBool,
     ownership: Arc<crate::desktop_ownership::Controller>,
@@ -261,6 +265,7 @@ struct Shared {
     organization: Mutex<Option<zerus_client_core::OrganizationSnapshot>>,
     frontend: frontend::Frontend,
     read_import: Mutex<read_import::State>,
+    retained_import: Option<Arc<retained_import::Report>>,
     projections: Vec<Projection>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     activation: Option<activation::Sink>,
@@ -300,6 +305,7 @@ impl Service {
             Observers {
                 projections,
                 notification_controls: None,
+                retained_sources: None,
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 activation: None,
             },
@@ -320,6 +326,7 @@ impl Service {
             zerus_client_core::desktop::ownership::Mode::Service,
         );
         let shared = Arc::new(Shared {
+            creation_rpc: Gate::new(1).unwrap(),
             notification_controls: crate::desktop_notification_controls::Controller::new(
                 observers.notification_controls,
             ),
@@ -357,6 +364,7 @@ impl Service {
             organization: Mutex::new(None),
             frontend: frontend::Frontend::default(),
             read_import: Mutex::new(read_import::State::default()),
+            retained_import: observers.retained_sources.map(retained_import::Report::new),
             projections: observers.projections,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             activation: observers.activation,
@@ -390,6 +398,36 @@ impl Service {
             .clone()
     }
     pub(crate) async fn ownership_rearm(self: &Arc<Self>) -> crate::desktop_ownership::View {
+        if self.shared.retained_import.is_some() {
+            let relay = self
+                .shared
+                .relay
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            let configuration = self
+                .shared
+                .configuration
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            let cancel = self
+                .shared
+                .cancellation
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            match (relay, configuration, cancel) {
+                (Some(relay), Some(configuration), Some(cancel)) => {
+                    retained_import::before_grant(&self.shared, relay, configuration, cancel, true)
+                        .await
+                }
+                _ => retained_import::record_error(
+                    &self.shared,
+                    "retained_import_connection_unavailable",
+                ),
+            }
+        }
         let view = self
             .shared
             .ownership
@@ -403,7 +441,8 @@ impl Service {
             .publish_ownership(crate::desktop_ownership::Phase::Rearm)
             .await;
         if self.shared.ownership.granted() {
-            self.retry();
+            // Rearm already made its one explicit report attempt above.
+            self.retry_connection();
         }
         view
     }
@@ -424,6 +463,12 @@ impl Service {
             .clone()
     }
     pub fn retry(&self) {
+        if let Some(report) = &self.shared.retained_import {
+            report.request_retry();
+        }
+        self.retry_connection();
+    }
+    fn retry_connection(&self) {
         if self.shared.stopped.load(Ordering::Acquire) {
             return;
         }
@@ -619,6 +664,10 @@ impl Service {
             .take();
         self.shared.rpc.close();
         self.shared.cache_rpc.close();
+        self.shared.creation_rpc.close();
+        if let Some(report) = &self.shared.retained_import {
+            report.close();
+        }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.shared.activation_rpc.close();
         let _ = self.control.send(Control::Stop);
@@ -645,8 +694,15 @@ impl Service {
         }
         let closed = self.shared.rpc.close();
         let cache_closed = self.shared.cache_rpc.close();
+        let creation_closed = self.shared.creation_rpc.close();
         let ownership_closed = self.shared.ownership.close();
         let notification_closed = self.shared.notification_controls.close();
+        let retained_closed = self
+            .shared
+            .retained_import
+            .as_ref()
+            .map(|report| report.close())
+            .unwrap_or_default();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let activation_closed = self.shared.activation_rpc.close();
         let drained = tauri::async_runtime::spawn_blocking(move || {
@@ -656,12 +712,18 @@ impl Service {
             let drained = (cache_closed.wait_until(until)
                 == zerus_client_core::desktop::drain::Observation::Idle)
                 && drained;
+            let drained = (creation_closed.wait_until(until)
+                == zerus_client_core::desktop::drain::Observation::Idle)
+                && drained;
             let drained = (ownership_closed.wait_until(until)
                 == zerus_client_core::desktop::drain::Observation::Idle)
                 && drained;
             let drained = (notification_closed.wait_until(until)
                 == zerus_client_core::desktop::drain::Observation::Idle)
                 && drained;
+            let drained = retained_closed.iter().all(|closed| {
+                closed.wait_until(until) == zerus_client_core::desktop::drain::Observation::Idle
+            }) && drained;
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             let drained = (activation_closed.wait_until(until)
                 == zerus_client_core::desktop::drain::Observation::Idle)
@@ -696,6 +758,12 @@ impl Drop for Service {
 }
 
 impl Shared {
+    fn publish_retained_import(&self) {
+        let report = self.retained_import.as_ref().map(|report| report.status());
+        let mut snapshot = self.snapshot.lock().unwrap_or_else(PoisonError::into_inner);
+        snapshot.retained_source_import = report;
+        self.pump.service(snapshot.clone());
+    }
     fn observe_peer_choices(&self, state: &service::State, value: &Value) {
         // A runtime draining its sources is not a peer-membership removal.
         // The parser already checked configuration/epoch and the <=64 roster.
@@ -757,6 +825,8 @@ impl Shared {
                 .unwrap_or_else(PoisonError::into_inner)
                 .status(),
         );
+        snapshot.retained_source_import =
+            self.retained_import.as_ref().map(|report| report.status());
         let mut current = self.snapshot.lock().unwrap_or_else(PoisonError::into_inner);
         *current = snapshot.clone();
         self.pump.service(snapshot);
@@ -1139,6 +1209,18 @@ async fn connection(
     }
     *shared.relay.lock().unwrap_or_else(PoisonError::into_inner) = Some(relay.clone());
     let configuration = preflight(&shared, stop.clone()).await?;
+    let explicit = shared
+        .retained_import
+        .as_ref()
+        .is_some_and(|report| report.take_retry());
+    retained_import::before_grant(
+        &shared,
+        relay.clone(),
+        configuration.clone(),
+        stop.clone(),
+        explicit,
+    )
+    .await;
     if shared.ownership_supported.load(Ordering::Acquire) {
         shared
             .ownership

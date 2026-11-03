@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createDesktopService, createServiceApprovalIntent, pendingReadNotice, ownershipNotice, createOwnershipActions } from "./desktopService";
+import { createDesktopService, createServiceApprovalIntent, pendingReadNotice, retainedSourceNotice, ownershipNotice, createOwnershipActions } from "./desktopService";
 import { createApprovalOptIn } from "../ui/screens/settings/approval-opt-in";
 import { emptyBatch, isEmptyBatch, type DesktopService, type NotificationOwnership } from "../types";
 import { normalize } from "../bridge";
@@ -9,6 +9,17 @@ export const serviceView = (patch: Partial<DesktopService> = {}): DesktopService
   automatic_approvals: null, details_available: false, code: "background_unready", ...patch,
 });
 describe("desktop service presentation", () => {
+  it("shows deferred or unconfirmed migration without changing connected readiness", () => {
+    const report = { required: true, complete: false, running: false, code: "retained_import_handoff_busy", phase: "not_committed" };
+    const service = createDesktopService();
+    service.apply(serviceView({ background: { fleet: { ready: true, code: "ready" } }, retained_source_import: report }));
+    expect(retainedSourceNotice(service.state())).toContain("deferred while background work is running");
+    expect(service.ready("fleet")).toBe(true);
+    expect(retainedSourceNotice(serviceView({ retained_source_import: { ...report, code: "retained_import_source_kept_for_review", phase: "quarantined" } }))).toContain("needs review");
+    expect(retainedSourceNotice(serviceView({ retained_source_import: { ...report, complete: true, code: "retained_import_result_unavailable", phase: "published" } }))).toContain("needs review");
+    expect(retainedSourceNotice(serviceView({ retained_source_import: { ...report, complete: true, code: "retained_import_staged", phase: "published" } }))).toBe("");
+    expect(retainedSourceNotice(serviceView({ retained_source_import: { ...report, required: false } }))).toBe("");
+  });
   it("shows blocked read transfer and its existing Retry path until durable completion", () => {
     expect(pendingReadNotice(undefined)).toBe("");
     const pending = { required: true, complete: false, running: true, code: "pending_read_import_waiting", through: 0, superseded: 0, delivered: false as const };

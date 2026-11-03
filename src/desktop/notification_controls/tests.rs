@@ -350,7 +350,7 @@ fn schema_fifteen_migration_is_atomic_and_creates_no_writer_permission() {
     };
     drop(f.store);
     let db = Connection::open(location.root.join("state.sqlite3")).unwrap();
-    db.execute_batch("DROP TABLE desktop_notification_preferences_requests; DROP TABLE desktop_notification_preferences;
+    db.execute_batch("DROP TABLE desktop_creation_clones; DROP TABLE desktop_creation_clone_budget; DROP TABLE desktop_notification_preferences_requests; DROP TABLE desktop_notification_preferences;
         CREATE TABLE desktop_notification_preferences(fixture TEXT); INSERT INTO desktop_notification_preferences VALUES('retained'); PRAGMA user_version=15;").unwrap();
     assert!(Store::open(&location, &id()).is_err());
     assert_eq!(

@@ -24,7 +24,7 @@ use zerus_client_core::{desktop::cache_maintenance as wire, download_cache::main
 use zerus_desktop_ledger::operations::cache as ledger;
 
 /// Assigned in merge order after the actual notification-controls migration.
-pub(super) const SCHEMA: i64 = 17;
+pub(super) const SCHEMA: i64 = 18;
 pub(super) fn migrate(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     ledger::migrate(tx)
 }

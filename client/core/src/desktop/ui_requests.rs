@@ -22,6 +22,9 @@ pub const LIFETIME: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
+    CreationClone {
+        intent: Box<super::creation_clone::Intent>,
+    },
     NotificationControl {
         scope: super::notification_control::Scope,
         control: super::notification_control::Command,
@@ -73,6 +76,7 @@ impl Request {
     }
     pub fn id(&self) -> &str {
         match self {
+            Self::CreationClone { intent } => &intent.clone_request_id,
             Self::NotificationControl { control, .. } => control.request_id(),
             Self::ActivationWait { request_id }
             | Self::DesktopOwnership { request_id, .. }
@@ -84,6 +88,7 @@ impl Request {
     }
     pub fn operation(&self) -> &'static str {
         match self {
+            Self::CreationClone { .. } => "creation_clone",
             Self::NotificationControl { control, .. } => control.operation(),
             Self::DesktopOwnership { .. } => "desktop_ownership",
             Self::ImportPendingReads { .. } => "import_pending_reads",
@@ -95,6 +100,7 @@ impl Request {
     }
     fn valid(&self) -> bool {
         match self {
+            Self::CreationClone { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::NotificationControl { scope, control } => scope.valid() && control.valid(),
             Self::DesktopOwnership {
                 journal, revision, ..
@@ -219,7 +225,10 @@ impl Cache {
             if ownership_mode != Some(action.mode()) {
                 return Err(io::ErrorKind::PermissionDenied.into());
             }
-        } else if matches!(envelope.request, Request::CacheMaintenance { .. }) {
+        } else if matches!(
+            envelope.request,
+            Request::CacheMaintenance { .. } | Request::CreationClone { .. }
+        ) {
             if ownership_mode != Some(super::ownership::Mode::Service) {
                 return Err(io::ErrorKind::PermissionDenied.into());
             }
@@ -344,6 +353,14 @@ impl Responder {
                     return Err(io::ErrorKind::PermissionDenied.into());
                 }
                 mode
+            }
+            Request::CreationClone { intent } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
+                    || self.configuration.get() != Some(&intent.scope.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
             }
             Request::DesktopOwnership { action, .. } => {
                 let mode = self.ownership_mode.get().copied();
@@ -636,6 +653,31 @@ mod tests {
         *ordinary.0.child.lock().unwrap() = Some((24, "synthetic-birth".into()));
         let value = serde_json::to_value(cache.evidence(&id(2)).unwrap()).unwrap();
         assert!(value.get("ownership_mode").is_none());
+    }
+
+    #[test]
+    fn creation_evidence_requires_cached_service_mode_and_exact_native_checkpoint() {
+        use crate::desktop::ownership::Mode;
+        let cache = Cache::default();
+        let mut value = envelope(1);
+        value.request = Request::CreationClone {
+            intent: Box::new(crate::desktop::creation_clone::test_intent()),
+        };
+        assert!(cache.prepare(value.clone()).is_err());
+        assert!(cache
+            .prepare_with_mode(value.clone(), Some(Mode::Native))
+            .is_err());
+        let slot = cache.prepare_with_mode(value, Some(Mode::Service)).unwrap();
+        *slot.0.child.lock().unwrap() = Some((23, "synthetic-birth".into()));
+        let evidence = cache.evidence(&id(1)).unwrap();
+        assert_eq!(evidence.ownership_mode, Some(Mode::Service));
+        assert_eq!(evidence.request_id, slot.envelope().request.id());
+        assert_eq!(evidence.fingerprint, slot.envelope().request.fingerprint());
+        for field in ["mode", "confirmed", "role", "execution_consent"] {
+            let mut request = serde_json::to_value(&slot.envelope().request).unwrap();
+            request[field] = true.into();
+            assert!(serde_json::from_value::<Request>(request).is_err());
+        }
     }
 
     #[test]

@@ -412,10 +412,16 @@ impl Host {
             "explicit descendant gate"
         );
         wait(|| self.weak.upgrade().is_none());
-        assert!(matches!(
-            custody::probe(&self.location, &self.record()),
-            custody::Observation::Released { .. }
-        ));
+        self.wait_for_kernel_release(|_| ());
+    }
+    fn wait_for_kernel_release(&self, mut observe: impl FnMut(&custody::Observation)) {
+        // Weak::upgrade can fail before the last Arc's File destructor closes
+        // its descriptor. Only the exact existing kernel lock proves release.
+        wait(|| {
+            let observation = custody::probe(&self.location, &self.record());
+            observe(&observation);
+            matches!(observation, custody::Observation::Released { .. })
+        });
     }
 }
 
@@ -553,6 +559,54 @@ fn each_real_last_pipe_keeps_custody_and_sql_after_the_runner_returns() {
         assert_eq!(attempt(&host.store.lock().unwrap().db).0, "unknown");
         println!("OWNED PIPE {mode}: actual last resource, exact descendant exit and kernel/SQL release; Unknown unchanged");
     }
+}
+
+#[test]
+fn a_released_weak_reference_still_waits_for_the_exact_kernel_descriptor() {
+    if !isolated("a_released_weak_reference_still_waits_for_the_exact_kernel_descriptor") {
+        return;
+    }
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let mut host = Host::new(false);
+    // Duplicate the SAME open-file description without keeping its Arc alive.
+    // This makes the last-Arc -> descriptor-close ordering deterministic.
+    // SAFETY: the live inherited-lock descriptor and duplication arguments are valid.
+    let fd = unsafe {
+        libc::fcntl(
+            host.lock.as_ref().unwrap().as_raw_fd(),
+            libc::F_DUPFD_CLOEXEC,
+            3,
+        )
+    };
+    assert!(fd >= 0);
+    // SAFETY: fcntl returned this test's one new owned descriptor.
+    let retained = unsafe { fs::File::from_raw_fd(fd) };
+    assert!(host.run("normal", false, false).unwrap().is_ok());
+    wait(|| host.weak.upgrade().is_none());
+    host.held();
+    let (observed, receive) = std::sync::mpsc::sync_channel(1);
+    let (release, wait_release) = std::sync::mpsc::sync_channel(1);
+    let worker = thread::spawn(move || {
+        let mut first = true;
+        host.wait_for_kernel_release(|observation| {
+            if first {
+                assert!(matches!(observation, custody::Observation::Held));
+                observed.send(()).unwrap();
+                wait_release.recv_timeout(Duration::from_secs(8)).unwrap();
+                first = false;
+            }
+        });
+        host
+    });
+    receive.recv_timeout(Duration::from_secs(8)).unwrap();
+    assert!(!worker.is_finished());
+    drop(retained); // The kernel can now release the original description.
+    release.send(()).unwrap();
+    let host = worker.join().unwrap();
+    held(&host.store.lock().unwrap().db); // No test probe commits SQL drain.
+    host.recover();
+    host.unchanged();
+    assert_eq!(attempt(&host.store.lock().unwrap().db).0, "submitted");
 }
 
 #[test]

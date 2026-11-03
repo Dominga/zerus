@@ -7,6 +7,7 @@ mod cache_maintenance;
 mod catalog_read;
 mod catalog_relay;
 mod counts;
+mod creation_clone;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod custody;
 mod delivery;
@@ -180,26 +181,28 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                 Ok(())
             }
             ["revoke-hold", "--json", "--request-id", id] => {
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                 {
                     revoke::hold::cli(config, &location, id)
                 }
-                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
                 {
                     let _ = id;
-                    anyhow::bail!("desktop revoke hold is supported on Linux and macOS only")
+                    anyhow::bail!(
+                        "desktop revoke hold is supported on Linux, macOS and Windows only"
+                    )
                 }
             }
             ["registration", "--json", "--background"] => {
                 ensure!(
-                    cfg!(target_os = "linux"),
-                    "background registration switching is currently supported on Linux only"
+                    cfg!(any(target_os = "linux", target_os = "macos")),
+                    "background registration switching is currently supported on Linux and macOS"
                 );
                 println!("{}", registration::preview_mode(config, &location, true)?);
                 Ok(())
             }
             ["registration", "mode-check", "--json"] => {
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                 {
                     let scope = ui_authority::Scope::new(config, &location);
                     let source = ui_authority::registration::caller(&scope)?;
@@ -209,9 +212,9 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                     );
                     Ok(())
                 }
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
                 anyhow::bail!(
-                    "desktop registration mode checks are currently supported on Linux only"
+                    "desktop registration mode checks are supported on Linux, macOS and Windows only"
                 )
             }
             ["registration", operation @ ("install" | "remove" | "status"), "--json"] => {
@@ -458,6 +461,7 @@ fn projection(
 }
 
 enum Event {
+    ImportOwner(String, mpsc::SyncSender<import_evidence::held::Loan>),
     Command(Hello, Arc<Queue>, Option<Box<ui_authority::Authorized>>),
     FeedOpen(Hello, mpsc::SyncSender<feed::Opened>),
     FeedData(feed::Data),
@@ -637,6 +641,27 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
             } else {
                 Duration::from_millis(200)
             }) {
+                Ok(Event::ImportOwner(configuration, reply)) => {
+                    seq += 1;
+                    let owner = if configuration == location.configuration {
+                        background
+                            .as_ref()
+                            .map(|runtime| runtime.publication_owner(&store))
+                            .unwrap_or(Ok(None))
+                    } else {
+                        Ok(None)
+                    };
+                    // The initially empty one-shot never blocks the actor. A
+                    // dropped caller/shutdown drops the original owner loan.
+                    // This actor never claims the stage. A failed owner query
+                    // is a definite no-job outcome for this request, not an
+                    // unknown filesystem publication.
+                    let _ = reply.try_send(import_evidence::held::Loan {
+                        owner: owner.unwrap_or(None),
+                        epoch: epoch.clone(),
+                        seq,
+                    });
+                }
                 Ok(Event::Command(hello, queue, authority)) => {
                     let mut value = projection(
                         &location,
@@ -835,6 +860,21 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                     json!({"request_id":hello.request.as_ref().unwrap()["request_id"],"accepted":false,"code":"details_unavailable"})
                                 }
                             }
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "creation_clone_result")
+                        {
+                            creation_clone::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "creation_clone")
+                        {
+                            frontend_refused(
+                                hello.request.as_ref(),
+                                "frontend_authentication_required",
+                            )
                         } else if hello.request.as_ref().is_some_and(|v| {
                             matches!(
                                 v["op"].as_str(),
@@ -1127,6 +1167,12 @@ fn client(
     #[cfg(windows)]
     transport::authenticate(&stream)?;
     let hello: Hello = serde_json::from_slice(&bytes).context("invalid desktop hello")?;
+    if hello.op == import_evidence::held::OP {
+        // The finalizer's Session owns the only original connection handle;
+        // its stream cleanup precedes release of the runtime Owner loan.
+        drop(reader);
+        return import_evidence::held::client(stream, hello, send, stopped, location);
+    }
     ensure!(!stopped.load(Ordering::SeqCst), "desktop is stopping");
     if hello.op == "feed" {
         return feed::client(stream, reader, hello, send, stopped, ingress);
@@ -1244,7 +1290,9 @@ fn exchange(location: &Location, op: &str, request: Option<Value>) -> Result<Opt
     };
     // Revocation includes a bounded SQLite busy wait and durable filesystem I/O.
     // A timeout remains an unknown result, never permission to start Qt.
-    if revoking || op == "frontend_request" {
+    if op == import_evidence::held::OP {
+        stream.set_read_timeout(Some(import_evidence::TOTAL))?;
+    } else if revoking || op == "frontend_request" {
         stream.set_read_timeout(Some(if activation_wait {
             zerus_client_core::desktop::activation::CLIENT_WAIT
         } else {

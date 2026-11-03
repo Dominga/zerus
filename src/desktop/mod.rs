@@ -486,9 +486,11 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
         }
         location.prepare()?;
         let lock = Arc::new(location.lock()?);
-        let listener = Arc::new(Listener::bind(&location)?);
         let epoch = uuid::Uuid::new_v4().to_string();
         let store = Store::open(&location, &epoch)?;
+        // A status deadline must not start while startup still owns the actor
+        // for migrations/recovery. Publish only once that work has completed.
+        let listener = Arc::new(Listener::bind(&location)?);
         Ok((signals, lock, listener, epoch, store))
     })()
     .context(StartupRefused)?;

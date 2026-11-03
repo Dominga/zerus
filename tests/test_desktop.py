@@ -682,6 +682,49 @@ finally:
         self.cli('--dry-run', 'desktop', 'serve', ok=False)
         self.assertFalse((self.root / 'unexpected-tool').exists())
 
+    @unittest.skipUnless(os.name == 'posix', 'Unix endpoint publication ordering')
+    def test_status_does_not_connect_to_a_service_waiting_for_its_schema_transaction(self):
+        import fcntl
+        process, _ = self.serve()
+        self.stop(process)
+        database = self.desktop / 'state.sqlite3'
+        with closing(sqlite3.connect(database)) as db:
+            # Rebuild the real predecessor so startup must take a write
+            # transaction. Hold it until the read-only readiness probe returns.
+            db.executescript('DROP TRIGGER desktop_cache_effect_monotone; DROP TRIGGER desktop_cache_kept_original; '
+                             'ALTER TABLE desktop_cache_operations DROP COLUMN effect_started; '
+                             'ALTER TABLE desktop_cache_operations DROP COLUMN kept_receipt; PRAGMA user_version=18;')
+            db.execute('BEGIN IMMEDIATE')
+            process = subprocess.Popen([str(HGS), 'desktop', 'serve'], env=self.env,
+                                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, text=True)
+            self.addCleanup(process.stdout.close)
+            self.addCleanup(process.stderr.close)
+            self.addCleanup(self.stop, process)
+            try:
+                deadline = time.monotonic() + 3
+                with (self.desktop / 'owner.lock').open('r+b') as owner:
+                    while True:
+                        self.assertIsNone(process.poll(), 'original startup exited before owner acquisition')
+                        try:
+                            fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        except BlockingIOError:
+                            break
+                        fcntl.flock(owner, fcntl.LOCK_UN)
+                        self.assertLess(time.monotonic(), deadline, 'original startup did not acquire its owner')
+                        time.sleep(0.005)
+                status = self.cli('desktop', 'status', '--json')
+                self.assertFalse(status['running'])
+                self.assertIsNone(process.poll())
+                self.assertFalse((self.desktop / 'service.sock').exists())
+            finally:
+                db.rollback()
+        deadline = time.monotonic() + 5
+        while not self.cli('desktop', 'status', '--json')['running']:
+            self.assertIsNone(process.poll(), 'original startup exited after releasing the schema transaction')
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+
     @unittest.skipIf(os.name == 'nt', 'Windows preview requires an installed stable CLI')
     def test_registration_preview_preserves_selected_paths_without_installing(self):
         preview = self.cli('desktop', 'registration', '--json')

@@ -86,6 +86,7 @@ export function createActivity(port: ActivityPort) {
   let span = OLDER_SPAN;
   let olderFrom: number | undefined;
   let olderTimer: ReturnType<typeof setTimeout> | undefined;
+  let subscribed: FollowTarget | undefined;
   // One display-only bridge across a run change; routing always uses target().
   let resuming: { conversation: string; previous: Map<string, ActivityEvent>; incoming: Map<string, ActivityEvent>; page: boolean; confirmed: boolean } | undefined;
 
@@ -142,8 +143,8 @@ export function createActivity(port: ActivityPort) {
     conversation_id: t.conversationId, after, tail: TAIL,
   });
 
-  /** Follows one session (the selected one); following another unfollows the previous. */
-  function follow(next: FollowTarget | undefined) {
+  /** Move routing now; subscribe after the native composer binds this run's key. */
+  function follow(next: FollowTarget | undefined, opened?: Promise<void>) {
     const prev = target();
     if (prev?.id === next?.id) return;
     const conversation = summary()?.conversation_id || prev?.conversationId;
@@ -153,6 +154,7 @@ export function createActivity(port: ActivityPort) {
     // incoming page into the retained conversation or its resume cursor.
     const retained = resuming && !resuming.confirmed ? resuming.previous : byKey;
     const after = continuing ? newestSeq(retained) : undefined;
+    subscribed = undefined;
     if (prev) void port.unfollow(prev.computer, prev.key).catch(() => {});
     batch(() => {
       if (continuing) {
@@ -172,9 +174,17 @@ export function createActivity(port: ActivityPort) {
       }
       setTarget(next);
     });
-    if (next) void port.follow(request(next, after)).catch((reason) => {
-      if (target() === next) batch(() => { setError(String(reason)); setLoaded(true); });
-    });
+    const subscribe = () => {
+      if (!next || target() !== next) return;
+      subscribed = next;
+      void port.follow(request(next, after)).catch((reason) => {
+        if (target() === next) batch(() => { setError(String(reason)); setLoaded(true); });
+      });
+    };
+    // A failed composer does not prevent read-only Activity. The await orders
+    // subscription delivery only; it supplies no native readiness or authority.
+    if (opened) void opened.then(subscribe, subscribe);
+    else subscribe();
   }
 
   /** The finish of an older read: it either moved the oldest event back or doubles the reach. */
@@ -195,7 +205,7 @@ export function createActivity(port: ActivityPort) {
   function loadOlder() {
     const t = target();
     const oldest = oldestSeq();
-    if (!t || loadingOlder() || olderDone() || oldest === undefined) return;
+    if (!t || subscribed !== t || loadingOlder() || olderDone() || oldest === undefined) return;
     if (oldest <= 1) { setOlderDone(true); return; }
     olderFrom = oldest;
     setLoadingOlder(true);

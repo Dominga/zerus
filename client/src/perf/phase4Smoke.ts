@@ -1025,6 +1025,47 @@ async function startPollStep() {
     throw new Error("the queued send needed a Terminal view switch");
 }
 
+async function resumeStatusStep() {
+  const row = await select(REVIEW);
+  const open = composer.open;
+  const follow = bridge.activityPort.follow;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let held = false, early = false, released = false;
+  composer.open = async (session) => {
+    if (session?.key.endsWith("-resumed")) { held = true; await gate; }
+    return open(session);
+  };
+  bridge.activityPort.follow = (request) => {
+    if (request.name === REVIEW && request.run_id?.endsWith("-resumed") && !released) early = true;
+    return follow(request);
+  };
+  try {
+    await perform(row, { kind: "resume" });
+    await waitCall("resume", 1);
+    await invoke("smoke_resume", { key: row.catalogKey });
+    await until(() => held, 5000, "the resumed composer did not open");
+    // Under the old ordering, ensure the sole ready frame has actually been
+    // consumed while native still follows the old key before releasing open.
+    if (early) await until(() => activity.summary()?.run_id === `${row.runId}-resumed`, 5000, "the early frame did not arrive");
+    released = true;
+    release();
+    await until(() => activity.summary()?.run_id === `${row.runId}-resumed` && composer.view()?.loaded === true
+      && composer.view()?.block_reason === null && composer.view()?.session_blocks_input === false,
+    7000, "the no-message composer stayed starting after resume").catch((error) => {
+      const view = composer.view();
+      throw new Error(`${error.message}: ${JSON.stringify({ early, status: view?.session_status, block: view?.block_reason })}`);
+    });
+    if (early) throw new Error("the first new-run frame raced ahead of the native composer binding");
+    if ((await calls("send")).length || (await calls("compact-context")).length || (await calls("a")).length || detailTab() !== "activity")
+      throw new Error("resuming without a message needed an effect or a Terminal switch");
+  } finally {
+    release();
+    composer.open = open;
+    bridge.activityPort.follow = follow;
+  }
+}
+
 async function processesStep() {
   await select(API);
   await setSetting("processes/enabled", true);
@@ -1285,6 +1326,7 @@ export async function phase4Smoke(allowed: boolean, smokeFile?: string) {
     ["start", startStep],
     ["start-poll", startPollStep],
     ["resume-history", resumeHistoryStep],
+    ["resume-status", resumeStatusStep],
     ["processes", processesStep],
     ["preview", previewStep],
     ["question", questionStep],
@@ -1312,7 +1354,7 @@ export async function phase4Smoke(allowed: boolean, smokeFile?: string) {
     const only = new URLSearchParams(location.search).get("phase4-only");
     if (only && !steps.some(([name]) => name === only)) throw new Error("Unknown phase4 step");
     // These steps need separate fixture setups and run individually.
-    for (const [name, run] of steps.filter(([name]) => only ? name === only : !["start-poll", "resume-history"].includes(name))) {
+    for (const [name, run] of steps.filter(([name]) => only ? name === only : !["start-poll", "resume-history", "resume-status"].includes(name))) {
       current = name;
       await run();
       log(`phase4-smoke ${name}: done`);

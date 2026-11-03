@@ -147,6 +147,12 @@ def main():
         for value in config["resume_ready"].values():
             value["phase"] = "starting"
         config["finish_compaction"] = True
+    if args.only == "resume-status":
+        # Only the followed stream knows readiness; a fallback inspection
+        # cannot accidentally conceal a missed first frame in this scenario.
+        config["resume_inspect_ready"] = copy.deepcopy(config["resume_ready"])
+        for value in config["resume_inspect_ready"].values():
+            value["phase"] = "starting"
     for index in range(150):
         config["attachments"][f"req-bottom-{index}"] = {"name": "late-image.png", "mime": "image/png", "data_base64": PNG}
     if args.only == "activity-bottom":

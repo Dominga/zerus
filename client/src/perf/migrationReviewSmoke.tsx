@@ -4,10 +4,12 @@ import { render } from "solid-js/web";
 import { desktopService } from "../store/desktopService";
 import { DesktopServiceStatus } from "../ui/components/DesktopServiceStatus";
 import type { DesktopService } from "../types";
+import { applySkin, skin } from "../skin/runtime";
 import "../ui/styles/base.css";
 import "../ui/styles/app.css";
 
 const failures: string[] = [];
+const layouts: unknown[] = [];
 const check = (condition: unknown, message: string) => { if (!condition) failures.push(message); };
 let calls = 0;
 Object.assign(window, { __TAURI_INTERNALS__: { invoke: () => { calls++; throw Error("Review attempted native IPC"); } } });
@@ -16,11 +18,17 @@ const state: DesktopService = { connected: true, epoch: "fixture", generation: 1
   background: Object.fromEntries(["fleet", "presence", "reads", "attention", "approvals"].map((key) => [key, { ready: true, code: "ready" }])),
   attention_counts: null, automatic_approvals: false, details_available: true, code: "", retained_source_import: report };
 desktopService.apply(state);
+applySkin(skin());
 const root = document.getElementById("root")!;
-const dispose = render(() => <DesktopServiceStatus />, root);
+const dispose = render(() => <div class="app" style={{ width: "900px" }}><nav class="rail" /><main class="page">Synthetic page</main>
+  <footer class="statusbar"><span>this computer: reconnecting (attempt 2); build-validation-01: reconnecting (attempt 2); studio-workstation-02: reconnecting (attempt 2); workspace-verification-03: reconnecting (attempt 2)</span><DesktopServiceStatus />
+    <span class="grow" /><span class="session-usage-strip" style={{ width: "200px" }}>Synthetic account usage</span></footer></div>, root);
 const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 30));
 async function run() {
   await settle();
+  const page = root.querySelector("main")!, footer = root.querySelector("footer")!;
+  const geometry = () => [page.getBoundingClientRect().y, page.getBoundingClientRect().height, footer.getBoundingClientRect().height];
+  const initial = geometry();
   const review = root.querySelector<HTMLButtonElement>('button[aria-label="Review migration report"]');
   check(review, "banner has no Review action");
   review!.focus(); review!.click(); await settle();
@@ -55,8 +63,44 @@ async function run() {
   dialog?.dispatchEvent(new Event("cancel", { cancelable: true })); await settle(); await settle();
   check(!root.querySelector("dialog") && document.activeElement === review, "Escape/cancel did not close and restore focus");
   check(calls === 0 && desktopService.ready("fleet"), "Review or dismissal changed native state");
+  const ownership = { pending: false, running: false, code: "", request_id: null,
+    status: { abi: "fixture", configuration: "fixture", journal: null, revision: 1, state: "revoked" as const, rearm_required: true, request_id: null, owner_epoch: null, identity_current: true } };
+  const baseline: DesktopService = { ...state, retained_source_import: undefined };
+  for (const [patch, expected] of [
+    [{}, []],
+    [{ code: "background_unready" }, ["Retry now"]],
+    [{ notification_ownership: ownership }, ["Resume background work"]],
+    [{ notification_ownership: { ...ownership, pending: true } }, ["Check result"]],
+    [{ code: "background_unready", retained_source_import: report, notification_ownership: ownership }, ["Review", "Retry now", "Resume background work"]],
+  ] as const) {
+    desktopService.apply({ ...baseline, ...patch }); await settle();
+    const actions = [...footer.querySelectorAll("button")].map((b) => b.textContent);
+    const serviceGroup = footer.querySelector<HTMLElement>(".desktop-service-status")!;
+    layouts.push({ actions, footer: footer.getBoundingClientRect().width, machine: footer.firstElementChild!.getBoundingClientRect().width,
+      service: serviceGroup.getBoundingClientRect().width, shrink: getComputedStyle(serviceGroup).flexShrink,
+      buttons: [...footer.querySelectorAll("button")].map((b) => [b.textContent, b.getBoundingClientRect().right]) });
+    check(JSON.stringify(actions) === JSON.stringify(expected), `wrong footer actions: ${JSON.stringify(actions)}`);
+    check(!page.querySelector(".desktop-service-status") && footer.querySelector('[role="status"]'), "service status escaped the footer");
+    check(JSON.stringify(geometry()) === JSON.stringify(initial) && initial[2] === 28, "service status changed the page or footer geometry");
+    check(footer.querySelector(".service-summary")?.getAttribute("title"), "full service explanation is unavailable");
+    for (const button of footer.querySelectorAll("button")) {
+      const box = button.getBoundingClientRect(), frame = footer.getBoundingClientRect(), group = button.closest(".desktop-service-status")!.getBoundingClientRect();
+      check(box.left >= frame.left && box.right <= frame.right && box.right <= 900, `footer action overflowed at 900px: ${button.textContent} right=${box.right}`);
+      check(box.left >= group.left && box.right <= group.right, `footer action overflowed its group: ${button.textContent} right=${box.right} group=${group.right}`);
+      check(button.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2)), `footer action is covered: ${button.textContent}`);
+    }
+    const summary = footer.querySelector<HTMLElement>(".service-summary")!;
+    summary.focus(); await settle();
+    const tooltip = document.querySelector<HTMLElement>('[role="tooltip"]');
+    check(tooltip?.textContent === summary.getAttribute("title") && tooltip?.getBoundingClientRect().height, "keyboard focus did not disclose the full status reasons");
+    check(getComputedStyle(summary).outlineStyle !== "none", "service status has no visible focus indicator");
+    summary.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); await settle();
+    check(!document.querySelector('[role="tooltip"]') && document.activeElement === summary, "Escape did not dismiss the tooltip while preserving focus");
+    summary.blur();
+  }
+  check(calls === 0, "status presentation attempted native IPC");
   dispose();
-  const result = { failures, calls, cases: ["Qt refusal detail", "read-only review", "unknown no-replay guidance", "close/cancel focus"] };
+  const result = { failures, calls, layouts, cases: ["Qt refusal detail", "read-only review", "unknown no-replay guidance", "close/cancel focus", "healthy/no retry", "not-ready/retry", "rearm/resume", "pending/check", "fixed page/footer geometry", "900px action bounds", "keyboard status reasons and Escape"] };
   (window as unknown as { webkit: { messageHandlers: { result: { postMessage(text: string): void } } } }).webkit.messageHandlers.result.postMessage(JSON.stringify(result));
 }
 void run().catch((error) => {

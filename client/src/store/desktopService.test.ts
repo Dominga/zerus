@@ -85,6 +85,28 @@ describe("desktop service presentation", () => {
     expect(retainedSourceDetails(unavailable)!.worktreeCache?.next).toContain("Restart Zerus");
   });
 
+  it("keeps historical folder-cache publication separate from live persistence and grants", () => {
+    const base = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
+    const report = { required: true, complete: false, running: false, code: "worktree_cache_import_before_record", phase: "before_record" };
+    const view = (patch = {}) => serviceView({ retained_source_import: { ...base, worktree_cache_report: { ...report, ...patch } } });
+    const state = view(), before = structuredClone(state);
+    expect(retainedSourceNotice(state)).toContain("folder catalog report is deferred");
+    expect(retainedSourceDetails(state)!.worktreeCacheReport?.reason).toContain("not sent because local preparation failed");
+    expect(retainedSourceNotice(view({ running: true }))).toContain("Preparing the historical folder catalog report");
+    const unknown = view({ phase: "unknown" });
+    expect(retainedSourceNotice(unknown)).toContain("never resent");
+    expect(retainedSourceDetails(unknown)!.worktreeCacheReport?.next).toContain("checks the original report");
+    const published = view({ complete: true, phase: "published", code: "worktree_cache_import_staged" });
+    expect(retainedSourceNotice(published)).toBe("");
+    expect(retainedSourceDetails(published)!.worktreeCacheReport?.next).toContain("does not verify today's checkouts");
+    const paused = serviceView({ retained_source_import: { ...state.retained_source_import!, worktree_cache_capture: { code: "worktree_cache_source_changed", paused: true, capture_id: "original" } } });
+    const details = retainedSourceDetails(paused)!;
+    expect(details.worktreeCache?.code).toBe("worktree_cache_source_changed");
+    expect(details.worktreeCacheReport?.code).toBe("worktree_cache_import_before_record");
+    expect(state).toEqual(before); expect(state.connected).toBe(true);
+    expect(state.pending_read_import).toBeUndefined();
+  });
+
   it("reviews the actual migration reason and gives a read-only next step", () => {
     const report = { required: true, complete: false, running: false, code: "retained_import_qt_unavailable", phase: null };
     const state = serviceView({ retained_source_import: report, background: { fleet: { ready: true, code: "ready" } } });

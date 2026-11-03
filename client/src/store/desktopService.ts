@@ -64,6 +64,12 @@ export function retainedSourceNotice(state: DesktopService | undefined): string 
     if (["creations_import_waiting", "creations_import_source_resources_pending", "creations_import_handoff_busy", "creations_import_before_record"].includes(creations.code)) return tr("The saved creation report is deferred. Your sessions remain available; Retry keeps the original report identity.");
     return tr("The saved creation report needs review. An unconfirmed publication will only be looked up, never resent.");
   }
+  const cache = report?.worktree_cache_report;
+  if (cache?.required && !cache.complete) {
+    if (cache.running) return tr("Preparing the historical folder catalog report. Your sessions remain available.");
+    if (cache.phase !== "unknown" && ["worktree_cache_import_waiting", "worktree_cache_import_source_resources_pending", "worktree_cache_import_handoff_busy", "worktree_cache_import_before_record"].includes(cache.code)) return tr("The historical folder catalog report is deferred. Retry keeps the original report identity.");
+    return tr("The historical folder catalog report needs review. An unconfirmed publication will only be looked up, never resent.");
+  }
   if (!report?.required || !report.code || report.code === "retained_import_staged") return "";
   if (report.running) return tr("Preparing the migration report. Your sessions remain available.");
   if (report.code === "retained_import_handoff_busy") return tr("The migration report is deferred while background work is running.");
@@ -74,7 +80,7 @@ export function retainedSourceNotice(state: DesktopService | undefined): string 
 const DRAFTS_RECORDED = ["draft_capture_waiting", "draft_capture_captured", "draft_capture_not_applicable"];
 
 export interface MigrationReportDetail { reason: string; next: string; code: string; phase: string | null }
-export type MigrationReportDetails = Partial<Record<"settings" | "creations" | "capture" | "localReads" | "localReadsReport" | "drafts" | "worktreeCache", MigrationReportDetail>>;
+export type MigrationReportDetails = Partial<Record<"settings" | "creations" | "capture" | "localReads" | "localReadsReport" | "drafts" | "worktreeCache" | "worktreeCacheReport", MigrationReportDetail>>;
 
 /** Independent native report reasons. Reviewing never retries or publishes. */
 export function retainedSourceDetails(state: DesktopService | undefined): MigrationReportDetails | undefined {
@@ -118,6 +124,30 @@ export function retainedSourceDetails(state: DesktopService | undefined): Migrat
       next = tr("Keep the original settings and report for review before attempting another migration.");
     }
     details.localReadsReport = { reason, next, code: local.code, phase: local.phase };
+  }
+  const cache = report.worktree_cache_report;
+  if (cache?.required) {
+    let reason: string, next: string;
+    if (cache.phase === "unknown" || ["worktree_cache_import_original_result_unconfirmed", "worktree_cache_import_result_unavailable"].includes(cache.code)) {
+      reason = tr("The original migration report result is unconfirmed.");
+      next = tr("Retry checks the original report result. It does not publish another copy of an unconfirmed report.");
+    } else if (cache.running) {
+      reason = tr("Preparing the historical folder catalog report. Your sessions remain available.");
+      next = tr("Your sessions remain available while the report is prepared.");
+    } else if (cache.phase === "before_record" && cache.code === "worktree_cache_import_before_record") {
+      reason = tr("The historical folder catalog report was not sent because local preparation failed.");
+      next = tr("Check access to the original journal and the Zerus data folder, then use Retry. The original report identity is preserved.");
+    } else if (cache.complete) {
+      reason = tr("The migration report has been saved for review.");
+      next = tr("This historical folder catalog report does not verify today's checkouts or authorize worktree creation or cleanup.");
+    } else if (["worktree_cache_import_waiting", "worktree_cache_import_source_resources_pending", "worktree_cache_import_handoff_busy"].includes(cache.code)) {
+      reason = tr("The historical folder catalog report is deferred. Retry keeps the original report identity.");
+      next = tr("Wait for background work to finish, then retry.");
+    } else {
+      reason = tr("The historical folder catalog report needs review. An unconfirmed publication will only be looked up, never resent.");
+      next = tr("Keep the original settings and report for review before attempting another migration.");
+    }
+    details.worktreeCacheReport = { reason, next, code: cache.code, phase: cache.phase };
   }
   const capture = report.creations_capture;
   if (capture?.paused) details.capture = {

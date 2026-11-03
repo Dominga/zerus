@@ -20,24 +20,28 @@ const FILE: &str = "creations-retained-import-v1.json";
 pub enum Group {
     Creations,
     LocalReads,
+    WorktreeCache,
 }
 impl Group {
     pub fn scope(self) -> &'static str {
         match self {
             Self::Creations => SCOPE,
             Self::LocalReads => "next-local-read-marks-preload-v1",
+            Self::WorktreeCache => "next-worktree-cache-preload-v1",
         }
     }
     fn file(self) -> &'static str {
         match self {
             Self::Creations => FILE,
             Self::LocalReads => "local-read-retained-import-v1.json",
+            Self::WorktreeCache => "worktree-cache-retained-import-v1.json",
         }
     }
     fn lock(self) -> &'static str {
         match self {
             Self::Creations => "creations-retained-import-v1.lock",
             Self::LocalReads => "local-read-retained-import-v1.lock",
+            Self::WorktreeCache => "worktree-cache-retained-import-v1.lock",
         }
     }
 }
@@ -156,7 +160,12 @@ impl Record {
                     && (self.phase != Phase::NotCommitted || n == self.attempt)
             }),
             _ => false,
-        }) && [Group::Creations.scope(), Group::LocalReads.scope()].contains(&self.scope.as_str())
+        }) && [
+            Group::Creations.scope(),
+            Group::LocalReads.scope(),
+            Group::WorktreeCache.scope(),
+        ]
+        .contains(&self.scope.as_str())
             && digest(&self.configuration)
             && self.source.valid()
             && self.import_id == self.source.capture_id()

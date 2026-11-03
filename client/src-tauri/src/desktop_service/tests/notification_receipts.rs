@@ -279,6 +279,106 @@ fn an_unchecked_native_reply_never_reaches_the_service_projection() {
 }
 
 #[test]
+fn a_checked_old_conversation_receipt_cannot_mute_a_cleared_conversation_with_valid_preferences() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = fixture(json!({"notification_hold":true}));
+        let release = ReleaseFixtureGate(fixture.0.join("notification-release"));
+        let (service, pump, live, desk) = start(&fixture).await;
+        let path = fixture.0.join("hgs");
+        let target = target();
+        let projection = live.notification_projection(target.clone());
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            crate::actions::change_notifications_projected(
+                &path,
+                &target,
+                true,
+                Some(1),
+                projection,
+            )
+        });
+        eventually("old-conversation receipt is held", || {
+            fixture.0.join("notification-held").exists()
+        })
+        .await;
+
+        // /clear can retain the same run, name, provider and catalog key. Its
+        // new conversation has valid preferences of its own, so capability
+        // refusal cannot substitute for the explicit conversation guard.
+        let mut cleared = row(false, 1);
+        cleared["conversation_id"] = json!("cleared-conversation");
+        cleared["notification_preferences"]["conversation_id"] = json!("cleared-conversation");
+        publish(&fixture, &pump, cleared, 1).await;
+        assert!(pump.row("", "row").unwrap().shared_notifications);
+        drop(release);
+        assert!(
+            result.await.unwrap().is_ok(),
+            "the original native reply remains checked"
+        );
+        let current = pump.row("", "row").unwrap();
+        assert!(!current.muted);
+        assert_eq!(current.notification_revision, Some(1));
+        assert_eq!(
+            current.conversation_id.as_deref(),
+            Some("cleared-conversation")
+        );
+        assert!(current.shared_notifications);
+        assert_eq!(
+            current.notify.preferences.unwrap().suppressed,
+            preferences(false, 1)["suppressed"]
+        );
+        assert_eq!(desk.lock().unwrap().attention(), 1);
+        assert_eq!(mutation_count(&fixture), 1);
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn the_preference_index_stays_bounded_when_one_catalog_key_is_repeatedly_replaced() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = fixture(json!({}));
+        let (service, pump, _live, _desk) = start(&fixture).await;
+        assert_eq!(pump.notification_index_len(""), 1);
+        for version in 1..=12 {
+            let mut updated = row(false, version as i64 + 1);
+            if version > 6 {
+                let conversation = format!("conversation-{version}");
+                updated["conversation_id"] = json!(conversation);
+                updated["notification_preferences"]["conversation_id"] = json!(conversation);
+                updated["cmd"] = json!(if version % 2 == 0 { "claude" } else { "codex" });
+            }
+            publish(&fixture, &pump, updated, version).await;
+            assert_eq!(
+                pump.notification_index_len(""),
+                1,
+                "version {version}: at most one index entry per current row"
+            );
+        }
+        fs::write(fixture.0.join("notification-key"), "run:next").unwrap();
+        fs::write(fixture.0.join("notification-removed"), "row").unwrap();
+        let mut next = row(false, 20);
+        next["run_id"] = json!("next");
+        publish(&fixture, &pump, next, 13).await;
+        eventually("the replaced key is removed", || {
+            pump.row("", "row").is_none()
+        })
+        .await;
+        assert_eq!(
+            pump.notification_index_len(""),
+            1,
+            "removal leaves only the replacement row indexed"
+        );
+        assert_eq!(
+            mutation_count(&fixture),
+            0,
+            "projection never mutates notification preferences"
+        );
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
 fn conversation_preferences_survive_a_new_key_but_an_old_run_receipt_cannot_apply_to_it() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {

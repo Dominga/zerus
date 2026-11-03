@@ -198,6 +198,21 @@ impl Pump {
         }
     }
 
+    #[cfg(all(test, unix))]
+    pub(crate) fn notification_index_len(&self, computer: &str) -> usize {
+        self.lock()
+            .mirror
+            .computers
+            .get(computer)
+            .map_or(0, |rows| {
+                rows.notification_rows
+                    .values()
+                    .flat_map(|conversations| conversations.values())
+                    .map(BTreeSet::len)
+                    .sum()
+            })
+    }
+
     pub(crate) fn apply_notification_preferences(
         &self,
         receipt: &crate::desktop_service::NotificationReceipt,

@@ -587,3 +587,23 @@ fn a_receipt_whose_length_disagrees_with_its_parts_refuses() {
         assert_eq!(evidence(&folder.0), Evidence::Unreadable);
     }
 }
+
+/// The stat-only status agrees with the full read on every outcome it can
+/// see without the original's bytes.
+#[test]
+fn the_stat_only_status_follows_the_capture() {
+    let folder = Folder::new();
+    folder.plain("a.txt", b"a", 90_000);
+    assert_eq!(status(&folder.0), Evidence::None);
+    assert_eq!(ON.trim(&folder.0, 0, NOW).error, None);
+    assert_eq!(status(&folder.0), evidence(&folder.0));
+    assert!(matches!(status(&folder.0), Evidence::Captured(_)));
+    // Damage that keeps the length: both refuse to call it captured.
+    let (canonical, object, birth) = super::folder(&folder.0).unwrap();
+    let slot = slot(&canonical, &object, birth.as_deref());
+    let length = fs::metadata(slot.join("original.bin")).unwrap().len() as usize;
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    fs::write(slot.join("original.bin"), vec![b' '; length]).unwrap();
+    assert_eq!(status(&folder.0), Evidence::Unreadable);
+    assert_eq!(evidence(&folder.0), Evidence::Unreadable);
+}

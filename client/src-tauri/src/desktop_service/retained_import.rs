@@ -25,13 +25,22 @@ pub(crate) struct Inputs {
     /// The G3 drafts capture (zerus-5wmh.66.5.2.1.2): the Next draft store
     /// runs it as its first job; its status and Retry go through this report.
     pub(crate) drafts: Arc<zerus_client_core::migration::draft_preload::Capture>,
+    /// The configured download folder, whose G3 evidence
+    /// (zerus-5wmh.66.5.2.1.3) the report shows.
+    pub(crate) downloads: Option<Downloads>,
 }
+/// Resolves the configured download folder when the report is shown.
+pub(crate) type Downloads = Arc<dyn Fn() -> PathBuf + Send + Sync>;
+/// How long a shown download-folder status is reused: it is a few bounded
+/// stats, but the report is published on every service state change.
+const DOWNLOADS_FRESH: Duration = Duration::from_secs(5);
 impl Inputs {
     pub(crate) fn native(
         identifier: &str,
         replay: bool,
         data: PathBuf,
         settings: Settings,
+        downloads: Downloads,
     ) -> Option<Self> {
         (identifier == crate::identity::SWITCH_ID && !replay).then(|| Self {
             creations: zerus_client_core::migration::preload::Capture::new(data.clone()),
@@ -40,6 +49,7 @@ impl Inputs {
                 data.clone(),
             ),
             drafts: Arc::new(zerus_client_core::migration::draft_preload::Capture::native(&data)),
+            downloads: Some(downloads),
             data,
             settings,
             qt: QtStore::here(),
@@ -92,16 +102,31 @@ struct State {
 }
 pub(super) struct Report {
     inputs: Inputs,
+    /// The last download-folder status shown, and when.
+    downloads: Mutex<Option<(Instant, Value)>>,
     state: Mutex<State>,
     creations: Mutex<creations::CreationState>,
     local_reads: Mutex<creations::CreationState>,
     capture: Gate,
     work: Gate,
 }
+/// The download folder's G3 evidence by bounded stats only: evidence, never
+/// download, removal or cleanup consent.
+fn downloads_value(root: &std::path::Path) -> Value {
+    use zerus_client_core::download_cache::evidence::{status, Evidence};
+    let (code, capture_id) = match status(root) {
+        Evidence::None => ("download_capture_none", None),
+        Evidence::Captured(receipt) => ("download_capture_captured", Some(receipt.capture_id)),
+        Evidence::Unsupported => ("download_capture_unsupported", None),
+        Evidence::Unreadable => ("download_capture_unreadable", None),
+    };
+    json!({"code": code, "capture_id": capture_id})
+}
 impl Report {
     pub fn new(inputs: Inputs) -> Arc<Self> {
         Arc::new(Self {
             inputs,
+            downloads: Mutex::new(None),
             state: Mutex::new(State::default()),
             creations: Mutex::new(creations::CreationState::new(
                 migration::creation_report::Group::Creations,
@@ -142,9 +167,29 @@ impl Report {
     pub fn take_retry(&self) -> bool {
         std::mem::take(&mut self.state().retry_requested)
     }
+    /// The configured download folder's evidence, reused for
+    /// [`DOWNLOADS_FRESH`].
+    fn downloads_status(&self) -> Value {
+        let Some(folder) = &self.inputs.downloads else {
+            return Value::Null;
+        };
+        let mut shown = self
+            .downloads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some((at, value)) = shown.as_ref() {
+            if at.elapsed() < DOWNLOADS_FRESH {
+                return value.clone();
+            }
+        }
+        let value = downloads_value(&folder());
+        *shown = Some((Instant::now(), value.clone()));
+        value
+    }
     pub fn status(&self) -> Value {
+        let downloads = self.downloads_status();
         let state = self.state();
-        json!({"creations_report":self.group_status(migration::creation_report::Group::Creations),"local_reads_report":self.group_status(migration::creation_report::Group::LocalReads),"creations_capture":self.inputs.creations.status(),"local_read_capture":self.inputs.local_reads.status(),"drafts_capture":self.inputs.drafts.status(),"worktree_cache_capture":self.inputs.worktree_cache.status(),"scope":SCOPE,"running":state.running,"code":state.code,
+        json!({"creations_report":self.group_status(migration::creation_report::Group::Creations),"local_reads_report":self.group_status(migration::creation_report::Group::LocalReads),"creations_capture":self.inputs.creations.status(),"local_read_capture":self.inputs.local_reads.status(),"drafts_capture":self.inputs.drafts.status(),"downloads_capture":downloads,"worktree_cache_capture":self.inputs.worktree_cache.status(),"scope":SCOPE,"running":state.running,"code":state.code,
             "required":!state.not_applicable,
             "complete":state.stored.as_ref().is_some_and(|s| s.record.phase == Phase::Published),
             "import_id":state.stored.as_ref().map(|s|&s.record.import_id),

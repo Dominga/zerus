@@ -47,6 +47,7 @@ export function retainedSourceNotice(state: DesktopService | undefined): string 
   const report = state?.retained_source_import;
   const drafts = report?.drafts_capture;
   if (drafts && !drafts.writes) return tr("Drafts are not being saved because their earlier versions could not be recorded. Check the Zerus data folder, then retry.");
+  if (report?.downloads_capture?.code === "download_capture_unreadable") return tr("Changes to the downloaded files folder are refused because its earlier index record could not be verified. Existing files are kept.");
   if (report?.local_read_capture?.paused) return tr("Local read marks are paused while their original file is preserved. Review the migration report and retry.");
   const captureNotice = creationCaptureNotice(report);
   if (captureNotice) return captureNotice;
@@ -74,7 +75,7 @@ export function retainedSourceNotice(state: DesktopService | undefined): string 
 const DRAFTS_RECORDED = ["draft_capture_waiting", "draft_capture_captured", "draft_capture_not_applicable"];
 
 export interface MigrationReportDetail { reason: string; next: string; code: string; phase: string | null }
-export type MigrationReportDetails = Partial<Record<"settings" | "creations" | "capture" | "localReads" | "localReadsReport" | "drafts" | "worktreeCache", MigrationReportDetail>>;
+export type MigrationReportDetails = Partial<Record<"settings" | "creations" | "capture" | "localReads" | "localReadsReport" | "drafts" | "downloads" | "worktreeCache", MigrationReportDetail>>;
 
 /** Independent native report reasons. Reviewing never retries or publishes. */
 export function retainedSourceDetails(state: DesktopService | undefined): MigrationReportDetails | undefined {
@@ -141,6 +142,14 @@ export function retainedSourceDetails(state: DesktopService | undefined): Migrat
         ? tr("Retry imports the drafts from Qt. The earlier drafts stay unrecorded; Retry never records them later.")
         : tr("This part of the migration report stays incomplete. Retry never records the earlier drafts later."),
     code: drafts.code, phase: null,
+  };
+  // The download folder's evidence: shown only when it is incomplete. It is
+  // never consent to download, remove or clean up anything.
+  const downloads = report.downloads_capture;
+  if (downloads && ["download_capture_unsupported", "download_capture_unreadable"].includes(downloads.code)) details.downloads = {
+    reason: downloads.code === "download_capture_unsupported" ? tr("The downloaded files folder is on a network or removable location, so its earlier index is not recorded for the migration report. Downloads keep working.") : tr("Changes to the downloaded files folder are refused because its earlier index record could not be verified. Existing files are kept."),
+    next: downloads.code === "download_capture_unsupported" ? tr("This part of the migration report stays incomplete.") : tr("Check that the folder and its .zerus-files-preload-v1 folder belong to your user and are private. Nothing is recaptured or overwritten."),
+    code: downloads.code, phase: null,
   };
   const code = report.code;
   let reason: string, next: string;

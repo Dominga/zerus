@@ -46,6 +46,11 @@ impl Fixture {
                 None,
                 Vec::new(),
             )),
+            // A synthetic download folder under this fixture's root.
+            downloads: Some({
+                let folder = root.join("downloads");
+                Arc::new(move || folder.clone())
+            }),
             data: root.clone(),
             settings: Settings::open(settings_path, None),
             qt: Some(QtStore::Ini(qt)),
@@ -633,4 +638,27 @@ fn a_paused_draft_import_is_visible_and_the_report_retry_resumes_it() {
     assert_eq!(status["drafts_capture"]["code"], "draft_capture_too_large");
     assert_eq!(status["drafts_capture"]["paused"], false);
     assert!(next.join(drafts::IMPORT_MARKER).exists());
+}
+
+/// G3 downloads (zerus-5wmh.66.5.2.1.3): the report shows the configured
+/// folder's evidence, read by bounded stats only, never consent to change it.
+#[test]
+fn the_report_shows_the_download_folders_evidence() {
+    let f = Fixture::new("success");
+    assert_eq!(
+        f.report.status()["downloads_capture"]["code"],
+        "download_capture_none"
+    );
+    let f = Fixture::new("success");
+    let folder = f.root.join("downloads");
+    let writer = zerus_client_core::download_cache::Writer { evidence: true };
+    let part = zerus_client_core::download_cache::reserve(&folder).unwrap();
+    fs::write(part.path(), b"copy").unwrap();
+    writer.complete(part, "copy.txt", None, 1).unwrap();
+    let status = f.report.status();
+    assert_eq!(
+        status["downloads_capture"]["code"],
+        "download_capture_captured"
+    );
+    assert!(status["downloads_capture"]["capture_id"].is_string());
 }

@@ -169,6 +169,21 @@ describe("desktop service presentation", () => {
     }
     expect(paused.connected).toBe(true);
   });
+  it("shows the download folder's evidence only when it is incomplete", () => {
+    const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
+    const view = (code: string) => serviceView({ retained_source_import: { ...report, downloads_capture: { code, capture_id: null } } });
+    for (const code of ["download_capture_none", "download_capture_captured"]) {
+      expect(retainedSourceNotice(view(code))).toBe("");
+      expect(retainedSourceDetails(view(code))).toBeUndefined();
+    }
+    const refused = view("download_capture_unreadable");
+    expect(retainedSourceNotice(refused)).toContain("Changes to the downloaded files folder are refused");
+    expect(retainedSourceDetails(refused)!.downloads!.next).toContain("Nothing is recaptured or overwritten");
+    const unsupported = view("download_capture_unsupported");
+    expect(retainedSourceNotice(unsupported)).toBe("");
+    expect(retainedSourceDetails(unsupported)!.downloads!.reason).toContain("network or removable location");
+    expect(retainedSourceDetails(unsupported)!.downloads!.next).toContain("stays incomplete");
+  });
   it("explains the archive and data-directory refusals without changing readiness", () => {
     const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
     const view = (code: string) => serviceView({ retained_source_import: { ...report, creations_capture: { code, paused: true, capture_id: null } } });

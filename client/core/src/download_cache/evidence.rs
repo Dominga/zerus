@@ -527,8 +527,47 @@ pub enum Evidence {
     Unreadable,
 }
 
+/// [`evidence`] by bounded stats only, for a status shown often: the seed
+/// and receipt (64 KiB each) and each part's stamp, never the original's
+/// bytes. A receipt it reports Captured still passes every check a change
+/// makes before relying on it.
+pub fn status(root: &Path) -> Evidence {
+    if fs::symlink_metadata(root).is_err_and(|error| error.kind() == io::ErrorKind::NotFound) {
+        return Evidence::None;
+    }
+    let Ok(canonical) = fs::canonicalize(root) else {
+        return Evidence::Unreadable;
+    };
+    match place(&canonical) {
+        Place::Local => {}
+        Place::Unsupported => return Evidence::Unsupported,
+        Place::Unknown => return Evidence::Unreadable,
+    }
+    let Ok((canonical, object, birth)) = folder(&canonical) else {
+        return Evidence::Unreadable;
+    };
+    let slot = slot(&canonical, &object, birth.as_deref());
+    if !slot.exists() {
+        return Evidence::None;
+    }
+    let seed = match read_json::<Seed>(&slot.join("identity.json")) {
+        Ok(Some(seed)) if seed.binds(&object, birth.as_deref()) => seed,
+        _ => return Evidence::Unreadable,
+    };
+    match read_json::<Original>(&slot.join("receipt.json")) {
+        Ok(None) => Evidence::None,
+        Ok(Some(receipt)) if receipt.valid(&seed) && receipt.leaf_matches(&slot) => {
+            Evidence::Captured(Box::new(receipt))
+        }
+        _ => Evidence::Unreadable,
+    }
+}
+
 /// What the folder at `root` holds for its current directory object.
 pub fn evidence(root: &Path) -> Evidence {
+    if fs::symlink_metadata(root).is_err_and(|error| error.kind() == io::ErrorKind::NotFound) {
+        return Evidence::None;
+    }
     let Ok(canonical) = fs::canonicalize(root) else {
         return Evidence::Unreadable;
     };

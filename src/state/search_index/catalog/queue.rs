@@ -74,22 +74,36 @@ impl Store {
         self.catalog_schema()?;
         progress.pruned_paths = self.prune_catalog(budget, cancel)?;
         self.cleanup()?;
-        self.sweep(state, budget, &mut progress.ingestion, cancel)?;
+        let mut reader = metadata::Reader::default();
+        self.sweep(state, budget, &mut progress.ingestion, cancel, &mut reader)?;
         let last:i64=self.index.connection().query_row("SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='queue_cursor'),0)",[],|r|r.get(0)).map_err(|e|e.to_string())?;
         let mut rows = self.queue_page(last)?;
         if rows.is_empty() && last > 0 {
             rows = self.queue_page(0)?;
         }
         for (id, path, kind) in rows {
-            if !progress.ingestion.available(budget, cancel)
-                || budget.bytes - progress.ingestion.bytes < RECORD_BYTES + 1
-            {
+            if !progress.ingestion.available(budget, cancel) {
                 progress.ingestion.stopped = true;
                 break;
             }
-            let record = queued_record(state, &path, &kind, &mut progress.ingestion, budget);
+            let record = queued_record(
+                state,
+                &path,
+                &kind,
+                &mut progress.ingestion,
+                budget,
+                &mut reader,
+            );
             let mut record = match record {
-                Ok(record) => record,
+                Ok(Some(record)) => record,
+                Ok(None) => {
+                    progress.ingestion.stopped = true;
+                    // Leave it pending, but let later bounded slices reach
+                    // other paths even when this record needs a larger slice.
+                    self.queue_cursor(id)?;
+                    progress.visited_paths += 1;
+                    continue;
+                }
                 Err(_) => {
                     // An invalid/missing staged file is not a verified source.
                     // Keep a visible unavailable marker, not a fake empty match.
@@ -163,7 +177,8 @@ impl Store {
                     bytes: budget.bytes - progress.ingestion.bytes,
                     deadline: budget.deadline,
                 };
-                let read = self.step(state, &[identity], &remaining, cancel)?;
+                let read =
+                    self.step_with_reader(state, &[identity], &remaining, cancel, &mut reader)?;
                 progress.ingestion.files += read.files;
                 progress.ingestion.directory_entries += read.directory_entries;
                 progress.ingestion.locator_probes += read.locator_probes;
@@ -306,7 +321,8 @@ fn queued_record(
     kind: &str,
     progress: &mut Progress,
     budget: &Budget,
-) -> Result<Value> {
+    reader: &mut metadata::Reader,
+) -> Result<Option<Value>> {
     let parents = match kind {
         "binding" => vec![state.to_owned(), state.join("bindings")],
         "archive" => vec![state.join("archives")],
@@ -316,29 +332,16 @@ fn queued_record(
     if !parents.iter().any(|parent| path.parent() == Some(parent)) || !candidate(path, kind) {
         return Err("Queued source is outside this state configuration".into());
     }
-    progress.files += 1;
-    let file = crate::platform::no_follow(fs::OpenOptions::new().read(true))
-        .open(path)
-        .map_err(|_| "Queued source unavailable")?;
-    if !file.metadata().map_err(|e| e.to_string())?.is_file() {
-        return Err("Queued source is not a regular file".into());
-    }
-    let mut bytes = Vec::new();
-    file.take((RECORD_BYTES + 1).min(budget.bytes.saturating_sub(progress.bytes)) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-    progress.bytes += bytes.len();
-    if bytes.len() > RECORD_BYTES {
-        return Err("Queued source exceeds its metadata budget".into());
-    }
-    let record: Value = serde_json::from_slice(&bytes).map_err(|_| "Queued source is invalid")?;
+    let Some(record) = reader.read(path, progress, budget, 0)? else {
+        return Ok(None);
+    };
     if !record.is_object() || (kind != "native" && record["version"] != 1) {
         return Err("Queued source is not a binding".into());
     }
     if kind == "native" && record["backend"] != "dsh" {
         return Err("Native source identity changed".into());
     }
-    Ok(record)
+    Ok(Some(record))
 }
 
 #[cfg(test)]

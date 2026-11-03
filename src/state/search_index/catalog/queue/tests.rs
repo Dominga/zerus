@@ -133,6 +133,92 @@ fn live_history_keeps_fresh_legacy_fallback_after_cache_ingestion() {
 }
 
 #[test]
+fn large_job_records_progress_through_discovery_and_catchup() {
+    for archive in [false, true] {
+        let (_temp, state, mut store) = fixture(archive);
+        let path = if archive {
+            fs::read_dir(state.join("archives"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path()
+        } else {
+            state.join(format!(
+                "{:x}.json",
+                Sha256::digest(b"codex/example/search")
+            ))
+        };
+        let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        record["shell_jobs"] = json!({"command":"private-shell-command ".repeat(70_000)});
+        fs::write(&path, record.to_string()).unwrap();
+        assert!(fs::metadata(&path).unwrap().len() > RECORD_BYTES as u64);
+        discover(&store, &state);
+        let mut small = budget(2);
+        small.bytes = RECORD_BYTES;
+        let deferred = store
+            .consume(&state, &small, &AtomicBool::new(false))
+            .unwrap();
+        assert!(deferred.ingestion.stopped && deferred.ingestion.errors.is_empty());
+        assert!(deferred.ingestion.bytes <= small.bytes);
+        assert_eq!(totals(&store).0, 1);
+        for _ in 0..32 {
+            let progress = store
+                .consume(&state, &budget(2), &AtomicBool::new(false))
+                .unwrap();
+            assert!(progress.ingestion.bytes <= 4 << 20);
+            assert!(progress.ingestion.files <= 32 && progress.ingestion.records <= 2);
+            if totals(&store).0 == 0 {
+                break;
+            }
+        }
+        assert_eq!(totals(&store), (0, i64::from(!archive)));
+        assert_eq!(store.index.query("needle", 50, None).unwrap().hits.len(), 6);
+    }
+}
+
+#[test]
+fn a_record_beyond_this_slice_stays_pending_without_blocking_other_sessions() {
+    let (_temp, state, mut store) = fixture(false);
+    let path = state.join(format!(
+        "{:x}.json",
+        Sha256::digest(b"codex/example/search")
+    ));
+    let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    record["shell_jobs"] = json!({"command":"private command ".repeat(300_000)});
+    fs::write(&path, record.to_string()).unwrap();
+    assert!(fs::metadata(&path).unwrap().len() > (4 << 20));
+    discover(&store, &state);
+    // Ensure the expensive path is staged before a healthy session.
+    record["name"] = json!("codex/example/other");
+    record.as_object_mut().unwrap().remove("shell_jobs");
+    fs::write(
+        state.join(format!("{:x}.json", Sha256::digest(b"codex/example/other"))),
+        record.to_string(),
+    )
+    .unwrap();
+    discover(&store, &state);
+    for _ in 0..32 {
+        let progress = store
+            .consume(&state, &budget(2), &AtomicBool::new(false))
+            .unwrap();
+        assert!(progress.ingestion.bytes <= 4 << 20);
+        assert!(progress.ingestion.files <= 32 && progress.ingestion.records <= 2);
+        if totals(&store).0 == 1 && store.index.query("needle", 50, None).unwrap().hits.len() == 6 {
+            break;
+        }
+    }
+    assert_eq!(store.index.query("needle", 50, None).unwrap().hits.len(), 6);
+    assert_eq!(totals(&store).0, 1);
+    let skipped: i64 = store
+        .index
+        .connection()
+        .query_row("SELECT sum(skipped) FROM catalog_queue", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(skipped, 0);
+}
+
+#[test]
 fn invalid_metadata_is_marked_unavailable_without_a_fake_source_or_body() {
     let (_temp, state, mut store) = fixture(false);
     let path = state.join(format!(

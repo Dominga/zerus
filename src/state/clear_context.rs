@@ -239,6 +239,19 @@ fn ended_request(record: &Value) -> bool {
         && !telemetry::work_remains(record)
 }
 
+pub(super) fn recovering_resume(record: &Value) -> bool {
+    if string(record, "error") != codex_clear_recovery::MISMATCH
+        || !string(record, "restore_archive_id").is_empty() || cleanup_pending(record) || pause_active(record) {
+        return false;
+    }
+    let mut original = record.clone();
+    original.as_object_mut().unwrap().remove("error");
+    let end = &original["session_end"];
+    let marked = end.get("clear_request_id").is_some() || end.get("clear_event_at").is_some();
+    resume_input::pending_binding(&original) && ended_request(&original)
+        && (!marked || ended_resume(&original))
+}
+
 pub(super) fn event(record: &Value) -> Option<Value> {
     let clear = &record["session_clear"];
     if clear["run_id"] != record["run_id"] || clear["conversation_id"] != record["conversation_id"]

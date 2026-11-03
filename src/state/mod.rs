@@ -18,6 +18,7 @@ mod computer_files;
 pub(crate) mod voice;
 mod interrupt;
 mod clear_context;
+mod codex_clear_recovery;
 mod compact_context;
 mod continuations;
 mod cache_hint;

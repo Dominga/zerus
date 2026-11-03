@@ -109,7 +109,7 @@ fn owns_rollout(record: &Value) -> Result<()> {
     Ok(())
 }
 
-fn checked_process(record: &Value) -> Result<u64> {
+pub(super) fn checked_process(record: &Value) -> Result<u64> {
     if !process_alive(record) || !matches(record, live()?.get(string(record, "name"))) {
         return Err("The tracked agent is no longer running".into());
     }

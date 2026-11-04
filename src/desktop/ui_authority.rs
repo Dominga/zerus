@@ -98,7 +98,7 @@ impl Scope {
                 configuration: location.configuration.clone(),
             },
             frontend_images,
-            portable: super::portable_frontend::materialize(&config.home),
+            portable: super::portable_frontend::materialize(),
             #[cfg(target_os = "linux")]
             sealed_reference: None,
         }

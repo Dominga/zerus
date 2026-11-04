@@ -57,8 +57,21 @@ fn serve(root: &Path, gui: &Path) -> (PortableScope, FrontendBinding, Layout) {
     let binding = binding_for(gui);
     let home = root.join("serve-home");
     let layout = publish_into(&home, &binding);
-    let scope = materialize(&home.to_string_lossy()).expect("this process's own image");
+    let scope = scope_over(&home);
     (scope, binding, layout)
+}
+
+/// This process's own loaded image, as a scope records it.
+fn own_cli() -> BoundObject {
+    object(&PinnedImage::for_process(&own_process()).unwrap())
+}
+
+/// A scope of this process over `home`'s images folder. Tests run from the
+/// build folder, not from `<home>\.local\bin`, so the folder is given here;
+/// `materialize` itself derives it from the CLI (see the serving-child test).
+fn scope_over(home: &Path) -> PortableScope {
+    PortableScope::with_images(staging::images_below(&home.to_string_lossy()), own_cli())
+        .expect("this process's own image")
 }
 
 fn until() -> Instant {
@@ -131,7 +144,7 @@ fn a_binding_for_another_cli_object_is_refused() {
     let binding = binding_with(&gui, &PinnedImage::open(&copy).unwrap());
     let home = dir.path().join("serve-home");
     publish_into(&home, &binding);
-    let scope = materialize(&home.to_string_lossy()).unwrap();
+    let scope = scope_over(&home);
     assert!(scope.snapshot().is_none());
     assert!(scope.closed(&gui, until()).is_none());
 }
@@ -141,7 +154,7 @@ fn a_missing_or_corrupt_record_proves_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let (_, gui) = fixture();
     let home = dir.path().to_string_lossy().into_owned();
-    let scope = materialize(&home).unwrap();
+    let scope = scope_over(dir.path());
     assert!(scope.snapshot().is_none() && scope.closed(&gui, until()).is_none());
     let images = staging::images_below(&home);
     fs::create_dir_all(&images).unwrap();
@@ -333,6 +346,7 @@ const REPORT: &str = "HGS_TEST_PORTABLE_REPORT";
 const BARRIER: &str = "HGS_TEST_PORTABLE_BARRIER";
 const DELAY: &str = "HGS_TEST_PORTABLE_DELAY_MS";
 const AGENT_MARKER: &str = "HGS_SESSION";
+const GUI: &str = "HGS_TEST_PORTABLE_GUI";
 
 /// Called by `record` between its proof and its last check, in test builds
 /// only: optionally sleep, and optionally wait for the test to act first.
@@ -421,7 +435,7 @@ fn creation_role() {
         "scope" => {
             let dir = PathBuf::from(std::env::var(HOME).unwrap());
             let gui = PathBuf::from(std::env::var(REPORT).unwrap());
-            let scope = materialize(&dir.to_string_lossy()).expect("serving scope");
+            let scope = materialize().expect("serving scope beside its own CLI");
             let launch = scope.closed(&gui, Instant::now() + DIGEST_TIME);
             assert!(launch.is_some(), "the serving scope admits the bound app");
             drop(launch);
@@ -433,6 +447,19 @@ fn creation_role() {
             drop(scope);
         }
         // The app's own staging step: the real install with its binder.
+        // A process checking whether it serves the bound app at GUI.
+        "serve-check" => {
+            let report = PathBuf::from(std::env::var(REPORT).unwrap());
+            let gui = PathBuf::from(std::env::var(GUI).unwrap());
+            let outcome = match materialize() {
+                None => "no-scope",
+                Some(scope) => match scope.closed(&gui, Instant::now() + DIGEST_TIME) {
+                    Some(_) => "admitted",
+                    None => "refused",
+                },
+            };
+            fs::write(&report, outcome).unwrap();
+        }
         "install" => {
             let home = std::env::var(HOME).unwrap();
             let report = PathBuf::from(std::env::var(REPORT).unwrap());
@@ -752,7 +779,7 @@ fn a_running_service_admits_a_same_path_rebind_at_once_and_never_the_old_object(
     let home = dir.path().join("serve-home");
     publish_into(&home, &binding_for(&old.image));
     // A serving scope made before anything changes.
-    let scope = materialize(&home.to_string_lossy()).unwrap();
+    let scope = scope_over(&home);
     drop(
         scope
             .running(&old.original(), until())
@@ -909,4 +936,49 @@ fn a_warm_proof_never_outlives_its_record() {
     assert!(fs::copy(std::env::current_exe().unwrap(), &image).is_err());
     drop(borrower);
     fs::remove_file(&image).unwrap();
+}
+
+#[test]
+fn this_test_binary_outside_dot_local_bin_has_no_portable_scope() {
+    // Built under target\..., not <dir>\.local\bin\hgs.exe: no scope, and no
+    // fallback to HOME or the profile.
+    assert!(materialize().is_none());
+}
+
+#[test]
+fn a_serving_process_finds_the_record_beside_its_own_cli_whatever_its_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("fixture-home");
+    let layout = Layout::new(&home.to_string_lossy(), &home.join("config"));
+    fs::create_dir_all(layout.cli.parent().unwrap()).unwrap();
+    fs::copy(std::env::current_exe().unwrap(), &layout.cli).unwrap();
+    let (_gui_dir, gui) = fixture();
+    let binding = binding_with(&gui, &PinnedImage::open(&layout.cli).unwrap());
+    staging::install_bound(&layout, &layout.cli, "1.0.0", |_, publish| {
+        assert!(publish(&binding, &|| true)?);
+        Ok(Some(binding.clone()))
+    })
+    .unwrap();
+    let elsewhere = dir.path().join("another-home");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let check = |cli: &Path, name: &str| {
+        let report = dir.path().join(format!("{name}.txt"));
+        let status = run_role(cli, "serve-check")
+            .env(GUI, &gui)
+            .env(REPORT, &report)
+            .env("HOME", &elsewhere)
+            .env_remove(AGENT_MARKER)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{name}");
+        fs::read_to_string(&report).unwrap()
+    };
+    // From <home>\.local\bin, with HOME pointing elsewhere: the bound app is admitted.
+    assert_eq!(check(&layout.cli, "beside"), "admitted");
+    // The same bytes elsewhere (an installer folder): no portable scope at all.
+    let programs = dir.path().join("Programs").join("Zerus");
+    fs::create_dir_all(&programs).unwrap();
+    let other = programs.join(staging::EXECUTABLE);
+    fs::copy(std::env::current_exe().unwrap(), &other).unwrap();
+    assert_eq!(check(&other, "programs"), "no-scope");
 }

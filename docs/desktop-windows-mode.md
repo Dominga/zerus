@@ -82,6 +82,14 @@ the zip's app relays through the stable CLI staged from that zip.
   facts as `cli_current` and `frontend_current`. So a moved, newly extracted
   or same-path replaced copy binds itself again. Same or newer version only,
   never a downgrade, and an unchanged CLI is not copied again.
+- **Where the record is read.** A process that admits frontends finds the
+  record beside the CLI it is running, never through `HOME`, `USERPROFILE`
+  or another setting. Only when its own loaded image is exactly
+  `<dir>\.local\bin\hgs.exe` does it read
+  `<dir>\.local\share\hgs\host\frontend.json`, where the binding install
+  writes it. A service started by Task Scheduler without `HOME` therefore
+  reads the same record as the app's install. A CLI anywhere else, such as
+  the installer folder or a custom path, admits no portable app.
 - **Visibility.** A process that admits frontends records its own CLI when it
   starts. Every admitting request, with a GUI running or a notification
   launch, reads and checks the current private record first, with a read of

@@ -953,7 +953,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         let Some(session) = member.session.as_ref() else { continue };
         let Some(found) = seen.iter().find(|seen| seen.host == session.host && seen.name == session.name) else { continue };
         let stale = member.pending.as_ref().is_some_and(|pending| now - pending.at > 60.0);
-        if !found.asking && member.pending.is_some() {
+        if !found.asking && (member.pending.is_some() || member.terminal_question.is_some()) {
             steps.push(Step::ClearPermission { member: member.id.clone() });
         } else if found.asking && found.live && (member.pending.is_none() || stale) {
             steps.push(Step::Permission { member: member.id.clone() });
@@ -5141,8 +5141,26 @@ fn sync_permission(store: &mut Store, team: &Team, member_id: &str) -> anyhow::R
                 card: card.clone(),
             })
     };
+    // A request Zerus cannot answer (Kimi's Edit and Write approvals) is
+    // never the lead's to answer, but it is never silent either: it keeps the
+    // time it was first seen, so the lead hears of it once.
+    let terminal = cards.iter().find(|card| card["can_answer"] == false).map(|card| {
+        let question_id = card["question_id"].as_str().unwrap_or_default().to_owned();
+        let at = member
+            .terminal_question
+            .as_ref()
+            .filter(|seen| seen.question_id == question_id)
+            .map_or_else(now, |seen| seen.at);
+        PendingQuestion {
+            question_id,
+            question_hash: card["question_hash"].as_str().unwrap_or_default().to_owned(),
+            approval: card["approval"] == true,
+            at,
+            card: card.clone(),
+        }
+    });
     let answered = ask.is_none() && same.is_none();
-    if ask.is_none() && !answered {
+    if ask.is_none() && !answered && terminal == member.terminal_question {
         return Ok(());
     }
     let role = team.role_of(member_id);
@@ -5153,6 +5171,15 @@ fn sync_permission(store: &mut Store, team: &Team, member_id: &str) -> anyhow::R
     let safe = ask.as_ref().and_then(|pending| safe_match(team, member, pending));
     change(store, &team.id, |team, events| {
         let found = team.members.iter_mut().find(|m| m.id == member_id).context("unknown member")?;
+        if found.terminal_question != terminal {
+            if let Some(asked) = terminal.as_ref().filter(|asked| {
+                found.terminal_question.as_ref().is_none_or(|seen| seen.question_id != asked.question_id)
+            }) {
+                events.push(Event::new("question_in_terminal", json!({"member":role,"question_id":asked.question_id,
+                    "tool":asked.card["questions"][0]["header"],"reason":asked.card["answer_unavailable_reason"]})));
+            }
+            found.terminal_question = terminal.clone();
+        }
         match &ask {
             Some(pending) => {
                 found.asked.push(format!("{}:{}", pending.question_id, pending.question_hash));
@@ -6246,6 +6273,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                         "question_id":answer["question_id"],"decision":answer["decision"],"by":answer["by"]})));
                 }
                 found.permission = None;
+                found.terminal_question = None;
             }
             Ok(())
         }),

@@ -38,6 +38,14 @@ gains the exact command and, after the answer, who answered.
   selects the deny option; Zerus then sends the text to the member as one
   message: `"Lead: denied <tool>: <text>"`. A deny without text works as
   before. An allow ignores text.
+- A request Zerus cannot answer (its card has `"can_answer": false`, such as
+  Kimi's Edit and Write approvals, which Kimi takes only in its Terminal
+  panel) is kept as the member's `terminal_question`. The lead's inbox names
+  it once (`terminal_question`, with the card's reason and "tell the owner"),
+  and the owner's attention list shows it at once (`permission_terminal`;
+  `hgs team waiting` lists it as `permission_escalated` with action
+  `open_terminal`). It clears when the session stops asking. Owner,
+  2026-11-04: such an approval waited half an hour with an idle lead.
 
 ```json
 {"request_id":"UUID","team":"ID","member":"frontend","question_id":"Q",

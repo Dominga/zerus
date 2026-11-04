@@ -297,6 +297,17 @@ fn a_permission_names_its_command_and_source() {
 }
 
 #[test]
+fn a_request_only_the_terminal_takes_clears_once_the_session_stops_asking() {
+    let mut team = team();
+    let lead = session("claude/x/lead", "r0", true);
+    let dev = session("codex/x/dev", "r1", false);
+    team.members.iter_mut().find(|member| member.id == "dev").unwrap().terminal_question =
+        Some(PendingQuestion { question_id: "k1".into(), question_hash: "hk".into(), approval: true, at: 1.0, card: json!({}) });
+    let found = steps(&team, &[lead, dev], 20.0);
+    assert!(found.contains(&Step::ClearPermission { member: "dev".into() }), "{found:?}");
+}
+
+#[test]
 fn a_vanished_question_is_recorded_as_unknown() {
     let mut answers = Vec::new();
     for index in 0..25 {

@@ -460,6 +460,12 @@ pub(crate) struct Member {
     /// answer (C2): the member's session question as Zerus read it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending: Option<PendingQuestion>,
+    /// A request of the member's session that Zerus cannot answer (Kimi takes
+    /// its Edit and Write approvals only in its Terminal panel): neither the
+    /// lead nor a safe action can, so the lead hears of it once and the owner
+    /// sees it at once, with where to answer it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_question: Option<PendingQuestion>,
     /// The first tick that saw this member idle without a ready task while
     /// tasks were open (C7); cleared when it gets work.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -899,6 +899,27 @@ fn all_items(team: &Team) -> Vec<Item> {
             subagents: if pending.card["subagents"].is_array() { pending.card["subagents"].clone() } else { Value::Null },
         });
     }
+    // A request only the member's Terminal takes (Kimi's Edit and Write
+    // approvals): the lead cannot answer it, so it says who can and where.
+    for member in team.members.iter().filter(|member| member.id != team.lead) {
+        let Some(asked) = &member.terminal_question else { continue };
+        let name = team.name_of(&member.id);
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "terminal_question",
+            key: format!("terminal_question:{}:{}", member.id, asked.question_id),
+            task: None,
+            member: name.clone(),
+            since: asked.at,
+            summary: summary(&format!("{name} waits for an answer only its Terminal takes: {}", terminal_title(asked))),
+            command: format!("{} | hgs team status --json", json!({"team":team.id})),
+            detail: format!(
+                "Zerus cannot answer it, so neither can you: {} Tell the owner to open {name}'s Terminal and answer it there; \
+                 the member continues once it is answered.",
+                asked.card["answer_unavailable_reason"].as_str().unwrap_or("Answer it in Terminal.")
+            ),
+        });
+    }
     // U20: a delivered attempt whose turn ended long ago and still has no
     // report is an item, whatever the capture did. The owner (2026-11-01):
     // waiting for the answer to the member's own question or for its Background
@@ -961,6 +982,15 @@ fn all_items(team: &Team) -> Vec<Item> {
     items.sort_by(|a, b| a.since.total_cmp(&b.since).then_with(|| a.key.cmp(&b.key)));
     items.truncate(ITEM_LIMIT);
     items
+}
+
+/// What a Terminal-only request asks: its tool and title ("Edit: Apply these
+/// edits?").
+pub(crate) fn terminal_title(asked: &PendingQuestion) -> String {
+    let question = &asked.card["questions"][0];
+    let header = question["header"].as_str().unwrap_or_default();
+    let title = question["question"].as_str().unwrap_or("a permission request");
+    if header.is_empty() { title.to_owned() } else { format!("{header}: {title}") }
 }
 
 impl PendingQuestion {
@@ -1284,6 +1314,15 @@ pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
             }
             out.push(item);
         }
+    }
+    // A request only the member's Terminal takes waits for the owner at once:
+    // nobody else can answer it.
+    for member in &team.members {
+        let Some(asked) = &member.terminal_question else { continue };
+        let name = team.name_of(&member.id);
+        out.push(json!({"kind":"permission_terminal","member":team.role_of(&member.id),"member_id":member.id,
+            "since":asked.at,"minutes":((now - asked.at).max(0.0) / 60.0).round() as u64,
+            "summary":format!("{name} waits for your answer in its Terminal: {}", terminal_title(asked))}));
     }
     out.extend(phase_items);
     // U63 (owner, 2026-10-31): a phase ready for the owner's acceptance.
@@ -1639,6 +1678,37 @@ mod tests {
         let late = super::attention(&team, now + 61.0 * 60.0);
         assert!(!late.iter().any(|item| item["kind"] == "permission"), "{late:?}");
         assert!(late.iter().any(|item| item["kind"] == "report"), "{late:?}");
+    }
+
+    /// The owner, 2026-11-04: a Kimi Edit approval waited half an hour with
+    /// an idle lead. Zerus cannot answer it, so it is the lead's item naming
+    /// who can and the owner's at once, never silence.
+    #[test]
+    fn a_request_only_the_terminal_takes_reaches_the_lead_and_the_owner_at_once() {
+        let mut team = team();
+        let now = 5_000.0;
+        let card = json!({"question_id":"k1","question_hash":"hk","approval":true,"can_answer":false,
+            "answer_unavailable_reason":"Zerus answers only Kimi's Bash command approvals here. Answer this request in Terminal.",
+            "questions":[{"id":"approval","header":"Edit","question":"Apply these edits?","options":[]}]});
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().terminal_question =
+            Some(PendingQuestion { question_id: "k1".into(), question_hash: "hk".into(), approval: true, at: now - 60.0, card });
+        let items = super::items(&team);
+        let item = items.iter().find(|item| item.kind == "terminal_question").expect("the lead hears of it");
+        assert!(item.summary.contains("dev (Backend)") && item.summary.contains("Edit: Apply these edits?"), "{}", item.summary);
+        assert!(item.detail.contains("Terminal") && item.detail.contains("Bash command approvals"), "{}", item.detail);
+        assert!(!item.command.contains("hgs team answer"), "the lead cannot answer it: {}", item.command);
+        // The owner sees it at once, without the permission reminder.
+        let attention = super::attention(&team, now);
+        let found = attention.iter().find(|item| item["kind"] == "permission_terminal").expect("the owner sees it");
+        assert_eq!(found["member_id"], "dev");
+        assert!(found["summary"].as_str().unwrap().contains("in its Terminal"), "{found}");
+        let waiting = super::super::owner_waiting::items(std::slice::from_ref(&team), now);
+        let listed = waiting.iter().find(|item| item["kind"] == "permission_escalated").expect("in the owner's list");
+        assert_eq!(listed["action"], "open_terminal");
+        // No request, no item.
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().terminal_question = None;
+        assert!(!super::items(&team).iter().any(|item| item.kind == "terminal_question"));
+        assert!(!super::attention(&team, now).iter().any(|item| item["kind"] == "permission_terminal"));
     }
 
     #[test]

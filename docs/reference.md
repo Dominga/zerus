@@ -4565,6 +4565,16 @@ does not turn `/command` into an ordinary message.
 
 ### Desktop background service
 
+Zerus Next defaults to the Service consumer on Linux and macOS when
+`ZERUS_CLIENT_DESKTOP_SERVICE` is absent. Explicit `=1` selects it on all supported
+desktop platforms; Windows keeps that opt-in until its PC acceptance. Explicit
+`=0` requests the guarded Native/rollback path, which still needs a verified
+takeover and drain. It never forces a writer or starts the Qt rollback directly.
+An already-background installation is unchanged. Explicit passive choices and
+retained revokes require **Resume background work**; automatic read-only reconnect
+never grants, rearms or changes mode. Automatic approvals stay off. See
+[consumer activation and failure actions](desktop-consumer-activation.md).
+
 ```sh
 hgs desktop serve
 hgs desktop status --json

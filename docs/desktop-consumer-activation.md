@@ -1,9 +1,11 @@
 # Native Service consumer activation
 
-The orchestration rollout keeps the startup default unchanged. Select the
-consumer with `ZERUS_CLIENT_DESKTOP_SERVICE=1`; the later Linux/macOS default
-change is a separate release step after this path reaches both owner machines.
-Windows keeps its explicit opt-in and maintained manual task transition.
+On Linux and macOS, Zerus Next uses the Service consumer when
+`ZERUS_CLIENT_DESKTOP_SERVICE` is absent. `=1` explicitly selects the same path;
+`=0` requests the guarded Native/rollback path. Other explicit values do not
+enable the consumer. A Native request still needs its existing takeover and
+drain checks; the flag supplies no writer authority and never forces a handoff.
+Windows keeps explicit `=1` opt-in and its maintained manual task transition.
 
 The paired backend is prepared before the GUI starts, through the existing
 installer/updater. The consumer selects that same backend, reads its native
@@ -23,6 +25,12 @@ frontend or foreground terminal, current Grant, selected CLI, configuration and
 owned registration; local status and JSON are routing observations only.
 Automatic read-only reconnection never grants, rearms, imports or activates.
 There is no legacy GUI writer fallback, and automatic approvals stay off.
+
+An existing Service/background installation stays on that path after the
+default change. A Native installation needs a guided first consumer start and
+explicit Resume when offered; changing the default does not silently clear a
+revoke or an explicit passive choice. The paired backend must already be
+prepared by the maintained installer before the GUI starts.
 
 ## Original activation and failure handling
 
@@ -66,6 +74,15 @@ review. No raw manager stop, native-agent signal or replay is introduced.
 The final-revoke journal lives beside the draft-snapshot directory. An interrupted
 original at the older snapshot location stays on that same lookup-only path;
 finding both locations requires review before any new offer.
+
+A stale or invalid managed registration keeps Qt stopped. Inspect the helper's
+record without deleting or repairing it: on Linux,
+`$XDG_CONFIG_HOME/systemd/user/.hgs-desktop.zerus-registration.json` (default
+`~/.config/systemd/user/`); on macOS,
+`~/Library/LaunchAgents/.com.hgdev.hgs-desktop.zerus-registration.json`.
+An owned, registered but stopped service is started in passive mode by this
+rollback, so the helper can verify IPC and settle its original hold before Qt
+starts. An unregistered host does not get a new service.
 
 Cutover and rollback preserve accounts, catalogs, drafts, native agents, tmux
 servers and DeepSeek hosts. Component tests use private manager/transport

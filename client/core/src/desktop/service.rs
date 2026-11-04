@@ -17,7 +17,11 @@ pub const CATALOG_ROWS: usize = 128;
 pub const COMPONENTS: [&str; 5] = ["fleet", "presence", "reads", "attention", "approvals"];
 
 pub fn enabled(value: Option<&str>) -> bool {
-    value == Some("1")
+    match value {
+        None => cfg!(any(target_os = "linux", target_os = "macos")),
+        Some("1") => true,
+        _ => false,
+    }
 }
 
 /// Transport success alone is not an actor commit. Read receipts and the

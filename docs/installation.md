@@ -99,6 +99,18 @@ Pacman upgrades never change user services. See the
 IPC readiness and background worker ownership are separate; registration alone
 does not enable background workers.
 
+On Linux and macOS, Zerus Next defaults to the Service consumer when
+`ZERUS_CLIENT_DESKTOP_SERVICE` is absent. An existing background installation
+keeps its mode. The paired backend is prepared before the GUI; a fresh native
+Service Grant admits activation of a newly installed implicit passive service.
+An explicit passive choice or retained revoke instead offers **Resume background
+work**. One explicit Resume performs the required Rearm and maintained background
+selection. Automatic reconnect never repeats those actions. `=0` requests the
+guarded Native/rollback path; it cannot override ownership or drain checks.
+Windows stays explicit `=1` opt-in. Helper refusal, Grant timeout and service-crash
+recovery remain usable through the explicit actions in
+[Service consumer activation](desktop-consumer-activation.md).
+
 For a local Linux Zerus Next source build, an explicit private WebKitGTK/GTK3
 stack can be selected at installation:
 

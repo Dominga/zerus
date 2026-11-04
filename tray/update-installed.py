@@ -1039,22 +1039,26 @@ def passive_before_qt(installed, configuration, status):
     backend = installed / 'Contents/MacOS/hgs' if MAC and (installed / 'Contents/MacOS/hgs').exists() else CLI
     query = ([sys.executable, str(helper), str(backend), '--status', '--json'] if MAC else
              [sys.executable, str(helper), 'status', '--hgs', str(CLI), '--json'])
+    record = (HOME / 'Library/LaunchAgents/.com.hgdev.hgs-desktop.zerus-registration.json' if MAC else
+              Path(os.environ.get('XDG_CONFIG_HOME') or HOME / '.config')
+              / 'systemd/user/.hgs-desktop.zerus-registration.json')
+    refusal = f'desktop registration is unconfirmed; keep Qt stopped and inspect {record} with the maintained helper'
     try:
         result = subprocess.run(query, capture_output=True, text=True, timeout=REVOKE_SECONDS)
         registration = json.loads(result.stdout)
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:
-        raise UpdateError(f'desktop registration is unconfirmed; keep Qt stopped and inspect the maintained helper: {error}') from None
+        raise UpdateError(f'{refusal}: {error}') from None
     if (result.returncode != 0 or not isinstance(registration, dict)
             or registration.get('schema') != 1 or registration.get('operation') != 'status'
             or registration.get('configuration') != configuration
             or type(registration.get('registered')) is not bool):
-        raise UpdateError('desktop registration is unconfirmed; keep Qt stopped and inspect the maintained helper')
+        raise UpdateError(refusal)
     # The CLI's lifecycle ABI also describes an unavailable service. Only the
     # helper can establish an existing owned registration; Qt never creates one.
     if registration['registered'] is False:
         return
     if registration.get('selected_mode') not in ('passive', 'background'):
-        raise UpdateError('desktop registration mode is unavailable; keep Qt stopped')
+        raise UpdateError(f'desktop registration mode is unavailable; keep Qt stopped and inspect {record}')
     args = ([sys.executable, str(helper), str(backend), '--mode', 'passive', '--json'] if MAC else
             [sys.executable, str(helper), 'install', '--hgs', str(CLI), '--mode', 'passive', '--json'])
     try:

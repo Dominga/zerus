@@ -71,7 +71,11 @@ static STARTUP_RECOVERY: std::sync::atomic::AtomicU8 = std::sync::atomic::Atomic
 pub fn mode() -> bool {
     static MODE: OnceLock<bool> = OnceLock::new();
     STARTUP_RECOVERY.load(Ordering::Acquire) != 0
-        || *MODE.get_or_init(|| service::enabled(std::env::var(service::MODE_ENV).ok().as_deref()))
+        || *MODE.get_or_init(|| {
+            let value = std::env::var_os(service::MODE_ENV);
+            // An invalid explicit value is distinct from the platform default.
+            service::enabled(value.as_deref().map(|value| value.to_str().unwrap_or("")))
+        })
 }
 
 /// Before any GUI producer exists, a failed native takeover can only move to

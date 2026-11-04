@@ -25,15 +25,12 @@ fn state() -> State {
 }
 
 #[test]
-fn one_explicit_startup_switch_is_off_by_default() {
-    for value in [
-        None,
-        Some(""),
-        Some("0"),
-        Some("true"),
-        Some("yes"),
-        Some("1 "),
-    ] {
+fn platform_default_keeps_explicit_native_and_windows_opt_in() {
+    assert_eq!(
+        enabled(None),
+        cfg!(any(target_os = "linux", target_os = "macos"))
+    );
+    for value in [Some(""), Some("0"), Some("true"), Some("yes"), Some("1 ")] {
         assert!(!enabled(value));
     }
     assert!(enabled(Some("1")));

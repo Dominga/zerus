@@ -629,6 +629,71 @@ fn a_cached_row_of_another_shape_is_damage() {
     }
 }
 
+/// The same for a cached history: a task the journal names is read again
+/// even when its files kept their stamps.
+#[test]
+fn a_changed_task_s_history_is_read_again_even_with_an_unchanged_stamp() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let mut task = new_task(&store, "T-aaaaaa", Stage::Todo, "V", "Plain");
+    aged_save(&store, &mut task);
+    let history = |store: &ProjectStore, uuid: &str| super::super::history::page(store, uuid, 80, None, false).unwrap();
+    history(&store, task.uuid());
+    task.comment("later", &Actor::Person, 5).unwrap();
+    aged_save(&store, &mut task);
+    {
+        let db = Connection::open(store.dir().join(FILE)).unwrap();
+        db.execute(
+            "UPDATE histories SET files=?1 WHERE uuid=?2",
+            params![files(store.dir(), task.uuid()), task.uuid()],
+        )
+        .unwrap();
+    }
+    let page = history(&store, task.uuid());
+    assert!(page["log"].as_array().unwrap().iter().any(|e| e["text"] == json!("later")), "{page}");
+}
+
+/// review-n on #1360: a cached history is held to the same trust rules as a
+/// page's rows. With other suspect rows ahead in the background queue, an
+/// expired or future-dated requested task is read again before its history
+/// is served, even when an older writer's change kept its stamps.
+#[test]
+fn a_requested_history_is_revalidated_like_a_page_row() {
+    for future in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(temp.path(), "example").unwrap();
+        let mut tasks: Vec<TaskDoc> = (0..300)
+            .map(|n| new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"))
+            .collect();
+        for task in &tasks {
+            write_plain(&store, task);
+        }
+        let target = 299;
+        let history = |store: &ProjectStore, uuid: &str| super::super::history::page(store, uuid, 80, None, false).unwrap();
+        history(&store, tasks[target].uuid());
+        // An older writer comments without the journal; its files keep the
+        // stamps the index holds, for the row and for the cached history.
+        tasks[target].comment("newer", &Actor::Person, 9).unwrap();
+        write_plain(&store, &tasks[target]);
+        let new_files = files(store.dir(), tasks[target].uuid());
+        {
+            let db = Connection::open(store.dir().join(FILE)).unwrap();
+            db.execute("UPDATE tasks SET files=?1 WHERE uuid=?2", params![new_files, tasks[target].uuid()]).unwrap();
+            db.execute("UPDATE histories SET files=?1 WHERE uuid=?2", params![new_files, tasks[target].uuid()]).unwrap();
+            // 256 other rows wait ahead of it in the suspect queue.
+            let long_ago = now() - 5 * MAX_AGE_MS;
+            for task in &tasks[..256] {
+                db.execute("UPDATE tasks SET checked=?1 WHERE uuid=?2", params![long_ago, task.uuid()]).unwrap();
+            }
+            let requested = if future { now() + 3_600_000 } else { now() - MAX_AGE_MS - 60_000 };
+            db.execute("UPDATE tasks SET checked=?1 WHERE uuid=?2", params![requested, tasks[target].uuid()]).unwrap();
+        }
+        let page = history(&store, tasks[target].uuid());
+        let texts: Vec<&str> = page["log"].as_array().unwrap().iter().filter_map(|e| e["text"].as_str()).collect();
+        assert!(texts.contains(&"newer"), "future={future}: {texts:?}");
+    }
+}
+
 #[test]
 fn a_damaged_foreign_or_shared_index_is_built_again() {
     let temp = tempfile::tempdir().unwrap();
@@ -696,6 +761,8 @@ fn queries_use_their_indexes() {
         ("SELECT count(*) FROM tasks WHERE stage='todo' AND (rank, uuid) < ('V', 'u')", "tasks_order"),
         ("SELECT uuid FROM tasks WHERE short_id='T-aaaa01'", "tasks_short"),
         ("SELECT count(*) FROM sends WHERE at >= 5", "sends_at"),
+        ("SELECT id, payload FROM entries WHERE uuid='u' AND (at, ordinal) < (5, 1) ORDER BY at DESC, ordinal DESC LIMIT 3", "entries_place"),
+        ("SELECT at, ordinal FROM entries WHERE uuid='u' AND id='1@2'", "entries_id"),
     ] {
         let found = plan(sql);
         assert!(found.contains(wanted) && !found.contains("TEMP B-TREE"), "{sql}: {found}");

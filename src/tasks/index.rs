@@ -23,7 +23,12 @@ use std::time::Duration;
 use zerus_replica::ids;
 
 const FILE: &str = "task-index-v1.sqlite3";
-const SCHEMA: i64 = 1;
+/// 2: the histories of recently read tasks as well (slice B).
+const SCHEMA: i64 = 2;
+/// The histories kept: the most recently read tasks.
+const HISTORIES: i64 = 16;
+/// The one-task history cache this index replaces.
+const OLD_HISTORY: &str = "task-history-v1.sqlite3";
 /// How often every task file's stamp is checked, for writers that do not
 /// append to the change journal.
 const FULL_CHECK_MS: i64 = 30_000;
@@ -93,6 +98,8 @@ thread_local! {
     /// Task documents decoded and task files stamped, for the bounded-work tests.
     pub(super) static DECODED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static STAMPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Task histories read from their documents into the index.
+    pub(super) static MATERIALIZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// A file's length, modification time and inode, or `-` when it is missing,
@@ -346,15 +353,21 @@ fn connect(dir: &Path) -> Outcome<Connection> {
     let objects: i64 = db.query_row(
         "SELECT count(*) FROM sqlite_schema WHERE name IN
             ('meta', 'tasks', 'sends', 'tasks_order', 'tasks_short', 'tasks_checked', 'tasks_untrusted',
-             'sends_at', 'sends_uuid')",
+             'sends_at', 'sends_uuid', 'histories', 'entries', 'entries_place', 'entries_id')",
         [],
         |r| r.get(0),
     )?;
-    if version != SCHEMA || objects != 9 {
+    if version != SCHEMA || objects != 13 {
+        // The one-task history cache before this index; nothing has it open
+        // while the project lock is held.
+        for suffix in ["", "-journal", "-wal", "-shm"] {
+            let _ = fs::remove_file(dir.join(format!("{OLD_HISTORY}{suffix}")));
+        }
         // New, or not this schema: start again from the documents.
         db.execute_batch(&format!(
             "BEGIN IMMEDIATE;
             DROP TABLE IF EXISTS meta; DROP TABLE IF EXISTS tasks; DROP TABLE IF EXISTS sends;
+            DROP TABLE IF EXISTS histories; DROP TABLE IF EXISTS entries;
             CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE tasks(uuid TEXT NOT NULL UNIQUE, files TEXT NOT NULL, stage TEXT, rank TEXT,
                 short_id TEXT, row TEXT, error TEXT, checked INTEGER NOT NULL, trusted INTEGER NOT NULL);
@@ -365,6 +378,12 @@ fn connect(dir: &Path) -> Outcome<Connection> {
             CREATE TABLE sends(uuid TEXT NOT NULL, at INTEGER NOT NULL);
             CREATE INDEX sends_at ON sends(at);
             CREATE INDEX sends_uuid ON sends(uuid);
+            CREATE TABLE histories(uuid TEXT PRIMARY KEY, files TEXT NOT NULL, header TEXT NOT NULL,
+                summary TEXT NOT NULL, total INTEGER NOT NULL, used INTEGER NOT NULL);
+            CREATE TABLE entries(uuid TEXT NOT NULL, id TEXT NOT NULL, at INTEGER NOT NULL,
+                ordinal INTEGER NOT NULL, payload TEXT NOT NULL, summary TEXT NOT NULL);
+            CREATE UNIQUE INDEX entries_place ON entries(uuid, at, ordinal);
+            CREATE UNIQUE INDEX entries_id ON entries(uuid, id);
             PRAGMA user_version={SCHEMA};
             COMMIT;"
         ))?;
@@ -567,6 +586,9 @@ impl<'a> Index<'a> {
                 changed = true;
                 tx.execute("DELETE FROM tasks WHERE uuid=?1", [uuid])?;
                 tx.execute("DELETE FROM sends WHERE uuid=?1", [uuid])?;
+                // A changed task's history is read again when next asked for.
+                tx.execute("DELETE FROM histories WHERE uuid=?1", [uuid])?;
+                tx.execute("DELETE FROM entries WHERE uuid=?1", [uuid])?;
                 match derived {
                     None => (),
                     Some(Derived::Damaged(error)) => {
@@ -777,6 +799,148 @@ impl<'a> Index<'a> {
             .db
             .query_row("SELECT count(*) FROM sends WHERE at >= ?1", [since], |r| r.get(0))?;
         Ok(count as usize)
+    }
+
+    /// One chronological page of task `uuid`'s history, `None` when the
+    /// entry `before` names is gone. The histories of the most recently read
+    /// tasks are kept; another is read from its document once and replaces
+    /// the least recently read. `summary` returns attachment metadata
+    /// instead of the files and names each entry.
+    pub(super) fn history(
+        &mut self,
+        uuid: &str,
+        limit: usize,
+        before: Option<&str>,
+        summary: bool,
+        prefix: &str,
+    ) -> Outcome<Option<Value>> {
+        // The task's row is held to the rules a page holds its rows to: one
+        // that is untrusted, read before the floor or dated after now is read
+        // again first. A row read again with other content drops the cached
+        // history, so the stamps check below never trusts a stale history.
+        let at = now();
+        let floor = self.floor(at)?;
+        let row: Option<(i64, bool)> = self
+            .db
+            .query_row("SELECT checked, trusted FROM tasks WHERE uuid=?1", [uuid], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        if !row.is_some_and(|(checked, trusted)| trusted && checked >= floor && checked <= at) {
+            let only = BTreeSet::from([uuid.to_owned()]);
+            self.refresh(&[uuid.to_owned()], None, Some(&only))?;
+        }
+        let dir = self.store.dir().to_owned();
+        let now = files(&dir, uuid);
+        let cached: Option<String> = self
+            .db
+            .query_row("SELECT files FROM histories WHERE uuid=?1", [uuid], |r| r.get(0))
+            .optional()?;
+        let used: i64 = self
+            .db
+            .query_row("SELECT coalesce(max(used), 0) + 1 FROM histories", [], |r| r.get(0))?;
+        if cached.as_deref() == Some(now.as_str()) {
+            self.db.execute("UPDATE histories SET used=?1 WHERE uuid=?2", params![used, uuid])?;
+        } else {
+            #[cfg(test)]
+            MATERIALIZED.with(|n| n.set(n.get() + 1));
+            // A task that cannot be read is answered from its document,
+            // which gives the reason.
+            let task = self.store.load(uuid).map_err(|_| Failure::Other)?;
+            let read = super::history::materialize(&task).map_err(|_| Failure::Other)?;
+            let tx = self.db.transaction()?;
+            tx.execute("DELETE FROM histories WHERE uuid=?1", [uuid])?;
+            tx.execute("DELETE FROM entries WHERE uuid=?1", [uuid])?;
+            tx.execute(
+                "INSERT INTO histories VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                params![uuid, now, read.header.to_string(), read.summary.to_string(), read.entries.len() as i64, used],
+            )?;
+            {
+                let mut insert = tx.prepare("INSERT INTO entries VALUES(?1, ?2, ?3, ?4, ?5, ?6)")?;
+                for (ordinal, entry) in read.entries.iter().enumerate() {
+                    insert.execute(params![
+                        uuid,
+                        entry.id,
+                        entry.at,
+                        ordinal as i64,
+                        entry.payload.to_string(),
+                        entry.summary.to_string()
+                    ])?;
+                }
+            }
+            tx.execute(
+                "DELETE FROM entries WHERE uuid IN (SELECT uuid FROM histories ORDER BY used DESC LIMIT -1 OFFSET ?1)",
+                [HISTORIES],
+            )?;
+            tx.execute(
+                "DELETE FROM histories WHERE uuid IN (SELECT uuid FROM histories ORDER BY used DESC LIMIT -1 OFFSET ?1)",
+                [HISTORIES],
+            )?;
+            tx.commit()?;
+        }
+        let column = if summary { "summary" } else { "header" };
+        let (header, total): (String, i64) = self.db.query_row(
+            &format!("SELECT {column}, total FROM histories WHERE uuid=?1"),
+            [uuid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let boundary = match before {
+            Some(id) => match self
+                .db
+                .query_row(
+                    "SELECT at, ordinal FROM entries WHERE uuid=?1 AND id=?2",
+                    params![uuid, id],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+                )
+                .optional()?
+            {
+                Some(boundary) => boundary,
+                None => return Ok(None),
+            },
+            None => (i64::MAX, i64::MAX),
+        };
+        let column = if summary { "summary" } else { "payload" };
+        let mut query = self.db.prepare_cached(&format!(
+            "SELECT id, {column}, at FROM entries WHERE uuid=?1 AND (at, ordinal) < (?2, ?3)
+             ORDER BY at DESC, ordinal DESC LIMIT ?4"
+        ))?;
+        let mut rows = query
+            .query_map(params![uuid, boundary.0, boundary.1, (limit + 1) as i64], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let more = rows.len() > limit;
+        rows.truncate(limit);
+        rows.reverse();
+        // Cached JSON is served only as the index wrote it: objects, the
+        // header for this task (its uuid and indexed short ID) and each entry
+        // at its indexed time. Anything else is a damaged index.
+        let object = |raw: &str| {
+            serde_json::from_str::<Value>(raw)
+                .ok()
+                .filter(Value::is_object)
+                .ok_or(Failure::Damaged)
+        };
+        let mut entries = Vec::with_capacity(rows.len());
+        for (id, raw, at) in &rows {
+            let mut entry = object(raw)?;
+            if entry["at"].as_i64() != Some(*at) {
+                return Err(Failure::Damaged);
+            }
+            if summary {
+                entry["id"] = json!(format!("{prefix}{id}"));
+            }
+            entries.push(entry);
+        }
+        let header = object(&header)?;
+        let short_id: Option<String> = self
+            .db
+            .query_row("SELECT short_id FROM tasks WHERE uuid=?1", [uuid], |r| r.get(0))
+            .optional()?
+            .flatten();
+        if header["uuid"].as_str() != Some(uuid) || short_id.is_none() || header["id"].as_str() != short_id.as_deref() {
+            return Err(Failure::Damaged);
+        }
+        let next = more.then(|| rows.first().map(|(id, ..)| format!("{prefix}{id}"))).flatten();
+        Ok(Some(super::history::finish(header, entries, total as usize, next)))
     }
 }
 

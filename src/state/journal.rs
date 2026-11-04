@@ -643,7 +643,7 @@ fn activity_page(newest: bool) -> &'static str {
 /// conversation, last sequence number]`: what the fork recorded when it
 /// began, or for a fork recorded before that, what [`derived_lineage`] finds
 /// (which `inspect` saves once, so later reads do not search again).
-fn lineage(db: &Connection, record: &Value) -> Vec<Value> {
+pub(super) fn lineage(db: &Connection, record: &Value) -> Vec<Value> {
     match record["fork_lineage"].as_array() {
         Some(recorded) => recorded
             .iter()
@@ -694,7 +694,7 @@ fn derived_lineage(db: &Connection, record: &Value) -> Option<Vec<Value>> {
 /// Saves a derived lineage into the fork's own record. The journal search
 /// runs without the state lock (`inspect` has released it by then); only
 /// [`store_lineage`] takes it, briefly.
-fn save_derived_lineage(db: &Connection, record: &mut Value) {
+pub(super) fn save_derived_lineage(db: &Connection, record: &mut Value) {
     let Some(lineage) = derived_lineage(db, record) else {
         return;
     };

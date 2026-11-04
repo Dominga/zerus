@@ -24,6 +24,19 @@ export function taskDetail(raw: unknown, project: string, uuid: string): TaskDet
     }) };
 }
 
+/** The previous objects of `next`'s unchanged items, each used once, in `next`'s order. */
+function reuse<T>(previous: readonly T[], next: T[]): T[] {
+  const known = new Map<string, T[]>();
+  for (const item of previous) { const key = JSON.stringify(item); known.set(key, [...known.get(key) ?? [], item]); }
+  const kept = next.map((item) => known.get(JSON.stringify(item))?.shift() ?? item);
+  return kept.length === previous.length && kept.every((item, i) => item === previous[i]) ? previous as T[] : kept;
+}
+/** A refreshed page keeps the objects of its unchanged entries and files, so
+ * keyed lists keep their nodes: a refresh replaces only what changed (zerus-agv9). */
+function retained(previous: TaskDetail | undefined, next: TaskDetail): TaskDetail {
+  return previous ? { ...next, files: reuse(previous.files, next.files), log: reuse(previous.log, next.log) } : next;
+}
+
 /** One page and one running read. Board updates coalesce into one follow-up;
  * a same-selection reply is published even while another refresh is pending. */
 export function createTaskDetails(read: (project: string, uuid: string, before: string | null) => Promise<unknown>) {
@@ -37,7 +50,7 @@ export function createTaskDetails(read: (project: string, uuid: string, before: 
     const target = selection, mine = generation, cursor = before();
     try {
       const reply = await read(target.project, target.uuid, cursor ?? null);
-      if (mine === generation) { setData(taskDetail(reply, target.project, target.uuid)); setError(""); }
+      if (mine === generation) { const next = taskDetail(reply, target.project, target.uuid); setData((previous) => retained(previous, next)); setError(""); }
     } catch (e) { if (mine === generation) setError(String(e)); }
     finally { running = false; if (mine === generation) setLoading(false); void drain(); }
   };

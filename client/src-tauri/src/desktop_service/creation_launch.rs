@@ -36,9 +36,19 @@ pub(crate) enum LaunchAnswer {
     Direct,
 }
 
+/// The service could not start the original launch child: nothing ran, so the
+/// reducer retires the launch ID and Continue setup can start the agent.
+pub(crate) const NOT_STARTED: &str = zerus_client_core::source!(
+    "The agent was not started: the desktop service could not start its launch. Continue setup to try again."
+);
+
 /// The reducer's answer for a settled original, as the direct path reads its
-/// exit: success advances, anything else is the launch's error.
-fn settled(receipt: &wire::Receipt, plan: &wire::Plan) -> Option<LaunchAnswer> {
+/// exit: success advances, anything else is the launch's error. Only the exact
+/// original's drained not-started receipt counts as never sent.
+pub(crate) fn settled(receipt: &wire::Receipt, plan: &wire::Plan) -> Option<LaunchAnswer> {
+    if receipt.not_started(plan) {
+        return Some(LaunchAnswer::Unsent(NOT_STARTED.into()));
+    }
     Some(match receipt.result(plan)? {
         Ok(()) => LaunchAnswer::Launched,
         Err(error) => LaunchAnswer::Unconfirmed(error),
@@ -180,5 +190,51 @@ mod tests {
                 LaunchAnswer::Unsent(NOT_SENT.into())
             );
         }
+    }
+
+    #[test]
+    fn only_the_drained_not_started_original_is_answered_as_never_sent() {
+        const ID: &str = "11111111-1111-4111-8111-111111111111";
+        const EPOCH: &str = "33333333-3333-4333-8333-333333333333";
+        let operation = json!({"id":ID,"creation_schema":1,"created":1,"revision":7,
+            "cmd":"codex","tag":"example","host":"","target":"/srv/repo",
+            "state":"launching","launch_dispatched":true,"launch_id":ID,
+            "expected_machine":"22222222-2222-4222-8222-222222222222"});
+        let verified = wire::Intent {
+            scope: wire::Scope {
+                configuration: "a".repeat(64),
+                service_epoch: EPOCH.into(),
+            },
+            creation_id: ID.into(),
+            launch_id: ID.into(),
+            revision: 7,
+            original: operation.to_string(),
+        }
+        .verify()
+        .expect("a valid launch checkpoint");
+        let mut receipt = wire::Receipt {
+            binding: verified.binding.clone(),
+            admission_epoch: EPOCH.into(),
+            revision: 3,
+            phase: wire::Phase::Failed,
+            drained: true,
+            code: wire::NOT_STARTED.into(),
+            launch: None,
+        };
+        assert_eq!(
+            settled(&receipt, &verified.plan),
+            Some(LaunchAnswer::Unsent(NOT_STARTED.into()))
+        );
+        // The same code on an Unknown original settles nothing.
+        receipt.phase = wire::Phase::Unknown;
+        assert_eq!(settled(&receipt, &verified.plan), None);
+        // A failed exit of a started child stays an unconfirmed launch.
+        receipt.phase = wire::Phase::Failed;
+        receipt.code.clear();
+        receipt.launch = Some(wire::Exited::new(&verified.plan, 1, "hgs: refused").unwrap());
+        assert!(matches!(
+            settled(&receipt, &verified.plan),
+            Some(LaunchAnswer::Unconfirmed(_))
+        ));
     }
 }

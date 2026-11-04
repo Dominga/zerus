@@ -50,6 +50,8 @@ mod catalog_relay;
 pub(crate) mod creation_clone;
 pub(crate) mod creation_launch;
 pub(crate) mod creation_worktree;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod task_start_reconcile;
 use catalog::catalog_loop;
 mod details;
 pub mod frontend;
@@ -343,6 +345,10 @@ struct ReadOnlyOriginal {
 }
 
 struct Shared {
+    /// Test fence: the original frame's report wake has returned. A hello
+    /// projection alone runs earlier and can conceal a missing job wake.
+    #[cfg(test)]
+    report_frame_finished: std::sync::atomic::AtomicUsize,
     creation_rpc: Gate,
     notification_controls: Arc<crate::desktop_notification_controls::Controller>,
     notification_supported: AtomicBool,
@@ -525,6 +531,8 @@ impl Service {
             zerus_client_core::desktop::ownership::Mode::Service,
         );
         let shared = Arc::new(Shared {
+            #[cfg(test)]
+            report_frame_finished: std::sync::atomic::AtomicUsize::new(0),
             creation_rpc: Gate::new(1).unwrap(),
             notification_controls: crate::desktop_notification_controls::Controller::new(
                 observers.notification_controls,
@@ -591,9 +599,11 @@ impl Service {
                 }
             }));
             let weak = Arc::downgrade(&shared);
+            // A settled drafts capture also starts its historical report.
             report.hook_drafts(Arc::new(move || {
                 if let Some(shared) = weak.upgrade() {
                     shared.publish_retained_import();
+                    retained_import::creations::schedule_current(&shared);
                 }
             }));
         }
@@ -1770,6 +1780,8 @@ async fn connection(
                             return Err("manual_refresh_required");
                         }
                         retained_import::creations::schedule_current(&shared);
+                        #[cfg(test)]
+                        shared.report_frame_finished.fetch_add(1, Ordering::Release);
                         if frame["t"] == "hello" && notification_worker.is_none()
                             && !startup_recovery()
                             && shared.notification_supported.load(Ordering::Acquire)

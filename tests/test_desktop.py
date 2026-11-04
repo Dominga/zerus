@@ -222,7 +222,7 @@ finally:
         else:
             self.assertNotIn('desktop-creation-worktree', help_text)
 
-    def test_task_start_reconcile_is_closed_and_not_yet_advertised(self):
+    def test_task_start_reconcile_is_closed_and_only_unix_advertises_the_native_caller(self):
         self.serve()
         status = self.cli('desktop', 'status', '--json')
         intent = dict(scope=dict(configuration=status['configuration'], service_epoch=status['epoch']),
@@ -231,11 +231,31 @@ finally:
         self.assertFalse(refused['accepted'])
         self.assertEqual(refused['code'], 'frontend_authentication_required')
         help_text = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True).stdout
-        self.assertNotIn('Desktop task Start reconcile ABI:', help_text)
-        self.assertNotIn('task-start-reconcile-v1', help_text)
+        marker = 'Desktop task start reconcile ABI: desktop-task-start-reconcile-v1'
+        if sys.platform.startswith(('linux', 'darwin')):
+            self.assertIn(marker, [line.strip() for line in help_text.splitlines()])
+        else:
+            self.assertNotIn(marker, help_text)
         with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_operations').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_operation_attempts').fetchone()[0], 0)
+
+    def test_task_message_is_a_closed_native_intent_refused_without_its_actor(self):
+        self.serve()
+        status = self.cli('desktop', 'status', '--json')
+        scope = dict(configuration=status['configuration'], service_epoch=status['epoch'])
+        request = str(uuid.uuid4())
+        content = dict(text='hello', attachments=[])
+        record = dict(id=request, intent=dict(content=content, mode='queue', dispatch=''),
+                      input_sha256=hashlib.sha256(json.dumps(content, separators=(',', ':'), sort_keys=True).encode()).hexdigest())
+        intent = dict(scope=scope, project='example', task_id=str(uuid.uuid4()), request_id=request,
+                      original=json.dumps(record, separators=(',', ':')))
+        # Only the native frontend lane carries it, and no actor admits it yet.
+        refused = self.cli('desktop', 'request', '--json', data=dict(op='task_message', intent=intent))
+        self.assertFalse(refused['accepted'])
+        self.assertEqual(refused['code'], 'frontend_authentication_required')
+        help_text = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True).stdout
+        self.assertNotIn('Desktop task message ABI', help_text, 'nothing advertises the kind yet')
 
     def test_creation_launch_is_a_closed_native_intent_with_scoped_read_only_lookup(self):
         self.serve()
@@ -278,8 +298,10 @@ finally:
         # close-on-exec before anything else: the Git (or tmux) it starts, and
         # their own children, never hold the creation's custody lock.
         import fcntl
-        fake = self.root / 'custody-bin'
-        fake.mkdir(mode=0o700)
+        # hgs prepends HOME/.local/bin and the package-manager directories to
+        # PATH. A fixture only in the caller's PATH loses to Homebrew Git on
+        # macOS, so use the private user-install directory created by setUp.
+        fake = self.root / '.local/bin'
         record = self.root / 'custody-record'
         git = fake / 'git'
         git.write_text('#!/bin/sh\n'
@@ -303,8 +325,10 @@ finally:
                                     pass_fds=(held,), capture_output=True, text=True, timeout=20)
         finally:
             os.close(held)
-        self.assertIn('closed', record.read_text().split(), result.stderr)
-        self.assertNotIn('open', record.read_text().split())
+        self.assertTrue(record.is_file(), f'Custody Git fixture did not run: {result}')
+        observed = record.read_text().split()
+        self.assertIn('closed', observed, result.stderr)
+        self.assertNotIn('open', observed)
         # The command and its programs have exited: nothing holds the lock,
         # although the program's own child is still running.
         probe = os.open(lock_path, os.O_RDWR)
@@ -614,6 +638,32 @@ finally:
 
     def failed_serve(self, env=None):
         return self.cli('desktop', 'serve', ok=False, env=env)
+
+    def test_termination_retention_requires_native_proof_and_status_is_original_id_only(self):
+        _, service = self.serve()
+        original_id = str(uuid.uuid4())
+        capture = dict(target=dict(computer='', name='codex/example/source', run_id='run', conversation_id='conversation'),
+                       machine=str(uuid.uuid4()), root='/srv/example/work', common_dir='/srv/example/main/.git', owner_id='original-owner')
+        original = dict(request_id=original_id, action='terminate', expected_run_id='run', expected_conversation_id='conversation')
+        intent = dict(scope=dict(configuration=service['configuration'], service_epoch=service['epoch']),
+                      confirmation_id=str(uuid.uuid4()), choice='remove_after_terminate', request_id=original_id,
+                      capture=capture, original=json.dumps(original))
+        refused = self.cli('desktop', 'request', '--json', data=dict(op='termination_outcome', intent=intent, confirmed=True, role='frontend'))
+        self.assertFalse(refused['accepted'])
+        self.assertFalse(refused['durable'])
+        self.assertEqual(refused['code'], 'frontend_authentication_required')
+        query = dict(op='termination_outcome_status', request_id=str(uuid.uuid4()), original_request_id=original_id, configuration=service['configuration'])
+        result = self.cli('desktop', 'request', '--json', data=query)
+        self.assertTrue(result['accepted'])
+        self.assertFalse(result['durable'])
+        self.assertFalse(result['found'])
+        self.assertIsNone(result['status'])
+        self.assertFalse(result['cleanup_authorized'])
+        query['allow_retry'] = True
+        self.assertFalse(self.cli('desktop', 'request', '--json', data=query)['accepted'])
+        status = self.cli('desktop', 'status', '--json')
+        self.assertFalse(status['writers_enabled'])
+        self.assertFalse(status['automatic_approvals'])
 
     def test_pending_read_import_requires_native_frontend_and_lookup_stays_read_only(self):
         self.serve()
@@ -939,6 +989,22 @@ finally:
         self.assertFalse((self.state / 'desktop-presence.json').exists())
         self.assertFalse((self.state / 'read-marks.json').exists())
         self.assertFalse((self.root / 'unexpected-tool').exists())
+
+    @unittest.skipUnless(os.name == 'posix', 'SQLite POSIX record locks')
+    def test_live_actor_retains_sqlite_lock_until_original_exit(self):
+        import fcntl
+        process, _ = self.serve(background=True)
+        database = self.desktop / 'state.sqlite3'
+        # SQLite's shared database lock occupies this byte range even in WAL
+        # mode. A raw descriptor closed after SQLite opened would drop it and
+        # let another connection mistake itself for the last WAL user.
+        with database.open('r+b') as file:
+            with self.assertRaises(BlockingIOError,
+                                   msg='live actor lost its SQLite shared lock'):
+                fcntl.lockf(file, fcntl.LOCK_EX | fcntl.LOCK_NB, 512, 0x40000000)
+        self.stop(process)
+        with database.open('r+b') as file:
+            fcntl.lockf(file, fcntl.LOCK_EX | fcntl.LOCK_NB, 512, 0x40000000)
 
     def test_background_fleet_lifetime_revoke_and_stale_epoch(self):
         self.env['HGS_PEERS'] = ''
@@ -1377,8 +1443,9 @@ finally:
     @staticmethod
     def remove_catalog_reason_schema(db):
         # Rewind the later leaves too, never leaving one labelled older: the
-        # schema-24 creation launch, the schema-23 creation worktree, then the
-        # schema-22 catalog approval.
+        # schema-25 termination retention, creation launch/worktree, then
+        # the schema-22 catalog approval.
+        db.execute('DROP TABLE desktop_termination_outcomes')
         db.execute('DROP TABLE desktop_creation_launches')
         db.execute('DROP TABLE desktop_creation_launch_budget')
         db.execute('DROP TABLE desktop_creation_worktrees')

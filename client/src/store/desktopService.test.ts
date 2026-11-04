@@ -67,6 +67,36 @@ describe("desktop service presentation", () => {
     expect(view().connected).toBe(true);
   });
 
+  it("prioritizes review and preparation over deferred sibling reports while keeping every detail", () => {
+    const settled = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
+    const local = { required: true, complete: false, running: false, code: "local_reads_import_before_record", phase: "before_record" };
+    const creations = { ...local, code: "creations_import_waiting", phase: null };
+    const qt = { ...local, code: "retained_import_handoff_busy", phase: "not_committed" };
+    const cases = [
+      { qt: settled, creations: { ...creations, running: true }, message: "Preparing the saved creation report" },
+      { qt: settled, creations: { ...creations, code: "creations_import_original_result_unconfirmed", phase: "unknown" }, message: "saved creation report needs review" },
+      { qt: { ...qt, running: true }, creations, message: "Preparing the migration report" },
+      { qt: { ...qt, code: "retained_import_qt_unavailable" }, creations, message: "migration report needs review" },
+      { qt, creations: { ...creations, running: true }, message: "Preparing the saved creation report" },
+      { qt: { ...qt, phase: "unknown" }, creations, message: "migration report needs review" },
+      { qt: { ...qt, code: "retained_import_source_resources_pending" }, creations: { ...creations, required: false }, message: "migration report is deferred while background work" },
+    ];
+    for (const item of cases) {
+      const state = serviceView({ retained_source_import: { ...item.qt, local_reads_report: local, creations_report: item.creations } });
+      const before = structuredClone(state);
+      expect(retainedSourceNotice(state)).toContain(item.message);
+      const details = retainedSourceDetails(state)!;
+      expect(details.localReadsReport?.reason).toContain("not sent because local preparation failed");
+      expect(details.creations?.code).toBe(item.creations.required ? item.creations.code : undefined);
+      if (item.qt.required) expect(details.settings?.code).toBe(item.qt.code);
+      expect(state).toEqual(before);
+    }
+    // Even a stale deferred code cannot hide an uncertain original result.
+    const unknown = serviceView({ retained_source_import: { ...settled, creations_report: creations, local_reads_report: { ...local, phase: "unknown" } } });
+    expect(retainedSourceNotice(unknown)).toContain("local read-mark report needs review");
+    expect(retainedSourceDetails(unknown)!.localReadsReport?.next).toContain("checks the original report");
+  });
+
   it("keeps a paused folder-cache write separate from draft/read capture, publication and service readiness", () => {
     const base = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
     const state = serviceView({ retained_source_import: { ...base,
@@ -144,7 +174,7 @@ describe("desktop service presentation", () => {
     expect(unsent.creations?.reason).toContain("not sent because local preparation failed");
     expect(unsent.creations?.next).toContain("then use Retry");
     expect(unsent.creations?.phase).toBe("before_record");
-    expect(retainedSourceNotice(view("before_record"))).toContain("deferred");
+    expect(retainedSourceNotice(view("before_record"))).toContain("migration report needs review");
     // A code alone cannot turn an unknown publication into a safe resend.
     const unknown = retainedSourceDetails(view("unknown"))!.creations!;
     expect(unknown.reason).toContain("unconfirmed");
@@ -180,9 +210,11 @@ describe("desktop service presentation", () => {
     expect(retainedSourceNotice(resumed)).toBe("");
     expect(retainedSourceDetails(resumed)!.drafts!.next).toContain("stays incomplete");
     expect(retainedSourceDetails(view({ code: "draft_capture_future", writes: true, paused: false }))!.drafts!.code).toBe("draft_capture_future");
-    // Qt's originals recorded, Next's own after an earlier run: incomplete.
+    // Next's own originals after an earlier run: incomplete, but nothing is
+    // lost, and it never claims a Qt store that may not exist.
     const earlier = retainedSourceDetails(view({ code: "draft_capture_next_earlier_run", writes: true, paused: false }))!.drafts!;
-    expect(earlier.reason).toContain("Your Qt drafts were recorded");
+    expect(earlier.reason).toContain("Your drafts are kept and nothing is lost");
+    expect(earlier.reason).not.toContain("Qt");
     expect(earlier.next).toContain("stays incomplete");
     // A captured store, or one with no drafts, shows nothing.
     for (const code of ["draft_capture_captured", "draft_capture_not_applicable"]) {
@@ -205,6 +237,56 @@ describe("desktop service presentation", () => {
     expect(retainedSourceNotice(unsupported)).toBe("");
     expect(retainedSourceDetails(unsupported)!.downloads!.reason).toContain("cannot be recorded, so it is not part of the migration report");
     expect(retainedSourceDetails(unsupported)!.downloads!.next).toContain("stays incomplete");
+  });
+  it("presents the historical downloaded files report as evidence only", () => {
+    const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
+    const view = (patch: object) => serviceView({ retained_source_import: { ...report, downloads_report: { required: true, complete: false, running: false, code: "downloads_import_waiting", phase: null, ...patch } } });
+    expect(retainedSourceNotice(view({ running: true }))).toContain("Preparing the historical downloaded files report");
+    expect(retainedSourceNotice(view({}))).toContain("is deferred");
+    const unknown = view({ code: "downloads_import_original_result_unconfirmed", phase: "unknown" });
+    expect(retainedSourceNotice(unknown)).toContain("needs review");
+    expect(retainedSourceDetails(unknown)!.downloadsReport!.next).toContain("checks the original report result");
+    const done = view({ complete: true, code: "downloads_import_staged", phase: "published" });
+    expect(retainedSourceNotice(done)).toBe("");
+    expect(retainedSourceDetails(done)!.downloadsReport!.next).toContain("never downloads, removes or cleans up files");
+    expect(retainedSourceDetails(view({ required: false, complete: true }))).toBeUndefined();
+  });
+  it("presents the historical drafts report as evidence and keeps an incomplete one visible", () => {
+    const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
+    const view = (patch: object) => serviceView({ retained_source_import: { ...report, drafts_report: { required: true, complete: false, partial: false, running: false, code: "drafts_import_waiting", phase: null, ...patch } } });
+    expect(retainedSourceNotice(view({ running: true }))).toContain("Preparing the historical drafts report");
+    expect(retainedSourceNotice(view({}))).toContain("is deferred");
+    const unknown = view({ code: "drafts_import_original_result_unconfirmed", phase: "unknown" });
+    expect(retainedSourceNotice(unknown)).toContain("needs review");
+    expect(retainedSourceDetails(unknown)!.draftsReport!.next).toContain("checks the original report result");
+    const done = view({ complete: true, code: "drafts_import_staged", phase: "published" });
+    expect(retainedSourceNotice(done)).toBe("");
+    expect(retainedSourceDetails(done)!.draftsReport!.next).toContain("never sends, imports or deletes drafts");
+    // Published without Next's earlier drafts: incomplete, with no banner.
+    const partial = view({ partial: true, code: "drafts_import_staged", phase: "published" });
+    expect(retainedSourceNotice(partial)).toBe("");
+    expect(retainedSourceDetails(partial)!.draftsReport!.reason).toContain("Your drafts are kept and nothing is lost");
+    expect(retainedSourceDetails(partial)!.draftsReport!.next).toContain("stays incomplete");
+    // Not captured: unavailable and incomplete, never saved for review.
+    const unavailable = view({ code: "drafts_import_capture_unavailable" });
+    expect(retainedSourceNotice(unavailable)).toBe("");
+    expect(retainedSourceDetails(unavailable)!.draftsReport!.reason).toContain("historical drafts report was not sent");
+    expect(retainedSourceDetails(unavailable)!.draftsReport!.next).toContain("stays incomplete");
+    expect(retainedSourceDetails(view({ required: false, complete: true }))).toBeUndefined();
+  });
+  it("shows no drafts report until the drafts capture's outcome is final", () => {
+    const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
+    const view = (capture: { code: string; writes?: boolean }) => serviceView({ retained_source_import: { ...report, drafts_capture: { writes: true, paused: false, capture_id: null, manifests: 0, ...capture }, drafts_report: { required: true, complete: false, partial: false, running: false, code: "drafts_import_waiting", phase: null } } });
+    for (const code of ["draft_capture_waiting", "draft_capture_private_slot"]) {
+      expect(retainedSourceNotice(view({ code }))).not.toContain("drafts report");
+      expect(retainedSourceDetails(view({ code }))?.draftsReport).toBeUndefined();
+    }
+    // A refused capture keeps its own notice and section.
+    const refused = view({ code: "draft_capture_private_slot", writes: false });
+    expect(retainedSourceNotice(refused)).toContain("Drafts are not being saved");
+    expect(retainedSourceDetails(refused)!.drafts).toBeDefined();
+    // Once the outcome is final the report shows as before.
+    expect(retainedSourceNotice(view({ code: "draft_capture_captured" }))).toContain("historical drafts report is deferred");
   });
   it("explains the archive and data-directory refusals without changing readiness", () => {
     const report = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };

@@ -12,7 +12,7 @@ use zerus_desktop_migration::{canonical, configuration, HANDOFF_LOCK};
 #[path = "maintenance.rs"]
 pub(crate) mod maintenance;
 
-pub const SCHEMA: i64 = super::creation_launch::SCHEMA;
+pub const SCHEMA: i64 = super::termination_outcome::SCHEMA;
 pub struct HandoffLock {
     _lock: platform::FileLock,
     root: PathBuf,
@@ -301,7 +301,10 @@ impl Store {
                 "desktop state requires a newer hgs version"
             );
         }
-        let _file = private_file(&path, true)?;
+        // Finish the raw-file check before SQLite acquires any locks. On Unix,
+        // closing any descriptor for this file drops this process's POSIX
+        // locks, including those held by the live SQLite connection.
+        drop(private_file(&path, true)?);
         let mut db = Connection::open_with_flags(&path, flags | OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         super::counts::register(&db)?;
         db.busy_timeout(Duration::from_secs(2))?;
@@ -474,6 +477,12 @@ impl Store {
             let tx = db.transaction()?;
             super::creation_launch::migrate(&tx)?;
             tx.pragma_update(None, "user_version", super::creation_launch::SCHEMA)?;
+            tx.commit()?;
+        }
+        if version < super::termination_outcome::SCHEMA {
+            let tx = db.transaction()?;
+            super::termination_outcome::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", super::termination_outcome::SCHEMA)?;
             tx.commit()?;
         }
         // Opening Store follows acquisition of the real exclusive serve owner.

@@ -99,6 +99,8 @@ struct State {
     not_applicable: bool,
     code: &'static str,
     retry_requested: bool,
+    pending: bool,
+    explicit: bool,
 }
 pub(super) struct Report {
     inputs: Inputs,
@@ -108,6 +110,8 @@ pub(super) struct Report {
     creations: Mutex<creations::CreationState>,
     local_reads: Mutex<creations::CreationState>,
     worktree_cache: Mutex<creations::CreationState>,
+    downloads_report: Mutex<creations::CreationState>,
+    drafts_report: Mutex<creations::CreationState>,
     capture: Gate,
     work: Gate,
 }
@@ -137,6 +141,12 @@ impl Report {
             )),
             worktree_cache: Mutex::new(creations::CreationState::new(
                 migration::creation_report::Group::WorktreeCache,
+            )),
+            downloads_report: Mutex::new(creations::CreationState::new(
+                migration::creation_report::Group::Downloads,
+            )),
+            drafts_report: Mutex::new(creations::CreationState::new(
+                migration::creation_report::Group::Drafts,
             )),
             capture: Gate::new(1).unwrap(),
             work: Gate::new(1).unwrap(),
@@ -196,7 +206,7 @@ impl Report {
     pub fn status(&self) -> Value {
         let downloads = self.downloads_status();
         let state = self.state();
-        json!({"creations_report":self.group_status(migration::creation_report::Group::Creations),"local_reads_report":self.group_status(migration::creation_report::Group::LocalReads),"worktree_cache_report":self.group_status(migration::creation_report::Group::WorktreeCache),"creations_capture":self.inputs.creations.status(),"local_read_capture":self.inputs.local_reads.status(),"drafts_capture":self.inputs.drafts.status(),"downloads_capture":downloads,"worktree_cache_capture":self.inputs.worktree_cache.status(),"scope":SCOPE,"running":state.running,"code":state.code,
+        json!({"creations_report":self.group_status(migration::creation_report::Group::Creations),"local_reads_report":self.group_status(migration::creation_report::Group::LocalReads),"worktree_cache_report":self.group_status(migration::creation_report::Group::WorktreeCache),"creations_capture":self.inputs.creations.status(),"local_read_capture":self.inputs.local_reads.status(),"drafts_capture":self.inputs.drafts.status(),"downloads_capture":downloads,"downloads_report":self.group_status(migration::creation_report::Group::Downloads),"drafts_report":self.group_status(migration::creation_report::Group::Drafts),"worktree_cache_capture":self.inputs.worktree_cache.status(),"scope":SCOPE,"running":state.running,"code":state.code,
             "required":!state.not_applicable,
             "complete":state.stored.as_ref().is_some_and(|s| s.record.phase == Phase::Published),
             "import_id":state.stored.as_ref().map(|s|&s.record.import_id),
@@ -481,7 +491,7 @@ pub(super) async fn before_grant(
     stop: Arc<AtomicBool>,
     explicit: bool,
 ) {
-    let result = attempt(
+    let _ = attempt(
         shared,
         relay.clone(),
         configuration.clone(),
@@ -489,12 +499,11 @@ pub(super) async fn before_grant(
         explicit,
     )
     .await;
+    // attempt records its result under the same state lock as admission, so
+    // a completion racing a deferred start cannot be overwritten by its old
+    // resources-pending error.
+    shared.publish_retained_import();
     creations::arm(shared, relay, configuration, stop, explicit);
-    if let Err(code) = result {
-        record_error(shared, code);
-    } else {
-        shared.publish_retained_import();
-    }
 }
 
 pub(super) fn record_error(shared: &Shared, code: &'static str) {
@@ -502,6 +511,63 @@ pub(super) fn record_error(shared: &Shared, code: &'static str) {
         report.state().code = code;
     }
     shared.publish_retained_import();
+}
+
+/// Only a deferred request is queued; the actual admission remains Gate(1).
+fn start_attempt(
+    report: &Report,
+    explicit: bool,
+) -> Result<(zerus_client_core::desktop::drain::Charge, bool), &'static str> {
+    let mut state = report.state();
+    if state.running {
+        return Err("retained_import_running");
+    }
+    let charge = report.work.admit(Role::Operations).map_err(|refused| {
+        state.code = "retained_import_source_resources_pending";
+        if refused == zerus_client_core::desktop::drain::Refused::Capacity {
+            state.pending = true;
+            state.explicit |= explicit;
+        }
+        "retained_import_source_resources_pending"
+    })?;
+    state.pending = false;
+    let explicit = explicit | std::mem::take(&mut state.explicit);
+    state.running = true;
+    state.code = "retained_import_running";
+    Ok((charge, explicit))
+}
+
+// Two independent ends of one admitted job: process its result and release
+// its final original resource. Whichever finishes second supplies ONE wake.
+const FINISHED: u8 = 1;
+const RELEASED: u8 = 2;
+/// The final original child/pipe resource can outlive the worker's result.
+/// Release its SAME charge before marking that half of completion.
+struct Work {
+    charge: Option<zerus_client_core::desktop::drain::Charge>,
+    shared: Weak<Shared>,
+    completion: Arc<std::sync::atomic::AtomicU8>,
+}
+impl Drop for Work {
+    fn drop(&mut self) {
+        drop(self.charge.take());
+        if self.completion.fetch_or(RELEASED, Ordering::AcqRel) & FINISHED != 0 {
+            if let Some(shared) = self.shared.upgrade() {
+                creations::schedule_current(&shared);
+            }
+        }
+    }
+}
+fn work_resources(
+    shared: &Arc<Shared>,
+    charge: zerus_client_core::desktop::drain::Charge,
+    completion: Arc<std::sync::atomic::AtomicU8>,
+) -> Arc<dyn Send + Sync> {
+    Arc::new(Work {
+        charge: Some(charge),
+        shared: Arc::downgrade(shared),
+        completion,
+    })
 }
 
 async fn attempt(
@@ -514,22 +580,58 @@ async fn attempt(
     let Some(report) = shared.retained_import.clone() else {
         return Ok(());
     };
-    let charge = report
-        .work
-        .admit(Role::Operations)
-        .map_err(|_| "retained_import_source_resources_pending")?;
-    {
-        let mut state = report.state();
-        if state.running {
-            return Err("retained_import_running");
-        }
-        state.running = true;
-        state.code = "retained_import_running";
+    let (charge, explicit) = start_attempt(&report, explicit)?;
+    finish_attempt(shared, report, relay, configuration, stop, explicit, charge).await
+}
+
+/// A completion can resume a Qt Retry that found another group holding the
+/// slot. No new Retry, source, import UUID or background grant is manufactured.
+fn schedule_pending(
+    shared: &Arc<Shared>,
+    relay: Arc<zerus_client_core::desktop::relay::Connection>,
+    configuration: String,
+    stop: Arc<AtomicBool>,
+) -> bool {
+    let Some(report) = shared.retained_import.clone() else {
+        return false;
+    };
+    if !report.state().pending {
+        return false;
     }
+    let Ok((charge, explicit)) = start_attempt(&report, false) else {
+        return true;
+    };
+    let shared = shared.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = finish_attempt(
+            &shared,
+            report,
+            relay,
+            configuration,
+            stop,
+            explicit,
+            charge,
+        )
+        .await;
+    });
+    true
+}
+
+async fn finish_attempt(
+    shared: &Arc<Shared>,
+    report: Arc<Report>,
+    relay: Arc<zerus_client_core::desktop::relay::Connection>,
+    configuration: String,
+    stop: Arc<AtomicBool>,
+    explicit: bool,
+    charge: zerus_client_core::desktop::drain::Charge,
+) -> Result<(), &'static str> {
     shared.publish_retained_import();
+    let completion = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let resources = work_resources(shared, charge, completion.clone());
     let worker = report.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        worker.run(relay, configuration, stop, explicit, Arc::new(charge))
+        worker.run(relay, configuration, stop, explicit, resources)
     })
     .await
     .map_err(|_| "retained_import_worker_unavailable")
@@ -537,17 +639,23 @@ async fn attempt(
     if shared.stopped.load(Ordering::Acquire) {
         report.close();
     }
-    let mut state = report.state();
-    state.running = false;
-    state.code = result
-        .as_ref()
-        .err()
-        .copied()
-        .unwrap_or(if state.not_applicable {
-            "retained_import_qt_absent"
-        } else {
-            "retained_import_staged"
-        });
+    {
+        let mut state = report.state();
+        state.running = false;
+        state.code = result
+            .as_ref()
+            .err()
+            .copied()
+            .unwrap_or(if state.not_applicable {
+                "retained_import_qt_absent"
+            } else {
+                "retained_import_staged"
+            });
+    }
+    shared.publish_retained_import();
+    if completion.fetch_or(FINISHED, Ordering::AcqRel) & RELEASED != 0 {
+        creations::schedule_current(shared);
+    }
     result
 }
 

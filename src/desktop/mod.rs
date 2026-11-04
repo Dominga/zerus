@@ -53,6 +53,7 @@ mod store;
 mod swarm_windows;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod task_start_reconcile;
+mod termination_outcome;
 mod transport;
 mod ui_authority;
 mod upgrade;
@@ -538,6 +539,8 @@ impl Drop for Permit {
 
 fn serve(config: &Config, location: Location, background_mode: bool) -> Result<()> {
     let mut upgrade = upgrade::Upgrade::new();
+    #[cfg(all(test, target_os = "linux"))]
+    upgrade::actor_tests::configure(&mut upgrade);
     let (_signals, owner, listener, epoch, mut store) = (|| -> Result<_> {
         #[cfg(windows)]
         crate::host::token::private_creation::prepare()
@@ -581,6 +584,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     // At most16 queued controls/data, thirteen bounded parsers and one passive
     // producer. Background mode owns the only internal source producer.
     let (send, receive) = mpsc::sync_channel(protocol::PENDING);
+    #[cfg(all(test, target_os = "linux"))]
+    let fault_send = upgrade::actor_tests::fault_sender(&send);
     let acceptor = {
         let ui_scope = ui_scope.clone();
         let (listener, stopped, active, ingress) = (
@@ -627,6 +632,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                 }
             })?
     };
+    #[cfg(all(test, target_os = "linux"))]
+    upgrade::actor_tests::started(&location, &owner);
     let mut fanout = Fanout::default();
     let mut migration = handoff::inspect(&location);
     let mut seq = 0;
@@ -634,6 +641,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     let mut collect_at = Instant::now();
     let mut failed = false;
     let mut background_blocked = false;
+    #[cfg(any(windows, all(test, target_os = "linux")))]
+    let mut retirement_drained = false;
     let run_result = (|| -> Result<()> {
         if background_mode {
             background_blocked = !revoke::background_permitted(&location, &store)?;
@@ -672,6 +681,10 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                     runtime.drain(&mut store, Duration::from_millis(10))
                 });
                 if drained.is_ok() && feed.stop(&mut store).is_ok() {
+                    #[cfg(any(windows, all(test, target_os = "linux")))]
+                    {
+                        retirement_drained = true;
+                    }
                     background = None;
                     // Audit/finalizer I/O can retain the original serve owner
                     // outside the background runtime. Never abandon those loans.
@@ -741,6 +754,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
             }
             frontend.tick(&location);
             store.recover_operation_custody(&location);
+            #[cfg(all(test, target_os = "linux"))]
+            upgrade::actor_tests::replacement_error(&upgrade, &fault_send, &active);
             match receive.recv_timeout(if full_batch {
                 Duration::ZERO
             } else {
@@ -811,6 +826,16 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         value["background_start"] = json!({"admitted":false,"code":"explicit_handoff_required","durably_blocked":true});
                     }
                     upgrade.decorate(&mut value);
+                    #[cfg(any(windows, all(test, target_os = "linux")))]
+                    if hello.op == "status" && hello.request.is_none() {
+                        upgrade.decorate_refresh(
+                            &mut value,
+                            &owner,
+                            retirement_drained,
+                            active.load(Ordering::SeqCst),
+                            store.operation_undrained()?,
+                        );
+                    }
                     let mut streaming = false;
                     let mut activation_waiting = false;
                     let reply = if hello.abi != ABI || hello.configuration != location.configuration
@@ -856,6 +881,19 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         frame(&epoch, seq, "status", value)
                     } else if hello.op == "frontend_request" {
                         let result = match (authority, &mut background) {
+                            (Some(authority), _)
+                                if authority.operation() == "termination_outcome" =>
+                            {
+                                match authority.into_request(&mut frontend_order) {
+                                    Ok(request) => {
+                                        termination_outcome::frontend(&mut store, request)
+                                    }
+                                    Err(_) => frontend_refused(
+                                        hello.request.as_ref(),
+                                        "frontend_identity_expired",
+                                    ),
+                                }
+                            }
                             (Some(authority), _)
                                 if authority.operation() == "desktop_ownership" =>
                             {
@@ -979,7 +1017,26 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         };
                         frame(&epoch, seq, "response", result)
                     } else if hello.op == "request" {
-                        let result = if hello.request.as_ref().is_some_and(|v| {
+                        let result = if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "termination_outcome_status")
+                        {
+                            termination_outcome::query(
+                                &store,
+                                &location.configuration,
+                                hello.request.as_ref().unwrap(),
+                            )
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "termination_outcome")
+                        {
+                            frontend_refused(
+                                hello.request.as_ref(),
+                                "frontend_authentication_required",
+                            )
+                        } else if hello.request.as_ref().is_some_and(|v| {
                             matches!(
                                 v["op"].as_str(),
                                 Some("cache_maintenance_result" | "cache_maintenance_policy")
@@ -1053,6 +1110,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                     "creation_clone"
                                         | "creation_worktree"
                                         | "creation_launch"
+                                        | "task_message"
                                         | "task_start_reconcile"
                                 )
                             )
@@ -1319,6 +1377,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
         Instant::now() < deadline,
         platform::shutdown_signal() != 0,
     ) {
+        #[cfg(all(test, target_os = "linux"))]
+        upgrade::actor_tests::connection_wait(replaced, &active);
         thread::sleep(Duration::from_millis(10));
     }
     let drained = if replaced {
@@ -1345,6 +1405,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
         // the original kernel owner through any independent finalizer/audit
         // loan even if the actor ended on an unrelated listener/store error.
         drop(background.take());
+        #[cfg(all(test, target_os = "linux"))]
+        upgrade::actor_tests::owner_wait(&owner);
         while !upgrade::owner_loans_released(&owner) && platform::shutdown_signal() == 0 {
             thread::sleep(Duration::from_millis(10));
         }

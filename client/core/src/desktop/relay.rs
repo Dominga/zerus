@@ -23,6 +23,30 @@ pub struct Connection {
     native: Option<crate::macos_notify::peer::installation::Selection>,
 }
 impl Connection {
+    /// Mac own-original-child observation only, before taking/writing stdin.
+    /// No caller-supplied PID, path, signature or reusable permission. Ordinary
+    /// routing has no native selection and refuses this operation. On failure
+    /// input is closed; the SAME Child stays with its caller for bounded
+    /// stop/reap/pipe custody. A success is point-in-time, not an exec fence or
+    /// G1 effect admission. Retain actual resources past any outer timeout.
+    #[cfg(target_os = "macos")]
+    pub fn observe_original_helper(
+        &self,
+        child: &mut std::process::Child,
+    ) -> Result<(), &'static str> {
+        #[cfg(feature = "macos-native-peer")]
+        let result = self.native.as_ref().ok_or(UNAVAILABLE).and_then(|native| {
+            native
+                .observe_original_helper(child)
+                .map_err(|_| UNAVAILABLE)
+        });
+        #[cfg(not(feature = "macos-native-peer"))]
+        let result = Err(UNAVAILABLE);
+        if result.is_err() {
+            drop(child.stdin.take());
+        }
+        result
+    }
     pub fn select(ordinary: &Path) -> Result<Self, &'static str> {
         #[cfg(target_os = "macos")]
         {

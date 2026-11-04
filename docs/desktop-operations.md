@@ -160,6 +160,51 @@ This remains true if G3 has added an adapter that this consumer does not yet
 understand. `ManifestEnd` means only the end of this immutable manifest; it
 never claims complete source discovery, drain or G2 coverage.
 
+Each deferred input reserves its client request UUID and a consent checkpoint
+before its dispatch, and saves them with its draft in the existing durable save
+(`operation_recovery::deferred_input`, draft manifest field `deferred_input`).
+The deferred inputs are a send, an answer, the compaction of a compact-to-send
+and the start of a resume-then-send. The dispatch uses that request id. The
+checkpoint records the original intent and identity only: the kind, the draft
+save revision and the exact message digest, the run and conversation, the
+question for an answer, a resume's start choice, and the CLI receipt family
+(`input_receipts`, `question_receipts`, `compact_receipts` or `resume_input`).
+Restart, import or reconnect never rebuild executable consent from it, and
+nothing sends from it. Imported and recovered drafts never carry one. A
+present but invalid field leaves the draft not restored, never read as absent.
+Executing kinds that reconcile its receipt remain a later slice.
+
+A draft holds one such identity until it is resolved. A definite outcome
+resolves it, as does a cancellation before its call was dispatched or, for a
+start or compaction, the session seen ready for the send. An uncertain outcome
+keeps it. Once its call is dispatched, a Cancel send, an interruption or a time
+limit keeps it too, and the call's own late answer then decides: a definite one
+resolves it, an uncertain one keeps it. Only calls still in flight are tracked
+for that late answer, at most 32; past that the oldest goes, and its draft
+keeps the identity until Allow retry, which also retires its draft's tracking.
+While it is held, the composer stays uncertain, with a notice that delivery is
+not confirmed (or, after a reload of a draft saved while sending, that it was
+interrupted), and refuses a new Send, a start or compaction, and a Retry of a
+failed message. A reload of a draft that holds one, including a draft saved
+while a start or compaction waited, loads it in that state. History carries
+only text, never a request id, so it never settles a held identity, not even
+the row of its own send; only evidence carrying that request id can, which a
+later slice reconciles. A draft holding none keeps the legacy text match. Apart
+from the definite outcomes above, only the user's explicit Allow retry ends a
+held identity; the next attempt then reserves its own before its call. Rename,
+recover and import treat a draft that holds one as occupied, even without text
+or files, and never overwrite it.
+
+This fail-closed rule changes behaviour in rare cases. After a quit or crash
+while a start or compaction ran, and after a Cancel send or time limit while
+that call was still running and then answered uncertainly, the user clicks
+Allow retry before sending again. A Retry of a failed message waits until the
+composer's own unresolved delivery is resolved, and a Retry that ends
+uncertainly leaves the composer uncertain even though its draft is another
+message. An uncertain send whose text later shows in history no longer clears
+its draft by itself: its failed row goes, and the draft stays uncertain until
+Allow retry.
+
 ## Executing kinds and the exit boundary
 
 The termination-outcome prerequisite shares the maintained CLI's exact
@@ -225,6 +270,22 @@ task metadata, so a future caller needs executing-kind admission. This slice
 only proposes the original queue/note call once, with the existing 90-second
 timeout, exact original marker and frozen stdin. It never reconstructs missing
 input. Send/reopen and deferred native input remain review-only.
+
+A new task message freezes its one actual `hgs task message` stdin before its
+outbox checkpoint, and the editor sends that same call.
+`outbox::reserve_message` saves the stdin in the same write: a canonical stdin
+(the content's serialization) as its digest `input_sha256`, so the record holds
+one copy of the content; any other as its exact `input` bytes. The complete
+record must fit the 32 MiB record limit, or nothing is written or sent. Reading
+a record (`outbox::decode`) refuses a present but malformed or mismatched
+`input` or `input_sha256`, or both at once, so such a record is never treated
+as legacy and no call is made. `message_call` sends the frozen bytes, recovery
+included, and the policy requires them to equal the retained input. A legacy
+record without either never qualifies for an admitted actor; only the direct
+path still serializes its content. A reservation, reopened or new, is durable
+data about the original, never consent to execute it.
+The service-owned leaf for these queue and note messages is specified in
+[the task message design](desktop-task-message.md).
 
 Configuration/project/task are independently retained expected data, not fields
 observed in an outbox record. Raw record and input each stay at most 1 MiB;

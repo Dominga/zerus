@@ -68,10 +68,12 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        Desktop creation clone ABI: desktop-creation-clone-v1
        Desktop creation worktree ABI: desktop-creation-worktree-v1
        Desktop creation launch ABI: desktop-creation-launch-v1
+       Desktop task start reconcile ABI: desktop-task-start-reconcile-v1
        Desktop pending read import ABI: desktop-pending-reads-v1
        Desktop activation ABI: desktop-activation-v1
        Desktop maintenance ABI: desktop-maintenance-v1
        Desktop cache maintenance ABI: desktop-cache-maintenance-v1
+       Desktop termination outcome ABI: desktop-termination-outcome-v1
        Desktop startup ABI: desktop-startup-v1
        Desktop logon registration ABI: desktop-logon-task-v1
        Desktop registration mode ABI: desktop-registration-mode-v1
@@ -424,6 +426,7 @@ fn unix_only_usage(line: &str) -> bool {
         zerus_client_core::desktop::creation_clone::HELP_MARKER,
         zerus_client_core::desktop::creation_worktree::HELP_MARKER,
         zerus_client_core::desktop::creation_launch::HELP_MARKER,
+        zerus_client_core::desktop::task_start_reconcile::HELP_MARKER,
     ]
     .contains(&line.trim())
     {
@@ -2702,6 +2705,8 @@ mod tests {
         assert!(USAGE.lines().any(|line| line.trim() == worktree_marker));
         let launch_marker = zerus_client_core::desktop::creation_launch::HELP_MARKER;
         assert!(USAGE.lines().any(|line| line.trim() == launch_marker));
+        let task_marker = zerus_client_core::desktop::task_start_reconcile::HELP_MARKER;
+        assert!(USAGE.lines().any(|line| line.trim() == task_marker));
         // Windows has no `hgs paste`, `hgs clip` or `hgs notify`, no Ctrl+V
         // that pulls a peer's image, and no POSIX creation-clone executor.
         // Its dry runs print the host's requests; every other line stays as is.
@@ -2710,6 +2715,7 @@ mod tests {
         assert!(!neutral.contains("Ctrl+V"), "{neutral}");
         assert!(!neutral.lines().any(|line| line.trim() == clone_marker));
         assert!(!neutral.lines().any(|line| line.trim() == worktree_marker));
+        assert!(!neutral.lines().any(|line| line.trim() == task_marker));
         assert_eq!(
             neutral,
             USAGE
@@ -2735,6 +2741,10 @@ mod tests {
                 )
                 .replace(
                     "       Desktop creation launch ABI: desktop-creation-launch-v1\n",
+                    ""
+                )
+                .replace(
+                    "       Desktop task start reconcile ABI: desktop-task-start-reconcile-v1\n",
                     ""
                 )
                 .replace(

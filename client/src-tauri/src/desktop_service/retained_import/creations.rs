@@ -3,11 +3,37 @@
 use super::*;
 use zerus_client_core::migration::{
     creation_report::{
-        Group, Journal as CreationJournal, Phase, Record as CreationRecord,
+        Group, Journal as CreationJournal, Phase, Record as CreationRecord, Source,
         Stored as CreationStored,
     },
+    download_report, draft_report,
     preload::Prepared,
 };
+/// One group's source held for an attempt: a preload capture's snapshot,
+/// the download folder's committed original (zerus-5wmh.66.5.2.1.3.1), or
+/// the drafts capture's committed originals (zerus-5wmh.66.5.2.1.2).
+#[derive(Clone)]
+enum Held {
+    Preload(Arc<migration::preload::Snapshot>),
+    Downloads(Arc<download_report::Snapshot>),
+    Drafts(Arc<draft_report::Snapshot>),
+}
+impl Held {
+    fn reference(&self) -> Result<Source, SourceError> {
+        match self {
+            Self::Preload(snapshot) => snapshot.reference().map(Source::from),
+            Self::Downloads(snapshot) => snapshot.reference().map(Source::from),
+            Self::Drafts(snapshot) => snapshot.reference().map(Source::from),
+        }
+    }
+    fn report_sources(self) -> Result<Vec<migration::SourceStream>, SourceError> {
+        match self {
+            Self::Preload(snapshot) => snapshot.report_sources(),
+            Self::Downloads(snapshot) => snapshot.report_sources(),
+            Self::Drafts(snapshot) => snapshot.report_sources(),
+        }
+    }
+}
 /// Closed historical groups use the same bounded executor and receipt rules.
 macro_rules! codes {
     ($($variant:ident => $suffix:literal),* $(,)?) => {
@@ -18,6 +44,8 @@ macro_rules! codes {
                     Group::Creations => match self { $(Self::$variant => concat!("creations_import_", $suffix)),* },
                     Group::LocalReads => match self { $(Self::$variant => concat!("local_reads_import_", $suffix)),* },
                     Group::WorktreeCache => match self { $(Self::$variant => concat!("worktree_cache_import_", $suffix)),* },
+                    Group::Downloads => match self { $(Self::$variant => concat!("downloads_import_", $suffix)),* },
+                    Group::Drafts => match self { $(Self::$variant => concat!("drafts_import_", $suffix)),* },
                 }
             }
         }
@@ -42,7 +70,13 @@ codes! {
     Waiting => "waiting",
     WorkerUnavailable => "worker_unavailable",
 }
-const GROUPS: [Group; 3] = [Group::Creations, Group::LocalReads, Group::WorktreeCache];
+const GROUPS: [Group; 5] = [
+    Group::Creations,
+    Group::LocalReads,
+    Group::WorktreeCache,
+    Group::Downloads,
+    Group::Drafts,
+];
 #[cfg(test)]
 type BeforeRecordHook =
     Box<dyn FnOnce(&migration::transport::StagedReceipt) -> Box<dyn Send> + Send>;
@@ -83,14 +117,22 @@ impl Report {
             Group::Creations => &self.creations,
             Group::LocalReads => &self.local_reads,
             Group::WorktreeCache => &self.worktree_cache,
+            Group::Downloads => &self.downloads_report,
+            Group::Drafts => &self.drafts_report,
         }
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
     }
     pub(super) fn group_status(&self, group: Group) -> Value {
         let s = self.group_state(group);
-        json!({"scope":group.scope(),"required":!s.not_applicable,"complete":s.not_applicable||s.stored.as_ref().is_some_and(|r|r.record.phase==Phase::Published),
-            "running":s.running,"code":s.code,"import_id":s.stored.as_ref().map(|r|&r.record.import_id),
+        // A published drafts report whose Next store showed an earlier
+        // uncaptured run stays incomplete: published, never complete.
+        let partial = s
+            .stored
+            .as_ref()
+            .is_some_and(|r| !r.record.source.complete());
+        json!({"scope":group.scope(),"required":!s.not_applicable,"complete":s.not_applicable||!partial&&s.stored.as_ref().is_some_and(|r|r.record.phase==Phase::Published),
+            "partial":partial,"running":s.running,"code":s.code,"import_id":s.stored.as_ref().map(|r|&r.record.import_id),
             "phase":s.stored.as_ref().map(|r|r.record.phase),"import_record":s.stored.as_ref().and_then(|r|r.record.expected.as_ref()).map(|r|&r.import_record)})
     }
     pub(super) fn retry_creations(&self) {
@@ -100,11 +142,81 @@ impl Report {
             s.explicit |= !s.running;
         }
     }
-    fn capture_for(&self, group: Group) -> &Arc<migration::preload::Capture> {
+    fn capture_for(&self, group: Group) -> Option<&Arc<migration::preload::Capture>> {
         match group {
-            Group::Creations => &self.inputs.creations,
-            Group::LocalReads => &self.inputs.local_reads,
-            Group::WorktreeCache => &self.inputs.worktree_cache,
+            Group::Creations => Some(&self.inputs.creations),
+            Group::LocalReads => Some(&self.inputs.local_reads),
+            Group::WorktreeCache => Some(&self.inputs.worktree_cache),
+            Group::Downloads | Group::Drafts => None,
+        }
+    }
+    /// The managed data folder the group's journal lives in. The download
+    /// and drafts groups have no preload capture and use the creations
+    /// capture's (the drafts capture's own slot is in the same folder).
+    fn group_data(&self, group: Group) -> Result<PathBuf, SourceError> {
+        self.capture_for(group)
+            .unwrap_or(&self.inputs.creations)
+            .data_path()
+    }
+    /// The group's source now: `None` when there is nothing to publish.
+    fn retained_for(&self, group: Group) -> Result<Option<Held>, SourceError> {
+        match self.capture_for(group) {
+            Some(capture) => Ok(match capture.retained()? {
+                Prepared::Missing { .. } => None,
+                Prepared::Snapshot(snapshot) => Some(Held::Preload(snapshot)),
+            }),
+            None if group == Group::Drafts => {
+                Ok(draft_report::retained(&self.inputs.drafts)?.map(Held::Drafts))
+            }
+            None => match &self.inputs.downloads {
+                Some(folder) => Ok(download_report::retained(&folder())?.map(Held::Downloads)),
+                None => Ok(None),
+            },
+        }
+    }
+    /// Whether the group's source is settled enough to report. A waiting or
+    /// unavailable capture is visible already; the download group needs only
+    /// the managed data folder, its evidence being read on demand.
+    fn source_ready(&self, group: Group) -> bool {
+        match self.capture_for(group) {
+            // A paused live cache writer cannot hide its committed historical
+            // archive. retained_for still validates that archive off the GUI.
+            Some(capture) if group == Group::WorktreeCache => matches!(
+                capture.status().code,
+                "worktree_cache_source_captured"
+                    | "worktree_cache_source_not_applicable"
+                    | "worktree_cache_source_unsupported"
+                    | "worktree_cache_source_too_large"
+                    | "worktree_cache_source_changed"
+                    | "worktree_cache_source_writer_unavailable"
+                    | "worktree_cache_source_owner_unavailable"
+            ),
+            Some(capture) => matches!(
+                capture.status().code,
+                "creation_source_captured"
+                    | "creation_source_not_applicable"
+                    | "creation_source_unsupported"
+                    | "creation_source_too_large"
+                    | "local_read_source_captured"
+                    | "local_read_source_not_applicable"
+                    | "local_read_source_unsupported"
+                    | "local_read_source_too_large"
+            ),
+            // The drafts capture runs as the draft store's first job. Its
+            // outcome, captured or not, is final for the run; waiting and a
+            // refused slot are visible already.
+            None if group == Group::Drafts => {
+                matches!(
+                    self.inputs.drafts.status().code,
+                    "draft_capture_captured"
+                        | "draft_capture_not_applicable"
+                        | "draft_capture_next_earlier_run"
+                        | "draft_capture_too_large"
+                        | "draft_capture_changed"
+                        | "draft_capture_unreadable"
+                ) && self.inputs.creations.data_path().is_ok()
+            }
+            None => self.inputs.downloads.is_some() && self.inputs.creations.data_path().is_ok(),
         }
     }
     #[cfg(all(test, unix))]
@@ -155,11 +267,16 @@ impl Report {
         if stop.load(Ordering::Acquire) {
             return Err("stopped");
         }
+        // The download folder's evidence can appear, or become unreadable,
+        // after an earlier run found nothing to publish: every run decides
+        // again. The preload captures are one-time and keep their result.
+        if group == Group::Downloads {
+            self.group_state(group).not_applicable = false;
+        }
         // The original worker resolves this before publishing capture status.
         // This reporter never creates a capture or reads today's live journal.
         let data = self
-            .capture_for(group)
-            .data_path()
+            .group_data(group)
             .map_err(|_| Code::CaptureUnavailable.for_group(group))?;
         let journal = Arc::new(
             CreationJournal::for_group(group, &data, &configuration)
@@ -233,18 +350,17 @@ impl Report {
             }
         }
         let snapshot = match self
-            .capture_for(group)
-            .retained()
+            .retained_for(group)
             .map_err(|_| Code::CaptureUnavailable.for_group(group))?
         {
-            Prepared::Missing { .. } => {
+            None => {
                 if existing.is_some() {
                     return Err(Code::SourceChanged.for_group(group));
                 }
                 self.group_state(group).not_applicable = true;
                 return Ok(());
             }
-            Prepared::Snapshot(snapshot) => snapshot,
+            Some(snapshot) => snapshot,
         };
         let reference = snapshot
             .reference()
@@ -459,10 +575,12 @@ pub(in crate::desktop_service) fn schedule_current(shared: &Arc<Shared>) {
     let Some(report) = &shared.retained_import else {
         return;
     };
-    if !GROUPS.into_iter().any(|group| {
-        let state = report.group_state(group);
-        state.pending && !state.running
-    }) {
+    if !report.state().pending
+        && !GROUPS.into_iter().any(|group| {
+            let state = report.group_state(group);
+            state.pending && !state.running
+        })
+    {
         return;
     }
     let relay = shared
@@ -502,39 +620,13 @@ fn schedule(
             return;
         }
     }
+    if super::schedule_pending(shared, relay.clone(), configuration.clone(), stop.clone()) {
+        return;
+    }
     for group in GROUPS {
-        let capture = report.capture_for(group).status();
         // Waiting/unavailable capture is visible already; do not spin helpers or
         // let this reporter initialize/recover the mutable source.
-        // The cache report describes its committed historical archive. A later
-        // live-file write refusal may pause persistence, but must not hide that
-        // archive. The worker validates retained() off the GUI in every case;
-        // waiting/partial/unreadable capture can never become empty success.
-        let ready = if group == Group::WorktreeCache {
-            matches!(
-                capture.code,
-                "worktree_cache_source_captured"
-                    | "worktree_cache_source_not_applicable"
-                    | "worktree_cache_source_unsupported"
-                    | "worktree_cache_source_too_large"
-                    | "worktree_cache_source_changed"
-                    | "worktree_cache_source_writer_unavailable"
-                    | "worktree_cache_source_owner_unavailable"
-            )
-        } else {
-            matches!(
-                capture.code,
-                "creation_source_captured"
-                    | "creation_source_not_applicable"
-                    | "creation_source_unsupported"
-                    | "creation_source_too_large"
-                    | "local_read_source_captured"
-                    | "local_read_source_not_applicable"
-                    | "local_read_source_unsupported"
-                    | "local_read_source_too_large"
-            )
-        };
-        if !ready {
+        if !report.source_ready(group) {
             continue;
         }
         let (charge, explicit) = {
@@ -554,16 +646,11 @@ fn schedule(
         };
         shared.publish_retained_import();
         let weak = Arc::downgrade(shared);
+        let completion = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let resources = super::work_resources(shared, charge, completion.clone());
         tauri::async_runtime::spawn_blocking(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                report.run_group(
-                    group,
-                    relay,
-                    configuration,
-                    stop,
-                    explicit,
-                    Arc::new(charge),
-                )
+                report.run_group(group, relay, configuration, stop, explicit, resources)
             }))
             .unwrap_or(Err(Code::WorkerUnavailable.for_group(group)));
             {
@@ -577,13 +664,19 @@ fn schedule(
             }
             if let Some(shared) = weak.upgrade() {
                 shared.publish_retained_import();
-                schedule_current(&shared);
+                if completion.fetch_or(super::FINISHED, Ordering::AcqRel) & super::RELEASED != 0 {
+                    schedule_current(&shared);
+                }
             }
         });
         return;
     }
 }
 
+#[cfg(all(test, unix))]
+mod downloads_tests;
+#[cfg(all(test, unix))]
+mod drafts_tests;
 #[cfg(all(test, unix))]
 mod local_reads_tests;
 #[cfg(all(test, unix))]

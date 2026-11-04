@@ -54,10 +54,27 @@ pub(crate) fn adopt_custody() -> Result<(), String> {
 pub(super) enum Ended {
     /// It exited with `code`, and both output pipes ended, within the deadline.
     Exited { code: i32, stderr: String },
-    /// Its result is unknown, for the named reason: it never started, a signal
-    /// ended it, the deadline passed (the child alone was then killed), or
-    /// another process kept its output open past the deadline.
+    /// It never started: refused before any child existed (the own image, its
+    /// custody, or the spawn itself, which reports a fork or exec failure
+    /// before any program code runs). Nothing ran.
+    NotStarted,
+    /// Its result is unknown, for the named reason: a signal ended it, the
+    /// deadline passed (the child alone was then killed), or another process
+    /// kept its output open past the deadline.
     Unknown(&'static str),
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Makes the next spawn on this thread fail inside `pre_exec`, as a custody
+    /// refusal there would.
+    pub(super) static REFUSE_PRE_EXEC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    // One-shot observation faults on the original executor thread. Anonymous
+    // pipes do not safely provide deterministic EIO, and provoking wait errors
+    // by stealing waitpid/SIGCHLD would interfere with other test children.
+    pub(super) static READ_ERROR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(super) static WAIT_ERROR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(super) static SPAWNED: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
 }
 
 /// Runs `program args` as the original launch child under `custody`.
@@ -77,11 +94,24 @@ pub(super) fn run(
         .env(CUSTODY_FD, custody.as_raw_fd().to_string());
     let spawned = {
         let _turn = platform::spawn_turn();
-        custody.inherit(&mut command).and_then(|()| command.spawn())
+        custody.inherit(&mut command).and_then(|()| {
+            #[cfg(test)]
+            if REFUSE_PRE_EXEC.with(|refuse| refuse.replace(false)) {
+                // SAFETY: returns an error only; nothing else runs after fork.
+                unsafe {
+                    command.pre_exec(|| Err(std::io::Error::from_raw_os_error(libc::EPERM)));
+                }
+            }
+            command.spawn()
+        })
     };
+    // Only these pre-child branches mean "not started"; once a child exists,
+    // every outcome is its exit or Unknown.
     let Ok(mut child) = spawned else {
-        return Ended::Unknown("creation_launch_not_started");
+        return Ended::NotStarted;
     };
+    #[cfg(test)]
+    SPAWNED.with(|spawned| spawned.set(Some(child.id())));
     let stdout = child.stdout.take();
     let stderr_pipe = child.stderr.take();
     for fd in [
@@ -114,7 +144,16 @@ pub(super) fn run(
             let Some(pipe) = slot else { continue };
             loop {
                 let mut chunk = [0u8; 4096];
-                match pipe.read(&mut chunk) {
+                let read = pipe.read(&mut chunk);
+                #[cfg(test)]
+                let read = READ_ERROR.with(|fault| {
+                    if fault.replace(false) {
+                        Err(std::io::Error::other("private launch output read fault"))
+                    } else {
+                        read
+                    }
+                });
+                match read {
                     Ok(0) => {
                         *slot = None;
                         break;
@@ -136,7 +175,16 @@ pub(super) fn run(
             }
         }
         if status.is_none() {
-            match child.try_wait() {
+            let observed = child.try_wait();
+            #[cfg(test)]
+            let observed = WAIT_ERROR.with(|fault| {
+                if fault.replace(false) {
+                    Err(std::io::Error::other("private launch wait fault"))
+                } else {
+                    observed
+                }
+            });
+            match observed {
                 Ok(found) => status = found,
                 Err(_) => {
                     let _ = child.kill();

@@ -9,9 +9,9 @@ Linux and macOS have a guarded, fixed recover-only actor. The ordinary CLI
 request lane still refuses `frontend_authentication_required`, and a passive
 service retains `desktop_background_unavailable`. Windows remains
 `task_start_reconcile_unsupported` until it has equivalent physical custody.
-The native renderer policy route cannot submit this kind. This actor slice
-adds no general Operations permission or advertised helper capability marker;
-the native Task Start caller is a separate integration.
+The native renderer policy route cannot submit this kind. The dedicated native
+Task Start command below supplies the actual registered helper and original
+checkpoint; it adds no general Operations permission.
 
 ## Original identity and bytes
 
@@ -151,16 +151,16 @@ input, provenance and private task/error views are absent. An old ticket's
 service/writer epochs and admission ID stay original even when the query uses a
 new service epoch. Unknown cannot become submitted because of a later read.
 Only exact submitted metadata together with actual durable drain is eligible
-for the future native caller's CAS of its still-unchanged outbox. The redacted
+for the native caller's CAS of its still-unchanged outbox. The redacted
 five fields are never expanded into a canonical CLI reply.
 
 Missing is only an observation. It proves no absence of an earlier effect,
 current executor, physical drain or permission to offer again. This path cannot
 admit/reserve, start a worker, release a record or mint a reconciliation ID. A
 changed/malformed query or stored binding returns
-`task_start_result_unavailable`. The native caller still needs its offered-unknown
-journal and retained selected-service resources. No per-kind capability marker
-is advertised until both that caller and this query are callable.
+`task_start_result_unavailable`. The native caller retains its offered-unknown journal and original selected-service
+resources through the exchange. The per-kind marker below describes this caller
+and result route together; it supplies no admission or execution authority.
 
 ## Native checkpoint capture
 
@@ -185,5 +185,202 @@ metadata for the future native journal; decoding it grants no file authority.
 Capture creates or repairs nothing, submits nothing and cannot settle or release
 an outbox. Its Scope is data: the eventual native caller must separately retain
 and recheck the actual selected Service and the complete unchanged control-frame
-limit. A durable offered-unknown journal, native offer and exact result-to-outbox
-CAS remain separate caller work. The per-kind capability marker stays absent.
+limit. The separate native caller below owns the durable offered-unknown journal,
+actual native offer and exact result-to-outbox CAS. Capture itself advertises
+no capability and authorizes none of those actions.
+
+## Native original-input journal
+
+`capture::journal` stores one bounded private `.reconcile` record beside the
+native task-start record, with a separate CLOEXEC metadata lock. It retains the
+exact original bytes, binding and native version plus one reconciliation UUID;
+it creates no Root operation or worker. The complete encoded journal is limited
+to 96 KiB and uses one fixed hash-derived slot per task, without discovery or
+history scans. An invalid preparation writes nothing. A missing journal beside
+an existing lock is uncertainty and cannot reserve another UUID.
+
+`Prepared` is durable before preparation returns. Before returning the fixed
+data Intent, the writer must persist `OfferedUnknown` with a file sync, atomic
+rename and parent-directory sync. A failed sync returns no Intent. The original
+native source, journal object and metadata lock are checked around publication.
+The native caller still needs its actual selected-Service/current admission;
+neither this phase nor an Intent is execution permission.
+
+After an offer, GUI exit, a missing lookup, a changed executor or service restart
+can only lead to bounded queries with the same original reconciliation UUID and
+binding. Saved data is readable without a live executor or extant outbox. It
+cannot infer no effect, change authority, replay the offer or reconstruct a task
+reply. A private-process kill control verifies the offered record survives the
+original writer's actual exit.
+
+Only a separate explicitly confirmed discard can retire a `Prepared` CHECK. It
+writes `CancelledBeforeOffer`, retains the original identity, and touches neither
+the task/outbox nor a Root receipt. `OfferedUnknown` cannot be discarded. A later
+explicit Check must match that cancellation tombstone before reserving a new
+reconciliation ID. Stale snapshots and missing metadata never authorize this
+transition; one previous cancellation ID stays in the bounded record.
+
+The journal has no renderer operation or independent execution authority. The
+native caller owns the offer and connection checks; completion below allows a
+genuinely new delivery without clearing an unsettled original.
+
+
+## Bounded publication recovery
+
+Each new journal writer uses one fixed `.reconcile.tmp` candidate per task and
+at most 4 KiB of append-only tracking in the existing metadata lock. Writable
+duplicates share that same open file description. No directory enumeration or
+growing cleanup history is needed; the candidate keeps the 96 KiB journal bound.
+Source and control-frame limits do not change.
+
+There are three ordered, closed frames, each ending with a newline and synced
+before its next filesystem step:
+
+1. Allocation records the retained directories, exact before-journal identity,
+   original reconciliation IDs, before/after hashes and a fresh allocation nonce
+   **before** the exclusive candidate create.
+2. Created records the original candidate's native object (and native birth time
+   where available) **before any body write**. Without this complete frame the
+   reservation may own only an empty staging file, never nonempty unknown data.
+3. Ready records the exact final file version after its body sync. Full object,
+   bytes, hash and ID checks precede rename, directory sync and Intent return.
+
+Any unterminated final line is uncommitted, including NUL-filled or garbage
+bytes and complete JSON lacking its final newline. It never grants the next
+filesystem step. Complete newline-terminated unknown frames still refuse. Recovery keeps
+the same observed file and tracking snapshots under the original metadata flock.
+An allocation with no candidate can retire its metadata; an empty allocated file
+or an original created file with an incomplete body can be removed. A ready file
+requires its exact recorded version and bytes. The before-journal must remain
+unchanged in every such case. If rename already published the same final object,
+recovery retires tracking without unlinking or rewriting the journal. **Both**
+branches sync the namespace before clearing tracking, including a rename seen
+only in the page cache and a removal interrupted before directory sync.
+
+`Saved::publication_status()` is a bounded read-only observation of this managed
+slot: `Clear`, `Recoverable`, `NeedsReview` or `Oversize`. It supplies no
+permission. Native Check and discard report distinct closed manual-review and
+oversize reasons; opening the Task Start review also displays that reason and
+disables Check. The oversize refusal uses private regular-file metadata only:
+it does not read a WAL beyond the unchanged 4 KiB limit. A later
+explicit Check, confirmed unsent discard or exact submitted/drained completion
+can recover publication metadata. This does not rotate the original ID or offer
+again; the saved phase and all existing admission/CAS guards remain decisive.
+Original-process abort controls cover allocation, create, body, ready, rename,
+unlink and tracking-clear cuts. Sync-order controls separately pin the namespace
+barrier; process-kill tests are not hardware power-loss qualification.
+
+Complete malformed frames, unknown nonempty data without a Created receipt,
+changed/replaced objects and missing original history remain for manual review.
+Another Check cannot allocate more candidates while this fixed slot is uncertain.
+Keep the checkpoint, marker, journal and lock: deleting them is not a supported
+way to permit another offer. Initial preparation with missing/corrupt history
+still refuses. Older random-name temporary files have no durable object record;
+they stay unindexed and are never removed by name, age or owner. The bounded slot
+status makes no claim that those legacy files are absent.
+
+
+### Manual publication review
+
+Use this procedure for the displayed recovery-data review or tracking-size
+refusal. It is an operator review, not permission to reset an uncertain Check.
+
+1. Close this Task Start review and other Next windows using the same private
+   draft store. Leave native agents, terminals and the desktop service running;
+   none of them needs to be stopped to inspect this metadata.
+2. Keep a private copy of the task checkpoint, marker, `.reconcile` journal,
+   `.reconcile-lock` tracking and fixed `.reconcile.tmp` if present. Keep the
+   original permissions. They may contain task text: do not paste them into a
+   public issue. Report only the displayed reason and original task/Check IDs.
+3. Have a maintainer inspect the bounded saved journal and tracking through the
+   retained-directory readers, with the same metadata flock held for any repair.
+   A Busy lock must wait for its original child/pipe custody to release it; never
+   delete a lock or force another owner. An oversized lock must first be inspected as metadata, not loaded without a
+   bound. Match the original delivery/Check IDs and before/after hashes and native
+   objects. Look up that exact saved Check through the existing authenticated
+   original-result read lane. Missing or Unknown is not proof of no effect.
+4. Only the original, verified publication can use the recovery rules above.
+   Complete unknown frames, replaced objects and oversized/unverifiable tracking
+   cannot be repaired by deleting or truncating the lock/candidate/journal or by
+   creating another Check ID. Keep them for maintainer-assisted review when the
+   original evidence cannot be established; there is no general reset command.
+   In particular, never turn an OfferedUnknown record back into Prepared.
+5. To continue the task manually meanwhile, inspect its history and the original
+   executor's Activity. The existing **I reviewed it, allow another start** action
+   remains a separate explicit owner decision. It does not stop the original,
+   prove no effect, settle its receipt, repair publication metadata or authorize
+   an automatic retry. The original Check stays preserved and may remain
+   unavailable until its evidence is resolved.
+
+Ordinary torn final lines do not require this procedure: a later explicit
+metadata publisher recovers the valid committed prefix under the original flock.
+There is no scan, automatic repair of corrupt complete frames or unsafe cleanup.
+
+## Explicit native receipt check and settlement
+
+In desktop-service mode on Linux and macOS, the Task Start review offers
+**Check delivery receipt**. Opening a task only reads its local view and journal;
+it does not submit a check. The renderer passes the expected task, original
+native delivery ID and UI snapshot, never a path, input body or reconciliation
+ID. The command selects the managed draft store and actual native Service itself.
+Windows remains unavailable.
+
+Before changing the journal, the native command probes the exact retained helper
+for `Desktop task start reconcile ABI: desktop-task-start-reconcile-v1` and the
+existing native frontend-request ABI. An older helper refuses with update guidance.
+Both the source field and the complete encoded request retain their existing
+32 KiB and 64 KiB bounds. The complete-envelope preflight is defence in depth:
+with today's fixed fields the reviewed quote-filled source (32,722 bytes)
+produces a 64,938-byte envelope, below the control bound. It remains enforced if
+fields grow; direct oversized helper input is also refused before spawn.
+The actual cached Service configuration, epoch, generation, cancellation object,
+relay and helper image are retained and checked around every call. The helper's
+original Child is registered before its input is released. Refused registration
+withholds stdin while that same Child remains owned for stop/reap and pipe joins.
+The native task-write permit and original registration resources stay charged
+through those physical joins even after a logical failure.
+
+A prepared check keeps its reconciliation ID. The native command durably marks
+it offered before the native request and follows a lost reply only with a bounded
+query of that same ID. GUI exit or restart, missing results and terminal Unknown
+never offer it again. Pending or submitted-but-undrained results may be queried
+within the fixed polling bound; they cannot settle the task. A fresh connection
+can read the original stored result without rebinding its original admission,
+writer, operation or delivery identities.
+
+An exact Submitted result with actual stored drain first persists
+`SettlementPrepared` and that exact result metadata. Under the native metadata
+lock and the existing in-process outbox writer lane, settlement rechecks the
+original managed directories, reservation marker and exact source file/version.
+It atomically changes only `phase` to `started` and clears `error`; all original
+input, plan and opaque fields are preserved. It never reconstructs a canonical
+CLI reply from redacted result fields. A changed same-ID source, alias, marker,
+file object or native connection refuses. After the source and directory sync,
+`Completed` is persisted. A crash after the source CAS can finish this metadata
+from the exact deterministic settled source without writing that source twice.
+A genuinely new native delivery is preserved and needs a separately explicit
+new Check after the previous completion; an unsettled offer cannot be replaced.
+
+Only an explicit confirmation can discard a prepared, unsent check. The
+confirmation binds the current task's delivery ID/snapshot and the exact native
+unsent check ID. A Prepared check for an earlier manually released delivery is
+shown with discard guidance even when a newer Start is pending. Check stays
+disabled until that confirmed metadata-only discard; it never silently rotates
+or offers the earlier check. A replaced check ID or changed current task view
+invalidates confirmation. Offered, settling and completed checks cannot be discarded.
+A lost
+return from its subsequent explicit preparation reopens the same new ID; invalid
+next records refuse before publication. Offered checks cannot be discarded.
+If the first prepare crashed after creating its metadata lock, or retained
+metadata is missing/malformed, the UI disables checking and directs manual review
+of the original task history before the existing separately confirmed manual
+release. It does not delete the slot, repair it or infer that no offer occurred.
+Orphan publication files and retirement of older cancellation IDs remain bounded
+follow-up work; neither authorizes replay or source cleanup.
+
+Private Core controls exercise exact result/drain matching, changed sources,
+late connection loss, publication validation and restart on either side of the
+source CAS. Native-cache controls use actual original child evidence but synthetic
+result DTOs; they cover lost replies, missing/Unknown results, refused registration,
+older helpers, image replacement and retained pipe resources. These controls are
+not installed frontend, macOS native or native-agent compatibility acceptance.

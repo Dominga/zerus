@@ -286,7 +286,9 @@ impl Validated {
                     | Request::CreationClone { .. }
                     | Request::CreationWorktree { .. }
                     | Request::CreationLaunch { .. }
+                    | Request::TaskMessage { .. }
                     | Request::TaskStartReconcile { .. }
+                    | Request::TerminationOutcome { .. }
             ),
             "native controls require their typed boundary"
         );
@@ -364,6 +366,20 @@ impl Validated {
     }
     pub fn check_ownership(self) -> Result<()> {
         self.ownership_parts().map(|_| ())
+    }
+    /// Only original-outcome retention consumes this, after BEGIN IMMEDIATE.
+    pub fn termination_outcome_parts(
+        &self,
+    ) -> Result<&zerus_client_core::desktop::termination_outcome::Intent> {
+        self.check()?;
+        let Request::TerminationOutcome { intent } = &self.0 else {
+            anyhow::bail!("not termination outcome retention");
+        };
+        ensure!(intent.valid(), "invalid original termination capture/plan");
+        Ok(intent)
+    }
+    pub fn check_termination_outcome(self) -> Result<()> {
+        self.termination_outcome_parts().map(|_| ())
     }
     pub fn cache_parts(
         &self,
@@ -819,12 +835,28 @@ fn validate(
             "creation does not match the native service frontend"
         );
     }
+    if let Request::TaskMessage { intent } = &envelope.request {
+        ensure!(
+            reply.request.ownership_mode
+                == Some(zerus_client_core::desktop::ownership::Mode::Service)
+                && intent.scope.configuration == configuration,
+            "task message does not match the native service frontend"
+        );
+    }
     if let Request::TaskStartReconcile { intent } = &envelope.request {
         ensure!(
             reply.request.ownership_mode
                 == Some(zerus_client_core::desktop::ownership::Mode::Service)
                 && intent.scope.configuration == configuration,
             "task reconciliation does not match the native service frontend"
+        );
+    }
+    if let Request::TerminationOutcome { intent } = &envelope.request {
+        ensure!(
+            reply.request.ownership_mode
+                == Some(zerus_client_core::desktop::ownership::Mode::Service)
+                && intent.scope.configuration == configuration,
+            "termination outcome does not match the native service frontend"
         );
     }
     if let Request::NotificationControl { scope, control } = &envelope.request {
@@ -886,10 +918,12 @@ fn dev_number(version: &str) -> Option<u64> {
 // string allowlist that can silently reject an otherwise authenticated read.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum OrderedOperation {
+    TerminationOutcome,
     CacheMaintenance,
     CreationClone,
     CreationWorktree,
     CreationLaunch,
+    TaskMessage,
     TaskStartReconcile,
     ActivationWait,
     AutomaticApprovals,
@@ -904,9 +938,11 @@ impl From<&Request> for OrderedOperation {
         use zerus_client_core::desktop::notification_control::Command;
         match request {
             Request::CacheMaintenance { .. } => Self::CacheMaintenance,
+            Request::TerminationOutcome { .. } => Self::TerminationOutcome,
             Request::CreationClone { .. } => Self::CreationClone,
             Request::CreationWorktree { .. } => Self::CreationWorktree,
             Request::CreationLaunch { .. } => Self::CreationLaunch,
+            Request::TaskMessage { .. } => Self::TaskMessage,
             Request::TaskStartReconcile { .. } => Self::TaskStartReconcile,
             Request::ActivationWait { .. } => Self::ActivationWait,
             Request::AutomaticApprovals { .. } => Self::AutomaticApprovals,
@@ -1434,6 +1470,70 @@ mod tests {
         assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
     }
     #[test]
+    fn task_message_has_its_own_lane_and_never_passes_the_generic_boundary() {
+        use zerus_client_core::desktop::{
+            ownership::Mode,
+            task_message::{Intent, Scope},
+        };
+        use zerus_client_core::tasks_write::{input_digest, message_input, message_intent};
+        let (mut envelope, caller, frontend, mut reply) = fixture();
+        let intent = message_intent("hello", &[], "queue", "");
+        let original = serde_json::json!({"id": id(2), "intent": intent,
+            "input_sha256": input_digest(&message_input(&intent))});
+        envelope.request = Request::TaskMessage {
+            intent: Box::new(Intent {
+                scope: Scope {
+                    configuration: "a".repeat(64),
+                    service_epoch: id(91),
+                },
+                project: "example".into(),
+                task_id: id(80),
+                request_id: id(2),
+                original: original.to_string(),
+            }),
+        };
+        assert_eq!(
+            OrderedOperation::from(&envelope.request),
+            OrderedOperation::TaskMessage
+        );
+        for other in [
+            OrderedOperation::CreationLaunch,
+            OrderedOperation::TaskStartReconcile,
+            OrderedOperation::TerminationOutcome,
+        ] {
+            assert_ne!(OrderedOperation::TaskMessage, other);
+        }
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Native);
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Service);
+        validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).unwrap();
+        // Only a future typed actor accessor may consume it.
+        assert!(Validated::fixture(&serde_json::json!(envelope.request))
+            .into_request()
+            .is_err());
+        if let Request::TaskMessage { intent } = &mut envelope.request {
+            intent.scope.configuration = "b".repeat(64);
+        }
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+    }
+    #[test]
+    fn the_shared_frontend_line_is_exactly_what_the_child_sends() {
+        // The wire's size check and the child's hello cannot drift apart.
+        let configuration = "c".repeat(64);
+        let envelope = serde_json::json!({"abi": "desktop-ui-request-v1", "attempt": id(5),
+            "request": {"op": "activation_wait", "request_id": id(6)},
+            "unicode": "пример \u{1b} \"quoted\""});
+        assert_eq!(
+            super::super::protocol::encode(&serde_json::json!({"abi": super::super::protocol::ABI,
+                "configuration": configuration, "op": "frontend_request", "request": envelope}))
+            .unwrap(),
+            zerus_client_core::desktop::ui_requests::frontend_line(&configuration, &envelope)
+        );
+    }
+    #[test]
     fn task_start_reconcile_is_native_service_bound_and_excluded_from_generic_requests() {
         use zerus_client_core::desktop::{
             ownership::Mode,
@@ -1937,6 +2037,56 @@ mod tests {
         order
             .observe(a, OrderedOperation::AutomaticApprovals, 5, now + WAIT)
             .unwrap();
+    }
+
+    #[test]
+    fn termination_outcome_has_an_isolated_exhaustive_native_lane() {
+        use zerus_client_core::{
+            desktop::termination_outcome::{Choice, Intent, Scope},
+            termination_cleanup::Capture,
+            Target,
+        };
+        let capture = Capture {
+            target: Target {
+                computer: String::new(),
+                name: "codex/example/source".into(),
+                run_id: "run".into(),
+                conversation_id: "conversation".into(),
+            },
+            machine: id(7),
+            root: "/srv/example/work".into(),
+            common_dir: "/srv/example/main/.git".into(),
+            owner_id: "original-owner".into(),
+        };
+        let original =
+            String::from_utf8(capture.invocation(&id(92)).unwrap().stdin.unwrap()).unwrap();
+        let request = Request::TerminationOutcome {
+            intent: Box::new(Intent {
+                scope: Scope {
+                    configuration: "a".repeat(64),
+                    service_epoch: id(93),
+                },
+                confirmation_id: id(94),
+                choice: Choice::RemoveAfterTerminate,
+                request_id: id(92),
+                capture,
+                original,
+            }),
+        };
+        let lane = OrderedOperation::from(&request);
+        assert_eq!(lane, OrderedOperation::TerminationOutcome);
+        let instance = (7, "100".into(), id(1));
+        let mut order = Order::default();
+        let now = Instant::now();
+        order
+            .observe(instance.clone(), OrderedOperation::CreationLaunch, 99, now)
+            .unwrap();
+        order.observe(instance.clone(), lane, 1, now).unwrap();
+        assert!(order.observe(instance.clone(), lane, 1, now).is_err());
+        order.observe(instance, lane, 2, now).unwrap();
+        assert!(Validated::fixture(&serde_json::to_value(request).unwrap())
+            .into_request()
+            .is_err());
     }
 
     #[test]

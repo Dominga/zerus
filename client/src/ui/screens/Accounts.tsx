@@ -340,7 +340,7 @@ export function AccountsScreen() {
             <Show when={!view().no_hosts}>
               <Show when={view().snapshot} fallback={<div class="acct-loading"><div class="row"><Spinner /><span>{tr("Loading accounts…")}</span></div><p class="muted">{tr("Checking accounts across your machines.")}</p></div>}>
                 <Show when={visible().length} fallback={<p class="muted acct-none">{accountMachine() === "*" ? tr("No accounts.") : tr("No accounts on %1.", filterName())}</p>}>
-                  <Index each={visible()}>{(a) => <AccountRow a={a()} now={now()} />}</Index>
+                  <Index each={visible()}>{(a) => <div role="listitem"><AccountRow a={a()} now={now()} /></div>}</Index>
                 </Show>
                 <Show when={view().truncated > 0}><p class="dim acct-none">{tr("%1 more accounts are not shown.", view().truncated)}</p></Show>
               </Show>

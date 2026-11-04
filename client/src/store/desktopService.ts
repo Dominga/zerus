@@ -54,35 +54,69 @@ export function retainedSourceNotice(state: DesktopService | undefined): string 
   if (captureNotice) return captureNotice;
   if (drafts?.paused) return tr("Importing drafts from Qt is paused because the earlier drafts could not be recorded. New drafts are saved.");
   if (report?.worktree_cache_capture?.paused) return tr("Saving folder catalogs is paused while their original cache is preserved. Fresh folder queries and session creation remain available.");
-  const local = report?.local_reads_report;
-  if (local?.required && !local.complete) {
-    if (local.running) return tr("Preparing the historical local read-mark report. Your sessions remain available.");
-    if (local.phase !== "unknown" && ["local_reads_import_waiting", "local_reads_import_source_resources_pending", "local_reads_import_handoff_busy", "local_reads_import_before_record"].includes(local.code)) return tr("The historical local read-mark report is deferred. Retry keeps the original report identity.");
-    return tr("The historical local read-mark report needs review. An unconfirmed publication will only be looked up, never resent.");
-  }
+  // Persistence pauses above remain first. Among reports, review and active
+  // preparation take precedence over a deferred sibling. Details keep every
+  // source's independent reason, regardless of which notice is shown.
+  const notices: { text: string; priority: number }[] = [];
   const creations = report?.creations_report;
   if (creations?.required && !creations.complete) {
-    if (creations.running) return tr("Preparing the saved creation report. Your sessions remain available.");
-    if (["creations_import_waiting", "creations_import_source_resources_pending", "creations_import_handoff_busy", "creations_import_before_record"].includes(creations.code)) return tr("The saved creation report is deferred. Your sessions remain available; Retry keeps the original report identity.");
-    return tr("The saved creation report needs review. An unconfirmed publication will only be looked up, never resent.");
+    if (creations.running) notices.push({ text: tr("Preparing the saved creation report. Your sessions remain available."), priority: 1 });
+    else if (creations.phase !== "unknown" && ["creations_import_waiting", "creations_import_source_resources_pending", "creations_import_handoff_busy", "creations_import_before_record"].includes(creations.code)) notices.push({ text: tr("The saved creation report is deferred. Your sessions remain available; Retry keeps the original report identity."), priority: 0 });
+    else notices.push({ text: tr("The saved creation report needs review. An unconfirmed publication will only be looked up, never resent."), priority: 2 });
+  }
+  if (report?.required && report.code && report.code !== "retained_import_staged") {
+    if (report.running) notices.push({ text: tr("Preparing the migration report. Your sessions remain available."), priority: 1 });
+    else if (report.phase !== "unknown" && ["retained_import_handoff_busy", "retained_import_source_resources_pending"].includes(report.code)) notices.push({ text: tr("The migration report is deferred while background work is running."), priority: 0 });
+    else notices.push({ text: tr("The migration report needs review. Your sessions remain available."), priority: 2 });
+  }
+  const local = report?.local_reads_report;
+  if (local?.required && !local.complete) {
+    if (local.running) notices.push({ text: tr("Preparing the historical local read-mark report. Your sessions remain available."), priority: 1 });
+    else if (local.phase !== "unknown" && ["local_reads_import_waiting", "local_reads_import_source_resources_pending", "local_reads_import_handoff_busy", "local_reads_import_before_record"].includes(local.code)) notices.push({ text: tr("The historical local read-mark report is deferred. Retry keeps the original report identity."), priority: 0 });
+    else notices.push({ text: tr("The historical local read-mark report needs review. An unconfirmed publication will only be looked up, never resent."), priority: 2 });
   }
   const cache = report?.worktree_cache_report;
   if (cache?.required && !cache.complete) {
-    if (cache.running) return tr("Preparing the historical folder catalog report. Your sessions remain available.");
-    if (cache.phase !== "unknown" && ["worktree_cache_import_waiting", "worktree_cache_import_source_resources_pending", "worktree_cache_import_handoff_busy", "worktree_cache_import_before_record"].includes(cache.code)) return tr("The historical folder catalog report is deferred. Retry keeps the original report identity.");
-    return tr("The historical folder catalog report needs review. An unconfirmed publication will only be looked up, never resent.");
+    if (cache.running) notices.push({ text: tr("Preparing the historical folder catalog report. Your sessions remain available."), priority: 1 });
+    else if (cache.phase !== "unknown" && ["worktree_cache_import_waiting", "worktree_cache_import_source_resources_pending", "worktree_cache_import_handoff_busy", "worktree_cache_import_before_record"].includes(cache.code)) notices.push({ text: tr("The historical folder catalog report is deferred. Retry keeps the original report identity."), priority: 0 });
+    else notices.push({ text: tr("The historical folder catalog report needs review. An unconfirmed publication will only be looked up, never resent."), priority: 2 });
   }
-  if (!report?.required || !report.code || report.code === "retained_import_staged") return "";
-  if (report.running) return tr("Preparing the migration report. Your sessions remain available.");
-  if (report.code === "retained_import_handoff_busy") return tr("The migration report is deferred while background work is running.");
-  return tr("The migration report needs review. Your sessions remain available.");
+  const downloadsReport = report?.downloads_report;
+  if (downloadsReport?.required && !downloadsReport.complete) {
+    if (downloadsReport.running) notices.push({ text: tr("Preparing the historical downloaded files report. Your sessions remain available."), priority: 1 });
+    else if (downloadsReport.phase !== "unknown" && ["downloads_import_waiting", "downloads_import_source_resources_pending", "downloads_import_handoff_busy", "downloads_import_before_record"].includes(downloadsReport.code)) notices.push({ text: tr("The historical downloaded files report is deferred. Retry keeps the original report identity."), priority: 0 });
+    else notices.push({ text: tr("The historical downloaded files report needs review. An unconfirmed publication will only be looked up, never resent."), priority: 2 });
+  }
+  // A not-captured or partial drafts report is permanent and shown in the
+  // Migration report; it needs no banner of its own. Before the capture's
+  // outcome is final the report has not started, and the Drafts notices
+  // above already explain a refused capture.
+  const draftsReport = draftsReportStarted(report) ? report?.drafts_report : undefined;
+  if (draftsReport?.required && !draftsReport.complete) {
+    if (draftsReport.running) notices.push({ text: tr("Preparing the historical drafts report. Your sessions remain available."), priority: 1 });
+    else if (draftsReport.phase !== "unknown" && DRAFTS_REPORT_DEFERRED.includes(draftsReport.code)) notices.push({ text: tr("The historical drafts report is deferred. Retry keeps the original report identity."), priority: 0 });
+    else if (!draftsReport.partial && draftsReport.code !== "drafts_import_capture_unavailable") notices.push({ text: tr("The historical drafts report needs review. An unconfirmed publication will only be looked up, never resent."), priority: 2 });
+  }
+  return notices.find(notice => notice.priority === 2)?.text
+    ?? notices.find(notice => notice.priority === 1)?.text
+    ?? notices[0]?.text ?? "";
 }
 
 /** Draft capture outcomes that recorded the earlier drafts (or found none). */
 const DRAFTS_RECORDED = ["draft_capture_waiting", "draft_capture_captured", "draft_capture_not_applicable"];
+/** Draft capture states before a final outcome: the drafts report waits. */
+const DRAFTS_PENDING = ["draft_capture_waiting", "draft_capture_private_slot"];
+
+/** The drafts report runs only once the drafts capture's outcome is final. */
+function draftsReportStarted(report: DesktopService["retained_source_import"]): boolean {
+  return !DRAFTS_PENDING.includes(report?.drafts_capture?.code ?? "");
+}
+
+/** Drafts report codes that wait for background work. */
+const DRAFTS_REPORT_DEFERRED = ["drafts_import_waiting", "drafts_import_source_resources_pending", "drafts_import_handoff_busy", "drafts_import_before_record"];
 
 export interface MigrationReportDetail { reason: string; next: string; code: string; phase: string | null }
-export type MigrationReportDetails = Partial<Record<"settings" | "creations" | "capture" | "localReads" | "localReadsReport" | "drafts" | "downloads" | "worktreeCache" | "worktreeCacheReport", MigrationReportDetail>>;
+export type MigrationReportDetails = Partial<Record<"settings" | "creations" | "capture" | "localReads" | "localReadsReport" | "drafts" | "draftsReport" | "downloads" | "downloadsReport" | "worktreeCache" | "worktreeCacheReport", MigrationReportDetail>>;
 
 /** Independent native report reasons. Reviewing never retries or publishes. */
 export function retainedSourceDetails(state: DesktopService | undefined): MigrationReportDetails | undefined {
@@ -103,6 +137,60 @@ export function retainedSourceDetails(state: DesktopService | undefined): Migrat
       : tr("Check access to the folder cache and its private archive, then retry. Keep unsupported or changed originals for review; Retry never replaces a saved original."),
     code: report.worktree_cache_capture.code, phase: null,
   };
+  const downloadsReport = report.downloads_report;
+  if (downloadsReport?.required) {
+    let reason: string, next: string;
+    if (downloadsReport.phase === "unknown" || ["downloads_import_original_result_unconfirmed", "downloads_import_result_unavailable"].includes(downloadsReport.code)) {
+      reason = tr("The original migration report result is unconfirmed.");
+      next = tr("Retry checks the original report result. It does not publish another copy of an unconfirmed report.");
+    } else if (downloadsReport.running) {
+      reason = tr("Preparing the historical downloaded files report. Your sessions remain available.");
+      next = tr("Your sessions remain available while the report is prepared.");
+    } else if (downloadsReport.phase === "before_record" && downloadsReport.code === "downloads_import_before_record") {
+      reason = tr("The historical downloaded files report was not sent because local preparation failed.");
+      next = tr("Check access to the original journal and the Zerus data folder, then use Retry. The original report identity is preserved.");
+    } else if (downloadsReport.complete) {
+      reason = tr("The migration report has been saved for review.");
+      next = tr("This historical downloaded files report is evidence only. It never downloads, removes or cleans up files.");
+    } else if (["downloads_import_waiting", "downloads_import_source_resources_pending", "downloads_import_handoff_busy"].includes(downloadsReport.code)) {
+      reason = tr("The historical downloaded files report is deferred. Retry keeps the original report identity.");
+      next = tr("Wait for background work to finish, then retry.");
+    } else {
+      reason = tr("The historical downloaded files report needs review. An unconfirmed publication will only be looked up, never resent.");
+      next = tr("Keep the original settings and report for review before attempting another migration.");
+    }
+    details.downloadsReport = { reason, next, code: downloadsReport.code, phase: downloadsReport.phase };
+  }
+  const draftsReport = draftsReportStarted(report) ? report.drafts_report : undefined;
+  if (draftsReport?.required) {
+    let reason: string, next: string;
+    if (draftsReport.phase === "unknown" || ["drafts_import_original_result_unconfirmed", "drafts_import_result_unavailable"].includes(draftsReport.code)) {
+      reason = tr("The original migration report result is unconfirmed.");
+      next = tr("Retry checks the original report result. It does not publish another copy of an unconfirmed report.");
+    } else if (draftsReport.running) {
+      reason = tr("Preparing the historical drafts report. Your sessions remain available.");
+      next = tr("Your sessions remain available while the report is prepared.");
+    } else if (draftsReport.phase === "before_record" && draftsReport.code === "drafts_import_before_record") {
+      reason = tr("The historical drafts report was not sent because local preparation failed.");
+      next = tr("Check access to the original journal and the Zerus data folder, then use Retry. The original report identity is preserved.");
+    } else if (draftsReport.partial && draftsReport.phase === "published") {
+      reason = tr("The historical drafts report was saved without earlier versions of the drafts already in Zerus. Your drafts are kept and nothing is lost.");
+      next = tr("This part of the migration report stays incomplete. Retry never records the earlier drafts later.");
+    } else if (draftsReport.complete) {
+      reason = tr("The migration report has been saved for review.");
+      next = tr("This historical drafts report is evidence only. It never sends, imports or deletes drafts or their attachments.");
+    } else if (draftsReport.code === "drafts_import_capture_unavailable") {
+      reason = tr("The recorded earlier drafts are unavailable, so the historical drafts report was not sent.");
+      next = tr("This part of the migration report stays incomplete. Retry never records the earlier drafts later.");
+    } else if (DRAFTS_REPORT_DEFERRED.includes(draftsReport.code)) {
+      reason = tr("The historical drafts report is deferred. Retry keeps the original report identity.");
+      next = tr("Wait for background work to finish, then retry.");
+    } else {
+      reason = tr("The historical drafts report needs review. An unconfirmed publication will only be looked up, never resent.");
+      next = tr("Keep the original settings and report for review before attempting another migration.");
+    }
+    details.draftsReport = { reason, next, code: draftsReport.code, phase: draftsReport.phase };
+  }
   const local = report.local_reads_report;
   if (local?.required) {
     let reason: string, next: string;
@@ -165,7 +253,7 @@ export function retainedSourceDetails(state: DesktopService | undefined): Migrat
       : drafts.paused
         ? tr("Importing drafts from Qt is paused because the earlier drafts could not be recorded. New drafts are saved.")
         : drafts.code === "draft_capture_next_earlier_run"
-          ? tr("Your Qt drafts were recorded. Drafts already in Zerus could not be recorded, because an earlier run changed them first.")
+          ? tr("Your drafts are kept and nothing is lost. Earlier versions of the drafts already in Zerus could not be recorded for the migration report, because an earlier run changed them first.")
           : tr("The earlier drafts could not be recorded for the migration report. Drafts are saved and imported normally."),
     next: !drafts.writes
       ? tr("Check that the Zerus data folder is available and owned by your user. Retry records the earlier drafts before any draft is saved.")

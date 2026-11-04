@@ -387,7 +387,7 @@ impl Runtime {
                                                 &lock,
                                                 deadline,
                                             ),
-                                            Err(_) => Ended::Unknown("creation_launch_not_started"),
+                                            Err(_) => Ended::NotStarted,
                                         };
                                         #[cfg(test)]
                                         let ended = match executor {
@@ -462,6 +462,8 @@ impl Runtime {
                                 .context("invalid launch plan")?;
                             ledger::result(&tx, &row, Some(&exit), "awaiting_resource_drain")?;
                         }
+                        // Durable before the drain, which alone settles it.
+                        Ended::NotStarted => ledger::not_started(&tx, &row)?,
                         Ended::Unknown(code) => ledger::result(&tx, &row, None, code)?,
                     }
                     tx.commit()?;
@@ -585,6 +587,12 @@ impl Runtime {
     pub(super) fn fixture_executor(&mut self, machine: &str, executor: Executor) {
         self.machine = Some(Machine::fixture(machine));
         self.executor = Some(executor);
+    }
+    /// The fixture source without an executor: the original path runs, and a
+    /// test image's own-image refusal stops it before any child.
+    #[cfg(test)]
+    pub(super) fn fixture_machine(&mut self, machine: &str) {
+        self.machine = Some(Machine::fixture(machine));
     }
 }
 impl Drop for Runtime {

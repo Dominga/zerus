@@ -26,15 +26,10 @@ service
   intent, each consumed once and separately from clone's:
   - a Submit, direct or from the task executor's Start (the same New session
     button, with a reserved identity);
-  - an explicit Continue setup that the reducer applies, for exactly its next
-    service step (zerus-5wmh.66.4.3.9). The reducer allows it only after
-    definite predecessors: an Unknown original refuses Continue and stays
-    lookup-only. The consent is process-local, never persisted or supplied
-    by the renderer, and binds the creation and the Resume's revision. It
-    authorizes only a request reserved after that Resume. The first service
-    admission after the Resume consumes it, whatever its kind; clone does
-    not honour it yet. A restart, recovery or replayed Continue grants
-    nothing.
+  - the worktree step of an explicit Continue setup's chain over the
+    remaining steps ([Continue](desktop-creation-clone.md#continue)), bound
+    to a request reserved after that Continue. An Unknown original refuses
+    Continue and stays lookup-only.
 - **Never sent.** The reducer emits a create only for a request it reserved
   and persisted in this process. A create without fresh consent, or one that
   stops before its admission request is written, was never sent: it fails as

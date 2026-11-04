@@ -1960,7 +1960,10 @@ in a project that no longer exists or with an unresolved project choice gives th
 fork an explicit Inbox membership. A source without a membership leaves the fork
 without one, so both follow the same default project. A fork name that already
 has a membership keeps it. Without a catalog, or if the catalog stays busy for
-3 seconds, the fork still starts in the default project. The desktop then places
+3 seconds, the fork still starts in the default project. That wait happens after
+the fork's binding is saved, without holding the session state or DeepSeek
+binding locks, and the membership is written only while the fork's binding is
+still the same run and conversation. The desktop then places
 the fork right after its original and opens it, once its inspection names the
 source conversation as its parent, even before a Codex fork has a conversation ID
 of its own. With an hgs that predates the parent field it waits for that ID.
@@ -1977,6 +1980,8 @@ fork's own: they open no attachments, and search finds them only in their source
 A provider that copies the history into the fork's own transcript adds nothing
 twice, because the fork's messages dated before its creation are not shown. The
 source session is never changed. Rows the journal no longer keeps are not shown.
+The phone history (`hgs history`) shows the same inherited rows as additive
+`Inherited` rows that never count as unread; see `services/mobile/README.md`.
 
 Codex may defer `SessionStart` until the fork's first message. Activity enables
 Send once Zerus verifies that the supervised process owns an independent child
@@ -2594,6 +2599,13 @@ requires a fresh complete inventory and refuses known programs or sessions using
 the folder, changed files or ownership, and all other protections. An incomplete
 inventory remains blocked. Automatic cleanup never uses this exception. Process
 names, PIDs and access details remain available under **Details**.
+
+A checkout with uncommitted or untracked files can also have such access
+denials. Its review then offers both consents (`discardable_with_process_consent`
+beside the discard and process fingerprints, while `discardable` stays false for
+older clients). Removal needs both: **Permanently discard** and **Remove even if
+some running programs cannot be checked**. Each consent alone is refused, and
+every other protection still wins.
 
 A refusal before deletion shows **Folder kept**. **Check again** refreshes only
 remaining folders and clears the prior local-file, discard and process choices;

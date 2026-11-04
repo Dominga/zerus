@@ -68,7 +68,7 @@ fn exact_previous_store_upgrade_adds_only_the_independent_launch_leaf() {
             .unwrap(),
         crate::desktop::store::SCHEMA
     );
-    assert_eq!(tables(&store.db), before + 2);
+    assert_eq!(tables(&store.db), before + 2 + 1);
     assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
 }
 
@@ -391,6 +391,43 @@ mod launch_child {
     }
 
     #[test]
+    fn only_a_child_that_never_existed_is_not_started() {
+        let (_temp, _location, _record, held) = lock();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        // A missing program: the spawn itself fails before any child runs.
+        assert_eq!(
+            child::run(
+                std::path::Path::new("/nonexistent/zerus-hgs"),
+                &[],
+                &held,
+                deadline
+            ),
+            Ended::NotStarted
+        );
+        // A refusal inside pre_exec, where custody's own setup runs.
+        child::REFUSE_PRE_EXEC.with(|refuse| refuse.set(true));
+        assert_eq!(
+            child::run(
+                std::path::Path::new("/usr/bin/env"),
+                &["true".into()],
+                &held,
+                deadline
+            ),
+            Ended::NotStarted
+        );
+        // Once a child exists, a later failure is never "not started".
+        assert_eq!(
+            child::run(
+                std::path::Path::new("/bin/sh"),
+                &["-c".into(), "kill -9 $$".into()],
+                &held,
+                deadline
+            ),
+            Ended::Unknown("creation_launch_signalled")
+        );
+    }
+
+    #[test]
     fn the_launch_child_leads_its_own_process_group() {
         let (_temp, _location, _record, held) = lock();
         let mut args = vec!["python3".to_string()];
@@ -571,6 +608,26 @@ mod actor {
                 + Sync
                 + 'static,
         ) -> Self {
+            Self::build(Some(Arc::new(execute)))
+        }
+        /// No executor: the original path runs, and this test image's own
+        /// self-exec refusal stops it before any child.
+        fn unexecuted() -> Self {
+            Self::build(None)
+        }
+        #[allow(clippy::type_complexity)]
+        fn build(
+            execute: Option<
+                Arc<
+                    dyn Fn(
+                            &wire::Plan,
+                            &Arc<zerus_client_core::run::custody::InheritedLock>,
+                        ) -> Ended
+                        + Send
+                        + Sync,
+                >,
+            >,
+        ) -> Self {
             let temp = tempfile::tempdir().unwrap();
             let root = temp.path().canonicalize().unwrap();
             let config = Config {
@@ -601,7 +658,10 @@ mod actor {
             let mut runtime = runtime::Runtime::new(&config, &epoch, owner.clone()).unwrap();
             // This synthetic source/Validated seam tests the actor, not native
             // authentication or an installed frontend authority positive.
-            runtime.fixture_executor(MACHINE, Arc::new(execute));
+            match execute {
+                Some(execute) => runtime.fixture_executor(MACHINE, execute),
+                None => runtime.fixture_machine(MACHINE),
+            }
             runtime.poll(&mut store, Some(exclusion.clone()));
             Self {
                 _temp: temp,
@@ -712,6 +772,195 @@ mod actor {
         }
     }
 
+    /// Exercises the real child/runtime result paths. The controller retains
+    /// one copy of THAT original custody so a worker result cannot masquerade
+    /// as kernel drain. Restart/readmission must keep the same settled ticket.
+    fn post_child_unknown(
+        code: &'static str,
+        execute: impl Fn(&Arc<zerus_client_core::run::custody::InheritedLock>) -> Ended
+            + Send
+            + Sync
+            + 'static,
+    ) {
+        let launches = Arc::new(AtomicUsize::new(0));
+        let count = launches.clone();
+        let retained = Arc::new(std::sync::Mutex::new(None));
+        let keep = retained.clone();
+        let mut f = Fixture::new(move |_, custody| {
+            count.fetch_add(1, Ordering::SeqCst);
+            *keep.lock().unwrap() = Some(custody.clone());
+            execute(custody)
+        });
+        let original = f.original();
+        assert!(f.admit(&original).matches(&original.intent));
+        f.until("original worker result persisted", |f| {
+            f.row(&original).receipt.phase == Phase::Unknown
+        });
+        let row = f.row(&original);
+        assert_eq!(row.receipt.code, code);
+        let ticket = row
+            .ticket
+            .clone()
+            .expect("original ticket reserved before child");
+        assert_eq!(ticket.admission_id, original.plan.launch_id);
+        assert_eq!(
+            ticket.binding_sha256,
+            original.binding.fingerprint().unwrap()
+        );
+        assert_eq!(row.next_step, 1);
+        assert_eq!(row.receipt.phase, Phase::Unknown);
+        assert!(row.receipt.launch.is_none());
+        assert!(!row.receipt.not_started(&original.plan));
+        assert!(!row.receipt.drained);
+        assert_eq!(f.store.operation_undrained().unwrap(), 1);
+        assert!(matches!(
+            crate::desktop::custody::probe(&f.location, row.custody.as_ref().unwrap()),
+            crate::desktop::custody::Observation::Held
+        ));
+        assert_eq!(f.admit(&original).receipt.unwrap(), row.receipt);
+        let held = retained.lock().unwrap().take().unwrap();
+        f.runtime.request_stop();
+        for _ in 0..8 {
+            f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+        }
+        assert!(
+            !f.runtime.drained(),
+            "original custody is still physically held"
+        );
+        assert_eq!(launches.load(Ordering::SeqCst), 1);
+        drop(held);
+        f.until("original custody and runtime drain", |f| {
+            f.runtime.drained()
+        });
+        let settled = f.row(&original);
+        assert_eq!(settled.ticket, Some(ticket.clone()));
+        assert_eq!(settled.next_step, 1);
+        assert_eq!(settled.receipt.phase, Phase::Unknown);
+        assert_eq!(settled.receipt.code, code);
+        assert!(settled.receipt.drained);
+        assert!(settled.receipt.launch.is_none());
+        assert!(!settled.receipt.not_started(&original.plan));
+        assert_eq!(f.store.operation_undrained().unwrap(), 0);
+        // A new runtime never gets execution consent from the unknown record.
+        f.runtime = runtime::Runtime::new(&f.config, &f.epoch, f.owner.clone()).unwrap();
+        let count = launches.clone();
+        f.runtime.fixture_executor(
+            MACHINE,
+            Arc::new(move |_, _| {
+                count.fetch_add(1, Ordering::SeqCst);
+                panic!("unknown original must never restart")
+            }),
+        );
+        let again = f.admit(&original);
+        assert!(again.accepted);
+        assert_eq!(again.receipt.unwrap(), settled.receipt);
+        for _ in 0..8 {
+            f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+        }
+        assert_eq!(f.row(&original).ticket, Some(ticket));
+        assert_eq!(launches.load(Ordering::SeqCst), 1);
+        f.runtime.request_stop();
+        f.until("restarted observer drained", |f| f.runtime.drained());
+    }
+
+    /// Reports OS cleanup separately: a worker assertion could panic into the
+    /// SAME unobserved fallback and otherwise conceal a broken kill/wait path.
+    fn child_fault(read: bool) {
+        use super::super::child;
+        use std::sync::atomic::AtomicBool;
+        let reaped = Arc::new(AtomicBool::new(false));
+        let spawned = Arc::new(AtomicUsize::new(0));
+        let consumed = Arc::new(AtomicBool::new(false));
+        let was_reaped = reaped.clone();
+        let was_spawned = spawned.clone();
+        let fault_consumed = consumed.clone();
+        post_child_unknown(
+            if read {
+                "creation_launch_output_unreadable"
+            } else {
+                "creation_launch_unobserved"
+            },
+            move |custody| {
+                if read {
+                    child::READ_ERROR.with(|fault| fault.set(true));
+                } else {
+                    child::WAIT_ERROR.with(|fault| fault.set(true));
+                }
+                // No native agent, descendant or global SIGCHLD manipulation. The
+                // wait-error helper self-exits in two seconds even under mutation.
+                let ended = child::run(
+                    std::path::Path::new("/usr/bin/env"),
+                    &[
+                        "python3".into(),
+                        "-c".into(),
+                        if read {
+                            "pass".into()
+                        } else {
+                            "import time; time.sleep(2)".into()
+                        },
+                    ],
+                    custody,
+                    Instant::now() + Duration::from_secs(20),
+                );
+                let pid = child::SPAWNED.with(|spawned| spawned.take()).unwrap_or(0);
+                was_spawned.store(pid as usize, Ordering::SeqCst);
+                fault_consumed.store(
+                    if read {
+                        child::READ_ERROR.with(|v| !v.get())
+                    } else {
+                        child::WAIT_ERROR.with(|v| !v.get())
+                    },
+                    Ordering::SeqCst,
+                );
+                if pid != 0 {
+                    let mut status = 0;
+                    // SAFETY: exactly the original private child PID reported by
+                    // Child::id; waitpid cannot observe an unrelated non-child.
+                    let result = unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) };
+                    was_reaped.store(
+                        result == -1
+                            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD),
+                        Ordering::SeqCst,
+                    );
+                    if result == 0 {
+                        // Mutation cleanup only: that SAME still-unreaped private
+                        // helper has its own bounded exit. Never signal by name.
+                        unsafe {
+                            libc::waitpid(pid as i32, &mut status, 0);
+                        }
+                    }
+                }
+                ended
+            },
+        );
+        assert!(spawned.load(Ordering::SeqCst) > 0, "a real child existed");
+        assert!(
+            consumed.load(Ordering::SeqCst),
+            "the actual observation boundary consumed the fault"
+        );
+        assert!(
+            reaped.load(Ordering::SeqCst),
+            "the production path reaped its original child before returning"
+        );
+    }
+
+    #[test]
+    fn post_child_output_read_error_is_unknown_and_never_replayed() {
+        child_fault(true);
+    }
+
+    #[test]
+    fn post_child_try_wait_error_is_unknown_and_never_replayed() {
+        child_fault(false);
+    }
+
+    #[test]
+    fn post_child_worker_panic_is_unknown_and_never_replayed() {
+        post_child_unknown("creation_launch_unobserved", |_| {
+            panic!("private launch worker lost its result")
+        });
+    }
+
     #[test]
     fn a_failed_or_unknown_child_settles_as_such_and_is_never_replayed() {
         for (ended, phase, code) in [
@@ -754,6 +1003,45 @@ mod actor {
             f.until("stopped", |f| f.runtime.drained());
             assert_eq!(launches.load(Ordering::SeqCst), 1);
         }
+    }
+
+    /// A drained receipt of a launch that never started: Failed, the closed
+    /// code, no exit; the client's never-sent proof.
+    fn settled_not_started(f: &mut Fixture, original: &Verified) {
+        f.until("settled", |f| f.row(original).receipt.drained);
+        let receipt = f.row(original).receipt;
+        assert_eq!(receipt.phase, Phase::Failed, "{receipt:?}");
+        assert_eq!(receipt.code, wire::NOT_STARTED);
+        assert!(receipt.launch.is_none());
+        assert!(receipt.not_started(&original.plan));
+        assert!(receipt.result(&original.plan).is_none(), "no exit to read");
+        // The same original admitted again returns its settled receipt.
+        assert_eq!(f.admit(original).receipt.unwrap(), receipt);
+        f.runtime.request_stop();
+        f.until("stopped", |f| f.runtime.drained());
+    }
+
+    #[test]
+    fn a_launch_that_never_started_settles_failed_only_after_its_drain() {
+        let launches = Arc::new(AtomicUsize::new(0));
+        let count = launches.clone();
+        // The executor reports the closed pre-child result, as child::run does.
+        let mut f = Fixture::new(move |_, _| {
+            count.fetch_add(1, Ordering::SeqCst);
+            Ended::NotStarted
+        });
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        settled_not_started(&mut f, &original);
+        assert_eq!(launches.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn the_own_image_refusal_never_starts_the_launch() {
+        let mut f = Fixture::unexecuted();
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        settled_not_started(&mut f, &original);
     }
 
     #[test]

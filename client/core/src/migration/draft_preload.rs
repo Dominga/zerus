@@ -33,7 +33,10 @@
 //! whose entries bind each original's offset, size and SHA-256 and the
 //! container's own SHA-256. Attachment references are stat-only observations
 //! under the checked roots: no blob content, no send or deletion claim.
-use super::{sources, SourceError, SourceResult};
+use super::{
+    lineage::{create_json, read_json, unreadable, Seed, META},
+    sources, SourceError, SourceResult,
+};
 use crate::fsx::preload::{self as disk, Stamp};
 use crate::{attachments, drafts};
 use serde::{Deserialize, Serialize};
@@ -58,7 +61,6 @@ pub const MAX_MANIFESTS: usize = 4096;
 /// Manifest bytes across every root (the Bundle cap).
 pub const MAX_BYTES: usize = 64 << 20;
 const MANIFEST: usize = drafts::MAX_MANIFEST as usize;
-const META: usize = 64 << 10;
 const INDEX: usize = 16 << 20;
 /// The largest leaf the private reader accepts on every platform (Windows
 /// refuses larger read limits): the container is kept in parts this size.
@@ -147,19 +149,6 @@ pub struct Index {
     pub entries: Vec<Entry>,
     pub container_bytes: u64,
     pub container_sha256: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Seed {
-    version: u32,
-    boundary: String,
-    capture_id: String,
-}
-impl Seed {
-    fn valid(&self) -> bool {
-        self.version == 1 && self.boundary == BOUNDARY && canonical_uuid(&self.capture_id)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,8 +276,9 @@ pub struct Capture {
     qt: Option<PathBuf>,
     dev: Vec<PathBuf>,
     state: Mutex<Status>,
-    /// Republishes the status after it changes.
-    notify: Mutex<Option<Hook>>,
+    /// Each listener republishes the status after it changes: the service
+    /// report, and the app's Saved drafts in every mode.
+    notify: Mutex<Vec<Hook>>,
     /// Queues the draft store's Retry job.
     retry: Mutex<Option<Hook>>,
 }
@@ -307,7 +297,7 @@ impl Capture {
                 writes: true,
                 paused: false,
             }),
-            notify: Mutex::new(None),
+            notify: Mutex::new(Vec::new()),
             retry: Mutex::new(None),
         }
     }
@@ -348,8 +338,9 @@ impl Capture {
         lock(&self.state).clone()
     }
 
+    /// Adds a listener for status changes; earlier listeners stay.
     pub fn hook(&self, notify: Hook) {
-        *lock(&self.notify) = Some(notify);
+        lock(&self.notify).push(notify);
     }
 
     /// The draft store's Retry job; set once the store is open.
@@ -357,8 +348,8 @@ impl Capture {
         *lock(&self.retry) = Some(retry);
     }
 
-    /// Retry from the migration status: queues the store's Retry job, which
-    /// never changes a recorded outcome.
+    /// Retry from the migration status or Saved drafts: queues the store's
+    /// Retry job, which never changes a recorded outcome.
     pub fn request_retry(&self) {
         let retry = lock(&self.retry).clone();
         if let Some(retry) = retry {
@@ -367,8 +358,8 @@ impl Capture {
     }
 
     fn changed(&self) {
-        let notify = lock(&self.notify).clone();
-        if let Some(notify) = notify {
+        let listeners = lock(&self.notify).clone();
+        for notify in listeners {
             notify();
         }
     }
@@ -416,8 +407,9 @@ impl Capture {
         match read_json::<Failed>(&slot.join("failed.json")) {
             // A supersede that cannot finish keeps the recorded failure for
             // this run, as before; the next start tries again.
-            Ok(Some(failed)) if superseded(&failed, windows()) && supersede(&slot).is_ok() => {}
-            Ok(Some(failed)) => {
+            Ok(Some((failed, _))) if superseded(&failed, windows()) && supersede(&slot).is_ok() => {
+            }
+            Ok(Some((failed, _))) => {
                 self.set(
                     failed_code(&failed.reason),
                     Some(failed.capture_id).filter(|id| canonical_uuid(id)),
@@ -436,7 +428,7 @@ impl Capture {
         }
         let mut resumed = None;
         let seed = match read_json::<Seed>(&slot.join("identity.json")) {
-            Ok(Some(seed)) if seed.valid() => {
+            Ok(Some((seed, _))) if seed.valid(BOUNDARY) => {
                 // A seed with no outcome: the attempt died inside its job.
                 // Anything in Next's store newer than the seed was written
                 // by a run that did not capture first.
@@ -452,11 +444,7 @@ impl Capture {
                 return refuse;
             }
             Ok(None) => {
-                let seed = Seed {
-                    version: 1,
-                    boundary: BOUNDARY.into(),
-                    capture_id: uuid::Uuid::new_v4().to_string(),
-                };
+                let seed = Seed::new(BOUNDARY);
                 if create_json(&slot.join("identity.json"), &seed).is_err() {
                     self.set("draft_capture_private_slot", None, 0);
                     return refuse;
@@ -611,28 +599,6 @@ fn failed_code(reason: &str) -> &'static str {
         "changed" => "draft_capture_changed",
         _ => "draft_capture_unreadable",
     }
-}
-
-fn unreadable(error: std::io::Error) -> SourceError {
-    if error.kind() == std::io::ErrorKind::FileTooLarge {
-        SourceError::TooLarge
-    } else {
-        SourceError::SourceUnreadable
-    }
-}
-
-fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> SourceResult<Option<T>> {
-    match disk::read(path, META).map_err(unreadable)? {
-        None => Ok(None),
-        Some((bytes, _)) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|_| SourceError::InvalidMetadata),
-    }
-}
-
-fn create_json(path: &Path, value: &impl Serialize) -> SourceResult<Stamp> {
-    let bytes = serde_json::to_vec(value).map_err(|_| SourceError::InvalidMetadata)?;
-    disk::create(path, &bytes).map_err(unreadable)
 }
 
 fn keep_or_create(path: &Path, bytes: &[u8], limit: usize) -> SourceResult<Stamp> {
@@ -833,13 +799,18 @@ fn entry(
     }
 }
 
+/// The manifest's own key, when its folder is named after it.
+pub(crate) fn manifest_key(folder: &str, bytes: &[u8]) -> Option<String> {
+    serde_json::from_slice::<Value>(bytes)
+        .ok()
+        .and_then(|value| value.get("key")?.as_str().map(str::to_owned))
+        .filter(|key| sha256(key.as_bytes()) == folder)
+}
+
 /// Supported only when the existing per-key checkpoint decoder accepts the
 /// manifest under the key its folder is named after.
 fn classify(store: Store, folder: &str, path: &Path, bytes: &[u8]) -> (Class, Vec<BlobRef>) {
-    let key = serde_json::from_slice::<Value>(bytes)
-        .ok()
-        .and_then(|value| value.get("key")?.as_str().map(str::to_owned));
-    let Some(key) = key.filter(|key| sha256(key.as_bytes()) == folder) else {
+    let Some(key) = manifest_key(folder, bytes) else {
         return (Class::Unsupported, Vec::new());
     };
     let origin = match store {
@@ -889,7 +860,7 @@ pub struct Snapshot {
 
 impl Snapshot {
     fn open(slot: &Path, seed: &Seed) -> SourceResult<Self> {
-        let receipt = read_json::<Receipt>(&slot.join("receipt.json"))?
+        let (receipt, _) = read_json::<Receipt>(&slot.join("receipt.json"))?
             .ok_or(SourceError::InvalidMetadata)?;
         if receipt.capture_id != seed.capture_id {
             return Err(SourceError::InvalidMetadata);
@@ -939,6 +910,89 @@ impl Snapshot {
     pub fn bytes(&self, entry: &Entry) -> &[u8] {
         let start = entry.offset as usize;
         &self.container[start..start + entry.size as usize]
+    }
+}
+
+/// A committed capture, read for publication: the receipt's exact bytes and
+/// the version it binds. Only [`Capture::committed`] makes one.
+pub struct Committed {
+    slot: PathBuf,
+    receipt: Vec<u8>,
+    index_sha256: String,
+    pub snapshot: Snapshot,
+}
+
+impl Committed {
+    /// `receipt.json`'s exact bytes.
+    pub fn receipt(&self) -> &[u8] {
+        &self.receipt
+    }
+
+    /// The SHA-256 of `index.json`'s exact bytes, as the receipt binds it.
+    pub fn index_sha256(&self) -> &str {
+        &self.index_sha256
+    }
+
+    /// By bounded stats only, never the container's bytes: the slot still
+    /// holds exactly this receipt, its index and container parts still have
+    /// the stamps it records (and no further part), and no failure record.
+    pub fn unchanged(&self) -> bool {
+        let Ok(Some((bytes, _))) = disk::read(&self.slot.join("receipt.json"), META) else {
+            return false;
+        };
+        let Ok(receipt) = serde_json::from_slice::<Receipt>(&bytes) else {
+            return false;
+        };
+        let leaf = |name: &str, expected: Option<&Stamp>| {
+            disk::stat(&self.slot.join(name)).is_ok_and(|actual| actual.as_ref() == expected)
+        };
+        let parts: Vec<&Stamp> = receipt.container.iter().chain(&receipt.more).collect();
+        bytes == self.receipt
+            && leaf("index.json", Some(&receipt.index))
+            && parts
+                .iter()
+                .enumerate()
+                .all(|(n, stamp)| leaf(&part(n), Some(stamp)))
+            && leaf(&part(parts.len()), None)
+            && leaf("failed.json", None)
+    }
+}
+
+impl Capture {
+    /// The committed capture in this store's slot, read-only: it never
+    /// creates the slot, a leaf or the lock, and never captures. No receipt
+    /// (not yet captured, or still inside the first job), a recorded failure
+    /// (not captured, permanently) and any failed check are errors, never a
+    /// complete source.
+    pub fn committed(&self) -> SourceResult<Committed> {
+        if !self.data.is_absolute() {
+            return Err(SourceError::UnsupportedSource);
+        }
+        let slot = self.data.join(SLOT);
+        if read_json::<Failed>(&slot.join("failed.json"))?.is_some() {
+            return Err(SourceError::SourceUnreadable);
+        }
+        let (seed, _) = read_json::<Seed>(&slot.join("identity.json"))?
+            .filter(|(seed, _)| seed.valid(BOUNDARY))
+            .ok_or(SourceError::InvalidMetadata)?;
+        let (receipt, _) = disk::read(&slot.join("receipt.json"), META)
+            .map_err(unreadable)?
+            .ok_or(SourceError::SourceUnreadable)?;
+        let index_sha256 = serde_json::from_slice::<Receipt>(&receipt)
+            .map_err(|_| SourceError::InvalidMetadata)?
+            .index_sha256;
+        let snapshot = Snapshot::open(&slot, &seed)?;
+        let committed = Committed {
+            slot,
+            receipt,
+            index_sha256,
+            snapshot,
+        };
+        // The receipt read first is the one the version was opened with.
+        if !committed.unchanged() {
+            return Err(SourceError::SourceChanged);
+        }
+        Ok(committed)
     }
 }
 

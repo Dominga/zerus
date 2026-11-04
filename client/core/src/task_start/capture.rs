@@ -1,4 +1,5 @@
-//! Native managed-source capture only. No journal, offer, task call or writer.
+//! Native managed-source capture. Its separate journal records explicit preparation.
+//! Capture itself cannot offer, call a task or write.
 //! A captured source and a wire Intent are data, never frontend authority.
 use crate::{
     desktop::task_start_reconcile as wire, fsx::preload::ManagedData,
@@ -19,6 +20,8 @@ use std::{
     path::{Path, PathBuf},
 };
 use zerus_desktop_migration::sha256;
+
+pub mod journal;
 
 const UNAVAILABLE: &str =
     "The original task Start checkpoint changed or cannot be verified. Recovery data was kept.";

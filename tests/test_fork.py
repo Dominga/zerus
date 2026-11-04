@@ -154,6 +154,38 @@ class Forks(Base):
         # A source in the default project leaves its fork there too.
         self.assertEqual(self.project_of(self.fork(loose,'loose-fork'),node),'ungrouped')
 
+    # zerus-wx3k: a fork waits for a busy catalog without holding the state
+    # lock, then still writes its inherited project while its binding is the same.
+    def test_a_fork_waits_for_a_busy_catalog_outside_the_state_lock(self):
+        import fcntl,time
+        source=self.start('codex')
+        node=self.swarm('hello')['node_id']
+        self.swarm('initialize',request={'projects':[dict(id='work',name='Work',color='#123456',folders=[],
+            sessions=[node+'\n'+source])]})
+        record=self.binding(source)
+        target='/'.join(source.split('/')[:2])+'/busy'
+        path=self.root/'state'/(hashlib.sha256(target.encode()).hexdigest()+'.json')
+        with open(self.root/'cfg'/'swarm'/'catalog.lock','r+') as catalog:
+            fcntl.flock(catalog,fcntl.LOCK_EX)
+            try:
+                self.hgs('fork',source,'-n','busy','-d','--expected-run-id',record['run_id'],
+                         '--expected-conversation-id',record['conversation_id'])
+                self.wait(path.exists)
+                # The fork's launch now waits for the catalog; the state lock is free.
+                with open(self.root/'state'/'.lock','a') as state:
+                    until=time.monotonic()+1.5
+                    while True:
+                        try:
+                            fcntl.flock(state,fcntl.LOCK_EX|fcntl.LOCK_NB);break
+                        except BlockingIOError:
+                            self.assertLess(time.monotonic(),until,'the state lock stayed held while the catalog was busy')
+                            time.sleep(0.01)
+                    fcntl.flock(state,fcntl.LOCK_UN)
+            finally:
+                fcntl.flock(catalog,fcntl.LOCK_UN)
+        self.wait(lambda:self.binding(target).get('conversation_id'))
+        self.assertEqual(self.project_of(target,node),'work')
+
     # zerus-b4qk: a fork's Activity shows its source's history up to the fork,
     # marked as inherited, then its own; the source's later rows stay out.
     def test_a_fork_shows_its_sources_history_up_to_the_fork(self):
@@ -198,6 +230,115 @@ class Forks(Base):
             hits=json.loads(self.hgs('search','--query','source request'))['results']
             self.assertIn(source,{h['name'] for h in hits},agent)
             self.assertFalse({fork,second}&{h['name'] for h in hits},agent)
+
+    # zerus-b4qk.1: the phone history (`hgs history`) of a fork shows its
+    # source's rows up to the fork, marked and never counted as unread.
+    def test_a_forks_phone_history_shows_its_source_up_to_the_fork(self):
+        import time,subprocess,uuid
+        def history(name):
+            record=self.binding(name)
+            for _ in range(12):
+                p=subprocess.run([str(test_pause.HGS),'history',name,'--json'],env=self.env,capture_output=True,text=True,timeout=20,
+                    input=json.dumps(dict(request_id=str(uuid.uuid4()),expected_run_id=record['run_id'],
+                                          expected_conversation_id=record['conversation_id'],limit=100)))
+                self.assertEqual(p.returncode,0,p.stdout+p.stderr)
+                page=json.loads(p.stdout)
+                if page['head']['complete']:
+                    return page
+            self.fail('history did not finish indexing: '+p.stdout)
+        talk=lambda page:[(e['detail'],e.get('inherited_from')) for e in page['events']]
+        source=self.start('claude','phone-root')
+        kinds=lambda page:[(e['type'],e.get('inherited_type')) for e in page['events'] if e.get('inherited_from')]
+        self.send_event(source,'UserPromptSubmit',prompt='source request')
+        self.send_event(source,'Stop',last_assistant_message='source reply')
+        time.sleep(1.1)
+        fork=self.fork(source,'phone-branch')
+        self.send_event(source,'UserPromptSubmit',prompt='source after the fork')
+        self.send_event(fork,'UserPromptSubmit',prompt='fork request')
+        before=history(fork)
+        self.send_event(fork,'Stop',last_assistant_message='fork reply')
+        page=history(fork)
+        self.assertEqual(talk(page),[('source request',source),('source reply',source),('fork request',None),('fork reply',None)])
+        # Their own type, so an app that does not know it drops them, never
+        # counting a source reply as unread; the original type stays.
+        self.assertEqual(kinds(page),[('Inherited','UserPromptSubmit'),('Inherited','Stop')])
+        # Inherited replies are never unread in the fork: only its own reply counts.
+        self.assertEqual(page['head']['total_incoming'],1)
+        self.assertEqual([e['incoming_seq'] for e in page['events'] if e['detail']=='source reply'],[None])
+        self.assertEqual(page['history_epoch'],before['history_epoch'])
+        # A new fork's first read is no backfill (#1248 N3).
+        self.assertNotIn('canonical_order_reset',before['source_status'])
+        # The source's own history is unchanged and inherits nothing.
+        self.assertEqual(talk(history(source)),[('source request',None),('source reply',None),('source after the fork',None)])
+        # A copy of the source history in the fork's own transcript (dated
+        # before the fork) is not shown again; the fork's own later line is.
+        transcript=Path(self.binding(fork)['transcript'])
+        line=lambda uuid_,at,text:json.dumps({"type":"assistant","uuid":uuid_,"timestamp":at,"sessionId":self.binding(fork)['conversation_id'],
+            "message":{"role":"assistant","content":[{"type":"text","text":text}]}})+"\n"
+        with transcript.open('a') as out:
+            out.write(line('copied','2001-01-01T00:00:00Z','copied source line'))
+            out.write(line('later',time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime(time.time()+5)),'later own line'))
+        details=[d for d,_ in talk(history(fork))]
+        self.assertNotIn('copied source line',details)
+        self.assertIn('later own line',details)
+        # An index that existed before its fork had a lineage gains the source
+        # rows later, with a new epoch so a reader that saw the oldest row reads again.
+        self.send_event(source,'Stop',last_assistant_message='source later reply')
+        late=self.fork(source,'phone-late')
+        path=self.root/'state'/(hashlib.sha256(late.encode()).hexdigest()+'.json')
+        record=json.loads(path.read_text());kept={k:record.pop(k) for k in ('fork_lineage','fork_source_name','fork_parent_id')}
+        path.write_text(json.dumps(record))
+        self.send_event(late,'UserPromptSubmit',prompt='late request')
+        # Indexed as an older CLI did, with a provider copy of the source history.
+        late_transcript=Path(self.binding(late)['transcript'])
+        with late_transcript.open('a') as out:
+            for uuid_,at,text in (('late-copy','2001-01-01T00:00:00Z','late copied line'),
+                                  ('late-own',time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime(time.time()+5)),'late own line')):
+                out.write(json.dumps({"type":"assistant","uuid":uuid_,"timestamp":at,"sessionId":self.binding(late)['conversation_id'],
+                    "message":{"role":"assistant","content":[{"type":"text","text":text}]}})+"\n")
+        first=history(late)
+        self.assertEqual(talk(first),[('late copied line',None),('late request',None),('late own line',None)])
+        self.assertEqual(first['head']['total_incoming'],2)
+        record=json.loads(path.read_text());record.update(kept);path.write_text(json.dumps(record))
+        second=history(late)
+        # Only the copy dated before the fork goes; the fork's own later line
+        # stays, and incoming rows are numbered again (#1248 N8).
+        self.assertEqual(talk(second),[('source request',source),('source reply',source),('source after the fork',source),
+                                       ('source later reply',source),('late request',None),('late own line',None)])
+        self.assertEqual(second['head']['total_incoming'],1)
+        self.assertNotEqual(second['history_epoch'],first['history_epoch'])
+        self.assertEqual(second['source_status']['canonical_order_reset'],'inherited_backfill')
+        # A long source loads over several bounded calls, reported as indexing.
+        import sqlite3
+        big=self.start('claude','phone-big')
+        self.send_event(big,'UserPromptSubmit',prompt='big request')
+        self.send_event(big,'Stop',last_assistant_message='big reply')
+        record=self.binding(big)
+        with sqlite3.connect(self.root/'state'/'events.sqlite3') as db:
+            db.executemany("INSERT INTO events(name,conversation,payload) VALUES(?,?,?)",
+                [(record.get('journal_name') or big,record['conversation_id'],
+                  json.dumps({"type":"Stop","agent_id":"","at":time.time()-5,"detail":f"bulk {i}"})) for i in range(2500)])
+        time.sleep(1.1)
+        branch=self.fork(big,'phone-big-branch')
+        self.send_event(branch,'UserPromptSubmit',prompt='branch request')
+        branch_record=self.binding(branch)
+        once=subprocess.run([str(test_pause.HGS),'history',branch,'--json'],env=self.env,capture_output=True,text=True,timeout=20,
+            input=json.dumps(dict(request_id=str(uuid.uuid4()),expected_run_id=branch_record['run_id'],
+                                  expected_conversation_id=branch_record['conversation_id'],limit=100)))
+        once=json.loads(once.stdout)
+        self.assertEqual((once['head']['complete'],once['indexing'],once['source_status']['inherited']),(False,True,'indexing'))
+        done=history(branch)
+        self.assertEqual(done['source_status']['inherited'],'complete')
+        # Rows sort by time: the bulk rows were dated before the source's own exchange.
+        self.assertEqual(talk(done)[-3:],[('big request',big),('big reply',big),('branch request',None)])
+        self.assertIn(('bulk 2499',big),talk(done))
+        self.assertEqual(done['head']['total_incoming'],0)
+        # A fork recorded before its lineage finds its source once and saves it (#1248 N7).
+        path=self.root/'state'/(hashlib.sha256(fork.encode()).hexdigest()+'.json')
+        record=json.loads(path.read_text());record.pop('fork_lineage');path.write_text(json.dumps(record))
+        history(fork)
+        [[saved_source,saved_conversation,_]]=self.binding(fork)['fork_lineage']
+        self.assertEqual((saved_source,saved_conversation),(source,self.binding(source)['conversation_id']))
 
     def test_provider_returning_source_id_is_not_confirmed_as_a_fork(self):
         source=self.start('claude');(self.root/'broken-fork').touch()

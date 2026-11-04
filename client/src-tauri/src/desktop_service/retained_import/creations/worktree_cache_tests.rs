@@ -266,54 +266,71 @@ fn worktree_cache_configuration_and_same_byte_snapshot_replacement_refuse_withou
 fn worktree_cache_group_waits_for_the_shared_slot_and_never_gates_grant_or_catalog() {
     use crate::desktop_service::tests::eventually;
     let _process = crate::PROCESS_TREE.read().unwrap();
-    tauri::async_runtime::block_on(async {
-        let f = Fixture::new("success");
-        let (service, _cache) = f.service();
-        let report = service.shared.retained_import.as_ref().unwrap().clone();
-        eventually("Qt completion before cache capture", || {
-            service.snapshot().connected
-                && service.shared.ownership.granted()
-                && report.status()["complete"] == true
-                && report.status()["running"] == false
-                && f.attempts() == 1
-        })
-        .await;
-        let held = report.work.admit(Role::Operations).unwrap();
-        source(&f);
-        assert_eq!(
-            report.group_status(GROUP)["code"],
-            "worktree_cache_import_source_resources_pending"
-        );
-        assert!(service.snapshot().connected && service.shared.ownership.granted());
-        let view = service.ownership_rearm().await;
-        assert!(!view.pending && view.code.is_empty(), "{view:?}");
-        assert_eq!(f.attempts(), 1);
-        // Later live-file failure pauses cache persistence only. Publication
-        // must still read/recheck the historical archive, not today's file.
-        zerus_client_core::fsx::write_private_durable(
-            &f.root.join("worktree-snapshots.json"),
-            b"[]",
-        )
-        .unwrap();
-        report
-            .inputs
-            .worktree_cache
-            .worktree_paused(SourceError::SourceChanged);
-        drop(held);
-        schedule_current(&service.shared);
-        eventually(
-            "cache historical report after the same slot releases",
-            || report.group_status(GROUP)["phase"] == "published",
-        )
-        .await;
-        assert_eq!(f.attempts(), 2);
-        assert_eq!(
-            service.snapshot().retained_source_import.unwrap()["worktree_cache_report"]["phase"],
-            "published"
-        );
-        service.stop();
-        service.join().await.unwrap();
-    });
+    type Pause = fn(&migration::preload::Capture);
+    let cases: [(&str, Pause); 3] = [
+        ("worktree_cache_source_changed", |c| {
+            c.worktree_paused(SourceError::SourceChanged)
+        }),
+        ("worktree_cache_source_writer_unavailable", |c| {
+            c.worktree_paused(SourceError::SourceUnreadable)
+        }),
+        ("worktree_cache_source_owner_unavailable", |c| {
+            c.worktree_owner_unavailable()
+        }),
+    ];
+    for (code, pause) in cases {
+        tauri::async_runtime::block_on(async {
+            let f = Fixture::new("success");
+            let (service, _cache) = f.service();
+            let report = service.shared.retained_import.as_ref().unwrap().clone();
+            eventually("Qt completion before cache capture", || {
+                service.snapshot().connected
+                    && service.shared.ownership.granted()
+                    && report.status()["complete"] == true
+                    && report.status()["running"] == false
+                    && f.attempts() == 1
+            })
+            .await;
+            let held = report.work.admit(Role::Operations).unwrap();
+            source(&f);
+            assert_eq!(
+                report.group_status(GROUP)["code"],
+                "worktree_cache_import_source_resources_pending"
+            );
+            assert!(service.snapshot().connected && service.shared.ownership.granted());
+            let view = service.ownership_rearm().await;
+            assert!(!view.pending && view.code.is_empty(), "{view:?}");
+            assert_eq!(f.attempts(), 1);
+            // Later live-file failure pauses cache persistence only. Publication
+            // must still read/recheck the historical archive, not today's file.
+            zerus_client_core::fsx::write_private_durable(
+                &f.root.join("worktree-snapshots.json"),
+                b"[]",
+            )
+            .unwrap();
+            pause(&report.inputs.worktree_cache);
+            assert_eq!(report.inputs.worktree_cache.status().code, code);
+            drop(held);
+            schedule_current(&service.shared);
+            eventually(
+                "cache historical report after the same slot releases",
+                || report.group_status(GROUP)["phase"] == "published",
+            )
+            .await;
+            assert_eq!(f.attempts(), 2);
+            // The service republishes its snapshot after the run; the report's
+            // own status can lead it.
+            eventually("the service snapshot carries the published report", || {
+                service
+                    .snapshot()
+                    .retained_source_import
+                    .is_some_and(|report| report["worktree_cache_report"]["phase"] == "published")
+            })
+            .await;
+            service.stop();
+            service.join().await.unwrap();
+        });
+    }
 }
 
 #[test]

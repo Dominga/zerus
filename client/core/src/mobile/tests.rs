@@ -302,8 +302,11 @@ impl Scratch {
 
     /// A fake program logging its arguments (and whether TMUX or the agent's
     /// attribution reached it) and answering per the first matching case.
-    fn program(&self, name: &str, cases: &[(&str, &str)]) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
+    fn program(
+        &self,
+        name: &str,
+        cases: &[(&str, &str)],
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
         let mut script = format!(
             "#!/bin/sh\nhere=$(dirname \"$0\")\necho \"$* tmux=${{TMUX:-unset}} pane=${{TMUX_PANE:-unset}} session=${{HGS_SESSION:-unset}} run=${{HGS_RUN_ID:-unset}}\" >> \"$here/{name}.calls\"\ncat >/dev/null\ncase \"$*\" in\n"
         );
@@ -312,9 +315,18 @@ impl Scratch {
         }
         script.push_str("  *) echo unexpected >&2; exit 9;;\nesac\n");
         let path = self.0.join(name);
-        std::fs::write(&path, script).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
+        let payload = self.0.join(format!("{name}.fixture"));
+        // A parallel fork can retain a new executable's write fd until exec,
+        // making this test's exec fail with ETXTBSY after our writer closed.
+        // Execute only the checked-in launcher; the completed payload is read
+        // as shell input and is never executable.
+        std::fs::write(&payload, script).unwrap();
+        std::os::unix::fs::symlink(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_mobile.sh"),
+            &path,
+        )
+        .unwrap();
+        (path, payload)
     }
 
     fn calls(&self, name: &str) -> String {
@@ -334,7 +346,7 @@ impl Drop for Scratch {
 fn the_connector_is_only_asked_for_read_only_status_and_capability() {
     let scratch = Scratch::new("connector");
     let reply = active().to_string().replace('"', "\\\"");
-    let connector = scratch.program(
+    let (connector, _) = scratch.program(
         "zerus-mobile-connector",
         &[
             ("*--workspace\\ status*", &format!("echo \"{reply}\"")),
@@ -377,13 +389,40 @@ fn the_connector_is_only_asked_for_read_only_status_and_capability() {
 
 #[cfg(unix)]
 #[test]
+fn a_held_fixture_writer_does_not_block_the_status_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let scratch = Scratch::new("held-writer");
+    let reply = active().to_string().replace('"', "\\\"");
+    let (connector, payload) = scratch.program(
+        "zerus-mobile-connector",
+        &[
+            ("*--workspace\\ status*", &format!("echo \"{reply}\"")),
+            ("--help", &format!("echo '{STOP_MARKER}'")),
+        ],
+    );
+    // Model the writable descriptor a concurrent child inherited during
+    // fixture publication. Holding it must not prevent either read-only call.
+    let held = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&payload)
+        .unwrap();
+    let workspace = read_status(&connector, &scratch.0.join("connector.json")).unwrap();
+    assert_eq!(workspace.connection, "Connector: running");
+    assert!(workspace.stop_supported);
+    assert_eq!(scratch.calls("zerus-mobile-connector").lines().count(), 2);
+    assert_eq!(held.metadata().unwrap().permissions().mode() & 0o111, 0);
+}
+
+#[cfg(unix)]
+#[test]
 fn phones_are_read_after_the_help_says_the_command_exists() {
     let scratch = Scratch::new("phones");
     let machines = r#"{"machines":[{"alias":"mac","enabled":true},{"alias":"off","enabled":false},{"alias":"","enabled":true}]}"#;
     let listed = json!({"configured": true, "encrypted": true, "server_url": "https://relay.example.com", "workspace_id": "ws-1",
         "workspace_name": "Example team", "devices": [{"id": "p1", "name": "Pixel", "platform": "android", "paired_at": 1_800_000_000,
         "last_seen_at": null, "added_by": {"name": "workstation"}}]}).to_string().replace('"', "\\\"");
-    let hgs = scratch.program(
+    let (hgs, _) = scratch.program(
         "hgs",
         &[
             ("machine\\ ls", &format!("echo '{machines}'")),
@@ -440,7 +479,7 @@ fn phones_are_read_after_the_help_says_the_command_exists() {
         "{calls}"
     );
     // A help past its own limit says so.
-    let long = scratch.program(
+    let (long, _) = scratch.program(
         "long",
         &[("--help", "head -c 300000 /dev/zero | tr '\\0' x")],
     );

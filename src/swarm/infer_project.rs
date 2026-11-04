@@ -5,6 +5,7 @@ use super::{
     store::{LockedStore, Store},
 };
 use crate::config::Config;
+use crate::state::Pinned;
 use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
@@ -46,42 +47,53 @@ pub(crate) fn infer_new_session(config: &Config, name: &str, directory: &Path) {
 }
 
 /// A fork's initial grouping, written once by this computer's catalog owner
-/// right after the fork's binding exists: the project of its source session
-/// (or of the archived source), or Inbox when that project no longer exists.
-/// Never initializes a catalog or replaces an explicit membership (including a
-/// tombstone); waits at most 3 s for the catalog lock, and a failure never
-/// fails the fork.
+/// after the fork's binding exists and its launch released the state lock:
+/// the project of its source session (or of the archived source), or Inbox
+/// when that project no longer exists. Never initializes a catalog or replaces
+/// an explicit membership (including a tombstone). Each attempt holds the state
+/// lock only to try the provider's binding lock once, confirm that `name` is
+/// still run `run_id` with `conversation`, and try the catalog lock once, so
+/// neither a busy catalog nor a busy provider lock holds the state lock
+/// (zerus-wx3k, zerus-jx5o). Attempts share one 3 s cap; a failure never fails
+/// the fork.
 pub(crate) fn inherit_fork_project(
     config: &Config,
     name: &str,
     source: &str,
     archive: Option<&str>,
+    run_id: &str,
+    conversation: &Value,
 ) {
     if !config.dir.join("swarm/catalog.json").is_file() {
         return;
     }
     let end = Instant::now() + Duration::from_secs(3);
-    let attempt = (|| -> anyhow::Result<()> {
-        let mut store = loop {
-            match LockedStore::try_load_scoped(config) {
-                Ok(store) => break store,
-                Err(_) if Instant::now() < end => std::thread::sleep(Duration::from_millis(50)),
-                Err(error) => return Err(error),
+    loop {
+        let attempt = crate::state::with_pinned_session_binding(name, run_id, conversation, end, || {
+            let Ok(mut store) = LockedStore::try_load_scoped(config) else {
+                return Ok(false);
+            };
+            if let Some(project) = inherited(&store.data, name, source, archive) {
+                let key = Key::Session {
+                    machine: store.data.catalog.machine(&store.data.node_id),
+                    session: name.into(),
+                };
+                let actor = store.data.node_id.clone();
+                store.data.catalog.set(&actor, key, json!(project))?;
+                store.save_catalog_only()?;
             }
-        };
-        let Some(project) = inherited(&store.data, name, source, archive) else {
-            return Ok(());
-        };
-        let key = Key::Session {
-            machine: store.data.catalog.machine(&store.data.node_id),
-            session: name.into(),
-        };
-        let actor = store.data.node_id.clone();
-        store.data.catalog.set(&actor, key, json!(project))?;
-        store.save_catalog_only()?;
-        Ok(())
-    })();
-    let _ = attempt;
+            anyhow::Ok(true)
+        });
+        if !retry(&attempt) || Instant::now() >= end {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+/// Whether a fork's project attempt may run again: a busy lock or catalog,
+/// with nothing held now. Done, a changed binding or a failure ends it.
+fn retry(attempt: &anyhow::Result<Pinned<anyhow::Result<bool>>>) -> bool {
+    matches!(attempt, Ok(Pinned::Busy | Pinned::Written(Ok(false))))
 }
 /// The fork's membership, or `None` to write nothing. A source without a
 /// membership (or explicitly unassigned) leaves the fork without one, so both
@@ -239,6 +251,17 @@ mod tests {
     use super::*;
     use crate::swarm::catalog::{new_id, Catalog};
     use std::collections::BTreeMap;
+    /// zerus-jx5o: a busy provider lock, state lock or catalog retries
+    /// within the cap; a write, a changed binding or a failure ends it.
+    #[test]
+    fn a_busy_attempt_retries_and_every_other_outcome_ends() {
+        assert!(retry(&Ok(Pinned::Busy)));
+        assert!(retry(&Ok(Pinned::Written(Ok(false)))));
+        assert!(!retry(&Ok(Pinned::Written(Ok(true)))));
+        assert!(!retry(&Ok(Pinned::Changed)));
+        assert!(!retry(&Ok(Pinned::Written(Err(anyhow::anyhow!("save failed"))))));
+        assert!(!retry(&Err(anyhow::anyhow!("lock failed"))));
+    }
     fn store() -> Store {
         Store {
             node_id: new_id(),

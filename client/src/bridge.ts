@@ -51,6 +51,8 @@ export const readTaskSettings = (project: string) => desktop<import("./store/tas
 export const saveTaskSettings = (project: string, changes: Partial<import("./store/taskSettings").TaskSettings>) => desktop<import("./store/taskSettings").TaskSettings>("task_settings", { project, changes });
 export const taskStart = (input: import("./store/taskStart").StartInput) => desktop<import("./store/taskStart").StartView>("task_start", { input });
 export const taskStartRelease = (view: import("./store/taskStart").StartView) => desktop<import("./store/taskStart").StartView>("task_start_release", { project: view.project, task: view.task, id: view.id, snapshot: view.snapshot });
+export const taskStartCheck = (view: import("./store/taskStart").StartView) => desktop<import("./store/taskStart").StartView>("task_start_check", { project: view.project, task: view.task, id: view.id, snapshot: view.snapshot });
+export const taskStartDiscardCheck = (view: import("./store/taskStart").StartView) => desktop<import("./store/taskStart").StartView>("task_start_discard_check", { project: view.project, task: view.task, id: view.id, snapshot: view.snapshot, checkId: view.unsent_check_id });
 export const cancelTaskExecution = (project: string, task: string, execution: import("./store/taskCancel").Execution, reason: string) => desktop<string | null>("task_cancel_execution", { project, task, execution, reason });
 export const taskBoardAction = (project: string, task: string, expectedStage: string, action: import("./store/taskBoard").BoardAction) => desktop<void>("task_board_action", { project, task, expectedStage, action });
 export const taskFormOpen = (target: import("./store/taskEditor").TaskEditorTarget<import("./store/taskForms").FormKind>) => desktop<import("./store/taskEditor").TaskEditorView<import("./store/taskForms").FormKind>>("task_form_open", { project: target.project, task: target.task, kind: target.mode });
@@ -956,6 +958,12 @@ export const savedDraft = (source: DraftSource, key: string) => desktop<SavedDra
 export const draftRecover = (key: string) => desktop<void>("draft_recover", { key });
 /** Replaces the open composer's draft with the selected one; rejects with why not. */
 export const draftRestore = (handle: number, source: DraftSource, key: string) => desktop<void>("draft_restore", { handle, source, key });
+/** This run's drafts capture status, `null` when the run never captures. */
+export const draftCaptureStatus = () => desktop<import("./types").DraftCaptureStatus | null>("draft_capture_status", {});
+/** Queues the draft store's Retry; a recorded outcome never changes. */
+export const draftCaptureRetry = () => desktop<void>("draft_capture_retry", {});
+/** `draft-capture-changed`: the capture's status changed; resolves with the stop once listening. */
+export const onDraftCaptureChanged = (listener: () => void) => onEvent<null>("draft-capture-changed", listener);
 
 /** Availability is a local folder stat; opening does a fresh identity/directory check. */
 export const sessionFolderStatus = (computer: string, directory: string) => desktop<import("./store/sessionFolders").FolderStatus>("session_folder_status", { computer, directory });

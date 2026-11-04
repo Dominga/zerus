@@ -379,6 +379,11 @@ impl Exited {
         })
     }
 }
+/// The closed code of an original launch child that never started: refused
+/// before any child existed (its own image, its custody, or the spawn). After
+/// the custody drain its receipt is Failed with this code and no exit.
+pub const NOT_STARTED: &str = "creation_launch_not_started";
+
 #[derive(Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Receipt {
@@ -424,9 +429,28 @@ impl Receipt {
                 Phase::Launched => {
                     self.drained && self.launch.as_ref().is_some_and(|e| e.code == 0)
                 }
-                Phase::Failed => self.drained && self.launch.as_ref().is_some_and(|e| e.code != 0),
+                Phase::Failed => {
+                    self.drained
+                        && match &self.launch {
+                            Some(exited) => exited.code != 0,
+                            None => self.code == NOT_STARTED,
+                        }
+                }
                 _ => self.launch.is_none(),
             }
+    }
+    /// Whether this exact original's drained receipt proves that its launch
+    /// child never started: Failed, no exit and the closed [`NOT_STARTED`]
+    /// code. Nothing ran, so the launch counts as never sent.
+    pub fn not_started(&self, plan: &Plan) -> bool {
+        self.valid()
+            && self.drained
+            && plan
+                .fingerprint()
+                .is_some_and(|fingerprint| fingerprint == self.binding.plan_sha256)
+            && self.phase == Phase::Failed
+            && self.launch.is_none()
+            && self.code == NOT_STARTED
     }
     pub fn matches(&self, intent: &Intent) -> bool {
         self.valid()
@@ -816,6 +840,34 @@ mod tests {
         let mut changed = verified.intent.clone();
         changed.launch_id = OTHER.into();
         assert!(changed.verify().is_err());
+    }
+
+    #[test]
+    fn only_the_exact_drained_not_started_original_counts_as_never_sent() {
+        let verified = checkpoint().verify().unwrap();
+        let mut receipt = exited(&verified, 1, "");
+        receipt.launch = None;
+        receipt.code = NOT_STARTED.into();
+        assert!(receipt.valid());
+        assert!(receipt.not_started(&verified.plan));
+        assert!(receipt.result(&verified.plan).is_none(), "no exit to read");
+        // A Failed receipt without an exit carries only this code.
+        let mut other = receipt.clone();
+        other.code = "creation_launch_timed_out".into();
+        assert!(!other.valid() && !other.not_started(&verified.plan));
+        // An exit, an Unknown or undrained receipt, or another plan is not it.
+        let mut exit = exited(&verified, 1, "");
+        exit.code = NOT_STARTED.into();
+        assert!(exit.valid() && !exit.not_started(&verified.plan));
+        let mut unknown = receipt.clone();
+        unknown.phase = Phase::Unknown;
+        assert!(unknown.valid() && !unknown.not_started(&verified.plan));
+        let mut undrained = receipt.clone();
+        undrained.drained = false;
+        assert!(!undrained.not_started(&verified.plan));
+        let mut plan = verified.plan.clone();
+        plan.target = "/srv/other".into();
+        assert!(!receipt.not_started(&plan));
     }
 
     #[test]

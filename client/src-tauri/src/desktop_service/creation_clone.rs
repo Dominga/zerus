@@ -12,8 +12,29 @@ use zerus_client_core::{
     run, Invocation,
 };
 
-pub(crate) const UNAVAILABLE: &str =
-    zerus_client_core::source!("Repository cloning is not available from this desktop service.");
+/// A clone this client never sent: nothing reached the service, so the
+/// request ID is retired as definitely effect-free and Continue setup can try
+/// again.
+pub(crate) const NOT_SENT: &str = zerus_client_core::source!(
+    "The repository was not cloned: the request was not sent to the desktop service. Continue setup to try again."
+);
+
+/// A definite, effect-free failure for a clone that was never sent, in the
+/// shape of a failed clone receipt, so the reducer retires its request ID and
+/// the creation stays resumable instead of Unknown.
+pub(crate) fn unsent(operation: &Value) -> Option<creation::Answer> {
+    let clone = operation["clone_id"].as_str()?;
+    if !creation::canonical_uuid(clone) {
+        return None;
+    }
+    let target = operation["target"].as_str()?;
+    Some(creation::Answer {
+        ok: true,
+        data: json!({"status":"failed", "request_id":clone, "path":target,
+            "effects_started":false, "detail":NOT_SENT}),
+        error: String::new(),
+    })
+}
 
 pub(super) struct Read {
     pub(super) service: Arc<Service>,
@@ -202,7 +223,17 @@ impl Read {
 }
 
 /// Called only by the native creation host after its ordered journal barrier.
-/// `fresh` is consumed once from that host's new-submit set, never from JSON.
+/// `fresh` is the host's one-use consent for this exact clone (a direct or
+/// task Submit, or an explicit Continue's chain), consumed before this call,
+/// never from JSON. `wait` marks the clone itself; a status read does not.
+///
+/// `None` routes the call down the unchanged direct path: only a completed
+/// probe that finds no clone support on the selected service does that, for
+/// clones and reads alike. The reducer emits a clone only for a request ID it
+/// reserved and persisted in this process, so a clone without fresh consent,
+/// or one stopped before its admission request is written, was never sent and
+/// fails definitely. A missing or Unknown result of a sent original never
+/// authorizes a resend or the direct path.
 pub(crate) fn call(
     service: Option<Arc<Service>>,
     id: &str,
@@ -210,26 +241,18 @@ pub(crate) fn call(
     fresh: bool,
     wait: bool,
     shutdown: &AtomicBool,
-) -> creation::Answer {
-    let result = (|| -> Result<Value, String> {
+) -> Option<creation::Answer> {
+    let sent = std::cell::Cell::new(false);
+    let result = (|| -> Result<Option<Value>, String> {
         let read = Read::new(service)?;
         if !creation::valid_operation(id, operation) {
             return Err(creation::READ_FAILED.into());
         }
+        // Only a completed probe can prove no support; an I/O error cannot.
         if !read.supported()? {
-            // This exact fresh intent has not reached frontend-request. An
-            // older CLI cannot establish the outcome of an existing original.
-            if fresh {
-                let clone = operation["clone_id"]
-                    .as_str()
-                    .ok_or(creation::READ_FAILED)?;
-                if !creation::canonical_uuid(clone) {
-                    return Err(creation::READ_FAILED.into());
-                }
-                let target = operation["target"].as_str().ok_or(creation::READ_FAILED)?;
-                return Ok(json!({"status":"failed", "request_id":clone,
-                    "path":target, "detail":UNAVAILABLE}));
-            }
+            return Ok(None);
+        }
+        if wait && !fresh {
             return Err(creation::READ_FAILED.into());
         }
         let plan = wire::Plan::from_operation(id, operation).ok_or(creation::READ_FAILED)?;
@@ -257,6 +280,7 @@ pub(crate) fn call(
                 original: serde_json::to_string(operation).map_err(|_| creation::READ_FAILED)?,
             };
             intent.clone().verify().map_err(|_| creation::READ_FAILED)?;
+            sent.set(true);
             let bytes = read.exchange(
                 Some(Request::CreationClone {
                     intent: Box::new(intent.clone()),
@@ -271,7 +295,7 @@ pub(crate) fn call(
                 return Err(creation::READ_FAILED.into());
             }
             if let Some(result) = admission.receipt.and_then(|r| r.result(&plan)) {
-                return Ok(result);
+                return Ok(Some(result));
             }
         }
         let until = Instant::now() + Duration::from_secs(650);
@@ -295,7 +319,7 @@ pub(crate) fn call(
             }
             let receipt = lookup.receipt.ok_or(creation::READ_FAILED)?; // Missing never authorizes Start.
             if let Some(result) = receipt.result(&plan) {
-                return Ok(result);
+                return Ok(Some(result));
             }
             if !wait || receipt.drained || Instant::now() >= until {
                 return Err(creation::READ_FAILED.into());
@@ -311,16 +335,23 @@ pub(crate) fn call(
         }
     })();
     match result {
-        Ok(data) => creation::Answer {
+        Ok(Some(data)) => Some(creation::Answer {
             ok: true,
             data,
             error: String::new(),
-        },
-        Err(_) => creation::Answer {
-            ok: false,
-            data: Value::Null,
-            error: zerus_client_core::repository::UNCONFIRMED_OPERATION.into(),
-        },
+        }),
+        Ok(None) => None,
+        // Nothing reached the service: never Unknown.
+        Err(_) => Some(
+            (wait && !sent.get())
+                .then(|| unsent(operation))
+                .flatten()
+                .unwrap_or_else(|| creation::Answer {
+                    ok: false,
+                    data: Value::Null,
+                    error: zerus_client_core::repository::UNCONFIRMED_OPERATION.into(),
+                }),
+        ),
     }
 }
 

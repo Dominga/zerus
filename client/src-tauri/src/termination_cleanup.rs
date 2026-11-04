@@ -196,15 +196,10 @@ fn leaf(path: &str) -> String {
         .unwrap_or(path)
         .into()
 }
+/// The folders core cleanup would remove (zerus-k2ga: one predicate, so the
+/// counted folders and the removed ones are the same).
 fn ready(entry: &zerus_client_core::termination_cleanup::Entry) -> bool {
-    !matches!(entry.status, Some(Status::Removed | Status::Unconfirmed))
-        && entry.verified
-        && (review::removable(&entry.row)
-            || review::process_reviewable(&entry.row)
-            || (entry.row["discardable"] == true
-                && entry.row["discard_fingerprint"]
-                    .as_str()
-                    .is_some_and(|s| !s.is_empty())))
+    entry.eligible()
 }
 impl Model {
     fn retain(
@@ -1322,6 +1317,58 @@ mod tests {
         m.jobs[0].manual_review = true;
         // The UI-ready predicate shares the existing core validator.
         assert_eq!(m.view().rows[0].ready, ready(&m.jobs[0].cleanup.entries[0]));
+    }
+    /// zerus-k2ga: a dirty folder beside hidden programs is ready, counted
+    /// and needs both consents, alone or beside a clean folder, so the
+    /// counted folders are the ones core cleanup removes.
+    #[test]
+    fn a_dirty_folder_beside_hidden_programs_is_ready_counted_and_needs_both_consents() {
+        let combined = json!({"path":"/srv/example/work","kind":"linked","verdict":"blocked","fingerprint":"f",
+            "reasons":[{"code":"changes"},{"code":"processes_unavailable"}],"discardable":false,
+            "discardable_with_process_consent":true,"discard_fingerprint":"d","process_fingerprint":"p"});
+        let reviewed = |path: &str, row: Value, id: &str| {
+            let mut j = job(Some(Status::Kept));
+            j.id = id.into();
+            j.cleanup.entries[0] = Entry::terminated(
+                "example-peer",
+                MACHINE,
+                path,
+                "/srv/example/.git",
+                "owner-1",
+                None,
+            )
+            .unwrap();
+            j.cleanup.entries[0].status = Some(Status::Kept);
+            j.cleanup.entries[0].verified = true;
+            j.cleanup.entries[0].row = row;
+            j.manual_review = true;
+            j
+        };
+        let mut m = Model::default();
+        m.jobs
+            .push_back(reviewed("/srv/example/work", combined.clone(), "job-1"));
+        let v = m.view();
+        assert!(
+            v.rows[0].ready,
+            "the dirty folder alone is a removal target"
+        );
+        assert!(v.required.discard_changes && v.required.unchecked_processes);
+        let clean = json!({"path":"/srv/example/other","kind":"linked","verdict":"ready","fingerprint":"g","reasons":[]});
+        m.jobs
+            .push_back(reviewed("/srv/example/other", clean, "job-2"));
+        let v = m.view();
+        assert_eq!(
+            v.rows.iter().map(|r| r.ready).collect::<Vec<_>>(),
+            [true, true]
+        );
+        assert!(v.required.discard_changes && v.required.unchecked_processes);
+        for (job, row) in m.jobs.iter().zip(&v.rows) {
+            assert_eq!(
+                row.ready,
+                job.cleanup.entries[0].eligible(),
+                "counted as core removes"
+            );
+        }
     }
     #[test]
     fn current_inspection_reads_are_bounded_and_charge_until_their_guard_ends() {

@@ -365,7 +365,7 @@ fn an_unknown_journal_makes_every_earlier_row_suspect() {
     drop(index);
     let index = Index::open(&store).unwrap();
     let floor = index.floor(now()).unwrap();
-    let suspect: i64 = index.db.query_row("SELECT count(*) FROM tasks WHERE decoded < ?1", [floor], |r| r.get(0)).unwrap();
+    let suspect: i64 = index.db.query_row("SELECT count(*) FROM tasks WHERE checked < ?1 OR trusted = 0", [floor], |r| r.get(0)).unwrap();
     assert_eq!(suspect, 0, "every row was read again");
 }
 
@@ -386,7 +386,7 @@ fn rows_past_the_maximum_age_are_read_again() {
         let db = Connection::open(store.dir().join(FILE)).unwrap();
         db.execute(sql, params![now() - MAX_AGE_MS - 1000]).unwrap();
     };
-    aged("UPDATE tasks SET decoded=?1");
+    aged("UPDATE tasks SET checked=?1");
     let (index, decoded, _) = counted(|| Index::open(&store).unwrap());
     assert_eq!(decoded, 20);
     assert_eq!(index.revision().unwrap(), revision);
@@ -399,7 +399,7 @@ fn rows_past_the_maximum_age_are_read_again() {
     let mut index = Index::open(&store).unwrap();
     {
         let db = Connection::open(store.dir().join(FILE)).unwrap();
-        db.execute("UPDATE tasks SET decoded=?1 WHERE uuid=?2", params![now() - MAX_AGE_MS - 1000, tasks[5].uuid()]).unwrap();
+        db.execute("UPDATE tasks SET checked=?1 WHERE uuid=?2", params![now() - MAX_AGE_MS - 1000, tasks[5].uuid()]).unwrap();
     }
     let (page, decoded, _) = counted(|| index.page(Stage::Todo, 50, &Anchor::Start).unwrap());
     assert_eq!(decoded, 1);
@@ -419,8 +419,8 @@ fn an_unsettled_row_is_read_again() {
     assert!(!settled);
     assert!(stamped(store.dir(), task.uuid(), now() + SETTLE_MS + 1000).1);
     let index = Index::open(&store).unwrap();
-    let decoded: i64 = index.db.query_row("SELECT decoded FROM tasks WHERE uuid=?1", [task.uuid()], |r| r.get(0)).unwrap();
-    assert_eq!(decoded, 0, "kept suspect");
+    let trusted: bool = index.db.query_row("SELECT trusted FROM tasks WHERE uuid=?1", [task.uuid()], |r| r.get(0)).unwrap();
+    assert!(!trusted, "kept suspect");
     drop(index);
     let (_, decoded, _) = counted(|| Index::open(&store).unwrap());
     assert_eq!(decoded, 1, "read again");
@@ -464,6 +464,116 @@ fn a_cursor_with_a_non_hex_rank_is_refused_without_panicking() {
     }
     let good = cursor("example", Stage::Todo, "V", &uuid);
     assert_eq!(parse_cursor("example", Stage::Todo, &good).unwrap(), ("V".to_owned(), uuid));
+}
+
+/// review-n on #1350 R2: a clock set back must not make earlier reads look
+/// recent. Reads dated after now are suspect, and so is a suspect mark.
+#[test]
+fn a_clock_set_back_leaves_no_row_trusted_by_its_future_date() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let tasks: Vec<TaskDoc> = (0..20)
+        .map(|n| new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"))
+        .collect();
+    for task in &tasks {
+        write_plain(&store, task);
+    }
+    drop(Index::open(&store).unwrap());
+    // As if every read and mark happened an hour ahead of the clock now, and
+    // one row changed unnoticed meanwhile.
+    let ahead = now() + 3_600_000;
+    {
+        let db = Connection::open(store.dir().join(FILE)).unwrap();
+        db.execute("UPDATE tasks SET checked=?1", [ahead]).unwrap();
+        db.execute("INSERT OR REPLACE INTO meta VALUES('suspect', ?1)", [ahead.to_string()]).unwrap();
+        db.execute("UPDATE meta SET value=?1 WHERE key='checked'", [ahead.to_string()]).unwrap();
+        db.execute("UPDATE tasks SET row=json_set(row, '$.text', 'Stale') WHERE uuid=?1", [tasks[3].uuid()]).unwrap();
+    }
+    let (mut index, decoded, _) = counted(|| Index::open(&store).unwrap());
+    assert_eq!(decoded, 20, "every future-dated read is read again");
+    let page = index.page(Stage::Todo, 50, &Anchor::Start).unwrap();
+    let row = page.rows.iter().find(|r| r["uuid"] == json!(tasks[3].uuid())).unwrap();
+    assert_eq!(row["text"], json!("Plain"));
+    let mark: i64 = index.meta("suspect").unwrap().unwrap().parse().unwrap();
+    assert!(mark <= now(), "the suspect mark is not left in the future");
+    // And it settles: the next read decodes nothing.
+    drop(index);
+    let (_, decoded, _) = counted(|| Index::open(&store).unwrap());
+    assert_eq!(decoded, 0);
+}
+
+/// review-n on #1350 R2: the size limit is in bytes, whatever the page size.
+#[test]
+fn the_index_size_limit_is_in_bytes_whatever_its_page_size() {
+    assert_eq!(budget(4096, 10), Some(65_536));
+    assert_eq!(budget(8192, 10), Some(32_768));
+    assert_eq!(budget(8192, 40_000), None, "over the budget");
+    assert_eq!(budget(0, 1), None);
+    assert_eq!(budget(-4096, 1), None);
+    let temp = tempfile::tempdir().unwrap();
+    let store = project(temp.path());
+    drop(Index::open(&store).unwrap());
+    {
+        let db = Connection::open(store.dir().join(FILE)).unwrap();
+        db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA page_size=8192; VACUUM;").unwrap();
+        let size: i64 = db.query_row("PRAGMA page_size", [], |r| r.get(0)).unwrap();
+        assert_eq!(size, 8192);
+    }
+    let index = Index::open(&store).unwrap();
+    let pages: i64 = index.db.query_row("PRAGMA max_page_count", [], |r| r.get(0)).unwrap();
+    assert_eq!(pages * 8192, BUDGET_BYTES);
+}
+
+/// review-n's starvation finding on #1350 R2: the background queue is
+/// ordered by when each row was last read, apart from whether it is trusted.
+/// Rows that stay unsettled (here, files dated in the future) go to the back
+/// each time they are read, so an expired row whose stage changed unnoticed
+/// is reached, and its stage count and membership become right.
+#[test]
+fn permanently_unsettled_rows_cannot_starve_an_expired_row() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let mut tasks: Vec<TaskDoc> = (0..300)
+        .map(|n| new_task(&store, &format!("T-{n:06}"), Stage::Backlog, "V", "Plain"))
+        .collect();
+    for task in &tasks {
+        write_plain(&store, task);
+    }
+    drop(Index::open(&store).unwrap());
+    // 260 tasks whose files are dated a day ahead: never settled.
+    let ahead = std::time::SystemTime::now() + Duration::from_secs(86_400);
+    for task in &tasks[..260] {
+        let path = store.dir().join("tasks").join(format!("{}.loro", task.uuid()));
+        fs::File::options().write(true).open(path).unwrap().set_modified(ahead).unwrap();
+    }
+    // The last one moves to To do; its new files keep the stamps the index holds.
+    let moved = 299;
+    tasks[moved].set_stage(Stage::Todo, &Actor::Person, 5).unwrap();
+    write_plain(&store, &tasks[moved]);
+    {
+        let db = Connection::open(store.dir().join(FILE)).unwrap();
+        for task in &tasks[..260] {
+            db.execute("UPDATE tasks SET files=?1, checked=0 WHERE uuid=?2", params![files(store.dir(), task.uuid()), task.uuid()]).unwrap();
+        }
+        db.execute(
+            "UPDATE tasks SET files=?1, checked=?2 WHERE uuid=?3",
+            params![files(store.dir(), tasks[moved].uuid()), now() - MAX_AGE_MS - 5_000, tasks[moved].uuid()],
+        )
+        .unwrap();
+    }
+    let mut seen = false;
+    for read in 0..3 {
+        let mut index = Index::open(&store).unwrap();
+        let page = index.page(Stage::Todo, 10, &Anchor::Start).unwrap();
+        let count = index.counts().unwrap().get("todo").copied().unwrap_or(0);
+        if page.rows.len() == 1 && count == 1 {
+            assert_eq!(page.rows[0]["uuid"], json!(tasks[moved].uuid()));
+            seen = true;
+            assert!(read <= 1, "reached within ceil(261 / 256) reads, not {read}");
+            break;
+        }
+    }
+    assert!(seen, "the moved task never reached To do");
 }
 
 #[test]

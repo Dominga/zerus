@@ -2941,11 +2941,14 @@ version, and never a reason for a read to fail. Each save notes the task in the
 project's change journal (`changes`, a bounded hint that is only ever replaced,
 never written through), so a read decodes only changed tasks. Every task
 file's stamp (length, modification time, inode) is also checked at least every
-30 seconds for writers without the journal. A row is suspect when its files
-changed within the last 2 seconds, when it was read before the journal last
-became unknown, or when it was read more than 10 minutes ago: a page reads its
-suspect rows from their documents again before it returns them, and each read
-of the index reads up to 256 others again, oldest first. Short-ID lookups,
+30 seconds for writers without the journal. A row is suspect when it was read
+from files modified within the last 2 seconds, before the journal last became
+unknown, more than 10 minutes ago, or at a time after now (a clock set back).
+A page reads its suspect rows from their documents again before it returns
+them, and each read of the index reads up to 256 others again, those read
+longest ago first, so every row, and with it every stage count, is read again
+within 10 minutes plus ceil(tasks / 256) reads. The index holds at most 256
+MiB whatever its page size; a larger one is built again. Short-ID lookups,
 list places and the agent start limit use the same index.
 
 Send pastes the task prompt into its session through the same input path as

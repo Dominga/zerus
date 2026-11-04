@@ -95,7 +95,9 @@ fn read_journal(path: &Path) -> Hint {
         .and_then(|line| line.strip_suffix('\n')?.strip_prefix("gen "))
         .and_then(|rest| rest.split_once(' '))
         .filter(|(generation, _)| ids::is_uuid(generation))
-        .and_then(|(generation, base)| Some((generation.to_owned(), base.parse::<u64>().ok()?)));
+        .and_then(|(generation, base)| Some((generation.to_owned(), base.parse::<u64>().ok()?)))
+        // A base with no room left to grow cannot be a real journal.
+        .filter(|(_, base)| base.checked_add(CHANGES_READ * 2).is_some());
     match parsed {
         Some((generation, base)) => Hint::Found(Journal {
             generation,
@@ -158,6 +160,9 @@ pub struct ProjectStore {
     dir: PathBuf,
     project: String,
     _lock: File,
+    /// Serializes this instance's read-modify-write of the change journal:
+    /// a store is shared between threads, and `save` takes `&self`.
+    journal: std::sync::Mutex<()>,
 }
 
 fn private_options() -> OpenOptions {
@@ -287,6 +292,7 @@ impl ProjectStore {
             dir,
             project: project.into(),
             _lock: lock,
+            journal: std::sync::Mutex::new(()),
         }))
     }
 
@@ -319,6 +325,7 @@ impl ProjectStore {
     /// effort: a lost line is found by a reader's periodic check of every
     /// task file.
     pub(crate) fn note_change(&self, document: &str) {
+        let _serial = self.journal.lock().unwrap_or_else(|e| e.into_inner());
         let path = self.dir.join(CHANGES);
         let (generation, mut base, mut body) = match read_journal(&path) {
             Hint::Found(journal) => (journal.generation, journal.base, journal.body),
@@ -332,8 +339,19 @@ impl ProjectStore {
                 .iter()
                 .position(|&b| b == b'\n')
                 .map_or(body.len(), |at| from + at + 1);
-            base += cut as u64;
-            body.drain(..cut);
+            match base.checked_add(cut as u64) {
+                Some(moved) => {
+                    base = moved;
+                    body.drain(..cut);
+                }
+                // No room left: a new generation, with only this change.
+                None => {
+                    let fresh = ids::new_uuid();
+                    let line = format!("{document}\n");
+                    write_journal(&path, &fresh, 0, line.as_bytes());
+                    return;
+                }
+            }
         }
         write_journal(&path, &generation, base, &body);
     }
@@ -343,6 +361,7 @@ impl ProjectStore {
     /// missing or unusable journal cannot say: it is started again, empty, so
     /// later reads can, and this one reports every document as unknown.
     pub fn changes_since(&self, generation: &str, offset: u64) -> Result<Changes> {
+        let _serial = self.journal.lock().unwrap_or_else(|e| e.into_inner());
         let path = self.dir.join(CHANGES);
         let journal = match read_journal(&path) {
             Hint::Found(journal) => journal,
@@ -356,7 +375,13 @@ impl ProjectStore {
                 });
             }
         };
-        let end = journal.base + journal.body.len() as u64;
+        let Some(end) = journal.base.checked_add(journal.body.len() as u64) else {
+            return Ok(Changes {
+                generation: String::new(),
+                offset: 0,
+                documents: None,
+            });
+        };
         let mut changes = Changes {
             generation: journal.generation,
             offset: end,
@@ -1144,5 +1169,61 @@ mod tests {
             store.save(&mut task).unwrap();
             assert!(fs::symlink_metadata(&path).unwrap().file_type().is_file());
         }
+    }
+
+    /// review-n on #1350 R2: a damaged base never panics a read or a save.
+    #[test]
+    fn a_journal_base_without_room_is_unknown_and_never_panics() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(temp.path(), "example").unwrap();
+        let path = store.dir().join(CHANGES);
+        let generation = ids::new_uuid();
+        // At the very end: reading it must not overflow.
+        fs::write(&path, format!("gen {generation} {}\nproject\n", u64::MAX)).unwrap();
+        let read = store.changes_since(&generation, u64::MAX).unwrap();
+        assert!(read.documents.is_none());
+        // Near the end with a full body: a save stores the task and notes it.
+        let near = u64::MAX - 10;
+        let full = "project\n".repeat(CHANGES_LIMIT / 8);
+        fs::write(&path, format!("gen {generation} {near}\n{full}")).unwrap();
+        let mut task = new_task(&store, "U");
+        store.save(&mut task).unwrap();
+        store.load(task.uuid()).unwrap();
+        let known = store.changes_since("", 0).unwrap();
+        assert!(!known.generation.is_empty());
+        task.comment("note", &Actor::Person, 2).unwrap();
+        store.save(&mut task).unwrap();
+        assert_eq!(
+            store
+                .changes_since(&known.generation, known.offset)
+                .unwrap()
+                .documents,
+            Some(BTreeSet::from([task.uuid().to_owned()]))
+        );
+    }
+
+    /// One store shared by threads: no note is lost to a concurrent
+    /// read-modify-write of the journal.
+    #[test]
+    fn notes_from_threads_sharing_a_store_are_all_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(temp.path(), "example").unwrap();
+        let start = store.changes_since("", 0).unwrap();
+        let mut tasks: Vec<TaskDoc> = (0..64).map(|_| new_task(&store, "U")).collect();
+        let uuids: BTreeSet<String> = tasks.iter().map(|t| t.uuid().to_owned()).collect();
+        std::thread::scope(|scope| {
+            for chunk in tasks.chunks_mut(8) {
+                let store = &store;
+                scope.spawn(move || {
+                    for task in chunk {
+                        store.save(task).unwrap();
+                    }
+                });
+            }
+        });
+        let read = store
+            .changes_since(&start.generation, start.offset)
+            .unwrap();
+        assert_eq!(read.documents, Some(uuids));
     }
 }

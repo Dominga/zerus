@@ -2533,6 +2533,7 @@
   "The agent reports a cold cache (%1 tokens). Continuing will rebuild the cached context.": "Агент сообщает о холодном кэше (токены %1). Продолжение приведет к перестройке кэшированного контекста.",
   "The agent reports a cold cache. Continuing will rebuild the cached context.": "Агент сообщает о холодном кэше. Продолжение приведет к перестройке кэшированного контекста.",
   "The agent suggests starting a new task with /clear to save %1 context tokens. The current cache may still be warm.": "Агент предлагает запустить новую задачу с помощью /clear, чтобы сэкономить токены контекста (%1). Текущий кэш может быть еще теплым.",
+  "The agent was not started: the desktop service could not start its launch. Continue setup to try again.": "Агент не запущен: служба рабочего стола не смогла начать его запуск. Продолжите настройку, чтобы повторить попытку.",
   "The agent was not started: the launch was not sent to the desktop service. Continue setup to start it.": "Агент не запущен: запуск не был отправлен в службу рабочего стола. Продолжите настройку, чтобы запустить его.",
   "The answer acknowledgement is invalid. Check Terminal before retrying.": "Подтверждение ответа недействительно. Проверьте терминал перед повторной попыткой.",
   "The answers exceed 64 KiB.": "Ответы превышают 64 КиБ.",

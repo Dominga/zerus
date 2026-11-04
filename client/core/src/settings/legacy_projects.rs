@@ -119,7 +119,8 @@ pub(super) fn observe(
     Ok(true)
 }
 pub(super) fn unavailable(code: Code) -> Value {
-    json!({"family":"legacy-projects","state":"waiting","keys":["projects","folders"],"reason":code.as_str()})
+    json!({"family":"legacy-projects","state":if code == Code::Pending {"waiting"} else {"blocked"},
+        "keys":["projects","folders"],"reasons":[code.as_str()]})
 }
 pub(super) fn report(extra: &Map<String, Value>) -> Value {
     let family = match load(extra) {
@@ -132,7 +133,16 @@ pub(super) fn report(extra: &Map<String, Value>) -> Value {
         .filter_map(Record::code)
         .map(Code::as_str)
         .collect();
-    json!({"family":"legacy-projects","state":if codes.is_empty() {"imported"} else {"waiting"},
+    let state = if family.records.is_empty() {
+        "empty"
+    } else if codes.is_empty() {
+        "imported"
+    } else if codes.iter().any(|code| *code != Code::Pending.as_str()) {
+        "blocked"
+    } else {
+        "waiting"
+    };
+    json!({"family":"legacy-projects","state":state,
         "keys":if family.records.is_empty() {Vec::<&str>::new()} else {vec!["projects","folders"]},
         "reasons":codes})
 }

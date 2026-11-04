@@ -22,6 +22,9 @@ fn an_unknown_apply_remains_pending_and_a_second_prepare_never_readmits_it() {
     assert!(read(&extra, &binding.machine).unwrap().unwrap().complete());
     let mut moved = binding.clone();
     moved.source = "d".repeat(64);
+    let complete = extra.clone();
+    assert!(!observe(&mut extra, &moved, &json!({})).unwrap());
+    assert_eq!(extra, complete, "completed records are not re-observed");
     let plan = one(&snapshot, moved);
     assert!(
         !prepare(&mut extra, &plan).unwrap(),
@@ -49,7 +52,63 @@ fn a_replaced_pending_scope_refuses_and_malformed_or_future_metadata_is_kept() {
         let original = extra.clone();
         assert_eq!(prepare(&mut extra, &plan), Err(Code::Invalid));
         assert_eq!(extra, original);
-        assert_eq!(report(&extra)["reason"], Code::Invalid.as_str());
+        assert_eq!(report(&extra)["reasons"], json!([Code::Invalid.as_str()]));
+    }
+}
+
+#[test]
+fn a_record_cannot_move_to_another_machine_or_complete_with_a_problem() {
+    let (snapshot, binding) = fixture();
+    let plan = one(&snapshot, binding.clone());
+    let mut good = Map::new();
+    prepare(&mut good, &plan).unwrap();
+    for changed_machine in [true, false] {
+        let mut extra = good.clone();
+        if changed_machine {
+            let records = extra.get_mut(KEY).unwrap()["records"]
+                .as_object_mut()
+                .unwrap();
+            let record = records.remove(&binding.machine).unwrap();
+            records.insert("44444444-2222-4333-8444-555555555555".into(), record);
+        } else {
+            let record = &mut extra.get_mut(KEY).unwrap()["records"][&binding.machine];
+            record["complete"] = json!(true);
+            record["evidence"]["problem"] = json!("history");
+        }
+        let original = extra.clone();
+        assert_eq!(read(&extra, &binding.machine), Err(Code::Invalid));
+        assert_eq!(prepare(&mut extra, &plan), Err(Code::Invalid));
+        assert_eq!(observe(&mut extra, &binding, &snapshot), Err(Code::Invalid));
+        assert_eq!(extra, original);
+    }
+}
+
+#[test]
+fn reports_use_one_shape_and_distinguish_empty_waiting_blocked_and_imported() {
+    let (mut snapshot, binding) = fixture();
+    let mut extra = Map::new();
+    assert_eq!(
+        report(&extra),
+        json!({"family":"legacy-projects","state":"empty","keys":[],"reasons":[]})
+    );
+    let plan = one(&snapshot, binding.clone());
+    prepare(&mut extra, &plan).unwrap();
+    assert_eq!(report(&extra)["state"], "waiting");
+    assert_eq!(report(&extra)["reasons"], json!([Code::Pending.as_str()]));
+    observe(&mut extra, &binding, &observed(&snapshot, &plan)).unwrap();
+    assert_eq!(report(&extra)["state"], "imported");
+    assert_eq!(report(&extra)["reasons"], json!([]));
+    snapshot["versions"][json!({"kind":"folder","id":"removed"}).to_string()] = json!(["head"]);
+    extra.clear();
+    prepare(&mut extra, &one(&snapshot, binding)).unwrap();
+    assert_eq!(report(&extra)["state"], "blocked");
+    assert_eq!(report(&extra)["reasons"], json!([Code::History.as_str()]));
+    for code in [Code::Invalid, Code::Capacity, Code::WindowsUnsupported] {
+        assert_eq!(
+            unavailable(code),
+            json!({"family":"legacy-projects","state":"blocked",
+            "keys":["projects","folders"],"reasons":[code.as_str()]})
+        );
     }
 }
 

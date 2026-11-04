@@ -115,6 +115,71 @@ fn a_new_project_never_writes_the_existing_shared_order_register() {
 }
 
 #[test]
+fn a_renamed_project_keeps_its_location_without_recreating_the_legacy_name() {
+    let (mut snapshot, binding) = fixture();
+    let project = &mut snapshot["organization"]["projects"][0];
+    project["name"] = json!("Renamed by user");
+    project["folders"] = json!([{"id":"existing","machine":"old-alias",
+        "machine_id":binding.machine,"path":"/srv/legacy","name":"User label"}]);
+    let plan = plan(
+        &snapshot,
+        binding.clone(),
+        "fixture",
+        &json!([{"name":"Legacy","dir":"/srv/legacy/"}]),
+        Style::Posix,
+    )
+    .unwrap();
+    assert!(!plan.changed());
+    assert_eq!(plan.input()["desired"], plan.input()["base"]);
+    assert!(plan.evidence.witnesses.is_empty());
+    assert_eq!(plan.evidence().problem(), None);
+    assert!(plan.evidence().observed(&binding, &snapshot).unwrap());
+}
+
+#[test]
+fn a_folder_moved_to_another_project_is_not_added_back_to_its_legacy_project() {
+    let (mut snapshot, binding) = fixture();
+    snapshot["organization"]["projects"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id":"destination","name":"Destination","sessions":[],
+            "folders":[{"id":"moved","machine":"fixture","path":"/srv/moved","name":"Kept label"}]}));
+    let plan = plan(
+        &snapshot,
+        binding.clone(),
+        "fixture",
+        &json!([{"name":"Next","dir":"/srv/./moved"}]),
+        Style::Posix,
+    )
+    .unwrap();
+    assert!(!plan.changed());
+    assert_eq!(plan.input()["desired"], plan.input()["base"]);
+    assert!(plan.evidence.witnesses.is_empty());
+    assert_eq!(plan.evidence().problem(), None);
+    assert!(plan.evidence().observed(&binding, &snapshot).unwrap());
+
+    // The same path on another physical computer does not settle this list.
+    snapshot["organization"]["projects"][1]["folders"][0]["machine"] = json!("other");
+    let other = plan_for_next(&snapshot, binding);
+    assert!(other.changed());
+    assert_eq!(
+        other.input()["desired"]["projects"][0]["folders"][0]["path"],
+        "/srv/moved"
+    );
+}
+
+fn plan_for_next(snapshot: &Value, binding: Binding) -> Plan {
+    plan(
+        snapshot,
+        binding,
+        "fixture",
+        &json!([{"name":"Next","dir":"/srv/moved"}]),
+        Style::Posix,
+    )
+    .unwrap()
+}
+
+#[test]
 fn a_project_or_folder_tombstone_is_never_bypassed_with_a_new_identity() {
     for kind in ["project", "folder"] {
         let (mut snapshot, binding) = fixture();
@@ -174,28 +239,96 @@ fn evidence_requires_all_original_additions_and_the_original_scope() {
 }
 
 #[test]
-fn windows_paths_use_the_owning_computer_style_and_deduplicate_case() {
+fn windows_lists_never_produce_a_shared_proposal() {
     let (snapshot, binding) = fixture();
-    let p = plan(
-        &snapshot,
-        binding,
-        "fixture",
-        &json!([
-            {"name":"Next","dir":"C:\\Work\\Fixture"},
-            {"name":"Next","dir":"c:/work/fixture/"},
-            {"name":"Next","dir":"C:relative"}
-        ]),
-        Style::Windows,
-    )
-    .unwrap();
+    for dir in [
+        "C:\\Work\\Fixture",
+        "c:/work/fixture/",
+        "C:relative",
+        "/srv/fixture",
+    ] {
+        assert!(matches!(
+            plan(
+                &snapshot,
+                binding.clone(),
+                "fixture",
+                &json!([{"name":"Win","dir":dir}]),
+                Style::Windows,
+            ),
+            Err(Code::WindowsUnsupported)
+        ));
+    }
     assert_eq!(
-        p.input()["desired"]["projects"][0]["folders"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
+        Code::WindowsUnsupported.as_str(),
+        "legacy_projects_windows_unsupported"
     );
-    assert_eq!(p.evidence().problem(), Some(Code::InvalidFolders));
+}
+
+#[test]
+fn an_uninitialized_catalog_never_plans_or_completes_an_import() {
+    let (mut snapshot, binding) = fixture();
+    let prepared = one(&snapshot, binding.clone());
+    snapshot = observed(&snapshot, &prepared);
+    for initialized in [json!(false), Value::Null] {
+        snapshot["initialized"] = initialized;
+        assert!(matches!(
+            plan(
+                &snapshot,
+                binding.clone(),
+                "fixture",
+                &json!([]),
+                Style::Posix
+            ),
+            Err(Code::Changed)
+        ));
+        assert_eq!(
+            prepared.evidence().observed(&binding, &snapshot),
+            Err(Code::Changed)
+        );
+    }
+}
+
+#[test]
+fn the_history_key_bound_refuses_the_whole_history() {
+    let (mut snapshot, _) = fixture();
+    let versions = snapshot["versions"].as_object_mut().unwrap();
+    for n in 0..=MAX_PROJECTS * (FOLDERS + 8) {
+        versions.insert(
+            json!({"kind":"folder","id":format!("historical-{n}")}).to_string(),
+            json!(["original-head"]),
+        );
+    }
+    // Exercise this bound independently of the earlier serialized input cap.
+    assert_eq!(
+        history(&snapshot, checked_projects(&snapshot).unwrap()),
+        Err(Code::Capacity)
+    );
+}
+
+#[test]
+fn a_large_session_catalog_refuses_with_capacity_instead_of_a_partial_plan() {
+    let (mut snapshot, binding) = fixture();
+    let mut sessions = Vec::new();
+    for n in 0..12_000 {
+        let session = format!("work-{n:08}");
+        sessions.push(json!(format!("{}\n{session}", binding.machine)));
+        snapshot["versions"]
+            [json!({"kind":"session","machine":binding.machine,"session":session}).to_string()] =
+            json!(["f".repeat(64)]);
+    }
+    snapshot["organization"]["projects"][0]["sessions"] = json!(sessions);
+    assert!(serde_json::to_vec(&snapshot).unwrap().len() > MAX_BYTES);
+    assert!(matches!(
+        plan(
+            &snapshot,
+            binding,
+            "fixture",
+            &json!([{"name":"Legacy","dir":"/srv/legacy"}]),
+            Style::Posix
+        ),
+        Err(Code::Capacity)
+    ));
+    assert_eq!(Code::Capacity.as_str(), "legacy_projects_capacity");
 }
 
 #[test]

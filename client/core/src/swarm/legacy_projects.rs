@@ -9,6 +9,8 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::io::{self, Write};
 
+/// Whole encoded inputs, including session assignments and causal keys, are
+/// bounded. An oversized catalog returns Capacity, never a partial proposal.
 pub const MAX_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_ROWS: usize = 4096;
 pub const MAX_HEADS: usize = 32;
@@ -22,6 +24,7 @@ pub enum Code {
     Changed,
     History,
     InvalidFolders,
+    WindowsUnsupported,
     Pending,
 }
 impl Code {
@@ -32,6 +35,7 @@ impl Code {
             Self::Changed => "legacy_projects_changed",
             Self::History => "legacy_projects_history",
             Self::InvalidFolders => "legacy_projects_invalid_folders",
+            Self::WindowsUnsupported => "legacy_projects_windows_unsupported",
             Self::Pending => "legacy_projects_pending",
         }
     }
@@ -240,6 +244,9 @@ enum VersionKey {
 /// Without deleted values, an unlisted historical key cannot safely be
 /// matched to a legacy name/path. Preserve that choice instead of inventing a
 /// new identity to bypass it. Unknown/malformed versions never mean empty.
+/// This is deliberately global: without deleted values, an absent key cannot
+/// be narrowed to one computer or location. Retained history is permanent, so
+/// this refusal requires manual review, not a wait for another observation.
 fn history(snapshot: &Value, projects: &[Value]) -> Result<(bool, bool), Code> {
     let versions = snapshot["versions"].as_object().ok_or(Code::Invalid)?;
     if versions.len() > MAX_PROJECTS * (FOLDERS + 8) {
@@ -287,6 +294,8 @@ fn history(snapshot: &Value, projects: &[Value]) -> Result<(bool, bool), Code> {
 
 /// Parse the actual CLI fields (`src == "ansible"`), and retain every Next
 /// field/order/default. Duplicate locations keep their original folder ID.
+/// The shared writer supports only POSIX paths. Windows lists need the separate
+/// device-local folder family and must never produce a shared proposal here.
 pub fn plan(
     snapshot: &Value,
     binding: Binding,
@@ -294,6 +303,9 @@ pub fn plan(
     rows: &Value,
     style: Style,
 ) -> Result<Plan, Code> {
+    if style == Style::Windows {
+        return Err(Code::WindowsUnsupported);
+    }
     bytes(snapshot, MAX_BYTES)?;
     bytes(rows, MAX_BYTES)?;
     if !binding.matches(snapshot) || !label(machine_name, 512) {
@@ -331,8 +343,10 @@ pub fn plan(
         }
         let path = paths::clean(path, style);
         let found = projects.iter().position(|p| p["name"] == name);
-        if found.is_some_and(|at| {
-            projects[at]["folders"].as_array().unwrap().iter().any(|f| {
+        // A rename or move is a Next choice too. A location already linked
+        // anywhere on this machine must not recreate its old project/link.
+        if projects.iter().any(|p| {
+            p["folders"].as_array().unwrap().iter().any(|f| {
                 (f["machine_id"] == binding.machine || f["machine"] == machine_name)
                     && f["path"]
                         .as_str()
@@ -368,14 +382,6 @@ pub fn plan(
         let project = &mut projects[at];
         let id = project["id"].as_str().ok_or(Code::Invalid)?.to_owned();
         let folders = project["folders"].as_array_mut().ok_or(Code::Invalid)?;
-        if folders.iter().any(|f| {
-            (f["machine_id"] == binding.machine || f["machine"] == machine_name)
-                && f["path"]
-                    .as_str()
-                    .is_some_and(|s| paths::same(s, &path, style))
-        }) {
-            continue;
-        }
         if folders.len() == FOLDERS {
             return Err(Code::Capacity);
         }

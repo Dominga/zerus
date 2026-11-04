@@ -91,7 +91,10 @@ const CACHE_MARK: &str = "inventory.repaired";
 
 /// What the mark holds for the cache `bytes`.
 fn cache_mark(bytes: &[u8]) -> String {
-    format!("schema-repair-1 {:x}\n", Sha256::digest(bytes))
+    // 2: a cut-over task's entry follows its mark, which a load raises
+    // before its version is acknowledged; a cache of an earlier build is
+    // never trusted.
+    format!("schema-repair-2 {:x}\n", Sha256::digest(bytes))
 }
 
 /// What tells a file changed without reading it: its length, modification
@@ -100,7 +103,15 @@ fn cache_mark(bytes: &[u8]) -> String {
 struct Stamp(u64, u64, u32, u64);
 
 fn stamp(path: &Path) -> Option<Stamp> {
-    let meta = fs::metadata(path).ok()?;
+    stamp_of(fs::metadata(path).ok()?)
+}
+
+/// A mark's stamp as its entry has it: a dangling link changes it too.
+fn mark_stamp(path: &Path) -> Option<Stamp> {
+    stamp_of(fs::symlink_metadata(path).ok()?)
+}
+
+fn stamp_of(meta: fs::Metadata) -> Option<Stamp> {
     let modified = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
     #[cfg(unix)]
     let inode = std::os::unix::fs::MetadataExt::ino(&meta);
@@ -331,10 +342,7 @@ impl ProjectStore {
             }
         }
         for uuid in self.uuids()? {
-            let files = vec![
-                stamp(&self.snapshot_path(&uuid)),
-                stamp(&self.updates_path(&uuid)),
-            ];
+            let files = self.stamps(&uuid);
             let trusted = settled(&files);
             let remembered = old.tasks.get(&uuid).filter(|c| {
                 trusted
@@ -344,9 +352,10 @@ impl ProjectStore {
             });
             let cached = match remembered {
                 Some(cached) => cached.clone(),
+                // A load may raise the mark: the entry keeps the stamps after it.
                 None => match self.load(&uuid).and_then(|task| self.repaired(task)) {
-                    Ok((task, saved)) => Cached {
-                        files: saved.unwrap_or(files),
+                    Ok((task, _)) => Cached {
+                        files: self.stamps(&uuid),
                         version: version(&task.current_vv()),
                         error: None,
                         stage: Some(task.stage()?),
@@ -356,7 +365,7 @@ impl ProjectStore {
                         }),
                     },
                     Err(error) => Cached {
-                        files,
+                        files: self.stamps(&uuid),
                         version: Version::new(),
                         error: Some(error.to_string()),
                         stage: None,
@@ -455,13 +464,17 @@ impl ProjectStore {
         }
         self.save(&mut task)?;
         let uuid = task.uuid().to_owned();
-        Ok((
-            task,
-            Some(vec![
-                stamp(&self.snapshot_path(&uuid)),
-                stamp(&self.updates_path(&uuid)),
-            ]),
-        ))
+        Ok((task, Some(self.stamps(&uuid))))
+    }
+
+    /// A task's files as the inventory cache compares them: its snapshot,
+    /// its updates and its mark.
+    fn stamps(&self, uuid: &str) -> Vec<Option<Stamp>> {
+        vec![
+            stamp(&self.snapshot_path(uuid)),
+            stamp(&self.updates_path(uuid)),
+            mark_stamp(&self.managed_path(uuid)),
+        ]
     }
 
     /// Imports another replica's updates. A document that cannot take them is
@@ -778,6 +791,48 @@ mod tests {
         assert_eq!(peer.stored_schema(), EXECUTION_TASK_SCHEMA);
     }
 
+    /// review-n on #1415 (R5): a save that fails after its mark leaves the
+    /// copy kept; a warm inventory cache entry never serves it as healthy,
+    /// since the entry stamps the mark with the task's files.
+    #[test]
+    fn a_mark_only_change_reaches_a_warm_inventory() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(dir.path(), "project-1").unwrap();
+        let mut task = created();
+        assert!(task.floor().unwrap());
+        store.save(&mut task).unwrap();
+        let uuid = task.uuid().to_owned();
+        let old_time = SystemTime::now() - Duration::from_secs(60);
+        let age = |path: &Path| {
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(old_time))
+                .unwrap();
+        };
+        for path in [
+            store.snapshot_path(&uuid),
+            store.updates_path(&uuid),
+            store.managed_path(&uuid),
+        ] {
+            age(&path);
+        }
+        let (warm, damaged) = store.inventory().unwrap();
+        assert!(damaged.is_empty() && warm.tasks.contains_key(&uuid));
+        // The mark moves ahead and the save fails before its append.
+        task.comment("Never appended", &Actor::Person, 5).unwrap();
+        let first = fs::read(store.updates_path(&uuid)).unwrap();
+        store
+            .write_mark(&uuid, &Mark::new(&task.current_vv(), &first))
+            .unwrap();
+        age(&store.managed_path(&uuid));
+        assert!(store.load(&uuid).is_err());
+        let (inventory, damaged) = store.inventory().unwrap();
+        assert!(!inventory.tasks.contains_key(&uuid));
+        assert!(damaged.iter().any(|d| d.uuid == uuid));
+    }
+
     #[test]
     fn an_older_binary_s_inventory_cache_never_bypasses_the_repair() {
         // review-n on #1402: an older importer persisted a lower-won copy and
@@ -790,6 +845,7 @@ mod tests {
         for path in [
             store.snapshot_path(stale.uuid()),
             store.updates_path(stale.uuid()),
+            store.managed_path(stale.uuid()),
         ] {
             if path.exists() {
                 fs::File::options()
@@ -800,10 +856,7 @@ mod tests {
                     .unwrap();
             }
         }
-        let files = vec![
-            stamp(&store.snapshot_path(stale.uuid())),
-            stamp(&store.updates_path(stale.uuid())),
-        ];
+        let files = store.stamps(stale.uuid());
         assert!(settled(&files));
         let before = version(&stale.current_vv());
         let older = Cache {
@@ -1076,11 +1129,15 @@ mod tests {
         store.save(&mut task).unwrap();
         only_the_opening_block(&store, task.uuid());
         assert_eq!(store.fresh_version(task.uuid()), Some(task.current_vv()));
-        assert_ne!(mark_version(&store, task.uuid()), Some(snapshot));
-        // A stale mark beside readable files is corrected by the next save.
-        store
-            .write_mark(task.uuid(), &Mark::new(&created().current_vv(), b"stale"))
-            .unwrap();
+        assert_ne!(mark_version(&store, task.uuid()), Some(snapshot.clone()));
+        // A stale mark beside readable files is corrected by the next save;
+        // a mark naming changes the copy lacks refuses it instead.
+        let mut foreign = Mark::new(&created().current_vv(), b"foreign");
+        store.write_mark(task.uuid(), &foreign).unwrap();
+        task.comment("Refused", &Actor::Person, 13).unwrap();
+        assert!(store.save(&mut task).is_err());
+        foreign = Mark::new(&snapshot, b"stale");
+        store.write_mark(task.uuid(), &foreign).unwrap();
         assert!(store.fresh_version(task.uuid()).is_none());
         task.comment("Corrected", &Actor::Person, 13).unwrap();
         store.save(&mut task).unwrap();
@@ -1500,6 +1557,158 @@ mod tests {
         assert!(store.load(plain.uuid()).is_ok());
     }
 
+    /// review-n on #1415 (R5): two documents of one task read from the same
+    /// store. The one read first saves after the other saved an Unknown:
+    /// its own changes are merged into what is saved, folding or not, the
+    /// Unknown survives and the mark never moves back.
+    #[test]
+    fn a_stale_document_from_the_same_store_merges_and_never_lowers_the_mark() {
+        for fold in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = ProjectStore::open(dir.path(), "project-1").unwrap();
+            let mut task = created();
+            assert!(task.floor().unwrap());
+            store.save(&mut task).unwrap();
+            let uuid = task.uuid().to_owned();
+            let mut stale = store.load(&uuid).unwrap();
+            let mut fresh = store.load(&uuid).unwrap();
+            reserve(&mut fresh);
+            store.save(&mut fresh).unwrap();
+            let saved = mark_version(&store, &uuid).unwrap();
+            stale
+                .comment("Written from the older copy", &Actor::Person, 20)
+                .unwrap();
+            stale.needs_fold = fold;
+            store.save(&mut stale).unwrap();
+            let merged = store.load(&uuid).unwrap();
+            assert!(merged.held().unwrap().is_some(), "fold={fold}");
+            assert!(merged
+                .view()
+                .unwrap()
+                .log
+                .iter()
+                .any(|e| e.text == "Written from the older copy"));
+            let after = mark_version(&store, &uuid).unwrap();
+            assert!(after.includes_vv(&saved) && after == merged.current_vv());
+            // The saving document now holds the merged state.
+            assert_eq!(stale.current_vv(), merged.current_vv());
+        }
+    }
+
+    /// review-n's barrier control: two documents of one floored task each
+    /// reserve their own Unknown, and two threads save them at once. After
+    /// both, the task's files and its mark hold every save that succeeded.
+    #[test]
+    fn shared_store_saves_keep_every_successful_version_and_never_lower_the_mark() {
+        for round in 0..16 {
+            let dir = tempfile::tempdir().unwrap();
+            let store = ProjectStore::open(dir.path(), "project-1").unwrap();
+            let mut task = created();
+            assert!(task.floor().unwrap());
+            store.save(&mut task).unwrap();
+            let uuid = task.uuid().to_owned();
+            let mut one = store.load(&uuid).unwrap();
+            let mut two = store.load(&uuid).unwrap();
+            reserve(&mut one);
+            second_attempt(&mut two);
+            let barrier = std::sync::Barrier::new(2);
+            let (a, b) = std::thread::scope(|scope| {
+                let a = scope.spawn(|| {
+                    barrier.wait();
+                    store.save(&mut one).map(|()| one.current_vv())
+                });
+                let b = scope.spawn(|| {
+                    barrier.wait();
+                    store.save(&mut two).map(|()| two.current_vv())
+                });
+                (a.join().unwrap(), b.join().unwrap())
+            });
+            let saved: Vec<VersionVector> = [a, b].into_iter().filter_map(|r| r.ok()).collect();
+            assert!(!saved.is_empty(), "round {round}");
+            let mut raw =
+                TaskDoc::from_bytes(&fs::read(store.snapshot_path(&uuid)).unwrap()).unwrap();
+            for (payload, _) in
+                crate::store::blocks(&fs::read(store.updates_path(&uuid)).unwrap()).0
+            {
+                assert!(raw.import_block(payload));
+            }
+            let mark = mark_version(&store, &uuid).unwrap();
+            for version in &saved {
+                assert!(raw.current_vv().includes_vv(version), "round {round}");
+                assert!(mark.includes_vv(version), "round {round}");
+            }
+            assert_eq!(saved.len(), 2, "round {round}: both saves succeed");
+            assert_eq!(
+                store
+                    .load(&uuid)
+                    .unwrap()
+                    .execution_records()
+                    .unwrap()
+                    .0
+                    .len(),
+                2
+            );
+        }
+    }
+
+    /// desktop-u G1 on #1415 (R5): an older build's fold crashed after its
+    /// snapshot (holding a second Unknown) but before it removed the updates
+    /// file. This build then inventories and exports that version; before it
+    /// does, the load raises the mark to it, so after damage an older peer's
+    /// copy cannot drop the acknowledged Unknown.
+    #[test]
+    fn what_this_build_acknowledges_is_inside_the_mark_first() {
+        let (_dir, store, uuid, _) = damaged_beside_a_pre_attempt_peer();
+        let mut base = store.load(&uuid).unwrap();
+        base.cancel_attempt(ID, "first disposed", &Actor::Person, 12)
+            .unwrap();
+        base.needs_fold = true;
+        store.save(&mut base).unwrap();
+        let peer = base.snapshot().unwrap();
+        let mark_before = fs::read(store.managed_path(&uuid)).unwrap();
+        let updates_before = fs::read(store.updates_path(&uuid)).unwrap();
+        let mut next = TaskDoc::from_bytes(&peer).unwrap();
+        second_attempt(&mut next);
+        write_atomic(&store.snapshot_path(&uuid), &next.snapshot().unwrap()).unwrap();
+        assert_eq!(fs::read(store.updates_path(&uuid)).unwrap(), updates_before);
+        assert_eq!(fs::read(store.managed_path(&uuid)).unwrap(), mark_before);
+        let (inventory, damaged) = store.inventory().unwrap();
+        assert!(damaged.is_empty());
+        assert_eq!(
+            inventory.tasks.get(&uuid),
+            Some(&version(&next.current_vv()))
+        );
+        // The inventory's load raised the mark to what it acknowledged.
+        assert_eq!(mark_version(&store, &uuid), Some(next.current_vv()));
+        assert_ne!(fs::read(store.managed_path(&uuid)).unwrap(), mark_before);
+        let (page, more) = store
+            .updates_for(&inventory, &Inventory::default(), 1 << 20)
+            .unwrap();
+        assert!(!more);
+        let sent = page
+            .iter()
+            .find(|u| u.document == Document::Task(uuid.clone()))
+            .unwrap();
+        assert!(TaskDoc::from_bytes(&sent.bytes)
+            .unwrap()
+            .held()
+            .unwrap()
+            .is_some());
+        // A warm inventory serves the same version and the same mark.
+        assert_eq!(
+            store.inventory().unwrap().0.tasks.get(&uuid),
+            Some(&version(&next.current_vv()))
+        );
+        damage(&store, &uuid);
+        kept(&store, &uuid, &peer);
+        // The copy that holds the second Unknown still rebuilds it.
+        assert!(refused(&store, &uuid, next.snapshot().unwrap()).is_empty());
+        assert_eq!(
+            store.load(&uuid).unwrap().held().unwrap().map(|a| a.id),
+            Some("22222222-2222-4222-8222-222222222222".to_owned())
+        );
+    }
+
     /// The mark is written before the append it describes: a crash between
     /// them leaves it ahead, which keeps the copy unless a peer holds the
     /// change that never landed. An older build's appends after a rollback
@@ -1715,6 +1924,16 @@ mod tests {
             "{}",
             refusals[0].error
         );
+        // Its mark alone keeps it listed, so a person can find it.
+        assert!(store.uuids().unwrap().contains(&uuid));
+        assert!(store.tasks().unwrap().1.iter().any(|d| d.uuid == uuid));
+        assert!(store.inventory().unwrap().1.iter().any(|d| d.uuid == uuid));
+        assert!(store
+            .find(&uuid)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("damaged"));
         assert!(!store.snapshot_path(&uuid).exists());
         // Removing the mark too is the person's decision to accept it.
         fs::remove_file(store.managed_path(&uuid)).unwrap();

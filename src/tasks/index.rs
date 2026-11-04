@@ -107,9 +107,19 @@ thread_local! {
 /// A file's length, modification time and inode, or `-` when it is missing,
 /// and whether it is settled: modified at least `SETTLE_MS` before `now`.
 fn stamp_at(path: &Path, now: i64) -> (String, bool) {
+    entry_stamp(fs::metadata(path), now)
+}
+
+/// A stamp of the entry itself, not what it links to: a dangling mark
+/// changes it too.
+fn link_stamp_at(path: &Path, now: i64) -> (String, bool) {
+    entry_stamp(fs::symlink_metadata(path), now)
+}
+
+fn entry_stamp(meta: std::io::Result<fs::Metadata>, now: i64) -> (String, bool) {
     #[cfg(test)]
     STAMPED.with(|n| n.set(n.get() + 1));
-    let Ok(meta) = fs::metadata(path) else {
+    let Ok(meta) = meta else {
         return ("-".into(), true);
     };
     let modified = meta
@@ -129,13 +139,14 @@ fn stamp(path: &Path) -> String {
     stamp_at(path, 0).0
 }
 
-/// The stamps of a task's snapshot and appended updates, and whether both
-/// are settled.
+/// The stamps of a task's snapshot, appended updates and mark, and whether
+/// all are settled: a change to the mark alone is a change of the task.
 fn stamped(dir: &Path, uuid: &str, now: i64) -> (String, bool) {
     let tasks = dir.join("tasks");
     let (snapshot, a) = stamp_at(&tasks.join(format!("{uuid}.loro")), now);
     let (updates, b) = stamp_at(&tasks.join(format!("{uuid}.updates")), now);
-    (format!("{snapshot}|{updates}"), a && b)
+    let (mark, c) = link_stamp_at(&tasks.join(format!("{uuid}.managed")), now);
+    (format!("{snapshot}|{updates}|{mark}"), a && b && c)
 }
 
 fn files(dir: &Path, uuid: &str) -> String {

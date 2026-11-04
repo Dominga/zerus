@@ -24,8 +24,11 @@ use crate::schema::{Actor, LogEntry, SessionKey, Stage, Target};
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 
-/// The schema of a task that records attempts.
-pub const EXECUTION_TASK_SCHEMA: i64 = 6;
+/// The schema of a task that records attempts or took a floor. It is above
+/// every released or interim build's schema (5 before execution attempts,
+/// 6 in the builds that read attempts without the floor), so each of them
+/// reads such a task as newer and refuses to write it.
+pub const EXECUTION_TASK_SCHEMA: i64 = 7;
 /// The most attempts one task records.
 pub const MAX_ATTEMPTS: usize = 256;
 /// The most attempt events one task records.

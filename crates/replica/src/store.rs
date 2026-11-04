@@ -164,6 +164,14 @@ pub struct ProjectStore {
     /// Serializes this instance's read-modify-write of the change journal:
     /// a store is shared between threads, and `save` takes `&self`.
     journal: std::sync::Mutex<()>,
+    /// One save at a time through this store, so a save's check of what is
+    /// durable and its write are one step: the project lock keeps other
+    /// processes out, this keeps this one's threads in turn.
+    admission: std::sync::Mutex<()>,
+    /// The version of each task this store last read from or wrote to its
+    /// files. A document whose base is older is merged into the files'
+    /// current state before it is saved, never written over it.
+    durable: std::sync::Mutex<std::collections::HashMap<String, VersionVector>>,
 }
 
 fn private_options() -> OpenOptions {
@@ -386,6 +394,8 @@ impl ProjectStore {
             project: project.into(),
             _lock: lock,
             journal: std::sync::Mutex::new(()),
+            admission: std::sync::Mutex::new(()),
+            durable: std::sync::Mutex::new(std::collections::HashMap::new()),
         }))
     }
 
@@ -551,6 +561,8 @@ impl ProjectStore {
         }
     }
 
+    /// Writes the mark. Every listing stamps it with the task's files, so
+    /// a save that fails after its mark still reaches them.
     pub(crate) fn write_mark(&self, uuid: &str, mark: &Mark) -> Result<()> {
         write_atomic(&self.managed_path(uuid), &serde_json::to_vec(mark)?)
     }
@@ -570,7 +582,8 @@ impl ProjectStore {
         for entry in fs::read_dir(self.dir.join("tasks"))? {
             let path = entry?.path();
             let extension = path.extension().and_then(|e| e.to_str());
-            if matches!(extension, Some("loro" | "updates")) {
+            // A mark alone is a task too: kept for review, never invisible.
+            if matches!(extension, Some("loro" | "updates" | "managed")) {
                 if let Some(stem) = path
                     .file_stem()
                     .and_then(|s| s.to_str())
@@ -583,15 +596,26 @@ impl ProjectStore {
         Ok(uuids.into_iter().collect())
     }
 
+    /// Reads the task, in turn with this store's saves.
     pub fn load(&self, uuid: &str) -> Result<TaskDoc> {
+        let _admitted = self
+            .admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.load_admitted(uuid)
+    }
+
+    fn load_admitted(&self, uuid: &str) -> Result<TaskDoc> {
         let mut task = TaskDoc::from_bytes(&fs::read(self.snapshot_path(uuid))?)?;
         if task.uuid() != uuid {
             return Err(Error::failed("the task file does not match its name"));
         }
+        let mut first = None;
         match fs::read(self.updates_path(uuid)) {
             Ok(bytes) => {
                 let (found, intact) = blocks(&bytes);
                 task.needs_fold = !intact;
+                first = found.first().map(|(_, end)| bytes[..*end].to_vec());
                 for (payload, end) in found {
                     if !task.import_block(payload) {
                         task.needs_fold = true;
@@ -622,16 +646,81 @@ impl ProjectStore {
                          short or a save did not finish",
                     ));
                 }
+                // The files hold more than the mark, or open with another
+                // block (an older build folded or appended): the mark is
+                // raised to what they hold before anything is read from
+                // them, so nothing is acknowledged or sent beyond it. It
+                // only rises, and names no opening when the files have none.
+                let raised = match &first {
+                    Some(first) => Mark::new(&task.current_vv(), first),
+                    None => Mark {
+                        opening: None,
+                        ..Mark::new(&task.current_vv(), &[])
+                    },
+                };
+                if self.mark(uuid).as_ref() != Some(&raised) {
+                    self.write_mark(uuid, &raised)?;
+                }
             }
         }
         // A task that cannot be shown is damaged: listed apart, never blocking the rest.
         task.view()?;
         task.saved = Some(task.current_vv());
         task.saved_stage = Some(task.stage()?);
+        self.durable(uuid, task.current_vv());
         Ok(task)
     }
 
+    fn durable(&self, uuid: &str, version: VersionVector) {
+        self.durable
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(uuid.to_owned(), version);
+    }
+
+    /// Saves the task. A document read from this store before a later save
+    /// of the same task is first merged into the files' current state: its
+    /// own new changes are applied there, and every change saved since is
+    /// kept. The mark of a cut-over task never moves back.
     pub fn save(&self, task: &mut TaskDoc) -> Result<()> {
+        let _admitted = self
+            .admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let durable = self
+            .durable
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(task.uuid())
+            .cloned();
+        if let (Some(base), Some(durable)) = (task.saved.clone(), durable) {
+            if base != durable {
+                let changes = task.export_since_vv(&base)?;
+                let mut current = self.load_admitted(task.uuid())?;
+                if !current.import_block(&changes) {
+                    return Err(Error::new(
+                        "this task changed here meanwhile and these changes do not apply to it; \
+                         read it again",
+                    ));
+                }
+                current.repair_schema()?;
+                *task = current;
+            }
+        }
+        if let Marked::Saved(saved) = self.marked(task.uuid()) {
+            if !task.current_vv().includes_vv(&saved) {
+                return Err(Error::new(
+                    "this copy holds less than this computer already saved of the task; read it \
+                     again",
+                ));
+            }
+        }
+        self.save_admitted(task)?;
+        self.durable(task.uuid(), task.current_vv());
+        Ok(())
+    }
+
+    fn save_admitted(&self, task: &mut TaskDoc) -> Result<()> {
         let snapshot = self.snapshot_path(task.uuid());
         let updates = self.updates_path(task.uuid());
         let current = task.current_vv();
@@ -720,7 +809,10 @@ impl ProjectStore {
     /// A task by its UUID or its short ID.
     pub fn find(&self, reference: &str) -> Result<TaskDoc> {
         if ids::is_uuid(reference) {
-            if !self.snapshot_path(reference).exists() && !self.updates_path(reference).exists() {
+            if !self.snapshot_path(reference).exists()
+                && !self.updates_path(reference).exists()
+                && !self.was_managed(reference)
+            {
                 return Err(Error::new(format!("no task {reference} in this project")));
             }
             return self

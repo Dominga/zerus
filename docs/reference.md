@@ -3103,15 +3103,16 @@ as a send an older build recorded concurrently, is listed in `unexplained`, sets
 No start, child or result is invented. A resume settles only the pauses it observed, so a
 pause that no resume observed keeps the attempt paused. A session's
 Stop, idle time, pause or elapsed time is never an attempt event and never
-moves a task. Attempts are kept beside the history under task schema 6, which a
-reader that does not know them shows read-only. The stored schema is one merged
+moves a task. Attempts are kept beside the history under task schema 7, which a
+reader that does not know them shows read-only: that includes the builds that
+already read schema 6 but know no floor. The stored schema is one merged
 value, so an older replica's concurrent upgrade can leave a lower one; this
 version raises it again for a task with attempts in every write and every live
 import, and before a task is read for an inventory, so the raised value is what
 other replicas receive. That repair is a new change, not proof that an older
 replica did nothing before it. A task can also take a floor before its first
-attempt: a cutover record that keeps schema 6 the same way, so a reader that
-does not know attempts refuses to write it, while every path that would start
+attempt: a cutover record that keeps schema 7 the same way, so a reader that
+does not know attempts or the floor refuses to write it, while every path that would start
 it without an attempt refuses it as cutting over. A floor this version cannot
 read still counts. This version reads attempts and guards reports against the
 current execution; recording attempts and floors comes later.
@@ -3341,7 +3342,12 @@ from fold to fold. A copy whose files hold less than its mark records (they
 were cut short, a save did not finish, or an older Zerus wrote them so), or
 whose mark cannot be read, is damaged, not read without those changes:
 nothing sends, writes or folds it until a person reviews it or a copy that
-covers the mark arrives. Its damaged copy is replaced only when the mark is readable and
+covers the mark arrives. Files that hold more than the mark records (an older
+Zerus folded or appended) raise the mark to what they hold when the task is
+read, before anything lists, inventories or sends it. A task with only its
+mark left is still listed under `damaged`. Saves of a task go through one
+store in turn: a copy read before a later save of the same task is merged
+into what is saved, never written over it, and the mark never moves back. Its damaged copy is replaced only when the mark is readable and
 still describes the files (an older Zerus that folded or rewrote them, or a
 mark restored from before a later fold, leaves it stale), every
 update saved here applies, and the other copy merged with them holds that

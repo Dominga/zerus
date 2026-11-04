@@ -2176,7 +2176,10 @@ mod tests {
             )
         );
         let after = task.view().unwrap();
-        assert_eq!((after.schema, after.writable), (6, true));
+        assert_eq!(
+            (after.schema, after.writable),
+            (execution::EXECUTION_TASK_SCHEMA, true)
+        );
         // Only the floor and the schema changed: no history, stage, target,
         // attempt or execution.
         assert_eq!(

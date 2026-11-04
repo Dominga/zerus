@@ -37,7 +37,7 @@ fn agent() -> SessionKey {
 /// tests count reads without waiting for `SETTLE_MS`.
 fn age(store: &ProjectStore, uuid: &str) {
     let past = std::time::SystemTime::now() - Duration::from_secs(3600);
-    for ext in ["loro", "updates"] {
+    for ext in ["loro", "updates", "managed"] {
         let path = store.dir().join("tasks").join(format!("{uuid}.{ext}"));
         if let Ok(file) = fs::File::options().write(true).open(path) {
             file.set_modified(past).unwrap();
@@ -248,14 +248,15 @@ fn reads_decode_only_what_changed() {
     let (_, decoded, stamped) = counted(|| Index::open(&store).unwrap());
     assert_eq!((decoded, stamped), (0, 1), "only the task folder is stamped");
     // The index started the journal: a saved change is found through it,
-    // stamping only the folder and that task's two files.
+    // stamping only the folder and that task's three files (snapshot,
+    // updates and mark).
     aged_save(&store, &mut tasks[7]);
     let (_, decoded, stamped) = counted(|| Index::open(&store).unwrap());
-    assert_eq!((decoded, stamped), (1, 3));
+    assert_eq!((decoded, stamped), (1, 4));
     tasks[7].comment("note", &Actor::Person, 5).unwrap();
     aged_save(&store, &mut tasks[7]);
     let (index, decoded, stamped) = counted(|| Index::open(&store).unwrap());
-    assert_eq!((decoded, stamped), (1, 3), "the folder and the changed task's two files");
+    assert_eq!((decoded, stamped), (1, 4), "the folder and the changed task's three files");
     let revision = index.revision().unwrap();
     drop(index);
     // A writer without the journal, in place: a page's rows are checked
@@ -894,7 +895,7 @@ fn a_large_project_pages_and_polls_with_bounded_work() {
     // A page reads its rows and checks only their files.
     let mut index = Index::open(&store).unwrap();
     let (page, decoded, stamped) = counted(|| index.page(Stage::Todo, 50, &Anchor::Start).unwrap());
-    assert_eq!((page.rows.len(), decoded, stamped), (50, 0, 100));
+    assert_eq!((page.rows.len(), decoded, stamped), (50, 0, 150));
     assert_eq!(index.revision().unwrap(), revision);
     let deep = page.next.unwrap();
     let (rank, uuid) = parse_cursor(store.project_id(), Stage::Todo, &deep).unwrap();
@@ -932,13 +933,13 @@ fn twenty_thousand_tasks_scale_smoke() {
         });
         polls.push(started.elapsed());
         assert_eq!(answer["unchanged"], json!(true));
-        assert_eq!((decoded, stamped), (0, 101), "the poll stamps the folder and its page");
+        assert_eq!((decoded, stamped), (0, 151), "the poll stamps the folder and its page");
     }
     let started = Instant::now();
     let mut index = Index::open(&store).unwrap();
     let (page, decoded, stamped) = counted(|| index.page(Stage::Todo, 50, &Anchor::Start).unwrap());
     let first_page = started.elapsed();
-    assert_eq!((page.rows.len(), decoded, stamped), (50, 0, 100));
+    assert_eq!((page.rows.len(), decoded, stamped), (50, 0, 150));
     let counts = index.counts().unwrap();
     assert_eq!(counts["todo"], 20_000);
     drop(index);
@@ -953,4 +954,76 @@ fn twenty_thousand_tasks_scale_smoke() {
         polls[polls.len() - 1]
     );
     assert!(first_page < full_decode / 10, "{first_page:?} vs {full_decode:?}");
+}
+
+/// review-n on #1415 (R5): a save that fails after its mark advanced (the
+/// append is refused) leaves the copy kept, and a warm index shows it as
+/// damaged, never as its old healthy cached row.
+#[cfg(unix)]
+#[test]
+fn a_mark_only_change_reaches_the_warm_listing() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let mut task = new_task(&store, "T-aaaaaa", Stage::Todo, "V", "Plain");
+    assert!(task.floor().unwrap());
+    aged_save(&store, &mut task);
+    let uuid = task.uuid().to_owned();
+    drop(Index::open(&store).unwrap());
+    let updates = store.dir().join("tasks").join(format!("{uuid}.updates"));
+    fs::set_permissions(&updates, fs::Permissions::from_mode(0o400)).unwrap();
+    task.set_title("Never appended", &Actor::Person, 5).unwrap();
+    let failed = store.save(&mut task).is_err();
+    fs::set_permissions(&updates, fs::Permissions::from_mode(0o600)).unwrap();
+    // A writer that ignores permissions cannot show this case.
+    if !failed {
+        return;
+    }
+    assert!(store.load(&uuid).is_err());
+    assert_eq!(store.tasks().unwrap().1.len(), 1);
+    let mut index = Index::open(&store).unwrap();
+    let page = index.page(Stage::Todo, 10, &Anchor::Start).unwrap();
+    assert!(page.rows.iter().all(|r| r["uuid"] != json!(uuid)), "{:?}", page.rows);
+    let (shown, total) = index.damaged().unwrap();
+    assert_eq!(total, 1);
+    assert_eq!(shown[0]["uuid"], json!(uuid));
+}
+
+/// A mark changed without a journal note (a writer that does not journal)
+/// is still found: the task's stamps include its mark.
+#[test]
+fn a_mark_changed_outside_the_journal_is_found_by_its_stamp() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let mut task = new_task(&store, "T-aaaaaa", Stage::Todo, "V", "Plain");
+    assert!(task.floor().unwrap());
+    aged_save(&store, &mut task);
+    let uuid = task.uuid().to_owned();
+    drop(Index::open(&store).unwrap());
+    let tasks = store.dir().join("tasks");
+    let path = tasks.join(format!("{uuid}.managed"));
+    let files = |ext: &str| fs::read(tasks.join(format!("{uuid}.{ext}"))).unwrap();
+    let (snapshot, updates) = (files("loro"), files("updates"));
+    let before = stamp(&tasks.join(format!("{uuid}.loro"))) + &stamp(&tasks.join(format!("{uuid}.updates")));
+    let mut mark: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for counter in mark["saved"].as_object_mut().unwrap().values_mut() {
+        *counter = json!(counter.as_i64().unwrap() + 1);
+    }
+    // Replaced as this store replaces it, with no journal note; only the
+    // mark is dated back, so the snapshot and updates keep their stamps.
+    let temporary = tasks.join("mark-outside-the-journal");
+    fs::write(&temporary, serde_json::to_vec(&mark).unwrap()).unwrap();
+    fs::rename(&temporary, &path).unwrap();
+    let past = std::time::SystemTime::now() - Duration::from_secs(3600);
+    fs::File::options().write(true).open(&path).unwrap().set_modified(past).unwrap();
+    assert_eq!((files("loro"), files("updates")), (snapshot, updates));
+    assert_eq!(
+        stamp(&tasks.join(format!("{uuid}.loro"))) + &stamp(&tasks.join(format!("{uuid}.updates"))),
+        before
+    );
+    assert!(store.load(&uuid).is_err());
+    let mut index = Index::open(&store).unwrap();
+    let page = index.page(Stage::Todo, 10, &Anchor::Start).unwrap();
+    assert!(page.rows.iter().all(|r| r["uuid"] != json!(uuid)), "{:?}", page.rows);
+    assert_eq!(index.damaged().unwrap().1, 1);
 }

@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use zerus_replica::execution::EXECUTION_TASK_SCHEMA as EXECUTION;
 use zerus_replica::phone::{answer, Answer, Budget, Exchange, Progress, Request};
 use zerus_replica::{Actor, Inventory, NewTask, ProjectStore, SessionKey, Stage, Target, TaskDoc};
 
@@ -561,14 +562,14 @@ fn an_old_phone_s_copy_keeps_the_computer_s_outstanding_attempt() {
             "damaged={damaged}"
         );
         assert!(current.held().unwrap().is_some());
-        assert_eq!(current.schema(), 6);
+        assert_eq!(current.schema(), EXECUTION);
         assert!(current.check_send().is_err());
         assert_eq!(comments(&computer, task.uuid()), 1);
         assert_eq!(
             set_aside(b.path(), task.uuid()),
             if damaged { 2 } else { 0 }
         );
-        assert_eq!(phone.load(task.uuid()).unwrap().schema(), 6);
+        assert_eq!(phone.load(task.uuid()).unwrap().schema(), EXECUTION);
         assert_eq!(live_digest(&phone), live_digest(&computer));
     }
 }
@@ -878,7 +879,7 @@ fn a_phone_edit_beside_the_first_attempt_comes_back_at_the_execution_schema() {
     settled(run(&phone, &computer, Budget::default()));
     for side in [&phone, &computer] {
         let copy = side.load(task.uuid()).unwrap();
-        assert_eq!(copy.schema(), 6);
+        assert_eq!(copy.schema(), EXECUTION);
         assert!(!copy.needs_schema_repair());
         assert!(copy.held().unwrap().is_some());
     }
@@ -902,7 +903,7 @@ fn a_lost_answer_and_a_reconnect_still_bring_the_execution_schema() {
     comment(&phone, task.uuid(), "After it");
     settled(run(&phone, &computer, Budget::default()));
     let copy = phone.load(task.uuid()).unwrap();
-    assert!(!copy.needs_schema_repair() && copy.schema() == 6);
+    assert!(!copy.needs_schema_repair() && copy.schema() == EXECUTION);
     assert_eq!(comments(&computer, task.uuid()), 2);
     assert_eq!(live_digest(&phone), live_digest(&computer));
 }
@@ -935,7 +936,7 @@ fn held_tasks_arrive_at_the_execution_schema_across_pages() {
     );
     for (n, task) in tasks.iter().enumerate() {
         let copy = phone.load(task.uuid()).unwrap();
-        assert_eq!(copy.schema() == 6, n == 2 || n == 9, "task {n}");
+        assert_eq!(copy.schema() == EXECUTION, n == 2 || n == 9, "task {n}");
         assert!(!copy.needs_schema_repair());
     }
     assert_eq!(live_digest(&phone), live_digest(&computer));

@@ -1471,3 +1471,305 @@ mod actor {
         assert_eq!(f.row(&original).receipt.code, "task_message_interrupted");
     }
 }
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod staging_tests {
+    use super::super::staging::{self, Roots};
+    use super::*;
+    use sha2::Digest;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
+    use zerus_client_core::attachments::Attachment;
+    use zerus_client_core::tasks_write::references;
+
+    fn private_dir(path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    fn fresh() -> (tempfile::TempDir, PathBuf, Roots) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap().join("desktop");
+        private_dir(&root);
+        let roots = Roots::open(&root).unwrap();
+        (temp, root, roots)
+    }
+    fn shot(seed: u8, size: usize) -> Vec<u8> {
+        (0..size).map(|n| (n as u8).wrapping_mul(seed)).collect()
+    }
+    /// A verified reference original whose attachments are `files`, its
+    /// blobs and its exact stdin.
+    fn original(files: &[Vec<u8>]) -> (Verified, Vec<Vec<u8>>, String) {
+        let (verified, blobs, stdin, _) = original_with_record(files);
+        (verified, blobs, stdin)
+    }
+    fn original_with_record(
+        files: &[Vec<u8>],
+    ) -> (Verified, Vec<Vec<u8>>, String, serde_json::Value) {
+        let attachments: Vec<Attachment> = files
+            .iter()
+            .enumerate()
+            .map(|(n, bytes)| Attachment {
+                name: format!("shot-{n}.png"),
+                mime: "image/png".into(),
+                bytes: bytes.clone().into(),
+                reference: format!("[shot-{n}.png]"),
+            })
+            .collect();
+        let intent = message_intent("see these", &attachments, "queue", "");
+        let request = uuid::Uuid::new_v4().to_string();
+        let record = json!({"id": request, "intent": intent,
+            "input_sha256": input_digest(&message_input(&intent))});
+        let (projection, blobs) = references::project(&record).unwrap();
+        let verified = Intent {
+            scope: wire::Scope {
+                configuration: "a".repeat(64),
+                service_epoch: uuid::Uuid::new_v4().to_string(),
+            },
+            project: "example".into(),
+            task_id: TASK.into(),
+            request_id: request,
+            original: projection.to_string(),
+            form: wire::Form::ReferenceV1,
+        }
+        .verify()
+        .unwrap();
+        let stdin = message_input(&record["intent"]);
+        (verified, blobs, stdin, record)
+    }
+    /// Stages each blob as `<staging>/<request>/<sha256>`, as the client does.
+    fn stage(root: &Path, request: &str, blobs: &[Vec<u8>]) -> PathBuf {
+        let dir = root.join(staging::STAGING).join(request);
+        private_dir(&dir);
+        for blob in blobs {
+            let file = dir.join(format!("{:x}", sha2::Sha256::digest(blob)));
+            std::fs::write(&file, blob).unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        dir
+    }
+    fn soon() -> Instant {
+        Instant::now() + Duration::from_secs(20)
+    }
+    fn input(root: &Path, request: &str) -> PathBuf {
+        root.join(staging::INPUTS).join(request)
+    }
+
+    #[test]
+    fn a_staged_original_prepares_its_exact_input_once_and_never_overwrites_it() {
+        let (_temp, root, roots) = fresh();
+        assert_eq!(roots.staging.path(), root.join(staging::STAGING));
+        let (verified, blobs, stdin, record) =
+            original_with_record(&[shot(3, 3000), shot(5, 70 << 10)]);
+        let request = verified.plan.request_id.clone();
+        let dir = stage(&root, &request, &blobs);
+        let prepared = staging::prepare(&roots, &verified, soon()).unwrap();
+        // Exactly the call of its original record (too large to go inline),
+        // and through the kept handle exactly its stdin.
+        let call =
+            zerus_client_core::tasks_write::message_call("example", TASK, &record, false).unwrap();
+        assert_eq!(call.input, stdin);
+        assert_eq!(prepared.args, call.invocation().args);
+        let mut kept = vec![0; stdin.len()];
+        std::os::unix::fs::FileExt::read_exact_at(&prepared.input.file, &mut kept, 0).unwrap();
+        assert_eq!(kept, stdin.as_bytes());
+        assert_eq!(prepared.input.bytes, stdin.len() as u64);
+        assert_eq!(prepared.input.sha256, verified.plan.input_sha256);
+        assert_eq!(
+            std::fs::read_to_string(input(&root, &request)).unwrap(),
+            stdin
+        );
+        let metadata = std::fs::metadata(input(&root, &request)).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(prepared.staged.len(), 2);
+        // The same request never replaces its custody input.
+        assert_eq!(
+            staging::prepare(&roots, &verified, soon()).err(),
+            Some(staging::EXISTS)
+        );
+        assert_eq!(
+            std::fs::read_to_string(input(&root, &request)).unwrap(),
+            stdin
+        );
+        staging::remove_staged(&roots, &request, &prepared.staged).unwrap();
+        assert!(!dir.exists(), "exactly its copies, then the empty folder");
+        staging::remove_input(&roots, &request, prepared.input.identity).unwrap();
+        assert!(!input(&root, &request).exists());
+        // Removing what is already gone is not an error.
+        staging::remove_input(&roots, &request, prepared.input.identity).unwrap();
+    }
+
+    #[test]
+    fn the_same_screenshot_sent_to_two_tasks_stays_two_independent_copies() {
+        let (_temp, root, roots) = fresh();
+        let same = shot(7, 9000);
+        // Within one message too: the same bytes twice share one staged copy.
+        let (first, blobs, _) = original(&[same.clone(), same.clone()]);
+        let (second, other, _) = original(std::slice::from_ref(&same));
+        stage(&root, &first.plan.request_id, &blobs);
+        let kept = stage(&root, &second.plan.request_id, &other);
+        let one = staging::prepare(&roots, &first, soon()).unwrap();
+        assert_eq!(one.staged.len(), 1);
+        staging::remove_staged(&roots, &first.plan.request_id, &one.staged).unwrap();
+        assert!(kept.exists(), "another request's copy is never touched");
+        let two = staging::prepare(&roots, &second, soon()).unwrap();
+        assert_ne!(one.input.identity, two.input.identity);
+    }
+
+    #[test]
+    fn unsafe_or_wrong_staging_is_refused_and_leaves_no_input() {
+        type Edit = fn(&Path, &Path);
+        let cases: [(&str, Edit, &str); 9] = [
+            (
+                "missing folder",
+                |dir, _| std::fs::remove_dir_all(dir).unwrap(),
+                staging::UNAVAILABLE,
+            ),
+            (
+                "folder symlink",
+                |dir, _| {
+                    let real = dir.with_extension("real");
+                    std::fs::rename(dir, &real).unwrap();
+                    std::os::unix::fs::symlink(&real, dir).unwrap();
+                },
+                staging::UNAVAILABLE,
+            ),
+            (
+                "open folder",
+                |dir, _| {
+                    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap()
+                },
+                staging::UNAVAILABLE,
+            ),
+            (
+                "missing copy",
+                |_, file| std::fs::remove_file(file).unwrap(),
+                staging::UNAVAILABLE,
+            ),
+            (
+                "copy symlink",
+                |_, file| {
+                    let real = file.with_extension("real");
+                    std::fs::rename(file, &real).unwrap();
+                    std::os::unix::fs::symlink(&real, file).unwrap();
+                },
+                staging::UNAVAILABLE,
+            ),
+            (
+                "readable copy",
+                |_, file| {
+                    std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o644)).unwrap()
+                },
+                staging::UNAVAILABLE,
+            ),
+            (
+                "hard link",
+                |dir, file| std::fs::hard_link(file, dir.join("another-name")).unwrap(),
+                staging::UNAVAILABLE,
+            ),
+            (
+                "special file",
+                |_, file| {
+                    std::fs::remove_file(file).unwrap();
+                    let name = std::ffi::CString::new(file.as_os_str().as_encoded_bytes()).unwrap();
+                    // SAFETY: a NUL-terminated path in a private test folder.
+                    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+                },
+                staging::UNAVAILABLE,
+            ),
+            (
+                "other bytes",
+                |_, file| {
+                    let mut bytes = std::fs::read(file).unwrap();
+                    bytes[0] ^= 1;
+                    std::fs::write(file, bytes).unwrap();
+                },
+                staging::MISMATCH,
+            ),
+        ];
+        for (name, edit, code) in cases {
+            let (_temp, root, roots) = fresh();
+            let (verified, blobs, _) = original(&[shot(9, 4096)]);
+            let request = verified.plan.request_id.clone();
+            let dir = stage(&root, &request, &blobs);
+            let file = dir.join(&verified.references[0].sha256);
+            edit(&dir, &file);
+            assert_eq!(
+                staging::prepare(&roots, &verified, soon()).err(),
+                Some(code),
+                "{name}"
+            );
+            assert!(!input(&root, &request).exists(), "{name}: no input");
+        }
+        // A copy of another size is refused as not the original's.
+        let (_temp, root, roots) = fresh();
+        let (verified, blobs, _) = original(&[shot(9, 4096)]);
+        let dir = stage(&root, &verified.plan.request_id, &blobs);
+        std::fs::write(dir.join(&verified.references[0].sha256), b"short").unwrap();
+        assert_eq!(
+            staging::prepare(&roots, &verified, soon()).err(),
+            Some(staging::MISMATCH)
+        );
+    }
+
+    #[test]
+    fn a_replaced_root_or_a_passed_deadline_prepares_nothing() {
+        let (_temp, root, roots) = fresh();
+        let (verified, blobs, _) = original(&[shot(11, 2048)]);
+        let request = verified.plan.request_id.clone();
+        stage(&root, &request, &blobs);
+        assert_eq!(
+            staging::prepare(&roots, &verified, Instant::now()).err(),
+            Some(staging::EXPIRED)
+        );
+        assert!(!input(&root, &request).exists());
+        // The staging folder replaced under the same name.
+        let staging_dir = root.join(staging::STAGING);
+        std::fs::rename(&staging_dir, root.join("moved")).unwrap();
+        private_dir(&staging_dir);
+        stage(&root, &request, &blobs);
+        assert!(!roots.current());
+        assert_eq!(
+            staging::prepare(&roots, &verified, soon()).err(),
+            Some(staging::UNAVAILABLE)
+        );
+        assert!(!input(&root, &request).exists());
+        // An existing directory that is not private is never adopted.
+        let (_temp, root, _) = fresh();
+        std::fs::set_permissions(
+            root.join(staging::INPUTS),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        assert!(Roots::open(&root).is_err());
+    }
+
+    #[test]
+    fn removal_touches_only_the_exact_objects_it_read_or_created() {
+        let (_temp, root, roots) = fresh();
+        let (verified, blobs, _) = original(&[shot(13, 1024)]);
+        let request = verified.plan.request_id.clone();
+        let dir = stage(&root, &request, &blobs);
+        let prepared = staging::prepare(&roots, &verified, soon()).unwrap();
+        // Another object under the custody name stays.
+        std::fs::remove_file(input(&root, &request)).unwrap();
+        std::fs::write(input(&root, &request), b"another").unwrap();
+        assert!(staging::remove_input(&roots, &request, prepared.input.identity).is_err());
+        assert!(input(&root, &request).exists());
+        // Another object under a staged name stays, and so does the folder.
+        let copy = dir.join(&verified.references[0].sha256);
+        std::fs::remove_file(&copy).unwrap();
+        std::fs::write(&copy, b"another").unwrap();
+        assert!(staging::remove_staged(&roots, &request, &prepared.staged).is_err());
+        assert!(copy.exists());
+        // Anything else in the folder keeps the folder.
+        let (_temp, root, roots) = fresh();
+        let (verified, blobs, _) = original(&[shot(17, 1024)]);
+        let request = verified.plan.request_id.clone();
+        let dir = stage(&root, &request, &blobs);
+        let prepared = staging::prepare(&roots, &verified, soon()).unwrap();
+        std::fs::write(dir.join("unrelated"), b"kept").unwrap();
+        staging::remove_staged(&roots, &request, &prepared.staged).unwrap();
+        assert!(dir.join("unrelated").exists() && dir.exists());
+    }
+}

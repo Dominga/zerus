@@ -12,6 +12,8 @@ pub(super) use runtime::Runtime;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod recovery;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod staging;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use child::adopt_custody;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) use recovery::Recovery;

@@ -5136,12 +5136,14 @@ fn sync_permission(store: &mut Store, team: &Team, member_id: &str) -> anyhow::R
         cards
             .iter()
             .find(|card| {
+                // One that waited for the Terminal and can be answered again
+                // goes back to the lead.
                 card["can_answer"] != false
-                    && !member.asked.contains(&format!(
+                    && (!member.asked.contains(&format!(
                         "{}:{}",
                         card["question_id"].as_str().unwrap_or_default(),
                         card["question_hash"].as_str().unwrap_or_default()
-                    ))
+                    )) || member.terminal_question.as_ref().is_some_and(|seen| card["question_id"].as_str() == Some(seen.question_id.as_str())))
             })
             .map(|card| PendingQuestion {
                 question_id: card["question_id"].as_str().unwrap_or_default().to_owned(),
@@ -5151,31 +5153,27 @@ fn sync_permission(store: &mut Store, team: &Team, member_id: &str) -> anyhow::R
                 card: card.clone(),
             })
     };
-    // A request Zerus cannot answer (Kimi's Edit and Write approvals) is
-    // never the lead's to answer, but it is never silent either: it keeps the
-    // time it was first seen, so the lead hears of it once.
-    // One the lead's answer was refused for stays the owner's while the
-    // session still asks it.
-    let kept = member
-        .terminal_question
-        .as_ref()
-        .filter(|seen| cards.iter().any(|card| card["question_id"].as_str() == Some(seen.question_id.as_str())))
-        .cloned();
-    let terminal = kept.or_else(|| cards.iter().find(|card| card["can_answer"] == false).map(|card| {
-        let question_id = card["question_id"].as_str().unwrap_or_default().to_owned();
-        let at = member
-            .terminal_question
-            .as_ref()
-            .filter(|seen| seen.question_id == question_id)
-            .map_or_else(now, |seen| seen.at);
-        PendingQuestion {
-            question_id,
-            question_hash: card["question_hash"].as_str().unwrap_or_default().to_owned(),
-            approval: card["approval"] == true,
-            at,
-            card: card.clone(),
-        }
-    }));
+    // A request Zerus cannot answer now (Kimi's Edit and Write approvals, or
+    // one behind another request) is never the lead's to answer, but it is
+    // never silent either. Kimi's cards say so on every inspection, so one
+    // that can be answered again leaves it; the first record of the same
+    // request stays, with its time and reason, so the lead hears of it once.
+    let asked_now = |id: &str| {
+        ask.as_ref().is_some_and(|asked| asked.question_id == id) || same.as_ref().is_some_and(|card| card["question_id"] == id)
+    };
+    let terminal = cards
+        .iter()
+        .find(|card| card["can_answer"] == false && !asked_now(card["question_id"].as_str().unwrap_or_default()))
+        .map(|card| {
+            let question_id = card["question_id"].as_str().unwrap_or_default().to_owned();
+            member.terminal_question.as_ref().filter(|seen| seen.question_id == question_id).cloned().unwrap_or_else(|| PendingQuestion {
+                question_id,
+                question_hash: card["question_hash"].as_str().unwrap_or_default().to_owned(),
+                approval: card["approval"] == true,
+                at: now(),
+                card: card.clone(),
+            })
+        });
     let answered = ask.is_none() && same.is_none();
     if ask.is_none() && !answered && terminal == member.terminal_question {
         return Ok(());

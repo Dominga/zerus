@@ -2611,7 +2611,15 @@ longer shows one. A history longer than 8 MiB (4 MiB for another agent), a
 record Kimi is still writing, a line that is not a JSON object with one string
 type, an interaction record without its ID or of a kind Kimi does not write,
 or a repeated request ID keeps the approval read-only. Types and IDs are
-compared as decoded JSON. Every key and pasted feedback line first finds the same
+compared as decoded JSON.
+Experimental and off by default: an empty file
+`~/.config/hgs/kimi-unverified-edit-approvals` (in `HGS_CONFIG_DIR` when set)
+also lets Zerus answer Kimi's **Edit** and **Write** approvals, from Activity
+or by a team lead. Zerus cannot redraw Kimi's diff, so it checks less than for
+Bash: the same sole unresolved request of every agent, its hash and active
+tool, and exactly one complete panel on screen titled for that tool with the
+default choices; the card says so above the request. Delete the file to turn
+it off. Every key and pasted feedback line first finds the same
 unresolved request, with its active tool call, in the same run, process and
 pane. The
 choices are Kimi's: **Approve once**, **Approve for this session**, **Reject** and

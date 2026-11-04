@@ -37,6 +37,40 @@ const UNVERIFIED: &str =
 const NARROW: &str =
     "Kimi's approval does not show this whole request; enlarge Terminal or answer there";
 
+/// Owner, 2026-11-05: an opt-in, experimental flag. With this empty file in
+/// the configuration directory, Zerus also answers Kimi's Edit and Write
+/// approvals. It cannot redraw Kimi's diff, so it checks less than for Bash:
+/// the request is the only one any Kimi agent of the run waits on, its hash
+/// and active tool are unchanged, and the screen shows exactly one complete
+/// approval panel with that tool's title and the default choices.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) const UNVERIFIED_EDITS_MARKER: &str = "kimi-unverified-edit-approvals";
+
+#[cfg(test)]
+thread_local! {
+    static UNVERIFIED_EDITS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn unverified_edits() -> bool {
+    #[cfg(test)]
+    {
+        UNVERIFIED_EDITS.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        crate::platform::home()
+            .is_some_and(|home| crate::config::config_dir(&home).join(UNVERIFIED_EDITS_MARKER).is_file())
+    }
+}
+
+/// A tool the flag lets Zerus answer by the panel's title.
+fn titled(request: &Value) -> bool {
+    matches!(string(request, "toolName"), "Edit" | "Write") && unverified_edits()
+}
+
+const TITLED_NOTE: &str = "Experimental (kimi-unverified-edit-approvals): Zerus checks that this is the only \
+Kimi request waiting and that Kimi shows one panel titled for it, not each line of the change below.";
+
 /// Pending approvals of the main agent, each bound to its active tool call
 /// and removed once Kimi records a resolution. Plan reviews and goal starts
 /// have their own choosers and exact request adapters.
@@ -353,6 +387,7 @@ fn card(record: &Value, event: &Value) -> Option<Value> {
     }
     let (body, problem) = match shell(request) {
         Ok(shell) => (shell.body(), None),
+        Err(_) if titled(request) => (format!("{TITLED_NOTE}\n\n{}", literal(request)), None),
         Err(problem) => (literal(request), Some(problem)),
     };
     let complete = body.chars().count() <= MAX_BODY_CHARS;
@@ -636,8 +671,33 @@ fn complete(screen: &str) -> bool {
     bottom(&rows).is_some_and(|(first, margin, width)| top(&rows, first, margin, width).is_some())
 }
 
+/// With the flag, an Edit or Write panel: exactly one complete approval
+/// panel on screen, titled for this tool, with the default choices.
+fn read_titled(screen: &str, request: &Value) -> Result<Shown> {
+    let plain = question_terminal::plain(screen)?;
+    let rows: Vec<&str> = plain.lines().map(str::trim_end).collect();
+    let heading = format!("  ▶ {}", title(string(request, "toolName")));
+    let titles = rows.iter().filter(|row| row.trim_start() == heading.trim_start()).count();
+    let Some((first, margin, width)) = bottom(&rows) else {
+        return Err("Kimi's approval is not visible; open Terminal".into());
+    };
+    let Some(start) = top(&rows, first, margin, width) else {
+        return Err(NARROW.into());
+    };
+    if inside(rows[start + 1], margin) != Some(heading.as_str()) {
+        return Err("The visible Kimi approval differs from this request; answer it in Terminal".into());
+    }
+    if titles != 1 {
+        return Err("Kimi shows more than one such approval; answer it in Terminal".into());
+    }
+    chooser(&rows[first..], margin, width).ok_or_else(|| "Kimi's approval is not visible; open Terminal".into())
+}
+
 /// The panel on `screen` that draws exactly `request`, row by row.
 fn read(screen: &str, request: &Value) -> Result<Shown> {
+    if shell(request).is_err() && titled(request) {
+        return read_titled(screen, request);
+    }
     let shell = shell(request)?;
     let plain = question_terminal::plain(screen)?;
     let rows: Vec<&str> = plain.lines().map(str::trim_end).collect();
@@ -1249,6 +1309,37 @@ mod tests {
         "  $ rm -rf build/cache",
         "    Remove the cached build",
     ];
+
+    /// Owner, 2026-11-05: with the experimental flag an Edit approval is
+    /// answered by its panel's title; without it, only in Terminal.
+    #[test]
+    fn an_edit_approval_is_answerable_only_with_the_flag_and_by_its_title() {
+        let home = tempfile::tempdir().unwrap();
+        let mut record = record(home.path());
+        record["active_tools"] = json!({"tool_edit":{"name":"Edit","started":1000.0}});
+        let mut edit = request("approval_e", "tool_edit", COMMAND);
+        edit["request"]["toolName"] = json!("Edit");
+        edit["request"]["display"] = json!({"kind":"diff","path":"/workspace/example/a.py","diff":"-a\n+b"});
+        let off = only(&record, std::slice::from_ref(&edit));
+        assert_eq!(off["questions"][0]["allow_other"], false);
+        assert!(string(&off, "answer_unavailable_reason").contains("Bash command approvals"), "{off}");
+        UNVERIFIED_EDITS.with(|flag| flag.set(true));
+        let on = only(&record, std::slice::from_ref(&edit));
+        UNVERIFIED_EDITS.with(|flag| flag.set(false));
+        assert_eq!(on["questions"][0]["allow_other"], true, "{on}");
+        assert!(string(&on["questions"][0], "body").starts_with("Experimental"), "{on}");
+        assert_ne!(on["question_hash"], off["question_hash"]);
+        // The screen: one complete panel titled for Edit.
+        let titled_screen = screen(&["  a.py", "  -a", "  +b"], CHOOSING, HINT_ROW).replace(RUN, "Apply these edits?");
+        let req = &edit["request"];
+        UNVERIFIED_EDITS.with(|flag| flag.set(true));
+        assert_eq!(read(&titled_screen, req).unwrap(), Shown::Choosing);
+        // Another tool's panel, or a Bash one, is refused.
+        let bash_screen = screen(&BODY, CHOOSING, HINT_ROW);
+        assert!(read(&bash_screen, req).unwrap_err().contains("differs"));
+        UNVERIFIED_EDITS.with(|flag| flag.set(false));
+        assert!(read(&titled_screen, req).is_err(), "without the flag the panel is never read");
+    }
 
     #[test]
     fn the_panel_must_draw_exactly_this_request() {

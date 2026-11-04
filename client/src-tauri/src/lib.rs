@@ -691,9 +691,13 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                         source:source.clone(),settings:app.state::<settings::Store>().0.clone()
                     });
                     app.manage(source);
+                    // The report shows the configured download folder's G3
+                    // evidence, resolved each time it is shown.
+                    let downloads_app = app.handle().clone();
                     if let Some(inputs) = desktop_service::retained_import::Inputs::native(
                         &app.state::<identity::Identity>().bundle_id, replay, dir.clone(),
                         app.state::<settings::Store>().0.clone(),
+                        std::sync::Arc::new(move || files::folder(&downloads_app)),
                     ) {
                         app.state::<commands::AppState>().set_retained_import_source(inputs);
                     }

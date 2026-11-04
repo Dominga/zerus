@@ -290,7 +290,7 @@ pub(crate) fn check(
 }
 
 #[cfg(all(test, unix))]
-mod fixture_tests;
+pub(super) mod fixture_tests;
 #[cfg(test)]
 mod tests {
     use super::*;

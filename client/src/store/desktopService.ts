@@ -414,6 +414,15 @@ export function ownershipNotice(view: NotificationOwnership | undefined): string
   return "";
 }
 
+/** Held task message copies the service reports for review; only a connected status counts. */
+export function heldInputsNotice(state: DesktopService | undefined): string {
+  const held = state?.connected ? state.task_message_inputs : undefined;
+  if (!held || !(held.review > 0)) return "";
+  return held.full
+    ? tr("Large task messages are paused: some held message copies need review.")
+    : tr("Some held task message copies need review.");
+}
+
 /** Compact footer presentation; full reasons stay in its accessible tooltip. */
 export function serviceStatus(state: DesktopService | undefined) {
   if (!state) return;
@@ -437,16 +446,17 @@ export function serviceStatus(state: DesktopService | undefined) {
     label = tr("Service views unavailable");
     notice = tr("Activity, processes and project tasks are unavailable with this background service connection.");
   }
-  const pending = pendingReadNotice(state), retained = retainedSourceNotice(state), owner = ownershipNotice(state.notification_ownership);
+  const pending = pendingReadNotice(state), retained = retainedSourceNotice(state), inputs = heldInputsNotice(state), owner = ownershipNotice(state.notification_ownership);
   const ownership = state.notification_ownership?.pending || state.notification_ownership?.activation?.pending ? "check"
     : !manualRefresh && (state.notification_ownership?.native_recovery || state.notification_ownership?.status?.rearm_required
       || state.notification_ownership?.activation?.needs_resume) ? "rearm" : undefined;
   if (!notice) {
     if (pending) label = state.pending_read_import?.running ? tr("Transferring read marks") : tr("Read marks need attention");
     else if (retained) label = tr("Migration report");
+    else if (inputs) label = tr("Held message copies");
     else if (owner) label = ownership === "check" ? tr("Background access unconfirmed") : ownership === "rearm" ? tr("Background access paused") : tr("Background access unavailable");
   }
-  const reasons = [notice, pending, retained, manualRefresh ? "" : owner].filter(Boolean);
+  const reasons = [notice, pending, retained, inputs, manualRefresh ? "" : owner].filter(Boolean);
   return { label, details: reasons.join("\n") || tr("Background service connected"), healthy: !reasons.length,
-    retry: !manualRefresh && !!(notice || pending || retained || (owner && !ownership)), review: !!retained, ownership, manualRefresh };
+    retry: !manualRefresh && !!(notice || pending || retained || (owner && !ownership)), review: !!retained, inputsReview: !!inputs, ownership, manualRefresh };
 }

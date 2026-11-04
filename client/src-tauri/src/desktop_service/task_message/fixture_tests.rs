@@ -10,7 +10,7 @@ use zerus_client_core::tasks_write::{input_digest, message_input, message_intent
 
 const TASK: &str = "11111111-1111-4111-8111-111111111111";
 
-fn private_case(case: &'static str) -> bool {
+pub(in crate::desktop_service) fn private_case(case: &'static str) -> bool {
     const MARKER: &str = "ZERUS_TASK_MESSAGE_CASE";
     if std::env::var(MARKER).as_deref() == Ok(case) {
         return true;
@@ -73,7 +73,7 @@ fn count(root: &std::path::Path, op: &str) -> usize {
         .filter(|c| c["value"]["request"]["op"] == op || c["value"]["op"] == op)
         .count()
 }
-async fn connected(f: &Fixture) -> (Arc<Service>, CacheServer) {
+pub(in crate::desktop_service) async fn connected(f: &Fixture) -> (Arc<Service>, CacheServer) {
     let responder = responder();
     assert!(responder
         .configure_ownership_mode_once(zerus_client_core::desktop::ownership::Mode::Service));

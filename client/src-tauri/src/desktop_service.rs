@@ -54,6 +54,8 @@ pub(crate) mod creation_worktree;
 // attachments by reference (zerus-5wmh.66.4.4.2); until then it is unused.
 #[allow(dead_code)]
 pub(crate) mod task_message;
+// Only Linux advertises the review; elsewhere its probe refuses.
+pub(crate) mod task_message_inputs;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod task_start_reconcile;
 use catalog::catalog_loop;
@@ -393,6 +395,8 @@ struct Shared {
     details_changed: Notify,
     organization: Mutex<Option<zerus_client_core::OrganizationSnapshot>>,
     frontend: frontend::Frontend,
+    /// The reviewed observations a confirmation may name, each sent once.
+    held_inputs: task_message_inputs::Reviewed,
     read_import: Mutex<read_import::State>,
     retained_import: Option<Arc<retained_import::Report>>,
     projections: Vec<Projection>,
@@ -579,6 +583,7 @@ impl Service {
             details_changed: Notify::new(),
             organization: Mutex::new(None),
             frontend: frontend::Frontend::default(),
+            held_inputs: task_message_inputs::Reviewed::default(),
             read_import: Mutex::new(read_import::State::default()),
             retained_import: observers.retained_sources.map(retained_import::Report::new),
             projections: observers.projections,

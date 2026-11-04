@@ -4,9 +4,11 @@ import { desktopService, serviceStatus, retryDesktopService, ownershipActions } 
 import { toast } from "../../store/ui";
 import { tr } from "../../i18n";
 import { MigrationReportDialog } from "./MigrationReportDialog";
+import { TaskMessageInputsDialog } from "./TaskMessageInputsDialog";
 
 export function DesktopServiceStatus(props: { counts?: boolean }) {
   const [reviewOrigin, setReviewOrigin] = createSignal<HTMLElement>();
+  const [inputsOrigin, setInputsOrigin] = createSignal<HTMLElement>();
   const [focused, setFocused] = createSignal(false);
   const status = createMemo(() => serviceStatus(desktopService.state()));
   const counts = () => desktopService.state()?.attention_counts?.aggregate;
@@ -21,6 +23,9 @@ export function DesktopServiceStatus(props: { counts?: boolean }) {
       </span>
       <Show when={view().review}>
         <button type="button" class="btn small ghost" aria-label={tr("Review migration report")} onClick={(event) => setReviewOrigin(event.currentTarget)}>{tr("Review")}</button>
+      </Show>
+      <Show when={view().inputsReview}>
+        <button type="button" class="btn small ghost" onClick={(event) => setInputsOrigin(event.currentTarget)}>{tr("Review message copies")}</button>
       </Show>
       <Show when={view().manualRefresh && !props.counts}>
         <button type="button" class="btn small ghost" onClick={() => {
@@ -42,5 +47,6 @@ export function DesktopServiceStatus(props: { counts?: boolean }) {
     </div>
     <Show when={focused()}><Portal><div id="service-status-details" class="service-status-details" role="tooltip">{details()}</div></Portal></Show>
     <Show when={reviewOrigin()}>{(origin) => <MigrationReportDialog origin={origin()} close={() => setReviewOrigin(undefined)} />}</Show>
+    <Show when={inputsOrigin()}>{(origin) => <TaskMessageInputsDialog origin={origin()} close={() => setInputsOrigin(undefined)} />}</Show>
   </>}</Show>;
 }

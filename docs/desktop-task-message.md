@@ -254,8 +254,13 @@ the form like every original.
   sent again, and a request ID with any input record never reserves or admits
   again. macOS answers with its fence; Windows has no inputs.
 - **Records.** `desktop_task_message_inputs` and its budget, added at Store
-  schema 27 by merge order, keep one record per input; status reports the
-  charged records and bytes.
+  schema 27 by merge order, keep one record per input. Status
+  (`operation_queue.kinds.task_message.inputs`) reports the charged records
+  and bytes, `review` (the `orphaned` and `failed` records, counted through
+  the open-state index) and `full` (no further input fits: 64 records or
+  64 MiB). The review marker is
+  `Desktop task message input review: desktop-task-message-input-review-v1`,
+  advertised only on Linux.
 
 ## Client
 
@@ -298,6 +303,19 @@ desktop-service mode lands together with attachments by reference.
   the original failed or its result is unknown; it is never sent again and
   never takes the direct path. Direct is the only answer that uses the direct
   path, after a completed capability probe that shows no support for the kind.
+- **Held copies review.** While status reports `review` above zero, the
+  service status (status bar and Settings > About) says that held copies need
+  review, or that large task messages are paused when `full`, and offers
+  Review message copies. Its dialog reads one bounded page when it opens and
+  one more per Load more click, never on its own, through
+  `desktop_service/task_message_inputs.rs`, which first requires the review
+  marker. The client remembers each listed entry's exact observation (at most
+  64, the newest review of a record winning) and shows only the time, size,
+  request ID, state and observed file. A confirmation names a request ID; the
+  client takes that record's remembered observation and sends it once as a
+  `TaskMessageInputRelease` with a fresh release ID. Without one, or after the
+  service changed, nothing is sent. A lost reply is unknown, and nothing is
+  retried; Review again reads that page again from its own cursor.
 
 ## Wire
 

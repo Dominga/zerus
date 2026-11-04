@@ -1518,6 +1518,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         desktop_service::notification_controls::desktop_notification_preferences_check,
         desktop_service::desktop_service_read_marks,
         desktop_service::desktop_service_automatic_approvals,
+        desktop_service::task_message_inputs::desktop_service_task_message_inputs,
+        desktop_service::task_message_inputs::desktop_service_task_message_input_release,
         desktop_service::frontend::desktop_service_maintenance_configure,
         desktop_service::frontend::desktop_service_maintenance_configuration,
         desktop_service::frontend::desktop_service_frontend_result,

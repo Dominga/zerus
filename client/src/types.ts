@@ -197,6 +197,8 @@ export interface DesktopService {
     computers: { computer: string; complete: boolean; online: boolean; total: number | null; attention: number | null }[];
   };
   automatic_approvals: boolean | null;
+  /** Held task message copies a person may review; display only, never a release. */
+  task_message_inputs?: null | { review: number; full: boolean };
   details_available: boolean;
   /** Native frozen-read transfer; completion is durable queueing, not host ACK. */
   pending_read_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; through: number; superseded: number; delivered: false };

@@ -41,6 +41,17 @@ pub(crate) fn selected_run(name: &str) -> Result<Option<String>> {
     Ok(Some(string(&record, "run_id").to_owned()))
 }
 
+/// Refuses a selected name that no longer has a record: a reader must not
+/// fall back to whatever untracked terminal now holds the name.
+pub(super) fn verify_absent(name: &str) -> Result<()> {
+    match selected() {
+        Some((selected, id)) if selected == name => {
+            Err(format!("Session ID {id} no longer names {name}; refresh and retry"))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Refuses a record that has the selected name but not the selected ID.
 pub(super) fn verify(record: &Value) -> Result<()> {
     let selected = SELECTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -126,6 +137,54 @@ pub(crate) fn ambiguity(name: &str, mut candidates: Vec<Value>) -> (String, Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// #1355 review: every raw reader on a selector command refuses a name
+    /// the selected ID left, whether another ID's record or no record holds
+    /// it. The fixture runs in a child process with a private state directory.
+    #[test]
+    fn raw_readers_refuse_a_name_the_selected_id_left() {
+        let state = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "state::session_id::tests::raw_readers_fixture",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("HGS_STATE_DIR", state.path())
+            .env("ZERUS_RAW_READERS_FIXTURE", "1")
+            .env_remove("HGS_SESSION")
+            .env_remove("HGS_SESSION_ID")
+            .env_remove("HGS_RUN_ID")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    #[test]
+    #[ignore = "run by raw_readers_refuse_a_name_the_selected_id_left"]
+    fn raw_readers_fixture() {
+        if std::env::var_os("ZERUS_RAW_READERS_FIXTURE").is_none() {
+            return;
+        }
+        std::fs::create_dir_all(root()).unwrap();
+        let name = "claude/example/raw";
+        let fresh = || uuid::Uuid::new_v4().to_string();
+        let other = json!({"version":1,"agent":"claude","name":name,"run_id":fresh(),
+            "conversation_id":fresh(),"session_id":fresh(),"created":1});
+        atomic(&record_path(name), &other.to_string()).unwrap();
+        select(name, &fresh());
+        let refused = |error: String| assert!(error.contains("no longer names"), "{error}");
+        refused(super::super::notifications::current(name).unwrap_err());
+        let input = json!({"request_id":fresh(),"expected_run_id":other["run_id"],
+            "expected_conversation_id":other["conversation_id"]});
+        refused(super::super::hook_health::session_report(name, &input).unwrap_err());
+        std::fs::remove_file(record_path(name)).unwrap();
+        refused(super::super::journal::inspection(name, 0, None, false).unwrap_err());
+    }
     #[test]
     fn only_a_lowercase_hyphenated_uuid_is_a_session_id() {
         assert!(canonical("3f2a9c1d-0b4e-4d6a-9c1d-2e3f4a5b6c7d"));

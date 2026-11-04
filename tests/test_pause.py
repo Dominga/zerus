@@ -1231,12 +1231,19 @@ class SessionIdentity(Harness):
         # The name runs another run while the record still carries the ID:
         # kill and both attach forms refuse before their first effect.
         take_name("another-run")
-        for args in (["kill"], ["a"], ["a", "--existing"]):
-            result = call(*args, "--session-id", session)
+        # R4: a supplied --run-id never stands in for the selected run, even
+        # when it names the run that now holds the name.
+        for args in (["kill"], ["a"], ["a", "--existing"], ["a", "--existing", "--run-id", "another-run"],
+                     ["a", "--existing", "--run-id", record["run_id"]]):
+            result = call(args[0], "--session-id", session, *args[1:])
             self.assertEqual(result.returncode, 1, (args, result.stdout, result.stderr))
             self.assertIn(refused, result.stderr, args)
             self.assertTrue(alive(name), args)
         give_back()
+        # The selected run holds the name, but the supplied run is another.
+        mismatch = call("a", "--session-id", session, "--existing", "--run-id", "another-run")
+        self.assertEqual(mismatch.returncode, 1, mismatch.stdout + mismatch.stderr)
+        self.assertIn("session run changed", mismatch.stderr)
         # The reviewer's race: kill waits for the state lock after resolution,
         # while another session takes the name, its terminal and its record.
         fd = os.open(state / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
@@ -1260,6 +1267,64 @@ class SessionIdentity(Harness):
         give_back()
         self.assertTrue(alive(name))
         self.assertEqual(self.binding(name)["session_id"], session)
+
+
+    # #1355 review R4: the notification reader reads the raw binding; after
+    # another session takes the name while it waits, it refuses, whatever
+    # identities the request carries, and persists nothing.
+    @unittest.skipUnless(sys.platform.startswith("linux"), "lock waiters are read from /proc/locks")
+    def test_the_notification_reader_checks_the_selected_id(self):
+        import fcntl
+        name = self.start()
+        session = self.binding(name)["session_id"]
+        state = self.root / "state"
+        path = state / (hashlib.sha256(name.encode()).hexdigest() + ".json")
+        original = path.read_text()
+        run, conversation = str(uuid.uuid4()), str(uuid.uuid4())
+        request = json.dumps(dict(run_id=run, conversation_id=conversation, muted=True, expected_revision=0))
+        fd = os.open(state / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            muting = subprocess.Popen([str(HGS), "notifications", "--session-id", session, "--json"], env=self.env,
+                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            muting.stdin.write(request)
+            muting.stdin.close()
+            inode = os.fstat(fd).st_ino
+            self.wait(lambda: any(line.split()[1] == "->" and f":{inode} " in line + " "
+                                  for line in Path("/proc/locks").read_text().splitlines()))
+            path.write_text(json.dumps(dict(json.loads(original), session_id=str(uuid.uuid4()),
+                                            run_id=run, conversation_id=conversation)) + "\n")
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        out, err = muting.stdout.read(), muting.stderr.read()
+        self.assertEqual(muting.wait(timeout=30), 1, out + err)
+        self.assertIn(f"Session ID {session} no longer names {name}", err)
+        self.assertNotIn("notification_preferences", json.loads(path.read_text()))
+        self.assertFalse(any((state / "notifications").glob("*")) if (state / "notifications").is_dir() else False)
+        path.write_text(original)
+
+
+    # #1355 review R4: an OpenCode session has no terminal record; its attach by
+    # ID reaches the OpenCode adapter, which checks its own binding and run.
+    def test_an_opencode_attach_by_id_reaches_its_adapter(self):
+        name, session = "opencode/p/native", str(uuid.uuid4())
+        bindings = self.root / "state" / "opencode" / "bindings"
+        bindings.mkdir(parents=True, exist_ok=True)
+        binding = dict(version=1, backend="opencode", agent="opencode", name=name, run_id=str(uuid.uuid4()),
+                       conversation_id="ses_" + uuid.uuid4().hex, session_id=session)
+        (bindings / (hashlib.sha256(name.encode()).hexdigest() + ".json")).write_text(json.dumps(binding))
+        def call(*args):
+            return subprocess.run([str(HGS), *args], env=self.env, capture_output=True, text=True, timeout=30)
+        result = call("a", "--session-id", session, "--existing")
+        self.assertNotIn("no saved binding", result.stderr)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        changed = call("a", "--session-id", session, "--existing", "--run-id", str(uuid.uuid4()))
+        self.assertEqual(changed.returncode, 1, changed.stdout + changed.stderr)
+        self.assertIn("session run changed", changed.stderr)
+        dry = call("--dry-run", "a", "--session-id", session, "--existing", "--run-id", binding["run_id"])
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertIn(f"would open the existing native OpenCode TUI for {name}", dry.stdout)
 
 
 class Lifecycle(Harness):

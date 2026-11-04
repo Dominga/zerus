@@ -837,6 +837,7 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
         value
     };
     if archive_id.is_none() && !record_path(name).exists() {
+        session_id::verify_absent(name)?;
         drop(_guard);
         return Ok(untracked(workspace::pane_cwds()));
     }

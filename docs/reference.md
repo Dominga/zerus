@@ -289,7 +289,9 @@ archived, must still carry the ID, so a name another session took meanwhile
 fails with "Session ID ID no longer names NAME" instead of acting on it. `kill`
 and `a` bind the terminal before their first effect: the name's immutable
 terminal session must run the run that the verified record carries, and they
-then act on that terminal session, never on the name.
+then act on that terminal session, never on the name. A `--run-id` given to
+`a --existing` must name that same run. An OpenCode session's attach goes to
+its own adapter, which checks its binding and run the same way.
 `hgs task` keeps its own `--session-id`, `notify` and `paste` stay the tray's
 and tmux's own entry points, and an agent's own flag after `--` is untouched.
 With `@host` the flag reaches a peer only once its `hgs --help` lists

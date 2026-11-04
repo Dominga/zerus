@@ -1591,12 +1591,8 @@ fn attach_command(config: &Config, args: &[String], client: &str, mut dry: bool)
     if run_id.is_some() && !existing {
         return Err(Error::new(1, "--run-id requires --existing"));
     }
-    // A selected session binds an existing attach to its verified run.
-    let selected_run;
-    if existing && run_id.is_none() && !dry {
-        selected_run = bound_terminal(session)?.map(|(_, run)| run);
-        run_id = selected_run.as_deref();
-    }
+    // OpenCode has no terminal record: its adapter checks its own binding,
+    // which carries the selected ID, and any supplied run.
     if state::opencode::exists(session) {
         return state::opencode::attach(session, run_id, dry).map_err(|error| Error::new(1, error));
     }
@@ -1611,6 +1607,14 @@ fn attach_command(config: &Config, args: &[String], client: &str, mut dry: bool)
         return Ok(0);
     }
     nested_guard(false, None)?;
+    // A selected session binds to its verified run before any client or attach
+    // effect, and a supplied --run-id must be that same run (#1355 review).
+    if let Some((id, run)) = bound_terminal(session)? {
+        if run_id.is_some_and(|expected| expected != run) {
+            return Err(Error::new(1, crate::state::backend::RUN_CHANGED));
+        }
+        return attach_target(config, session, client, Target::Session(&id), Some(&run));
+    }
     // Resolve exact name to an immutable tmux session ID before checking the run.
     // If it disappears later, attach fails instead of creating or selecting a new one.
     const ENDED: &str = "session is no longer running; resume it explicitly";

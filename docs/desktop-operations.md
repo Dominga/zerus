@@ -179,15 +179,20 @@ resolves it, as does a cancellation before its call was dispatched or, for a
 start or compaction, the session seen ready for the send. An uncertain outcome
 keeps it. Once its call is dispatched, a Cancel send, an interruption or a time
 limit keeps it too, and the call's own late answer then decides: a definite one
-resolves it, an uncertain one keeps it. While it is held, the composer stays
-uncertain, with a notice that delivery is not confirmed (or, after a reload of
-a draft saved while sending, that it was interrupted), and refuses a new Send,
-a start or compaction, and a Retry of a failed message. A reload of a draft
-that holds one, including a draft saved while a start or compaction waited,
-loads it in that state. Only the user's explicit Allow retry ends a held
-identity; the next attempt then reserves its own before its call. Rename,
-recover and import treat a draft that holds one as occupied, even without text
-or files, and never overwrite it.
+resolves it, an uncertain one keeps it. Only calls still in flight are tracked
+for that late answer, at most 32; past that the oldest goes, and its draft
+keeps the identity until Allow retry, which also retires its draft's tracking.
+While it is held, the composer stays uncertain, with a notice that delivery is
+not confirmed (or, after a reload of a draft saved while sending, that it was
+interrupted), and refuses a new Send, a start or compaction, and a Retry of a
+failed message. A reload of a draft that holds one, including a draft saved
+while a start or compaction waited, loads it in that state. History settles a
+held identity only when it shows that identity's own send delivered, by its
+request id; an older message with the same text never settles a newer identity,
+and a draft holding none keeps the text match. Otherwise only the user's
+explicit Allow retry ends a held identity; the next attempt then reserves its
+own before its call. Rename, recover and import treat a draft that holds one as
+occupied, even without text or files, and never overwrite it.
 
 This fail-closed rule changes behaviour in rare cases. After a quit or crash
 while a start or compaction ran, and after a Cancel send or time limit while

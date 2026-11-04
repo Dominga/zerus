@@ -892,10 +892,35 @@ pub(crate) enum Call {
     /// Not asked for: an end resolves its identity, nothing ran.
     #[default]
     NotCalled,
-    /// Asked for, with no definite outcome yet (or an uncertain one).
+    /// Asked for and not answered yet: physically in flight.
     Running,
+    /// Answered uncertainly: it may have run, and no later answer comes.
+    Unresolved,
     /// A definite outcome: the call ran, or was refused before it ran.
     Settled,
+}
+
+/// The most continuation calls tracked as ended while in flight. Past it the
+/// oldest goes: its late answer then resolves nothing, and its draft keeps
+/// the identity until the user allows a retry (zerus-5wmh.66.4.4).
+pub(crate) const ORPHANS: usize = 32;
+
+/// A start or compaction call whose continuation ended while it was still
+/// in flight: its late answer decides the identity its draft holds.
+#[derive(Clone, Debug)]
+pub(crate) struct Orphan {
+    pub(crate) request: String,
+    pub(crate) key: String,
+    /// The notice its end showed, shown again if a definite answer resolves it.
+    pub(crate) notice: String,
+}
+
+/// Tracks `orphan`, the oldest going past [`ORPHANS`].
+pub(crate) fn track_orphan(orphans: &mut VecDeque<Orphan>, orphan: Orphan) {
+    while orphans.len() >= ORPHANS {
+        orphans.pop_front();
+    }
+    orphans.push_back(orphan);
 }
 
 /// One delivery: what is sent, to which run, with which consent.
@@ -1736,6 +1761,14 @@ impl Composers {
                 !c.sending
                     && c.draft.attachments.is_empty()
                     && reconciled.delivered.contains(&c.draft.text)
+                    // Text alone never settles a held identity: only its
+                    // own send's row, shown delivered, proves it
+                    // (zerus-5wmh.66.4.4). A draft holding none keeps the
+                    // text match.
+                    && c.checkpoint.as_ref().is_none_or(|held| {
+                        held.kind == Kind::Send
+                            && reconciled.delivered_ids.contains(&held.request_id)
+                    })
             });
             (key, reconciled.removed > 0, clear)
         };
@@ -2624,10 +2657,14 @@ impl Composers {
                 let mut hub = me.lock();
                 let definite = !matches!(outcome, Outcome::Uncertain { .. });
                 let live = match pending_mut(&mut hub, &owned, start, revision) {
+                    // Answered: never in flight again, before any handler
+                    // can end the continuation.
                     Some(pending) => {
-                        if definite {
-                            pending.call = Call::Settled;
-                        }
+                        pending.call = if definite {
+                            Call::Settled
+                        } else {
+                            Call::Unresolved
+                        };
                         true
                     }
                     None => {
@@ -2776,7 +2813,10 @@ impl Composers {
     /// its end as a plain error again. An uncertain one leaves it held until
     /// the user allows a retry.
     fn settle_orphan(&self, hub: &mut Hub, request: &str, definite: bool) {
-        let Some((key, notice)) = hub.orphans.remove(request) else {
+        let Some(at) = hub.orphans.iter().position(|o| o.request == request) else {
+            return;
+        };
+        let Some(Orphan { key, notice, .. }) = hub.orphans.remove(at) else {
             return;
         };
         if !definite {
@@ -2810,14 +2850,19 @@ impl Composers {
             };
             // Its start or compaction was asked for and has no definite
             // outcome: it may have run. The draft keeps that call's identity
-            // and stays uncertain; only its own late definite outcome, or the
-            // user's Allow retry, ends it (zerus-5wmh.66.4.4). One lock, so
-            // the call's answer sees either the continuation or all of this.
-            if pending.call == Call::Running {
-                hub.orphans.insert(
-                    pending.request_id.clone(),
-                    (key.to_owned(), text.to_owned()),
-                );
+            // and stays uncertain until the user allows a retry
+            // (zerus-5wmh.66.4.4). A call still in flight is tracked, in the
+            // same lock, so its own late definite answer can resolve it; one
+            // that answered uncertainly has no later answer to wait for.
+            if matches!(pending.call, Call::Running | Call::Unresolved) {
+                if pending.call == Call::Running {
+                    let orphan = Orphan {
+                        request: pending.request_id.clone(),
+                        key: key.to_owned(),
+                        notice: text.to_owned(),
+                    };
+                    track_orphan(&mut hub.orphans, orphan);
+                }
                 let detail = local_messages::uncertain_detail(text);
                 let end = End {
                     ok: false,
@@ -6789,6 +6834,345 @@ mod continuations {
         );
     }
 
+    /// review-n's #1316 R2 probe (zerus-5wmh.66.4.4).
+    #[test]
+    fn completed_uncertain_calls_do_not_accumulate_dead_orphans() {
+        let mut remaining = Vec::new();
+        for start in [false, true] {
+            let root = dir(if start {
+                "probe-r2-resume-orphans"
+            } else {
+                "probe-r2-compact-orphans"
+            });
+            let store = drafts(&root);
+            let (c, fake) = send_hub_on(&store);
+            if start {
+                stopped(&fake);
+            }
+            *lock(&fake.outcome) = Box::new(|_, _| Outcome::Uncertain {
+                detail: "reply lost, call ended".into(),
+            });
+            let mut details = if start { ready() } else { cold() };
+            if start {
+                details["runtime_state"] = json!("stopped");
+                details["process_state"] = json!("exited");
+            }
+            opened(&c, details);
+            for n in 0..8 {
+                let view = c.current().unwrap();
+                let ask = c.send_message(
+                    view.handle,
+                    view.rev + 1,
+                    view.text_epoch,
+                    "kept".into(),
+                    0,
+                    0,
+                );
+                let token = match ask {
+                    SendReply::Start { token, .. } | SendReply::Cold { token, .. } => token,
+                    x => panic!("{x:?}"),
+                };
+                let answer = if start {
+                    Answer::Start {
+                        choice: StartChoice::Resume,
+                    }
+                } else {
+                    Answer::Cold {
+                        action: ColdAction::Compact,
+                    }
+                };
+                assert_eq!(c.answer(token, answer), SendReply::Sending);
+                let view = until(&c, |v| v.uncertain && v.waiting.is_none());
+                store.flush();
+                assert_eq!(lock(&fake.calls).len(), n + 1);
+                c.allow_retry(view.handle);
+                store.flush();
+                assert!(on_disk(&root).is_none());
+            }
+            let count = c.lock().orphans.len();
+            eprintln!(
+                "start={start}: completed_calls={} retained_orphans={count}",
+                lock(&fake.calls).len()
+            );
+            remaining.push(count);
+        }
+        assert_eq!(
+            remaining,
+            vec![0, 0],
+            "a completed uncertain callback has no late callback to remove an orphan"
+        );
+    }
+
+    /// review-n's #1316 R2 probe (zerus-5wmh.66.4.4).
+    #[test]
+    fn an_old_definite_orphan_reply_never_clears_a_newer_identity() {
+        let root = dir("probe-r2-orphan-newer");
+        let store = drafts(&root);
+        let (c, fake) = send_hub_on(&store);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        *lock(&fake.outcome) = Box::new(move |action, _| match action {
+            Action::CompactContext => {
+                entered_tx.send(()).unwrap();
+                lock(&release_rx)
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                Outcome::Done {
+                    receipt: json!({"request_id":"old-compact", "status":"submitted"}),
+                    cleanup: None,
+                }
+            }
+            Action::Send { .. } => Outcome::Uncertain {
+                detail: "new send uncertain".into(),
+            },
+            _ => panic!("unexpected action"),
+        });
+        let view = opened(&c, cold());
+        let SendReply::Cold { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "old draft".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Cold {
+                action: ColdAction::Compact,
+            },
+        );
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let old = on_disk(&root).unwrap();
+        c.cancel_send(view.handle);
+        until(&c, |v| v.uncertain && v.waiting.is_none());
+        c.allow_retry(view.handle);
+        c.observe(&state(ready()));
+        let view = c.current().unwrap();
+        assert_eq!(
+            c.send_message(
+                view.handle,
+                view.rev + 1,
+                view.text_epoch,
+                "new draft".into(),
+                0,
+                0
+            ),
+            SendReply::Sending
+        );
+        eventually(|| {
+            let hub = c.lock();
+            let composer = &hub.composers[KEY];
+            composer.sending && !composer.saving
+        });
+        store.flush();
+        let newer = on_disk(&root).unwrap();
+        assert_ne!(old.request_id, newer.request_id);
+        release_tx.send(()).unwrap();
+        until(&c, |v| !v.sending && v.uncertain);
+        store.flush();
+        assert_eq!(on_disk(&root).as_ref(), Some(&newer));
+        assert!(c.lock().orphans.is_empty());
+        assert_eq!(lock(&fake.calls).len(), 2);
+    }
+
+    /// Only calls still in flight are tracked, and never more than
+    /// [`ORPHANS`]: the oldest goes first (zerus-5wmh.66.4.4).
+    #[test]
+    fn the_calls_ended_in_flight_are_tracked_within_a_bound() {
+        let mut orphans = VecDeque::new();
+        for n in 0..ORPHANS + 5 {
+            let orphan = Orphan {
+                request: format!("call-{n}"),
+                key: KEY.into(),
+                notice: String::new(),
+            };
+            track_orphan(&mut orphans, orphan);
+        }
+        assert_eq!(orphans.len(), ORPHANS);
+        assert_eq!(orphans.front().map(|o| o.request.as_str()), Some("call-5"));
+        assert_eq!(
+            orphans.back().map(|o| o.request.clone()),
+            Some(format!("call-{}", ORPHANS + 4))
+        );
+    }
+
+    /// Allow retry ends the held identity and retires the tracking of its
+    /// call still in flight; that call's late answer then changes nothing
+    /// (zerus-5wmh.66.4.4).
+    #[test]
+    fn allow_retry_retires_a_call_still_in_flight() {
+        let root = dir("checkpoint-orphan-allow-retry");
+        let store = drafts(&root);
+        let (c, fake) = send_hub_on(&store);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = Mutex::new(release_rx);
+        *lock(&fake.outcome) = Box::new(move |action, id| match action {
+            Action::CompactContext => {
+                entered_tx.send(()).unwrap();
+                lock(&release_rx)
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                Outcome::Done {
+                    receipt: json!({"status": "submitted", "request_id": "cmp-1"}),
+                    cleanup: None,
+                }
+            }
+            _ => receipt(action, id),
+        });
+        let view = opened(&c, cold());
+        let SendReply::Cold { token, .. } =
+            c.send_message(view.handle, 1, view.text_epoch, "pending".into(), 0, 0)
+        else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Cold {
+                action: ColdAction::Compact,
+            },
+        );
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        c.cancel_send(view.handle);
+        let view = until(&c, |v| v.waiting.is_none() && v.uncertain);
+        assert_eq!(c.lock().orphans.len(), 1, "tracked while in flight");
+        c.allow_retry(view.handle);
+        assert!(c.lock().orphans.is_empty(), "retired with its identity");
+        eventually(|| on_disk(&root).is_none());
+        release_tx.send(()).unwrap();
+        eventually(|| lock(&fake.calls).len() == 1);
+        c.flush();
+        let view = c.current().unwrap();
+        assert!(!view.uncertain && view.status.is_empty(), "nothing changed");
+        assert!(on_disk(&root).is_none());
+    }
+
+    /// review-n's #1316 R2 probe (zerus-5wmh.66.4.4).
+    #[test]
+    fn old_message_history_never_resolves_a_newer_compact_identity() {
+        let root = dir("probe-r2-history-identity");
+        let store = drafts(&root);
+        let (c, fake) = send_hub_on(&store);
+        *lock(&fake.outcome) = Box::new(|_, _| Outcome::Uncertain {
+            detail: "reply lost".into(),
+        });
+        let view = opened(&c, ready());
+        assert_eq!(
+            c.send_message(view.handle, 1, view.text_epoch, "same draft".into(), 0, 0),
+            SendReply::Sending
+        );
+        let view = until(&c, |v| !v.sending && v.uncertain);
+        let old = on_disk(&root).unwrap();
+        assert_eq!(view.local.len(), 1);
+        c.allow_retry(view.handle);
+        c.observe(&state(cold()));
+        let view = c.current().unwrap();
+        let SendReply::Cold { token, .. } = c.send_message(
+            view.handle,
+            view.rev + 1,
+            view.text_epoch,
+            "same draft".into(),
+            0,
+            0,
+        ) else {
+            panic!()
+        };
+        assert_eq!(
+            c.answer(
+                token,
+                Answer::Cold {
+                    action: ColdAction::Compact
+                }
+            ),
+            SendReply::Sending
+        );
+        until(&c, |v| v.uncertain && v.waiting.is_none());
+        store.flush();
+        let newer = on_disk(&root).unwrap();
+        assert_eq!(newer.kind, Kind::CompactToSend);
+        assert_ne!(old.request_id, newer.request_id);
+        let mut late = state(cold());
+        late.activity.push(ActivityOut {
+            computer: ComputerId::from("studio"), key: "run:run-1".into(), kind: "events".into(),
+            payload: json!({"events":[{"type":"UserPromptSubmit","detail":"same draft","at":*lock(&fake.now)}]}),
+        });
+        c.observe(&late);
+        store.flush();
+        let view = c.current().unwrap();
+        eprintln!(
+            "old input event vs compact: uncertain={} text={:?} checkpoint_kept={}",
+            view.uncertain,
+            view.text,
+            on_disk(&root).as_ref() == Some(&newer)
+        );
+        assert_eq!(
+            on_disk(&root).as_ref(),
+            Some(&newer),
+            "an old message event does not settle a newer compaction's receipt"
+        );
+        assert!(view.uncertain && view.text == "same draft");
+    }
+
+    /// History settles a held identity only through its own send's row: an
+    /// uncertain send shown delivered clears its draft and identity, and a
+    /// draft holding none keeps the text match (zerus-5wmh.66.4.4).
+    #[test]
+    fn history_settles_a_held_send_only_through_its_own_row() {
+        let root = dir("checkpoint-history-own");
+        let store = drafts(&root);
+        let (c, fake) = send_hub_on(&store);
+        let shown = |text: &str, at: f64| {
+            let mut batch = state(ready());
+            batch.activity.push(ActivityOut {
+                computer: ComputerId::from("studio"),
+                key: "run:run-1".into(),
+                kind: "events".into(),
+                payload: json!({"events": [{"type": "UserPromptSubmit", "detail": text, "at": at}]}),
+            });
+            batch
+        };
+        *lock(&fake.outcome) = Box::new(|_, _| Outcome::Uncertain {
+            detail: "reply lost".into(),
+        });
+        let view = opened(&c, ready());
+        assert_eq!(
+            c.send_message(view.handle, 1, view.text_epoch, "maybe sent".into(), 0, 0),
+            SendReply::Sending
+        );
+        let view = until(&c, |v| !v.sending && v.uncertain);
+        store.flush();
+        let held = on_disk(&root).expect("held");
+        assert_eq!(view.local[0].id, held.request_id, "its row carries its id");
+        let now = *lock(&fake.now);
+        c.observe(&shown("maybe sent", now));
+        let view = until(&c, |v| v.local.is_empty() && !v.uncertain);
+        assert!(view.text.is_empty(), "its own row proved it delivered");
+        eventually(|| on_disk(&root).is_none());
+        // A definite failure holds no identity: its text alone clears it.
+        *lock(&fake.outcome) = Box::new(|_, _| Outcome::Failed {
+            detail: "refused".into(),
+        });
+        assert_eq!(
+            c.send_message(
+                view.handle,
+                view.rev + 1,
+                view.text_epoch,
+                "plain".into(),
+                0,
+                0
+            ),
+            SendReply::Sending
+        );
+        until(&c, |v| !v.sending && v.status_error && v.local.len() == 1);
+        assert!(c.lock().composers[KEY].checkpoint.is_none());
+        c.observe(&shown("plain", now));
+        let view = until(&c, |v| v.local.is_empty());
+        assert!(view.text.is_empty());
+    }
+
     fn sent_ids(fake: &Fake) -> Vec<String> {
         lock(&fake.calls)
             .iter()
@@ -8160,6 +8544,10 @@ mod continuations {
         assert!(view.status_error && view.uncertain && view.text == "maybe");
         let held = c.lock().composers[KEY].checkpoint.clone().expect("held");
         assert_eq!(held.kind, Kind::ResumeToSend);
+        assert!(
+            c.lock().orphans.is_empty(),
+            "a call that answered is not in flight"
+        );
         eventually(|| on_disk(&root).as_ref() == Some(&held));
         assert_eq!(
             c.send_message(view.handle, 2, view.text_epoch, "maybe".into(), 0, 0),

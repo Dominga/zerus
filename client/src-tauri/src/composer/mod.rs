@@ -566,11 +566,11 @@ pub(crate) struct Hub {
     pub(crate) start: Option<(send::Pending, StartSend)>,
     /// Compact-to-send, by draft key (Qt's `m_compacts`).
     pub(crate) compacts: HashMap<String, (send::Pending, CompactSend)>,
-    /// The start or compaction calls whose continuation ended while they ran,
-    /// by request id: their draft key and the notice their end showed. Each
-    /// call's late outcome removes its entry and decides its held identity
-    /// (zerus-5wmh.66.4.4).
-    pub(crate) orphans: HashMap<String, (String, String)>,
+    /// The start or compaction calls whose continuation ended while they
+    /// were in flight, oldest first, at most [`send::ORPHANS`]. Each call's
+    /// late answer removes its entry and decides its held identity; Allow
+    /// retry retires its draft's entries (zerus-5wmh.66.4.4).
+    pub(crate) orphans: VecDeque<send::Orphan>,
     /// When the continuations were last polled (every 2.5 s).
     pub(crate) last_poll: f64,
     /// The draft key whose context reset runs: one at a time across all
@@ -1322,6 +1322,9 @@ impl Composers {
         composer.notice.clear();
         composer.checkpoint = None;
         self.save(composer);
+        // Its late answers resolve nothing now: their tracking goes.
+        let key = composer.key.clone();
+        hub.orphans.retain(|orphan| orphan.key != key);
         drop(hub);
         self.changed();
     }

@@ -907,6 +907,34 @@ mod tests {
         );
     }
 
+    /// review-n's #1316 R2 probe (zerus-5wmh.66.4.4).
+    #[test]
+    fn a_recovery_callback_never_installs_over_a_held_memory_identity() {
+        let root = dir("probe-r2-recovered-memory");
+        let store = Arc::new(DraftStore::open(root.join("drafts")));
+        let (c, _) = crate::composer::tests::hub_on(&store);
+        c.open(Some(session()));
+        until(&c, |v| v.loaded);
+        let held = crate::composer::tests::held_checkpoint();
+        {
+            let mut hub = c.lock();
+            let composer = hub.composers.get_mut(KEY).unwrap();
+            composer.checkpoint = Some(held.clone());
+            composer.uncertain = true;
+        }
+        let mut copy = Loaded::default();
+        copy.draft.draft.text = "recovered elsewhere".into();
+        // Model the writer result after an identity appeared in memory during recovery.
+        c.recovered(KEY, copy);
+        let hub = c.lock();
+        let composer = &hub.composers[KEY];
+        assert_eq!(composer.checkpoint.as_ref(), Some(&held));
+        assert!(
+            composer.draft.text.is_empty() && composer.uncertain,
+            "the callback must not install or normalize a held draft"
+        );
+    }
+
     #[test]
     fn a_restore_keeps_the_open_draft_s_unresolved_identity() {
         let root = dir("restore-held");

@@ -130,11 +130,22 @@ The owner's answers to questions 1 and 3 and the coordinator's decision on quest
   Most sessions never move, and older builds keep reading them.
 - **The ID layout.** A session created, renamed, restored or forked onto a label that another live or saved session holds is stored at `sessions/<session_id>.json`. Its provider binding goes to `dsh/sessions/` or `opencode/sessions/`. It stays there for life and never moves back, even after its label becomes free.
 - **The label index.** `labels/<sha256(label)>.json` (`{version, label, ids}`) lists the sessions stored by ID under a label.
-  - Like `ids/`, it is a verified cache. Every entry is checked against its record: the same session ID and label, no archive and no rename shadow.
-  - A miss or a stale entry falls back to one scan of `sessions/`, which stays small because only sessions with a reused label live there.
-  - Writers change it under the state writer lock; readers never take that lock.
+  - It is always a superset (#1430 review). A writer adds a session's entry before its record takes the label: it is created there, renamed to it, or restored to it. The writer removes the entry only after the record has left the label, by a rename, an archive or a forget. A crash or a concurrent lock-free reader can therefore only see an extra entry, never miss one, so `hgs LABEL` never opens the first holder while another session shares its label.
+  - Every entry is checked against its record: the same session ID and label, no archive and no rename shadow. A stale entry, such as one a crash left, is dropped by that check and removed by the next writer. A scan of `sessions/`, which stays small because only sessions with a reused label live there, rebuilds an index that is missing or unreadable.
+  - Writers change it under the state writer lock; readers never take that lock. Tests cover a crash between each pair of writes.
   - `ids/<session_id>.json` (P2a) gains a record kind for the ID layout, so `--session-id` and hooks reach such a session in O(1).
 - **One resolver.** A label's candidates are its legacy holder plus the index's sessions. Every reader that resolves a label goes through this resolver, including `records()`, which also lists `sessions/`.
+- **The rollback-floor guard.** A session in the ID layout never writes a `name_routes` entry, a legacy rename shadow or any other file at a label's path, and `mirror_legacy`, `sync_legacy_locked` and `remove_legacy` skip it. A rename of such a session rewrites only its own `sessions/<id>.json` and the label index; its terminal follows by `$N`. Renaming it away from a label whose first holder remains leaves that holder byte-identical.
+- **Readers outside `records()`.** P3a also moves these readers, which scan the binding directories or resolve a label themselves (#1430 review):
+  - the binding scanners:
+    - `worktree_cleanup::bindings()`, a deletion path, so that an ID-layout session counts as using its checkout;
+    - `task_bindings_in`, behind task routing;
+    - the search index's catalog and queue scanners, and its record path `sha256(identity.name)` through `name_routes`;
+    - `voice.rs`, which reads the DeepSeek and OpenCode bindings;
+    - `watch/stamps.rs` `FOLDERS`, which gains `sessions/`, `dsh/sessions/` and `opencode/sessions/` so `hgs watch` notices their changes;
+  - the `record_path(name)` callers that resolve a label without the resolver: `read_marks::current` (`hgs read`), `notifications`, `effort`, `terminate`, `untracked_shell`, `session_action`, `recovery`, `journal`, `watch_source`, `attempts`, `lifecycle`, `session_project`, `archive` and `desktop/maintenance/io.rs`.
+
+  A P3a test enumerates the binding-directory scanners: it searches the source for reads of the binding directories and fails on any that does not also cover the ID layout, so a new scanner cannot miss it.
 - **Other files keyed by the label.** For a session in the ID layout, every other file keyed by `sha256(name)` is keyed by the session ID: recovery jobs, the native-input lock and DeepSeek fork intents, and the hash that `hook_health`, `task_reconcile`, `session_graph`, `session_project` and `launch_observation` recompute. Sessions at the legacy path keep their files.
 - **Journals.** A reused label always belongs to a new session, which has its own `session:<session_id>` journal since P2b. Journals named by a label before P2b stay with their own session.
 
@@ -152,6 +163,7 @@ The owner's answers to questions 1 and 3 and the coordinator's decision on quest
   - no candidate: not found, or for a launch, a new session;
   - one candidate: that session;
   - several: the expected IDs select. The `--expected-run-id` and `--expected-conversation-id` flags and the JSON `expected_run_id` and `expected_conversation_id` fields keep the candidates whose run, and conversation if given, match. Exactly one left is that session; none left is each command's stale-target refusal, as today; several left is the ambiguity report (exit 5).
+- **`hgs read` and other guards with other field names.** Read marks are delivered as `hgs read NAME` with `run_id` and `conversation_id` in its JSON (#1430 review). P3c selects with those guards too, and with `--session-id` where the computer supports it. Without that, an ID-layout session would get exit 5 forever: the desktop would show it read while its host never does, #1421's failure mode. P3c names every command whose guards use other field names. Read delivery selecting this way is a P3e precondition.
 - **Older clients.** The desktop, Android, iOS and the connector send expected IDs with every write. Their builds from before `--session-id` therefore still reach the right one of several sessions. A command sent by bare label without expected IDs, such as pause or kill from an older desktop, fails closed with exit 5.
 - **Other selectors.** `--session-id` and references select as in P1. `--all` commands go through records, not labels.
 - **Listings.** `hgs ls --json` merges live, saved and archived data by session ID instead of label, so a saved session is hidden only when the same session is live. Watch rows keep their `run:` keys.
@@ -162,7 +174,7 @@ The owner's answers to questions 1 and 3 and the coordinator's decision on quest
   - every machine of its swarm catalog and every configured peer lists a new `session-labels-v1` line in `hgs --help`;
   - its mobile gateway connector reports the same.
 
-  Answers are cached like `session-id-selector-v1` (10 minutes). An unknown or unreachable computer keeps the gate closed.
+  Answers are cached like `session-id-selector-v1` (10 minutes). Any member's hello, or a change in a member's reported version, drops the cached answer at once, so a computer or connector that downgrades closes the gate at its next sync rather than after 10 minutes. An unknown or unreachable computer keeps the gate closed, and so does a machine that left the swarm but is still in its catalog, until it is removed from the catalog.
 - **A transition only** (coordinator, 2026-11-05). The gate exists only while a swarm is being upgraded. Nobody turns it on or off: it opens by itself on each computer once every computer it addresses is upgraded, and from then on the owner's rule holds in full.
 - **While it is closed,** P3 behaves as P2, and nothing refuses that did not refuse before:
   - a new or forked session that would reuse a label in use takes the next free `-2`, `-3`… suffix, exactly as a P2 fork does;
@@ -170,6 +182,10 @@ The owner's answers to questions 1 and 3 and the coordinator's decision on quest
   - rename, restore and `hgs NAME --new` refuse a label in use, as they do today.
 - **The connector's marker** (coordinator, 2026-11-05). The gateway connector advertises `session-labels-v1` only once it resolves sessions and project membership by session ID, reading the catalog's ID twins. Otherwise the phone would merge sessions that share a label into one project. This is part of the connector work that adds the marker, a prerequisite of P3d and P3f, so the gate cannot open while the phone would merge them (`zerus-v8tzi`).
 - **Session emission.** `hgs reference`, `hgs self` and sender envelopes add the optional `session` field (the session ID) only while the gate is open, because a parser older than P1c-1 rejects unknown fields.
+
+### The Qt GUI
+
+The Qt GUI (`tray/src`) is part of neither the gate nor P3f. It addresses sessions by name through the CLI. With labels that repeat, a command it sends for a shared label fails with exit 5, and it shows that error: never another session. This is accepted, because the Qt GUI is the rollback GUI (coordinator, 2026-11-05).
 
 ### P3 checklist
 
@@ -188,9 +204,9 @@ The rollback floor for labels that repeat is P3a (coordinator, 2026-11-05). P3a 
 
 | Step | After a rollback of a computer, older builds see | What breaks |
 | --- | --- | --- |
-| P3a–P3c | Nothing new on disk except `terminal_name` and index entries, which they ignore. Every label is still unique and at its legacy path. | Nothing. A build older than P3b that rewrites a record drops `terminal_name`, which then equals the label anyway. |
+| P3a–P3c | Nothing new on disk except `terminal_name` and index entries, which they ignore. Every label is still unique and at its legacy path. | A terminal name can already differ from its label in P3b: it is `label~<id8>` when another terminal, such as an untracked one, holds the label. A build below P3b then finds no pane for that session (v0.47.0's `matches` needs the pane and its run marker) and shows it as not live. It never acts on the other terminal, but its `hgs LABEL` attaches to that terminal. A build below P3b that rewrites the record drops `terminal_name`. |
 | P3d | References with `session` | A build older than P1c-1 cannot parse them. It also lacks the marker, so the gate stays closed until it is updated, and closes again on a rollback. |
-| P3e, labels in use more than once, rolled back below P3a | Only the legacy holder of each label. Sessions in the ID layout are invisible to older builds but never deleted: they are not listed as saved, and a live one shows as an untracked terminal `label~<id>`. | Hooks of a session in the ID layout update nothing: v0.47.0's `read_run` takes the label's record only when its run matches, then scans only `sha256` paths. Such a session cannot be resumed until the computer moves forward again. Nothing is deleted, because no older build writes `sessions/` or `labels/`. To use such a session on the older build, archive it first: archives are keyed by ID, and the older build restores it under a free label. P3e states both rules in `docs/reference.md`. |
+| P3e, labels in use more than once, rolled back below P3a | Only the legacy holder of each label. Sessions in the ID layout are invisible to older builds but never deleted: they are not listed as saved, and a live one shows as an untracked terminal `label~<id>`. | Hooks of a session in the ID layout update nothing: v0.47.0's `read_run` takes the label's record only when its run matches, then scans only `sha256` paths. Such a session cannot be resumed until the computer moves forward again. Nothing is deleted, because no older build writes `sessions/` or `labels/`. To use such a session on the older build, archive it first: archives are keyed by ID, and the older build restores it under a free label. The older build's worktree maintenance scans only the four binding directories, so the checkout of an ID-layout session looks unowned to it. P3e therefore locks such a checkout with `git worktree lock --reason zerus:<session_id>` while the session is live or saved, and unlocks it when the session is archived or forgotten. v0.47.0's review reports a locked worktree as blocked ("Locked by Git"), and its automatic removal refuses blocked rows (`worktree_cleanup.rs`: `assess` and `remove_command`). This build treats its own `zerus:` lock as the session's use, and unlocks before a removal the person confirmed. P3e states these rules in `docs/reference.md`. |
 | P3e, other computers | — | A peer or desktop on an older build that names a label held by several sessions gets exit 5 when it sends no expected IDs: a refusal, never another session. |
 | P3f | Older desktops and phones list every session; rows sharing a label are told apart only by folder and time. | Their actions without expected IDs refuse with exit 5. |
 
@@ -201,16 +217,21 @@ The rollback floor for labels that repeat is P3a (coordinator, 2026-11-05). P3a 
    - `ids/` entries for the ID layout, and `records()` over `sessions/`.
    - Files keyed by session ID for that layout.
    - Hooks and the `read_run` callers by session ID; the deferred-send check.
+   - The readers outside `records()` listed under storage, and the test that enumerates binding-directory scanners.
+   - The rollback-floor guard: no routes, shadows, mirrors or removals at label paths for ID-layout sessions; renames in place; the label index kept a superset, with crash-window tests.
    - The ambiguity report wired in, still unreachable.
 2. **P3b, terminal names.** `terminal_name` on new records, every tmux and host target through it, and the Windows host registry by terminal name. While labels are unique, every terminal name equals its label.
-3. **P3c, selection.** The expected IDs select among candidates, `hgs ls --json` merges by session ID, and `--all` iterates records.
+3. **P3c, selection.** The expected IDs select among candidates, including `hgs read`'s `run_id`/`conversation_id` guards and every other command whose guards use other field names, and `--session-id` where the computer supports it. `hgs ls --json` merges by session ID, and `--all` iterates records.
 4. **P3d, the fleet gate and emission.** The `session-labels-v1` marker in the CLI, the gate with its cache, and the `session` field in references, `hgs self` and sender envelopes behind it. The gateway connector adds its own marker only with its work to resolve sessions and project membership by ID, which is a prerequisite of opening the gate and of P3f.
 5. **P3e, labels that repeat (CLI).** With the gate open:
    - launch `--new`, rename, restore and fork write the ID layout when the label is in use;
    - `hgs NAME` reports ambiguity;
    - fork takes the entered name, and the `-2` search goes;
    - DeepSeek and OpenCode follow;
-   - `docs/reference.md` states the rollback rules: sessions in the ID layout are invisible to older builds but never deleted, and to use one on an older build, archive it first.
+   - the checkout of an ID-layout session is locked with `git worktree lock --reason zerus:<session_id>` while the session is live or saved, so worktree maintenance below P3a never removes it;
+   - `docs/reference.md` states the rollback rules: sessions in the ID layout are invisible to older builds but never deleted; to use one on an older build, archive it first; and its checkout stays locked until it is archived or forgotten.
+
+   Preconditions: read delivery selects among sessions that share a label (P3c), and P3a is installed on every computer.
 
    With the gate closed, it behaves as P2, with the `-2` suffix and its hint for new sessions and forks.
 6. **P3f, desktop and phone.**

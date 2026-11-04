@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 import uuid
+from desktop_activation_review import ReviewControls
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("mac_desktop_installer", ROOT / "scripts/install-macos-desktop-service.py")
@@ -56,6 +57,8 @@ class Commands:
         self.before_hold = None
         self.after_revoke_check = None
         self.after_action = None
+        self.consumer = {"machine": str(uuid.uuid4()), "boot": str(uuid.uuid4()),
+                         "pid": os.getpid(), "birth": "fixture-native-birth"}
         self.during_probe = None
         self.release_failure = False
         self.hold_marker = True
@@ -114,7 +117,8 @@ class Commands:
                     callback, self.after_revoke_check = self.after_revoke_check, None
                     callback()
                 code = 1 if self.refuse_caller else 0
-                output = json.dumps({"schema": 1, "configuration": self.config, "admitted": True, "source": "interactive_terminal"})
+                output = json.dumps({"schema": 1, "configuration": self.config, "admitted": True,
+                                     "source": "interactive_terminal", "consumer": self.consumer})
             else:
                 value = copy.deepcopy(self.plan)
                 if argv[-1] == "--background":
@@ -174,7 +178,7 @@ class Commands:
         return [argv for argv, _ in self.calls if argv[0] == "launchctl" and argv[1] != "print"]
 
 
-class MacDesktopService(unittest.TestCase):
+class MacDesktopService(ReviewControls, unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="zerus-mac-desktop-")
         self.addCleanup(temporary.cleanup)

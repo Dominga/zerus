@@ -384,6 +384,7 @@ finally:
 #include <stdio.h>
 int main(int argc, char **argv) {
     if (argc != 2) return 90;
+    fprintf(stderr, "MODE_CALLER_CONSUMER=%ld\n", (long)getpid());
     pid_t child = fork();
     if (child < 0) return 91;
     if (child == 0) {
@@ -420,7 +421,7 @@ try:
   env.pop('HGS_SESSION',None);env.pop('HGS_RUN_ID',None)
  child=subprocess.run([sys.argv[3],'desktop','registration','mode-check','--json'],env=env,
                       stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=5)
- print(json.dumps(dict(code=child.returncode,out=child.stdout.decode(),error=child.stderr.decode())))
+ print(json.dumps(dict(code=child.returncode,out=child.stdout.decode(),error=child.stderr.decode(),consumer_pid=os.getpid())))
 finally:
  if tty is not None: os.close(tty)
 '''
@@ -474,9 +475,20 @@ finally:
         foreground = case(sys.executable, terminal=True)
         self.assertEqual(foreground['code'], 0, foreground)
         self.assertEqual(json.loads(foreground['out'])['source'], 'interactive_terminal')
+        foreground_consumer = json.loads(foreground['out'])['consumer']
+        self.assertEqual(foreground_consumer['pid'], foreground['consumer_pid'])
         gui = case(frontend, native=True)
         self.assertEqual(gui['code'], 0, gui)
         self.assertEqual(json.loads(gui['out'])['source'], 'installed_frontend')
+        gui_consumer = json.loads(gui['out'])['consumer']
+        self.assertEqual(gui_consumer['pid'], int(re.search(r'MODE_CALLER_CONSUMER=(\d+)', gui['error'])[1]))
+        for value in (foreground_consumer, gui_consumer):
+            self.assertGreater(len(value['birth']), 0)
+            for field in ('machine', 'boot'):
+                self.assertEqual(str(uuid.UUID(value[field])), value[field])
+                self.assertNotEqual(uuid.UUID(value[field]).int, 0)
+        self.assertEqual(foreground_consumer['machine'], gui_consumer['machine'])
+        self.assertEqual(foreground_consumer['boot'], gui_consumer['boot'])
 
     def test_approval_audit_is_selected_scoped_and_does_not_create_a_journal(self):
         self.serve()

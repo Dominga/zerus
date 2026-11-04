@@ -97,7 +97,8 @@ pub(in crate::desktop) fn database(location: &Location) -> Result<(Connection, V
     }
     #[cfg(unix)]
     {
-        crate::sqlite_file::bind(&db, identity).context("rollback database changed")?;
+        crate::sqlite_file::bind_private(&db, &path, identity)
+            .context("rollback database changed")?;
         Ok((db, Verification { identity }))
     }
 }

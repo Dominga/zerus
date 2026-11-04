@@ -200,7 +200,7 @@ impl Store {
             | OpenFlags::SQLITE_OPEN_NOFOLLOW;
         let db = Connection::open_with_flags(&path, flags).map_err(|e| e.to_string())?;
         #[cfg(unix)]
-        crate::sqlite_file::bind(&db, identity).map_err(|e| e.to_string())?;
+        crate::sqlite_file::bind_private(&db, &path, identity).map_err(|e| e.to_string())?;
         let index = Index::new(db, DEFAULT_FILE_BYTES).map_err(|e| e.to_string())?;
         let parent = crate::platform::canonical(directory.parent().ok_or("Invalid index path")?)
             .map_err(|e| e.to_string())?;

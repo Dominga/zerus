@@ -67,6 +67,47 @@ fn bind_accepts_the_checked_file_and_refuses_another() {
     assert!(bind(&db, identity).is_err(), "SQLite's open file has moved");
 }
 
+/// review-w's PH: the privacy checked before the open must still hold after
+/// it. A second name or a group-readable mode added after `private` is
+/// refused by `bind_private`, which `bind` alone would accept.
+#[test]
+fn bind_private_refuses_a_file_that_stopped_being_private() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("a.sqlite3");
+    create(&path).unwrap();
+    let identity = private(&path).unwrap();
+    let db = Connection::open(&path).unwrap();
+    bind_private(&db, &path, identity).unwrap();
+    let second = temp.path().join("second.sqlite3");
+    fs::hard_link(&path, &second).unwrap();
+    bind(&db, identity).unwrap();
+    assert!(bind_private(&db, &path, identity).is_err(), "a second name");
+    fs::remove_file(&second).unwrap();
+    bind_private(&db, &path, identity).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+    assert!(bind_private(&db, &path, identity).is_err(), "group access");
+}
+
+/// review-w's PB, the A-B-A swap: the path names the checked file A at the
+/// check and again at `bind`, but SQLite opened B in between. Only SQLite's
+/// own HAS_MOVED check can tell, so it is required.
+#[test]
+fn bind_refuses_a_connection_to_a_file_swapped_in_during_the_open() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("a.sqlite3");
+    let aside = |name: &str| temp.path().join(name);
+    create(&path).unwrap();
+    let identity = private(&path).unwrap();
+    fs::rename(&path, aside("a.aside")).unwrap();
+    create(&path).unwrap();
+    let db = Connection::open(&path).unwrap();
+    fs::rename(&path, aside("b.aside")).unwrap();
+    fs::rename(aside("a.aside"), &path).unwrap();
+    assert_eq!(private(&path).unwrap(), identity, "the path names A again");
+    assert!(bind(&db, identity).is_err(), "SQLite opened B");
+    assert!(bind_private(&db, &path, identity).is_err());
+}
+
 /// The failure this module avoids, and the open sequence that avoids it.
 /// While one connection holds a read transaction, another process cannot
 /// lock the database for writing. Opening it again through `create`,

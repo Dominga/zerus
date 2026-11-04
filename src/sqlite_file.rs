@@ -176,6 +176,17 @@ pub fn bind(db: &Connection, expected: Identity) -> io::Result<()> {
     Ok(())
 }
 
+/// `bind`, then the file at `path` is still that private file: the check
+/// `private` made before the open holds after it too, as a second name or a
+/// changed owner or mode is refused here as well. Still no raw descriptor.
+pub fn bind_private(db: &Connection, path: &Path, expected: Identity) -> io::Result<()> {
+    bind(db, expected)?;
+    if private(path)? != expected {
+        return Err(io::Error::other("database file changed"));
+    }
+    Ok(())
+}
+
 /// Whether another process is refused a write lock over SQLite's lock bytes
 /// of `path` (the pending, reserved and shared bytes: 512 at 0x40000000), as
 /// #1332's test probes: a lock of a live connection here is still held.

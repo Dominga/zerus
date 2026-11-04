@@ -1060,9 +1060,13 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     // otherwise); a question or dialog on the lead's screen still holds it.
     let lead_reachable = lead_ready || lead.is_some_and(|found| found.live && !found.asking && found.activity == "busy");
     if lead_reachable {
-        let new = inbox::items(team).into_iter().filter(|item| !team.inbox.told.contains(&item.key)).count();
+        let items = inbox::items(team);
+        let new = items.iter().filter(|item| !team.inbox.told.contains(&item.key)).count();
+        // A permission or question the free lead left unanswered is told once
+        // more (owner, 2026-11-05).
+        let again = if lead_ready { inbox::overdue(&items, &team.inbox.told, now).len() } else { 0 };
         let interval = team.settings.inbox_interval_seconds as f64;
-        if new > 0 && (team.inbox.told_at == 0.0 || now - team.inbox.told_at >= interval) {
+        if new + again > 0 && (team.inbox.told_at == 0.0 || now - team.inbox.told_at >= interval) {
             steps.push(Step::Inbox);
         }
     }
@@ -5366,15 +5370,19 @@ fn tell_lead_inbox(store: &mut Store, team: &Team) -> anyhow::Result<()> {
     let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
     let items = inbox::items(team);
     let new: Vec<inbox::Item> = items.iter().filter(|item| !team.inbox.told.contains(&item.key)).cloned().collect();
-    anyhow::ensure!(!new.is_empty(), "no new inbox items");
-    let outcome = send(&lead, &uuid::Uuid::new_v4().to_string(), &inbox::text(team, &new, now()));
+    let again = inbox::overdue(&items, &team.inbox.told, now());
+    anyhow::ensure!(!new.is_empty() || !again.is_empty(), "no new inbox items");
+    let outcome = send(&lead, &uuid::Uuid::new_v4().to_string(), &inbox::text_with(team, &new, &again, now()));
     if matches!(outcome, Sent::Refused(_)) {
         return Ok(());
     }
     change(store, &team.id, |team, events| {
-        let named = new.len();
+        let named = new.len() + again.len();
         // L2: keep the keys of items that are still open.
         let open: BTreeSet<String> = inbox::items(team).into_iter().map(|item| item.key).collect();
+        for item in &again {
+            team.inbox.told.push(format!("remind:{}", item.key));
+        }
         inbox::mark_told(&mut team.inbox.told, &new, &open);
         team.inbox.told_at = now();
         events.push(Event::new("inbox_told", json!({"items":named})));

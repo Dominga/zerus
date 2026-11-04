@@ -307,6 +307,46 @@ fn a_request_only_the_terminal_takes_clears_once_the_session_stops_asking() {
     assert!(found.contains(&Step::ClearPermission { member: "dev".into() }), "{found:?}");
 }
 
+/// The owner, 2026-11-05: the lead answered permissions late and left a
+/// question unanswered among reports. Permissions and questions come first in
+/// the message, and one left unanswered reaches the free lead once more.
+#[test]
+fn a_permission_comes_first_and_an_unanswered_one_is_told_once_more() {
+    let mut team = team();
+    delivered(&mut team);
+    let card = json!({"questions":[{"id":"decision","header":"Bash","question":"Run the build?",
+        "options":[{"id":"allow","label":"Allow"},{"id":"deny","label":"Deny"}]}]});
+    team.members.iter_mut().find(|member| member.id == "dev").unwrap().pending =
+        Some(PendingQuestion { question_id: "q9".into(), question_hash: "h9".into(), approval: true, at: 50.0, card });
+    team.tasks.push(Task { id: 7, title: "Plan review".into(), assignee: "lead".into(), status: TaskStatus::Pending, ..Default::default() });
+    let items = super::inbox::items(&team);
+    let text = super::inbox::text(&team, &items, 60.0);
+    let permission = text.find("permission \u{b7}").expect(&text);
+    assert!(text.contains("permission(s) and question(s) first"), "{text}");
+    assert!(text.contains("before you end your turn"), "{text}");
+    assert!(items.iter().filter(|item| item.kind != "permission").all(|item| {
+        text.find(&item.summary).is_none_or(|at| at > permission)
+    }), "{text}");
+    // Told, still open, the lead free: nothing before the reminder time.
+    team.inbox.told = items.iter().map(|item| item.key.clone()).collect();
+    team.inbox.told_at = 60.0;
+    let lead = session("claude/x/lead", "r0", true);
+    let dev = session("codex/x/dev", "r1", false);
+    let early = 50.0 + super::inbox::REMIND_BLOCKING_SECONDS - 1.0;
+    assert!(!steps(&team, &[lead.clone(), dev.clone()], early).contains(&Step::Inbox));
+    let late = 50.0 + super::inbox::REMIND_BLOCKING_SECONDS + 1.0;
+    assert!(steps(&team, &[lead.clone(), dev.clone()], late).contains(&Step::Inbox));
+    let again = super::inbox::overdue(&items, &team.inbox.told, late);
+    assert_eq!(again.iter().map(|item| item.kind).collect::<Vec<_>>(), ["permission"]);
+    assert!(super::inbox::text_with(&team, &[], &again, late).contains("STILL UNANSWERED"));
+    // Reminded once: never again while it stays open, and the mark stays.
+    team.inbox.told.push(format!("remind:{}", again[0].key));
+    let open: BTreeSet<String> = items.iter().map(|item| item.key.clone()).collect();
+    super::inbox::mark_told(&mut team.inbox.told, &[], &open);
+    assert!(team.inbox.told.contains(&format!("remind:{}", again[0].key)));
+    assert!(!steps(&team, &[lead, dev], late + 600.0).contains(&Step::Inbox));
+}
+
 #[test]
 fn a_vanished_question_is_recorded_as_unknown() {
     let mut answers = Vec::new();

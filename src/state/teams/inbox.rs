@@ -1055,18 +1055,59 @@ fn local_time(at: f64) -> String {
         .unwrap_or_else(|| format!("{at:.0}"))
 }
 
-/// The single message that lists the lead's new items (C2).
+/// An item that stops its member until the lead answers it.
+pub(crate) fn blocks_member(item: &Item) -> bool {
+    matches!(item.kind, "permission" | "question")
+}
+
+/// The owner, 2026-11-05: a lead answered a member's permissions late and
+/// left a question unanswered among many reports. A permission or question
+/// the lead was told of and still has not answered after this long is told
+/// once more, when the lead is free.
+pub(crate) const REMIND_BLOCKING_SECONDS: f64 = 180.0;
+
+/// The told permissions and questions still open past the reminder time and
+/// not reminded yet.
+pub(crate) fn overdue(items: &[Item], told: &[String], now: f64) -> Vec<Item> {
+    items
+        .iter()
+        .filter(|item| blocks_member(item) && now - item.since >= REMIND_BLOCKING_SECONDS)
+        .filter(|item| told.contains(&item.key) && !told.contains(&format!("remind:{}", item.key)))
+        .cloned()
+        .collect()
+}
+
+/// The single message that lists the lead's new items (C2): what stops a
+/// member first, then the rest, each part oldest first.
 pub(crate) fn text(team: &Team, items: &[Item], now: f64) -> String {
+    text_with(team, items, &[], now)
+}
+
+/// `text`, with `again` the overdue items told once more.
+pub(crate) fn text_with(team: &Team, items: &[Item], again: &[Item], now: f64) -> String {
+    let mut ordered: Vec<(&Item, bool)> = again.iter().map(|item| (item, true)).collect();
+    ordered.extend(items.iter().filter(|item| !again.iter().any(|old| old.key == item.key)).map(|item| (item, false)));
+    ordered.sort_by(|(a, _), (b, _)| blocks_member(b).cmp(&blocks_member(a)).then(a.since.total_cmp(&b.since)));
+    let blocking = ordered.iter().filter(|(item, _)| blocks_member(item)).count();
     let mut text = format!(
-        "[Zerus team \u{b7} from: Zerus \u{b7} inbox]\nTeam: {}. {} item(s) wait for you, oldest first:\n",
+        "[Zerus team \u{b7} from: Zerus \u{b7} inbox]\nTeam: {}. {} item(s) wait for you{}:\n",
         team.name,
-        items.len()
+        ordered.len(),
+        if blocking > 0 {
+            format!("; the {blocking} permission(s) and question(s) first: each stops its member until you answer it")
+        } else {
+            ", oldest first".to_owned()
+        }
     );
-    for (index, item) in items.iter().take(MESSAGE_ITEMS).enumerate() {
+    for (index, (item, reminded)) in ordered.iter().take(MESSAGE_ITEMS).enumerate() {
+        let item = *item;
+        if *reminded {
+            text += &format!("\n{}. STILL UNANSWERED, told before:", index + 1);
+        }
         let task = item.task.map(|task| format!("task #{task} \u{b7} ")).unwrap_or_default();
         text += &format!(
-            "\n{}. {} \u{b7} {task}{} \u{b7} {}\n   {}\n",
-            index + 1,
+            "{}{} \u{b7} {task}{} \u{b7} {}\n   {}\n",
+            if *reminded { " ".to_owned() } else { format!("\n{}. ", index + 1) },
             item,
             item.member,
             age(now, item.since),
@@ -1087,8 +1128,13 @@ pub(crate) fn text(team: &Team, items: &[Item], now: f64) -> String {
             }
         }
     }
-    if items.len() > MESSAGE_ITEMS {
-        text += &format!("\n[{} more item(s); hgs team inbox --json lists them all]\n", items.len() - MESSAGE_ITEMS);
+    if ordered.len() > MESSAGE_ITEMS {
+        text += &format!("\n[{} more item(s); hgs team inbox --json lists them all]\n", ordered.len() - MESSAGE_ITEMS);
+    }
+    if blocking > 0 {
+        text += "\nAnswer every permission and question before you end your turn, and check that each answer \
+                 went through. One Zerus refuses as Terminal-only goes to the owner by itself: tell the owner in \
+                 your reply which member waits in its Terminal.\n";
     }
     text += &format!(
         "\nAll items: {} | hgs team inbox --json\n\
@@ -1209,7 +1255,10 @@ pub(crate) fn mark_told(told: &mut Vec<String>, named: &[Item], open: &std::coll
     // several were decided at once; forgetting it then repeated the whole
     // batch to the lead. Its key is kept (the newest 200) while other items
     // are forgotten once they close, so an item that opens again is new.
-    told.retain(|key| open.contains(key) || key.starts_with("proposal:"));
+    // A reminder's mark stays while its item is open.
+    told.retain(|key| {
+        open.contains(key) || key.starts_with("proposal:") || key.strip_prefix("remind:").is_some_and(|item| open.contains(item))
+    });
     let decided = told.iter().filter(|key| key.starts_with("proposal:")).count();
     if decided > 200 {
         let mut drop = decided - 200;
@@ -1783,7 +1832,8 @@ mod tests {
         let items = super::items(&team);
         let text = super::text(&team, &items, 1200.0);
         assert!(text.contains("from: Zerus \u{b7} inbox") && text.contains("2 item(s)"), "{text}");
-        assert!(text.contains("1. report") && text.contains("2. question"), "{text}");
+        // The question stops its member: it comes before the older report.
+        assert!(text.contains("1. question") && text.contains("2. report"), "{text}");
         assert!(text.contains("10 min") && text.contains("5 min"), "{text}");
         assert!(text.contains("Done and checked") && text.contains("Which database?"), "{text}");
         assert!(text.contains("hgs team accept --json") && text.contains("hgs team reply --json"), "{text}");

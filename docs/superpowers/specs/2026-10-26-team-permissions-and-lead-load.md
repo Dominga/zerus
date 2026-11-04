@@ -54,6 +54,11 @@ gains the exact command and, after the answer, who answered.
   team, never live. `restart_crashed` (still off by default) restarts the lead
   too, and a running team whose lead's session stopped is on the owner's
   attention list at once (`lead_stopped`, action `resume_lead`).
+- Owner, 2026-11-05: the lead's inbox message lists permissions and questions
+  first (each stops its member) and asks the lead to answer them all before
+  it ends its turn. One the lead was told of and still has not answered after
+  3 minutes is told once more when the lead is free ("STILL UNANSWERED"),
+  marked `remind:<key>` in the told keys while it stays open.
 
 ```json
 {"request_id":"UUID","team":"ID","member":"frontend","question_id":"Q",

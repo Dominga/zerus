@@ -2,12 +2,14 @@
 //! (docs/desktop-windows-mode.md, zerus-5wmh.66.8.1.14).
 //!
 //! Creation: only the app's own `hgs session-host install` child, outside any
-//! agent tree, records the pair, both pinned, with the app's digest read through
-//! its pin. Use: each process that admits frontends pins the recorded pair
-//! again, proves that the CLI is its own loaded image, checks the app's digest
-//! once and keeps both pins for as long as its scope lives. Admission itself
-//! never hashes, and neither the record's identities nor its digest admit
-//! anything without that proof.
+//! agent tree, records the pair in a private record, with the app's digest read
+//! through a pin on its loaded image. Use is proven per operation: a process
+//! that admits frontends establishes once that its own loaded image is the
+//! bound CLI (and pins nothing afterwards); each running GUI is proven through
+//! its own process handle and loaded image within the caller's deadline, and a
+//! notification launch pins and proves the app itself. No proof pins anything
+//! beyond the GUI process it serves or the launch that holds it, so maintained
+//! staging can still replace the stable CLI and the app.
 use crate::host::staging::Layout;
 #[cfg(windows)]
 use crate::host::staging::{self, BoundObject, FrontendBinding, FRONTEND_SCHEMA};
@@ -17,38 +19,33 @@ use std::path::PathBuf;
 #[cfg(windows)]
 use std::time::{Duration, Instant};
 #[cfg(windows)]
-use zerus_client_core::desktop::windows::{image::PinnedImage, process::Ancestry};
+use zerus_client_core::desktop::windows::{
+    image::PinnedImage,
+    process::{Ancestry, Original},
+};
 
 /// The largest app whose digest is read.
 #[cfg(windows)]
 const DIGEST_BYTES: u64 = 256 * 1024 * 1024;
-/// The one digest read per binding lifetime.
+/// The one original deadline of a record: the app's ancestry, its digest and
+/// the last check before publication all count against it.
 #[cfg(windows)]
-const DIGEST_TIME: Duration = Duration::from_secs(10);
-/// Proving the installing app and its ancestry.
-#[cfg(windows)]
-const ANCESTRY_TIME: Duration = Duration::from_secs(2);
+const RECORD_TIME: Duration = Duration::from_secs(10);
 
-/// The exact pinned pair: neither file nor any folder above it can be written,
-/// deleted or renamed while this lives.
+/// The largest number of running GUI processes whose proofs are kept.
+#[cfg(windows)]
+const PROOFS: usize = 4;
+
+/// What a scope knows about the portable app: the private binding, and that
+/// this process's own loaded image is the bound CLI. No file stays pinned for
+/// the scope's lifetime, so maintained staging can still replace the stable
+/// CLI and the app; each use proves the app again (`running`, `closed`).
 #[cfg_attr(not(windows), allow(dead_code))]
-pub(crate) struct Portable {
+pub(crate) struct PortableScope {
     #[cfg(windows)]
-    gui: PinnedImage,
+    binding: FrontendBinding,
     #[cfg(windows)]
-    cli: PinnedImage,
-}
-
-#[cfg(windows)]
-impl Portable {
-    /// The pinned app's final path.
-    pub fn gui(&self) -> &Path {
-        self.gui.path()
-    }
-    /// Whether both retained objects still have their paths and lengths.
-    pub fn current(&self) -> bool {
-        self.gui.revalidate().is_ok() && self.cli.revalidate().is_ok()
-    }
+    cache: std::sync::Arc<Cache>,
 }
 
 #[cfg(windows)]
@@ -84,13 +81,333 @@ fn is(image: &PinnedImage, object: &BoundObject) -> bool {
             .eq_ignore_ascii_case(object.path.as_os_str())
 }
 
+/// One running GUI process proven to run the bound app: its own process
+/// handle (the original object, never a PID), its birth, and its loaded image
+/// pinned, with the app's digest read through that pin. Holders keep the pin
+/// until they drop the proof; the cache drops its reference when the process
+/// exits.
+#[cfg(windows)]
+pub(crate) struct GuiProof {
+    process: std::os::windows::io::OwnedHandle,
+    pid: u32,
+    birth: u64,
+    image: PinnedImage,
+    frontend: BoundObject,
+}
+
+#[cfg(windows)]
+impl GuiProof {
+    /// Within `until`, the caller's original deadline: the loaded section of
+    /// `original` is the bound app object with the bound digest, and the same
+    /// process still runs it.
+    fn prove(binding: &FrontendBinding, original: &Original, until: Instant) -> Option<Self> {
+        let process = duplicate(&original.handle())?;
+        let image = PinnedImage::for_process(&process).ok()?;
+        if !is(&image, &binding.frontend) {
+            return None;
+        }
+        let digest = image.sha256(DIGEST_BYTES, until).ok()?;
+        let proof = Self {
+            process,
+            pid: original.pid,
+            birth: original.birth,
+            image,
+            frontend: binding.frontend.clone(),
+        };
+        (digest == binding.frontend_sha256
+            && original.current()
+            && proof.current()
+            && Instant::now() < until)
+            .then_some(proof)
+    }
+    /// The same process object still runs, from the same pinned loaded image.
+    pub fn current(&self) -> bool {
+        alive(&self.process)
+            && self.image.matches_process(&self.process).is_ok()
+            && self.image.revalidate().is_ok()
+            && is(&self.image, &self.frontend)
+    }
+    /// This proof is for `original` (same PID and native birth) and still holds.
+    pub fn proves(&self, original: &Original) -> bool {
+        self.pid == original.pid
+            && self.birth == original.birth
+            && original.current()
+            && self.current()
+    }
+}
+
+#[cfg(windows)]
+fn duplicate(
+    handle: &std::os::windows::io::BorrowedHandle<'_>,
+) -> Option<std::os::windows::io::OwnedHandle> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use windows_sys::Win32::{Foundation::*, System::Threading::GetCurrentProcess};
+    let mut copy = std::ptr::null_mut();
+    // SAFETY: a live borrowed handle duplicated into this process.
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            handle.as_raw_handle(),
+            GetCurrentProcess(),
+            &mut copy,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    // SAFETY: a new handle owned by this process.
+    (ok != 0 && !copy.is_null())
+        .then(|| unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(copy) })
+}
+
+#[cfg(windows)]
+fn alive(process: &impl std::os::windows::io::AsRawHandle) -> bool {
+    use windows_sys::Win32::{Foundation::WAIT_TIMEOUT, System::Threading::WaitForSingleObject};
+    // SAFETY: a held process handle with SYNCHRONIZE.
+    unsafe { WaitForSingleObject(process.as_raw_handle(), 0) == WAIT_TIMEOUT }
+}
+
+/// Proofs of running GUI processes, at most `PROOFS`. One watcher thread per
+/// scope waits on their processes and drops a proof as soon as its process
+/// exits; holders that still borrow it keep its pin until they drop it.
+#[cfg(windows)]
+struct Cache {
+    state: std::sync::Mutex<CacheState>,
+    wake: std::os::windows::io::OwnedHandle,
+}
+
+#[cfg(windows)]
+struct CacheState {
+    proofs: Vec<std::sync::Arc<GuiProof>>,
+    watching: bool,
+    closed: bool,
+}
+
+#[cfg(windows)]
+impl Cache {
+    fn new() -> Option<std::sync::Arc<Self>> {
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::System::Threading::CreateEventW;
+        // SAFETY: an unnamed auto-reset event.
+        let event = unsafe { CreateEventW(std::ptr::null(), 0, 0, std::ptr::null()) };
+        if event.is_null() {
+            return None;
+        }
+        Some(std::sync::Arc::new(Self {
+            state: std::sync::Mutex::new(CacheState {
+                proofs: Vec::new(),
+                watching: false,
+                closed: false,
+            }),
+            // SAFETY: the new event is owned here.
+            wake: unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(event) },
+        }))
+    }
+    fn lock(&self) -> std::sync::MutexGuard<'_, CacheState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+    fn signal(&self) {
+        use std::os::windows::io::AsRawHandle;
+        // SAFETY: the owned event handle.
+        unsafe { windows_sys::Win32::System::Threading::SetEvent(self.wake.as_raw_handle()) };
+    }
+    fn find(&self, original: &Original) -> Option<std::sync::Arc<GuiProof>> {
+        self.lock()
+            .proofs
+            .iter()
+            .find(|proof| proof.pid == original.pid && proof.birth == original.birth)
+            .cloned()
+    }
+    fn insert(self: &std::sync::Arc<Self>, proof: std::sync::Arc<GuiProof>) {
+        let start = {
+            let mut state = self.lock();
+            if state.closed
+                || state
+                    .proofs
+                    .iter()
+                    .any(|held| held.pid == proof.pid && held.birth == proof.birth)
+            {
+                return;
+            }
+            if state.proofs.len() >= PROOFS {
+                state.proofs.remove(0);
+            }
+            state.proofs.push(proof);
+            !std::mem::replace(&mut state.watching, true)
+        };
+        if start {
+            let weak = std::sync::Arc::downgrade(self);
+            let started = std::thread::Builder::new()
+                .name("portable-frontend-exit".into())
+                .spawn(move || watch(weak));
+            if started.is_err() {
+                // Without a watcher nothing is kept past its process.
+                let mut state = self.lock();
+                state.proofs.clear();
+                state.watching = false;
+            }
+        }
+        self.signal();
+    }
+    fn close(&self) {
+        let mut state = self.lock();
+        state.closed = true;
+        state.proofs.clear();
+        drop(state);
+        self.signal();
+    }
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.lock().proofs.len()
+    }
+}
+
+/// Wait for the cached GUI processes and the wake event; drop the proof of a
+/// process the moment it exits. Ends when its scope closes.
+#[cfg(windows)]
+fn watch(cache: std::sync::Weak<Cache>) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::{
+        Foundation::WAIT_FAILED,
+        System::Threading::{WaitForMultipleObjects, INFINITE},
+    };
+    loop {
+        let Some(strong) = cache.upgrade() else {
+            return;
+        };
+        let handles = {
+            let state = strong.lock();
+            if state.closed {
+                return;
+            }
+            let mut handles = vec![duplicate(&std::os::windows::io::AsHandle::as_handle(
+                &strong.wake,
+            ))];
+            handles.extend(state.proofs.iter().map(|proof| {
+                duplicate(&std::os::windows::io::AsHandle::as_handle(&proof.process))
+            }));
+            handles
+        };
+        drop(strong);
+        let Some(handles) = handles.into_iter().collect::<Option<Vec<_>>>() else {
+            return;
+        };
+        let raw: Vec<_> = handles
+            .iter()
+            .map(|handle| handle.as_raw_handle())
+            .collect();
+        // SAFETY: at most 1 + PROOFS live handles, all held through the wait.
+        let woke = unsafe { WaitForMultipleObjects(raw.len() as u32, raw.as_ptr(), 0, INFINITE) };
+        if woke == WAIT_FAILED {
+            return;
+        }
+        let Some(strong) = cache.upgrade() else {
+            return;
+        };
+        strong.lock().proofs.retain(|proof| alive(&proof.process));
+    }
+}
+
+#[cfg(windows)]
+impl Drop for PortableScope {
+    fn drop(&mut self) {
+        self.cache.close();
+    }
+}
+
+#[cfg(windows)]
+impl PortableScope {
+    /// For a process that admits frontends: the private binding, when this
+    /// process's own loaded image is the bound CLI object. The CLI is pinned
+    /// only while that is established.
+    pub fn materialize(home: &str) -> Option<Self> {
+        Self::from_binding(staging::read_frontend(&staging::images_below(home))?)
+    }
+    fn from_binding(binding: FrontendBinding) -> Option<Self> {
+        let own = PinnedImage::for_process(&own_process()).ok()?;
+        let cli = is(&own, &binding.cli);
+        drop(own);
+        cli.then(|| {
+            Some(Self {
+                binding,
+                cache: Cache::new()?,
+            })
+        })
+        .flatten()
+    }
+    /// A running GUI (an authenticated frontend, a mode caller's ancestor):
+    /// the proof for that exact process within the caller's own deadline. A
+    /// cached proof is image evidence only, rechecked for the same process.
+    pub fn running(&self, original: &Original, until: Instant) -> Option<std::sync::Arc<GuiProof>> {
+        if let Some(proof) = self.cache.find(original) {
+            return proof.proves(original).then_some(proof);
+        }
+        let proof = std::sync::Arc::new(GuiProof::prove(&self.binding, original, until)?);
+        self.cache.insert(proof.clone());
+        Some(proof)
+    }
+    /// With the UI closed (a notification launch): the bound app pinned, and
+    /// its digest read through that same pin, which the caller keeps through
+    /// the launch. Never taken from a running GUI's proof.
+    pub fn closed(&self, image: &Path, until: Instant) -> Option<PinnedImage> {
+        let pin = PinnedImage::open(image).ok()?;
+        if !is(&pin, &self.binding.frontend) {
+            return None;
+        }
+        let digest = pin.sha256(DIGEST_BYTES, until).ok()?;
+        (digest == self.binding.frontend_sha256
+            && pin.revalidate().is_ok()
+            && Instant::now() < until)
+            .then_some(pin)
+    }
+}
+
 /// Under the install lock, after staging completed: when this process is the
 /// direct child of the native app beside its own loaded image, outside any
 /// agent tree, pin that app's loaded image and the staged CLI and record both,
-/// with the app's digest read through its pin. Anything else records nothing.
+/// with the app's digest read through its pin. One original deadline covers
+/// the whole proof. Immediately before `publish`, the same ancestry, parent and
+/// pins are checked again against that deadline, and they stay held while the
+/// record is published. Anything else records nothing.
 #[cfg(windows)]
-pub(crate) fn record(layout: &Layout) -> Option<FrontendBinding> {
-    let until = Instant::now() + ANCESTRY_TIME;
+pub(crate) fn record(
+    layout: &Layout,
+    publish: &mut staging::Publish<'_>,
+) -> Result<Option<FrontendBinding>, staging::StageError> {
+    let until = Instant::now() + RECORD_TIME;
+    let Some((ancestry, gui, cli)) = prove_creation(layout, until) else {
+        return Ok(None);
+    };
+    let Ok(digest) = gui.sha256(DIGEST_BYTES, until) else {
+        return Ok(None);
+    };
+    let binding = FrontendBinding {
+        schema: FRONTEND_SCHEMA,
+        frontend: object(&gui),
+        frontend_sha256: digest,
+        cli: object(&cli),
+    };
+    #[cfg(test)]
+    tests::barrier();
+    let parent = ancestry.ancestors().next();
+    let current = ancestry.validate(until).is_ok()
+        && parent.is_some_and(|parent| parent.current())
+        && gui.revalidate().is_ok()
+        && cli.revalidate().is_ok()
+        && Instant::now() < until;
+    if !current {
+        return Ok(None);
+    }
+    publish(&binding)?;
+    Ok(Some(binding))
+}
+
+/// The app that started this process and the staged CLI, both pinned, with the
+/// ancestry that admitted them.
+#[cfg(windows)]
+fn prove_creation(layout: &Layout, until: Instant) -> Option<(Ancestry, PinnedImage, PinnedImage)> {
     let own = PinnedImage::for_process(&own_process()).ok()?;
     let ancestry = Ancestry::inspect(std::process::id(), until).ok()?;
     let parent = ancestry.ancestors().next()?;
@@ -105,46 +422,16 @@ pub(crate) fn record(layout: &Layout) -> Option<FrontendBinding> {
     }
     ancestry.validate(until).ok()?;
     let cli = PinnedImage::open(&layout.cli).ok()?;
-    let digest = gui
-        .sha256(DIGEST_BYTES, Instant::now() + DIGEST_TIME)
-        .ok()?;
-    if !parent.current() || cli.revalidate().is_err() {
-        return None;
-    }
-    Some(FrontendBinding {
-        schema: FRONTEND_SCHEMA,
-        frontend: object(&gui),
-        frontend_sha256: digest,
-        cli: object(&cli),
-    })
-}
-
-/// For a process that admits frontends: the recorded pair pinned again, when
-/// the CLI is this process's own loaded image and the app has the recorded
-/// digest. Done once per scope, before any request is admitted.
-#[cfg(windows)]
-pub(crate) fn materialize(home: &str) -> Option<Portable> {
-    prove(&staging::read_frontend(&staging::images_below(home))?)
+    Some((ancestry, gui, cli))
 }
 
 #[cfg(windows)]
-fn prove(binding: &FrontendBinding) -> Option<Portable> {
-    let cli = PinnedImage::for_process(&own_process()).ok()?;
-    if !is(&cli, &binding.cli) {
-        return None;
-    }
-    let gui = PinnedImage::open(&binding.frontend.path).ok()?;
-    if !is(&gui, &binding.frontend) {
-        return None;
-    }
-    let digest = gui
-        .sha256(DIGEST_BYTES, Instant::now() + DIGEST_TIME)
-        .ok()?;
-    (digest == binding.frontend_sha256).then_some(Portable { gui, cli })
+pub(crate) fn materialize(home: &str) -> Option<PortableScope> {
+    PortableScope::materialize(home)
 }
 
 #[cfg(not(windows))]
-pub(crate) fn materialize(_: &str) -> Option<Portable> {
+pub(crate) fn materialize(_: &str) -> Option<PortableScope> {
     None
 }
 

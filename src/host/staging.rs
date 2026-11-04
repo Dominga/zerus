@@ -705,28 +705,111 @@ pub fn install_cli(layout: &Layout, source: &Path) -> Result<CliReport, StageErr
 /// Idempotent; installs of one user run one at a time. Removes any app
 /// binding: only the app's own install (`install_bound`) records one.
 pub fn install(layout: &Layout, source: &Path, version: &str) -> Result<InstallReport, StageError> {
-    install_bound(layout, source, version, |_| None)
+    install_bound(layout, source, version, |_, _| Ok(None))
 }
 
+/// Create `path` and its missing parents; on Unix owner-only, like the other
+/// private records. Existing folders are never changed.
+fn create_private_dirs(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
+    }
+    #[cfg(not(unix))]
+    fs::create_dir_all(path)
+}
+
+/// One folder of the binding's chain, opened without following a link or
+/// junction, verified private to this user (owner and access) and held: on
+/// Windows without delete sharing, so it cannot be renamed while held.
+fn private_directory(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(
+            libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        );
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        };
+        options
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    }
+    let file = options.open(path)?;
+    if !platform::verify_private_directory(&file)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the binding's folder is not private to this user",
+        ));
+    }
+    Ok(file)
+}
+
+/// The images folder and the three folders above it that hgs keeps below the
+/// home folder (`.local`, `share`, `hgs`, `host`), outermost first, all private
+/// and held while a binding is published or read. Unsafe folders are refused,
+/// never repaired.
+fn private_chain(images: &Path) -> io::Result<Vec<fs::File>> {
+    let mut chain: Vec<&Path> = images.ancestors().take(4).collect();
+    chain.reverse();
+    chain.into_iter().map(private_directory).collect()
+}
+
+/// The binding file itself, opened without following a link and verified
+/// private: this user's, owner-only access, a single link, not a reparse
+/// point. On Windows nobody can write or delete it while it is held.
+fn private_record(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    platform::no_follow(&mut options);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ);
+    }
+    let file = options.open(path)?;
+    if !platform::verify_private_file(&file)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the binding is not a private file of this user",
+        ));
+    }
+    Ok(file)
+}
+
+/// Publishes a binding while its creator still holds the evidence for it.
+pub type Publish<'a> = dyn FnMut(&FrontendBinding) -> Result<(), StageError> + 'a;
+
 /// `install`, then `bind` may record the app staged with this CLI. The old
-/// binding goes first, so a failure anywhere leaves none; the new one is
-/// published only after the CLI, the image and the marker are complete.
+/// binding goes first, so a failure anywhere leaves none. `bind` runs only
+/// after the CLI, the image and the marker are complete, and publishes through
+/// the callback it is given, immediately after its last check of the evidence
+/// it still holds.
 pub fn install_bound(
     layout: &Layout,
     source: &Path,
     version: &str,
-    bind: impl FnOnce(&Layout) -> Option<FrontendBinding>,
+    bind: impl FnOnce(&Layout, &mut Publish<'_>) -> Result<Option<FrontendBinding>, StageError>,
 ) -> Result<InstallReport, StageError> {
-    fs::create_dir_all(&layout.images).map_err(at(&layout.images))?;
+    create_private_dirs(&layout.images).map_err(at(&layout.images))?;
     let _lock = lock(&layout.images)?;
     unbind_frontend(layout)?;
     let cli = stage_cli(source, &layout.cli)?;
     let image = stage_image(source, &layout.images, version)?;
     let enabled = enable(&layout.marker).map_err(at(&layout.marker))?;
-    let frontend = bind(layout);
-    if let Some(binding) = &frontend {
-        publish_frontend(layout, binding)?;
-    }
+    let frontend = bind(layout, &mut |binding| publish_frontend(layout, binding))?;
     Ok(InstallReport {
         cli,
         image,
@@ -807,27 +890,25 @@ fn publish_frontend(layout: &Layout, binding: &FrontendBinding) -> Result<(), St
     if !binding.valid() || bytes.len() as u64 > FRONTEND_BYTES {
         return Err(StageError::Io(path, io::ErrorKind::InvalidData.into()));
     }
-    write_replacing(&layout.images, &path, &bytes).map_err(at(&path))
+    let _chain = private_chain(&layout.images).map_err(at(&layout.images))?;
+    write_replacing(&layout.images, &path, &bytes).map_err(at(&path))?;
+    // What was published must read back as a private record of this user.
+    if let Err(error) = private_record(&path) {
+        let _ = fs::remove_file(&path);
+        return Err(StageError::Io(path, error));
+    }
+    Ok(())
 }
 
-/// The binding below `images`, read like the other private records: never
-/// through a link, a regular file of at most `FRONTEND_BYTES`, the exact
+/// The binding below `images`, read like the other private records: every
+/// folder of its chain and the file itself private to this user and held, no
+/// link or reparse point, a single link, at most `FRONTEND_BYTES`, the exact
 /// schema with absolute paths. Anything else is no binding.
 pub fn read_frontend(images: &Path) -> Option<FrontendBinding> {
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    platform::no_follow(&mut options);
-    let file = options.open(images.join(FRONTEND_BINDING)).ok()?;
+    let _chain = private_chain(images).ok()?;
+    let file = private_record(&images.join(FRONTEND_BINDING)).ok()?;
     let metadata = file.metadata().ok()?;
-    #[cfg(windows)]
-    let regular = {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        metadata.is_file() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
-    };
-    #[cfg(not(windows))]
-    let regular = metadata.is_file();
-    if !regular || metadata.len() > FRONTEND_BYTES {
+    if !metadata.is_file() || metadata.len() > FRONTEND_BYTES {
         return None;
     }
     let mut bytes = Vec::new();
@@ -1140,16 +1221,30 @@ mod tests {
         }
     }
 
+    /// A private images folder below a home in `root`, as an install creates it.
+    fn private_images(root: &Path) -> PathBuf {
+        let images = images_below(&root.join("home").to_string_lossy());
+        create_private_dirs(&images).unwrap();
+        images
+    }
+
+    /// A new owner-only file, as the publication creates it.
+    fn write_private(path: &Path, bytes: &[u8]) {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        platform::private_open(&mut options);
+        options.open(path).unwrap().write_all(bytes).unwrap();
+    }
+
     #[test]
     fn a_frontend_binding_is_read_only_in_its_exact_bounded_form() {
         let dir = tempfile::tempdir().unwrap();
-        let images = dir.path().join("images");
-        fs::create_dir_all(&images).unwrap();
+        let images = private_images(dir.path());
         let path = images.join(FRONTEND_BINDING);
         assert_eq!(read_frontend(&images), None);
         let binding = sample_binding(dir.path());
         let good = serde_json::to_value(&binding).unwrap();
-        fs::write(&path, serde_json::to_vec(&good).unwrap()).unwrap();
+        write_private(&path, &serde_json::to_vec(&good).unwrap());
         assert_eq!(read_frontend(&images), Some(binding.clone()));
 
         let refused = |bytes: Vec<u8>, why: &str| {
@@ -1208,11 +1303,68 @@ mod tests {
         #[cfg(unix)]
         {
             let real = dir.path().join("elsewhere.json");
-            fs::write(&real, serde_json::to_vec(&good).unwrap()).unwrap();
+            write_private(&real, &serde_json::to_vec(&good).unwrap());
             fs::remove_file(&path).unwrap();
             std::os::unix::fs::symlink(&real, &path).unwrap();
             assert_eq!(read_frontend(&images), None, "link");
         }
+    }
+
+    /// Unix half of the private-record controls; Windows owner, ACL, hard-link
+    /// and junction controls are in desktop::portable_frontend::tests.
+    #[cfg(unix)]
+    #[test]
+    fn a_binding_that_is_not_a_private_record_of_this_user_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let images = private_images(dir.path());
+        let path = images.join(FRONTEND_BINDING);
+        let bytes = serde_json::to_vec(&sample_binding(dir.path())).unwrap();
+        write_private(&path, &bytes);
+        assert!(read_frontend(&images).is_some());
+        let mode = |path: &Path, mode: u32| {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap()
+        };
+        // A record others may read or write.
+        for permissive in [0o640, 0o604, 0o620] {
+            mode(&path, permissive);
+            assert!(read_frontend(&images).is_none(), "{permissive:o}");
+        }
+        mode(&path, 0o600);
+        // A record with a second link.
+        let other = dir.path().join("second-link.json");
+        fs::hard_link(&path, &other).unwrap();
+        assert!(read_frontend(&images).is_none(), "hard link");
+        fs::remove_file(&other).unwrap();
+        assert!(read_frontend(&images).is_some());
+        // Any folder of the chain that others may use.
+        for folder in images.ancestors().take(4) {
+            mode(folder, 0o750);
+            assert!(read_frontend(&images).is_none(), "{}", folder.display());
+            mode(folder, 0o700);
+        }
+        assert!(read_frontend(&images).is_some());
+        // A link in place of a folder of the chain.
+        let hgs = images.parent().unwrap();
+        let moved = dir.path().join("real-hgs");
+        fs::rename(hgs, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, hgs).unwrap();
+        assert!(read_frontend(&images).is_none(), "linked ancestor");
+        fs::remove_file(hgs).unwrap();
+        fs::rename(&moved, hgs).unwrap();
+        assert!(read_frontend(&images).is_some());
+        // Publication refuses a folder that is not private, and leaves nothing.
+        fs::remove_file(&path).unwrap();
+        let layout = Layout::new(
+            &dir.path().join("home").to_string_lossy(),
+            &dir.path().join("config"),
+        );
+        mode(&images, 0o755);
+        assert!(publish_frontend(&layout, &sample_binding(dir.path())).is_err());
+        assert!(!path.exists());
+        mode(&images, 0o700);
+        publish_frontend(&layout, &sample_binding(dir.path())).unwrap();
+        assert!(read_frontend(&images).is_some());
     }
 
     #[test]
@@ -1225,11 +1377,12 @@ mod tests {
         let one = source(dir.path(), "one", b"build one", &PAIR);
         let binding = sample_binding(dir.path());
         // The binder runs after the CLI, the image and the marker are complete.
-        let report = install_bound(&layout, &one, "1.0.0", |layout| {
+        let report = install_bound(&layout, &one, "1.0.0", |layout, publish| {
             assert_eq!(fs::read(&layout.cli).unwrap(), b"build one");
             assert!(current_image_in(&layout.images).is_some());
             assert!(layout.enabled());
-            Some(binding.clone())
+            publish(&binding)?;
+            Ok(Some(binding.clone()))
         })
         .unwrap();
         assert_eq!(report.frontend, Some(binding.clone()));
@@ -1242,24 +1395,40 @@ mod tests {
         assert!(!layout.images.join(FRONTEND_BINDING).exists());
 
         // The old binding goes before staging: a failing install leaves none.
-        install_bound(&layout, &one, "1.0.0", |_| Some(binding.clone())).unwrap();
-        assert!(
-            install_bound(&layout, &dir.path().join("gone.exe"), "1.1.0", |_| {
-                Some(sample_binding(dir.path()))
-            })
-            .is_err()
-        );
+        install_bound(&layout, &one, "1.0.0", |_, publish| {
+            publish(&binding)?;
+            Ok(Some(binding.clone()))
+        })
+        .unwrap();
+        assert!(install_bound(
+            &layout,
+            &dir.path().join("gone.exe"),
+            "1.1.0",
+            |_, publish| {
+                publish(&sample_binding(dir.path()))?;
+                Ok(None)
+            }
+        )
+        .is_err());
         assert_eq!(read_frontend(&layout.images), None);
 
         // An invalid binding is never published.
         let mut invalid = binding.clone();
         invalid.frontend.file_id = "short".into();
-        assert!(install_bound(&layout, &one, "1.0.0", |_| Some(invalid)).is_err());
+        assert!(install_bound(&layout, &one, "1.0.0", |_, publish| {
+            publish(&invalid)?;
+            Ok(Some(invalid.clone()))
+        })
+        .is_err());
         assert_eq!(read_frontend(&layout.images), None);
 
         // A binder that declines records nothing.
-        install_bound(&layout, &one, "1.0.0", |_| Some(binding.clone())).unwrap();
-        let report = install_bound(&layout, &one, "1.0.0", |_| None).unwrap();
+        install_bound(&layout, &one, "1.0.0", |_, publish| {
+            publish(&binding)?;
+            Ok(Some(binding.clone()))
+        })
+        .unwrap();
+        let report = install_bound(&layout, &one, "1.0.0", |_, _| Ok(None)).unwrap();
         assert_eq!(report.frontend, None);
         assert_eq!(read_frontend(&layout.images), None);
         // A stray temporary binding from an interrupted publish is not a binding.

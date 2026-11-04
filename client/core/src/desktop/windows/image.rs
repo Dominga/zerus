@@ -228,6 +228,11 @@ impl PinnedImage {
             offset += read as u64;
         }
         self.revalidate()?;
+        // A last read that ended after the deadline is not a bounded success.
+        require(
+            std::time::Instant::now() < until,
+            "pinned executable read deadline",
+        )?;
         Ok(format!("{:x}", hash.finalize()))
     }
     pub fn revalidate(&self) -> io::Result<()> {

@@ -27,6 +27,8 @@ enum Evidence {
         birth: u64,
         file: File,
         identity: platform::FileIdentity,
+        /// For the portable zip's bound app: its proof for this ancestor.
+        portable: Option<std::sync::Arc<crate::desktop::portable_frontend::GuiProof>>,
     },
     Console {
         input: File,
@@ -34,6 +36,19 @@ enum Evidence {
         parent: u32,
         birth: u64,
     },
+}
+
+/// The installer or adjacent image, or the portable app whose proof is still
+/// for this same process.
+fn frontend(
+    scope: &Scope,
+    process: &zerus_client_core::desktop::windows::process::Original,
+    portable: Option<&crate::desktop::portable_frontend::GuiProof>,
+) -> bool {
+    match portable {
+        None => scope.selected_frontend(Path::new(&process.image)),
+        Some(proof) => proof.proves(process),
+    }
 }
 
 fn same_object(left: &platform::FileIdentity, right: &platform::FileIdentity) -> bool {
@@ -108,10 +123,19 @@ impl Caller {
         let ancestry = Ancestry::inspect(std::process::id(), until)?;
         // These are the SAME native objects inspected above. In particular,
         // the checking CLI cannot serve as its own installed frontend.
-        let selected = ancestry
+        let installed = ancestry
             .ancestors()
-            .find(|process| scope.selected_frontend(Path::new(&process.image)));
-        let evidence = if let Some(process) = selected {
+            .find(|process| scope.selected_frontend(Path::new(&process.image)))
+            .map(|process| (process, None));
+        // Otherwise the portable zip's bound app, proven for that exact ancestor.
+        let selected = installed.or_else(|| {
+            ancestry.ancestors().find_map(|process| {
+                scope
+                    .portable_running(process, until)
+                    .map(|proof| (process, Some(proof)))
+            })
+        });
+        let evidence = if let Some((process, portable)) = selected {
             let file = OpenOptions::new()
                 .read(true)
                 .share_mode(FILE_SHARE_READ)
@@ -125,7 +149,7 @@ impl Caller {
                 "installed frontend image changed"
             );
             ensure!(
-                scope.selected_frontend(Path::new(&process.image)) && process.current(),
+                frontend(scope, process, portable.as_deref()) && process.current(),
                 "installed frontend changed"
             );
             Evidence::Frontend {
@@ -133,6 +157,7 @@ impl Caller {
                 birth: process.birth,
                 file,
                 identity,
+                portable,
             }
         } else {
             let parent = ancestry.ancestors().next().context(GUIDANCE)?;
@@ -188,6 +213,7 @@ impl Caller {
                 birth,
                 file,
                 identity,
+                portable,
             } => {
                 let process = self
                     .ancestry
@@ -198,7 +224,7 @@ impl Caller {
                     same_object(identity, &platform::FileIdentity::of(file)?)
                         && platform::file_identity(Path::new(&process.image))
                             .is_some_and(|current| same_object(identity, &current))
-                        && scope.selected_frontend(Path::new(&process.image))
+                        && frontend(scope, process, portable.as_deref())
                         && process.current(),
                     "original installed frontend changed"
                 );

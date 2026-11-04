@@ -44,27 +44,45 @@ the zip's app relays through the stable CLI staged from that zip.
 - **Creation.** When the app starts `hgs session-host install` beside it, the
   install records `frontend.json` in the host images folder. It does so only
   when its direct parent is the app beside its own loaded image and no
-  ancestor is an agent. Under the install lock, after the CLI, the image and
-  the marker are complete, it pins the app's loaded image and the staged CLI
-  (deny-write and deny-delete, ancestors included). It records both exact
-  objects with the app's SHA-256, read through that pin.
+  ancestor is an agent. One deadline covers the whole proof. Under the
+  install lock, after the CLI, the image and the marker are complete, the
+  install pins the app's loaded image and the staged CLI (deny-write and
+  deny-delete, ancestors included) and reads the app's SHA-256 through that
+  pin. Immediately before publishing, it checks the same ancestry, parent and
+  pins again against that deadline. It then records both exact objects and
+  the digest.
 - **No other writer.** Every install removes the old binding first, so a
   failure leaves none. Any other install records nothing: from a terminal,
   from an agent, or with a copied CLI.
-- **Use.** Each process that admits frontends pins the recorded pair again
-  when it builds its frontend scope, before any request. The CLI must be that
-  process's own loaded image, and the app must still be the recorded object
-  with the recorded digest, read once through the new pin with a size and
-  time limit. The scope keeps both pins: neither file nor a folder above it
-  can be changed while frontend requests, Settings mode changes and the
-  notification launch use it. Admission itself never hashes, and the record
-  alone admits nothing.
-- **Refusals.** A record that is malformed, oversized, linked or stale
+- **The record.** `frontend.json` and each folder from `.local` down to the
+  images folder must be private to this user: owner, access, a single link,
+  and no link or junction. They are held while the record is published or
+  read. An unsafe record or folder is refused, never repaired.
+- **The CLI.** A process that admits frontends establishes once, from its own
+  loaded image, that it is the bound CLI. It holds no pin on it afterwards,
+  so a newer zip can still restage the stable CLI while it runs.
+- **A running app.** A frontend request or a Settings mode change from the
+  app is proven for that exact process: its own handle and birth, and its
+  loaded image pinned. The image must be the recorded object, and its digest
+  is read through that pin within the request's original deadline, followed
+  by the final process and ancestry checks. The proof travels with the
+  request and is checked again where the request takes effect. A scope keeps
+  at most four such proofs and drops each one as soon as its process exits.
+  Requests still in flight keep their own pin until they finish.
+- **A notification launch.** With the UI closed, the launch pins the
+  recorded app, reads its digest through that pin, and keeps that pin
+  through the launch and its checks until release. A proof from a running
+  app never authorizes such a launch.
+- **Refusals.** A malformed, oversized, linked, foreign or stale record
   admits nothing. Neither does a replaced app or CLI, or an edit that keeps
   the app's length and write time.
 - **Rebinding.** The app stages again at start when the binding does not
   name it, so a moved or newly extracted copy binds itself. Same or newer
   version only, never a downgrade, and an unchanged CLI is not copied again.
+- **Visibility.** A service reads the binding when it starts. A binding made
+  later, for example by a copy of the zip extracted elsewhere, is used from
+  the service's next start. An upgrade restarts the service on the new CLI
+  in any case.
 
 As with the common frontend boundary, this prevents unintended agent descent.
 Deliberate same-user parent-process spoofing is outside its scope. Caller

@@ -40,10 +40,10 @@ const ACTIVATION_PROOF_INTERVAL: Duration = Duration::from_millis(500);
 pub(super) struct Scope {
     location: Location,
     frontend_images: Vec<PathBuf>,
-    /// Windows: the portable zip's app and the stable CLI as the app's own
-    /// staging bound them, pinned and proven when this scope was made.
+    /// Windows: the portable zip's app as its own staging bound it to this
+    /// process's CLI; each use proves the app again.
     #[cfg_attr(not(windows), allow(dead_code))]
-    portable: Option<super::portable_frontend::Portable>,
+    portable: Option<super::portable_frontend::PortableScope>,
 }
 impl std::ops::Deref for Scope {
     type Target = Location;
@@ -106,19 +106,25 @@ impl Scope {
             .iter()
             .find(|path| platform::file_identity(path) == Some(identity))
             .map(PathBuf::as_path)
-            .or_else(|| self.portable_frontend(identity))
     }
-    /// The bound portable app, while its retained pins still hold. The pins
-    /// keep that object and every folder above it in place for this scope.
+    /// A running GUI that is the portable zip's bound app: its proof, bound to
+    /// that process and its loaded image, within `until`.
     #[cfg(windows)]
-    fn portable_frontend(&self, identity: platform::FileIdentity) -> Option<&Path> {
-        let portable = self.portable.as_ref()?;
-        (portable.current() && platform::file_identity(portable.gui()) == Some(identity))
-            .then(|| portable.gui())
+    pub(super) fn portable_running(
+        &self,
+        original: &Original,
+        until: Instant,
+    ) -> Option<std::sync::Arc<super::portable_frontend::GuiProof>> {
+        self.portable.as_ref()?.running(original, until)
     }
-    #[cfg(not(windows))]
-    fn portable_frontend(&self, _: platform::FileIdentity) -> Option<&Path> {
-        None
+    /// With the UI closed: the bound portable app pinned and proven for a launch.
+    #[cfg(windows)]
+    pub(super) fn portable_closed(
+        &self,
+        image: &Path,
+        until: Instant,
+    ) -> Option<zerus_client_core::desktop::windows::image::PinnedImage> {
+        self.portable.as_ref()?.closed(image, until)
     }
     /// Bind an explicit maintained-image choice; this never discovers one from
     /// PATH or turns an inbound path check into a launch/worker permission.
@@ -204,6 +210,8 @@ impl Process {
 struct WindowsFreshness {
     canonical: Peer,
     ancestry: Ancestry,
+    /// The portable app's proof for this exact frontend, held to the end.
+    portable: Option<std::sync::Arc<super::portable_frontend::GuiProof>>,
 }
 #[cfg(windows)]
 impl WindowsFreshness {
@@ -213,6 +221,10 @@ impl WindowsFreshness {
             "canonical frontend expired"
         );
         self.ancestry.validate(until)?;
+        ensure!(
+            self.portable.as_ref().is_none_or(|proof| proof.current()),
+            "portable frontend proof expired"
+        );
         ensure!(
             self.canonical.current() && Instant::now() < until,
             "canonical frontend expired"
@@ -719,6 +731,21 @@ pub(super) fn authenticate(location: &Scope, peer_pid: u32, value: &Value) -> Re
     } = probe(location, &envelope.attempt, until)
         .context("canonical frontend evidence unavailable")?;
     let frontend = Process::read(frontend_pid)?;
+    // The portable zip's bound app is proven for this exact process within the
+    // same original deadline; the installer and adjacent images are unchanged.
+    #[cfg(windows)]
+    let portable = if location.selected_frontend(Path::new(&frontend.executable)) {
+        None
+    } else {
+        Some(
+            frontend
+                .original
+                .as_deref()
+                .and_then(|original| location.portable_running(original, until))
+                .context("canonical frontend is not the installed application")?,
+        )
+    };
+    #[cfg(not(windows))]
     ensure!(
         location.selected_frontend(Path::new(&frontend.executable)),
         "canonical frontend is not the installed application"
@@ -741,6 +768,7 @@ pub(super) fn authenticate(location: &Scope, peer_pid: u32, value: &Value) -> Re
         let windows = WindowsFreshness {
             canonical: peer,
             ancestry: Ancestry::inspect(peer_pid, until)?,
+            portable,
         };
         windows.check(until)?;
         windows

@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    #[cfg(any(feature = "live", target_os = "macos", windows))]
     zerus_client_core::quit_origin::capture_process_entry();
     // The service's fixed inherited socket/owner entry precedes renderer,
     // Tauri context, instance claims and every ordinary GUI/writer setup.

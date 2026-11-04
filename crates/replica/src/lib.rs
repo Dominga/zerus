@@ -27,4 +27,4 @@ pub use schema::{
 };
 pub use store::{Changes, Damaged, Position, ProjectStore};
 pub use sync::{Document, DonePage, DoneRow, Imported, Inventory, Update, Version};
-pub use task::{NewTask, TaskDoc};
+pub use task::{NewTask, Settled, Settlement, TaskDoc};

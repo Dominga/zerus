@@ -2,8 +2,8 @@
 //! (last writer wins), `text` (the prompt, merged by character) and `log`
 //! (history, append only).
 use crate::attachment::{
-    check_attachments, TaskAttachment, BASE_TASK_SCHEMA, DISCUSSION_TASK_SCHEMA, NAMED_TASK_SCHEMA,
-    TASK_SCHEMA,
+    check_attachments, TaskAttachment, BASE_TASK_SCHEMA, DISCUSSION_TASK_SCHEMA,
+    MESSAGE_TASK_SCHEMA, NAMED_TASK_SCHEMA, TASK_SCHEMA,
 };
 use crate::execution::{
     self, check_attempt, check_event, Attempt, AttemptEvent, ReportDecision, ReportKind, Stale,
@@ -16,6 +16,10 @@ use crate::schema::{
 use crate::{ids, rank, Error, Result};
 use loro::{ContainerTrait, ExportMode, LoroDoc, LoroMap, LoroValue, UpdateOptions, VersionVector};
 use sha2::{Digest, Sha256};
+
+#[path = "task_attempts.rs"]
+mod attempts;
+pub use attempts::{Settled, Settlement};
 
 pub struct NewTask<'a> {
     pub project: &'a str,
@@ -305,8 +309,24 @@ impl TaskDoc {
         Ok(())
     }
 
+    /// A task that records attempts keeps their schema even when a lower
+    /// upgrade by an older replica won the merged `meta.schema` value.
     pub fn schema(&self) -> i64 {
+        let stored = self.stored_schema();
+        if self.executes_attempts() {
+            stored.max(execution::EXECUTION_TASK_SCHEMA)
+        } else {
+            stored
+        }
+    }
+
+    fn stored_schema(&self) -> i64 {
         integer(&self.meta(), "schema").unwrap_or(0)
+    }
+
+    /// Whether the task records execution attempts (`execution` module).
+    pub fn executes_attempts(&self) -> bool {
+        !self.doc.get_map("attempts").is_empty()
     }
 
     pub fn stage(&self) -> Result<Stage> {
@@ -586,8 +606,11 @@ impl TaskDoc {
         Ok(entry)
     }
 
+    /// Raises the stored schema, never lowering it. It compares the stored
+    /// value, so an attempt write also restores the execution schema that a
+    /// concurrent lower upgrade replaced.
     fn upgrade_schema(&self, required: i64) -> Result<()> {
-        if self.schema() < required {
+        if self.stored_schema() < required {
             self.meta().insert("schema", required)?;
         }
         Ok(())
@@ -807,8 +830,18 @@ impl TaskDoc {
     }
 
     /// Whether a send could be recorded; check it before pasting anything.
+    /// A task that records attempts refuses a send that would not reserve
+    /// one, before any input.
     pub fn check_send(&self) -> Result<()> {
+        self.sendable()?;
+        self.legacy_start()
+    }
+
+    /// Whether the task can begin an execution: its stage, and no attempt
+    /// whose delivery is unknown.
+    fn sendable(&self) -> Result<()> {
         self.writable()?;
+        self.not_held()?;
         match self.stage()? {
             Stage::Backlog | Stage::Todo => Ok(()),
             Stage::Active => Err(self.already_running()),
@@ -853,11 +886,19 @@ impl TaskDoc {
         Error::new(format!("{} is already In progress in {session}", self.id()))
     }
 
+    /// Whether a handoff could be recorded, checked before any input; a task
+    /// that records attempts refuses one that would not reserve its attempt.
     pub fn check_handoff(&self, actor: &Actor) -> Result<()> {
+        self.handoffable(actor)?;
+        self.legacy_start()
+    }
+
+    fn handoffable(&self, actor: &Actor) -> Result<()> {
         self.require(
             &[Stage::Active],
             "only a task In progress can be handed off",
         )?;
+        self.not_held()?;
         if let Actor::Agent(own) = actor {
             if self.session().as_ref() != Some(own) {
                 return Err(Error::new(
@@ -927,8 +968,10 @@ impl TaskDoc {
             .map(|n| n.ok_or_else(|| Error::new("the considered revision counts from 1")))
             .transpose()?;
         // A report by the exact pinned agent is explicit work evidence even
-        // when it filed the task during an already-running turn.
-        if matches!(self.stage()?, Stage::Todo | Stage::Backlog)
+        // when it filed the task during an already-running turn; while an
+        // attempt's delivery is unknown it starts nothing.
+        if self.held()?.is_none()
+            && matches!(self.stage()?, Stage::Todo | Stage::Backlog)
             && matches!((&self.view()?.target, actor), (Target::Session(target), Actor::Agent(own)) if target == own)
         {
             self.record_start(actor, now)?;
@@ -953,6 +996,7 @@ impl TaskDoc {
         if let Some(considered) = considered {
             entry.insert("considered", considered)?;
         }
+        self.record_report_fact(&view, &decision, kind, actor, now)?;
         self.doc.commit();
         Ok(decision)
     }
@@ -973,6 +1017,9 @@ impl TaskDoc {
                     "register the native subagent worker before starting",
                 ));
             }
+            if self.executes_attempts() {
+                return self.acknowledge_attempt(&view, own, actor, now);
+            }
             if view.session.as_ref() != Some(own) {
                 return Err(Error::new("the task is active in another session"));
             }
@@ -988,7 +1035,7 @@ impl TaskDoc {
             self.doc.commit();
             return Ok(());
         }
-        self.check_send()?;
+        self.sendable()?;
         if matches!(
             view.target,
             Target::NewSession { .. } | Target::Subagent { .. }
@@ -1005,6 +1052,11 @@ impl TaskDoc {
         if !own.session_id.is_empty() {
             self.upgrade_schema(BASE_TASK_SCHEMA)?;
         }
+        // A task that records attempts begins a direct-start attempt in the
+        // same commit as its history entry.
+        if self.executes_attempts() {
+            self.begin_start_attempt(&view, own, actor, now)?;
+        }
         let fields = self.fields();
         fields.insert("stage", Stage::Active.as_str())?;
         fields.insert("stage_at", now)?;
@@ -1020,6 +1072,9 @@ impl TaskDoc {
 
     pub fn record_cancel(&mut self, reason: &str, actor: &Actor, now: i64) -> Result<()> {
         self.require(&[Stage::Active], "only a task In progress can be cancelled")?;
+        // An attempt whose delivery is unknown is cancelled as that attempt,
+        // never through the session that held the task before it.
+        self.not_held()?;
         // The reason becomes a comment, under the same rules.
         if !reason.trim().is_empty() {
             check_text(reason, "reason")?;
@@ -1029,6 +1084,9 @@ impl TaskDoc {
         fields.insert("stage_at", now)?;
         fields.insert("cancelled_at", now)?;
         fields.insert("cancel_reason", reason.trim())?;
+        if let Some(current) = self.current_attempt()? {
+            self.push_event(&current.id, execution::EventKind::Cancelled, actor, now)?;
+        }
         self.log("cancelled", actor, now, "", None)?;
         // The reason is a comment for people and agents; it is never sent.
         if !reason.trim().is_empty() {
@@ -1050,7 +1108,13 @@ impl TaskDoc {
             ));
         }
         let sent = view.log.iter().rev().find(|entry| entry.kind == "sent");
-        if sent.and_then(|entry| entry.request_id.as_deref()) != Some(worker.request_id.as_str()) {
+        let attempt = self.current_attempt()?;
+        if sent.and_then(|entry| entry.request_id.as_deref()) != Some(worker.request_id.as_str())
+            || attempt.as_ref().is_some_and(|current| {
+                current.request_id != worker.request_id
+                    || current.phase == execution::Phase::Unknown
+            })
+        {
             return Err(Error::new(
                 "task dispatch changed; read the current request_id",
             ));
@@ -1160,6 +1224,14 @@ impl TaskDoc {
                     && delivery.prompt.is_empty()
                     && delivery.submitted_id.is_empty() => {}
             "send" | "reopen" if delivery.state == "reserved" => {
+                // A reopen begins an attempt (S2b.3), and nothing more goes to
+                // an attempt whose delivery is unknown.
+                if delivery.mode == "reopen" && self.executes_attempts() {
+                    return Err(Error::new(
+                        "this task records execution attempts; reopen it through its next attempt",
+                    ));
+                }
+                self.not_held()?;
                 let expected_stage = if delivery.mode == "send" {
                     view.stage == Stage::Active
                 } else {
@@ -1190,7 +1262,7 @@ impl TaskDoc {
         {
             return Err(Error::new("task discussion is full"));
         }
-        self.upgrade_schema(TASK_SCHEMA)?;
+        self.upgrade_schema(MESSAGE_TASK_SCHEMA)?;
         let entry = self.log("message", actor, now, text, session)?;
         entry.insert("request_id", id)?;
         entry.insert("delivery", serde_json::to_string(delivery)?)?;
@@ -1272,23 +1344,14 @@ impl TaskDoc {
         now: i64,
     ) -> Result<()> {
         self.writable()?;
-        for message in self.view()?.log.into_iter().filter(|e| {
-            e.kind == "message" && e.delivery.as_ref().is_some_and(|d| d.state == "queued")
-        }) {
-            let mut delivery = message.delivery.expect("queued message");
-            delivery.state = "submitted".into();
-            delivery.submitted_id = dispatch.into();
-            delivery.prompt.clear();
-            let entry = self.log("message_delivery", actor, now, "", None)?;
-            entry.insert("request_id", message.request_id.unwrap_or_default())?;
-            entry.insert("delivery", serde_json::to_string(&delivery)?)?;
-        }
+        self.queued_submitted(dispatch, actor, now)?;
         self.doc.commit();
         Ok(())
     }
 
     /// A line Zerus adds to the history, such as a refused cancel message.
     pub fn note(&mut self, text: &str, actor: &Actor, now: i64) -> Result<()> {
+        self.writable()?;
         self.log("note", actor, now, text, None)?;
         self.doc.commit();
         Ok(())
@@ -2363,6 +2426,7 @@ mod tests {
                 requirement: 1,
                 actor: Actor::Person,
                 at: 50,
+                delivery: None,
             }
         }
 
@@ -2374,6 +2438,15 @@ mod tests {
                 actor: Actor::Agent(worker()),
                 at: 60,
                 settles: Vec::new(),
+            }
+        }
+
+        /// The attempt's own submitted receipt.
+        fn delivered(n: u128, attempt: &str) -> AttemptEvent {
+            AttemptEvent {
+                kind: EventKind::Submitted,
+                at: 55,
+                ..began(n, attempt)
             }
         }
 
@@ -2438,15 +2511,15 @@ mod tests {
         }
 
         #[test]
-        fn a_task_with_attempts_is_read_and_this_build_cannot_write_it() {
+        fn a_task_with_attempts_is_read_and_written_under_their_rules() {
             let mut task = task(Stage::Todo);
             task.record_send(&worker(), "request-1", &Actor::Person, 10)
                 .unwrap();
             let before = task.view().unwrap();
-            task.record_attempt_for_test(&attempt(A1, 1), &[began(1, A1)]);
+            task.record_attempt_for_test(&attempt(A1, 1), &[delivered(2, A1), began(1, A1)]);
             let view = task.view().unwrap();
             assert_eq!(view.schema, execution::EXECUTION_TASK_SCHEMA);
-            assert!(!view.writable);
+            assert!(view.writable);
             let current = view.execution.as_ref().unwrap().current.clone().unwrap();
             assert_eq!(
                 (
@@ -2462,16 +2535,30 @@ mod tests {
                 (view.stage, view.log.len()),
                 (before.stage, before.log.len())
             );
-            // Writes fail closed rather than bypassing rules this build lacks.
-            let refused = task.record_report("Done", &Actor::Agent(worker()), 70);
+            // The records survive a snapshot.
+            let restored = TaskDoc::from_bytes(&task.snapshot().unwrap()).unwrap();
+            assert_eq!(restored.view().unwrap().execution, view.execution);
+            // The current executor's result finishes the attempt in its commit.
+            assert!(task
+                .record_report("Done", &Actor::Agent(worker()), 70)
+                .unwrap());
+            let current = task.view().unwrap().execution.unwrap().current.unwrap();
+            assert_eq!((current.id.as_str(), current.phase), (A1, Phase::Ready));
+            // A newer schema is read-only: writes fail closed rather than
+            // bypassing rules this build lacks.
+            let mut newer = TaskDoc::from_bytes(&bytes_of(&restored)).unwrap();
+            newer.meta().insert("schema", TASK_SCHEMA + 1).unwrap();
+            newer.doc.commit();
+            let refused = newer.record_report("Done", &Actor::Agent(worker()), 70);
             assert_eq!(
                 refused.unwrap_err().to_string(),
                 "Update Zerus to edit this task"
             );
-            assert_eq!(task.stage().unwrap(), Stage::Active);
-            // The records survive a snapshot.
-            let restored = TaskDoc::from_bytes(&task.snapshot().unwrap()).unwrap();
-            assert_eq!(restored.view().unwrap().execution, view.execution);
+            assert_eq!(newer.stage().unwrap(), Stage::Active);
+        }
+
+        fn bytes_of(task: &TaskDoc) -> Vec<u8> {
+            task.snapshot().unwrap()
         }
 
         #[test]
@@ -2496,9 +2583,9 @@ mod tests {
             );
             // The same event merged from both replicas counts once.
             let mut three = TaskDoc::from_bytes(&bytes).unwrap();
-            three.record_attempt_for_test(&attempt(A1, 2), &[began(7, A1)]);
+            three.record_attempt_for_test(&attempt(A1, 2), &[delivered(6, A1), began(7, A1)]);
             let mut four = TaskDoc::from_bytes(&three.snapshot().unwrap()).unwrap();
-            four.record_attempt_for_test(&attempt(A1, 2), &[began(7, A1)]);
+            four.record_attempt_for_test(&attempt(A1, 2), &[delivered(6, A1), began(7, A1)]);
             three.import(&four.snapshot().unwrap()).unwrap();
             let current = three.view().unwrap().execution.unwrap().current.unwrap();
             assert_eq!(
@@ -2518,6 +2605,9 @@ mod tests {
             assert!(task.view().is_err());
             task.upgrade_schema(execution::EXECUTION_TASK_SCHEMA)
                 .unwrap();
+            task.doc.commit();
+            assert!(task.view().is_err());
+            task.upgrade_schema(TASK_SCHEMA + 1).unwrap();
             task.doc.commit();
             let view = task.view().unwrap();
             assert!(!view.writable && view.execution.is_none());

@@ -1,0 +1,106 @@
+{
+  "uuid": "a14e0091-428f-42f7-854f-35b48a874064",
+  "id": "T-d4e5f6",
+  "project": "project-1",
+  "schema": 6,
+  "writable": true,
+  "created_at": 1790000000000,
+  "stage_at": 1790000002000,
+  "author": {
+    "kind": "person"
+  },
+  "stage": "active",
+  "target": {
+    "kind": "session",
+    "machine": "00000000-0000-4000-8000-000000000001",
+    "session": "codex/api",
+    "session_id": "launch_id:00000000-0000-4000-8000-000000000003"
+  },
+  "rank": "V",
+  "session": {
+    "machine": "00000000-0000-4000-8000-000000000001",
+    "session": "codex/api",
+    "session_id": "launch_id:00000000-0000-4000-8000-000000000003"
+  },
+  "summary": "",
+  "cancelled_at": null,
+  "cancel_reason": "",
+  "text": "Add rate limiting to POST /v1/orders.",
+  "log": [
+    {
+      "kind": "created",
+      "actor": {
+        "kind": "person"
+      },
+      "at": 1790000000000
+    },
+    {
+      "kind": "sent",
+      "actor": {
+        "kind": "person"
+      },
+      "at": 1790000002000,
+      "session": {
+        "machine": "00000000-0000-4000-8000-000000000001",
+        "session": "codex/api",
+        "session_id": "launch_id:00000000-0000-4000-8000-000000000003"
+      },
+      "request_id": "00000000-0000-4000-8000-000000000004"
+    },
+    {
+      "kind": "comment",
+      "actor": {
+        "kind": "person"
+      },
+      "at": 1790000002500,
+      "text": "Limit per API key."
+    },
+    {
+      "kind": "started",
+      "actor": {
+        "kind": "agent",
+        "machine": "00000000-0000-4000-8000-000000000001",
+        "session": "codex/api",
+        "session_id": "launch_id:00000000-0000-4000-8000-000000000003"
+      },
+      "at": 1790000003000,
+      "session": {
+        "machine": "00000000-0000-4000-8000-000000000001",
+        "session": "codex/api",
+        "session_id": "launch_id:00000000-0000-4000-8000-000000000003"
+      }
+    },
+    {
+      "kind": "progress",
+      "actor": {
+        "kind": "agent",
+        "machine": "00000000-0000-4000-8000-000000000001",
+        "session": "codex/api",
+        "session_id": "launch_id:00000000-0000-4000-8000-000000000003"
+      },
+      "at": 1790000004000,
+      "text": "Token bucket in place; tests next.",
+      "considered": 1
+    }
+  ],
+  "execution": {
+    "requirement": 1,
+    "attempts": 1,
+    "current": {
+      "id": "00000000-0000-4000-8000-000000000004",
+      "generation": 1,
+      "origin": "send",
+      "executor": {
+        "machine": "00000000-0000-4000-8000-000000000001",
+        "session": "codex/api",
+        "session_id": "launch_id:00000000-0000-4000-8000-000000000003"
+      },
+      "request_id": "00000000-0000-4000-8000-000000000004",
+      "requirement": 1,
+      "phase": "running",
+      "at": 1790000001000,
+      "began_at": 1790000003000,
+      "progress_at": 1790000004000
+    }
+  }
+}

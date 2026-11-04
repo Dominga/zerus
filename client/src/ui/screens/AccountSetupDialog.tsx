@@ -17,6 +17,20 @@ export default function AccountSetupDialog(props:{prompt:SetupPrompt;busy:boolea
  const chooseHost=(h:string)=>{setHost(h);const p=machine()?.providers.includes(provider())?provider():machine()?.providers[0]??"codex";chooseAgent(p);};
  chooseHost(host());
  const reuse=()=>!!saved(),ocListed=()=>machine()?.listed.includes("native-opencode"),canAgent=(p:string)=>p!=="opencode"||savedFor(p).length>0;
+ const tabAgent=()=>machine()?.providers.find(p=>p===provider()&&canAgent(p))??machine()?.providers.find(canAgent);
+ const stepAgent=(event:KeyboardEvent&{currentTarget:HTMLDivElement})=>{
+  if(event.altKey||event.ctrlKey||event.metaKey)return;
+  const rows=[...event.currentTarget.querySelectorAll<HTMLButtonElement>(".acct-agent:not(:disabled)")];
+  const at=rows.findIndex(row=>row===event.target);
+  if(at<0)return;
+  const next=event.key==="ArrowDown"||event.key==="ArrowRight"?at+1:event.key==="ArrowUp"||event.key==="ArrowLeft"?at-1:event.key==="Home"?0:event.key==="End"?rows.length-1:undefined;
+  if(next===undefined)return;
+  event.preventDefault();
+  const row=rows[Math.max(0,Math.min(rows.length-1,next))];
+  // Moving against an edge must not reset an already chosen saved profile.
+  if(row.getAttribute("aria-selected")!=="true")row.click();
+  row.focus();
+ };
  const detail=(p:string)=>p==="opencode"?(savedFor(p).length?tr("Add the native configuration again"):ocListed()?tr("Native configuration, already added"):tr("Not installed on %1", machine()?.machine ?? "")):p==="dsh"?(savedFor(p).length?tr("Saved API key or a new one"):tr("DeepSeek API key")):savedFor(p).length?tr("Saved account or a new profile"):tr("New profile with its own sign-in");
  const hint=()=>!machine()?.online?`${machine()?.machine??"Machine"} is offline.`:reuse()&&provider()==="opencode"?tr("Use OpenCode's native configuration on %1 for new sessions again.", machine()?.machine ?? ""):reuse()?tr("Use the saved sign-in on %1. The account will be available for new sessions again.", machine()?.machine ?? ""):provider()==="dsh"?tr("Configure a DeepSeek API key on the selected machine."):tr("Create a separate account profile on the selected machine, then sign in.");
  const can=()=>!!machine()?.online&&(api()?!!key().trim():canAgent(provider())&&(reuse()||!!name().trim()));
@@ -29,7 +43,7 @@ export default function AccountSetupDialog(props:{prompt:SetupPrompt;busy:boolea
   <div class="dlg-head"><Icon name={api()?"key-round":"user-round-cog"} size={18} class="accent"/><h2 id={titleId()}>{api()?`DeepSeek API key on ${machine()?.machine}`:tr("Add agent account")}</h2><span class="grow"/><button type="button" class="icon-btn" aria-label={tr("Close")} disabled={props.busy} onClick={()=>props.close(view.handle)}><Icon name="x" size={16}/></button></div>
   <div class="dlg-body"><Show when={api()} fallback={<>
    <div class="form-row"><label for="aa-host">{tr("Machine")}</label><select id="aa-host" class="field" value={host()} onChange={e=>chooseHost(e.currentTarget.value)}><For each={view.hosts}>{h=><option value={h.key}>{h.label}{h.online?"":" (offline)"}</option>}</For></select></div>
-   <div class="form-row acct-agents-row"><label>{tr("Agent")}</label><div class="acct-agents" role="listbox" aria-label={tr("Agent")}><For each={machine()?.providers}>{p=><button type="button" role="option" class="acct-agent" classList={{on:provider()===p}} aria-selected={provider()===p} disabled={!canAgent(p)} title={p==="opencode"?(ocListed()?tr("Configure providers, models and permissions with OpenCode on %1. Zerus uses that native configuration.", machine()?.machine ?? ""):tr("Install OpenCode on %1, then refresh Accounts.", machine()?.machine ?? "")):undefined} style={{"--agent":`var(--z-agent-${agentKind(p)})`}} onClick={()=>chooseAgent(p)}><AgentGlyph agent={agentKind(p)} size={16}/><span class="col"><b>{providerName(p)}</b><span class="muted">{detail(p)}</span></span></button>}</For></div></div>
+   <div class="form-row acct-agents-row"><label>{tr("Agent")}</label><div class="acct-agents" role="listbox" aria-label={tr("Agent")} onKeyDown={stepAgent}><For each={machine()?.providers}>{p=><button type="button" role="option" class="acct-agent" classList={{on:provider()===p}} aria-selected={provider()===p} tabIndex={p===tabAgent()?0:-1} disabled={!canAgent(p)} title={p==="opencode"?(ocListed()?tr("Configure providers, models and permissions with OpenCode on %1. Zerus uses that native configuration.", machine()?.machine ?? ""):tr("Install OpenCode on %1, then refresh Accounts.", machine()?.machine ?? "")):undefined} style={{"--agent":`var(--z-agent-${agentKind(p)})`}} onClick={()=>chooseAgent(p)}><AgentGlyph agent={agentKind(p)} size={16}/><span class="col"><b>{providerName(p)}</b><span class="muted">{detail(p)}</span></span></button>}</For></div></div>
    <div class="form-row"><label for="aa-saved">{tr("Account")}</label><select id="aa-saved" class="field" value={saved()} disabled={savedFor().length+(provider()==="opencode"?0:1)<2} onChange={e=>setSaved(e.currentTarget.value)}><For each={savedFor()}>{s=><option value={s.id}>{s.label}</option>}</For><Show when={provider()!=="opencode"}><option value="">{tr("New account")}</option></Show></select></div>
    <div class="form-row"><label for="aa-name">{tr("Account name")}</label><input id="aa-name" class="field" maxLength={160} placeholder={tr("Work, Personal, Team…")} disabled={reuse()} value={reuse()?"":name()} onInput={e=>setName(e.currentTarget.value)}/></div>
   </>}><p>Save an API key on {machine()?.machine}. DeepSeek on that machine will use this key.</p><div class="form-row"><label for="ak-key">{tr("API key")}</label><input ref={keyInput} disabled={props.busy} id="ak-key" class="field" type="password" maxLength={4096} autocomplete="off" value={key()} onInput={e=>setKey(e.currentTarget.value)}/></div></Show></div>

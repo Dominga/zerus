@@ -772,6 +772,195 @@ mod actor {
         }
     }
 
+    /// Exercises the real child/runtime result paths. The controller retains
+    /// one copy of THAT original custody so a worker result cannot masquerade
+    /// as kernel drain. Restart/readmission must keep the same settled ticket.
+    fn post_child_unknown(
+        code: &'static str,
+        execute: impl Fn(&Arc<zerus_client_core::run::custody::InheritedLock>) -> Ended
+            + Send
+            + Sync
+            + 'static,
+    ) {
+        let launches = Arc::new(AtomicUsize::new(0));
+        let count = launches.clone();
+        let retained = Arc::new(std::sync::Mutex::new(None));
+        let keep = retained.clone();
+        let mut f = Fixture::new(move |_, custody| {
+            count.fetch_add(1, Ordering::SeqCst);
+            *keep.lock().unwrap() = Some(custody.clone());
+            execute(custody)
+        });
+        let original = f.original();
+        assert!(f.admit(&original).matches(&original.intent));
+        f.until("original worker result persisted", |f| {
+            f.row(&original).receipt.phase == Phase::Unknown
+        });
+        let row = f.row(&original);
+        assert_eq!(row.receipt.code, code);
+        let ticket = row
+            .ticket
+            .clone()
+            .expect("original ticket reserved before child");
+        assert_eq!(ticket.admission_id, original.plan.launch_id);
+        assert_eq!(
+            ticket.binding_sha256,
+            original.binding.fingerprint().unwrap()
+        );
+        assert_eq!(row.next_step, 1);
+        assert_eq!(row.receipt.phase, Phase::Unknown);
+        assert!(row.receipt.launch.is_none());
+        assert!(!row.receipt.not_started(&original.plan));
+        assert!(!row.receipt.drained);
+        assert_eq!(f.store.operation_undrained().unwrap(), 1);
+        assert!(matches!(
+            crate::desktop::custody::probe(&f.location, row.custody.as_ref().unwrap()),
+            crate::desktop::custody::Observation::Held
+        ));
+        assert_eq!(f.admit(&original).receipt.unwrap(), row.receipt);
+        let held = retained.lock().unwrap().take().unwrap();
+        f.runtime.request_stop();
+        for _ in 0..8 {
+            f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+        }
+        assert!(
+            !f.runtime.drained(),
+            "original custody is still physically held"
+        );
+        assert_eq!(launches.load(Ordering::SeqCst), 1);
+        drop(held);
+        f.until("original custody and runtime drain", |f| {
+            f.runtime.drained()
+        });
+        let settled = f.row(&original);
+        assert_eq!(settled.ticket, Some(ticket.clone()));
+        assert_eq!(settled.next_step, 1);
+        assert_eq!(settled.receipt.phase, Phase::Unknown);
+        assert_eq!(settled.receipt.code, code);
+        assert!(settled.receipt.drained);
+        assert!(settled.receipt.launch.is_none());
+        assert!(!settled.receipt.not_started(&original.plan));
+        assert_eq!(f.store.operation_undrained().unwrap(), 0);
+        // A new runtime never gets execution consent from the unknown record.
+        f.runtime = runtime::Runtime::new(&f.config, &f.epoch, f.owner.clone()).unwrap();
+        let count = launches.clone();
+        f.runtime.fixture_executor(
+            MACHINE,
+            Arc::new(move |_, _| {
+                count.fetch_add(1, Ordering::SeqCst);
+                panic!("unknown original must never restart")
+            }),
+        );
+        let again = f.admit(&original);
+        assert!(again.accepted);
+        assert_eq!(again.receipt.unwrap(), settled.receipt);
+        for _ in 0..8 {
+            f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+        }
+        assert_eq!(f.row(&original).ticket, Some(ticket));
+        assert_eq!(launches.load(Ordering::SeqCst), 1);
+        f.runtime.request_stop();
+        f.until("restarted observer drained", |f| f.runtime.drained());
+    }
+
+    /// Reports OS cleanup separately: a worker assertion could panic into the
+    /// SAME unobserved fallback and otherwise conceal a broken kill/wait path.
+    fn child_fault(read: bool) {
+        use super::super::child;
+        use std::sync::atomic::AtomicBool;
+        let reaped = Arc::new(AtomicBool::new(false));
+        let spawned = Arc::new(AtomicUsize::new(0));
+        let consumed = Arc::new(AtomicBool::new(false));
+        let was_reaped = reaped.clone();
+        let was_spawned = spawned.clone();
+        let fault_consumed = consumed.clone();
+        post_child_unknown(
+            if read {
+                "creation_launch_output_unreadable"
+            } else {
+                "creation_launch_unobserved"
+            },
+            move |custody| {
+                if read {
+                    child::READ_ERROR.with(|fault| fault.set(true));
+                } else {
+                    child::WAIT_ERROR.with(|fault| fault.set(true));
+                }
+                // No native agent, descendant or global SIGCHLD manipulation. The
+                // wait-error helper self-exits in two seconds even under mutation.
+                let ended = child::run(
+                    std::path::Path::new("/usr/bin/env"),
+                    &[
+                        "python3".into(),
+                        "-c".into(),
+                        if read {
+                            "pass".into()
+                        } else {
+                            "import time; time.sleep(2)".into()
+                        },
+                    ],
+                    custody,
+                    Instant::now() + Duration::from_secs(20),
+                );
+                let pid = child::SPAWNED.with(|spawned| spawned.take()).unwrap_or(0);
+                was_spawned.store(pid as usize, Ordering::SeqCst);
+                fault_consumed.store(
+                    if read {
+                        child::READ_ERROR.with(|v| !v.get())
+                    } else {
+                        child::WAIT_ERROR.with(|v| !v.get())
+                    },
+                    Ordering::SeqCst,
+                );
+                if pid != 0 {
+                    let mut status = 0;
+                    // SAFETY: exactly the original private child PID reported by
+                    // Child::id; waitpid cannot observe an unrelated non-child.
+                    let result = unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) };
+                    was_reaped.store(
+                        result == -1
+                            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD),
+                        Ordering::SeqCst,
+                    );
+                    if result == 0 {
+                        // Mutation cleanup only: that SAME still-unreaped private
+                        // helper has its own bounded exit. Never signal by name.
+                        unsafe {
+                            libc::waitpid(pid as i32, &mut status, 0);
+                        }
+                    }
+                }
+                ended
+            },
+        );
+        assert!(spawned.load(Ordering::SeqCst) > 0, "a real child existed");
+        assert!(
+            consumed.load(Ordering::SeqCst),
+            "the actual observation boundary consumed the fault"
+        );
+        assert!(
+            reaped.load(Ordering::SeqCst),
+            "the production path reaped its original child before returning"
+        );
+    }
+
+    #[test]
+    fn post_child_output_read_error_is_unknown_and_never_replayed() {
+        child_fault(true);
+    }
+
+    #[test]
+    fn post_child_try_wait_error_is_unknown_and_never_replayed() {
+        child_fault(false);
+    }
+
+    #[test]
+    fn post_child_worker_panic_is_unknown_and_never_replayed() {
+        post_child_unknown("creation_launch_unobserved", |_| {
+            panic!("private launch worker lost its result")
+        });
+    }
+
     #[test]
     fn a_failed_or_unknown_child_settles_as_such_and_is_never_replayed() {
         for (ended, phase, code) in [

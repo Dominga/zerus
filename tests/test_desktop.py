@@ -240,6 +240,23 @@ finally:
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_operations').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_operation_attempts').fetchone()[0], 0)
 
+    def test_task_message_is_a_closed_native_intent_refused_without_its_actor(self):
+        self.serve()
+        status = self.cli('desktop', 'status', '--json')
+        scope = dict(configuration=status['configuration'], service_epoch=status['epoch'])
+        request = str(uuid.uuid4())
+        content = dict(text='hello', attachments=[])
+        record = dict(id=request, intent=dict(content=content, mode='queue', dispatch=''),
+                      input_sha256=hashlib.sha256(json.dumps(content, separators=(',', ':'), sort_keys=True).encode()).hexdigest())
+        intent = dict(scope=scope, project='example', task_id=str(uuid.uuid4()), request_id=request,
+                      original=json.dumps(record, separators=(',', ':')))
+        # Only the native frontend lane carries it, and no actor admits it yet.
+        refused = self.cli('desktop', 'request', '--json', data=dict(op='task_message', intent=intent))
+        self.assertFalse(refused['accepted'])
+        self.assertEqual(refused['code'], 'frontend_authentication_required')
+        help_text = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True).stdout
+        self.assertNotIn('Desktop task message ABI', help_text, 'nothing advertises the kind yet')
+
     def test_creation_launch_is_a_closed_native_intent_with_scoped_read_only_lookup(self):
         self.serve()
         status = self.cli('desktop', 'status', '--json')

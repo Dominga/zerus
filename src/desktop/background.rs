@@ -251,6 +251,11 @@ impl Runtime {
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"creation_launch_unsupported"});
         }
+        // The task message actor is a separate leaf; until it lands no
+        // service advertises this kind, and an authenticated request is refused.
+        if authority.operation() == "task_message" {
+            return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"task_message_unsupported"});
+        }
         // A recognized native request is still not executing-kind admission.
         if authority.operation() == "task_start_reconcile" {
             return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"task_start_reconcile_unsupported"});

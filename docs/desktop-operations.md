@@ -239,6 +239,8 @@ included, and the policy requires them to equal the retained input. A legacy
 record without either never qualifies for an admitted actor; only the direct
 path still serializes its content. A reservation, reopened or new, is durable
 data about the original, never consent to execute it.
+The service-owned leaf for these queue and note messages is specified in
+[the task message design](desktop-task-message.md).
 
 Configuration/project/task are independently retained expected data, not fields
 observed in an outbox record. Raw record and input each stay at most 1 MiB;

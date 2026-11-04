@@ -16,40 +16,52 @@ pub(crate) fn with_session_project_binding<T>(
     let record = binding_metadata(&path, name, provider)?;
     check(&record)
 }
+/// What a pinned binding attempt found.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Pinned<T> {
+    /// `write` ran under the locks.
+    Written(T),
+    /// A lock was busy; nothing is held now, so the caller may retry.
+    Busy,
+    /// `name` is no longer that run and conversation.
+    Changed,
+}
 /// Runs `write` while `name` is still the binding of run `run_id` with
 /// conversation `conversation`: a fork's inherited project, written after its
 /// launch released the state lock (zerus-wx3k). The locks and their order are
-/// a project move's: the state writer lock, then the provider's binding lock.
-/// It waits for them no later than `deadline`. `None` when they stayed busy or
-/// the binding changed. `write` must not wait for another lock.
+/// a project move's: the state writer lock (waited for until `deadline`),
+/// then the provider's binding lock, tried once so that a busy provider never
+/// holds the state lock (zerus-jx5o). The binding is checked under both.
+/// `write` must not wait for another lock.
 pub(crate) fn with_pinned_session_binding<T>(
     name: &str,
     run_id: &str,
     conversation: &Value,
     deadline: std::time::Instant,
     write: impl FnOnce() -> T,
-) -> anyhow::Result<Option<T>> {
+) -> anyhow::Result<Pinned<T>> {
     let Some(_writer) = super::storage::writer_until(deadline).map_err(anyhow::Error::msg)? else {
-        return Ok(None);
+        return Ok(Pinned::Busy);
     };
     let (provider, path) = binding_location(name);
     let _provider = match provider {
         Some(provider) => {
             let lock = root().join(provider).join("bindings.lock");
-            match super::storage::lock_until(&lock, deadline).map_err(anyhow::Error::msg)? {
+            let once = std::time::Instant::now();
+            match super::storage::lock_until(&lock, once).map_err(anyhow::Error::msg)? {
                 Some(guard) => Some(guard),
-                None => return Ok(None),
+                None => return Ok(Pinned::Busy),
             }
         }
         None => None,
     };
     let Ok(record) = binding_metadata(&path, name, provider) else {
-        return Ok(None);
+        return Ok(Pinned::Changed);
     };
     if string(&record, "run_id") != run_id || record["conversation_id"] != *conversation {
-        return Ok(None);
+        return Ok(Pinned::Changed);
     }
-    Ok(Some(write()))
+    Ok(Pinned::Written(write()))
 }
 /// A binding's provider (none for a terminal session) and its record path.
 fn binding_location(name: &str) -> (Option<&'static str>, PathBuf) {
@@ -167,40 +179,63 @@ mod tests {
         let pinned = |name: &str, run: &str, conversation: &Value| {
             with_pinned_session_binding(name, run, conversation, soon(), || "written").unwrap()
         };
+        let free = |lock: &std::path::Path| {
+            super::super::storage::lock_until(lock, Instant::now()).unwrap().is_some()
+        };
         let terminal = "claude/example/fork";
         let deepseek = "dsh/example/fork";
-        let (_, path) = binding_location(terminal);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &path,
-            json!({"version":1,"agent":"claude","name":terminal,"run_id":"run-1","conversation_id":null}).to_string(),
-        )
-        .unwrap();
-        let (_, path) = binding_location(deepseek);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &path,
-            json!({"backend":"dsh","name":deepseek,"run_id":"run-2","conversation_id":"session-2"}).to_string(),
-        )
-        .unwrap();
-        assert_eq!(pinned(terminal, "run-1", &Value::Null), Some("written"));
-        assert_eq!(pinned(deepseek, "run-2", &json!("session-2")), Some("written"));
+        let save = |name: &str, record: Value| {
+            let (_, path) = binding_location(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, record.to_string()).unwrap();
+        };
+        let own = json!({"version":1,"agent":"claude","name":terminal,"run_id":"run-1","conversation_id":null});
+        save(terminal, own.clone());
+        save(deepseek, json!({"backend":"dsh","name":deepseek,"run_id":"run-2","conversation_id":"session-2"}));
+        let writer = root().join(".lock");
+        let provider = root().join("dsh/bindings.lock");
+        assert_eq!(pinned(terminal, "run-1", &Value::Null), Pinned::Written("written"));
+        assert_eq!(pinned(deepseek, "run-2", &json!("session-2")), Pinned::Written("written"));
         // A replaced run, another conversation or no binding: nothing is written.
-        assert_eq!(pinned(terminal, "run-other", &Value::Null), None);
-        assert_eq!(pinned(terminal, "run-1", &json!("other")), None);
-        assert_eq!(pinned(deepseek, "run-2", &json!("session-other")), None);
-        assert_eq!(pinned("claude/example/missing", "run-1", &Value::Null), None);
-        // A held state writer lock, or the provider's binding lock: no wait past the deadline.
-        for (held, name, run, conversation) in [
-            (root().join(".lock"), terminal, "run-1", Value::Null),
-            (root().join("dsh/bindings.lock"), deepseek, "run-2", json!("session-2")),
-        ] {
-            let guard = super::super::storage::lock_until(&held, soon()).unwrap().unwrap();
-            let started = Instant::now();
-            assert_eq!(pinned(name, run, &conversation), None);
-            assert!(started.elapsed() < Duration::from_secs(2));
-            drop(guard);
-            assert_eq!(pinned(name, run, &conversation), Some("written"));
-        }
+        assert_eq!(pinned(terminal, "run-other", &Value::Null), Pinned::Changed);
+        assert_eq!(pinned(terminal, "run-1", &json!("other")), Pinned::Changed);
+        assert_eq!(pinned(deepseek, "run-2", &json!("session-other")), Pinned::Changed);
+        assert_eq!(pinned("claude/example/missing", "run-1", &Value::Null), Pinned::Changed);
+        // A held state writer lock: busy, never waiting past the deadline.
+        let guard = super::super::storage::lock_until(&writer, soon()).unwrap().unwrap();
+        let started = Instant::now();
+        assert_eq!(pinned(deepseek, "run-2", &json!("session-2")), Pinned::Busy);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        // Lock order: waiting for the writer, it holds no provider lock (X4).
+        let waiting = std::thread::spawn(|| {
+            with_pinned_session_binding(deepseek, "run-2", &json!("session-2"), Instant::now() + Duration::from_secs(5), || "written")
+                .unwrap()
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(free(&provider), "the provider lock is taken only after the writer");
+        drop(guard);
+        assert_eq!(waiting.join().unwrap(), Pinned::Written("written"));
+        // A busy provider lock: busy at once, and the writer is free again (PH).
+        let guard = super::super::storage::lock_until(&provider, soon()).unwrap().unwrap();
+        let started = Instant::now();
+        assert_eq!(pinned(deepseek, "run-2", &json!("session-2")), Pinned::Busy);
+        assert!(started.elapsed() < Duration::from_millis(250), "the provider lock is tried once");
+        assert!(free(&writer));
+        drop(guard);
+        // The binding is checked under the lock: a run replaced while the
+        // attempt waited for the writer writes nothing (PW, X6).
+        let guard = super::super::storage::lock_until(&writer, soon()).unwrap().unwrap();
+        let waiting = std::thread::spawn(|| {
+            with_pinned_session_binding(terminal, "run-1", &Value::Null, Instant::now() + Duration::from_secs(5), || "written")
+                .unwrap()
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        let mut replaced = own.clone();
+        replaced["run_id"] = json!("run-replaced");
+        save(terminal, replaced);
+        drop(guard);
+        assert_eq!(waiting.join().unwrap(), Pinned::Changed);
+        save(terminal, own);
+        assert_eq!(pinned(terminal, "run-1", &Value::Null), Pinned::Written("written"));
     }
 }

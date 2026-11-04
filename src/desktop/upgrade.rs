@@ -89,6 +89,34 @@ impl Upgrade {
     pub fn restart_ready(&self, owner: &Arc<crate::platform::FileLock>) -> bool {
         self.requested() && self.supervised() && owner_loans_released(owner)
     }
+    /// Bounded actor observation for the original native refresh controller.
+    /// It grants no Stop/start authority: that caller must retain the same
+    /// native endpoint, Grant and handoff exclusion and recheck all of them.
+    #[cfg(any(windows, all(test, target_os = "linux")))]
+    pub fn decorate_refresh(
+        &self,
+        value: &mut Value,
+        owner: &Arc<crate::platform::FileLock>,
+        runtime_drained: bool,
+        connections: usize,
+        operations: u64,
+    ) {
+        if !self.requested() || self.supervised() {
+            return;
+        }
+        let owner_released = owner_loans_released(owner);
+        // The status observer itself owns one real parser/connection Permit.
+        // Even a partial frame on another pipe keeps this false until EOF.
+        let connections_drained = connections == 1;
+        value["executable_upgrade"]["refresh"] = json!({
+            "abi":"desktop-retirement-drain-v1",
+            "runtime_drained":runtime_drained,
+            "owner_loans_released":owner_released,
+            "connections_drained":connections_drained,
+            "operations_drained":operations == 0,
+            "drained":runtime_drained && owner_released && connections_drained && operations == 0
+        });
+    }
     pub fn decorate(&self, value: &mut Value) {
         if self.requested() {
             value["executable_upgrade"] = json!({"code":"hgs_replaced",
@@ -101,6 +129,35 @@ impl Upgrade {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn refresh_drain_observation_requires_every_original_resource_and_manual_retirement() {
+        let owner =
+            Arc::new(crate::platform::FileLock::exclusive(tempfile::tempfile().unwrap()).unwrap());
+        let mut upgrade = Upgrade::new();
+        upgrade.supervised = false;
+        let mut value = json!({});
+        upgrade.decorate_refresh(&mut value, &owner, true, 1, 0);
+        assert!(value["executable_upgrade"].is_null());
+        upgrade.stable.requested = true;
+        for (runtime, connections, operations) in
+            [(false, 1, 0), (true, 0, 0), (true, 2, 0), (true, 1, 1)]
+        {
+            upgrade.decorate_refresh(&mut value, &owner, runtime, connections, operations);
+            assert_eq!(value["executable_upgrade"]["refresh"]["drained"], false);
+        }
+        let loan = owner.clone();
+        upgrade.decorate_refresh(&mut value, &owner, true, 1, 0);
+        assert_eq!(value["executable_upgrade"]["refresh"]["drained"], false);
+        drop(loan);
+        upgrade.decorate_refresh(&mut value, &owner, true, 1, 0);
+        assert_eq!(value["executable_upgrade"]["refresh"]["drained"], true);
+        upgrade.supervised = true;
+        let mut value = json!({});
+        upgrade.decorate_refresh(&mut value, &owner, true, 1, 0);
+        assert!(value["executable_upgrade"].is_null());
+    }
 
     #[test]
     fn an_unsupervised_reader_finishes_owner_cleanup_without_becoming_restartable() {

@@ -2600,6 +2600,13 @@ the folder, changed files or ownership, and all other protections. An incomplete
 inventory remains blocked. Automatic cleanup never uses this exception. Process
 names, PIDs and access details remain available under **Details**.
 
+A checkout with uncommitted or untracked files can also have such access
+denials. Its review then offers both consents (`discardable_with_process_consent`
+beside the discard and process fingerprints, while `discardable` stays false for
+older clients). Removal needs both: **Permanently discard** and **Remove even if
+some running programs cannot be checked**. Each consent alone is refused, and
+every other protection still wins.
+
 A refusal before deletion shows **Folder kept**. **Check again** refreshes only
 remaining folders and clears the prior local-file, discard and process choices;
 removal needs a new explicit confirmation. File inspection remains available.

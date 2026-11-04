@@ -98,6 +98,7 @@ impl Saved {
         self.disk = publish(
             &self.slot,
             &self.disk,
+            &lock,
             &next,
             || {
                 if !current() {
@@ -127,6 +128,7 @@ impl Saved {
         self.disk = publish(
             &self.slot,
             &self.disk,
+            &lock,
             &next,
             || {
                 if !current() {
@@ -174,6 +176,7 @@ impl Saved {
         let disk = publish(
             &self.slot,
             &self.disk,
+            &lock,
             &record,
             || {
                 source.recheck()?;
@@ -315,4 +318,4 @@ fn replace_source(
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

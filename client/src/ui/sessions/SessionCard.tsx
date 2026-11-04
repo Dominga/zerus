@@ -295,6 +295,8 @@ const CHILD_STATUS: Record<Subagent["state"], { kind: BadgeKind; caption: string
   attention: { kind: "attention", caption: trNoop("Needs input") },
   error: { kind: "error", caption: trNoop("Error") },
   paused: { kind: "paused", caption: trNoop("Paused") },
+  unknown: { kind: "neutral", caption: trNoop("Unknown") },
+  ended: { kind: "neutral", caption: trNoop("Ended") },
 };
 export const childStatus = (c: Subagent) => ({ ...CHILD_STATUS[c.state], caption: tr(CHILD_STATUS[c.state].caption) });
 

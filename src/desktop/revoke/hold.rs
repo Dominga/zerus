@@ -17,18 +17,15 @@ struct Held {
     receipt: Value,
 }
 
+#[cfg(windows)]
 fn database_file(path: &std::path::Path) -> Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
-    #[cfg(unix)]
-    platform::no_follow(&mut options);
-    #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
         use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
         platform::refuse_link(&mut options).share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
     }
-    #[cfg(windows)]
     platform::never_block(&mut options);
     let file = options.open(path)?;
     ensure!(
@@ -38,17 +35,49 @@ fn database_file(path: &std::path::Path) -> Result<std::fs::File> {
     Ok(file)
 }
 
-pub(in crate::desktop) fn database(location: &Location) -> Result<(Connection, std::fs::File)> {
+/// What checked the rollback database, kept with its connection: on Windows
+/// the checked handle itself; on Unix only the identity the connection is
+/// bound to, since closing any raw descriptor of the live database would drop
+/// this process's SQLite locks on it, a live service writer's included
+/// (zerus-iiee).
+pub(in crate::desktop) struct Verification {
+    #[cfg(windows)]
+    file: std::fs::File,
+    // Read through `identity` by the Windows and test registration grant.
+    #[cfg(unix)]
+    #[cfg_attr(not(test), allow(dead_code))]
+    identity: crate::sqlite_file::Identity,
+}
+impl Verification {
+    /// The checked database file's device and inode.
+    #[cfg_attr(all(unix, not(test)), allow(dead_code))]
+    pub(in crate::desktop) fn identity(&self) -> Result<(u64, u64)> {
+        #[cfg(windows)]
+        {
+            let id = platform::FileIdentity::of(&self.file)?;
+            Ok((id.device, id.inode))
+        }
+        #[cfg(unix)]
+        Ok((self.identity.device, self.identity.inode))
+    }
+}
+
+pub(in crate::desktop) fn database(location: &Location) -> Result<(Connection, Verification)> {
     location.check_existing()?;
     super::super::store::database_files(location)?;
     let path = location.root.join("state.sqlite3");
-    let file = database_file(&path)?;
-    let before = platform::FileIdentity::of(&file)?;
     #[cfg(windows)]
-    ensure!(
-        before.inode != 0,
-        "rollback database object identity unavailable"
-    );
+    let (file, before) = {
+        let file = database_file(&path)?;
+        let before = platform::FileIdentity::of(&file)?;
+        ensure!(
+            before.inode != 0,
+            "rollback database object identity unavailable"
+        );
+        (file, before)
+    };
+    #[cfg(unix)]
+    let identity = crate::sqlite_file::private(&path).context("unsafe rollback database")?;
     let db = Connection::open_with_flags(
         &path,
         OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -57,17 +86,26 @@ pub(in crate::desktop) fn database(location: &Location) -> Result<(Connection, s
     )?;
     db.busy_timeout(Duration::from_millis(250))?;
     db.execute_batch("PRAGMA query_only=ON; PRAGMA trusted_schema=OFF; PRAGMA cache_size=-512;")?;
-    let after = platform::FileIdentity::of(&database_file(&path)?)?;
-    ensure!(
-        before.device == after.device && before.inode == after.inode,
-        "rollback database changed"
-    );
-    Ok((db, file))
+    #[cfg(windows)]
+    {
+        let after = platform::FileIdentity::of(&database_file(&path)?)?;
+        ensure!(
+            before.device == after.device && before.inode == after.inode,
+            "rollback database changed"
+        );
+        Ok((db, Verification { file }))
+    }
+    #[cfg(unix)]
+    {
+        crate::sqlite_file::bind_private(&db, &path, identity)
+            .context("rollback database changed")?;
+        Ok((db, Verification { identity }))
+    }
 }
 
 fn verify(location: &Location, id: &str, lock: &HandoffLock) -> Result<Value> {
     lock.verify(location)?;
-    let (mut db, verification_file) = database(location)?;
+    let (mut db, verification) = database(location)?;
     let tx = db.transaction()?;
     let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     ensure!(
@@ -139,8 +177,12 @@ fn verify(location: &Location, id: &str, lock: &HandoffLock) -> Result<Value> {
     tx.commit()?;
     // In particular, do not retain a Windows verification handle or SQLite
     // connection into Ready: the passive replacement must be able to write.
+    // On Unix the verification holds no descriptor.
     drop(db);
-    drop(verification_file);
+    #[cfg(windows)]
+    drop(verification);
+    #[cfg(not(windows))]
+    let _ = verification;
     Ok(result)
 }
 
@@ -452,6 +494,46 @@ mod tests {
         assert!(f.hold().is_err());
     }
 
+    /// zerus-iiee: checking the rollback database never closes a raw
+    /// descriptor of the live database, so the service's live connection
+    /// keeps its SQLite locks, also after the service restarts.
+    #[cfg(unix)]
+    #[test]
+    fn verification_keeps_the_live_service_connection_s_locks() {
+        use crate::sqlite_file::foreign_lock_refused;
+        let Fixture {
+            _temp,
+            location,
+            store,
+            epoch,
+            ..
+        } = Fixture::new();
+        let path = location.root.join("state.sqlite3");
+        let mut store = Some(store);
+        for round in 0..2 {
+            if round == 1 {
+                // A restart: the old service connection goes, a new one opens.
+                drop(store.take());
+                store = Some(Store::open(&location, &epoch).unwrap());
+            }
+            let live = &store.as_ref().unwrap().db;
+            live.execute_batch("BEGIN").unwrap();
+            let _: i64 = live
+                .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
+                .unwrap();
+            assert!(foreign_lock_refused(&path), "round {round}: the service holds its lock");
+            {
+                let (_db, verification) = database(&location).unwrap();
+                let checked = crate::sqlite_file::private(&path).unwrap();
+                assert_eq!(verification.identity().unwrap(), (checked.device, checked.inode));
+            }
+            assert!(foreign_lock_refused(&path), "round {round}: the check kept the service's lock");
+            live.execute_batch("COMMIT").unwrap();
+        }
+        drop(store);
+        assert!(!foreign_lock_refused(&path), "the lock went with the service");
+    }
+
     #[test]
     fn a_linked_database_is_refused_through_the_actual_verification_handle() {
         let f = Fixture::new();
@@ -464,13 +546,13 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn verification_open_refuses_a_symlink_to_an_otherwise_valid_database() {
+    fn verification_refuses_a_symlink_to_an_otherwise_valid_database() {
         let f = Fixture::new();
         let path = f.location.root.join("state.sqlite3");
-        assert!(database_file(&path).is_ok());
+        assert!(crate::sqlite_file::private(&path).is_ok());
         let alias = f.location.root.join("database-symlink");
         std::os::unix::fs::symlink(&path, &alias).unwrap();
-        assert!(database_file(&alias).is_err());
+        assert!(crate::sqlite_file::private(&alias).is_err());
     }
 
     #[test]

@@ -78,7 +78,7 @@ class SessionCardPresentationTest {
     @Test fun childStatusUsesDisplayEvidenceAndTheDesktopCaptions() {
         mapOf("working" to "Working", "finished" to "Ready", "ready" to "Ready", "idle" to "Ready", "error" to "Error", "paused" to "Paused",
             "approval" to "Needs input", "input" to "Needs input", "attention" to "Needs input", "unknown" to "Unknown", "" to "Unknown",
-            "failed" to "Unknown").forEach { (state, caption) ->
+            "ended" to "Ended", "failed" to "Unknown").forEach { (state, caption) ->
             assertEquals(state, caption, SessionCardPresentation.childStatus(JSONObject().put("state", state)))
         }
         assertEquals("Needs input", SessionCardPresentation.childStatus(JSONObject("""{"state":"finished","display_state":"input"}""")))
@@ -88,7 +88,7 @@ class SessionCardPresentationTest {
     }
 
     @Test fun inactiveChildrenFollowExplicitEvidenceAndCompleteGroupCounts() {
-        listOf("finished", "idle", "ready", "error").forEach { assertTrue(SessionCardPresentation.inactiveChild(JSONObject().put("state", it))) }
+        listOf("finished", "idle", "ready", "error", "ended").forEach { assertTrue(SessionCardPresentation.inactiveChild(JSONObject().put("state", it))) }
         assertTrue(SessionCardPresentation.inactiveChild(JSONObject("""{"state":"finished","display_state":"error"}""")))
         listOf("working", "paused", "input", "unknown", "").forEach { assertFalse(it, SessionCardPresentation.inactiveChild(JSONObject().put("state", it))) }
         assertFalse(SessionCardPresentation.inactiveChild(JSONObject("""{"state":"finished","display_state":"unknown"}""")))

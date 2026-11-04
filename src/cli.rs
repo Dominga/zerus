@@ -130,6 +130,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs @host download --path REMOTE_PATH --output LOCAL_FILE   download a file through configured SSH
        hgs [@host] answer <session> --json   answer an exact pending question from JSON stdin
        hgs [@host] read <session> --json   mark the current reply/attention read (JSON stdin)
+       hgs [@host] subagent retire <session> --json   retire an exact stale child record (JSON stdin)
+       Subagent retirement ABI: subagent-retire-v1
        hgs [@host] notifications <session> --json   shared mute preference (session-notifications-v1)
        hgs [@host] fork <session> [-n name] [-d] [--archive ID]  branch into a new conversation
        hgs [@host] effort <session> --json   change this agent's effort from JSON stdin
@@ -245,7 +247,7 @@ fn local_sessions() -> Result<()> {
 // Repository preparation owns only its checkout and receipt. Like the existing
 // configuration/control commands, it does not require or enable a session host.
 fn needs_local_sessions(command: &str) -> bool {
-    !matches!(command, "ls" | "watch" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "analytics" | "graph" | "wait" | "mobile" | "hooks" | "repository" | "session-action-status")
+    !matches!(command, "ls" | "watch" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "analytics" | "graph" | "wait" | "mobile" | "hooks" | "repository" | "session-action-status" | "subagent")
 }
 
 /// Fails unless this process may run what the processes of a session run:
@@ -758,6 +760,16 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
             println!("{}", json!({"url":url}));
             Ok(0)
         }
+        "subagent" => {
+            if args.len() != 3 || args[0] != "retire" || args[2] != "--json" || dry {
+                return Err(Error::new(1,"usage: hgs subagent retire NAME --json (JSON stdin)"));
+            }
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            std::io::stdin().lock().take(8193).read_to_end(&mut bytes)?;
+            let result = state::subagent_lifecycle::retire(&args[1],&bytes).map_err(|e|Error::new(1,e))?;
+            println!("{result}"); Ok(0)
+        }
         "ls" => list(&config, args, dry),
         "watch" => crate::watch::run(&config, args, dry),
         "archives" => {
@@ -1181,6 +1193,8 @@ fn remote(
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'guarded-create-v1' && ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*lifecycle-receipt-status-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to read lifecycle receipts' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "--expect-machine" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'guarded-create-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to continue verified creation' >&2; exit 1; fi",platform::join(&remote_args)))
+    } else if command == "subagent" {
+        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'Subagent retirement ABI: subagent-retire-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to retire stale subagent records' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "repository" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'repository-clone-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to clone repositories' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "wait" {
@@ -2490,7 +2504,7 @@ mod tests {
     #[test]
     fn repository_preparation_does_not_admit_session_commands_on_control_consoles() {
         for command in ["ls", "machine", "presence", "swarm", "project", "account",
-            "speech", "analytics", "graph", "wait", "mobile", "hooks", "repository", "session-action-status"] {
+            "speech", "analytics", "graph", "wait", "mobile", "hooks", "repository", "session-action-status", "subagent"] {
             assert!(!needs_local_sessions(command), "{command}");
         }
         for command in ["a", "kill", "send", "send-now", "inspect", "history",

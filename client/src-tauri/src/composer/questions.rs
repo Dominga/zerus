@@ -21,6 +21,9 @@ use serde::Serialize;
 use serde_json::Value;
 use zerus_client_core::actions::ALREADY_ANSWERING;
 use zerus_client_core::drafts::Loaded;
+use zerus_client_core::operation_recovery::deferred_input::{
+    identity_sha256, message_sha256, Checkpoint, Intent, Kind, Question as CheckpointQuestion,
+};
 use zerus_client_core::questions::{
     self as rules, Actionable, AnswerDraft, AnswerFacts, AnswerItem, CardContext, CardView,
     ColdAnswer, Edit, Question, Selection, Snapshot,
@@ -687,6 +690,9 @@ pub(crate) struct Answering {
     captured: Arc<Value>,
     skipping: bool,
     consent: bool,
+    /// The one `hgs answer` request id, reserved with the checkpoint saved in
+    /// the durable "sending" save (zerus-5wmh.66.4.4); set by `prepare_answer`.
+    request_id: String,
 }
 
 /// An answer waiting for the cold-cache consent (`answerQuestion` 5111-5142).
@@ -816,6 +822,7 @@ impl Composers {
             answers,
             skipping,
             consent: false,
+            request_id: String::new(),
         };
         if let Some(prompt) = rules::cold_answer(&details, &answering.question, self.now()) {
             let Some(draft) = hub.answers.drafts.get(card) else {
@@ -888,7 +895,11 @@ impl Composers {
 
     /// `prepareSendingAsync` (428-445): the draft is saved durably as
     /// sending before anything runs, and only that save's answer can continue.
-    fn prepare_answer(&self, mut hub: MutexGuard<'_, Hub>, answering: Answering) -> QuestionReply {
+    fn prepare_answer(
+        &self,
+        mut hub: MutexGuard<'_, Hub>,
+        mut answering: Answering,
+    ) -> QuestionReply {
         let card = answering.card.clone();
         if hub.answers.loading.contains(&card) {
             return QuestionReply::Busy;
@@ -900,6 +911,31 @@ impl Composers {
             return QuestionReply::Busy;
         }
         draft.begin_sending();
+        // The answer's request id is reserved now and saved with the draft in
+        // this durable save, before `hgs answer`: it binds the question, its
+        // run and conversation and the exact answers, as data only.
+        let revision = hub.answers.saves.get(&card).copied().unwrap_or(0) + 1;
+        let checkpoint = Checkpoint::reserve(Intent {
+            kind: Kind::Answer,
+            draft_revision: revision,
+            message_sha256: message_sha256(
+                &serde_json::to_string(&answering.answers).unwrap_or_default(),
+                [],
+            ),
+            run_id: answering.question.run_id.clone(),
+            conversation_id: answering.question.conversation_id.clone(),
+            question: Some(CheckpointQuestion {
+                id: answering.question.id.clone(),
+                identity_sha256: identity_sha256(&answering.pinned),
+            }),
+            start: None,
+            retry_of: None,
+            consent: answering.consent,
+        });
+        answering.request_id = checkpoint.request_id.clone();
+        if let Some(draft) = hub.answers.drafts.get_mut(&card) {
+            draft.checkpoint = Some(checkpoint);
+        }
         let me = self.clone();
         self.save_answer(
             &mut hub,
@@ -1002,7 +1038,14 @@ impl Composers {
     /// Qt's text (`HgsClient.cpp:1905`); any other `Err` or a panic means the
     /// call's thread died, so it may have run: uncertain.
     fn answer_now(&self, answering: Answering) {
-        let request_id = uuid::Uuid::new_v4().to_string();
+        // Reserved by `prepare_answer` and saved before this call.
+        let request_id = answering.request_id.clone();
+        if request_id.is_empty() {
+            return self.answer_finished(
+                &answering,
+                outcome_of(Ok(Err(crate::actions::BUSY.to_owned())), ALREADY_ANSWERING),
+            );
+        }
         let target = Target {
             computer: answering.session.computer.clone(),
             name: answering.session.name.clone(),
@@ -1990,6 +2033,86 @@ pub(crate) mod tests {
             panic!("not an answer")
         };
         serde_json::to_value(answers).unwrap()
+    }
+
+    /// Each call's request id with the checkpoint on disk at that moment.
+    type SeenAnswers = Arc<std::sync::Mutex<Vec<(String, Option<Checkpoint>)>>>;
+
+    /// The answer's draft checkpoint on disk at the moment of each call
+    /// (zerus-5wmh.66.4.4), answering with `outcome`.
+    fn record_answer_checkpoint(
+        fake: &crate::composer::send::tests::Fake,
+        root: &crate::composer::tests::Scratch,
+        card: &str,
+        outcome: fn(&Action, &str) -> Outcome,
+    ) -> SeenAnswers {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (record, store, key) = (seen.clone(), root.join("drafts"), card.to_owned());
+        *lock(&fake.outcome) = Box::new(move |action, id| {
+            let saved = read_draft(&store, &key)
+                .draft
+                .checkpoint
+                .map(|saved| *saved);
+            lock(&record).push((id.to_owned(), saved));
+            outcome(action, id)
+        });
+        seen
+    }
+
+    #[test]
+    fn an_answer_saves_its_reserved_request_id_with_the_draft_before_the_call() {
+        let root = dir("q-checkpoint");
+        let (c, fake) = send_hub(&root);
+        opened(&c, asking(vec![card_json("tool:t1")]));
+        let card = chosen(&c);
+        let seen = record_answer_checkpoint(&fake, &root, &card, answered);
+        assert_eq!(c.question_submit(&card), QuestionReply::Sending);
+        status_is(&c, "Answer sent. Waiting for the agent…");
+        let seen = lock(&seen).clone();
+        assert_eq!(seen.len(), 1);
+        let (id, saved) = &seen[0];
+        let saved = saved.as_ref().expect("saved before the call");
+        assert!(saved.valid());
+        assert_eq!(&saved.request_id, id, "the call uses the reserved id");
+        assert_eq!(saved.kind, Kind::Answer);
+        assert_eq!(saved.receipts, "question_receipts");
+        assert_eq!(
+            saved.question.as_ref().map(|q| q.id.as_str()),
+            Some("tool:t1")
+        );
+        assert_eq!(
+            (saved.run_id.as_str(), saved.conversation_id.as_str()),
+            ("run-1", "conv-1")
+        );
+        // The host recorded the answer: its identity goes.
+        crate::composer::send::tests::eventually(|| {
+            read_draft(&root.join("drafts"), &card)
+                .draft
+                .checkpoint
+                .is_none()
+        });
+    }
+
+    #[test]
+    fn an_uncertain_answer_keeps_its_identity_and_sends_nothing_more() {
+        let root = dir("q-checkpoint-uncertain");
+        let (c, fake) = send_hub(&root);
+        opened(&c, asking(vec![card_json("tool:t1")]));
+        let card = chosen(&c);
+        let seen = record_answer_checkpoint(&fake, &root, &card, |_, _| Outcome::Uncertain {
+            detail: "connection lost".into(),
+        });
+        assert_eq!(c.question_submit(&card), QuestionReply::Sending);
+        crate::composer::send::tests::eventually(|| lock(&seen).len() == 1);
+        let id = lock(&seen)[0].0.clone();
+        crate::composer::send::tests::eventually(|| {
+            read_draft(&root.join("drafts"), &card)
+                .draft
+                .checkpoint
+                .is_some_and(|saved| saved.request_id == id)
+        });
+        assert_eq!(c.question_submit(&card), QuestionReply::Busy);
+        assert_eq!(sent(&fake).len(), 1, "nothing is sent again");
     }
 
     #[test]

@@ -107,7 +107,23 @@ pub(super) fn record_path(name: &str) -> PathBuf {
 }
 
 pub(super) fn read(name: &str) -> Result<Value> {
-    let contents = fs::read_to_string(record_path(name)).map_err(|e| {
+    read_limit(name,None)
+}
+pub(super) fn read_bounded(name: &str, bytes: u64) -> Result<Value> {
+    read_limit(name,Some(bytes))
+}
+fn read_limit(name: &str, limit: Option<u64>) -> Result<Value> {
+    let contents = (|| -> io::Result<String> {
+        if let Some(limit) = limit {
+            use std::io::Read;
+            let mut bytes=Vec::new();
+            let file=crate::platform::never_block(OpenOptions::new().read(true)).open(record_path(name))?;
+            if !file.metadata()?.is_file() {return Err(io::Error::other("Selected session is not a regular record"));}
+            file.take(limit+1).read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > limit { return Err(io::Error::other("Selected session record exceeds retirement bound")); }
+            String::from_utf8(bytes).map_err(|e|io::Error::new(io::ErrorKind::InvalidData,e))
+        } else {fs::read_to_string(record_path(name))}
+    })().map_err(|e| {
         if e.kind() == io::ErrorKind::NotFound {
             format!("{name}: no saved binding; restart through hgs to enable tracking")
         } else {
@@ -127,6 +143,7 @@ pub(super) fn read(name: &str) -> Result<Value> {
     journal::repair_claude_internal(&mut record);
     claude_subagents::reconcile(&mut record);
     native_subagents::reconcile(&mut record);
+    subagent_lifecycle::reconcile(&mut record);
     Ok(record)
 }
 

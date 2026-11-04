@@ -132,10 +132,19 @@ def main_call(begin, result):
 def hint_output(raw):
     if not raw:
         return False
-    document = json.loads(raw)
-    if document != {'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': HINT}}:
-        raise AssertionError('unexpected main hook output')
-    return True
+    document = json.loads(raw)  # A second/trailing document remains invalid.
+    combined = json.loads((Path(__file__).parent / 'fixtures/session-start-context.json').read_text(encoding='utf-8'))
+    text = combined['hookSpecificOutput']['additionalContext']
+    prefix = HINT + '\n\n'
+    if not text.startswith(prefix):
+        raise AssertionError('frozen SessionStart contract does not include the hint')
+    hint_only = {'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': HINT}}
+    tasks_only = {'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': text[len(prefix):]}}
+    if document == combined or document == hint_only:
+        return True
+    if document == tasks_only:
+        return False
+    raise AssertionError('unexpected main hook output')
 
 
 def startup_answer(state, binding, attempted):

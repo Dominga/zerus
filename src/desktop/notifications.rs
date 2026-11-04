@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{
     atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
-    mpsc, Arc, Mutex,
+    mpsc, Arc, Mutex, Weak,
 };
 use std::time::{Duration, Instant};
 use zerus_client_core::{
@@ -177,6 +177,26 @@ struct QueuedEvent {
     event: Event,
     count: Arc<AtomicUsize>,
 }
+
+#[derive(Debug)]
+struct ClickProof {
+    binding: Binding,
+    attention_edge: Option<i64>,
+    native_closed: AtomicBool,
+}
+/// A click admitted against the original live Delivered mapping. No wire or
+/// caller-provided value can construct this routing witness.
+#[derive(Debug)]
+pub(super) struct AdmittedClick {
+    value: Activation,
+    proof: Arc<ClickProof>,
+}
+#[derive(Clone, Copy)]
+enum ActivationUse {
+    Callback,
+    AdmittedNativeClose,
+    Cleanup,
+}
 impl Drop for QueuedEvent {
     fn drop(&mut self) {
         self.count.fetch_sub(1, Ordering::AcqRel);
@@ -253,6 +273,9 @@ pub(super) struct Outbox {
     send: mpsc::SyncSender<Work>,
     events: mpsc::Receiver<QueuedEvent>,
     callbacks: VecDeque<QueuedEvent>,
+    // Router holds at most 32 clicks; one actor turn admits at most 32 more.
+    // Weak witnesses never keep a consumed/expired click or native work alive.
+    admitted: Vec<Weak<ClickProof>>,
     event_count: Arc<AtomicUsize>,
     stopping: Arc<AtomicBool>,
     pending: Vec<Pending>,
@@ -288,6 +311,7 @@ impl Outbox {
                 send,
                 events: event_receive,
                 callbacks: VecDeque::new(),
+                admitted: Vec::new(),
                 event_count: event_count.clone(),
                 stopping: stopping.clone(),
                 pending: Vec::new(),
@@ -462,7 +486,8 @@ impl Outbox {
         })
     }
 
-    pub fn poll(&mut self, store: &mut Store, now: Instant) -> Vec<Activation> {
+    pub fn poll(&mut self, store: &mut Store, now: Instant) -> Vec<AdmittedClick> {
+        self.admitted.retain(|proof| proof.strong_count() != 0);
         for pending in &mut self.pending {
             if !pending.committed {
                 if pending.terminal.is_none() {
@@ -558,8 +583,38 @@ impl Outbox {
                 continue;
             }
             let retry = match self.current_activation(store, value) {
-                Ok(Some(_)) if matches!(callback.event, Event::Clicked(_)) => {
-                    clicks.push(value.clone());
+                Ok(Some(binding)) if matches!(callback.event, Event::Clicked(_)) => {
+                    // Read/mute retirement is independent of the native banner
+                    // closing. Recheck this same edge at the eventual handoff.
+                    let source: Option<(i64, bool, bool)> = match store.db.query_row(
+                        "SELECT id,live,blocked FROM desktop_attention_edges WHERE intent=?1 ORDER BY id DESC LIMIT 1",
+                        [&binding.intent_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+                    ).optional() {
+                        Ok(source) => source,
+                        Err(_) => {
+                            self.error = Some("notification_callback_unavailable");
+                            blocked.insert(value.request_id.clone());
+                            self.callbacks.push_back(callback);
+                            continue;
+                        }
+                    };
+                    if source.is_some_and(|(_, live, blocked)| !live || blocked) {
+                        continue;
+                    }
+                    if self.admitted.len() == EVENTS * 2 {
+                        // Transient click pressure must not disable posting.
+                        continue;
+                    }
+                    let proof = Arc::new(ClickProof {
+                        binding,
+                        attention_edge: source.map(|(id, _, _)| id),
+                        native_closed: AtomicBool::new(false),
+                    });
+                    self.admitted.push(Arc::downgrade(&proof));
+                    clicks.push(AdmittedClick {
+                        value: value.clone(),
+                        proof,
+                    });
                     false
                 }
                 Ok(Some(binding)) => {
@@ -569,6 +624,13 @@ impl Outbox {
                         self.error = Some("notification_close_uncommitted");
                         true
                     } else {
+                        // Only this original native close preserves an already
+                        // admitted click; ordinary policy withdrawal does not.
+                        for proof in self.admitted.iter().filter_map(Weak::upgrade) {
+                            if proof.binding == binding {
+                                proof.native_closed.store(true, Ordering::Release);
+                            }
+                        }
                         false
                     }
                 }
@@ -587,15 +649,37 @@ impl Outbox {
     }
 
     fn current_activation(&self, store: &Store, value: &Activation) -> Result<Option<Binding>> {
-        self.activation_binding(store, value, false)
+        self.activation_binding(store, value, ActivationUse::Callback)
     }
-    // Cleanup restoration may retain a withdrawn mapping for native removal.
-    // The callback path above always requires the original intent to be live.
+    fn admitted_activation(&self, store: &Store, click: &AdmittedClick) -> Result<Option<Binding>> {
+        if self.retiring || self.stopping.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        if let Some(id) = click.proof.attention_edge {
+            let live: bool = store.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM desktop_attention_edges WHERE id=?1 AND intent=?2 AND live=1 AND blocked=0)",
+                params![id, click.proof.binding.intent_id], |r| r.get(0),
+            )?;
+            if !live {
+                return Ok(None);
+            }
+        }
+        let purpose = if click.proof.native_closed.load(Ordering::Acquire) {
+            ActivationUse::AdmittedNativeClose
+        } else {
+            ActivationUse::Callback
+        };
+        Ok(self
+            .activation_binding(store, &click.value, purpose)?
+            .filter(|binding| *binding == click.proof.binding))
+    }
+    // Raw callbacks require a live intent. An admitted click may survive its
+    // exact native close; cleanup may retain a mapping for native removal.
     fn activation_binding(
         &self,
         store: &Store,
         value: &Activation,
-        cleanup: bool,
+        purpose: ActivationUse,
     ) -> Result<Option<Binding>> {
         if !value.valid_for(self.session.platform) {
             return Ok(None);
@@ -631,8 +715,8 @@ impl Outbox {
                     self.session.writer_epoch,
                     ledger::PAYLOAD_BYTES,
                     ledger::RECEIPT_BYTES,
-                    cleanup,
-                    cleanup && self.retiring,
+                    !matches!(purpose, ActivationUse::Callback),
+                    matches!(purpose, ActivationUse::Cleanup) && self.retiring,
                 ],
                 |r| {
                     Ok((
@@ -753,7 +837,15 @@ impl Outbox {
             // Revocation ends click authority immediately, but restoration
             // must still load the original mappings for the cleanup phase.
             if self
-                .activation_binding(store, &activation, self.retiring)?
+                .activation_binding(
+                    store,
+                    &activation,
+                    if self.retiring {
+                        ActivationUse::Cleanup
+                    } else {
+                        ActivationUse::Callback
+                    },
+                )?
                 .is_some()
             {
                 mappings.push(activation);
@@ -855,7 +947,10 @@ impl Outbox {
                 native_id,
                 platform_context: None,
             };
-            if self.activation_binding(store, &activation, true)?.is_some() {
+            if self
+                .activation_binding(store, &activation, ActivationUse::Cleanup)?
+                .is_some()
+            {
                 mappings.push(activation);
             }
         }
@@ -922,7 +1017,15 @@ impl Outbox {
                 platform_context: None,
             };
             if self
-                .activation_binding(store, &value, self.retiring)?
+                .activation_binding(
+                    store,
+                    &value,
+                    if self.retiring {
+                        ActivationUse::Cleanup
+                    } else {
+                        ActivationUse::Callback
+                    },
+                )?
                 .is_some()
             {
                 mappings.push(value);

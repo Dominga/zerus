@@ -799,7 +799,7 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
    Expected lines:
    - quitting Zerus;
    - kept a copy of the Qt settings;
-   - `Zerus <DEV_VERSION>-dev.N runs as pid …; … nonempty drafts kept, … native processes untouched; the replaced GUI is the rollback copy in …`;
+   - `Zerus <DEV_VERSION>-dev.N runs as pid …; drafts kept: … with unsent input, … with saved form state only, … with a held delivery identity; … native processes untouched; the replaced GUI is the rollback copy in …`;
    - possibly `Cocoa settings written since the switch: …`.
    Any `hgs-tray update failed` line stops the runbook. The updater has already restored or kept the previous GUI and printed where it and the draft snapshot are.
 7. **Verify** (no display):

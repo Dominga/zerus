@@ -685,6 +685,47 @@ class MacDesktopService(unittest.TestCase):
         self.assertEqual(self.install(), "ready")
         self.assertEqual(self.command.mutations(), [])
 
+    def test_second_install_keeps_all_registration_files_and_the_running_service(self):
+        self.assertEqual(self.install(), "ready")
+        directory = self.command.destination.parent
+        for path in directory.iterdir():
+            # Make a rewrite visible even on filesystems with coarse timestamps.
+            os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+
+        def snapshot():
+            result = {}
+            for path in directory.iterdir():
+                info = path.stat()
+                result[path.name] = (path.read_bytes(), info.st_dev, info.st_ino,
+                                     info.st_mode, info.st_mtime_ns)
+            return result
+
+        before = snapshot()
+        self.command.calls.clear()
+        self.assertEqual(self.install(), "ready")
+        after = snapshot()
+        self.assertEqual(before.keys(), after.keys())
+        for name in before:
+            with self.subTest(path=name):
+                self.assertEqual(after[name], before[name])
+        self.assertEqual(self.command.mutations(), [])
+        self.assertTrue(any(argv[1:3] == ["desktop", "status"] for argv, _ in self.command.calls))
+
+    def test_unchanged_install_refuses_a_mode_record_changed_during_readiness(self):
+        self.install()
+        replacement = json.loads(self.mode_record().read_bytes())
+        replacement["mode_selection"] = "retained"
+
+        def replace_record():
+            self.mode_record().write_text(json.dumps(replacement))
+
+        self.command.calls.clear()
+        self.command.during_probe = replace_record
+        with self.assertRaisesRegex(installer.Refusal, "mode record changed during the transition"):
+            self.install()
+        self.assertEqual(json.loads(self.mode_record().read_bytes()), replacement)
+        self.assertEqual(self.command.mutations(), [])
+
     def test_separate_runner_never_changes_the_selected_service_registration(self):
         runner = self.root / "stable-hgs"; runner.write_text("independent runner"); runner.chmod(0o755)
         self.assertEqual(self.install(runner_hgs=runner), "ready")

@@ -131,7 +131,7 @@ object SessionDetailsPresentation {
     fun taskStatus(status: String) = when(status) { "completed" -> "Done"; "in_progress" -> "In progress"; "pending" -> "Planned"; else -> status.ifBlank { "Unknown" } }
     fun agentStatus(status: String) = when(status) {
         "finished","ready","idle" -> "Ready"; "working","running","busy" -> "Working"; "approval" -> "Needs approval"; "input" -> "Needs input"
-        "attention" -> "Needs attention"; "error","failed" -> "Error"; "completed" -> "Finished"; "stopped" -> "Stopped"; "paused" -> "Paused"; else -> status.ifBlank { "Unknown" }
+        "attention" -> "Needs attention"; "error","failed" -> "Error"; "completed" -> "Finished"; "stopped" -> "Stopped"; "paused" -> "Paused"; "ended" -> "Ended"; "unknown" -> "Unknown"; else -> status.ifBlank { "Unknown" }
     }
     fun goalStatus(goal: JSONObject) = when(goal.string("status")) {
         "active" -> if(goal.string("activation") == "disarmed") "Goal waiting to resume" else "Pursuing goal"

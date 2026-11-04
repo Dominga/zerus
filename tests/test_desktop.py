@@ -298,8 +298,10 @@ finally:
         # close-on-exec before anything else: the Git (or tmux) it starts, and
         # their own children, never hold the creation's custody lock.
         import fcntl
-        fake = self.root / 'custody-bin'
-        fake.mkdir(mode=0o700)
+        # hgs prepends HOME/.local/bin and the package-manager directories to
+        # PATH. A fixture only in the caller's PATH loses to Homebrew Git on
+        # macOS, so use the private user-install directory created by setUp.
+        fake = self.root / '.local/bin'
         record = self.root / 'custody-record'
         git = fake / 'git'
         git.write_text('#!/bin/sh\n'
@@ -323,8 +325,10 @@ finally:
                                     pass_fds=(held,), capture_output=True, text=True, timeout=20)
         finally:
             os.close(held)
-        self.assertIn('closed', record.read_text().split(), result.stderr)
-        self.assertNotIn('open', record.read_text().split())
+        self.assertTrue(record.is_file(), f'Custody Git fixture did not run: {result}')
+        observed = record.read_text().split()
+        self.assertIn('closed', observed, result.stderr)
+        self.assertNotIn('open', observed)
         # The command and its programs have exited: nothing holds the lock,
         # although the program's own child is still running.
         probe = os.open(lock_path, os.O_RDWR)
@@ -985,6 +989,28 @@ finally:
         self.assertFalse((self.state / 'desktop-presence.json').exists())
         self.assertFalse((self.state / 'read-marks.json').exists())
         self.assertFalse((self.root / 'unexpected-tool').exists())
+
+    @unittest.skipUnless(os.name == 'posix', 'SQLite POSIX record locks')
+    def test_live_actor_retains_sqlite_lock_until_original_exit(self):
+        import fcntl
+        self.env['HGS_PEERS'] = ''
+        database = self.desktop / 'state.sqlite3'
+        # SQLite's shared database lock occupies this byte range even in WAL
+        # mode. A raw descriptor closed after SQLite opened would drop it and
+        # let another connection mistake itself for the last WAL user.
+        previous_epoch = None
+        for restart in range(2):
+            with self.subTest(restart=restart):
+                process, status = self.serve(background=True)
+                self.assertNotEqual(status['epoch'], previous_epoch)
+                previous_epoch = status['epoch']
+                with database.open('r+b') as file:
+                    with self.assertRaises(BlockingIOError,
+                                           msg='live actor lost its SQLite shared lock'):
+                        fcntl.lockf(file, fcntl.LOCK_EX | fcntl.LOCK_NB, 512, 0x40000000)
+                self.stop(process)
+                with database.open('r+b') as file:
+                    fcntl.lockf(file, fcntl.LOCK_EX | fcntl.LOCK_NB, 512, 0x40000000)
 
     def test_background_fleet_lifetime_revoke_and_stale_epoch(self):
         self.env['HGS_PEERS'] = ''

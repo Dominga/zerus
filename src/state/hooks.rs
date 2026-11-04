@@ -1215,30 +1215,44 @@ mod windows {
     }
 }
 
+#[derive(Default)]
+struct StartOutput {
+    started: bool,
+    hint: Option<&'static str>,
+}
+
 pub(super) fn hook() -> Result<i32> {
     let (Some(name), Some(token)) = (nonempty_env("HGS_SESSION"), nonempty_env("HGS_RUN_ID"))
     else {
         return Ok(0);
     };
     let event = stdin_json()?;
-    let mut started = false;
-    let code = track(name, token, event, &mut started)?;
-    // The project's task commands, in the agent's context from its first turn on
-    // (docs/superpowers/specs/2026-10-13-project-task-queue-design.md); only a
-    // start this run recorded as its own conversation's, never a nested CLI's.
-    if code == 0 && started {
-        if let Some(context) =
+    let mut output = StartOutput::default();
+    let code = track(name, token, event, &mut output)?;
+    if code == 0 {
+        // One hook invocation has exactly one JSON result. The optional hint
+        // and task instructions share its additionalContext, after the normal
+        // tracking/mark commit; failed output never rolls back or retries it.
+        let tasks = if output.started {
             nonempty_env("HGS_AGENT").and_then(|agent| crate::tasks::session_context(&agent))
-        {
-            println!("{context}");
+        } else {
+            None
+        };
+        let task_text = tasks
+            .as_ref()
+            .and_then(|value| value["hookSpecificOutput"]["additionalContext"].as_str());
+        let context: Vec<_> = output.hint.into_iter().chain(task_text).collect();
+        if !context.is_empty() {
+            let stdout = io::stdout();
+            agent_hint::output(&mut stdout.lock(), &context.join("\n\n"))?;
         }
     }
     Ok(code)
 }
 
-/// Records one hook event of the session `name`'s run `token`; `started` says
-/// that it was the start of the run's own conversation.
-fn track(name: String, token: String, mut event: Value, started: &mut bool) -> Result<i32> {
+/// Records one hook event of the session `name`'s run `token`; output is
+/// collected only for an admitted start of that run's own conversation.
+fn track(name: String, token: String, mut event: Value, output: &mut StartOutput) -> Result<i32> {
     if nonempty_env("HGS_AGENT").as_deref() == Some("claude") {
         if let std::borrow::Cow::Owned(prompt) = journal::pasted_text(string(&event, "prompt")) {
             event["prompt"] = json!(prompt);
@@ -1267,8 +1281,10 @@ fn track(name: String, token: String, mut event: Value, started: &mut bool) -> R
         return Ok(0);
     }
     if let Some(scoped) = external_agents::route(&mut record, &event) {
+        if scoped["hgs_retired_external_hook"] == true { return Ok(0); }
         processes::observe(&mut record, &scoped);
         journal::update_activity(&mut record, &scoped);
+        subagent_lifecycle::reconcile(&mut record);
         if kind == "PermissionRequest" {
             let child = &mut record["subagents"][string(&scoped, "agent_id")];
             child["display_state"] = json!("approval");
@@ -1342,6 +1358,8 @@ fn track(name: String, token: String, mut event: Value, started: &mut bool) -> R
                 "prompt",
                 "last_message",
                 "subagents",
+                "subagent_retirements",
+                "subagents_ended_pruned",
                 "active_tools",
                 "last_error",
                 "subagent_groups",
@@ -1438,12 +1456,9 @@ fn track(name: String, token: String, mut event: Value, started: &mut bool) -> R
     write(&mut record)?;
     if kind == "SessionStart" && string(&event, "agent_id").is_empty() {
         archive::confirm_restore(&mut record)?;
-        *started = true;
+        output.started = true;
     }
-    if let Some(hint) = hint {
-        let stdout = io::stdout();
-        agent_hint::output(&mut stdout.lock(), hint)?;
-    }
+    output.hint = hint;
     Ok(0)
 }
 

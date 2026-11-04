@@ -929,6 +929,91 @@ Record the accepted conservative first-baseline omission window from
 [#914](https://github.com/ufna/zerus/pull/914); native presentation and click results
 still need their own platform checks above.
 
+### Recorded Windows installer acceptance — 2026-11-04
+
+win-accept-cl ran the #906b installer acceptance on va-kids for integrate head
+`0fca73f54579db2882657d56ca9e08ca399792c8`, CI run
+[41783655673](https://github.com/ufna/zerus/actions/runs/41783655673), attempt 1.
+Every job of that run passed, including Quick checks and the CI gate. Admission
+used the Windows package job `126420804566` and the native job `126420804715`.
+Artifact `13301922603` (`windows-x86_64-<source>`, SHA256
+`c995126af2874080e3ff7fbb76531573caab491bd8fe6c16b496b5e1f8ef6790`) contains:
+
+- the portable ZIP, 36,155,383 bytes, SHA256
+  `6296e44790cddaef14146c4a9cc8fa2d2c1316e981894e288b4024f3180da1ff`;
+- the per-user installer, 24,515,324 bytes, SHA256
+  `d5107b4d8e4c7177df46ff795e60305996baab8032d5a29420fdc8fddd99de36`;
+- `hgs.exe`, 36,961,792 bytes, SHA256
+  `04ddfbaa02d7090164842ba3251626cd3d64117b3bd3cd830372b1de97f2e53a`.
+
+The installer payload has 1,106 files, `desktop: tauri` and version 0.47.0, with
+no Qt DLLs or plugins.
+
+Both cases used the owner's standard console account in session 1 with an
+unelevated token. The console was unlocked; this was checked before each case.
+Kaspersky stayed active and unchanged: it logged no events and its quarantine did
+not change. A one-shot SYSTEM task started each case through `WTSQueryUserToken`.
+Each case used a fresh private stage and fixture profile, its own `HOME`, config
+and state, and the real per-user registration namespace, which each case first
+verified absent. Every product call was waited until it physically exited, with
+its output fully captured.
+
+**Setup case — PASS, 16/16.** A clean per-user `setup.exe` install wrote the
+exact payload and `installation.json`. It registered the passive task in READY
+state and the Toast AUMID/COM keys without starting the service or creating
+durable service state. The staged stable CLI matched the CI `hgs.exe` bytes. The
+Start Menu entry targeted the installed UI, and login stayed opt-in. A
+same-source upgrade with the explicit login choice added only the UI
+`--background` Run value and kept the backend registration. UI-only uninstall
+kept the task, stable CLI and Toast identity. The maintained removals then left
+the task and every Toast key absent. Seeded config, drafts and session files
+survived every step.
+
+**Legacy case — PASS, 22/22.** A clean portable ZIP extraction kept the winget
+layout (`hgs-tray.exe`, `hgs.exe`, connector, ConPTY). Its GUI loader reported
+the exact source, and its maintained commands registered only passive backend
+metadata.
+
+The Qt starting point was a CI-built Qt portable ZIP of
+`c7189d936e1743ed5109a59b5351aaa4eed5391e` (Qt 6.10.3, 615 files, SHA256
+`af133299dff0b39a94db0b985a0c13285736eca9815ed513085793e75960f442`), extracted
+into its own folder. Released Windows builds were only ever portable ZIPs, so the
+upgrade followed the documented route: the Next installer went into its own
+folder. That left the Qt folder byte-identical (615/615) and installed no Qt
+files; seeded config, drafts and session files survived.
+
+The installed Tauri loader reported the exact source. The first start opened its
+own visible WebView2 window; the retained screenshot shows the Sessions screen
+and one connected machine. The native tray menu (Open Zerus, No remote machines,
+Open in, Quit) quit the app within the bound. UI-only uninstall and the
+maintained removals then left the namespace absent.
+
+An earlier attempt installed `setup.exe` over the extracted Qt ZIP folder
+instead. The installer correctly does not sweep a folder it does not own, so
+the Qt files stayed mixed with the Next payload. The owner decided that the
+installer must refuse such a folder (`zerus-5wmh.66.8.1.11`).
+The installed `uninstall\payload.txt` has CR CR LF line endings when CI packages
+it on Windows. The same ordered path list matched; the installer reader is
+unaffected (`zerus-5wmh.66.8.1.10`).
+
+Cleanup after each case removed its temporary task, stage and fixture profile.
+It also removed the Explorer tray-icon record that the test GUI left under the
+owner's `NotifyIconSettings`. A final read-only check found no Zerus task, stage,
+registration, shortcut, notification setting or process. A cold standard-user
+status preflight of `1ba301c5` (CI 41675738074) the same morning also passed:
+`--version`, `desktop registration status` and `desktop notification-registration
+status` returned structured results in 33, 112 and 38 ms. That closed the
+CLI-only hang scope of `.66.3.27.3.2`.
+
+**Owner-account row.** The step-0 inventory found no Zerus or Qt installation and
+no agent CLI on the owner's account. The owner-account upgrade is therefore
+recorded under the 2026-11-03 clean-install exception; it was not exercised on
+the main account.
+
+**Not covered by this record:** upgrade with agents running, notifications and
+clicks, terminal, voice/video, UI/durable parity and Qt rollback. Those rows stay
+unchecked, and this record ticks no broader checkbox.
+
 ## Deletion PR merge gate
 
 The coordinator records per-platform acceptance and any exceptions against the
@@ -956,3 +1041,91 @@ CLI/connector/ConPTY and immutable published assets unchanged. Keep legacy updat
 feed fields and sealed-candidate retry templates while old clients require them.
 Remove each part only at its gate above; the coordinator owns merge and rollout. This document authorizes no install,
 service cutover, credential operation or deletion of user data.
+
+## Deletion gate matrix — 2026-11-04
+
+Owner: win-accept-cl, for the coordinator (`zerus-5wmh.66.8.1`). This matrix maps
+every applicable gate row to arch, Mac and va-kids at integrate `7d2b9b93`. It
+promotes no checkbox; a cell is complete only with a full per-platform record.
+
+Each cell has three parts:
+
+- **Have** is the evidence recorded so far, including today's runs: the Windows
+  installer cases on `0fca73f5` (setup 16/16, legacy 22/22, #1339); desktop-u's
+  Arch window on `0fca73f5` (`zerus-5wmh.66.8.3`); and macbundle-u's Mac window
+  on `b72dea32` (`zerus-5wmh.66.3.30.2.4`).
+- **Auto** is a route that needs only existing access, with no new grant, install,
+  security or settings change.
+- **Owner** marks what needs the owner's presence or a new grant. Those items are
+  batched into the owner questions below.
+
+Shared routes the cells refer to:
+
+- **Qt round trip (arch, Mac).** First check read-only that `desktop-previous`
+  is the verified complete Qt copy that `tray/update-installed.py` keeps after
+  the Next switch.
+  - Settle the desktop revoke, then run `update-installed.py --rollback` to start Qt.
+  - Check the exact agents, drafts and settings under Qt.
+  - Return through the maintained Next install.
+  - Record a native process-birth census, one open terminal session and one
+    unsent draft before and after.
+
+  One round trip gives the Qt rollback row, a recorded Qt→Next upgrade with live
+  agents, the no-second-import check and the owner-account half of the
+  clean-install exception. It interrupts the owner's GUI for minutes, so the
+  coordinator schedules it.
+- **Synthetic session.** A disposable target that the coordinator or the test
+  creates, as in the Arch and Mac windows today; never the owner's agents. On
+  va-kids it is a fixture agent in a private profile, because the owner's
+  Windows account has no agents.
+- **Windows UI driving.** A temporary SYSTEM task starts a helper in console
+  session 1 with the user's token. That helper uses UI Automation and SendInput at
+  the same integrity level, including on Toast buttons, with no new grant.
+- **Arch input.** The session user already has an ACL on `/dev/uinput`, so raw
+  uinput pointer events (no package install) and `spectacle -b` screenshots can
+  click a banner or menu in a scheduled display window. Injecting input into the
+  live Plasma session is listed as owner question 3. XTEST into XWayland stays
+  forbidden; a private Xvfb with XTEST remains available for fixture walks.
+- **Arch audio.** `espeak-ng` already exists and can speak into a temporary
+  PipeWire virtual source (`pw-cli`/`pw-loopback`), removed afterwards. Choose
+  that source explicitly in Zerus. `pw-record` on the sink monitor proves that
+  non-silent playback reached the output.
+
+| Gate row | arch | Mac | va-kids |
+|---|---|---|---|
+| Clean install / package (exception) | **Have:** source-install identity and no Qt/KF6/WebEngine in the dependency closure (11-02, `a1023d4`); today's `0fca73f5` source install has clean source identity. Neither is a package transaction or a clean-account install. **Auto:** the exact candidate's CI Arch package job, plus the Qt round trip for the owner-account upgrade half. **Owner:** none. | **Have:** clean frozen `b72dea32` pair/seal verified today. **Auto:** the exact candidate's CI signed/notarized bundle check, plus the Qt round trip. **Owner:** none. | **Have:** PASS. CI install/package checks plus setup 16/16 and legacy 22/22 on `0fca73f5`. The owner-account half is recorded under the exception: no Qt install exists. **Owner:** none. |
+| Upgrade with live agents | **Have:** today all 63 original native PID/births survived GUI Quit/restart; rollouts keep 63–64 agents. Both are Next→Next only. **Auto:** the Qt round trip. **Owner:** none. | **Have:** rollouts keep agents (Next→Next). **Auto:** the Qt round trip (macbundle-u; normal app Quit is authorized). **Owner:** none. | **Have:** legacy case, Qt ZIP→Next installer in its own folder, with seeded config, drafts and session files preserved; no agents. **Auto:** a private profile running a fixture-agent session and ConPTY job through the Qt ZIP's `hgs.exe`, upgraded to Next; verify the same session, run, conversation, job and draft. **Owner:** question 5. |
+| One-time import | **Have:** 9 handled preference families unchanged (11-02); retained-source warning `.66.5.11`. **Blocked:** G3 source work `.66.5.2.1/.66.5.2/.66.5.4` (migrate-u). **Auto after G3:** during the Qt round trip, check the handled families and source hashes, and that there is no reseed or second import. | **Blocked:** G3 as on arch. **Auto after G3:** during the Qt round trip, with the exported defaults snapshot. **Owner:** none. | **Have:** none. The owner account has no Qt registry or INI state (inventory 06:10Z). **Auto:** none on the main account; seeding a legacy source there would manufacture state. **Owner:** question 5. |
+| Service registration / readiness | **Have:** readiness PASS (`5c110055`); today a background no-op, with presence, reads and delivery continuing while the GUI was absent. Custom-unit refusal still PENDING. **Auto:** custom-unit refusal against a private unit directory; one exact-target delivered read with the UI closed, on a synthetic session. **Owner:** none. | **Have:** today the service and host were ready, drain and revoke settled, and wrapper `.4.11` failed closed (macbundle-u fix). **Auto:** inspect the `zerus-setup` LaunchAgent; foreign-definition refusal against a private directory; UI-closed duties on a synthetic session. **Owner:** none. | **Have:** passive registration [x] (11-02); today install/status/remove, cold activation refusal and no service start. **Auto:** start the registered task in session 1; check the pipe identity and readiness with the UI closed; remove it afterwards. **Owner:** the real logon trigger needs a sign-out/sign-in (question 6). |
+| Notifications / clicks | **Have:** today one Post Delivered, with its native ID in the history. The click FAILED to reopen the GUI (`.66.3.42`); banner appearance was not observed. **Auto after the `.42` fix:** one synthetic Post, then a uinput click on the banner (question 3), plus stale and withdrawn refusal. **Owner:** the click if question 3 is declined; lock/idle (question 6). | **Have:** a Post plus an owner click into the project (`f1833dec`; selection unqualified; drain FAILED). Today a Post was Delivered and drain settled; Withdraw is Unknown; no click. **Auto:** Post, drain and withdraw rerun after `.4.11`; selection readback (#1210). **Owner:** the click and selection (question 1); lock/idle (question 6). | **Have:** none. The GUI routes #1170/#1174/#1175 are merged. **Auto:** a service-owned Toast from a synthetic session, clicked through UI Automation, with stale and withdrawn refusal and a cold-GUI launch (win-notify-cl plan `.66.3.30.8`). **Owner:** lock/idle (question 6). |
+| Tray / menu bar / lifecycle | **Have:** today the panel tooltip, menu and primary reopen; normal Quit and maintained unit start; drafts byte-identical. **Auto:** second-instance routing, background start, Quit with a pending draft. **Owner:** none. | **Have:** none. **Auto:** reopen and second instance through `open`; maintained Quit. **Owner:** menu-bar clicks, Services, Hide and Show All (question 1). | **Have:** legacy case first-start window, own tray menu (Open Zerus / No remote machines / Open in / Quit) and native Quit (fixture). **Auto:** on the main install, second instance, background start, draft-safe exit, and setting/removing the login opt-in, all through UI Automation. **Owner:** the real login start (question 6). |
+| Terminal | **Have:** none. **Auto:** a synthetic session and a folder terminal on fixture paths with spaces and non-ASCII; exact argv from `/proc`; resize, paste and reattach after client exit. **Owner:** none. | **Have:** none. **Auto:** none; driving Terminal.app needs AX. **Owner:** the expected Apple Events consent and GUI driving (questions 1 and 2). | **Have:** none. **Auto:** a fixture session through Windows Terminal, PowerShell and ConPTY on paths with spaces and non-ASCII; exact selection through UI Automation; paste and resize through SendInput; continuity after GUI exit. **Owner:** none. |
+| Voice / video | **Have:** today microphone record, Escape to preview, playback state and discard PASS. Camera FAILED (`.66.3.41`; fix #1338 merged, awaiting rollout). Audible playback and transcription unqualified. **Auto:** real-camera preview and cancel after the rollout; espeak-ng speech into a virtual source, then transcription with the existing speech profile; playback proven by sink-monitor capture. **Owner:** question 4. A new speech-provider credential, if no profile exists. | **Have:** none. **Auto:** none; consent state is unknown, and synthetic input needs a virtual audio driver. **Owner:** question 2. | **Have:** none. Voice for local Windows sessions is unsupported by design (installation docs). **Auto:** check through UI Automation that the refusal is visible. **Owner:** none. |
+| UI / durable parity | **Have:** approvals OFF and generic-agent refusal (11-02); today 128 draft records byte-identical. **Auto:** a fixture walk of the installed build in a private Xvfb; on the owner account, read-only service queries plus a uinput-driven walk (question 3); one authenticated frontend request round trip. **Owner:** none if question 3 is approved. | **Have:** none. **Auto:** read-only service and catalog queries. **Owner:** the GUI walk (question 1). | **Have:** first-start window only. **Auto:** a UI Automation walk against a fixture profile with a synthetic session; one frontend request through a ready service to its durable result. **Owner:** none. |
+| Qt rollback / reimport | **Have:** none. **Auto:** the Qt round trip. **Owner:** none. | **Have:** none. **Auto:** the Qt round trip with the retained settings snapshot. **Owner:** none. | **Have:** none; the main account has no Qt. **Auto:** in a fixture, settle the revoke, start the Qt ZIP and return. **Owner:** question 5. |
+| Open failures | `.66.3.41`: rerun the real camera after the rollout (desktop-u). `.66.3.42`: rerun after macbundle-u's fix, with the click as above. | `.66.3.30.2.4`: click and navigation owner-pending (AX untrusted, loginwindow frontmost); wrapper `.4.11`. | `.66.8.1.11` (P2, installer refuses a non-owned folder), `.66.8.1.10` (CR CR LF), both win-accept-cl; `.66.8.1.12` (P4 log line). |
+
+### Batched owner questions
+
+1. **Mac clicks.** Either one window in which the owner unlocks the Mac and
+   performs the listed clicks (one banner, menu-bar items, a short UI walk), or
+   Accessibility for one dedicated, revocable test runner, so macbundle-u can
+   drive them.
+2. **Mac media and terminal consent.** Microphone, camera and Apple Events
+   consent for `com.hgdev.hgs-tray`, if not already granted. Then either one
+   spoken phrase with the owner confirming playback, or permission to install a
+   virtual audio driver for synthetic speech.
+3. **Arch input injection.** May tests inject uinput pointer events into the live
+   Plasma session during coordinator-scheduled display windows? This uses the
+   existing ACL; no new grant. If not, the owner performs one physical click per
+   window.
+4. **Audible playback.** Does a PipeWire (or WASAPI loopback) monitor capture of
+   non-silent output count as playback evidence, or must the owner listen once?
+5. **Windows main account.** It has no Qt install, Qt settings or agents. Accept
+   private-profile evidence (Qt ZIP plus a fixture-agent session) for the upgrade,
+   import and Qt rollback rows. Or authorize installing Qt 0.47.0 plus an agent
+   on that account; that needs the owner's agent login.
+6. **Logon and lock.** On all three machines, the lock/idle notification subcases
+   need a lock and an owner unlock. The va-kids logon-trigger rows need one
+   sign-out/sign-in. Either the owner does these once per machine, or they stay
+   recorded as owner-pending.

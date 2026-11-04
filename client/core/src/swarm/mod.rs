@@ -25,6 +25,7 @@ pub mod edit;
 pub mod folder_edit;
 pub mod grouping;
 pub mod layout;
+pub mod legacy_projects;
 pub mod qt_import;
 pub mod runs;
 pub mod sync;

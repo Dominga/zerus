@@ -172,7 +172,7 @@ fn sync_failure_returns_no_offer_and_keeps_the_exact_before_or_after_phase() {
         assert_eq!(
             steps,
             if fail_directory {
-                vec![false, true]
+                vec![false, false, false, false, true]
             } else {
                 vec![false]
             }
@@ -422,6 +422,7 @@ fn invalid_next_record_is_refused_before_publication_and_replaced_preparation_is
     assert!(publish(
         &snapshot.slot,
         &snapshot.disk,
+        &lock,
         &invalid,
         || lock_current(&snapshot.slot, &lock),
         |f, _| f.sync_all()
@@ -503,4 +504,84 @@ fn killing_the_original_private_frontend_process_preserves_offered_unknown() {
     let mut reopened = Journal::prepare(f.capture().unwrap(), NEXT).unwrap();
     assert_eq!(reopened.offer().err(), Some(Error::OfferedUnknown));
     assert_eq!(reopened.saved().reconcile_id(), f.intent.reconcile_id);
+}
+
+#[test]
+fn abort_after_candidate_sync_can_reoffer_the_same_prepared_original() {
+    use std::{
+        io::Read,
+        process::{Child, Command, Stdio},
+        time::{Duration, Instant},
+    };
+    const LEAF: &str = "ZERUS_TEST_TASK_PUBLICATION_BEFORE_TRACKING";
+    if let Some(root) = std::env::var_os(LEAF) {
+        let intent = wire::test_intent();
+        let source = Captured::read(
+            Path::new(&root),
+            &intent.binding.key.project,
+            &intent.binding.key.task,
+            &intent.binding.key.request_id,
+            &intent.binding.ui_snapshot_sha256,
+            intent.scope,
+        )
+        .unwrap();
+        let mut journal = Journal::prepare(source, &intent.reconcile_id).unwrap();
+        journal
+            .offer_with_sync(|file, directory| {
+                if !directory {
+                    let bytes = read(file, super::BYTES)?.0;
+                    let is_candidate = serde_json::from_slice::<serde_json::Value>(&bytes)
+                        .is_ok_and(|value| value.get("intent").is_some());
+                    if is_candidate {
+                        file.sync_all()?;
+                        crate::fsx::write_private_durable(
+                            &Path::new(&root).join("candidate-synced"),
+                            b"same-cut",
+                        )?;
+                        let _ = std::io::stdin().read(&mut [0; 1]);
+                        std::process::exit(0);
+                    }
+                }
+                file.sync_all()
+            })
+            .unwrap();
+        panic!("original writer never reached candidate sync");
+    }
+    struct Owned(Child);
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let f = Fixture::new();
+    drop(prepared(&f));
+    let outbox = fs::read(&f.file).unwrap();
+    let marker = fs::read(&f.marker).unwrap();
+    let mut child = Owned(Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "task_start::capture::journal::tests::abort_after_candidate_sync_can_reoffer_the_same_prepared_original", "--nocapture"])
+        .env(LEAF, &f.store).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap());
+    let until = Instant::now() + Duration::from_secs(8);
+    while !f.store.join("candidate-synced").exists() {
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "original writer exited before candidate sync"
+        );
+        assert!(
+            Instant::now() < until,
+            "original writer never reached bounded candidate sync"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    child.0.kill().unwrap();
+    assert!(!child.0.wait().unwrap().success());
+    drop(child.0.stdin.take());
+    assert_eq!(saved(&f).phase(), Phase::Prepared);
+    let mut explicit = prepared(&f);
+    assert_eq!(
+        explicit.offer().unwrap().reconcile_id,
+        f.intent.reconcile_id
+    );
+    assert_eq!(fs::read(&f.file).unwrap(), outbox);
+    assert_eq!(fs::read(&f.marker).unwrap(), marker);
 }

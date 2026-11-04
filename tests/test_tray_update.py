@@ -203,7 +203,9 @@ class TrayUpdate(unittest.TestCase):
         self.assertEqual((record['guiVersionName'], record['preservedDrafts']), ('second', 2))
         self.assertEqual(self.leftovers(), [])
         self.assertEqual(list((self.home / '.local/state/hgs/desktop-update').iterdir()), [])
-        self.assertIn('2 nonempty drafts kept', result.stdout)
+        self.assertIn('drafts kept: 2 with unsent input, 0 with saved form state only, '
+                      '0 with a held delivery identity;', result.stdout)
+        self.assertEqual(record['keptDrafts'], {'unsentInput': 2, 'formState': 0, 'heldIdentities': 0})
         # The next update keeps exactly one rollback copy: the GUI it replaced.
         result = self.update(self.build('third'))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

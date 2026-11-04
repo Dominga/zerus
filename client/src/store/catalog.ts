@@ -150,6 +150,7 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     resumable: !!v.resumable,
     activity: text(v.activity),
     processState: text(v.process_state),
+    conversationState: text(v.conversation_state),
     archiveId: optional(v.archive_id),
     replyId: optional(v.reply_id),
     attentionSignature: optional(v.attention_signature),

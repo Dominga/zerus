@@ -14,7 +14,7 @@ ProcessRunner::Request command(const QString &executable, const QString &host, Q
     request.arguments = args; request.input = QByteArray(); request.timeoutMs = 30000;
     request.maximumOutputBytes = AnalyticsData::MaximumBytes;
     auto environment = QProcessEnvironment::systemEnvironment();
-    environment.remove("HGS_SESSION"); environment.remove("HGS_RUN_ID"); request.environment = environment;
+    environment.remove("HGS_SESSION"); environment.remove("HGS_SESSION_ID"); environment.remove("HGS_RUN_ID"); request.environment = environment;
     return request;
 }
 bool success(const ProcessRunner::Result &result) {

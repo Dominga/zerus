@@ -8,6 +8,7 @@ import { now } from "../../store/ui";
 import { settings } from "../../store/settings";
 import { machineAppearance } from "../../store/machineAppearance";
 import type { AgentKind, Session, Status, Subagent } from "./types";
+import { currentChildren, workingChildren } from "./subagents";
 
 // Card anatomy follows tray/src/SessionCardDelegate.h paintCard() at the
 // compact density (94 px rows, the only density in the web client):
@@ -231,7 +232,7 @@ function detailText(s: Session): string {
 
 export const agentsLabel = (s: Session) => {
   const kids = s.subagents ?? [];
-  return `${kids.filter((k) => k.state === "working").length}/${kids.length}`;
+  return `${workingChildren(s, !computerOffline(s.computer))}/${kids.length}`;
 };
 
 /** The checkout's folder name, as the card's second line shows it. */
@@ -295,18 +296,23 @@ const CHILD_STATUS: Record<Subagent["state"], { kind: BadgeKind; caption: string
   attention: { kind: "attention", caption: trNoop("Needs input") },
   error: { kind: "error", caption: trNoop("Error") },
   paused: { kind: "paused", caption: trNoop("Paused") },
+  unknown: { kind: "neutral", caption: trNoop("Unknown") },
+  ended: { kind: "neutral", caption: trNoop("Ended") },
 };
-export const childStatus = (c: Subagent) => ({ ...CHILD_STATUS[c.state], caption: tr(CHILD_STATUS[c.state].caption) });
+export const childStatus = (c: Subagent, current = true): { kind: BadgeKind; caption: string } => current
+  ? { ...CHILD_STATUS[c.state], caption: tr(CHILD_STATUS[c.state].caption) }
+  : { kind: "neutral", caption: tr("Recorded") };
 
 /** Native subagent row (64 px): card indented 24 px, one muted detail line. */
 export function ChildCard(props: { parent: Session; child: Subagent; last: boolean; first: boolean; selected: boolean }) {
+  const status = () => childStatus(props.child, currentChildren(props.parent, !computerOffline(props.parent.computer)));
   return (
     <div class="child-row" classList={{ last: props.last, first: props.first }}>
       <i class="tree" aria-hidden="true" />
       <div class="scard child" classList={{ selected: props.selected }}>
         <div class="sc-l1">
           <span class="sc-title ell" style={titleReserve(props.child.name, 72)}>{props.child.name}</span>
-          <StatusBadge kind={childStatus(props.child).kind} caption={childStatus(props.child).caption} />
+          <StatusBadge kind={status().kind} caption={status().caption} />
           <span class="grow" />
           <AgentBadge agent={props.parent.agent} max={85} />
         </div>

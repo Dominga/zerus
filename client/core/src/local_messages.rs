@@ -69,9 +69,6 @@ pub struct Reconciled {
     /// Texts of failed rows the history shows delivered after all: a draft
     /// still holding one of them was sent.
     pub delivered: Vec<String>,
-    /// Their request ids, in the same order: the only proof that settles a
-    /// draft's held deferred input (zerus-5wmh.66.4.4).
-    pub delivered_ids: Vec<String>,
 }
 
 /// Where Inspect on a failed row leads.
@@ -340,7 +337,6 @@ impl LocalMessages {
                 result.removed += 1;
                 if failed {
                     result.delivered.push(row.text.clone());
-                    result.delivered_ids.push(row.id.clone());
                 }
             }
             !shown
@@ -605,8 +601,7 @@ mod tests {
             reconciled,
             Reconciled {
                 removed: 2,
-                delivered: vec!["exact failure".into()],
-                delivered_ids: vec!["2".into()],
+                delivered: vec!["exact failure".into()]
             }
         );
         let left: Vec<_> = messages

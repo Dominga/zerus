@@ -1761,14 +1761,12 @@ impl Composers {
                 !c.sending
                     && c.draft.attachments.is_empty()
                     && reconciled.delivered.contains(&c.draft.text)
-                    // Text alone never settles a held identity: only its
-                    // own send's row, shown delivered, proves it
+                    // History carries only text, never a request id: it
+                    // never settles a held identity, which stays until
+                    // evidence carrying its id, or the user's Allow retry
                     // (zerus-5wmh.66.4.4). A draft holding none keeps the
                     // text match.
-                    && c.checkpoint.as_ref().is_none_or(|held| {
-                        held.kind == Kind::Send
-                            && reconciled.delivered_ids.contains(&held.request_id)
-                    })
+                    && c.checkpoint.is_none()
             });
             (key, reconciled.removed > 0, clear)
         };
@@ -7116,11 +7114,11 @@ mod continuations {
         assert!(view.uncertain && view.text == "same draft");
     }
 
-    /// History settles a held identity only through its own send's row: an
-    /// uncertain send shown delivered clears its draft and identity, and a
-    /// draft holding none keeps the text match (zerus-5wmh.66.4.4).
+    /// History carries only text: it never settles a held identity, not
+    /// even its own send's row, while a draft holding none keeps the text
+    /// match (zerus-5wmh.66.4.4).
     #[test]
-    fn history_settles_a_held_send_only_through_its_own_row() {
+    fn text_only_history_never_settles_a_held_send() {
         let root = dir("checkpoint-history-own");
         let store = drafts(&root);
         let (c, fake) = send_hub_on(&store);
@@ -7148,9 +7146,17 @@ mod continuations {
         assert_eq!(view.local[0].id, held.request_id, "its row carries its id");
         let now = *lock(&fake.now);
         c.observe(&shown("maybe sent", now));
-        let view = until(&c, |v| v.local.is_empty() && !v.uncertain);
-        assert!(view.text.is_empty(), "its own row proved it delivered");
+        let view = until(&c, |v| v.local.is_empty());
+        store.flush();
+        assert!(
+            view.uncertain && view.text == "maybe sent",
+            "the draft stays"
+        );
+        assert_eq!(on_disk(&root).as_ref(), Some(&held), "its identity stays");
+        // Only the user's Allow retry ends it.
+        c.allow_retry(view.handle);
         eventually(|| on_disk(&root).is_none());
+        let view = c.current().unwrap();
         // A definite failure holds no identity: its text alone clears it.
         *lock(&fake.outcome) = Box::new(|_, _| Outcome::Failed {
             detail: "refused".into(),
@@ -7171,6 +7177,171 @@ mod continuations {
         c.observe(&shown("plain", now));
         let view = until(&c, |v| v.local.is_empty());
         assert!(view.text.is_empty());
+    }
+
+    /// review-n's #1316 R3 probe (zerus-5wmh.66.4.4).
+    #[test]
+    fn an_old_text_event_never_proves_a_second_same_text_send() {
+        let root = dir("probe-r3-two-sends");
+        let store = drafts(&root);
+        let (c, fake) = send_hub_on(&store);
+        *lock(&fake.outcome) = Box::new(|_, _| Outcome::Uncertain {
+            detail: "reply lost".into(),
+        });
+        let view = opened(&c, ready());
+        c.send_message(view.handle, 1, view.text_epoch, "same draft".into(), 0, 0);
+        let view = until(&c, |v| !v.sending && v.uncertain);
+        store.flush();
+        let older = on_disk(&root).unwrap();
+        c.allow_retry(view.handle);
+        c.observe(&state(ready()));
+        let view = c.current().unwrap();
+        assert_eq!(
+            c.send_message(
+                view.handle,
+                view.rev + 1,
+                view.text_epoch,
+                "same draft".into(),
+                0,
+                0
+            ),
+            SendReply::Sending
+        );
+        let view = until(&c, |v| !v.sending && v.uncertain);
+        store.flush();
+        let newer = on_disk(&root).unwrap();
+        assert_ne!(older.request_id, newer.request_id);
+        assert_eq!(view.local.len(), 1);
+        assert_eq!(view.local[0].id, newer.request_id);
+        let mut late = state(ready());
+        late.activity.push(ActivityOut { computer: ComputerId::from("studio"), key: "run:run-1".into(), kind: "events".into(),
+            payload: json!({"events":[{"type":"UserPromptSubmit","detail":"same draft","at":*lock(&fake.now)}]}) });
+        c.observe(&late);
+        store.flush();
+        let view = c.current().unwrap();
+        eprintln!(
+            "two sends / one text event: local_rows={} uncertain={} text={:?} newer_kept={}",
+            view.local.len(),
+            view.uncertain,
+            view.text,
+            on_disk(&root).as_ref() == Some(&newer)
+        );
+        assert_eq!(
+            on_disk(&root).as_ref(),
+            Some(&newer),
+            "a text match cannot manufacture proof of the second send's request ID"
+        );
+        assert!(view.uncertain && view.text == "same draft");
+    }
+
+    /// review-n's #1316 R3 probe (zerus-5wmh.66.4.4).
+    #[test]
+    fn an_evicted_inflight_entry_cannot_clear_or_misattribute_a_checkpoint() {
+        for definite in [false, true] {
+            let root = dir(if definite {
+                "probe-r3-evict-definite"
+            } else {
+                "probe-r3-evict-unknown"
+            });
+            let store = drafts(&root);
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let (c, fake) = send_hub_with(
+                &store,
+                Arc::new(move |job| {
+                    let tx = done_tx.clone();
+                    std::thread::spawn(move || {
+                        job();
+                        let _ = tx.send(std::thread::current().id());
+                    });
+                }),
+            );
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let release_rx = Mutex::new(release_rx);
+            *lock(&fake.outcome) = Box::new(move |_, id| {
+                entered_tx.send(std::thread::current().id()).unwrap();
+                lock(&release_rx)
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                if definite {
+                    Outcome::Done {
+                        receipt: json!({"status":"submitted","request_id":id}),
+                        cleanup: None,
+                    }
+                } else {
+                    Outcome::Uncertain {
+                        detail: "lost".into(),
+                    }
+                }
+            });
+            let view = opened(&c, cold());
+            let SendReply::Cold { token, .. } =
+                c.send_message(view.handle, 1, view.text_epoch, "held".into(), 0, 0)
+            else {
+                panic!()
+            };
+            c.answer(
+                token,
+                Answer::Cold {
+                    action: ColdAction::Compact,
+                },
+            );
+            let caller_thread = entered_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            let held = on_disk(&root).unwrap();
+            c.cancel_send(view.handle);
+            until(&c, |v| v.uncertain && v.waiting.is_none());
+            let retained;
+            {
+                let mut hub = c.lock();
+                assert_eq!(hub.orphans.front().unwrap().request, held.request_id);
+                // One actual running callback plus 32 newer independent tracking entries.
+                for n in 0..ORPHANS {
+                    track_orphan(
+                        &mut hub.orphans,
+                        Orphan {
+                            request: uuid::Uuid::new_v4().to_string(),
+                            key: format!("other-{n}"),
+                            notice: format!("notice-{n}"),
+                        },
+                    );
+                }
+                assert_eq!(hub.orphans.len(), ORPHANS);
+                assert!(hub.orphans.iter().all(|o| o.request != held.request_id));
+                retained = hub
+                    .orphans
+                    .iter()
+                    .map(|o| (o.request.clone(), o.key.clone(), o.notice.clone()))
+                    .collect::<Vec<_>>();
+            }
+            store.flush();
+            assert_eq!(on_disk(&root).as_ref(), Some(&held));
+            release_tx.send(()).unwrap();
+            loop {
+                if done_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap()
+                    == caller_thread
+                {
+                    break;
+                }
+            }
+            assert_eq!(lock(&fake.calls).len(), 1);
+            c.flush();
+            store.flush();
+            let hub = c.lock();
+            assert_eq!(hub.composers[KEY].checkpoint.as_ref(), Some(&held));
+            assert!(hub.composers[KEY].uncertain && hub.composers[KEY].draft.text == "held");
+            assert_eq!(
+                hub.orphans
+                    .iter()
+                    .map(|o| (o.request.clone(), o.key.clone(), o.notice.clone()))
+                    .collect::<Vec<_>>(),
+                retained
+            );
+            eprintln!("eviction definite={definite}: original held, 32 other entries unchanged");
+        }
     }
 
     fn sent_ids(fake: &Fake) -> Vec<String> {

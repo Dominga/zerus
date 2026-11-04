@@ -186,13 +186,14 @@ While it is held, the composer stays uncertain, with a notice that delivery is
 not confirmed (or, after a reload of a draft saved while sending, that it was
 interrupted), and refuses a new Send, a start or compaction, and a Retry of a
 failed message. A reload of a draft that holds one, including a draft saved
-while a start or compaction waited, loads it in that state. History settles a
-held identity only when it shows that identity's own send delivered, by its
-request id; an older message with the same text never settles a newer identity,
-and a draft holding none keeps the text match. Otherwise only the user's
-explicit Allow retry ends a held identity; the next attempt then reserves its
-own before its call. Rename, recover and import treat a draft that holds one as
-occupied, even without text or files, and never overwrite it.
+while a start or compaction waited, loads it in that state. History carries
+only text, never a request id, so it never settles a held identity, not even
+the row of its own send; only evidence carrying that request id can, which a
+later slice reconciles. A draft holding none keeps the legacy text match. Apart
+from the definite outcomes above, only the user's explicit Allow retry ends a
+held identity; the next attempt then reserves its own before its call. Rename,
+recover and import treat a draft that holds one as occupied, even without text
+or files, and never overwrite it.
 
 This fail-closed rule changes behaviour in rare cases. After a quit or crash
 while a start or compaction ran, and after a Cancel send or time limit while
@@ -200,7 +201,9 @@ that call was still running and then answered uncertainly, the user clicks
 Allow retry before sending again. A Retry of a failed message waits until the
 composer's own unresolved delivery is resolved, and a Retry that ends
 uncertainly leaves the composer uncertain even though its draft is another
-message.
+message. An uncertain send whose text later shows in history no longer clears
+its draft by itself: its failed row goes, and the draft stays uncertain until
+Allow retry.
 
 ## Executing kinds and the exit boundary
 

@@ -18,5 +18,5 @@ export async function readCleanupOffer(
   }
 }
 export function unavailableServiceRemoval(error: string): boolean {
-  return error === "termination_native_relay_unavailable" || error === "termination_native_image_unavailable";
+  return error === "termination_native_image_unavailable";
 }

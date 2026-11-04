@@ -4,7 +4,6 @@ import { readCleanupOffer, unavailableServiceRemoval, type CleanupOfferState } f
 const target = { computer: "example", name: "codex/example/session", run_id: "run", conversation_id: "conversation" };
 describe("Terminate dialog removal availability", () => {
   it.each([
-    ["Linux", "termination_native_relay_unavailable"],
     ["macOS", "termination_native_image_unavailable"],
   ])("visibly explains %s Service refusal without an automatic fallback", async (_platform, error) => {
     let state: CleanupOfferState = {};
@@ -17,6 +16,13 @@ describe("Terminate dialog removal availability", () => {
     expect(unavailableServiceRemoval(state.error!)).toBe(true);
     expect(calls).toEqual(["offer"]); // No confirm/ordinary probe/fallback port exists.
     expect(cancel).not.toHaveBeenCalled();
+  });
+  it("does not classify the retired Linux blanket as a current platform limitation", async () => {
+    let state: CleanupOfferState = {};
+    const error = "termination_native_relay_unavailable";
+    await readCleanupOffer(target, { offer: async () => { throw error; }, cancel: async () => {} }, () => true, (next) => { state = next; });
+    expect(state).toEqual({ error });
+    expect(unavailableServiceRemoval(error)).toBe(false);
   });
   it("keeps other offer errors visible and offers only the separate review", async () => {
     let state: CleanupOfferState = {};

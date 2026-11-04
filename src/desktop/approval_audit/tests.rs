@@ -264,6 +264,35 @@ fn sqlite_connection_must_match_the_original_guard_even_if_its_path_is_unchanged
 }
 #[cfg(unix)]
 #[test]
+fn reader_allows_symlinked_ancestors_but_not_the_journal_leaf() {
+    use std::os::unix::fs::symlink;
+    let mut f = Fixture::new();
+    let real = f._temp.path().join("real");
+    f.reader.root = real.join("approval-audit");
+    drop(f.rows(1));
+    let link = f._temp.path().join("link");
+    symlink(&real, &link).unwrap();
+    f.reader.root = link.join("approval-audit");
+    let path = f.reader.root.join("journal.sqlite3");
+    for _ in 0..2 {
+        assert_eq!(f.send(&f.query())["accepted"], true);
+        crate::approval_log::lock_tests::assert_lock(&path, true);
+        drop(f.reader.journal.take());
+        crate::approval_log::lock_tests::assert_lock(&path, false);
+    }
+    let target = real.join("retained.sqlite3");
+    fs::rename(&path, &target).unwrap();
+    let original = fs::read(&target).unwrap();
+    symlink(&target, &path).unwrap();
+    let refused = f.send(&f.query());
+    assert_eq!(refused["accepted"], false);
+    assert_eq!(refused["code"], "approval_audit_unavailable");
+    assert!(f.reader.journal.is_none());
+    assert_eq!(fs::read(&target).unwrap(), original);
+}
+
+#[cfg(unix)]
+#[test]
 fn restoring_the_checked_path_cannot_hide_a_different_sqlite_file() {
     let f = Fixture::new();
     let other = Fixture::new();
@@ -272,9 +301,12 @@ fn restoring_the_checked_path_cannot_hide_a_different_sqlite_file() {
         db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;")
             .unwrap();
     }
-    let path = f.reader.root.join("journal.sqlite3");
-    let original = f.reader.root.join("original.sqlite3");
-    let replacement = other.reader.root.join("journal.sqlite3");
+    let root = platform::canonical(&f.reader.root).unwrap();
+    let path = root.join("journal.sqlite3");
+    let original = root.join("original.sqlite3");
+    let replacement = platform::canonical(&other.reader.root)
+        .unwrap()
+        .join("journal.sqlite3");
     let checked = platform::file_identity(&path).unwrap();
     // A is checked, B is opened at the SAME filename, then A is restored.
     // Both stat checks see A; only SQLite can identify its retained B.

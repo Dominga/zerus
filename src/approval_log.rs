@@ -107,11 +107,14 @@ pub(crate) fn open(root: &Path) -> Result<Connection> {
     if !platform::verify_private(root, platform::Private::Directory)? {
         return Err(bad("The approval journal folder must be private"));
     }
+    // NOFOLLOW checks every component; resolve the verified directory only,
+    // preserving ancestor aliases while still refusing a linked journal.
+    let root = platform::canonical(root)?;
     let path = root.join("journal.sqlite3");
     // Never close a raw fd on an existing SQLite inode: another connection
     // (including the actor's audit reader) may already hold POSIX locks.
     if !path.try_exists()? {
-        let file = tempfile::NamedTempFile::new_in(root)?;
+        let file = tempfile::NamedTempFile::new_in(&root)?;
         platform::make_private(file.as_file())?;
         if !platform::verify_private_file(file.as_file())? {
             return Err(bad("The approval journal must be a private regular file"));
@@ -153,7 +156,7 @@ pub(crate) fn open(root: &Path) -> Result<Connection> {
     if version == 0 {
         db.execute_batch("PRAGMA user_version=1").map_err(bad)?;
     }
-    platform::sync_dir(root)?;
+    platform::sync_dir(&root)?;
     if let Some(parent) = root.parent() {
         platform::sync_dir(parent)?;
     }
@@ -653,6 +656,39 @@ mod tests {
         }
         assert!(list(&db, &json!({"before":0})).is_err());
         assert!(list(&db, &json!({"before":20,"after":10})).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writer_allows_symlinked_ancestors_but_not_the_journal_leaf() {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir().unwrap();
+        let real = directory.path().join("real");
+        platform::private_dir(&real).unwrap();
+        let link = directory.path().join("link");
+        symlink(&real, &link).unwrap();
+        let root = link.join("audit");
+        let path = root.join("journal.sqlite3");
+        for _ in 0..2 {
+            let db = open(&root).unwrap();
+            assert_eq!(
+                db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            lock_tests::assert_lock(&path, true);
+            drop(db);
+            lock_tests::assert_lock(&path, false);
+        }
+        let target = real.join("retained.sqlite3");
+        fs::rename(&path, &target).unwrap();
+        let original = fs::read(&target).unwrap();
+        symlink(&target, &path).unwrap();
+        assert!(
+            open(&root).is_err(),
+            "a valid journal reached through a leaf link is refused"
+        );
+        assert_eq!(fs::read(&target).unwrap(), original);
     }
 
     #[cfg(unix)]

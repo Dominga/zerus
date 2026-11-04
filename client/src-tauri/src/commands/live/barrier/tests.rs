@@ -6,6 +6,52 @@ use std::{
     time::Duration,
 };
 
+// These fixtures exercise the legacy Native/replay graph. A manager's Service
+// opt-in must not select a different graph; MODE is cached for the process.
+// Re-execute only the current test with a clean context, never mutate the
+// shared parent environment while other tests own frozen native snapshots.
+fn isolated_native_context() -> bool {
+    let keys = [
+        zerus_client_core::desktop::service::MODE_ENV,
+        "HGS_SESSION",
+        "HGS_SESSION_ID",
+        "HGS_RUN_ID",
+    ];
+    if keys.iter().all(|key| std::env::var_os(key).is_none()) {
+        return false;
+    }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    let thread = std::thread::current();
+    let case = thread.name().expect("named libtest fixture");
+    let invocation = zerus_client_core::Invocation {
+        args: ["--exact", case, "--test-threads=1", "--nocapture"]
+            .map(String::from)
+            .into(),
+        stdin: Some(Vec::new()),
+        timeout: Duration::from_secs(30), // Harness watchdog, not a test deadline.
+        request_id: None,
+    };
+    let output = zerus_client_core::run::run_owned(
+        &std::env::current_exe().unwrap(),
+        &invocation,
+        &[],
+        &std::sync::atomic::AtomicBool::new(false),
+        move |command| {
+            for key in keys {
+                command.env_remove(key);
+            }
+            command.spawn()
+        },
+        Arc::new(()),
+    )
+    .expect("isolated Native fixture must physically settle");
+    assert!(
+        String::from_utf8_lossy(&output).contains("1 passed; 0 failed"),
+        "the exact fixture must run, not an empty filter"
+    );
+    true
+}
+
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(5)
 }
@@ -19,6 +65,9 @@ fn eventually(label: &str, test: impl Fn() -> bool) {
 
 #[test]
 fn empty_freeze_is_one_use_and_every_control_remains_closed() {
+    if isolated_native_context() {
+        return;
+    }
     let live = Arc::new(Live::default());
     live.freeze().unwrap().drain_until(deadline()).unwrap();
     assert!(matches!(live.freeze(), Err(Refused::Closed)));
@@ -33,6 +82,9 @@ fn empty_freeze_is_one_use_and_every_control_remains_closed() {
 
 #[test]
 fn admitted_control_finishes_before_drain_and_timeout_never_reopens() {
+    if isolated_native_context() {
+        return;
+    }
     let live = Arc::new(Live::default());
     let held = live.admit().unwrap();
     let frozen = live.freeze().unwrap();
@@ -44,6 +96,9 @@ fn admitted_control_finishes_before_drain_and_timeout_never_reopens() {
 
 #[test]
 fn admitted_start_waiting_for_source_cannot_create_a_late_graph() {
+    if isolated_native_context() {
+        return;
+    }
     let live = Arc::new(Live::default());
     let source = live.source.lock().unwrap();
     let worker = live.clone();
@@ -62,6 +117,9 @@ fn admitted_start_waiting_for_source_cannot_create_a_late_graph() {
 
 #[test]
 fn poisoned_source_never_becomes_a_successful_empty_drain() {
+    if isolated_native_context() {
+        return;
+    }
     let live = Arc::new(Live::default());
     let broken = live.clone();
     assert!(std::thread::spawn(move || {
@@ -78,6 +136,9 @@ fn poisoned_source_never_becomes_a_successful_empty_drain() {
 
 #[test]
 fn busy_source_is_refused_without_waiting_or_reopening() {
+    if isolated_native_context() {
+        return;
+    }
     let live = Arc::new(Live::default());
     let frozen = live.freeze().unwrap();
     let _held = live.source.lock().unwrap();
@@ -87,6 +148,9 @@ fn busy_source_is_refused_without_waiting_or_reopening() {
 
 #[test]
 fn callback_completion_outlives_an_abandoned_controller() {
+    if isolated_native_context() {
+        return;
+    }
     let live = Arc::new(Live::default());
     let (tx, rx) = mpsc::channel();
     let (entered, ready) = mpsc::channel();
@@ -145,6 +209,9 @@ impl Drop for Fixture {
 
 #[test]
 fn live_gui_source_requires_actual_helper_pipe_and_pump_completion() {
+    if isolated_native_context() {
+        return;
+    }
     let f = Fixture::new();
     let live = Arc::new(Live::default());
     assert_eq!(live.start_from(|| f.0.join("hgs"), None).unwrap(), "live");
@@ -163,6 +230,9 @@ fn live_gui_source_requires_actual_helper_pipe_and_pump_completion() {
 
 #[test]
 fn replay_never_supplies_live_fleet_proof() {
+    if isolated_native_context() {
+        return;
+    }
     let f = Fixture::new();
     fs::write(
         f.0.join("replay.ndjson"),

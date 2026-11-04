@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 const HISTORY: usize = 8; // The existing 8 KiB record bound also applies.
+const CHOICES: usize = 48; // Bytes, including reserved review growth, can refuse sooner.
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -103,7 +104,7 @@ impl Record {
             .last()
             .context("No original review selects this choice.")?;
         let choice = choice.context("After review, confirm a NEW mode choice with --after-review UUID --request-id NEW_UUID.")?;
-        ensure!(self.choices.len() < 64 && !self.choices.iter().any(|c| c.request == choice.request),
+        ensure!(self.choices.len() < CHOICES && !self.choices.iter().any(|c| c.request == choice.request),
             "Original choice was already offered or history is full; read its original mode-result, never replay it.");
         ensure!(canonical_id(&choice.request) && choice.reviewed == last.original.request_id
             && self.completed.as_deref() != Some(choice.request.as_str())
@@ -116,12 +117,16 @@ impl Record {
 
     pub fn reserve_choice(&mut self, choice: &Choice, desired: Mode) -> Result<()> {
         self.choice(Some(choice))?;
-        self.choices.push(Receipt {
+        self.ensure_review_slot()?;
+        let mut next = self.clone();
+        next.choices.push(Receipt {
             reviewed: choice.reviewed.clone(),
             request: choice.request.clone(),
             desired,
             phase: ChoicePhase::Unknown,
         });
+        next.ensure_review_capacity(&Pending::prepared(choice.request.clone(), desired, None))?;
+        self.choices = next.choices;
         Ok(())
     }
 
@@ -155,6 +160,54 @@ impl Record {
         );
         Ok(())
     }
+
+    /// Reserve bytes BEFORE admission, not after an uncertain effect. The
+    /// native transition may still capture consumer/start identities and reach
+    /// any offered phase before interruption. Size-only models below use the
+    /// largest accepted UUID, integer and phase encodings, never evidence or a
+    /// native permission. Both the barrier and immutable archive must fit.
+    fn review_capacity(&self, pending: &Pending) -> Result<usize> {
+        let uuid = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+        let identity = Boot {
+            machine: uuid.into(),
+            boot: uuid.into(),
+        };
+        let mut largest = pending.clone();
+        largest.desired = Mode::Background;
+        largest.phase = Phase::RevokeOffered;
+        largest.original = Some(ObservedInstance {
+            guid: format!("urn:uuid:{uuid}"),
+            pid: u32::MAX,
+            birth: u64::MAX,
+            epoch: uuid.into(),
+        });
+        largest.started = Some(format!("urn:uuid:{uuid}"));
+        largest.consumer = Some(Consumer {
+            pid: u32::MAX,
+            birth: u64::MAX,
+            boot: identity.clone(),
+        });
+        largest.review = Some(Disposition {
+            state: State::RebootRequired,
+            barrier: identity,
+            binding: "f".repeat(64),
+        });
+        let mut model = self.clone();
+        model.pending = Some(largest.clone());
+        let barrier = serde_json::to_vec(&model)?.len();
+        largest.review.as_mut().expect("size model").state = State::ReviewedUnknown;
+        model.pending = None;
+        model.reviewed.push(Archive {
+            original: largest,
+            outcome: Outcome::Unknown,
+        });
+        Ok(barrier.max(serde_json::to_vec(&model)?.len()))
+    }
+    pub(super) fn ensure_review_capacity(&self, pending: &Pending) -> Result<()> {
+        ensure!(self.review_capacity(pending)? <= RECORD_BYTES,
+            "Desktop mode history has no byte headroom for original review; no new intent was admitted. Keep the record and current mode; inspect status or original mode-result. No maintained history rollover is available.");
+        Ok(())
+    }
     fn binding(&self, pending: &Pending) -> Result<String> {
         let mut original = pending.clone();
         original.review = None;
@@ -167,7 +220,7 @@ impl Record {
     pub(super) fn check_reviews(&self) -> Result<()> {
         let mut choices = BTreeSet::new();
         ensure!(
-            self.choices.len() <= 64
+            self.choices.len() <= CHOICES
                 && self.choices.iter().all(|c| canonical_id(&c.request)
                     && canonical_id(&c.reviewed)
                     && choices.insert(&c.request)
@@ -785,12 +838,14 @@ mod tests {
     #[test]
     fn choice_receipts_are_bounded_and_never_evicted_to_make_an_old_id_new() {
         let (mut record, id) = reviewed();
-        for _ in 0..64 {
+        for _ in 0..CHOICES {
             let choice = Choice {
                 reviewed: id.clone(),
                 request: uuid::Uuid::new_v4().to_string(),
             };
-            record.reserve_choice(&choice, Mode::Passive).unwrap();
+            if record.reserve_choice(&choice, Mode::Passive).is_err() {
+                break;
+            }
             record.complete(&choice.request).unwrap();
         }
         let before = record.clone();
@@ -804,9 +859,172 @@ mod tests {
             )
             .is_err());
         assert_eq!(record, before);
-        assert!(
-            record.encode(&plan()).is_err(),
-            "the existing 8 KiB cap also applies"
+        assert!(!record.choices.is_empty() && record.choices.len() <= CHOICES);
+        record.encode(&plan()).unwrap();
+    }
+
+    fn grow_command(record: &mut Record, selected: &mut Plan, bytes: usize) {
+        // Keep a normal hgs.exe leaf and sub-255-character components. Each
+        // separator costs two JSON bytes; `bytes` is encoded record growth.
+        let mut remaining = bytes;
+        let mut padding = String::new();
+        while remaining > 200 {
+            padding.push_str(&"p".repeat(199));
+            padding.push('\\');
+            remaining -= 201;
+        }
+        padding.push_str(&"p".repeat(remaining));
+        selected.argv[0].insert_str(3, &padding);
+        record.command = selected.argv[..7].to_vec();
+        // This models a registration originally selected at the longer path,
+        // not migration or a runtime rewrite of a retained original binding.
+        for index in 0..record.reviewed.len() {
+            let binding = record.binding(&record.reviewed[index].original).unwrap();
+            record.reviewed[index]
+                .original
+                .review
+                .as_mut()
+                .unwrap()
+                .binding = binding;
+        }
+    }
+
+    #[test]
+    fn a_pending_record_that_fits_without_review_is_refused_before_admission() {
+        let (mut record, reviewed) = reviewed();
+        let mut selected = plan();
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut pending = Pending::prepared(id.clone(), Mode::Background, Some(instance()));
+        pending.phase = Phase::StopOffered;
+        pending.consumer = Some(Consumer {
+            pid: 1,
+            birth: 2,
+            boot: boot(),
+        });
+        let mut legacy_probe = record.clone();
+        legacy_probe.pending = Some(pending.clone());
+        let padding = 8045 - legacy_probe.encode(&selected).unwrap().len();
+        grow_command(&mut record, &mut selected, padding);
+        legacy_probe = record.clone();
+        legacy_probe.pending = Some(pending);
+        assert_eq!(legacy_probe.encode(&selected).unwrap().len(), 8045);
+        for native in [boot(), next_boot()] {
+            let mut unreserved = legacy_probe.clone();
+            unreserved.review_original(&id, &native, false).unwrap();
+            assert!(
+                unreserved.encode(&selected).is_err(),
+                "old admission would strand this review"
+            );
+        }
+        let before = record.clone();
+        let error = record
+            .begin_id(Mode::Background, Some(instance()), id.clone())
+            .unwrap_err();
+        assert!(error.to_string().contains("byte headroom"), "{error:#}");
+        assert_eq!(record, before);
+        let error = record
+            .reserve_choice(
+                &Choice {
+                    reviewed,
+                    request: id,
+                },
+                Mode::Background,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("byte headroom"), "{error:#}");
+        assert_eq!(record, before);
+        record.encode(&selected).unwrap();
+    }
+
+    #[test]
+    fn the_last_admitted_byte_leaves_room_for_both_barrier_and_archive_after_every_phase() {
+        let (mut record, reviewed) = reviewed();
+        let choice = Choice {
+            reviewed,
+            request: uuid::Uuid::new_v4().to_string(),
+        };
+        record.reserve_choice(&choice, Mode::Background).unwrap();
+        let pending = Pending::prepared(choice.request.clone(), Mode::Background, None);
+        let mut selected = plan();
+        let padding = RECORD_BYTES - record.review_capacity(&pending).unwrap();
+        grow_command(&mut record, &mut selected, padding);
+        assert_eq!(record.review_capacity(&pending).unwrap(), RECORD_BYTES);
+        let mut unoffered = record.clone();
+        unoffered.choices.pop();
+        unoffered.reserve_choice(&choice, Mode::Background).unwrap();
+        assert_eq!(
+            unoffered, record,
+            "receipt admission reserves the same final byte"
         );
+        let mut over = record.clone();
+        let mut over_plan = selected.clone();
+        grow_command(&mut over, &mut over_plan, 1);
+        let before = over.clone();
+        assert!(over
+            .begin_id(Mode::Background, None, choice.request.clone())
+            .is_err());
+        assert_eq!(over, before);
+        record
+            .begin_id(Mode::Background, None, choice.request.clone())
+            .unwrap();
+        let uuid = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+        for phase in [
+            Phase::Prepared,
+            Phase::RevokeOffered,
+            Phase::Held,
+            Phase::StopOffered,
+            Phase::Stopped,
+            Phase::UpdateOffered,
+            Phase::Updated,
+            Phase::StartOffered,
+            Phase::Ready,
+        ] {
+            let mut attempt = record.clone();
+            let original = attempt.pending.as_mut().unwrap();
+            original.phase = phase;
+            original.original = Some(ObservedInstance {
+                guid: format!("urn:uuid:{uuid}"),
+                pid: u32::MAX,
+                birth: u64::MAX,
+                epoch: uuid.into(),
+            });
+            original.consumer = Some(Consumer {
+                pid: u32::MAX,
+                birth: u64::MAX,
+                boot: Boot {
+                    machine: uuid.into(),
+                    boot: uuid.into(),
+                },
+            });
+            if matches!(phase, Phase::StartOffered | Phase::Ready) {
+                original.started = Some(format!("urn:uuid:{uuid}"));
+            }
+            let same_boot = original.consumer.as_ref().unwrap().boot.clone();
+            attempt.encode(&selected).unwrap();
+            assert_eq!(
+                attempt
+                    .review_original(&choice.request, &same_boot, false)
+                    .unwrap(),
+                State::RebootRequired
+            );
+            let barrier = attempt.encode(&selected).unwrap();
+            let mut reopened = Record::decode(&barrier, &selected).unwrap();
+            assert_eq!(
+                reopened
+                    .review_original(
+                        &choice.request,
+                        &Boot {
+                            boot: boot().boot,
+                            ..same_boot
+                        },
+                        false
+                    )
+                    .unwrap(),
+                State::ReviewedUnknown
+            );
+            let archive = reopened.encode(&selected).unwrap();
+            assert!(barrier.len() <= RECORD_BYTES && archive.len() <= RECORD_BYTES);
+            assert_eq!(reopened.reviewed.last().unwrap().outcome, Outcome::Unknown);
+        }
     }
 }

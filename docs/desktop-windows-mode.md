@@ -256,6 +256,10 @@ from the current boot require an explicit reboot barrier. The first Review
 binds that barrier to the original UUID and full immutable record binding,
 machine and kernel boot; it returns `reboot_required` without acknowledgement.
 **Restart the computer, then use Review interrupted mode change again.**
+Use Windows **Restart**, not Shut down followed by power-on: Fast Startup can
+keep the previous kernel session. If the kernel boot identity is unchanged,
+Review still refuses acknowledgement. Confirming this distinction against
+the actual BootId on a Fast Startup PC remains part of native qualification.
 A genuinely different kernel boot on that same machine proves process death
 only. Wall-clock age, file dates, a free lock and a missing direct child never
 substitute for this proof. Native boot observation is read from the kernel's
@@ -300,13 +304,22 @@ An absent receipt remains Unknown. After a new explicit choice was offered,
 keep that UUID until its original physical cleanup is confirmed; a timeout or
 missing receipt alone never permits another choice. Completed, cancelled and
 same-mode no-op request IDs remain reserved after later mode changes. The
-receipt ledger retains at most 64 IDs, also within the existing 8 KiB record
-bound, and never evicts an old ID to permit replay.
+receipt ledger has a ceiling of 48 IDs and never evicts an old ID to permit
+replay. Actual capacity is lower when archives or longer selected commands use
+the shared 8 KiB record. Admission reserves the worst-case consumer, original
+start identity, offered phase, reboot barrier and reviewed archive bytes before
+any effect, so the last admitted transition can still record both reviews.
 
 The original archive retains at most eight entries within the existing 8 KiB
 mode-record bound, with no eviction or silent reset. Exhaustion refuses a new
 intent before effects. Missing, inconsistent or changed original evidence fails
-closed. The dedicated capability marker is
+closed. Exhaustion leaves the current task and selected mode untouched, with
+no new pending intent. Status and original `mode-result` lookups remain usable.
+There is currently **no maintained history rollover or reset route**. Ordinary
+registration install/remove does not clear these retained identities and is
+not an exhaustion workaround. Keep the original record and current mode and
+request a maintained migration before another mode change; do not delete the
+record, discard an archive or rotate a pending UUID. The dedicated capability marker is
 `Desktop registration mode review ABI: desktop-registration-mode-review-v1`.
 Native PC and installed Settings qualification remain outstanding.
 

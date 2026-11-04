@@ -126,6 +126,12 @@ pub(in crate::desktop) struct Pending {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<review::Disposition>,
 }
+impl Pending {
+    fn prepared(request_id: String, desired: Mode, original: Option<ObservedInstance>) -> Self {
+        Self { request_id, desired, phase: Phase::Prepared, original, started: None,
+            consumer: None, review: None }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -218,15 +224,9 @@ impl Record {
         if let Some(original) = &original {
             original.validate()?;
         }
-        self.pending = Some(Pending {
-            request_id: id,
-            desired,
-            phase: Phase::Prepared,
-            original,
-            started: None,
-            consumer: None,
-            review: None,
-        });
+        let pending = Pending::prepared(id, desired, original);
+        self.ensure_review_capacity(&pending)?;
+        self.pending = Some(pending);
         Ok(self.pending.as_ref().expect("inserted"))
     }
     pub fn advance(&mut self, expected: Phase, next: Phase) -> Result<()> {

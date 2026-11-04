@@ -1,6 +1,8 @@
 use super::*;
 use serde_json::json;
 
+mod upgrade;
+
 const EPOCH: &str = "00000000-0000-4000-8000-000000000001";
 const REQUEST: &str = "00000000-0000-4000-8000-000000000002";
 

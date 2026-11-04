@@ -1,7 +1,7 @@
 import { dayTime } from "../ui/lib/usage";
 import { batch, createSignal } from "solid-js";
 import { createStore, produce } from "solid-js/store";
-import type { ConflictsPage, DraftSource, SavedDraftDetail, SavedDraftItem, SavedDraftsPage } from "../types";
+import type { ConflictsPage, DraftCaptureStatus, DraftSource, SavedDraftDetail, SavedDraftItem, SavedDraftsPage } from "../types";
 import type { Session } from "../ui/sessions/types";
 import { folderOf } from "../ui/sessions/SessionCard";
 import { composer } from "./composer";
@@ -38,6 +38,18 @@ export const TEXTS = {
 export const replaceText = (key: string) => tr("Replace the unsent draft in %1 with the selected saved draft?", key.split("\n").filter(Boolean).join(" / "));
 
 /** Why a button is off; each shows as its tooltip. */
+/**
+ * What Saved drafts says about the drafts capture (zerus-5wmh.66.5.2.1.2.1),
+ * in service mode or not: refused saves, or a one-time import waiting for
+ * Retry. Retry never changes a recorded outcome.
+ */
+export function draftCaptureNotice(status: DraftCaptureStatus | null | undefined): string | undefined {
+  if (!status) return undefined;
+  if (!status.writes) return trNoop("Drafts are not being saved because their earlier versions could not be recorded. Check the Zerus data folder, then retry.");
+  if (status.paused) return trNoop("Importing drafts from Qt is paused because the earlier drafts could not be recorded. New drafts are saved.");
+  return undefined;
+}
+
 export const REASONS = {
   select: trNoop("Select a draft."),
   loading: trNoop("Loading draft…"),

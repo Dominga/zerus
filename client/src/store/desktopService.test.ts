@@ -180,9 +180,11 @@ describe("desktop service presentation", () => {
     expect(retainedSourceNotice(resumed)).toBe("");
     expect(retainedSourceDetails(resumed)!.drafts!.next).toContain("stays incomplete");
     expect(retainedSourceDetails(view({ code: "draft_capture_future", writes: true, paused: false }))!.drafts!.code).toBe("draft_capture_future");
-    // Qt's originals recorded, Next's own after an earlier run: incomplete.
+    // Next's own originals after an earlier run: incomplete, but nothing is
+    // lost, and it never claims a Qt store that may not exist.
     const earlier = retainedSourceDetails(view({ code: "draft_capture_next_earlier_run", writes: true, paused: false }))!.drafts!;
-    expect(earlier.reason).toContain("Your Qt drafts were recorded");
+    expect(earlier.reason).toContain("Your drafts are kept and nothing is lost");
+    expect(earlier.reason).not.toContain("Qt");
     expect(earlier.next).toContain("stays incomplete");
     // A captured store, or one with no drafts, shows nothing.
     for (const code of ["draft_capture_captured", "draft_capture_not_applicable"]) {
@@ -233,7 +235,7 @@ describe("desktop service presentation", () => {
     // Published without Next's earlier drafts: incomplete, with no banner.
     const partial = view({ partial: true, code: "drafts_import_staged", phase: "published" });
     expect(retainedSourceNotice(partial)).toBe("");
-    expect(retainedSourceDetails(partial)!.draftsReport!.reason).toContain("saved without the drafts already in Zerus");
+    expect(retainedSourceDetails(partial)!.draftsReport!.reason).toContain("Your drafts are kept and nothing is lost");
     expect(retainedSourceDetails(partial)!.draftsReport!.next).toContain("stays incomplete");
     // Not captured: unavailable and incomplete, never saved for review.
     const unavailable = view({ code: "drafts_import_capture_unavailable" });

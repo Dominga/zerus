@@ -1094,6 +1094,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                     "creation_clone"
                                         | "creation_worktree"
                                         | "creation_launch"
+                                        | "task_message"
                                         | "task_start_reconcile"
                                 )
                             )

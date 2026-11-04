@@ -27,6 +27,8 @@ pub enum Operation {
     CreationWorktree,
     #[serde(skip)] // Native creation owner only; never generic policy dispatch or receipts.
     CreationLaunch,
+    #[serde(skip)] // Native task message owner only; never generic policy dispatch or receipts.
+    TaskMessage,
     #[serde(skip)] // Native TaskStart boundary only, never generic renderer JSON.
     TaskStartReconcile,
     #[serde(skip)] // Separate native notification controller, never generic policy JSON.
@@ -48,6 +50,7 @@ impl Operation {
             Request::CreationClone { .. } => Self::CreationClone,
             Request::CreationWorktree { .. } => Self::CreationWorktree,
             Request::CreationLaunch { .. } => Self::CreationLaunch,
+            Request::TaskMessage { .. } => Self::TaskMessage,
             Request::TaskStartReconcile { .. } => Self::TaskStartReconcile,
             Request::NotificationControl { .. } => Self::NotificationControl,
             Request::DesktopOwnership { .. } => Self::DesktopOwnership,
@@ -64,6 +67,7 @@ impl Operation {
             Self::CreationClone => "creation_clone",
             Self::CreationWorktree => "creation_worktree",
             Self::CreationLaunch => "creation_launch",
+            Self::TaskMessage => "task_message",
             Self::TaskStartReconcile => "task_start_reconcile",
             Self::NotificationControl => "notification_controls",
             Self::DesktopOwnership => "desktop_ownership",
@@ -564,6 +568,7 @@ fn submission_ready(snapshot: &Snapshot, request: &Request) -> bool {
             | Request::CreationClone { .. }
             | Request::CreationWorktree { .. }
             | Request::CreationLaunch { .. }
+            | Request::TaskMessage { .. }
             | Request::TaskStartReconcile { .. }
             | Request::TerminationOutcome { .. }
     ) {
@@ -713,6 +718,7 @@ fn lookup(
             | Request::CreationClone { .. }
             | Request::CreationWorktree { .. }
             | Request::CreationLaunch { .. }
+            | Request::TaskMessage { .. }
             | Request::TaskStartReconcile { .. }
             | Request::TerminationOutcome { .. }
     ) {
@@ -751,6 +757,7 @@ fn lookup_receipt(request: &Request, id: &str, value: Value) -> Result<Receipt, 
             | Request::CreationClone { .. }
             | Request::CreationWorktree { .. }
             | Request::CreationLaunch { .. }
+            | Request::TaskMessage { .. }
             | Request::TaskStartReconcile { .. }
             | Request::TerminationOutcome { .. }
     ) {
@@ -813,6 +820,7 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
             | Request::CreationClone { .. }
             | Request::CreationWorktree { .. }
             | Request::CreationLaunch { .. }
+            | Request::TaskMessage { .. }
             | Request::TaskStartReconcile { .. }
             | Request::TerminationOutcome { .. }
     ) {
@@ -877,6 +885,7 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
         | Request::CreationClone { .. }
         | Request::CreationWorktree { .. }
         | Request::CreationLaunch { .. }
+        | Request::TaskMessage { .. }
         | Request::TaskStartReconcile { .. }
         | Request::TerminationOutcome { .. } => return None,
         Request::AutomaticApprovals { enabled, .. } => {

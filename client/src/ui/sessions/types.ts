@@ -110,6 +110,7 @@ export interface Session {
   /** The raw activity (`idle`, `busy`, ...). */
   activity: string;
   processState: string;
+  conversationState?: string;
   archiveId?: string;
   /** The latest reply and the attention it raised, for marking them read. */
   replyId?: string;

@@ -6,6 +6,13 @@ const text = (value: unknown) => typeof value === "string" ? value : "";
 const simplified = (value: unknown) => text(value).trim().replace(/\s+/g, " ").slice(0, 240);
 export const childState = (child: Record<string, unknown>) => text(child.display_state) || text(child.state);
 
+/** Qt/Android currentActivity: recorded children never establish current work. */
+export const currentChildren = (row: Session, online: boolean) => online && !row.archiveId
+  && row.state === "running" && row.processState !== "exited" && row.activity !== "unknown"
+  && !(row.conversationState === "ended" && row.activity !== "idle");
+export const workingChildren = (row: Session, online: boolean) => currentChildren(row, online)
+  ? (row.subagents ?? []).filter((child) => child.state === "working").length : 0;
+
 /** SessionPresentation::inactiveChild, including grouped count evidence. */
 export function childInactive(child: Record<string, unknown>, countsComplete = false): boolean {
   const state = childState(child);

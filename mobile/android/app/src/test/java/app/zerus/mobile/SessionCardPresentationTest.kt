@@ -13,6 +13,24 @@ class SessionCardPresentationTest {
         SessionCardPresentation.childCount(it, online, false, includeCompleted) to SessionCardPresentation.childCount(it, online, true, includeCompleted)
     }
 
+    @Test fun recordedChildCaptionsFollowTheSharedContract() {
+        val contract = JSONObject(checkNotNull(javaClass.getResourceAsStream("/subagent-caption-contract.json")).bufferedReader().use { it.readText() })
+        contract.getJSONArray("cases").objects().forEach { example ->
+            val raw = JSONObject(example.getJSONObject("raw").toString()).put("subagents", contract.getJSONObject("children"))
+            val item = session(raw.toString(), example.optString("archive_id"))
+            val before = item.raw.toString()
+            val rows = SessionCardPresentation.children(item, example.getBoolean("online"), includeCompleted = true)
+            val expected = if (example.getBoolean("current")) (0 until 8).map { contract.getJSONArray("live_captions").getString(it) } else List(8) { "Recorded" }
+            assertEquals(example.getString("name"), expected, rows.map { it.status })
+            assertEquals(example.getString("name"), example.getInt("working"), rows.count { it.kind == DesktopBadgeKind.Working })
+            if (!example.getBoolean("current")) assertTrue(rows.all { it.kind == DesktopBadgeKind.Neutral })
+            val counted = session(raw.put("subagent_source", "hooks").put("subagent_count", 1).put("subagent_active_count", 1)
+                .put("subagent_total_count", 8).put("subagent_counts_complete", true).toString(), example.optString("archive_id"))
+            assertEquals(if (example.getBoolean("current")) "1/8" else "", SessionCardPresentation.childCount(counted, example.getBoolean("online"), includeCompleted = true))
+            assertEquals(before, item.raw.toString())
+        }
+    }
+
     @Test fun optionalQuestionChipFollowsSharedContract() {
         val contract = JSONObject(checkNotNull(javaClass.getResourceAsStream("/optional-question-contract.json")).bufferedReader().use { it.readText() })
         contract.getJSONArray("cases").objects().forEach { example ->

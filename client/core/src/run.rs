@@ -213,8 +213,8 @@ impl FrozenEnvironment {
     }
 }
 
-/// The existing accounted runner with fixed routing environment and a final
-/// caller-supplied spawn check. Invocation timeouts are unchanged (no 30s cap).
+/// The existing accounted runner with fixed routing environment and the
+/// caller's original-image spawn hook. Timeouts are unchanged (no 30s cap).
 /// Resources remain charged through actual child and pipe lifetime, including
 /// a bounded error return. Neither this API nor its environment grants consent.
 pub fn run_accounted_frozen(
@@ -224,7 +224,7 @@ pub fn run_accounted_frozen(
     stdout_cap: usize,
     cancel: &AtomicBool,
     resources: Arc<dyn Send + Sync>,
-    before_spawn: impl FnOnce() -> std::io::Result<()> + Send + 'static,
+    spawn: impl FnOnce(&mut Command) -> std::io::Result<Child> + Send + 'static,
 ) -> Result<Exit, Stopped> {
     let environment = environment.clone();
     accounted(
@@ -238,8 +238,7 @@ pub fn run_accounted_frozen(
             clear_environment: true,
             spawn: Some(Box::new(move |command| {
                 environment.apply(command);
-                before_spawn()?;
-                command.spawn()
+                spawn(command)
             })),
             ..Pipes::default()
         },
@@ -1086,7 +1085,7 @@ mod frozen_tests {
             4096,
             &AtomicBool::new(false),
             Arc::new(()),
-            || Ok(()),
+            |command| command.spawn(),
         )
         .unwrap()
     }

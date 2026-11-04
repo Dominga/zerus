@@ -7,6 +7,18 @@ use crate::desktop_service::{
 };
 use zerus_client_core::{Action, Outcome, Target};
 
+type RefusedObserver = Box<dyn FnOnce(&mut std::process::Child)>;
+thread_local! {
+    // Observe only a REAL failed binding, before the SAME child is returned to
+    // run_owned. A hook never substitutes a binding result or supplies consent.
+    static REFUSED_OBSERVER: std::cell::RefCell<Option<RefusedObserver>> = const { std::cell::RefCell::new(None) };
+}
+pub(super) fn observe_refused_binding(child: &mut std::process::Child) {
+    if let Some(observer) = REFUSED_OBSERVER.with_borrow_mut(Option::take) {
+        observer(child);
+    }
+}
+
 fn fixture(config: Value) -> Fixture {
     let f = Fixture::new(config);
     std::fs::remove_file(f.0.join("hgs")).unwrap();
@@ -54,6 +66,9 @@ async fn connected(f: &Fixture) -> (Arc<Service>, CacheServer) {
     let (service, _) = f.start_with_responder(true, Some(responder));
     eventually("termination service connected", || {
         service.snapshot().connected
+            && f.calls()
+                .iter()
+                .any(|call| call["args"] == json!(["desktop", "watch", "--json"]))
     })
     .await;
     (service, cache)
@@ -385,5 +400,264 @@ fn the_live_dispatch_transition_is_one_way_even_without_a_native_spawn() {
         )
         .is_err());
         service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn a_new_legacy_helper_is_probed_before_any_new_subcommand() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        for broken in ["missing", "substring", "frontend", "utf8"] {
+            let f = fixture(json!({}));
+            let (service, _cache) = connected(&f).await;
+            eventually("original catalog published", || {
+                service.shared.pump.live("")
+            })
+            .await;
+            let mut help = format!(
+                "{HELP}\n{}\n{}\n",
+                wire::HELP_MARKER,
+                zerus_client_core::desktop::ui_requests::HELP_MARKER
+            )
+            .into_bytes();
+            match broken {
+                "missing" => help = b"Legacy fixture CLI\n".to_vec(),
+                "substring" => {
+                    help =
+                        format!("prefix {} suffix\n", String::from_utf8(help).unwrap()).into_bytes()
+                }
+                "frontend" => help = format!("{HELP}\n{}\n", wire::HELP_MARKER).into_bytes(),
+                "utf8" => help.push(0xff),
+                _ => unreachable!(),
+            }
+            // Service's original watch stays connected; this newly installed
+            // image must prove its own ABI before any new desktop command.
+            std::fs::rename(f.0.join("hgs"), f.0.join("original-hgs")).unwrap();
+            std::fs::write(f.0.join("hgs"), format!(
+                "#!/usr/bin/python3\nimport sys,json,os\nfrom pathlib import Path\np=Path(os.path.realpath(__file__)).parent\nwith (p/'legacy-calls').open('a') as f:f.write(json.dumps(sys.argv[1:])+'\\n')\nif sys.argv[1:] != ['--help']:sys.exit(2)\nsys.stdout.buffer.write(bytes({help:?}))\n"
+            )).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(f.0.join("hgs"), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            assert!(Selected::inspect(
+                service.clone(),
+                &capture().target,
+                &capture().machine,
+                Arc::new(())
+            )
+            .is_err());
+            let actual: Vec<Value> = std::fs::read_to_string(f.0.join("legacy-calls"))
+                .unwrap()
+                .lines()
+                .map(|s| serde_json::from_str(s).unwrap())
+                .collect();
+            assert_eq!(actual, vec![json!(["--help"])], "{broken}");
+            assert!(requests(&calls(&f), "termination_outcome").is_empty());
+            assert!(effects(&calls(&f)).is_empty());
+            service.join().await.unwrap();
+        }
+    });
+}
+
+#[test]
+fn refused_or_expired_original_binding_withholds_input_and_keeps_real_custody() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    struct Owned(std::process::Child);
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    tauri::async_runtime::block_on(async {
+        for expired in [false, true] {
+            let f = fixture(json!({"termination_refused_registration":true}));
+            let (service, _cache) = connected(&f).await;
+            let actions = Arc::new(actions(&f));
+            let key = crate::actions::Lane::key(&capture().target, &Action::Terminate);
+            let hold = actions.begin(key.clone(), &Action::Terminate).unwrap();
+            let controller = confirm(service.clone(), Arc::new(Pending::default()))
+                .bind(Arc::new(hold))
+                .unwrap();
+            let registration = service
+                .shared
+                .responder
+                .as_ref()
+                .unwrap()
+                .prepare_ui_request(
+                    uuid::Uuid::new_v4().to_string(),
+                    Request::TerminationOutcome {
+                        intent: Box::new(controller.intent.clone()),
+                    },
+                )
+                .unwrap();
+            let slot = registration.resources();
+            let original_slot = Arc::downgrade(&slot);
+            drop(slot);
+            let other = if expired {
+                // Expiration removes evidence, never the original resource slot.
+                std::thread::sleep(
+                    zerus_client_core::desktop::ui_requests::LIFETIME + Duration::from_millis(10),
+                );
+                None
+            } else {
+                let child = Owned(
+                    std::process::Command::new("/bin/sleep")
+                        .arg("20")
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                        .unwrap(),
+                );
+                assert!(registration.bind_original(&child.0));
+                Some(child)
+            };
+            let input = serde_json::to_vec(registration.envelope()).unwrap();
+            let context = controller.context.clone();
+            drop(controller);
+            let busy = context.busy.clone();
+            let root = f.0.clone();
+            let check_actions = actions.clone();
+            let check_key = key.clone();
+            let check_slot = original_slot.clone();
+            let check_service = service.clone();
+            let (observed, observation) = std::sync::mpsc::sync_channel(1);
+            let result = tauri::async_runtime::spawn_blocking(move || {
+                REFUSED_OBSERVER.with_borrow_mut(|hook| {
+                    *hook = Some(Box::new(move |child| {
+                        let until = std::time::Instant::now() + Duration::from_secs(2);
+                        let path = root.join("termination-refused-input");
+                        while !path.exists() && std::time::Instant::now() < until {
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        // No panic in the spawn callback: return THIS child to the
+                        // runner even when a guard mutation makes the control fail.
+                        let checks = (
+                            std::fs::read(path).is_ok_and(|raw| raw.is_empty()),
+                            child.try_wait().is_ok_and(|s| s.is_none()),
+                            check_actions.begin(check_key, &Action::Terminate).is_none(),
+                            check_slot.upgrade().is_some() && busy.load(Ordering::Acquire),
+                            check_service
+                                .shared
+                                .rpc
+                                .snapshot()
+                                .is_ok_and(|v| v.count(Role::Fleet) > 0),
+                        );
+                        let _ = observed.send(checks);
+                    }))
+                });
+                context.rpc(
+                    vec!["desktop".into(), "frontend-request".into(), "--json".into()],
+                    Some(input),
+                    Some(registration),
+                )
+            })
+            .await
+            .unwrap();
+            assert!(result.is_err());
+            assert_eq!(
+                observation.try_recv().unwrap(),
+                (true, true, true, true, true)
+            );
+            assert_eq!(
+                std::fs::read(f.0.join("termination-refused-input")).unwrap(),
+                b""
+            );
+            assert!(
+                original_slot.upgrade().is_none(),
+                "registration released only after physical stop/join"
+            );
+            assert!(actions.begin(key, &Action::Terminate).is_some());
+            assert!(requests(&calls(&f), "termination_outcome").is_empty());
+            assert!(effects(&calls(&f)).is_empty());
+            drop(other);
+            service.join().await.unwrap();
+        }
+    });
+}
+
+#[test]
+fn an_oversized_native_receipt_is_bounded_and_never_restores_dispatch() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({"termination_effect_oversize":true}));
+        let (service, _cache) = connected(&f).await;
+        let pending = Arc::new(Pending::default());
+        let actions = actions(&f);
+        let key = crate::actions::Lane::key(&capture().target, &Action::Terminate);
+        let hold = actions.begin(key.clone(), &Action::Terminate).unwrap();
+        let mut controller = confirm(service.clone(), pending.clone())
+            .bind(Arc::new(hold))
+            .unwrap();
+        let invocation = controller.invocation().clone();
+        controller.retain().unwrap();
+        controller.begin_dispatch(&invocation).unwrap();
+        let exit = controller.run_native(&invocation);
+        assert!(
+            matches!(&exit, Exit::StartFailed(_)),
+            "the native runner must enforce the receipt cap"
+        );
+        assert!(!matches!(
+            capture().completed(&invocation, exit),
+            Outcome::Done { .. }
+        ));
+        assert_eq!(effects(&calls(&f)).len(), 1);
+        assert!(Confirmation::new(
+            uuid::Uuid::new_v4().to_string(),
+            capture(),
+            selected(service.clone()),
+            pending
+        )
+        .is_err());
+        eventually("oversize native resources physically joined", || {
+            actions.begin(key.clone(), &Action::Terminate).is_some()
+        })
+        .await;
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn overflow_keeps_original_dispatch_and_claim_until_the_actual_pipe_ends() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    struct Release(PathBuf);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let _ = std::fs::write(self.0.join("termination-release"), b"release");
+        }
+    }
+    tauri::async_runtime::block_on(async {
+        let f = fixture(
+            json!({"termination_effect_oversize":true,"termination_effect_oversize_pipe":true}),
+        );
+        f.1.store(true, Ordering::Release);
+        let _release = Release(f.0.clone());
+        let (service, _cache) = connected(&f).await;
+        let pending = Arc::new(Pending::default());
+        let actions = actions(&f);
+        let original = confirm(service.clone(), pending.clone());
+        let target = original.capture().target.clone();
+        let key = crate::actions::Lane::key(&target, &Action::Terminate);
+        let outcome = crate::actions::dispatch_cleanup_native(&actions, original, None)
+            .await
+            .unwrap();
+        assert!(!matches!(outcome, Outcome::Done { .. }));
+        assert_eq!(effects(&calls(&f)).len(), 1);
+        assert!(actions.begin(key.clone(), &Action::Terminate).is_none());
+        assert!(Confirmation::new(
+            uuid::Uuid::new_v4().to_string(),
+            capture(),
+            selected(service.clone()),
+            pending
+        )
+        .is_err());
+        std::fs::write(f.0.join("termination-release"), b"release").unwrap();
+        eventually("overflow original pipe EOF", || {
+            actions.begin(key.clone(), &Action::Terminate).is_some()
+        })
+        .await;
+        service.join().await.unwrap();
+        f.1.store(false, Ordering::Release);
     });
 }

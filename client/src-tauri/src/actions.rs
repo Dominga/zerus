@@ -1588,12 +1588,7 @@ async fn dispatch_reserved_original(
                 return Err(zerus_client_core::termination_cleanup::STATE_CHANGED.into());
             }
             controller.begin_dispatch(&inv)?;
-            let cap = if delayed.is_some() {
-                zerus_client_core::end_action::METADATA_LIMIT
-            } else {
-                usize::MAX
-            };
-            controller.run_native(&inv, cap)
+            controller.run_native(&inv)
         } else {
             runner(&hgs, &inv, native_read.as_ref())
         };

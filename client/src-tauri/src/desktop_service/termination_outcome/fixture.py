@@ -1,5 +1,7 @@
 # Synthetic CLI prefix. Real native cache children; fake actor/Terminate replies.
-import sys
+import sys, os
+# Descriptor-bound execution keeps the original script source, not a new path.
+__file__ = os.path.realpath(__file__)
 from pathlib import Path
 root = Path(__file__).absolute().parent
 original_args = sys.argv[1:]
@@ -21,6 +23,16 @@ elif args[:1] in [['inspect'], ['session-action']] or args[:2] in [['desktop', '
     config = json.loads((root / 'fixture.json').read_text())
     capture = json.loads((root / 'termination-capture').read_text())
     epoch = (root / 'runtime-epoch').read_text() if (root / 'runtime-epoch').exists() else '00000000-0000-4000-8000-000000000001'
+    if args[:2] == ['desktop', 'frontend-request'] and config.get('termination_refused_registration'):
+        # Actual EOF must be observed before the parent's guarded spawn returns.
+        raw = sys.stdin.buffer.readline(65537)
+        (root / 'termination-refused-input').write_bytes(raw)
+        if raw:
+            sys.exit(1)
+        until = time.monotonic() + 10
+        while time.monotonic() < until:
+            time.sleep(.005)
+        sys.exit(1)
     value = json.loads(sys.stdin.readline()) if args[:1] == ['session-action'] or args[:2] == ['desktop', 'frontend-request'] else None
     with (root / 'termination-calls').open('a') as log:
         log.write(json.dumps(dict(args=original_args, value=value, pid=os.getpid())) + '\n')
@@ -45,6 +57,15 @@ elif args[:1] in [['inspect'], ['session-action']] or args[:2] in [['desktop', '
             sys.exit(1)
         if config.get('termination_effect_wait'):
             time.sleep(31)
+        if config.get('termination_effect_oversize'):
+            if config.get('termination_effect_oversize_pipe') and os.fork() == 0:
+                until = time.monotonic() + 20
+                while not (root / 'termination-release').exists() and time.monotonic() < until:
+                    time.sleep(.005)
+                os._exit(0)
+            sys.stdout.write('x' * 65537)
+            sys.stdout.flush()
+            sys.exit(0)
         print(json.dumps(dict(request_id=value['request_id'], name=capture['target']['name'],
             run_id=capture['target']['run_id'], conversation_id=capture['target']['conversation_id'], status='completed',
             result_target=dict(name=capture['target']['name'], run_id=capture['target']['run_id'],

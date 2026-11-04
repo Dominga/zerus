@@ -1,6 +1,8 @@
 //! Native confirmation only. Retention is data admission, never Terminate
 //! consent. A consumed live confirmation can invoke its frozen native call once.
-use super::{audit::help::Image, *};
+use super::*;
+mod image;
+use image::Image;
 use serde::Deserialize;
 use zerus_client_core::{
     desktop::{
@@ -15,6 +17,8 @@ use zerus_client_core::{
 pub(crate) const UNCONFIRMED: &str =
     "The termination is unconfirmed. Check the original session before continuing.";
 const RPC_LIMIT: usize = 64 << 10;
+// Capture::completed accepts at most this many original receipt bytes.
+const NATIVE_RECEIPT_LIMIT: usize = 64 << 10;
 
 /// Bounded correlation/bookkeeping only. No controller can be rebuilt from
 /// these records. Durable client recovery is a separate follow-up.
@@ -44,6 +48,7 @@ impl Selected {
         read: Arc<dyn Send + Sync>,
     ) -> Result<(Option<Capture>, Self), String> {
         let context = Context::new(service, read)?;
+        context.probe_abi()?;
         context.check_scope()?;
         let helper = context.helper.clone();
         let runner = |_: &std::path::Path, invocation: &Invocation| context.read(invocation);
@@ -197,17 +202,8 @@ impl Controller {
         if self.stage != Stage::Fresh {
             return Err(UNCONFIRMED.into());
         }
+        self.context.probe_abi()?;
         self.context.check_scope()?;
-        let help = self.context.rpc(vec!["--help".into()], None, None)?;
-        let text = std::str::from_utf8(&help).map_err(|_| UNCONFIRMED)?;
-        for marker in [
-            wire::HELP_MARKER,
-            zerus_client_core::desktop::ui_requests::HELP_MARKER,
-        ] {
-            if !text.lines().any(|line| line.trim() == marker) {
-                return Err(UNCONFIRMED.into());
-            }
-        }
         let registration = self
             .context
             .service
@@ -279,7 +275,7 @@ impl Controller {
             .store(Stage::DispatchBegun as u8, Ordering::Release);
         Ok(())
     }
-    pub(crate) fn run_native(self, invocation: &Invocation, cap: usize) -> Exit {
+    pub(crate) fn run_native(self, invocation: &Invocation) -> Exit {
         if self.stage != Stage::DispatchBegun || !same_invocation(invocation, &self.invocation) {
             return Exit::StartFailed(UNCONFIRMED.into());
         }
@@ -287,15 +283,17 @@ impl Controller {
         // timeout (45 local / 60 peer), not run_owned's 30-second RPC cap.
         let current = self.context.clone();
         run::run_accounted_frozen(
-            &self.context.helper,
+            self.context.image.executable(),
             invocation,
             &self.context.environment,
-            cap,
+            NATIVE_RECEIPT_LIMIT,
             &AtomicBool::new(false),
             Arc::new((self.context.hold.clone(), self.context.clone())),
-            move || current.spawn_check(),
+            move |command| current.spawn(command),
         )
-        .unwrap_or_else(|_| Exit::StartFailed(UNCONFIRMED.into()))
+        .ok()
+        .filter(|_| !self.context.rejected.load(Ordering::Acquire))
+        .unwrap_or_else(|| Exit::StartFailed(UNCONFIRMED.into()))
     }
 }
 fn same_invocation(a: &Invocation, b: &Invocation) -> bool {
@@ -363,6 +361,7 @@ struct Context {
     environment: FrozenEnvironment,
     hold: Arc<dyn Send + Sync>,
     busy: Arc<AtomicBool>,
+    rejected: Arc<AtomicBool>,
 }
 struct CallLifetime {
     hold: Option<Arc<dyn Send + Sync>>,
@@ -378,6 +377,12 @@ impl Drop for CallLifetime {
 }
 impl Context {
     fn new(service: Arc<Service>, hold: Arc<dyn Send + Sync>) -> Result<Arc<Self>, String> {
+        image::prepare(|| Self::new_supported(service, hold))
+    }
+    fn new_supported(
+        service: Arc<Service>,
+        hold: Arc<dyn Send + Sync>,
+    ) -> Result<Arc<Self>, String> {
         let snapshot = service.snapshot();
         let shared = &service.shared;
         if !shared.allowed || !snapshot.connected {
@@ -402,7 +407,7 @@ impl Context {
             .clone()
             .ok_or(UNCONFIRMED)?;
         let helper = routing.executable()?.to_owned();
-        let image = Arc::new(Image::capture(&helper).ok_or(UNCONFIRMED)?);
+        let image = Arc::new(Image::capture(&helper).map_err(|_| UNCONFIRMED)?);
         let context = Arc::new(Self {
             service,
             scope: wire::Scope {
@@ -417,6 +422,7 @@ impl Context {
             environment: FrozenEnvironment::capture().map_err(|_| UNCONFIRMED)?,
             hold,
             busy: Arc::new(AtomicBool::new(false)),
+            rejected: Arc::new(AtomicBool::new(false)),
         });
         context.current_or_refuse()?;
         Ok(context)
@@ -434,12 +440,14 @@ impl Context {
             environment: self.environment.clone(),
             hold,
             busy: Arc::new(AtomicBool::new(false)),
+            rejected: self.rejected.clone(),
         }))
     }
     fn current(&self) -> bool {
         let shared = &self.service.shared;
         let snapshot = self.service.snapshot();
         !shared.stopped.load(Ordering::Acquire)
+            && !self.rejected.load(Ordering::Acquire)
             && !self.cancel.load(Ordering::Acquire)
             && snapshot.connected
             && snapshot.epoch.as_deref() == Some(&self.scope.service_epoch)
@@ -475,12 +483,19 @@ impl Context {
             Ok(())
         }
     }
-    fn spawn_check(&self) -> std::io::Result<()> {
-        if self.current() {
-            Ok(())
-        } else {
-            Err(std::io::ErrorKind::PermissionDenied.into())
+    fn spawn(&self, command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+        if !self.current() {
+            return Err(std::io::ErrorKind::PermissionDenied.into());
         }
+        self.image.before_spawn(command)?;
+        let mut child = command.spawn()?;
+        if !self.image.matches_child(&child) {
+            self.rejected.store(true, Ordering::Release);
+            drop(child.stdin.take());
+        }
+        // Never lose custody by returning Err after spawning. Both runners
+        // retain/reap THIS child; rejected cannot become a successful receipt.
+        Ok(child)
     }
     fn start_call(&self) -> Result<Arc<dyn Send + Sync>, String> {
         self.current_or_refuse()?;
@@ -526,16 +541,22 @@ impl Context {
             request_id: None,
         };
         let result = run::run_owned(
-            &self.helper,
+            self.image.executable(),
             &invocation,
             &[],
             &self.cancel,
             move |command| {
                 environment.apply(command);
-                original.spawn_check()?;
-                let child = command.spawn()?;
-                if let Some(registration) = registration {
-                    let _ = registration.bind_original(&child);
+                let mut child = original.spawn(command)?;
+                if registration
+                    .as_ref()
+                    .is_some_and(|registration| !registration.bind_original(&child))
+                {
+                    // Withhold the envelope but keep THIS child in the owned
+                    // runner's stop/reap/pipe custody, including on refusal.
+                    drop(child.stdin.take());
+                    #[cfg(all(test, target_os = "linux"))]
+                    tests::observe_refused_binding(&mut child);
                 }
                 Ok(child)
             },
@@ -555,13 +576,13 @@ impl Context {
         };
         let original = self.clone();
         let exit = run::run_accounted_frozen(
-            &self.helper,
+            self.image.executable(),
             invocation,
             &self.environment,
             zerus_client_core::worktree_review::REVIEW_LIMIT,
             &self.cancel,
             Arc::new((self.clone(), resources)),
-            move || original.spawn_check(),
+            move |command| original.spawn(command),
         );
         if self.finish_call().is_err() || self.current_or_refuse().is_err() {
             return Exit::StartFailed(UNCONFIRMED.into());
@@ -575,6 +596,20 @@ impl Context {
                 return Err(UNCONFIRMED.into());
             }
             std::thread::sleep(Duration::from_millis(1));
+        }
+        Ok(())
+    }
+    fn probe_abi(self: &Arc<Self>) -> Result<(), String> {
+        let help = self.rpc(vec!["--help".into()], None, None)?;
+        let text = std::str::from_utf8(&help).map_err(|_| UNCONFIRMED)?;
+        for marker in [
+            HELP,
+            wire::HELP_MARKER,
+            zerus_client_core::desktop::ui_requests::HELP_MARKER,
+        ] {
+            if !text.lines().any(|line| line.trim() == marker) {
+                return Err(UNCONFIRMED.into());
+            }
         }
         Ok(())
     }

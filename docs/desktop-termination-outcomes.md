@@ -55,8 +55,11 @@ retention and the one native call. A failed retention never selects the ordinary
 CLI or falls back to a different action. Ordinary/native and replay paths keep
 their existing behavior.
 
-The controller checks the actual selected configuration through desktop status,
-then uses a fresh original-child registration for retention. A lost reply may
+The controller first probes exact UTF-8 ABI markers on its retained image,
+before any new desktop subcommand. It checks the actual selected configuration
+through desktop status, then uses a fresh original-child registration for
+retention. A failed binding closes stdin while returning the same Child to its
+runner for physical stop/reap/pipe custody; no private envelope is released. A lost reply may
 query only the original UUID, while the same live controller has never invoked
 Terminate and all old helper/pipe resources have physically finished. Missing,
 corrupt, unknown, foreign or cleanup-authorizing responses refuse. After every
@@ -67,6 +70,8 @@ Immediately before calling the existing runner, a one-way process-local stage
 changes to DispatchBegun. Failure, timeout, GUI exit or a later status cannot
 restore it. The original 45-second local / 60-second peer invocation remains;
 the metadata RPC's owned runner and its 30-second cap are not used for Terminate.
+The native receipt is capped at 64 KiB during reading, matching the existing
+Capture validator; overflow stays unconfirmed and cannot restore dispatch.
 Original machine guards, scoped receipt validation, completion/Pump hooks and
 Quit/exit-work behavior remain intact. A metadata acknowledgement is never a
 successful termination receipt or cleanup proposal.
@@ -86,3 +91,23 @@ a durable client
 recovery journal: restart observation and service-owned receipt reconciliation
 remain separate follow-up work. No stored metadata can submit a recovered
 Terminate or remove a checkout.
+
+## Execution custody and platform boundary
+
+Windows uses the maintained read/execute PinnedImage, with write/delete sharing
+excluded for the file and its ancestor chain. Before releasing stdin it checks
+the same original Child against the retained loaded-image section. A rejected
+image withholds input, keeps that child in runner custody and cannot produce a
+successful receipt. Linux launches the retained executable descriptor; a leaf
+or ancestor replacement after the final check cannot select replacement code.
+Native ELF does not inherit the execution descriptor; a script retains its own
+source descriptor for the interpreter.
+
+The new service submission refuses on macOS with
+`termination_native_image_unavailable`, before preparation or any new child.
+Ordinary/native/replay paths are unchanged. The independent
+`zerus-5wmh.66.3.40.4` follow-up must qualify observation of the same unreaped
+helper's audit token and selected bundle requirement before this path is enabled.
+Existing paired metadata and connected-peer code observations are not relabeled
+as an execution fence. Platform component tests do not establish installed,
+Root-authenticated or end-to-end controller qualification.

@@ -8,6 +8,7 @@
 
 class QVBoxLayout;
 class QScrollArea;
+class QKeyEvent;
 
 // WhiteWh fork: agent teams. A task's card (design/agent-teams S3): its status,
 // the problem with its actions, description, criteria, what it depends on and
@@ -36,6 +37,9 @@ public:
     std::function<void(int task, const RunsRead &done)> readTestRuns;
     std::function<void(const QString &record)> openTestRecord;
     static constexpr qint64 RunsStaleMs = 15000;
+protected:
+    // Esc closes the card, as its back button does.
+    void keyPressEvent(QKeyEvent *event) override;
 private:
     void readRuns();
     struct TestRuns { int task = 0; qint64 at = 0; bool loading = false; QJsonArray runs; QString error; quint64 generation = 0; };

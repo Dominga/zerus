@@ -22,6 +22,7 @@
 #include <QTimer>
 #include <QMenu>
 #include <QPlainTextEdit>
+#include <QKeyEvent>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSettings>
@@ -71,6 +72,12 @@ void TeamTaskCard::setTask(const Team &team, int task, const LiveLookup &live, b
     rebuild();
 }
 
+void TeamTaskCard::keyPressEvent(QKeyEvent *event)
+{
+    if (event->key() == Qt::Key_Escape && back) { back(); event->accept(); return; }
+    QWidget::keyPressEvent(event);
+}
+
 void TeamTaskCard::readRuns()
 {
     if (!readTestRuns || m_runs.loading || !m_task) return;
@@ -91,6 +98,11 @@ void TeamTaskCard::rebuild()
 {
     const Colors c = colorsFor(m_dark);
     const int scroll = m_scroll->verticalScrollBar()->value();
+    // The card paints its own surface: a scroll area's viewport otherwise takes
+    // the system palette, white on a light Windows under the dark theme, with
+    // the theme's light text and back button unreadable on it.
+    m_scroll->setStyleSheet(QStringLiteral("QScrollArea#teamTaskCardScroll,QScrollArea#teamTaskCardScroll>QWidget#qt_scrollarea_viewport,"
+                                           "QWidget#teamTaskCardContent{background:%1;border:0;}").arg(c.surface.name()));
     const Task *task = m_team.task(m_task);
     auto *content = new QWidget;
     content->setObjectName("teamTaskCardContent");

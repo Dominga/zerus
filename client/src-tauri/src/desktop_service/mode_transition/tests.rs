@@ -714,7 +714,10 @@ fn preflight_and_ownership_waits_cannot_rearm_a_changed_confirmed_original() {
                 .unwrap()
                 .unwrap();
             running.service.join().await.unwrap();
-            assert!(mutations(&running).is_empty(), "stale {lane} offered a frontend request");
+            assert!(
+                mutations(&running).is_empty(),
+                "stale {lane} offered a frontend request"
+            );
             assert_eq!(result.unwrap_err(), "activation_scope_changed", "{lane}");
             assert_eq!(
                 running.service.shared.mode_transition.view().request_id,

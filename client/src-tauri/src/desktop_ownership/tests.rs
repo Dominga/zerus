@@ -152,27 +152,43 @@ mod native {
     fn a_keep_epoch_refresh_requires_a_fresh_read_of_our_own_native_receipt() {
         let _process = crate::PROCESS_TREE.read().unwrap();
         tauri::async_runtime::block_on(async {
-            let f = Fixture::new(Mode::Service,json!({"state":"service"}));
+            let f = Fixture::new(Mode::Service, json!({"state":"service"}));
             let config = "a".repeat(64);
             let stop = Arc::new(AtomicBool::new(false));
-            assert!(f.owner.current_grant(config.clone(),stop.clone()).await.is_none(),
-                "a display status alone cannot construct the token");
+            assert!(
+                f.owner
+                    .current_grant(config.clone(), stop.clone())
+                    .await
+                    .is_none(),
+                "a display status alone cannot construct the token"
+            );
             f.run(Some(Action::Grant));
-            let token = f.owner.current_grant(config.clone(),stop.clone()).await.unwrap();
+            let token = f
+                .owner
+                .current_grant(config.clone(), stop.clone())
+                .await
+                .unwrap();
             let original = token.status().clone();
             let path = f.root.join("current.json");
             let mut changed = original.clone();
             changed.owner_epoch = Some(uuid::Uuid::new_v4().to_string());
-            fs::write(&path,serde_json::to_vec(&changed).unwrap()).unwrap();
+            fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
             let calls = f.calls("frontend-request").len();
-            f.owner.keep_epoch_refresh(token,stop.clone()).await;
-            assert_eq!(f.calls("frontend-request").len(),calls,"changed epoch is never repaired");
-            fs::write(&path,serde_json::to_vec(&original).unwrap()).unwrap();
-            let token = f.owner.current_grant(config,stop.clone()).await.unwrap();
-            f.owner.keep_epoch_refresh(token,stop).await;
-            assert_eq!(f.calls("frontend-request").len(),calls+1);
+            f.owner.keep_epoch_refresh(token, stop.clone()).await;
+            assert_eq!(
+                f.calls("frontend-request").len(),
+                calls,
+                "changed epoch is never repaired"
+            );
+            fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+            let token = f.owner.current_grant(config, stop.clone()).await.unwrap();
+            f.owner.keep_epoch_refresh(token, stop).await;
+            assert_eq!(f.calls("frontend-request").len(), calls + 1);
             assert!(f.owner.granted());
-            assert_eq!(f.owner.view().status.unwrap().owner_epoch,original.owner_epoch);
+            assert_eq!(
+                f.owner.view().status.unwrap().owner_epoch,
+                original.owner_epoch
+            );
         });
     }
 

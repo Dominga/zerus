@@ -51,6 +51,7 @@ mod startup_stdio;
 mod store;
 #[cfg(windows)]
 mod swarm_windows;
+pub(crate) mod task_message;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod task_start_reconcile;
 mod termination_outcome;
@@ -1100,6 +1101,12 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                             .is_some_and(|v| v["op"] == "creation_launch_result")
                         {
                             creation_launch::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "task_message_result")
+                        {
+                            task_message::query(&store, hello.request.as_ref().unwrap())
                         } else if hello
                             .request
                             .as_ref()

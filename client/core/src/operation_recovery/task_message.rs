@@ -364,118 +364,137 @@ impl Original {
         else {
             return Err(Review::UnknownOutcome);
         };
-        if stdout.len() > REPLY_BYTES {
-            return Err(Review::TooLarge);
-        }
-        let root = raw_fields(stdout, &["schema", "version", "task", "message"])
-            .map_err(|_| Review::InvalidReply)?;
-        raw_fields(
-            required(&root, "task")
-                .map_err(|_| Review::InvalidReply)?
-                .get()
-                .as_bytes(),
-            &["uuid", "project"],
-        )
-        .map_err(|_| Review::InvalidReply)?;
-        let message = raw_fields(
-            required(&root, "message")
-                .map_err(|_| Review::InvalidReply)?
-                .get()
-                .as_bytes(),
-            &["kind", "request_id", "session", "delivery"],
-        )
-        .map_err(|_| Review::InvalidReply)?;
-        raw_fields(
-            required(&message, "delivery")
-                .map_err(|_| Review::InvalidReply)?
-                .get()
-                .as_bytes(),
-            &[
-                "mode",
-                "state",
-                "dispatch_id",
-                "run_id",
-                "conversation_id",
-                "submitted_id",
-                "prompt",
-                "error",
-                "stage",
-                "stage_at",
-            ],
-        )
-        .map_err(|_| Review::InvalidReply)?;
-        let data: Value = serde_json::from_slice(stdout).map_err(|_| Review::InvalidReply)?;
-        if !version(&data) {
-            return Err(Review::InvalidReply);
-        }
-        let map = data.as_object().ok_or(Review::InvalidReply)?;
-        tasks_write::message_delivered(map, &self.binding.task_id, &self.binding.request_id)
-            .map_err(|_| Review::IdentityChanged)?;
-        if data["task"]["project"].as_str() != Some(&self.binding.project) {
-            return Err(Review::IdentityChanged);
-        }
-        let message = &data["message"];
-        if message["kind"].as_str() != Some("message")
-            || message
-                .get("session")
-                .is_some_and(|session| !session.is_null())
-        {
-            return Err(Review::InvalidReply);
-        }
-        let delivery = &message["delivery"];
-        let expected_state = if self.binding.mode == "queue" {
-            "queued"
-        } else {
-            "note"
-        };
-        if delivery["mode"].as_str() != Some(&self.binding.mode)
-            || delivery["state"].as_str() != Some(expected_state)
-        {
-            return Err(Review::UnknownOutcome);
-        }
-        // TaskDelivery omits dispatch_id when its canonical value is empty.
-        // No other missing or malformed identity is synthesized here.
-        let dispatch = match delivery.get("dispatch_id") {
-            None => "",
-            Some(value) => value.as_str().ok_or(Review::InvalidReply)?,
-        };
-        if dispatch != self.binding.dispatch_id {
-            return Err(Review::IdentityChanged);
-        }
-        for key in [
-            "run_id",
-            "conversation_id",
-            "submitted_id",
-            "prompt",
-            "error",
-        ] {
-            if delivery
-                .get(key)
-                .is_some_and(|value| value.as_str() != Some(""))
-            {
-                return Err(Review::InvalidReply);
-            }
-        }
-        if delivery.get("stage").is_some_and(|v| !v.is_string())
-            || delivery
-                .get("stage_at")
-                .is_some_and(|v| v.as_i64().is_none())
-        {
-            return Err(Review::InvalidReply);
-        }
+        let state = reply_state(
+            &self.binding.project,
+            &self.binding.task_id,
+            &self.binding.request_id,
+            &self.binding.mode,
+            &self.binding.dispatch_id,
+            stdout,
+        )?;
         let receipt = Receipt {
             schema: 1,
             kind: Kind::TaskMessageRecovery,
             task_id: self.binding.task_id.clone(),
             request_id: self.binding.request_id.clone(),
             mode: self.binding.mode.clone(),
-            dispatch_id: dispatch.into(),
-            state: expected_state.into(),
+            dispatch_id: self.binding.dispatch_id.clone(),
+            state: state.into(),
             executor: (),
         };
         receipt_size(&receipt)?;
         Ok(receipt)
     }
+}
+/// The exact metadata outcome that an `hgs task message` reply (its whole
+/// stdout, exit 0) proves for one original: its project, task, request, mode
+/// and dispatch, and the state that mode records (`queued` or `note`). Known
+/// fields are bounded and unambiguous; a session, executor, prompt or error
+/// never passes. This never proves native delivery or consumption. Shared by
+/// this policy and the service-owned task message leaf.
+pub fn reply_state(
+    project: &str,
+    task_id: &str,
+    request_id: &str,
+    mode: &str,
+    dispatch_id: &str,
+    stdout: &[u8],
+) -> Result<&'static str, Review> {
+    if stdout.len() > REPLY_BYTES {
+        return Err(Review::TooLarge);
+    }
+    let root = raw_fields(stdout, &["schema", "version", "task", "message"])
+        .map_err(|_| Review::InvalidReply)?;
+    raw_fields(
+        required(&root, "task")
+            .map_err(|_| Review::InvalidReply)?
+            .get()
+            .as_bytes(),
+        &["uuid", "project"],
+    )
+    .map_err(|_| Review::InvalidReply)?;
+    let message = raw_fields(
+        required(&root, "message")
+            .map_err(|_| Review::InvalidReply)?
+            .get()
+            .as_bytes(),
+        &["kind", "request_id", "session", "delivery"],
+    )
+    .map_err(|_| Review::InvalidReply)?;
+    raw_fields(
+        required(&message, "delivery")
+            .map_err(|_| Review::InvalidReply)?
+            .get()
+            .as_bytes(),
+        &[
+            "mode",
+            "state",
+            "dispatch_id",
+            "run_id",
+            "conversation_id",
+            "submitted_id",
+            "prompt",
+            "error",
+            "stage",
+            "stage_at",
+        ],
+    )
+    .map_err(|_| Review::InvalidReply)?;
+    let data: Value = serde_json::from_slice(stdout).map_err(|_| Review::InvalidReply)?;
+    if !version(&data) {
+        return Err(Review::InvalidReply);
+    }
+    let map = data.as_object().ok_or(Review::InvalidReply)?;
+    tasks_write::message_delivered(map, task_id, request_id)
+        .map_err(|_| Review::IdentityChanged)?;
+    if data["task"]["project"].as_str() != Some(project) {
+        return Err(Review::IdentityChanged);
+    }
+    let message = &data["message"];
+    if message["kind"].as_str() != Some("message")
+        || message
+            .get("session")
+            .is_some_and(|session| !session.is_null())
+    {
+        return Err(Review::InvalidReply);
+    }
+    let delivery = &message["delivery"];
+    let expected_state = if mode == "queue" { "queued" } else { "note" };
+    if delivery["mode"].as_str() != Some(mode) || delivery["state"].as_str() != Some(expected_state)
+    {
+        return Err(Review::UnknownOutcome);
+    }
+    // TaskDelivery omits dispatch_id when its canonical value is empty.
+    // No other missing or malformed identity is synthesized here.
+    let dispatch = match delivery.get("dispatch_id") {
+        None => "",
+        Some(value) => value.as_str().ok_or(Review::InvalidReply)?,
+    };
+    if dispatch != dispatch_id {
+        return Err(Review::IdentityChanged);
+    }
+    for key in [
+        "run_id",
+        "conversation_id",
+        "submitted_id",
+        "prompt",
+        "error",
+    ] {
+        if delivery
+            .get(key)
+            .is_some_and(|value| value.as_str() != Some(""))
+        {
+            return Err(Review::InvalidReply);
+        }
+    }
+    if delivery.get("stage").is_some_and(|v| !v.is_string())
+        || delivery
+            .get("stage_at")
+            .is_some_and(|v| v.as_i64().is_none())
+    {
+        return Err(Review::InvalidReply);
+    }
+    Ok(expected_state)
 }
 fn receipt_size(receipt: &Receipt) -> Result<(), Review> {
     struct Limit(usize);

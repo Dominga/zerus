@@ -139,9 +139,9 @@ describe("held message copies in the service status", () => {
     expect(full?.details).toBe("Large task messages are paused: some held message copies need review.");
     expect(full).toMatchObject({ inputsReview: true, review: false, retry: false });
   });
-  it("keeps a connection problem's label and Retry while still offering the review", () => {
+  it("keeps a not-ready service's label and Retry, and names the copies without a review it cannot list", () => {
     const status = serviceStatus(connected({ code: "background_unready", task_message_inputs: { review: 1, full: false } }));
-    expect(status).toMatchObject({ label: "Background service not ready", retry: true, inputsReview: true });
+    expect(status).toMatchObject({ label: "Background service not ready", retry: true, inputsReview: false });
     expect(status?.details).toContain("Some held task message copies need review.");
   });
 });

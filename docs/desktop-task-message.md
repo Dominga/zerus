@@ -325,22 +325,24 @@ then only reads its result. The task editor is its only caller.
   for a service without reference support.
 - **Held copies review.** While status reports `review` above zero, the
   service status (status bar and Settings > About) says that held copies need
-  review, or that large task messages are paused when `full`, and offers
-  Review message copies. Its dialog reads one bounded page when it opens and
-  one more per Load more click, never on its own, through
+  review, or that large task messages are paused when `full`. Only a ready,
+  running service offers Review message copies: a paused, not-ready or
+  handoff-waiting one cannot list them, so its status names the copies in its
+  tooltip but offers no review. Its dialog reads one bounded page when it
+  opens and one more per Load more click, never on its own, through
   `desktop_service/task_message_inputs.rs`, which first requires the review
   marker. Each listing is numbered when it starts. The client remembers each
-  listed entry's exact observation with that number (at most 64; a read
-  that ends after a newer listing began never replaces it) and shows only
-  the time, size, request ID, state and observed file. A confirmation names
-  a request ID and its row's listing; the client takes exactly that
-  observation and sends it once, only on the native frontend lane, as a
-  `TaskMessageInputRelease` with a fresh release ID. Without it, for another
-  listing, or after the service changed, nothing is sent. Only the service's
-  exact refusal before any claim reads as nothing changed; a lost or any
-  other reply is unknown, and nothing is retried; Review again reads that page again from
-  its own cursor. When no copies are left while the dialog is open, closing
-  it returns focus to the service status summary.
+  listed entry's exact observation with that number (at most 64; a read that
+  ends after a newer listing began never replaces it) and shows only the time,
+  size, request ID, state and observed file. A confirmation names a request ID
+  and its row's listing; the client takes exactly that observation and sends
+  it once, only on the native frontend lane, as a `TaskMessageInputRelease`
+  with a fresh release ID. Without it, for another listing, or after the
+  service changed, nothing is sent. Only the service's exact refusal before
+  any claim reads as nothing changed; a lost or any other reply is unknown,
+  and nothing is retried. Review again reads that page again from its own
+  cursor. When no copies are left while the dialog is open, closing it returns
+  focus to the service status summary.
 
 ## Wire
 

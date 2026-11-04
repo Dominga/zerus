@@ -470,13 +470,18 @@ export function serviceStatus(state: DesktopService | undefined) {
     notice = tr("Activity, processes and project tasks are unavailable with this background service connection.");
   }
   const pending = pendingReadNotice(state), retained = retainedSourceNotice(state), inputs = heldInputsNotice(state), owner = ownershipNotice(state.notification_ownership);
+  // Held copies are listed and released by the running background service:
+  // a paused, not-ready or handoff-waiting one cannot, so it offers no review.
+  // The notice still tells the user that copies are held.
+  const reviewable = !!inputs && !manualRefresh && !paused && state.connected && !state.code
+    && COMPONENTS.every((name) => state.background[name]?.ready);
   const ownership = state.notification_ownership?.pending || state.notification_ownership?.activation?.pending ? "check"
     : !manualRefresh && (state.notification_ownership?.native_recovery || state.notification_ownership?.status?.rearm_required
       || state.notification_ownership?.activation?.needs_resume) ? "rearm" : undefined;
   if (!notice) {
     if (pending) label = state.pending_read_import?.running ? tr("Transferring read marks") : tr("Read marks need attention");
     else if (retained) label = tr("Migration report");
-    else if (inputs) label = tr("Held message copies");
+    else if (reviewable) label = tr("Held message copies");
     else if (owner) label = ownership === "check" ? tr("Background access unconfirmed") : ownership === "rearm" ? tr("Background access paused") : tr("Background access unavailable");
     else if (paused === "settings") label = tr("Background access paused");
   }
@@ -485,5 +490,5 @@ export function serviceStatus(state: DesktopService | undefined) {
   const settings = paused === "settings" ? tr("Zerus runs your sessions through a background service, which is paused on this computer. Settings shows its current state.") : "";
   const reasons = [notice, pending, retained, inputs, manualRefresh ? "" : owner, settings].filter(Boolean);
   return { label, details: reasons.join("\n") || tr("Background service connected"), healthy: !reasons.length,
-    retry: !manualRefresh && !!(notice || pending || retained || (owner && !ownership)), review: !!retained, inputsReview: !!inputs, ownership, manualRefresh };
+    retry: !manualRefresh && !!(notice || pending || retained || (owner && !ownership)), review: !!retained, inputsReview: reviewable, ownership, manualRefresh };
 }

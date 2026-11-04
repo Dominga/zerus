@@ -277,7 +277,13 @@ The second kind, `deferred_answer` (`desktop::deferred_answer`, ABI
   CLI's receipt records. Before its child the actor compares `pinned` again
   with the native current question read from the original store
   (`consent_current`); that fresh observation, never `pinned` alone, decides
-  source and transport.
+  source and transport. The observation is `hgs answer <session> --observe
+  --json` (stdin: the question ID and the expected run and conversation).
+  It gives `found` and the question's consent identity as `hgs inspect`
+  shows it, rebuilt only from these sources' pure reads: it never fits a
+  clipped panel, takes a lock, lists Claude's approval queue or writes a
+  receipt, cache or any other file. A question it cannot see without an
+  effect, or of another run, is not found, and the answer does not start.
 - **Receipt.** Recorded only from the CLI's own exact
   `question_receipts/<request_id>.json` record of this session, run,
   conversation, question, question hash and stdin digest with status

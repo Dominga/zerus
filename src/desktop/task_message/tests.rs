@@ -441,6 +441,53 @@ mod message_child {
         Instant::now() + Duration::from_secs(20)
     }
 
+    /// Reports whether the descriptor named by `argv[1]` is the file `argv[2]`
+    /// (`dev:ino`), on stdout unless `argv[3]` is `stderr`.
+    const CUSTODY_SCRIPT: &str = r#"import os, sys
+var = sys.argv[1]
+want = sys.argv[2]
+out = sys.stderr if sys.argv[3:] == ["stderr"] else sys.stdout
+named = os.environ.get(var, "")
+if not named.isdigit():
+    print("custody: no variable", end="", file=out)
+    sys.exit(3)
+try:
+    seen = os.fstat(int(named))
+except OSError:
+    print("custody: not inherited", end="", file=out)
+    sys.exit(3)
+print("custody: inherited" if f"{seen.st_dev}:{seen.st_ino}" == want else "custody: another file", end="", file=out)
+"#;
+
+    /// The runner's child holds the actor's exact custody descriptor, named
+    /// by this kind's variable.
+    #[test]
+    fn the_runner_child_inherits_exactly_the_named_custody() {
+        use std::os::fd::AsRawFd;
+        let (_temp, _location, _record, held) = lock();
+        // SAFETY: fstat into a zeroed struct on a descriptor `held` owns.
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::fstat(held.as_raw_fd(), &mut stat) }, 0);
+        let mut args = python(CUSTODY_SCRIPT);
+        args.push(child::CUSTODY_FD.into());
+        args.push(format!("{}:{}", stat.st_dev, stat.st_ino));
+        assert_eq!(
+            child::run(
+                Path::new("/usr/bin/env"),
+                &args,
+                b"",
+                &held,
+                &guard(),
+                soon(),
+                |_| Ok(())
+            ),
+            Ended::Exited {
+                code: 0,
+                stdout: b"custody: inherited".to_vec()
+            }
+        );
+    }
+
     #[test]
     fn the_child_reads_exactly_its_frozen_input_and_returns_its_whole_reply() {
         let (_temp, _location, _record, held) = lock();

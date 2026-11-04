@@ -347,6 +347,23 @@ mod launch_child {
     fn python(script: &str) -> Vec<String> {
         vec!["-c".into(), script.into()]
     }
+    /// Reports whether the descriptor named by `argv[1]` is the file `argv[2]`
+    /// (`dev:ino`), on stdout unless `argv[3]` is `stderr`.
+    const CUSTODY_SCRIPT: &str = r#"import os, sys
+var = sys.argv[1]
+want = sys.argv[2]
+out = sys.stderr if sys.argv[3:] == ["stderr"] else sys.stdout
+named = os.environ.get(var, "")
+if not named.isdigit():
+    print("custody: no variable", end="", file=out)
+    sys.exit(3)
+try:
+    seen = os.fstat(int(named))
+except OSError:
+    print("custody: not inherited", end="", file=out)
+    sys.exit(3)
+print("custody: inherited" if f"{seen.st_dev}:{seen.st_ino}" == want else "custody: another file", end="", file=out)
+"#;
     /// Running, not merely an unreaped zombie of a killed process.
     fn alive(pid: i32) -> bool {
         let state = Command::new("ps")
@@ -388,6 +405,35 @@ mod launch_child {
             Ended::Exited {
                 code: 0,
                 stderr: String::new()
+            }
+        );
+    }
+
+    /// The runner's child holds the actor's exact custody descriptor, named
+    /// by this kind's variable.
+    #[test]
+    fn the_runner_child_inherits_exactly_the_named_custody() {
+        use std::os::fd::AsRawFd;
+        let (_temp, _location, _record, held) = lock();
+        // SAFETY: fstat into a zeroed struct on a descriptor `held` owns.
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::fstat(held.as_raw_fd(), &mut stat) }, 0);
+        let mut args = vec!["python3".to_string()];
+        args.extend(python(CUSTODY_SCRIPT));
+        args.push(child::CUSTODY_FD.into());
+        args.push(format!("{}:{}", stat.st_dev, stat.st_ino));
+        // This kind keeps stderr.
+        args.push("stderr".into());
+        assert_eq!(
+            child::run(
+                std::path::Path::new("/usr/bin/env"),
+                &args,
+                &held,
+                Instant::now() + Duration::from_secs(20)
+            ),
+            Ended::Exited {
+                code: 0,
+                stderr: "custody: inherited".into()
             }
         );
     }

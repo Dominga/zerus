@@ -5175,7 +5175,13 @@ non-fatal `tasks_failed`. A stream follows at most 8 projects
 A subscription may add `"window": N` (1 to `limits.tasks_window`, 200; a server
 that announces 0 or omits it always sends the whole list). It then carries only
 the first N rows of each stage, read from the task index, in stage order (In
-review, In progress, To do, Backlog, Done), never the whole list. The last
+review, In progress, To do, Backlog, Done), never the whole list. Every stage
+is read at one index revision: a window whose stages were read at different
+revisions is read again, at most 4 times, and then from the task documents read
+once, so each task is in exactly one stage of a window. That fallback, like
+the index's first build, reads every task document of the project once,
+without a separate I/O or memory budget, and sends at most N rows of each
+stage and the first damaged tasks. The last
 page's `value` adds the `counts` of every stage, `damaged_total`, the
 `revision` and `window: {schema: 1, limit, stages: {STAGE: {total, next}}}`;
 each `next` is the cursor of that stage's next page for `hgs task list --stage

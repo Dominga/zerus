@@ -722,21 +722,47 @@ fn page_of(docs: &Documents, project: &str, stage: Stage, limit: usize, anchor: 
     page_reply(stage, limit, page, start, next, previous, &docs.counts, (shown, docs.damaged.len()), docs.revision.clone())
 }
 
-/// The first page of each stage in `LIST_STAGES` order, from the task index,
-/// or from the documents read once when the index cannot answer.
+/// Reads of the five indexed pages before a window is read from the documents.
+const WINDOW_ATTEMPTS: usize = 4;
+
+/// The pages of one `pass` that all have the same revision. Each page checks
+/// its rows against their files, so a later page can find a change an earlier
+/// page could not see, such as a task an older hgs moved to an earlier stage
+/// without a journal note; such a window is read again, at most
+/// `WINDOW_ATTEMPTS` times. `None` when no pass was coherent; a failed pass
+/// is returned at once.
+fn coherent_window<E>(
+    mut pass: impl FnMut() -> std::result::Result<Vec<Value>, E>,
+) -> std::result::Result<Option<Vec<Value>>, E> {
+    for _ in 0..WINDOW_ATTEMPTS {
+        let pages = pass()?;
+        if pages.iter().all(|page| page["revision"] == pages[0]["revision"]) {
+            return Ok(Some(pages));
+        }
+    }
+    Ok(None)
+}
+
+/// The first page of each stage in `LIST_STAGES` order, all of one revision:
+/// from the task index, or from the documents read once when the index
+/// cannot answer or keeps changing. That fallback reads every task document
+/// of the project, as the index's first build does, and keeps only each
+/// stage's first `limit` rows.
 fn window_pages(store: &ProjectStore, limit: usize) -> Result<Vec<Value>> {
     let indexed = index::Index::open(store).and_then(|mut index| {
-        let mut pages = Vec::new();
-        for stage in LIST_STAGES {
-            match indexed_page(&mut index, stage, limit, &index::Anchor::Start, None) {
-                Ok(page) => pages.push(page),
-                Err(failure) => {
-                    index.discard(&failure);
-                    return None;
-                }
+        let read = coherent_window(|| {
+            LIST_STAGES
+                .iter()
+                .map(|stage| indexed_page(&mut index, *stage, limit, &index::Anchor::Start, None))
+                .collect::<std::result::Result<Vec<_>, _>>()
+        });
+        match read {
+            Ok(pages) => pages,
+            Err(failure) => {
+                index.discard(&failure);
+                None
             }
         }
-        Some(pages)
     });
     match indexed {
         Some(pages) => Ok(pages),
@@ -759,7 +785,7 @@ pub(crate) fn window(config: &Config, wanted: &str, limit: usize) -> Result<Valu
     let machines = machines(config)?;
     let (id, name) = project(config, wanted)?;
     let pages = window_pages(&store(config, &id)?, limit)?;
-    // The last page read is the latest: its counts, damaged tasks and revision.
+    // Every page has the same revision, counts and damaged tasks.
     let last = pages.last().cloned().unwrap_or_default();
     let mut tasks = Vec::new();
     let mut stages = serde_json::Map::new();

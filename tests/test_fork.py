@@ -154,6 +154,38 @@ class Forks(Base):
         # A source in the default project leaves its fork there too.
         self.assertEqual(self.project_of(self.fork(loose,'loose-fork'),node),'ungrouped')
 
+    # zerus-wx3k: a fork waits for a busy catalog without holding the state
+    # lock, then still writes its inherited project while its binding is the same.
+    def test_a_fork_waits_for_a_busy_catalog_outside_the_state_lock(self):
+        import fcntl,time
+        source=self.start('codex')
+        node=self.swarm('hello')['node_id']
+        self.swarm('initialize',request={'projects':[dict(id='work',name='Work',color='#123456',folders=[],
+            sessions=[node+'\n'+source])]})
+        record=self.binding(source)
+        target='/'.join(source.split('/')[:2])+'/busy'
+        path=self.root/'state'/(hashlib.sha256(target.encode()).hexdigest()+'.json')
+        with open(self.root/'cfg'/'swarm'/'catalog.lock','r+') as catalog:
+            fcntl.flock(catalog,fcntl.LOCK_EX)
+            try:
+                self.hgs('fork',source,'-n','busy','-d','--expected-run-id',record['run_id'],
+                         '--expected-conversation-id',record['conversation_id'])
+                self.wait(path.exists)
+                # The fork's launch now waits for the catalog; the state lock is free.
+                with open(self.root/'state'/'.lock','a') as state:
+                    until=time.monotonic()+1.5
+                    while True:
+                        try:
+                            fcntl.flock(state,fcntl.LOCK_EX|fcntl.LOCK_NB);break
+                        except BlockingIOError:
+                            self.assertLess(time.monotonic(),until,'the state lock stayed held while the catalog was busy')
+                            time.sleep(0.01)
+                    fcntl.flock(state,fcntl.LOCK_UN)
+            finally:
+                fcntl.flock(catalog,fcntl.LOCK_UN)
+        self.wait(lambda:self.binding(target).get('conversation_id'))
+        self.assertEqual(self.project_of(target,node),'work')
+
     # zerus-b4qk: a fork's Activity shows its source's history up to the fork,
     # marked as inherited, then its own; the source's later rows stay out.
     def test_a_fork_shows_its_sources_history_up_to_the_fork(self):

@@ -30,6 +30,22 @@ elif args == ['desktop', 'registration', 'status', '--json']:
     save()
 elif args[:7] == ['desktop', 'registration', 'install', '--mode', 'background', '--json', '--request-id'] and len(args) == 8:
     request = args[7]
+    if state.get('install') in ('missing_ok', 'missing_fail', 'replaced'):
+        # A simulated effect that started, then its original evidence went
+        # missing (journal deleted) or was replaced by another request's.
+        pending = dict(request_id=request, desired='background', phase='update_offered', original=None, started=None)
+        state['status'].update(pending_transition=pending, pending_restart=True)
+        if state['install'] == 'replaced':
+            state['receipts'][request] = dict(request='33333333-3333-4333-8333-333333333333',
+                                              desired='background', phase='settled')
+        else:
+            state['receipts'].pop(request, None)
+        save()
+        if state['install'] == 'missing_fail':
+            sys.exit(1)
+        print(json.dumps(dict(abi='desktop-registration-mode-v1', schema=1, configuration=config,
+                              request_id=request, ok=True, changed=True)))
+        sys.exit(0)
     if state.get('install') == 'lost':
         pending = dict(request_id=request, desired='background', phase='stop_offered', original=None, started=None)
         state['status'].update(pending_transition=pending, pending_restart=True)
@@ -289,12 +305,74 @@ fn a_drift_between_the_last_read_and_the_spawn_never_reaches_the_helper() {
         "the mutating child never spawned"
     );
     assert!(!controller.first_settled(&id));
+    // The closed no-spawn fact is the positive not-started case.
+    let view = controller.view();
+    assert!(!view.pending, "{:?}", view.code);
+    assert_eq!(view.code, "activation_not_started");
     // 5 is the spawn check; 6 is the final read after the lookup.
     assert_eq!(
         fixture.state()["status_calls"],
         6,
         "the spawn check read the registration"
     );
+}
+
+#[test]
+fn an_unsupported_final_status_never_reaches_the_helper() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    let fixture = Fixture::new("settle", true);
+    let controller = fixture.controller();
+    let display = controller.view().first.unwrap();
+    let prepared = tauri::async_runtime::block_on(controller.confirm_first(display, |_| true))
+        .unwrap()
+        .unwrap();
+    let mut state = fixture.state();
+    state["drift_after"] = json!(4);
+    state["drift"] = json!({"schema": 2});
+    fixture.write(state);
+    let id = tauri::async_runtime::block_on(controller.apply_first(prepared)).unwrap();
+    assert!(
+        fixture.installs().is_empty(),
+        "the mutating child never spawned"
+    );
+    assert!(!controller.first_settled(&id));
+}
+
+#[test]
+fn missing_or_replaced_evidence_after_a_possible_start_stays_unknown() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    for case in ["missing_ok", "missing_fail", "replaced"] {
+        let fixture = Fixture::new(case, true);
+        let controller = fixture.controller();
+        let display = controller.view().first.unwrap();
+        let prepared =
+            tauri::async_runtime::block_on(controller.confirm_first(display.clone(), |_| true))
+                .unwrap()
+                .unwrap();
+        let id = tauri::async_runtime::block_on(controller.apply_first(prepared)).unwrap();
+        assert_eq!(fixture.installs().len(), 1, "{case}");
+        let view = controller.view();
+        assert!(view.pending && !controller.first_settled(&id), "{case}");
+        assert_ne!(view.code, "activation_not_started", "{case}");
+        assert!(view.first.is_none(), "{case}");
+        // Check result and a later observe read only the retained original.
+        tauri::async_runtime::block_on(controller.observe(fixture.cli.clone(), CONFIG.into()));
+        tauri::async_runtime::block_on(controller.observe(fixture.cli.clone(), CONFIG.into()));
+        assert!(controller.view().pending, "{case}");
+        assert_eq!(fixture.installs().len(), 1, "{case}");
+        assert!(fixture.lookups().iter().all(|l| l == &id), "{case}");
+        let again = tauri::async_runtime::block_on(controller.confirm_first(display, |_| true));
+        assert!(again.is_err(), "{case}");
+        // A restarted consumer adopts only the stored original ID.
+        let restarted = fixture.controller();
+        assert!(restarted.view().pending, "{case}");
+        assert_eq!(
+            restarted.view().request_id.as_deref(),
+            Some(id.as_str()),
+            "{case}"
+        );
+        assert_eq!(fixture.installs().len(), 1, "{case}");
+    }
 }
 
 #[test]

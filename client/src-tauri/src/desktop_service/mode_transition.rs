@@ -40,6 +40,12 @@ struct Intent {
     route: Arc<Route>,
     complete: bool,
     joined: bool,
+    /// A first explicit choice (zerus-yfbd.1): only a closed no-spawn fact
+    /// or an exact refused receipt ends it as not started.
+    first: bool,
+    /// The original effect child was never spawned (pin or spawn-time
+    /// refusal before the process existed). Never inferred from a join.
+    no_spawn: bool,
 }
 #[derive(Default)]
 struct State {
@@ -309,6 +315,8 @@ impl Controller {
             route,
             complete: false,
             joined: false,
+            first: false,
+            no_spawn: false,
         });
         state.view.pending = true;
         state.view.request_id = state.intent.as_ref().map(|i| i.id.clone());
@@ -333,17 +341,7 @@ impl Controller {
                 return None;
             }
         };
-        if status["schema"] != 1
-            || status["configuration"] != configuration
-            || !matches!(
-                status["selected_mode"].as_str(),
-                Some("passive" | "background")
-            )
-            || !matches!(
-                status["mode_selection"].as_str(),
-                Some("default" | "explicit" | "retained")
-            )
-        {
+        if !valid_status(&status, configuration) {
             self.failed("activation_status_unavailable");
             return None;
         }
@@ -457,7 +455,14 @@ impl Controller {
         else {
             return;
         };
-        let absent = intent.joined && value["phase"] == "missing" && value["result"].is_null();
+        // A first choice may have run Stop/Update/RunEx before its journal
+        // went missing: a join settles resources, it does not prove no start.
+        let closed = if intent.first {
+            intent.no_spawn
+        } else {
+            intent.joined
+        };
+        let absent = closed && value["phase"] == "missing" && value["result"].is_null();
         intent.complete = settled || refused || absent;
         state.view.pending = !(settled || refused || absent);
         state.view.needs_resume = !settled && state.view.review.is_none();
@@ -531,6 +536,7 @@ impl Controller {
             .filter(|i| i.id == id)
         {
             intent.joined = joined;
+            intent.no_spawn = matches!(result, Err(OwnedError::StartFailed));
         }
         match result {
             Ok(bytes) => Some(bytes),
@@ -630,6 +636,21 @@ struct Route {
     #[cfg(unix)]
     files: Vec<(std::fs::File, PathBuf, std::fs::Metadata, bool)>,
 }
+/// The supported registration status shape for this configuration. Every
+/// read that can admit or veto an effect checks it, including the final one.
+fn valid_status(status: &Value, configuration: &str) -> bool {
+    status["schema"] == 1
+        && status["configuration"] == configuration
+        && matches!(
+            status["selected_mode"].as_str(),
+            Some("passive" | "background")
+        )
+        && matches!(
+            status["mode_selection"].as_str(),
+            Some("default" | "explicit" | "retained")
+        )
+}
+
 impl Route {
     fn select(ordinary: &std::path::Path) -> Result<Self, &'static str> {
         #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]

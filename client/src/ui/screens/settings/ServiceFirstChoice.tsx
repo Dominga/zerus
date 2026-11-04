@@ -1,5 +1,5 @@
 import { Show } from "solid-js";
-import { desktopService, firstChoiceActions, ownershipActions, ownershipNotice } from "../../../store/desktopService";
+import { desktopService, firstChoiceActions, firstChoicePending, ownershipActions, ownershipNotice } from "../../../store/desktopService";
 import { toast } from "../../../store/ui";
 import { tr } from "../../../i18n";
 import { Actions, Group, Status } from "./ui";
@@ -14,7 +14,7 @@ export function ServiceFirstChoice() {
   const ownership = () => desktopService.state()?.notification_ownership;
   const activation = () => ownership()?.activation;
   const own = () => { const id = firstChoiceActions.request(); return !!id && activation()?.request_id === id; };
-  const pending = () => own() && !!activation()?.pending;
+  const pending = () => firstChoicePending(desktopService.state());
   const notStarted = () => own() && activation()?.code === "activation_not_started";
   const offer = () => (activation()?.first && !ownershipNotice(ownership())) ? activation()!.first! : undefined;
   const visible = () => !activation()?.review && (!!offer() || pending() || notStarted());
@@ -26,9 +26,11 @@ export function ServiceFirstChoice() {
   };
   return <Show when={visible()}>
     <Group title={tr("Background service")}>
-      <Status kind="warn">{tr("Background work is paused on this computer.")}</Status>
-      <p class="set-group-hint">{tr("Turn on background mode to let Zerus run your sessions through the background service on this computer.")}</p>
-      <Show when={pending()}>
+      <Show when={pending()} fallback={<>
+        <Status kind="warn">{tr("Background work is paused on this computer.")}</Status>
+        <p class="set-group-hint">{tr("Turn on background mode to let Zerus run your sessions through the background service on this computer.")}</p>
+      </>}>
+        <Status kind="busy">{tr("Turning on background mode…")}</Status>
         <p class="set-group-hint">{tr("The new mode choice is unconfirmed. Check its original result; do not make another choice.")}</p>
       </Show>
       <Show when={notStarted()}>

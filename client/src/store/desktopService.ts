@@ -487,9 +487,18 @@ export function servicePaused(state: DesktopService | undefined): PausedAction |
   return activation.code === "activation_platform_manual" && !ownershipNotice(ownership) ? "settings" : undefined;
 }
 
+/** THIS first background choice is unconfirmed: its own original ID is
+ * pending and no review or manual refresh has taken over. Presentation only. */
+export function firstChoicePending(state: DesktopService | undefined, request = firstChoiceActions.request()): boolean {
+  const activation = state?.notification_ownership?.activation;
+  return !!request && !!activation?.pending && activation.request_id === request && !activation.review
+    && state?.executable_upgrade?.state !== "manual_refresh_required";
+}
+
 /** The Windows paused body: it promises turning background mode on in
  * Settings only while that first choice is actually offered. */
 export function pausedSettingsBody(state: DesktopService | undefined): string {
+  if (firstChoicePending(state)) return tr("Zerus is turning on background mode on this computer. Settings shows its progress.");
   return state?.notification_ownership?.activation?.first
     ? tr("Zerus runs your sessions through a background service, which stays paused until you turn it on in Settings.")
     : tr("Zerus runs your sessions through a background service, which is paused on this computer. Settings shows its current state.");
@@ -498,6 +507,11 @@ export function pausedSettingsBody(state: DesktopService | undefined): string {
 /** Compact footer presentation; full reasons stay in its accessible tooltip. */
 export function serviceStatus(state: DesktopService | undefined) {
   if (!state) return;
+  // An explicit mode change in flight: only its original-ID Check, never a
+  // reconnect Retry, even while the service restarts into background mode.
+  if (firstChoicePending(state)) return { label: tr("Turning on background mode"),
+    details: tr("The new mode choice is unconfirmed. Check its original result; do not make another choice."),
+    healthy: false, retry: false, review: false, ownership: "check" as const, manualRefresh: false, modeReview: false };
   const manualRefresh = state.executable_upgrade?.state === "manual_refresh_required";
   const paused = servicePaused(state);
   let notice = "", label = tr("Background service");

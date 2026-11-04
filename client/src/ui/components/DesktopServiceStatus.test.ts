@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createFirstChoiceActions, pausedSettingsBody, servicePaused, serviceStatus } from "../../store/desktopService";
+import { createFirstChoiceActions, firstChoicePending, pausedSettingsBody, servicePaused, serviceStatus } from "../../store/desktopService";
 import type { DesktopService, NotificationOwnership } from "../../types";
 // Produced by the native passive_projection_tests from the root's passive status
 // and the platform-manual activation view (Windows); never hand-written here.
@@ -47,7 +47,7 @@ describe("passive service", () => {
     const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: URL, encoding: "utf8"): string };
     const read = (path: string) => fs.readFileSync(new URL(path, import.meta.url), "utf8");
     const component = read("./DesktopServiceStatus.tsx");
-    expect(component).toContain("!!servicePaused(desktopService.state()) && !Object.keys(catalog.computers).length");
+    expect(component).toContain("(!!servicePaused(desktopService.state()) || firstChoicePending(desktopService.state()))\n  && !Object.keys(catalog.computers).length");
     const detail = component.match(/export function PausedServiceDetail[\s\S]*?\n}\n/)?.[0] ?? "";
     expect(detail).toContain('tr("Background work is paused")');
     expect(detail).toContain('servicePaused(desktopService.state()) === "settings"');
@@ -62,7 +62,7 @@ describe("passive service", () => {
     const list = read("../sessions/SessionList.tsx").match(/function ListPlaceholder\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
     expect(list.indexOf("<Show when={!servicePausedEmpty()}")).toBeGreaterThan(-1);
     expect(list.indexOf("<Show when={!servicePausedEmpty()}")).toBeLessThan(list.indexOf("skel-card"));
-    expect(read("../../App.tsx")).toContain('fallback={<Show when={!servicePaused(desktopService.state())}><span>{props.mode() === "starting" ? tr("Starting…") : tr("Connecting…")}</span></Show>}');
+    expect(read("../../App.tsx")).toContain('fallback={<Show when={!servicePaused(desktopService.state()) && !firstChoicePending(desktopService.state())}><span>{props.mode() === "starting" ? tr("Starting…") : tr("Connecting…")}</span></Show>}');
   });
 });
 
@@ -141,6 +141,38 @@ describe("Windows first background choice (zerus-yfbd.1)", () => {
     const about = read("../screens/settings/About.tsx");
     expect(about.indexOf("<ServiceModeReview />")).toBeLessThan(about.indexOf("<ServiceFirstChoice />"));
     expect(read("../../store/desktopService.ts")).toContain('invoke("desktop_service_first_choice", { display })');
+  });
+});
+
+const REQUEST = "22222222-2222-4222-8222-222222222222";
+const PENDING_BODY = "Zerus is turning on background mode on this computer. Settings shows its progress.";
+const inFlight = (patch: Partial<DesktopService> = {}) => windows({ ...patch, notification_ownership: { ...windows().notification_ownership!,
+  activation: { ...windows().notification_ownership!.activation!, first: null, pending: true, request_id: REQUEST, code: "activation_unconfirmed" } } });
+
+describe("Windows first background choice in flight", () => {
+  it("is pending only for its own original ID, and review or manual refresh take over", () => {
+    expect(firstChoicePending(inFlight(), REQUEST)).toBe(true);
+    expect(firstChoicePending(inFlight(), undefined)).toBe(false);
+    expect(firstChoicePending(inFlight(), "33333333-3333-4333-8333-333333333333")).toBe(false);
+    expect(firstChoicePending(windows(), REQUEST)).toBe(false);
+    const reviewed = inFlight();
+    reviewed.notification_ownership!.activation!.review = { request_id: REQUEST, configuration: "a".repeat(64),
+      selection: "s", disposition: "required", passive_available: true };
+    expect(firstChoicePending(reviewed, REQUEST)).toBe(false);
+    expect(firstChoicePending(inFlight({ executable_upgrade: { state: "manual_refresh_required" } }), REQUEST)).toBe(false);
+  });
+  it("source wiring: the footer, main area and Settings group show the explicit change, never Retry or Connecting", async () => {
+    const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: URL, encoding: "utf8"): string };
+    const read = (path: string) => fs.readFileSync(new URL(path, import.meta.url), "utf8");
+    const store = read("../../store/desktopService.ts");
+    expect(store).toContain('if (firstChoicePending(state)) return { label: tr("Turning on background mode"),');
+    expect(store).toContain('healthy: false, retry: false, review: false, ownership: "check" as const, manualRefresh: false, modeReview: false };');
+    expect(store).toContain(`if (firstChoicePending(state)) return tr("${PENDING_BODY}");`);
+    expect(read("./DesktopServiceStatus.tsx")).toContain('servicePaused(desktopService.state()) === "settings" || firstChoicePending(desktopService.state());');
+    const group = read("../screens/settings/ServiceFirstChoice.tsx");
+    expect(group).toContain("const pending = () => firstChoicePending(desktopService.state());");
+    expect(group).toContain('<Status kind="busy">{tr("Turning on background mode…")}</Status>');
+    expect(group.indexOf('<Status kind="busy">')).toBeLessThan(group.indexOf('tr("The new mode choice is unconfirmed.'));
   });
 });
 

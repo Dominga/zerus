@@ -1,6 +1,6 @@
 import { Show, createMemo, createSignal } from "solid-js";
 import { Portal } from "solid-js/web";
-import { desktopService, serviceStatus, servicePaused, retryDesktopService, ownershipActions, pausedSettingsBody } from "../../store/desktopService";
+import { desktopService, serviceStatus, servicePaused, retryDesktopService, ownershipActions, pausedSettingsBody, firstChoicePending } from "../../store/desktopService";
 import { catalog } from "../../store/catalog";
 import { toast } from "../../store/ui";
 import { tr } from "../../i18n";
@@ -8,7 +8,8 @@ import { MigrationReportDialog } from "./MigrationReportDialog";
 import { TaskMessageInputsDialog } from "./TaskMessageInputsDialog";
 
 /** A connected passive service that lists no computers yet; the main area explains it. */
-export const servicePausedEmpty = () => !!servicePaused(desktopService.state()) && !Object.keys(catalog.computers).length;
+export const servicePausedEmpty = () => (!!servicePaused(desktopService.state()) || firstChoicePending(desktopService.state()))
+  && !Object.keys(catalog.computers).length;
 
 const resume = () => void ownershipActions.rearm().catch(error => toast(tr("Background service"), String(error), "error", true));
 const resumeBlocked = () => ownershipActions.busy() || !!desktopService.state()?.notification_ownership?.running;
@@ -21,7 +22,7 @@ const openServiceSettings = () => void import("../screens/settings/sections").th
  * shows the service state (Windows).
  */
 export function PausedServiceDetail() {
-  const settings = () => servicePaused(desktopService.state()) === "settings";
+  const settings = () => servicePaused(desktopService.state()) === "settings" || firstChoicePending(desktopService.state());
   return (
     <div class="detail-empty paused-service">
       <h2>{tr("Background work is paused")}</h2>

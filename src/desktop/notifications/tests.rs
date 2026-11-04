@@ -915,6 +915,98 @@ fn native_close_after_click_admission_preserves_only_that_original_click() {
 }
 
 #[test]
+fn another_notifications_close_cannot_preserve_a_withdrawn_click() {
+    let mut f = Fixture::new();
+    let (first, first_dispatch) = f.queued();
+    let first_closed = activation(&first_dispatch);
+    let first_outcome = delivered(first_dispatch.command());
+    first_dispatch.finish(first_outcome);
+    let (second, second_dispatch) = f.queued();
+    let second_clicked = activation(&second_dispatch);
+    let second_outcome = delivered(second_dispatch.command());
+    second_dispatch.finish(second_outcome);
+    f.outbox.poll(&mut f.store, Instant::now());
+    f.store.db.execute("INSERT INTO desktop_attention_edges(logical,session,intent,identity,payload,blocked,bytes) SELECT 'fixture','fixture',id,identity,payload,0,0 FROM desktop_intents WHERE id=?1",[&second.intent_id]).unwrap();
+
+    assert!(f.host.emit(Event::Clicked(second_clicked.clone())));
+    let click = f.outbox.poll(&mut f.store, Instant::now()).pop().unwrap();
+    assert!(f.host.emit(Event::Closed(first_closed.clone())));
+    assert!(f.outbox.poll(&mut f.store, Instant::now()).is_empty());
+    assert!(f
+        .outbox
+        .current_activation(&f.store, &first_closed)
+        .unwrap()
+        .is_none());
+    assert!(f
+        .outbox
+        .current_activation(&f.store, &second_clicked)
+        .unwrap()
+        .is_some());
+
+    // PX: B's source stays live, so only exact native-close matching can
+    // prevent A's close from granting B the withdrawn-intent exception.
+    ledger::withdraw(&mut f.store.db, &second.intent_id, 1).unwrap();
+    let live: bool = f
+        .store
+        .db
+        .query_row(
+            "SELECT live=1 AND blocked=0 FROM desktop_attention_edges WHERE intent=?1",
+            [&second.intent_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(live);
+    let mut router = activation::Router::new(
+        &f.outbox.session.configuration,
+        &f.outbox.session.service_epoch,
+    );
+    assert!(!router.offer(&f.store, &f.outbox, click).unwrap());
+    assert!(!router.needs_frontend());
+    assert_eq!(f.state(&first), "delivered");
+    assert_eq!(f.state(&second), "delivered");
+}
+
+#[test]
+fn click_witness_overflow_drops_only_that_click_and_keeps_later_posts_available() {
+    let mut f = Fixture::new();
+    let (first, dispatch) = f.queued();
+    let value = activation(&dispatch);
+    let outcome = delivered(dispatch.command());
+    dispatch.finish(outcome);
+    f.outbox.poll(&mut f.store, Instant::now());
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        for _ in 0..EVENTS {
+            assert!(f.host.emit(Event::Clicked(value.clone())));
+        }
+        held.extend(f.outbox.poll(&mut f.store, Instant::now()));
+    }
+    assert_eq!(held.len(), EVENTS * 2);
+    assert!(f.host.emit(Event::Clicked(value.clone())));
+    assert!(f.outbox.poll(&mut f.store, Instant::now()).is_empty());
+    assert!(
+        f.outbox.available(),
+        "click pressure must not disable posting"
+    );
+    assert_eq!(f.outbox.status()["callbacks"], 0);
+    assert!(f.host.try_next().is_err());
+
+    drop(held);
+    assert!(
+        f.outbox.poll(&mut f.store, Instant::now()).is_empty(),
+        "a dropped overflow click is never retried"
+    );
+    assert!(f.host.emit(Event::Clicked(value)));
+    assert_eq!(f.outbox.poll(&mut f.store, Instant::now()).len(), 1);
+    let (next, dispatch) = f.queued();
+    let outcome = delivered(dispatch.command());
+    dispatch.finish(outcome);
+    f.outbox.poll(&mut f.store, Instant::now());
+    assert_eq!(f.state(&first), "delivered");
+    assert_eq!(f.state(&next), "delivered");
+}
+
+#[test]
 fn admitted_click_never_bypasses_policy_revision_blocking_or_writer_changes() {
     for change in [
         "withdraw_before_close",

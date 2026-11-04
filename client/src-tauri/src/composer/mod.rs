@@ -923,8 +923,10 @@ impl Composers {
                             newer.anchor = moved.anchor;
                             newer.label = moved.label;
                             newer.form_state = moved.form_state;
-                            // An uncertain delivery stays uncertain.
+                            // An uncertain delivery stays uncertain, and
+                            // keeps its reserved identity (zerus-5wmh.66.4.4).
                             newer.uncertain = moved.uncertain;
+                            newer.checkpoint = moved.checkpoint;
                             newer.error = moved.error;
                             newer.notice = moved.notice;
                             newer.removed = moved.removed;
@@ -2703,6 +2705,54 @@ pub(crate) mod tests {
         assert_eq!(
             read_draft(&root.join("drafts"), RENAMED).draft.draft.text,
             "already here"
+        );
+    }
+
+    #[test]
+    fn a_rename_back_keeps_an_uncertain_delivery_identity() {
+        use zerus_client_core::operation_recovery::deferred_input::{Intent, Kind};
+        let root = dir("rename-back-checkpoint");
+        let store = drafts(&root);
+        let mut there = StoredDraft::default();
+        there.draft.text = "already here".into();
+        store.save_durable(RENAMED, there, |_| {});
+        let (c, _) = hub_on(&store);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.edit(view.handle, 1, view.text_epoch, "first".into(), 5, 5);
+        let held = Checkpoint::reserve(Intent {
+            kind: Kind::Send,
+            draft_revision: 1,
+            message_sha256: "a".repeat(64),
+            run_id: "run-1".into(),
+            conversation_id: "conv-1".into(),
+            question: None,
+            start: None,
+            retry_of: None,
+            consent: false,
+        });
+        {
+            let mut hub = c.lock();
+            let composer = hub.composers.get_mut(KEY).unwrap();
+            composer.uncertain = true;
+            composer.checkpoint = Some(held.clone());
+        }
+        let release = hold(&store);
+        c.open(Some(renamed()));
+        // Renamed back while the refused first rename is still queued: the
+        // newer composer takes the moved draft, its doubt and its identity.
+        let back = c.open(Some(session())).unwrap();
+        release.send(()).unwrap();
+        let view = until(&c, |v| v.loaded && v.key == KEY);
+        assert_eq!(view.handle, back.handle, "the newer composer stays");
+        assert_eq!(c.lock().composers[KEY].checkpoint.as_ref(), Some(&held));
+        store.flush();
+        assert_eq!(
+            read_draft(&root.join("drafts"), KEY)
+                .draft
+                .checkpoint
+                .as_deref(),
+            Some(&held)
         );
     }
 

@@ -2,6 +2,7 @@ import { Show, createMemo } from "solid-js";
 import { desktopService, modeReviewActions, ownershipActions } from "../../../store/desktopService";
 import { toast } from "../../../store/ui";
 import { tr } from "../../../i18n";
+import { Actions, Group, Status } from "./ui";
 import type { ModeReview } from "../../../types";
 import type { ModeReviewAction } from "../../../store/desktopService";
 
@@ -20,44 +21,58 @@ export function ServiceModeReview() {
         ? tr("Update Zerus and its background service, then reopen Zerus to review this change.")
         : tr("The mode action could not be confirmed. Check the original result before making another choice."), "error", true));
   };
-  return <Show when={original()}>{(display) => <section aria-label={tr("Interrupted service mode change")}>
-    <h2>{tr("Interrupted service mode change")}</h2>
-    <p>{tr("The original manager result stays Unknown. Review does not stop or start the service, change its mode or resume background access.")}</p>
-    <dl class="selectable" style={{ "overflow-wrap": "anywhere" }}>
-      <dt>{tr("Original request")}</dt><dd>{display().request_id}</dd>
-      <dt>{tr("Configuration")}</dt><dd>{display().configuration}</dd>
-    </dl>
+  return <Show when={original()}>{(display) => <Group title={tr("Interrupted service mode change")}>
+    <Status kind="warn">{display().disposition === "reviewed_unknown"
+      ? tr("The review has been recorded.") : display().disposition === "reboot_required"
+        ? tr("A restart is needed before reviewing again.") : tr("The earlier mode change needs review.")}</Status>
+    <p class="set-group-hint">{tr("Zerus could not confirm whether the last change of the background service mode finished. Reviewing it records what Zerus can see now; it does not start or stop the service or change its mode.")}</p>
     <Show when={display().disposition === "reboot_required"}>
-      <p>{tr("Use Restart, not Shut down, then open Zerus and choose Review interrupted mode change again. Fast Startup can keep the previous kernel session.")}</p>
+      <p class="set-group-hint">{display().passive_available
+        ? tr("Restart Windows, then open Zerus and review again. Use Restart, not Shut down: with Fast Startup, Shut down keeps the previous session.")
+        : tr("Restart your computer, then open Zerus and review again.")}</p>
     </Show>
-    <Show when={display().disposition === "reviewed_unknown"} fallback={
-      <button type="button" class="btn" disabled={busy()}
-        onClick={() => act(display(), "review")}>{tr("Review interrupted mode change")}</button>
-    }>
-      <p>{tr("The interrupted change was reviewed. Automatic activation stays off. A new mode choice needs a separate native confirmation and fresh checks.")}</p>
+    <Show when={display().disposition === "reviewed_unknown"}>
+      <p class="set-group-hint">{tr("Review is recorded. Zerus will not change the service mode automatically. Choose a mode below.")}</p>
       <Show when={manual()}>
-        <p>{tr("A CLI update also needs attention. Follow the service update guidance before choosing a mode.")}</p>
+        <p class="set-group-hint">{tr("Zerus was updated. Follow the service update guidance before choosing a mode.")}</p>
       </Show>
-      <Show when={choicePending() || accessPending()} fallback={<>
-        <button type="button" class="btn" disabled={choosing() || manual()}
-          onClick={() => act(display(), "background")}>{tr("Use background mode")}</button>
-        <Show when={display().passive_available}>
-          <button type="button" class="btn" disabled={choosing() || manual()}
-            onClick={() => act(display(), "passive")}>{tr("Use passive mode")}</button>
-        </Show>
-      </>}>
-        <p>{accessPending() ? tr("Background access is unconfirmed. Check the result before making another change.")
+      <Show when={choicePending() || accessPending()}>
+        <p class="set-group-hint">{accessPending() ? tr("Background access is unconfirmed. Check the result before making another change.")
           : tr("The new mode choice is unconfirmed. Check its original result; do not make another choice.")}</p>
       </Show>
     </Show>
-    <Show when={activation()?.request_id && activation()?.request_id !== display().request_id}>
-      <p class="selectable">{tr("New mode request")}: {activation()?.request_id}</p>
-    </Show>
     <Show when={activation()?.code === "activation_not_started"}>
-      <p>{tr("The new mode choice did not start. Check the registration and background access before confirming another choice.")}</p>
+      <p class="set-group-hint">{tr("The new mode choice did not start. Check the registration and background access before confirming another choice.")}</p>
     </Show>
-    <button type="button" class="btn" disabled={busy() || ownershipActions.busy()}
-      onClick={() => void ownershipActions.check().catch(() =>
-        toast(tr("Background service"), tr("The original mode result is unavailable. Keep its request ID and check again."), "error", true))}>{tr("Check result")}</button>
-  </section>}</Show>;
+    <details>
+      <summary>{tr("Technical details")}</summary>
+      <dl class="selectable" style={{ "overflow-wrap": "anywhere" }}>
+        <dt>{tr("Original request")}</dt><dd><code>{display().request_id}</code></dd>
+        <dt>{tr("Configuration")}</dt><dd><code title={display().configuration} aria-label={display().configuration} tabIndex={0} onCopy={event => {
+          event.clipboardData?.setData("text/plain", display().configuration); event.preventDefault();
+        }}>{display().configuration.slice(0, 12)}…</code></dd>
+        <Show when={activation()?.request_id && activation()?.request_id !== display().request_id}>
+          <dt>{tr("New mode request")}</dt><dd><code>{activation()?.request_id}</code></dd>
+        </Show>
+      </dl>
+    </details>
+    <Actions>
+      <Show when={display().disposition === "reviewed_unknown"} fallback={
+        <button type="button" class="btn" disabled={busy()}
+          onClick={() => act(display(), "review")}>{tr("Review interrupted mode change")}</button>
+      }>
+        <Show when={!choicePending() && !accessPending()}>
+          <button type="button" class="btn" disabled={choosing() || manual()}
+            onClick={() => act(display(), "background")}>{tr("Use background mode")}</button>
+          <Show when={display().passive_available}>
+            <button type="button" class="btn" disabled={choosing() || manual()}
+              onClick={() => act(display(), "passive")}>{tr("Use passive mode")}</button>
+          </Show>
+        </Show>
+      </Show>
+      <button type="button" class="btn" disabled={busy() || ownershipActions.busy()}
+        onClick={() => void ownershipActions.check().catch(() =>
+          toast(tr("Background service"), tr("The original mode result is unavailable. Keep its request ID and check again."), "error", true))}>{tr("Check result")}</button>
+    </Actions>
+  </Group>}</Show>;
 }

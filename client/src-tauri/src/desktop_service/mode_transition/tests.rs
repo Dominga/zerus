@@ -657,6 +657,84 @@ fn actual_reviewed_archive_needs_a_second_confirmation_before_its_only_rearm_and
     });
 }
 #[test]
+fn preflight_and_ownership_waits_cannot_rearm_a_changed_confirmed_original() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        for lane in ["preflight", "ownership"] {
+            let helpers = Fixture::new();
+            let original = interrupted(&helpers).await;
+            acknowledge_model_boot(&helpers, &original).await;
+            assert_eq!(
+                original
+                    .close()
+                    .wait_until(std::time::Instant::now() + Duration::from_secs(1)),
+                zerus_client_core::desktop::drain::Observation::Idle
+            );
+            helpers.config("default", "passive", false);
+            let running = start_native(&helpers, json!({"ready":true}));
+            crate::desktop_service::tests::eventually("original read stream settled", || {
+                running
+                    .source
+                    .calls()
+                    .iter()
+                    .any(|c| c["args"] == json!(["desktop", "watch", "--json"]))
+                    && !running.service.shared.ownership.view().running
+            })
+            .await;
+            let prepared = confirm_when_idle(
+                &running.service.shared.mode_transition,
+                ReviewAction::Background,
+            )
+            .await;
+            let mode_id = running.service.shared.mode_transition.view().request_id;
+            let record = fs::read(helpers.root.join("intent.json")).unwrap();
+            let ownership_id = running.service.shared.ownership.view().request_id;
+            fs::write(running.source.0.join(format!("mode-{lane}-hold")), []).unwrap();
+            let owner = running.service.clone();
+            let task = tauri::async_runtime::spawn(async move {
+                owner.apply_mode_action(Some(prepared)).await
+            });
+            crate::desktop_service::tests::eventually(
+                "exact slow native preflight boundary",
+                || {
+                    running
+                        .source
+                        .0
+                        .join(format!("mode-{lane}-entered"))
+                        .exists()
+                },
+            )
+            .await;
+            // Same configuration and original UUID; only its selected mode
+            // changes after the initial opaque validation and before Rearm.
+            helpers.config("explicit", "background", false);
+            fs::write(running.source.0.join(format!("mode-{lane}-release")), []).unwrap();
+            let result = tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .unwrap()
+                .unwrap();
+            running.service.join().await.unwrap();
+            assert!(mutations(&running).is_empty(), "stale {lane} offered a frontend request");
+            assert_eq!(result.unwrap_err(), "activation_scope_changed", "{lane}");
+            assert_eq!(
+                running.service.shared.mode_transition.view().request_id,
+                mode_id
+            );
+            assert_eq!(
+                running.service.shared.ownership.view().request_id,
+                ownership_id
+            );
+            assert_eq!(fs::read(helpers.root.join("intent.json")).unwrap(), record);
+
+            assert!(!running.source.calls().iter().any(|c| c["args"][1]
+                .as_str()
+                .is_some_and(|s| s.starts_with("import-"))));
+            assert_eq!((helpers.effects(), helpers.reviews()), (1, 2));
+        }
+    });
+}
+
+#[test]
 fn a_manual_refresh_discovered_after_confirmation_refuses_before_rearm_or_mode_effect() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {

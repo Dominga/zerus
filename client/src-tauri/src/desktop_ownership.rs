@@ -83,6 +83,8 @@ struct State {
     // local codes are kept, never child output, IDs, paths or configuration.
     diagnostic: Option<(&'static str, &'static str)>,
 }
+/// A retained veto only; this cannot grant native ownership authority.
+pub(crate) type EffectCheck = Arc<dyn Fn() -> Result<(), &'static str> + Send + Sync>;
 /// Captured only after a fresh actor read matches this controller's OWN
 /// native Grant receipt. Read-only scope, never constructible from JSON.
 pub(crate) struct CurrentGrant(Status);
@@ -166,6 +168,33 @@ impl Controller {
         let owner = self.clone();
         let _ = tauri::async_runtime::spawn_blocking(move || job.run()).await;
         owner.view()
+    }
+    /// Additional original-selection/cancellation fence. It can only refuse;
+    /// native caller/current journal admission remains in the original actor.
+    pub(crate) async fn request_checked(
+        self: &Arc<Self>,
+        action: Action,
+        configuration: String,
+        check: EffectCheck,
+    ) -> Result<View, &'static str> {
+        let mut job = self
+            .admit(Some(action), Some(configuration), None)
+            .ok_or("ownership_transport_busy")?;
+        job.effect_check = Some(check);
+        let owner = self.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            if owner.mode == Mode::Service {
+                owner.record_view(Phase::WorkerStarted);
+            }
+            let result = job.execute();
+            if let Err(code) = result {
+                owner.state().code = code.into();
+            }
+            result
+        })
+        .await
+        .map_err(|_| "ownership_unconfirmed")??;
+        Ok(self.view())
     }
     /// Image replacement can need another bounded drain after the actor's
     /// 750 ms attempt. Only a matched, definitive refusal admits a NEW Grant;
@@ -365,6 +394,7 @@ impl Controller {
             refresh_absent_native: false,
             basis,
             keep_epoch: None,
+            effect_check: None,
         })
     }
     fn granted_state(state: &State) -> bool {
@@ -432,6 +462,7 @@ struct Job {
     refresh_absent_native: bool,
     basis: Option<Basis>,
     keep_epoch: Option<CurrentGrant>,
+    effect_check: Option<EffectCheck>,
 }
 impl Drop for Job {
     fn drop(&mut self) {
@@ -476,7 +507,7 @@ impl Job {
             return Err("ownership_stopped");
         }
         let held: Arc<dyn Send + Sync> =
-            Arc::new((self.resources.clone(), self.owner.clone(), route.clone()));
+            Arc::new((self.resources.clone(), self.owner.clone(), route.clone(), self.effect_check.clone()));
         let mut call = invocation(args, input);
         self.bound(&mut call)?;
         let step = match args {
@@ -684,6 +715,10 @@ impl Job {
             self.owner.state().code = "ownership_rearm_required".into();
             return Ok(());
         }
+        // All slow help/status work has finished. Check the SAME confirmed
+        // target before reserving any ownership original, then again at spawn.
+        if let Some(check) = &self.effect_check {check()?;}
+        if self.stopped() {return Err("ownership_stopped");}
         let request = Request::DesktopOwnership {
             request_id: uuid::Uuid::new_v4().to_string(),
             action,
@@ -737,6 +772,7 @@ impl Job {
             self.owner.clone(),
             route.clone(),
             registration.resources(),
+            self.effect_check.clone(),
         ));
         let spawned = Arc::new(AtomicBool::new(false));
         let original = spawned.clone();
@@ -745,12 +781,23 @@ impl Job {
             self.owner.state().intent.as_mut().unwrap().complete = true;
             return Err(code);
         }
+        let check = self.effect_check.clone();
+        let check_error = Arc::new(Mutex::new(None));
+        let original_error = check_error.clone();
         let result = run_owned_observed(
             helper,
             &call,
             &[],
             &self.cancel,
             move |command| {
+                // The target/cancellation fence survives registration and any
+                // later ownership-side wait. No mutating child on refusal.
+                if let Some(check) = check {
+                    if let Err(code) = check() {
+                        *original_error.lock().unwrap_or_else(PoisonError::into_inner) = Some(code);
+                        return Err(std::io::Error::other(code));
+                    }
+                }
                 let child = command.spawn()?;
                 original.store(true, Ordering::Release);
                 let _ = registration.bind_original(&child);
@@ -767,6 +814,9 @@ impl Job {
             } else {
                 intent.complete = true;
             }
+        }
+        if let Some(code) = *check_error.lock().unwrap_or_else(PoisonError::into_inner) {
+            return Err(code);
         }
         let bytes = result.map_err(|_| "ownership_unconfirmed")?;
         route.executable()?;

@@ -420,9 +420,9 @@ export function ownershipNotice(view: NotificationOwnership | undefined): string
   if (view.pending) return tr("Background access is unconfirmed. Check the result before making another change.");
   if (view.activation?.review) {
     if (view.activation.review.disposition !== "reviewed_unknown")
-      return tr("An interrupted service mode change needs review in Settings > About. Its original result stays Unknown.");
+      return tr("An earlier change of the background service mode needs review in Settings > About.");
     if (!view.activation.business_ready || !view.activation.active || view.activation.pending || view.status?.state !== "service" || !view.status.identity_current || view.status.rearm_required)
-      return tr("The interrupted change was reviewed. Choose a service mode explicitly in Settings > About.");
+      return tr("The earlier mode change was reviewed. Choose how the service should work in Settings > About.");
   }
   if (view.activation?.pending) return tr("Background activation is unconfirmed. Check the original result before making another change.");
   if (view.activation?.needs_resume) {

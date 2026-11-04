@@ -756,6 +756,16 @@ impl Service {
                     return Err("manual_refresh_required".into());
                 }
             }
+            // Preflight can wait while the original mode charge makes its
+            // ordinary observe busy. Revalidate the SAME opaque continuation.
+            self.shared
+                .mode_transition
+                .validate(&prepared)
+                .await
+                .map_err(str::to_owned)?;
+            if action != ReviewAction::Review && self.shared.read_checks_only() {
+                return Err("manual_refresh_required".into());
+            }
             // Review never reaches this branch. A new background choice may make
             // its explicit Rearm against the current connected service; an absent
             // actor supplies no inferred grant. The native mode helper independently
@@ -772,14 +782,30 @@ impl Service {
                 && self.snapshot().connected
                 && !self.shared.ownership.granted()
             {
+                let check = self.shared.mode_transition.effect_check(&prepared);
+                let shared = self.shared.clone();
+                let checked = Arc::new(move || {
+                    if shared.stopped.load(Ordering::Acquire) {
+                        return Err("ownership_stopped");
+                    }
+                    if shared.read_checks_only() {
+                        return Err("manual_refresh_required");
+                    }
+                    check()?;
+                    if shared.read_checks_only() {
+                        return Err("manual_refresh_required");
+                    }
+                    Ok(())
+                });
                 self.shared
                     .ownership
-                    .request(
-                        Some(zerus_client_core::desktop::ownership::Action::Rearm),
-                        None,
-                        None,
+                    .request_checked(
+                        zerus_client_core::desktop::ownership::Action::Rearm,
+                        prepared.configuration().into(),
+                        checked,
                     )
-                    .await;
+                    .await
+                    .map_err(str::to_owned)?;
                 if !self.shared.ownership.granted() {
                     self.shared
                         .publish_ownership(crate::desktop_ownership::Phase::Result)
@@ -2229,9 +2255,10 @@ pub async fn desktop_service_mode_action(
             ReviewAction::Passive => text(zerus_client_core::text!("Use passive mode")),
         };
         let message = match action {
-            ReviewAction::Review => text(zerus_client_core::text!("The original mode change stays Unknown. This review does not stop or start the service or resume background access. You may need to restart the computer and review again.")),
-            ReviewAction::Background => text(zerus_client_core::text!("This is a new choice after the interrupted change was reviewed. It resumes background access when the current service can confirm it, then checks the registration before using background mode.")),
-            ReviewAction::Passive => text(zerus_client_core::text!("This is a new choice after the interrupted change was reviewed. It stops background work and keeps the service available for the open app. The original interrupted result stays Unknown.")),
+            ReviewAction::Review if display.passive_available => text(zerus_client_core::text!("Zerus still cannot confirm whether the earlier mode change finished. This review does not start or stop the service or resume background work. You may need to restart Windows and review again.")),
+            ReviewAction::Review => text(zerus_client_core::text!("Zerus still cannot confirm whether the earlier mode change finished. This review does not start or stop the service or resume background work. You may need to restart your computer and review again.")),
+            ReviewAction::Background => text(zerus_client_core::text!("This is a new choice, made after the review. Zerus turns on background work once the running service confirms it, then checks the registration before using background mode.")),
+            ReviewAction::Passive => text(zerus_client_core::text!("This is a new choice, made after the review. Zerus stops background work and keeps the service available for the open app. The earlier change still has no confirmed result.")),
         };
         app.dialog().message(format!("{message}\n\n{}: {}\n{}: {}",
             text(zerus_client_core::text!("Original request")), display.request_id,

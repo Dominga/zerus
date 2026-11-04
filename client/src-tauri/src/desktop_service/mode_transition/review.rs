@@ -424,6 +424,25 @@ impl Controller {
         .ok()
         .flatten()
     }
+    /// A read-only veto derived only from this native-confirmed original.
+    /// It retains the exact route/resources through any ownership child loan.
+    pub(in crate::desktop_service) fn effect_check(
+        self: &Arc<Self>,
+        original: &Prepared,
+    ) -> crate::desktop_ownership::EffectCheck {
+        let owner = self.clone();
+        let display = original.display.clone();
+        let action = original.action;
+        let route = original.route.clone();
+        let resources = original.resources.clone();
+        Arc::new(move || {
+            owner.checked_target(&display, action)?;
+            owner
+                .status(route.clone(), &display.configuration, resources.clone())
+                .ok_or("activation_status_unavailable")?;
+            owner.checked_target(&display, action).map(|_| ())
+        })
+    }
     pub(in crate::desktop_service) async fn validate(
         self: &Arc<Self>,
         original: &Prepared,

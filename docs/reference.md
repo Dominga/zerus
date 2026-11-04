@@ -3351,6 +3351,16 @@ what `send` and `cancel` do and answer only the task's stage (a refusal says
 first, with how many there are and how many from the last 7 days. See
 `services/mobile/relay/README.md`.
 
+The phone apps edit only tasks at schema 2 or below, and none of their edits
+changes the stored schema. The exchange imports a phone's changes and raises a
+task that records attempts back to the execution schema before it answers, so
+a phone that receives a task's attempts receives that schema with them and
+shows the task read-only from then on. Its earlier offline edits merge as
+ordinary concurrent edits; they add no attempt fact and never stand for a
+delivery, a refusal or a cancellation. Send now and Cancel from a phone run the
+same checks as `send` and `cancel`, including the hold of an attempt whose
+delivery is unknown.
+
 Agents use the same `hgs task` commands in their own shell. A command run inside
 an agent session acts as that session when it proves it as `hgs self` does (the
 run is live here and the command descends from the agent; renames are

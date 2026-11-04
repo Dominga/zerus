@@ -12,6 +12,7 @@ mod observation;
 pub use observation::{Kind, Operation, RecordedState, Scope};
 pub mod creation_clone;
 pub mod creation_worktree;
+pub mod deferred_input;
 pub mod task_message;
 pub mod task_start;
 

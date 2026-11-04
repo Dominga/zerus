@@ -464,7 +464,10 @@ fn agent(environment: &[u16]) -> io::Result<bool> {
             .position(|c| *c == u16::from(b'='))
             .ok_or(io::ErrorKind::InvalidData)?;
         let key = String::from_utf16(&entry[..equal]).map_err(|_| io::ErrorKind::InvalidData)?;
-        if equal_windows(&key, "HGS_SESSION")? || equal_windows(&key, "HGS_RUN_ID")? {
+        if equal_windows(&key, "HGS_SESSION")?
+            || equal_windows(&key, "HGS_SESSION_ID")?
+            || equal_windows(&key, "HGS_RUN_ID")?
+        {
             return Ok(true);
         }
         // Search paths are ordinary configuration, not injection primitives.

@@ -764,6 +764,7 @@ mod tests {
                 let environment: Vec<_> = std::env::vars()
                     .filter(|(key, _)| {
                         !key.eq_ignore_ascii_case("HGS_SESSION")
+                            && !key.eq_ignore_ascii_case("HGS_SESSION_ID")
                             && !key.eq_ignore_ascii_case("HGS_RUN_ID")
                     })
                     .collect();

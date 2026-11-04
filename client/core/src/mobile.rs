@@ -43,8 +43,9 @@ const HELP_BYTES: usize = 256 * 1024;
 
 /// What the connector's child never inherits: the agent's attribution and
 /// the terminal it may run in.
-pub const CONNECTOR_UNSET: [&str; 8] = [
+pub const CONNECTOR_UNSET: [&str; 9] = [
     "HGS_SESSION",
+    "HGS_SESSION_ID",
     "HGS_RUN_ID",
     "HGS_EXPECTED_ID",
     "HGS_AGENT",

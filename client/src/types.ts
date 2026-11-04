@@ -13,6 +13,7 @@ export type ComputerId = string;
  * are null; times are seconds since the Unix epoch.
  */
 export interface ViewRow {
+  conversation_state?: string;
   /** This device's retained pre-cutover queue, not host acknowledgement. */
   local_read_reply?: boolean;
   local_read_attention?: boolean;

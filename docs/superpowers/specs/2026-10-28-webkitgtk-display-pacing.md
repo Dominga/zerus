@@ -214,14 +214,22 @@ not evidence that these two bugs should remain unfixed.
 
 ## Patch and client status
 
-- `0001-GTK-match-DRM-connectors-by-name.patch`: GTK 3/GTK 4 name lookup with
-  exact-mm compatibility fallback.
-- `0002-GLib-use-display-rate-for-timer-fallback.patch`: display-ID-aware timer
-  rate, fractional monotonic deadlines and no catch-up burst.
-- `0003-GTK3-arm-Wayland-frame-callback-before-GL-swap.patch`: GTK 3.24.52 GL
-  end-paint arms the real surface callback before the buffer swap. It also
-  applies to gtk-3-24 commit `4ef4903ed50e11bb13a34c5ea07523bd136370a4`.
-- [The companion frame-clock correction](../../../client/patches/0004-GDK-complete-paint-before-thaw.patch)
+The complete patch set of the private arch stack is in `client/patches/`.
+WebKit patches 0001, 0002 and 0005 apply to the WebKitGTK 2.54.1 release, and
+GTK patches 0003 and 0004 apply to GTK 3.24.52, each with `patch -p1` from the
+source root.
+
+- [0001](../../../client/patches/0001-GTK-match-DRM-connectors-by-name.patch):
+  GTK 3/GTK 4 name lookup with exact-mm compatibility fallback, in the form
+  under upstream review ([325789](https://bugs.webkit.org/show_bug.cgi?id=325789)).
+- [0002](../../../client/patches/0002-GLib-use-display-rate-for-timer-fallback.patch):
+  display-ID-aware timer rate, fractional monotonic deadlines and no catch-up
+  burst.
+- [0003](../../../client/patches/0003-GTK3-arm-Wayland-frame-callback-before-GL-swap.patch):
+  GTK 3.24.52 GL end-paint arms the real surface callback before the buffer
+  swap. It also applies to gtk-3-24 commit
+  `4ef4903ed50e11bb13a34c5ea07523bd136370a4`.
+- [The companion frame-clock correction 0004](../../../client/patches/0004-GDK-complete-paint-before-thaw.patch)
   completes the paint phase before a backend freeze resumes. Otherwise a busy
   producer can repeat paint after every thaw, starving layout and after-paint
   while a resized window keeps its old child allocation. Apply it to the same
@@ -229,13 +237,69 @@ not evidence that these two bugs should remain unfixed.
   `client/scripts/test-gtk-frame-clock.py`; the native Wayland resize and pacing
   regression is `client/scripts/window-resize-smoke.py` with the `resize_fixture`
   example. Both require an explicitly selected private build.
-- The WebKit patches apply with `git apply --check` to WebKit main commit
-  `6740c3a3f01a5a450fa7698037385790dfa3aa87` as well as the verified 2.54.1
-  source. Main has not been built in this task.
+- [0005](../../../client/patches/0005-Skia-keep-ended-animation-values.patch)
+  backports the WebKitGTK 2.54.2 `SkiaCompositingLayer` change. In 2.54.1 the
+  default Skia compositor painted a layer's own opacity, transform and filter
+  once an animation had ended on the compositor but before the web process
+  committed the final style, so every finite CSS entrance presented one frame
+  near its start values at its end. Its regressions are
+  `client/scripts/task-view-flicker-smoke.html?entrance` and
+  `client/scripts/entrance-survey-smoke.html` under
+  `client/scripts/menu-smoke.py --paint-column 100`. A rebase onto 2.54.2 drops
+  it.
+- WebKit patches 0001 and 0002 apply with `git apply --check` to WebKit main
+  commit `6740c3a3f01a5a450fa7698037385790dfa3aa87` as well as the verified
+  2.54.1 source. Main has not been built in this task.
 - The client disables the near-60 feature through WebKit's public C API using
   runtime symbol lookup. Its Rust bindings predate that API, and dynamic lookup
   avoids a new hard WebKit 2.42 runtime requirement.
   `ZERUS_CLIENT_PERF_PREFERENCE=default` retains the control behavior.
+
+### Building the private prefix
+
+`SOURCES`, `BUILD` and `PREFIX` are private absolute directories, and `ZERUS`
+is a checkout of this repository. The WebKitGTK release is
+`webkitgtk-2.54.1.tar.xz` from webkitgtk.org, SHA-256
+`ea0bbb02dbdbc596874a4e7ad35b66645b3e0a232bd0e4081de5ed92eb0a397d`.
+
+```sh
+cd "$SOURCES" && tar -xJf webkitgtk-2.54.1.tar.xz && cd webkitgtk-2.54.1
+for patch in 0001-GTK-match-DRM-connectors-by-name 0002-GLib-use-display-rate-for-timer-fallback \
+    0005-Skia-keep-ended-animation-values; do
+  patch -p1 < "$ZERUS/client/patches/$patch.patch"
+done
+cmake -S . -B "$BUILD/webkit" -G Ninja -DPORT=GTK -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_INSTALL_LIBDIR=lib -DUSE_GTK4=OFF \
+  -DENABLE_TOOLS=OFF -DENABLE_TESTING=OFF -DENABLE_MINIBROWSER=OFF -DENABLE_WEBDRIVER=OFF \
+  -DENABLE_DOCUMENTATION=OFF -DENABLE_INTROSPECTION=OFF -DENABLE_BUBBLEWRAP_SANDBOX=OFF \
+  -DENABLE_SPEECH_SYNTHESIS=OFF -DUSE_LIBBACKTRACE=OFF
+cmake --build "$BUILD/webkit" && cmake --install "$BUILD/webkit"
+
+cd "$SOURCES" && git clone --depth 1 --branch 3.24.52 https://gitlab.gnome.org/GNOME/gtk.git gtk-3.24.52
+cd gtk-3.24.52
+patch -p1 < "$ZERUS/client/patches/0003-GTK3-arm-Wayland-frame-callback-before-GL-swap.patch"
+patch -p1 < "$ZERUS/client/patches/0004-GDK-complete-paint-before-thaw.patch"
+meson setup "$BUILD/gtk" -Dbuildtype=release -Dprefix="$PREFIX/gtk" -Dlibdir=lib \
+  -Dx11_backend=true -Dwayland_backend=true -Dbroadway_backend=false -Dintrospection=false \
+  -Ddemos=false -Dexamples=false -Dtests=false -Dinstalled_tests=false -Dgtk_doc=false -Dman=false
+meson compile -C "$BUILD/gtk" && meson install -C "$BUILD/gtk"
+```
+
+The result has `lib/`, `libexec/webkit2gtk-4.1/` and the `gtk/` override that
+`tray/linux-launcher.py` requires. It is selected as described in
+[installation](../../installation.md). A WebKit-only prefix without `gtk/` uses
+system GTK and stays at 60 Hz. Keep the previously selected prefix as the
+rollback, and qualify a new one before selecting it:
+
+- `client/scripts/test-gtk-frame-clock.py` in its private Xvfb.
+- `client/scripts/window-resize-smoke.py --webkit-prefix "$PREFIX" --min-fps 130
+  --timer-burst` on the physical display, holding the display lock as its usage
+  text describes. On the arch 144 Hz display this set measures 142.5 Hz rAF and
+  143 Hz GTK paint and after-paint, with every resize transition applied.
+- `task-view-flicker-smoke.html?entrance` and `entrance-survey-smoke.html` under
+  `menu-smoke.py --paint-column 100`, with `LD_LIBRARY_PATH` and
+  `WEBKIT_EXEC_PATH` set as `tray/linux-launcher.py` sets them. No presented
+  frame may dim a finished entrance.
 
 ## Validation
 

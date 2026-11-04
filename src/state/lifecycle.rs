@@ -33,6 +33,7 @@ pub(super) fn agent_help(executable: &str) -> Result<String> {
         command
             .env_remove("HGS_RUN_ID")
             .env_remove("HGS_SESSION")
+            .env_remove("HGS_SESSION_ID")
             .env("KIMI_CODE_NO_AUTO_UPDATE", "1")
             .stdin(Stdio::null())
             .stderr(Stdio::null())
@@ -149,7 +150,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     // The launch's binding is written under the state lock; a fork's inherited
     // project waits until after it.
-    let fork_project = {
+    let (fork_project, session_id) = {
         let _guard = lock(None)?;
         let actual_name = backend::current()
             .pane_info(
@@ -252,6 +253,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
                 "fork_source_name",
                 "fork_lineage",
                 "cleared_conversations",
+                "session_id",
             ] {
                 if let Some(value) = previous.get(key) {
                     record[key] = value.clone();
@@ -286,9 +288,10 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
                 crate::swarm::infer_new_session(&config, &name, &cwd);
             }
         }
-        fork_source
+        let fork_project = fork_source
             .filter(|(source, _)| !source.is_empty())
-            .map(|(source, archive)| (source, archive, record["conversation_id"].clone()))
+            .map(|(source, archive)| (source, archive, record["conversation_id"].clone()));
+        (fork_project, string(&record, "session_id").to_owned())
     };
     // A fork's inherited project waits for a busy catalog outside the state
     // lock, writing only while this run still holds its binding (zerus-wx3k).
@@ -299,6 +302,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     }
     std::env::set_var("HGS_RUN_ID", &token);
     std::env::set_var("HGS_SESSION", &name);
+    std::env::set_var("HGS_SESSION_ID", &session_id);
     std::env::set_var("HGS_STATE_DIR", absolute_root()?);
     std::env::remove_var("HGS_EXPECTED_ID");
     let config = crate::config::Config::load().map_err(|e|e.message)?;

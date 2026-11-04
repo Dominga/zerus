@@ -59,6 +59,9 @@ class Forks(Base):
             transcript=Path(record['transcript']);body=json.loads(transcript.read_text());body['context']=['user request','agent reply'];transcript.write_text(json.dumps(body)+'\n')
             original=path.read_bytes();history=transcript.read_bytes()
             target=self.fork(source)
+            # zerus-ucck P1: a fork is another session with its own durable ID.
+            self.assertNotEqual(self.binding(target)['session_id'],record.get('session_id'))
+            import uuid;self.assertEqual(str(uuid.UUID(self.binding(target)['session_id'])),self.binding(target)['session_id'])
             forked=self.binding(target)
             self.assertNotEqual(forked['conversation_id'],record['conversation_id'])
             self.assertEqual(forked['fork_parent_id'],record['conversation_id'])

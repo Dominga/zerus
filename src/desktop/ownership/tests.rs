@@ -1055,7 +1055,7 @@ fn registration_refresh_pins_its_checked_database_without_delete_sharing() {
     let original = RegistrationGrant::capture(&f.location).unwrap().unwrap();
     drop(f.store); // The retained registration guard is now the sole database pin.
     let path = f.location.root.join("state.sqlite3");
-    let before = platform::FileIdentity::of(&original.database).unwrap();
+    let before = original.database.identity().unwrap();
     let error = std::fs::rename(&path, f.location.root.join("moved.sqlite3")).unwrap_err();
     assert_eq!(
         error.raw_os_error(),
@@ -1064,7 +1064,7 @@ fn registration_refresh_pins_its_checked_database_without_delete_sharing() {
     );
     original.check(&f.location).unwrap();
     let actual = platform::file_identity(&path).unwrap();
-    assert_eq!((before.device, before.inode), (actual.device, actual.inode));
+    assert_eq!(before, (actual.device, actual.inode));
     drop(original);
     let moved = f.location.root.join("moved.sqlite3");
     std::fs::rename(&path, &moved).unwrap();

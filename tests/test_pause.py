@@ -71,7 +71,8 @@ if agent == "kimi" and sys.argv[1:3] == ["session", "list"]:
     print(json.dumps([{"id": p.stem} for p in (home / "history").glob("*.jsonl")]))
     sys.exit(0)
 with open(home / "argv.jsonl", "a") as f:
-    f.write(json.dumps({"agent": agent, "argv": sys.argv[1:], "codex_home": os.environ.get("CODEX_HOME")}) + "\n")
+    f.write(json.dumps({"agent": agent, "argv": sys.argv[1:], "codex_home": os.environ.get("CODEX_HOME"),
+                        "hgs_session_id": os.environ.get("HGS_SESSION_ID")}) + "\n")
 args = sys.argv[1:]
 sid = str(uuid.uuid4())
 for flag in ("--resume", "--session", "resume"):
@@ -1011,6 +1012,75 @@ class Harness(unittest.TestCase):
         path = state / (hashlib.sha256(name.encode()).hexdigest() + ".json")
         path.write_text(json.dumps(record) + "\n")
         return record, path
+
+
+class SessionIdentity(Harness):
+    """zerus-ucck P1: the durable session ID. A class of its own keeps the
+    pinned Lifecycle bodies unchanged (test_pause_signal_trace_source)."""
+
+    # zerus-ucck P1: one durable session ID across pause and resume, a fresh
+    # conversation, rename, archive and restore (a fork gets its own: see
+    # test_fork); a record an older CLI wrote gains one when next written.
+    def test_a_session_keeps_one_durable_id(self):
+        name = self.start()
+        session = self.binding(name)["session_id"]
+        self.assertEqual(str(uuid.UUID(session)), session)
+        launched = lambda: json.loads((self.root / "argv.jsonl").read_text().splitlines()[-1])
+        self.assertEqual(launched()["hgs_session_id"], session)
+        row = next(s for s in json.loads(self.hgs("ls", "--local", "--json"))["sessions"] if s["name"] == name)
+        self.assertEqual(row["session_id"], session)
+        self.assertEqual(json.loads(self.hgs("inspect", name))["session_id"], session)
+        self.hgs("pause", name)
+        self.resume(name)
+        self.assertEqual(self.binding(name)["session_id"], session)
+        self.assertEqual(launched()["hgs_session_id"], session)
+        self.hgs("pause", name)
+        conversation, run = self.binding(name)["conversation_id"], self.binding(name)["run_id"]
+        self.hgs("resume", name, "--fresh", "--expected-run-id", run, "-d")
+        self.wait(lambda: self.binding(name).get("conversation_id") not in (None, conversation))
+        self.assertEqual(self.binding(name)["session_id"], session)
+        # Expected (#1317 R5): an older hgs rebuilds the record on resume
+        # without this field, and the next write here assigns a new ID once;
+        # it then stays through every later write.
+        path = self.root / "state" / (hashlib.sha256(name.encode()).hexdigest() + ".json")
+        older = json.loads(path.read_text()); older.pop("session_id"); path.write_text(json.dumps(older) + "\n")
+        self.hgs("pause", name)
+        reminted = self.binding(name)["session_id"]
+        self.assertNotEqual(reminted, session)
+        self.assertEqual(str(uuid.UUID(reminted)), reminted)
+        self.resume(name)
+        self.assertEqual(self.binding(name)["session_id"], reminted)
+        session = reminted
+        renamed = "claude/p/renamed"
+        self.hgs("rename", name, renamed)
+        self.assertEqual(self.binding(renamed)["session_id"], session)
+        self.hgs("pause", renamed)
+        self.hgs("archive", renamed)
+        archived = next(json.loads(p.read_text()) for p in (self.root / "state" / "archives").glob("*.json")
+                        if json.loads(p.read_text())["name"] == renamed)
+        self.assertEqual(archived["session_id"], session)
+        archive_id = archived["archive_id"]
+        self.hgs("resume", renamed, "--archive", archive_id, "-d")
+        self.wait(lambda: self.binding(renamed).get("activity") == "idle")
+        self.assertEqual(self.binding(renamed)["session_id"], session)
+        # Archiving a record an older hgs wrote gives the archive an ID, and
+        # restoring keeps it (#1317 R2).
+        old, _ = self.saved_v1(tag="legacy-archive")
+        self.hgs("archive", old["name"])
+        kept = next(json.loads(p.read_text()) for p in (self.root / "state" / "archives").glob("*.json")
+                    if json.loads(p.read_text())["name"] == old["name"])
+        self.assertEqual(str(uuid.UUID(kept["session_id"])), kept["session_id"])
+        self.hgs("resume", old["name"], "--archive", kept["archive_id"], "-d")
+        self.wait(lambda: self.binding(old["name"]).get("activity") == "idle")
+        self.assertEqual(self.binding(old["name"])["session_id"], kept["session_id"])
+        legacy, _ = self.saved_v1()
+        self.assertNotIn("session_id", legacy)
+        self.resume(legacy["name"])
+        gained = self.binding(legacy["name"])["session_id"]
+        self.assertEqual(str(uuid.UUID(gained)), gained)
+        self.hgs("pause", legacy["name"])
+        self.resume(legacy["name"])
+        self.assertEqual(self.binding(legacy["name"])["session_id"], gained)
 
 
 class Lifecycle(Harness):

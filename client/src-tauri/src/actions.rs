@@ -1299,6 +1299,41 @@ pub(crate) async fn dispatch_cleanup_reserved(
     .await
 }
 
+/// Only the consumed native Remove confirmation can enter this service path.
+/// Its frozen UUID/input and selected controller never pass through reselection.
+pub(crate) async fn dispatch_cleanup_native(
+    state: &Actions,
+    native: crate::desktop_service::termination_outcome::Confirmation,
+    delayed: Option<(zerus_client_core::end_action::Captured, Arc<Claim>)>,
+) -> Result<Outcome, String> {
+    if blocked() {
+        return Ok(failed(REPLAY_NEEDS_HGS));
+    }
+    let capture = native.capture().clone();
+    let request_id = native
+        .invocation()
+        .request_id
+        .clone()
+        .ok_or(zerus_client_core::termination_cleanup::STATE_CHANGED)?;
+    dispatch_reserved_original(
+        state,
+        capture.target.clone(),
+        Action::Terminate,
+        request_id,
+        |_, _, _| {
+            zerus_client_core::Exit::StartFailed(
+                crate::desktop_service::termination_outcome::UNCONFIRMED.into(),
+            )
+        },
+        CleanupPlan {
+            capture: Some(capture),
+            native: Some(native),
+        },
+        delayed,
+    )
+    .await
+}
+
 /// The Clear handler keeps its composer checks and reply wording; only its
 /// final dispatcher call uses this already elapsed native reservation.
 pub(crate) async fn dispatch_delayed(
@@ -1353,6 +1388,55 @@ async fn dispatch_reserved_plan(
     cleanup: Option<zerus_client_core::termination_cleanup::Capture>,
     delayed: Option<(zerus_client_core::end_action::Captured, Arc<Claim>)>,
 ) -> Result<Outcome, String> {
+    dispatch_reserved_original(
+        state,
+        target,
+        action,
+        request_id,
+        runner,
+        CleanupPlan {
+            capture: cleanup,
+            native: None,
+        },
+        delayed,
+    )
+    .await
+}
+
+struct CleanupPlan {
+    capture: Option<zerus_client_core::termination_cleanup::Capture>,
+    native: Option<crate::desktop_service::termination_outcome::Confirmation>,
+}
+
+async fn dispatch_reserved_original(
+    state: &Actions,
+    target: Target,
+    action: Action,
+    request_id: String,
+    runner: impl Fn(
+            &std::path::Path,
+            &zerus_client_core::Invocation,
+            Option<&crate::readsync::NativeRead>,
+        ) -> zerus_client_core::Exit
+        + Send
+        + 'static,
+    cleanup: CleanupPlan,
+    delayed: Option<(zerus_client_core::end_action::Captured, Arc<Claim>)>,
+) -> Result<Outcome, String> {
+    let CleanupPlan {
+        capture: cleanup,
+        native,
+    } = cleanup;
+    if native.as_ref().is_some_and(|n| {
+        cleanup.as_ref() != Some(n.capture())
+            || target != n.capture().target
+            || action != Action::Terminate
+            || n.invocation().request_id.as_deref() != Some(request_id.as_str())
+    }) {
+        return Ok(failed(
+            zerus_client_core::termination_cleanup::STATE_CHANGED,
+        ));
+    }
     if let Some(refusal) = refused_before_claim(&target, &action) {
         return Ok(failed(refusal));
     }
@@ -1377,13 +1461,21 @@ async fn dispatch_reserved_plan(
         }
         None => state.begin(key, &action),
     };
-    let Some(_running) = running else {
+    let Some(running) = running else {
         return match Lane::of(&action) {
             Lane::Send => Ok(failed(ALREADY_SENDING)),
             Lane::Answer => Ok(failed(ALREADY_ANSWERING)),
             _ => Err(BUSY.into()),
         };
     };
+    // The service case moves this SAME native claim into its I/O resources.
+    // Dropping the async future cannot release it while a helper/pipe survives.
+    let (_running, native_hold): (Option<Running>, Option<Arc<dyn Send + Sync>>) =
+        if native.is_some() {
+            (None, Some(Arc::new(running)))
+        } else {
+            (Some(running), None)
+        };
     let mut read_call = if matches!(action, Action::MarkRead { .. }) {
         Some(state.read_delivery.admit().ok_or(BUSY)?)
     } else {
@@ -1412,7 +1504,7 @@ async fn dispatch_reserved_plan(
     }
     // Building the call may read dropped files, so it runs off the async
     // workers with the call itself.
-    let hgs = default_hgs();
+    let ordinary_hgs = native.is_none().then(default_hgs);
     let (call_target, call_action) = (target.clone(), action.clone());
     let termination: Option<crate::pump::Termination> = (WriteKind::of(&action)
         == WriteKind::Terminate
@@ -1429,39 +1521,77 @@ async fn dispatch_reserved_plan(
     let delayed_receipt = delayed.as_ref().map(|(captured, _)| captured.clone());
     let native_read = read_call.as_mut().map(crate::readsync::Call::native);
     let ran = tauri::async_runtime::spawn_blocking(move || {
-        let plain =
-            |hgs: &std::path::Path, inv: &zerus_client_core::Invocation| runner(hgs, inv, None);
-        if let Some((captured, _)) = &delayed {
-            captured.checked_inspection(plain(&hgs, &captured.inspection()?))?;
+        let mut native = native
+            .map(|confirmation| {
+                confirmation.bind(
+                    native_hold.ok_or(crate::desktop_service::termination_outcome::UNCONFIRMED)?,
+                )
+            })
+            .transpose()?;
+        let hgs = match &native {
+            Some(controller) => controller.executable().to_owned(),
+            None => ordinary_hgs.ok_or(zerus_client_core::termination_cleanup::STATE_CHANGED)?,
+        };
+        let mut inv = {
+            let plain = |hgs: &std::path::Path, inv: &zerus_client_core::Invocation| match &native {
+                Some(controller) => controller.read(inv),
+                None => runner(hgs, inv, None),
+            };
+            if let Some((captured, _)) = &delayed {
+                captured.checked_inspection(plain(&hgs, &captured.inspection()?))?;
+            }
+            if let Some(capture) = &cleanup {
+                crate::termination_cleanup::probe(&hgs, &capture.target, &plain)?;
+                let fresh = crate::termination_cleanup::inspection(
+                    &hgs,
+                    &capture.target,
+                    &capture.machine,
+                    &plain,
+                )?;
+                if !capture.recheck(&fresh) {
+                    return Err(zerus_client_core::termination_cleanup::STATE_CHANGED.into());
+                }
+            }
+            if matches!(call_action, Action::Recovery { .. }) {
+                let inspection = details_invocation(&call_target, None);
+                recovery_preflight(&call_target, &call_action, plain(&hgs, &inspection))?;
+            }
+            if let Some(controller) = &native {
+                controller.invocation().clone()
+            } else if let Some(capture) = &cleanup {
+                capture.invocation(&request_id)?
+            } else if let Some((captured, _)) = &delayed {
+                captured.invocation(&request_id)?
+            } else {
+                invocation(&call_target, &call_action, &request_id)?
+            }
+        };
+        if native.is_none() {
+            if let Some(capture) = &cleanup {
+                zerus_client_core::worktrees::guard(&mut inv.args, &capture.machine);
+            }
         }
-        if let Some(capture) = &cleanup {
-            crate::termination_cleanup::probe(&hgs, &capture.target, &plain)?;
+        let exit = if let Some(mut controller) = native.take() {
+            controller.retain()?;
+            controller.recheck_scope()?;
+            if let Some((captured, _)) = &delayed {
+                captured.checked_inspection(controller.read(&captured.inspection()?))?;
+            }
+            let capture = controller.capture();
             let fresh = crate::termination_cleanup::inspection(
                 &hgs,
                 &capture.target,
                 &capture.machine,
-                &plain,
+                &|_, invocation| controller.read(invocation),
             )?;
-            if !capture.recheck(&fresh) {
+            if !capture.recheck(&fresh) || !controller.current() {
                 return Err(zerus_client_core::termination_cleanup::STATE_CHANGED.into());
             }
-        }
-        if matches!(call_action, Action::Recovery { .. }) {
-            let inspection = details_invocation(&call_target, None);
-            let fresh = plain(&hgs, &inspection);
-            recovery_preflight(&call_target, &call_action, fresh)?;
-        }
-        let mut inv = if let Some(capture) = &cleanup {
-            capture.invocation(&request_id)?
-        } else if let Some((captured, _)) = &delayed {
-            captured.invocation(&request_id)?
+            controller.begin_dispatch(&inv)?;
+            controller.run_native(&inv)
         } else {
-            invocation(&call_target, &call_action, &request_id)?
+            runner(&hgs, &inv, native_read.as_ref())
         };
-        if let Some(capture) = &cleanup {
-            zerus_client_core::worktrees::guard(&mut inv.args, &capture.machine);
-        }
-        let exit = runner(&hgs, &inv, native_read.as_ref());
         drop(native_read);
         Ok::<_, String>((inv, exit))
     })

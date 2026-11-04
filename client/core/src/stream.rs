@@ -190,6 +190,7 @@ pub(crate) fn hgs_command(hgs: &Path, computer: &ComputerId, args: &[&str]) -> C
     command
         .args(args)
         .env_remove("HGS_SESSION")
+        .env_remove("HGS_SESSION_ID")
         .env_remove("HGS_RUN_ID");
     command
 }
@@ -2414,7 +2415,7 @@ mod tests {
             .filter(|(_, value)| value.is_none())
             .map(|(name, _)| name.to_string_lossy().into_owned())
             .collect();
-        assert_eq!(removed, vec!["HGS_RUN_ID", "HGS_SESSION"]);
+        assert_eq!(removed, vec!["HGS_RUN_ID", "HGS_SESSION", "HGS_SESSION_ID"]);
         let local = hgs_command(Path::new("hgs"), &ComputerId::local(), &["-h"]);
         assert_eq!(local.get_args().count(), 1);
     }

@@ -441,13 +441,17 @@ class AgentCompatibility(unittest.TestCase):
             for target in ('linux-x64', 'darwin-arm64', 'win32-x64'):
                 self.assertEqual(compat.agent_target(agent, target), target)
 
-    def test_windows_runs_only_the_session_host_suites(self):
+    def test_windows_runs_only_the_session_host_and_portable_parser_suites(self):
         classes = {'claude': 'NativeWindowsClaude', 'codex': 'NativeWindowsCodex'}
         self.assertEqual({agent for agent, spec in compat.AGENTS.items() if 'win32-x64' in spec['members']}, set(classes))
         for agent in classes:
             spec = compat.AGENTS[agent]
             windows = compat.target_spec(agent, 'win32-x64')
-            self.assertEqual(windows['suites'], ['test_windows_native_agents.' + classes[agent]])
+            expected = ['test_windows_native_agents.' + classes[agent]]
+            if agent == 'claude':
+                expected.append('test_claude_session_start_native.NativeClaudeSessionStartJSON')
+                self.assertIn(expected[-1], compat.AGENTS[agent]['suites'])
+            self.assertEqual(windows['suites'], expected)
             self.assertEqual(windows['variable'], spec['variable'])
             self.assertFalse([name for name in spec['suites'] if 'windows' in name])
             for target in set(spec['members']) - {'win32-x64'}:

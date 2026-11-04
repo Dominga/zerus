@@ -10,6 +10,7 @@
 
 use crate::cache;
 use crate::drafts::{Loaded, StoredDraft};
+use crate::operation_recovery::deferred_input::Checkpoint;
 use crate::text::{Arg, Text};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -526,6 +527,10 @@ pub struct AnswerDraft {
     pub answered: bool,
     pub error: bool,
     pub uncertain: bool,
+    /// The answer's reserved request identity and consent checkpoint,
+    /// saved with the draft before `hgs answer` (zerus-5wmh.66.4.4). Kept
+    /// while the outcome is uncertain; data only, never a permission.
+    pub checkpoint: Option<Checkpoint>,
 }
 
 /// What a submission's consent is compared with, the notice aside
@@ -556,6 +561,7 @@ impl AnswerDraft {
             notice: loaded.notice.clone().unwrap_or_default(),
             uncertain: loaded.draft.uncertain,
             error: loaded.draft.uncertain,
+            checkpoint: loaded.draft.checkpoint.as_deref().cloned(),
             label: label.to_owned(),
             page: state.get("page").and_then(Value::as_u64).unwrap_or(0) as usize,
             answered: state
@@ -622,6 +628,7 @@ impl AnswerDraft {
             label: self.label.clone(),
             sending: self.sending,
             uncertain: self.uncertain,
+            checkpoint: self.checkpoint.clone().map(Box::new),
             ..StoredDraft::default()
         };
         if !self.answered && !self.submitted {
@@ -827,11 +834,12 @@ impl AnswerDraft {
         self.notice = SAVING.to_owned();
     }
 
-    /// That save failed: nothing was sent.
+    /// That save failed: nothing was sent, and its reserved identity goes.
     pub fn sending_failed(&mut self) {
         if !self.submitted && !self.answered {
             self.sending = false;
             self.notice.clear();
+            self.checkpoint = None;
         }
     }
 
@@ -844,6 +852,11 @@ impl AnswerDraft {
         }
         self.error = true;
         self.uncertain = uncertain;
+        // A definite failure sent nothing; an uncertain one keeps the
+        // original identity for its receipt.
+        if !uncertain {
+            self.checkpoint = None;
+        }
         self.notice = if uncertain {
             format!("Delivery is not confirmed. Check Terminal before retrying. {detail}")
         } else {
@@ -854,6 +867,7 @@ impl AnswerDraft {
     /// The host recorded the answer.
     pub fn set_answered(&mut self, optional: bool) {
         self.sending = false;
+        self.checkpoint = None;
         self.answered = true;
         self.error = false;
         self.uncertain = false;
@@ -863,17 +877,22 @@ impl AnswerDraft {
     /// Codex took the answer and will record it.
     pub fn set_submitted(&mut self) {
         self.sending = false;
+        self.checkpoint = None;
         self.submitted = true;
         self.error = false;
         self.uncertain = false;
         self.notice = SUBMITTED_CODEX.to_owned();
     }
 
-    /// Allow retry, after the user checked the agent.
+    /// Allow retry, after the user checked the agent: the explicit
+    /// resolution of an uncertain answer. It also ends the held identity,
+    /// and the next answer reserves its own before its call
+    /// (zerus-5wmh.66.4.4). Nothing reaches it automatically.
     pub fn allow_retry(&mut self) {
         self.uncertain = false;
         self.error = false;
         self.notice.clear();
+        self.checkpoint = None;
     }
 
     pub fn snapshot(&self) -> Snapshot {

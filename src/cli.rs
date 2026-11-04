@@ -131,6 +131,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs @host download --path REMOTE_PATH --output LOCAL_FILE   download a file through configured SSH
        hgs [@host] answer <session> --json   answer an exact pending question from JSON stdin
        hgs [@host] read <session> --json   mark the current reply/attention read (JSON stdin)
+       hgs [@host] subagent retire <session> --json   retire an exact stale child record (JSON stdin)
+       Subagent retirement ABI: subagent-retire-v1
        hgs [@host] notifications <session> --json   shared mute preference (session-notifications-v1)
        hgs [@host] fork <session> [-n name] [-d] [--archive ID]  branch into a new conversation
        hgs [@host] effort <session> --json   change this agent's effort from JSON stdin
@@ -246,7 +248,7 @@ fn local_sessions() -> Result<()> {
 // Repository preparation owns only its checkout and receipt. Like the existing
 // configuration/control commands, it does not require or enable a session host.
 fn needs_local_sessions(command: &str) -> bool {
-    !matches!(command, "ls" | "watch" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "analytics" | "graph" | "wait" | "mobile" | "hooks" | "repository" | "session-action-status")
+    !matches!(command, "ls" | "watch" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "analytics" | "graph" | "wait" | "mobile" | "hooks" | "repository" | "session-action-status" | "subagent")
 }
 
 /// Fails unless this process may run what the processes of a session run:
@@ -457,7 +459,8 @@ fn unix_only(command: &str, unix: bool) -> Result<()> {
 /// `hgs clip`, no `hgs notify`, and its dry runs print the session host's
 /// requests, so its text tells of none of them and does not name tmux.
 /// What this computer's `hgs --help` prints. The creation worktree executor
-/// binds Git to a `/proc/self/fd` link, so only Linux advertises its ABI.
+/// binds Git to a `/proc/self/fd` link, and no qualified seam yet attests the
+/// code a macOS task message child runs, so only Linux advertises those ABIs.
 fn help_text() -> Cow<'static, str> {
     advertised(usage_text(cfg!(unix)), cfg!(target_os = "linux"))
 }
@@ -465,10 +468,13 @@ fn advertised(usage: Cow<'static, str>, linux: bool) -> Cow<'static, str> {
     if linux {
         return usage;
     }
-    let marker = zerus_client_core::desktop::creation_worktree::HELP_MARKER;
+    let markers = [
+        zerus_client_core::desktop::creation_worktree::HELP_MARKER,
+        zerus_client_core::desktop::task_message::HELP_MARKER,
+    ];
     usage
         .lines()
-        .filter(|line| line.trim() != marker)
+        .filter(|line| !markers.contains(&line.trim()))
         .map(|line| format!("{line}\n"))
         .collect::<String>()
         .into()
@@ -759,6 +765,16 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
                 .map_err(|e| Error::new(1, e))?;
             println!("{}", json!({"url":url}));
             Ok(0)
+        }
+        "subagent" => {
+            if args.len() != 3 || args[0] != "retire" || args[2] != "--json" || dry {
+                return Err(Error::new(1,"usage: hgs subagent retire NAME --json (JSON stdin)"));
+            }
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            std::io::stdin().lock().take(8193).read_to_end(&mut bytes)?;
+            let result = state::subagent_lifecycle::retire(&args[1],&bytes).map_err(|e|Error::new(1,e))?;
+            println!("{result}"); Ok(0)
         }
         "ls" => list(&config, args, dry),
         "watch" => crate::watch::run(&config, args, dry),
@@ -1183,6 +1199,8 @@ fn remote(
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'guarded-create-v1' && ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*lifecycle-receipt-status-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to read lifecycle receipts' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "--expect-machine" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'guarded-create-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to continue verified creation' >&2; exit 1; fi",platform::join(&remote_args)))
+    } else if command == "subagent" {
+        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'Subagent retirement ABI: subagent-retire-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to retire stale subagent records' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "repository" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'repository-clone-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to clone repositories' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "wait" {
@@ -2441,6 +2459,7 @@ fn launch(
             format!("HGS_STATE_DIR={}", config.state.display()),
             format!("HGS_EXECUTABLE={executable}"),
             "HGS_RUN_ID=".into(),
+            "HGS_SESSION_ID=".into(),
             "HGS_EXPECTED_ID=".into(),
             "HGS_ARCHIVE_ID=".into(),
             "HGS_FRESH_REPLACES=".into(),
@@ -2491,7 +2510,7 @@ mod tests {
     #[test]
     fn repository_preparation_does_not_admit_session_commands_on_control_consoles() {
         for command in ["ls", "machine", "presence", "swarm", "project", "account",
-            "speech", "analytics", "graph", "wait", "mobile", "hooks", "repository", "session-action-status"] {
+            "speech", "analytics", "graph", "wait", "mobile", "hooks", "repository", "session-action-status", "subagent"] {
             assert!(!needs_local_sessions(command), "{command}");
         }
         for command in ["a", "kill", "send", "send-now", "inspect", "history",
@@ -2767,24 +2786,33 @@ mod tests {
     }
 
     #[test]
-    fn only_linux_advertises_the_creation_worktree_executor() {
+    fn only_linux_advertises_the_creation_worktree_and_task_message_executors() {
         let marker = zerus_client_core::desktop::creation_worktree::HELP_MARKER;
+        let message = zerus_client_core::desktop::task_message::HELP_MARKER;
         let clone = zerus_client_core::desktop::creation_clone::HELP_MARKER;
         assert_eq!(advertised(usage_text(true), true), USAGE);
         let mac = advertised(usage_text(true), false);
         assert!(!mac.lines().any(|line| line.trim() == marker));
+        assert!(!mac.lines().any(|line| line.trim() == message));
         assert!(mac.lines().any(|line| line.trim() == clone), "clone stays POSIX");
         assert_eq!(
             mac,
-            USAGE.replace(
-                "       Desktop creation worktree ABI: desktop-creation-worktree-v1\n",
-                ""
-            )
+            USAGE
+                .replace(
+                    "       Desktop creation worktree ABI: desktop-creation-worktree-v1\n",
+                    ""
+                )
+                .replace(
+                    "       Desktop task message ABI: desktop-task-message-v1\n",
+                    ""
+                )
         );
-        assert_eq!(
-            help_text().lines().any(|line| line.trim() == marker),
-            cfg!(target_os = "linux")
-        );
+        for marker in [marker, message] {
+            assert_eq!(
+                help_text().lines().any(|line| line.trim() == marker),
+                cfg!(target_os = "linux")
+            );
+        }
     }
 
     #[test]

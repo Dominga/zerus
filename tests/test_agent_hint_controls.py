@@ -226,6 +226,19 @@ class HintFixtureControls(unittest.TestCase):
         with self.assertRaises(AssertionError):
             fixture.hint_output(json.dumps(dict(agent_hint='marked')).encode())
 
+    def test_hint_output_accepts_only_the_frozen_context_union_and_refuses_a_second_document(self):
+        combined = json.loads((Path(__file__).parent / 'fixtures/session-start-context.json').read_text(encoding='utf-8'))
+        raw = json.dumps(combined).encode()
+        self.assertTrue(fixture.hint_output(raw))
+        text = combined['hookSpecificOutput']['additionalContext']
+        combined['hookSpecificOutput']['additionalContext'] = text.removeprefix(fixture.HINT + '\n\n')
+        self.assertFalse(fixture.hint_output(json.dumps(combined).encode()))
+        combined['hookSpecificOutput']['additionalContext'] = fixture.HINT + '\n\nunexpected appended context'
+        with self.assertRaises(AssertionError):
+            fixture.hint_output(json.dumps(combined).encode())
+        with self.assertRaises(json.JSONDecodeError):
+            fixture.hint_output(raw + b'\n' + raw)
+
     def test_output_without_complete_forwarding_is_unknown(self):
         before, after = invocation(b'actual stdout')
         for field, value in (('forwarded', 0), ('error', True), ('overflow', True), ('sha256', '0' * 64)):

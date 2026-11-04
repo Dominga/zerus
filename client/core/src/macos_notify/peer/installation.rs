@@ -10,6 +10,7 @@ use std::{
 
 use objc2::rc::autoreleasepool;
 
+mod original_child;
 mod service;
 pub use service::{select_for_service, ChildObservation, ServiceSelection};
 
@@ -60,6 +61,19 @@ pub fn select_own() -> Result<Selection, Refusal> {
     snapshot().map(|original| Selection { original })
 }
 impl Selection {
+    /// Observe only the caller's still-owned, unreaped helper before private
+    /// stdin. Refusal closes its input; the caller retains that SAME Child and
+    /// all pipe/worker charges for stop/reap. Off UI/actor threads, with no
+    /// outer timeout releasing those resources. This does not fence later exec
+    /// or supply effect authority, and cannot authenticate a caller's PID/path.
+    pub(crate) fn observe_original_helper(
+        &self,
+        child: &mut std::process::Child,
+    ) -> Result<(), Refusal> {
+        original_child::observe(child, &self.original.service, || {
+            same_generation(&self.original, &snapshot()?)
+        })
+    }
     /// CLI routing only, after actual running-self and sealed-pair verification.
     /// A caller must not treat this path as a lease or native effect permission.
     pub fn service_executable(&self) -> &Path {

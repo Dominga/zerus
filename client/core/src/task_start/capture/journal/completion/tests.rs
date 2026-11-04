@@ -19,7 +19,10 @@ fn saved(f: &Fixture) -> Saved {
     .unwrap()
     .unwrap()
 }
-fn submitted(f: &Fixture, saved: &Saved) -> (wire::Query, wire::Lookup) {
+pub(in crate::task_start::capture::journal) fn submitted(
+    f: &Fixture,
+    saved: &Saved,
+) -> (wire::Query, wire::Lookup) {
     let query = saved.query(f.intent.scope.clone(), READ).unwrap();
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../../../../fixtures/desktop-operation-port-v1.json"
@@ -277,6 +280,7 @@ fn serialized_marker_version_never_substitutes_for_exact_marker_bytes() {
     saved.disk = publish(
         &saved.slot,
         &saved.disk,
+        &lock,
         &record,
         || lock_current(&saved.slot, &lock),
         |f, _| f.sync_all(),
@@ -319,6 +323,7 @@ fn settlement_and_completed_phases_refuse_offer_before_any_publication_attempt()
         journal.saved.disk = publish(
             &journal.saved.slot,
             &journal.saved.disk,
+            &journal.lock,
             &record,
             || lock_current(&journal.saved.slot, &journal.lock),
             |f, _| f.sync_all(),

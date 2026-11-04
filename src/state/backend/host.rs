@@ -137,6 +137,7 @@ const SESSION_CONTEXT: &[&str] = &[
     "HGS_HOST_SESSION",
     "HGS_HOST_PANE",
     "HGS_SESSION",
+    "HGS_SESSION_ID",
     "HGS_AGENT",
     "HGS_RUN_ID",
     "HGS_EXPECTED_ID",

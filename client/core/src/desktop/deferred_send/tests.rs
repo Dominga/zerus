@@ -185,7 +185,7 @@ fn only_a_plain_send_matching_its_checkpoint_verifies() {
                 "attachments",
                 json!([{"name":"a.txt","mime":"text/plain","data_base64":"!!","reference":"[File #1]"}]),
             ),
-            "invalid_deferred_send_original",
+            "deferred_send_message_refused",
         ),
         (
             "not json",
@@ -253,6 +253,7 @@ fn only_a_drained_submitted_receipt_or_the_no_spawn_boundary_settles() {
     let submitted = Some(Outcome {
         request_id: plan.request_id.clone(),
         status: SUBMITTED.into(),
+        input_sha256: plan.input_sha256.clone(),
     });
     let recorded = receipt(&verified, Phase::Recorded, true, "", submitted.clone());
     assert!(recorded.valid() && recorded.matches(&intent));
@@ -262,6 +263,11 @@ fn only_a_drained_submitted_receipt_or_the_no_spawn_boundary_settles() {
     assert!(failed.valid());
     assert_eq!(failed.result(plan), Some(Err(NOT_STARTED.into())));
     assert!(failed.not_started(plan));
+    // An undrained Failed receipt is a valid shape but never settles.
+    let undrained = receipt(&verified, Phase::Failed, false, NOT_STARTED, None);
+    assert!(undrained.valid());
+    assert_eq!(undrained.result(plan), None);
+    assert!(!undrained.not_started(plan));
     // Unknown, running and undrained never settle.
     for unsettled in [
         receipt(
@@ -290,15 +296,23 @@ fn only_a_drained_submitted_receipt_or_the_no_spawn_boundary_settles() {
         assert!(!invalid.valid(), "{invalid:?}");
         assert_eq!(invalid.result(plan), None);
     }
-    // In-progress, or another request's outcome, never settles as recorded.
+    // In-progress, another request's outcome or another stdin's never
+    // settles as recorded.
     for outcome in [
         Outcome {
             request_id: plan.request_id.clone(),
             status: "in_progress".into(),
+            input_sha256: plan.input_sha256.clone(),
         },
         Outcome {
             request_id: "00000000-0000-4000-8000-000000000001".into(),
             status: SUBMITTED.into(),
+            input_sha256: plan.input_sha256.clone(),
+        },
+        Outcome {
+            request_id: plan.request_id.clone(),
+            status: SUBMITTED.into(),
+            input_sha256: "d".repeat(64),
         },
     ] {
         let other = receipt(&verified, Phase::Recorded, true, "", Some(outcome));
@@ -312,7 +326,7 @@ fn only_a_drained_submitted_receipt_or_the_no_spawn_boundary_settles() {
     // The declared plan digest never overrides a conflicting original field
     // the binding repeats, for Recorded and Failed alike.
     type Change = fn(&mut Binding);
-    let changes: [(&str, Change); 6] = [
+    let changes: [(&str, Change); 7] = [
         ("session", |b| b.session = "claude/other-send".into()),
         ("request", |b| {
             b.request_id = "00000000-0000-4000-8000-000000000001".into()
@@ -323,6 +337,7 @@ fn only_a_drained_submitted_receipt_or_the_no_spawn_boundary_settles() {
         }),
         ("input", |b| b.input_sha256 = "d".repeat(64)),
         ("message", |b| b.message_sha256 = "d".repeat(64)),
+        ("plan digest", |b| b.plan_sha256 = "e".repeat(64)),
     ];
     for (name, change) in changes {
         let mut changed = recorded.clone();
@@ -400,6 +415,20 @@ fn a_lookup_matches_only_its_own_query() {
         assert!(receipt.valid());
     }
     assert!(!foreign.matches(&query));
+    // Another session's receipt, or an invalid one, is never this query's.
+    let mut other_session = found.clone();
+    if let Some(receipt) = other_session.receipt.as_mut() {
+        receipt.binding.session = "claude/other-send".into();
+        assert!(receipt.valid());
+    }
+    assert!(!other_session.matches(&query));
+    let mut invalid = found.clone();
+    if let Some(receipt) = invalid.receipt.as_mut() {
+        receipt.phase = Phase::Recorded;
+        receipt.drained = false;
+        assert!(!receipt.valid());
+    }
+    assert!(!invalid.matches(&query));
     // The historical admission epoch stays separate from the current scope.
     let mut admitted_earlier = found.clone();
     if let Some(receipt) = admitted_earlier.receipt.as_mut() {
@@ -420,4 +449,207 @@ fn the_native_request_names_its_reserved_identity() {
     assert_eq!(value["op"], "deferred_send");
     let back: super::super::ui_requests::Request = serde_json::from_value(value).unwrap();
     assert_eq!(back, request);
+}
+
+/// The CLI's `input_receipts` record for `plan`, as `hgs send` writes it.
+fn cli_receipt(plan: &Plan, status: &str) -> Value {
+    json!({"request_id": plan.request_id, "name": plan.session, "run_id": plan.run_id,
+        "conversation_id": plan.conversation_id, "first_message": false,
+        "digest": plan.input_sha256, "status": status, "submitted_at": 1.5,
+        "submitted_text": "see [File #1]", "text": "see [File #1]", "attachments": [],
+        "transport": "terminal"})
+}
+
+#[test]
+fn only_this_originals_exact_submitted_cli_receipt_is_an_outcome() {
+    let verified = intent().verify().unwrap();
+    let plan = &verified.plan;
+    let bytes = |value: &Value| serde_json::to_vec(value).unwrap();
+    let outcome = Outcome::from_receipt(plan, &bytes(&cli_receipt(plan, SUBMITTED))).unwrap();
+    assert!(outcome.matches(plan));
+    assert_eq!(outcome.input_sha256, plan.input_sha256);
+    // Each field of another record: the CLI keeps an earlier submitted record
+    // when a later submit of the same ID with other content is refused.
+    for (field, value) in [
+        ("request_id", json!("00000000-0000-4000-8000-000000000001")),
+        ("name", json!("claude/other-send")),
+        ("run_id", json!("run-2")),
+        ("conversation_id", json!("conversation-2")),
+        ("digest", json!("d".repeat(64))),
+        ("transport", json!("native")),
+        ("status", json!("failed")),
+    ] {
+        let mut other = cli_receipt(plan, SUBMITTED);
+        other[field] = value;
+        assert_eq!(
+            Outcome::from_receipt(plan, &bytes(&other)),
+            Err(RECEIPT_MISMATCH),
+            "{field}"
+        );
+    }
+    assert_eq!(
+        Outcome::from_receipt(plan, &bytes(&cli_receipt(plan, "in_progress"))),
+        Err(RECEIPT_IN_PROGRESS)
+    );
+    // Not a readable receipt: missing or duplicate fields, not JSON, or over
+    // the bound.
+    let mut missing = cli_receipt(plan, SUBMITTED);
+    missing.as_object_mut().unwrap().remove("digest");
+    let duplicate = String::from_utf8(bytes(&cli_receipt(plan, SUBMITTED)))
+        .unwrap()
+        .replacen('{', "{\"digest\":\"x\",", 1);
+    let mut padded = cli_receipt(plan, SUBMITTED);
+    padded["submitted_text"] = json!("x".repeat(RECEIPT_BYTES));
+    for unreadable in [
+        bytes(&missing),
+        duplicate.into_bytes(),
+        b"{".to_vec(),
+        bytes(&padded),
+    ] {
+        assert_eq!(
+            Outcome::from_receipt(plan, &unreadable),
+            Err(RECEIPT_INVALID)
+        );
+    }
+}
+
+#[test]
+fn verify_refuses_what_the_cli_itself_would_refuse_before_any_spawn() {
+    let base = intent();
+    let cp: Checkpoint = serde_json::from_str(&base.checkpoint).unwrap();
+    let original: Value = serde_json::from_str(&base.original).unwrap();
+    let with = |key: &str, value: Value| {
+        let mut changed = original.clone();
+        changed[key] = value;
+        intent_of(&cp, &changed.to_string())
+    };
+    let file = |name: &str, mime: &str, data: &str, reference: &str| json!({"name": name, "mime": mime, "data_base64": data, "reference": reference});
+    let hello = STANDARD.encode(b"hello");
+    let cases: Vec<(&str, Intent)> = vec![
+        ("empty", {
+            let mut empty = original.clone();
+            empty["text"] = json!("   ");
+            empty["attachments"] = json!([]);
+            intent_of(&cp, &empty.to_string())
+        }),
+        ("control", with("text", json!("see \u{1b}[31m"))),
+        ("slash command", with("text", json!("  /compact now"))),
+        ("shell", with("text", json!("!ls"))),
+        (
+            "nine files",
+            with(
+                "attachments",
+                json!(vec![file("a.txt", "text/plain", &hello, ""); 9]),
+            ),
+        ),
+        (
+            "empty file",
+            with(
+                "attachments",
+                json!([file("a.txt", "text/plain", "", "[File #1]")]),
+            ),
+        ),
+        (
+            "unnamed",
+            with(
+                "attachments",
+                json!([file("", "text/plain", &hello, "[File #1]")]),
+            ),
+        ),
+        (
+            "long name",
+            with(
+                "attachments",
+                json!([file(&"n".repeat(256), "text/plain", &hello, "[File #1]")]),
+            ),
+        ),
+        (
+            "control mime",
+            with(
+                "attachments",
+                json!([file("a.txt", "text/\u{7}", &hello, "[File #1]")]),
+            ),
+        ),
+        (
+            "bad label",
+            with(
+                "attachments",
+                json!([file("a.txt", "text/plain", &hello, "[Img #1]")]),
+            ),
+        ),
+        (
+            "zero label",
+            with(
+                "attachments",
+                json!([file("a.txt", "text/plain", &hello, "[File #0]")]),
+            ),
+        ),
+        (
+            "duplicate label",
+            with(
+                "attachments",
+                json!([
+                    file("a.txt", "text/plain", &hello, "[File #1]"),
+                    file("b.txt", "text/plain", &hello, "[File #1]")
+                ]),
+            ),
+        ),
+        ("empty run", {
+            // A checkpoint with no run, whose stdin repeats it.
+            let mut runless = cp.clone();
+            runless.run_id.clear();
+            let mut empty = original.clone();
+            empty["expected_run_id"] = json!("");
+            intent_of(&runless, &empty.to_string())
+        }),
+    ];
+    for (name, intent) in cases {
+        assert_eq!(
+            intent.verify().err(),
+            Some("deferred_send_message_refused"),
+            "{name}"
+        );
+    }
+    // An absolute path in the first token is ordinary text, as for the CLI.
+    let path = "/srv/example/file.png see [File #1]";
+    let cp = reserved(path, &[FILE], checkpoint::Kind::Send);
+    let original = stdin(&cp, path, &[FILE]).to_string();
+    assert!(intent_of(&cp, &original).verify().is_ok());
+}
+
+#[test]
+fn a_checkpoint_that_decodes_but_is_not_a_valid_send_checkpoint_is_refused() {
+    let base = intent();
+    let checkpoint: Value = serde_json::from_str(&base.checkpoint).unwrap();
+    for (field, value) in [
+        ("receipts", json!("question_receipts")),
+        ("version", json!(2)),
+        ("start", json!("resume")),
+        (
+            "question",
+            json!({"id": "q", "identity_sha256": "c".repeat(64)}),
+        ),
+        ("message_sha256", json!("not-a-digest")),
+    ] {
+        let mut changed = checkpoint.clone();
+        changed[field] = value;
+        let intent = Intent {
+            checkpoint: changed.to_string(),
+            ..base.clone()
+        };
+        assert_eq!(
+            intent.verify().err(),
+            Some("invalid_deferred_send_checkpoint"),
+            "{field}"
+        );
+    }
+}
+
+#[test]
+fn a_plan_needs_a_run() {
+    let mut plan = intent().verify().unwrap().plan;
+    assert!(plan.valid());
+    plan.run_id.clear();
+    assert!(!plan.valid());
+    assert_eq!(plan.fingerprint(), None);
 }

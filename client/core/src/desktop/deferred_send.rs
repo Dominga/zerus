@@ -31,6 +31,22 @@ pub const SUBMITTED: &str = "submitted";
 /// The closed code of an original child that never started: refused before
 /// any child existed. Nothing ran, so the message counts as never sent.
 pub const NOT_STARTED: &str = "deferred_send_not_started";
+/// The largest CLI input receipt read.
+pub const RECEIPT_BYTES: usize = 256 << 10;
+/// The CLI receipt says `in_progress`: the input may have reached the
+/// terminal without its Enter.
+pub const RECEIPT_IN_PROGRESS: &str = "deferred_send_in_progress";
+/// The CLI receipt is not this original's: another session, run,
+/// conversation, stdin, transport or status.
+pub const RECEIPT_MISMATCH: &str = "deferred_send_receipt_mismatch";
+/// The CLI receipt is oversized or not a readable receipt.
+pub const RECEIPT_INVALID: &str = "deferred_send_receipt_invalid";
+/// The CLI's own bounds on one send, mirrored so that an original the CLI
+/// would refuse never spawns.
+const MAX_TEXT: usize = 64 * 1024;
+const MAX_FILES: usize = 8;
+const MAX_FILE: usize = 10 * 1024 * 1024;
+const MAX_TOTAL: usize = 20 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -209,6 +225,79 @@ fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+/// The CLI's own `validate()` of `hgs send`, mirrored: the decoded
+/// attachments, or `None` for a message the CLI would refuse.
+fn cli_rules(send: &Send) -> Option<Vec<Vec<u8>>> {
+    let text = &send.text;
+    if send.expected_run_id.is_empty()
+        || send.expected_run_id.len() > 128
+        || text.len() > MAX_TEXT
+        || text
+            .chars()
+            .any(|c| c.is_control() && c != '\n' && c != '\t')
+    {
+        return None;
+    }
+    // A slash command's first token is /name; an absolute path has another
+    // slash in that token and is ordinary text.
+    let start = text.trim_start();
+    let first = start.split_whitespace().next().unwrap_or("");
+    if first
+        .strip_prefix('/')
+        .is_some_and(|name| !name.contains('/'))
+        || start.starts_with('!')
+    {
+        return None;
+    }
+    if send.attachments.len() > MAX_FILES || (text.trim().is_empty() && send.attachments.is_empty())
+    {
+        return None;
+    }
+    let mut references = std::collections::HashSet::new();
+    let mut total = 0;
+    let mut files = Vec::with_capacity(send.attachments.len());
+    for attachment in &send.attachments {
+        let reference = attachment.reference.as_str();
+        if !reference.is_empty() && (!reference_label(reference) || !references.insert(reference)) {
+            return None;
+        }
+        if attachment.name.is_empty()
+            || attachment.name.len() > 255
+            || attachment.name.chars().any(char::is_control)
+            || attachment.mime.len() > 100
+            || attachment.mime.chars().any(char::is_control)
+            || attachment.data_base64.len() > MAX_FILE.div_ceil(3) * 4
+        {
+            return None;
+        }
+        let bytes = STANDARD.decode(&attachment.data_base64).ok()?;
+        if bytes.is_empty() || bytes.len() > MAX_FILE {
+            return None;
+        }
+        total += bytes.len();
+        if total > MAX_TOTAL {
+            return None;
+        }
+        files.push(bytes);
+    }
+    Some(files)
+}
+/// `[Image #n]` or `[File #n]`, n from 1 with at most nine digits.
+fn reference_label(value: &str) -> bool {
+    let Some(inner) = value.strip_prefix('[').and_then(|v| v.strip_suffix(']')) else {
+        return false;
+    };
+    let Some(number) = inner
+        .strip_prefix("Image #")
+        .or_else(|| inner.strip_prefix("File #"))
+    else {
+        return false;
+    };
+    (1..=9).contains(&number.len())
+        && number.bytes().all(|b| b.is_ascii_digit())
+        && !number.starts_with('0')
+}
+
 impl Intent {
     pub fn verify(self) -> Result<Verified, &'static str> {
         if !self.scope.valid()
@@ -247,14 +336,7 @@ impl Intent {
         if !send.expected_compaction_id.is_empty() {
             return Err("deferred_send_kind_refused");
         }
-        let mut files = Vec::with_capacity(send.attachments.len());
-        for attachment in &send.attachments {
-            files.push(
-                STANDARD
-                    .decode(&attachment.data_base64)
-                    .map_err(|_| "invalid_deferred_send_original")?,
-            );
-        }
+        let files = cli_rules(&send).ok_or("deferred_send_message_refused")?;
         let message = deferred_input::message_sha256(
             &send.text,
             send.attachments.iter().zip(&files).map(|(a, bytes)| {
@@ -353,17 +435,66 @@ impl Phase {
     }
 }
 
-/// The closed outcome a matching `submitted` receipt proves: no text, files
-/// or terminal data.
+/// The closed outcome a matching `submitted` CLI receipt proves: its request
+/// ID, status and stdin digest; no text, files or terminal data.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Outcome {
     pub request_id: String,
     pub status: String,
+    /// The CLI receipt's `digest`: the SHA-256 of the exact stdin it
+    /// submitted.
+    pub input_sha256: String,
+}
+/// The fields of the CLI's `input_receipts/<request_id>.json` record this rule
+/// reads; others are kept by the CLI and ignored here. A duplicate of any of
+/// these refuses.
+#[derive(Deserialize)]
+struct CliReceipt {
+    request_id: String,
+    name: String,
+    run_id: String,
+    conversation_id: String,
+    digest: String,
+    status: String,
+    transport: String,
 }
 impl Outcome {
     pub fn matches(&self, plan: &Plan) -> bool {
-        self.request_id == plan.request_id && self.status == SUBMITTED
+        self.request_id == plan.request_id
+            && self.status == SUBMITTED
+            && self.input_sha256 == plan.input_sha256
+    }
+    /// The one rule for a matching CLI receipt. The CLI keys its receipt by
+    /// request ID alone and keeps an earlier `submitted` record when a later
+    /// submit with other content or another session is refused, so the
+    /// receipt proves this original only when its session (`name`), run,
+    /// conversation, stdin digest and terminal transport are all this
+    /// plan's and its status is `submitted`. `in_progress` and anything else
+    /// is never an outcome.
+    pub fn from_receipt(plan: &Plan, bytes: &[u8]) -> Result<Self, &'static str> {
+        if bytes.len() > RECEIPT_BYTES {
+            return Err(RECEIPT_INVALID);
+        }
+        let receipt: CliReceipt = serde_json::from_slice(bytes).map_err(|_| RECEIPT_INVALID)?;
+        let exact = receipt.request_id == plan.request_id
+            && receipt.name == plan.session
+            && receipt.run_id == plan.run_id
+            && receipt.conversation_id == plan.conversation_id
+            && receipt.digest == plan.input_sha256
+            && receipt.transport == "terminal";
+        if !exact {
+            return Err(RECEIPT_MISMATCH);
+        }
+        match receipt.status.as_str() {
+            SUBMITTED => Ok(Self {
+                request_id: receipt.request_id,
+                status: receipt.status,
+                input_sha256: receipt.digest,
+            }),
+            "in_progress" => Err(RECEIPT_IN_PROGRESS),
+            _ => Err(RECEIPT_MISMATCH),
+        }
     }
 }
 

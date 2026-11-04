@@ -183,13 +183,25 @@ The first, `deferred_send` (`desktop::deferred_send`, ABI
   checkpoint whose request ID, run and conversation the stdin repeats, and
   whose message digest the stdin's text and decoded attachments reproduce.
   A plain send only: no subagent target or compaction. v1 refuses any `@`
-  or other-machine session. An intent whose service line does not fit the
-  control frame stays on the direct path, decided before any offer.
+  or other-machine session. The CLI's own send rules are mirrored, so an
+  original the CLI would refuse never spawns: a run, a non-empty message
+  within 64 KiB without control characters, no `/` or `!` command, at most
+  eight attachments with valid names, types and labels, each 10 MiB and
+  20 MiB in total. An intent whose service line does not fit the control
+  frame stays on the direct path, decided before any offer.
 - **Plan and binding.** The fixed `send <session> --json` call. The plan's
   input digest is the SHA-256 of the exact stdin, which is the digest the
   CLI's receipt records.
 - **Receipt.** Recorded only from the CLI's own matching `submitted`
   receipt: a submission to the terminal, never proof the agent read it.
+  The wire owns the matching rule (`Outcome::from_receipt`). The CLI keys
+  `input_receipts/<request_id>.json` by request ID alone and keeps an
+  earlier `submitted` record when a later submit of that ID with other
+  content or another session is refused. So a record matches only when its
+  session (`name`), run, conversation, stdin digest and terminal transport
+  are all the plan's and its status is `submitted`. The outcome carries
+  that digest. `in_progress`, a duplicate or missing field, or more than
+  256 KiB is never an outcome.
   Failed only at the no-spawn boundary (`deferred_send_not_started`).
   Everything else after a possibly started child is Unknown and never
   resent: `in_progress`, a missing, corrupt, mismatched, inaccessible or
@@ -199,8 +211,9 @@ The first, `deferred_send` (`desktop::deferred_send`, ABI
 
 No actor executes it yet: the native frontend lane carries the request on
 its own ordered lane, and the service refuses it
-(`deferred_send_unsupported`) until the actor lands. Its help marker is not
-advertised before then.
+(`deferred_send_unsupported`) until the actor lands; an unauthenticated
+hello naming it gets `frontend_authentication_required`, like its siblings.
+Its help marker is not advertised before then.
 
 A draft holds one such identity until it is resolved. A definite outcome
 resolves it, as does a cancellation before its call was dispatched or, for a

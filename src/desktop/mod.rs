@@ -1230,6 +1230,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                         | "creation_launch"
                                         | "task_message"
                                         | "task_message_input_release"
+                                        | "deferred_send"
                                         | "task_start_reconcile"
                                 )
                             )

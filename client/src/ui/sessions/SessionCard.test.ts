@@ -18,6 +18,7 @@ import type { Session } from "./types";
 import { toSession } from "../../store/catalog";
 import { currentChildren, workingChildren } from "./subagents";
 import { groupRows } from "./group-rows";
+import { stripChildStatus } from "./SessionList";
 import contract from "../../../../mobile/android/app/src/test/resources/subagent-caption-contract.json";
 
 const row = (extra: Partial<Session> = {}): Session => ({
@@ -69,6 +70,8 @@ describe("recorded child captions shared with Android", () => {
     });
     expect(list.flatMap((item) => item.type === "child" ? [childStatus(item.child, currentChildren(item.parent, example.online)).caption] : []))
       .toEqual(captions.map((status) => status.caption));
+    // The collapsed strip has a separate tooltip/badge binding from ChildCard.
+    expect(list.flatMap((item) => item.type === "child" ? [stripChildStatus(item)] : [])).toEqual(captions);
     expect(JSON.stringify(session)).toBe(before);
     if (example.current) expect(list[0].type === "card" && list[0].session).toBe(session);
   });

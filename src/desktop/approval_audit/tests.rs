@@ -264,6 +264,54 @@ fn sqlite_connection_must_match_the_original_guard_even_if_its_path_is_unchanged
 }
 #[cfg(unix)]
 #[test]
+fn restoring_the_checked_path_cannot_hide_a_different_sqlite_file() {
+    let f = Fixture::new();
+    let other = Fixture::new();
+    for (fixture, count) in [(&f, 1), (&other, 2)] {
+        let db = fixture.rows(count);
+        db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;")
+            .unwrap();
+    }
+    let path = f.reader.root.join("journal.sqlite3");
+    let original = f.reader.root.join("original.sqlite3");
+    let replacement = other.reader.root.join("journal.sqlite3");
+    let checked = platform::file_identity(&path).unwrap();
+    // A is checked, B is opened at the SAME filename, then A is restored.
+    // Both stat checks see A; only SQLite can identify its retained B.
+    fs::rename(&path, &original).unwrap();
+    fs::rename(&replacement, &path).unwrap();
+    let db = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM attempts", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    fs::rename(&path, &replacement).unwrap();
+    fs::rename(&original, &path).unwrap();
+    let restored = platform::file_identity(&path).unwrap();
+    assert_eq!(
+        (restored.device, restored.inode),
+        (checked.device, checked.inode)
+    );
+    let journal = Journal {
+        identity: (checked.device, checked.inode),
+        token: uuid::Uuid::new_v4().to_string(),
+        db,
+    };
+    assert_eq!(
+        journal.check(&f.reader.root).unwrap_err().to_string(),
+        "audit SQLite file changed"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn replacement_cannot_rebind_an_old_detail_id_or_cursor() {
     let mut f = Fixture::new();
     let db = f.rows(1);

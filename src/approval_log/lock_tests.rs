@@ -54,14 +54,14 @@ fn probe_child() {
     );
     if owner == 0 {
         assert_eq!(
-            i32::from(lock.l_type),
-            libc::F_UNLCK,
+            i64::from(lock.l_type),
+            i64::from(libc::F_UNLCK),
             "original SQLite lock was not released"
         );
     } else {
         assert_ne!(
-            i32::from(lock.l_type),
-            libc::F_UNLCK,
+            i64::from(lock.l_type),
+            i64::from(libc::F_UNLCK),
             "live SQLite connection lost its shared lock"
         );
         assert_eq!(lock.l_pid, owner, "lock belongs to a different process");

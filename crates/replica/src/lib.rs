@@ -3,6 +3,7 @@
 //! a Loro upgrade or a schema change happens here once.
 mod attachment;
 mod error;
+pub mod execution;
 pub mod ids;
 mod ops;
 pub mod phone;

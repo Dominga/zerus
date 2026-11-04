@@ -3015,6 +3015,23 @@ Task list rows also include a bounded `history_revision` token. A journal-only
 note or delivery receipt changes it, so the existing task stream can refresh the
 selected inspector without transferring the journal or adding a polling loop.
 
+Task views (`task get`, history pages and list rows) include an `execution`
+object for a task that is In progress or recorded execution attempts:
+`requirement` (the task's requirement revision, from 1), `attempts`, `current`
+and, when two attempts claim the same generation, `conflict: true`, which
+nothing resolves automatically. `current` is the attempt the task's execution is
+about: its `id` and `generation`, `origin` (`send`, `start`, `handoff` or
+`reopen`), `executor`, `request_id`, the `requirement` it executes, `phase`
+(`submitted`, `unknown`, `running`, `paused`, `ready`, `cancelled`, or
+`unconfirmed` when nothing shows who executes it), `at`, and `began_at` and
+`progress_at` when known. History written before attempts were recorded reads
+as `legacy: true` with generation 0, from the last send and whether the session
+holding the task began it; no start, child or result is invented. A session's
+Stop, idle time, pause or elapsed time is never an attempt event and never
+moves a task. Attempts are kept beside the history under task schema 6, which a
+reader that does not know them shows read-only. This version reads attempts;
+recording them comes with the stale-report guard.
+
 Plain `task list` still returns every task for existing clients. With `--stage`
 and `--limit` (1–200) it returns one page of that stage in the same order and
 with the same rows, except that a prompt longer than 2 KiB is cut at a

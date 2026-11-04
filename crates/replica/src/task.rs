@@ -5,6 +5,9 @@ use crate::attachment::{
     check_attachments, TaskAttachment, BASE_TASK_SCHEMA, DISCUSSION_TASK_SCHEMA, NAMED_TASK_SCHEMA,
     TASK_SCHEMA,
 };
+use crate::execution::{
+    self, check_attempt, check_event, Attempt, AttemptEvent, MAX_ATTEMPTS, MAX_ATTEMPT_EVENTS,
+};
 use crate::schema::{
     check_text, Actor, LogEntry, SessionKey, Stage, Target, TaskView, TaskWorker, MAX_DOCUMENT,
     SCHEMA,
@@ -325,6 +328,51 @@ impl TaskDoc {
         string(&self.fields(), "session").and_then(|s| serde_json::from_str(&s).ok())
     }
 
+    /// The requirement revision: 1 until an edit of the requirement counts one.
+    pub fn requirement(&self) -> u64 {
+        integer(&self.fields(), "requirement")
+            .and_then(|n| u64::try_from(n).ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(1)
+    }
+
+    /// The attempt records and attempt events (`execution` module), checked
+    /// and bounded. Reading them never reads the history.
+    fn execution_records(&self) -> Result<(Vec<Attempt>, Vec<AttemptEvent>)> {
+        let map = self.doc.get_map("attempts");
+        let list = self.doc.get_list("attempt_events");
+        if map.len() > MAX_ATTEMPTS || list.len() > MAX_ATTEMPT_EVENTS {
+            return Err(Error::failed("too many task attempts"));
+        }
+        let mut attempts = Vec::with_capacity(map.len());
+        let mut failure = None;
+        map.for_each(|key, value| {
+            let attempt = match value.into_value() {
+                Ok(LoroValue::String(raw)) => serde_json::from_str::<Attempt>(&raw)
+                    .map_err(Error::from)
+                    .and_then(|attempt| check_attempt(key, &attempt).map(|()| attempt)),
+                _ => Err(Error::failed("invalid task attempt")),
+            };
+            match attempt {
+                Ok(attempt) => attempts.push(attempt),
+                Err(error) => failure = failure.take().or(Some(error)),
+            }
+        });
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        let mut events = Vec::with_capacity(list.len());
+        for index in 0..list.len() {
+            let event = match list.get(index).map(|item| item.into_value()) {
+                Some(Ok(LoroValue::String(raw))) => serde_json::from_str::<AttemptEvent>(&raw)?,
+                _ => return Err(Error::failed("invalid task attempt event")),
+            };
+            check_event(&event)?;
+            events.push(event);
+        }
+        Ok((attempts, events))
+    }
+
     pub fn view(&self) -> Result<TaskView> {
         self.view_with_history_ids().map(|(view, _)| view)
     }
@@ -453,6 +501,20 @@ impl TaskDoc {
             Err(_) if !writable => Vec::new(),
             files => files?,
         };
+        let stage = self.stage()?;
+        let session = self.session();
+        let execution = match self.execution_records() {
+            Ok((attempts, events)) => execution::project(
+                stage,
+                session.as_ref(),
+                &log,
+                &attempts,
+                &events,
+                self.requirement(),
+            ),
+            Err(_) if !writable => None,
+            Err(error) => return Err(error),
+        };
         Ok((
             TaskView {
                 uuid: self.uuid.clone(),
@@ -466,10 +528,10 @@ impl TaskDoc {
                     .or_else(|| integer(&meta, "created_at"))
                     .unwrap_or(0),
                 author,
-                stage: self.stage()?,
+                stage,
                 target,
                 rank: self.rank(),
-                session: self.session(),
+                session,
                 worker: match string(&fields, "worker")
                     .map(|raw| serde_json::from_str(&raw))
                     .transpose()
@@ -484,6 +546,7 @@ impl TaskDoc {
                 text: self.doc.get_text("text").to_string(),
                 attachments,
                 log,
+                execution,
             },
             ids,
         ))
@@ -1170,6 +1233,25 @@ impl TaskDoc {
         self.log("note", actor, now, text, None)?;
         self.doc.commit();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl TaskDoc {
+    /// Records an attempt and its events as a writer of the execution schema
+    /// does; this build reads them and does not write them yet.
+    pub(crate) fn record_attempt_for_test(&mut self, attempt: &Attempt, events: &[AttemptEvent]) {
+        self.upgrade_schema(execution::EXECUTION_TASK_SCHEMA)
+            .unwrap();
+        self.doc
+            .get_map("attempts")
+            .insert(&attempt.id, serde_json::to_string(attempt).unwrap())
+            .unwrap();
+        let list = self.doc.get_list("attempt_events");
+        for event in events {
+            list.push(serde_json::to_string(event).unwrap()).unwrap();
+        }
+        self.doc.commit();
     }
 }
 
@@ -1949,5 +2031,178 @@ mod tests {
         let view = t.view().unwrap();
         assert!(!view.writable);
         assert_eq!((view.author, view.target), (Actor::Person, Target::Any));
+    }
+
+    mod execution_records {
+        use super::*;
+        use crate::execution::{EventKind, Origin, Phase};
+
+        const A1: &str = "11111111-1111-4111-8111-111111111111";
+        const A2: &str = "22222222-2222-4222-8222-222222222222";
+
+        fn worker() -> SessionKey {
+            SessionKey {
+                session_id: "launch_id:worker".into(),
+                ..api()
+            }
+        }
+
+        fn attempt(id: &str, generation: u64) -> Attempt {
+            Attempt {
+                id: id.into(),
+                generation,
+                origin: Origin::Send,
+                executor: worker(),
+                request_id: format!("request-{generation}"),
+                requirement: 1,
+                actor: Actor::Person,
+                at: 50,
+            }
+        }
+
+        fn began(n: u128, attempt: &str) -> AttemptEvent {
+            AttemptEvent {
+                id: uuid::Uuid::from_u128(n).to_string(),
+                attempt: attempt.into(),
+                kind: EventKind::Began,
+                actor: Actor::Agent(worker()),
+                at: 60,
+            }
+        }
+
+        #[test]
+        fn history_before_attempts_projects_an_assigned_execution() {
+            let mut task = task(Stage::Todo);
+            assert_eq!(task.view().unwrap().execution, None);
+            assert_eq!(task.requirement(), 1);
+            task.record_send(&worker(), "first-send", &Actor::Person, 10)
+                .unwrap();
+            let execution = task.view().unwrap().execution.unwrap();
+            let current = execution.current.unwrap();
+            assert!(current.legacy);
+            assert_eq!(
+                (current.phase, current.request_id.as_str(), current.executor),
+                (Phase::Submitted, "first-send", Some(worker()))
+            );
+            task.record_start(&Actor::Agent(worker()), 20).unwrap();
+            let current = task.view().unwrap().execution.unwrap().current.unwrap();
+            assert_eq!(
+                (current.phase, current.began_at),
+                (Phase::Running, Some(20))
+            );
+            // Serialized only when there is one.
+            let json = serde_json::to_value(task.view().unwrap()).unwrap();
+            assert_eq!(json["execution"]["current"]["phase"], "running");
+            assert!(
+                serde_json::to_value(super::task(Stage::Todo).view().unwrap())
+                    .unwrap()
+                    .get("execution")
+                    .is_none()
+            );
+        }
+
+        #[test]
+        fn a_task_with_attempts_is_read_and_this_build_cannot_write_it() {
+            let mut task = task(Stage::Todo);
+            task.record_send(&worker(), "request-1", &Actor::Person, 10)
+                .unwrap();
+            let before = task.view().unwrap();
+            task.record_attempt_for_test(&attempt(A1, 1), &[began(1, A1)]);
+            let view = task.view().unwrap();
+            assert_eq!(view.schema, execution::EXECUTION_TASK_SCHEMA);
+            assert!(!view.writable);
+            let current = view.execution.as_ref().unwrap().current.clone().unwrap();
+            assert_eq!(
+                (
+                    current.id.as_str(),
+                    current.generation,
+                    current.phase,
+                    current.legacy
+                ),
+                (A1, 1, Phase::Running, false)
+            );
+            // Attempts add no history and change no stage.
+            assert_eq!(
+                (view.stage, view.log.len()),
+                (before.stage, before.log.len())
+            );
+            // Writes fail closed rather than bypassing rules this build lacks.
+            let refused = task.record_report("Done", &Actor::Agent(worker()), 70);
+            assert_eq!(
+                refused.unwrap_err().to_string(),
+                "Update Zerus to edit this task"
+            );
+            assert_eq!(task.stage().unwrap(), Stage::Active);
+            // The records survive a snapshot.
+            let restored = TaskDoc::from_bytes(&task.snapshot().unwrap()).unwrap();
+            assert_eq!(restored.view().unwrap().execution, view.execution);
+        }
+
+        #[test]
+        fn attempts_merged_from_two_replicas_project_the_same_conflict() {
+            let mut base = task(Stage::Todo);
+            base.record_send(&worker(), "request-1", &Actor::Person, 10)
+                .unwrap();
+            let bytes = base.snapshot().unwrap();
+            let mut one = TaskDoc::from_bytes(&bytes).unwrap();
+            let mut two = TaskDoc::from_bytes(&bytes).unwrap();
+            one.record_attempt_for_test(&attempt(A1, 1), &[]);
+            two.record_attempt_for_test(&attempt(A2, 1), &[began(1, A2)]);
+            one.import(&two.snapshot().unwrap()).unwrap();
+            two.import(&one.snapshot().unwrap()).unwrap();
+            let (left, right) = (one.view().unwrap(), two.view().unwrap());
+            assert_eq!(left.execution, right.execution);
+            let execution = left.execution.unwrap();
+            assert!(execution.conflict);
+            assert_eq!(
+                (execution.attempts, execution.current.unwrap().id.as_str()),
+                (2, A1)
+            );
+            // The same event merged from both replicas counts once.
+            let mut three = TaskDoc::from_bytes(&bytes).unwrap();
+            three.record_attempt_for_test(&attempt(A1, 2), &[began(7, A1)]);
+            let mut four = TaskDoc::from_bytes(&three.snapshot().unwrap()).unwrap();
+            four.record_attempt_for_test(&attempt(A1, 2), &[began(7, A1)]);
+            three.import(&four.snapshot().unwrap()).unwrap();
+            let current = three.view().unwrap().execution.unwrap().current.unwrap();
+            assert_eq!(
+                (current.phase, current.began_at),
+                (Phase::Running, Some(60))
+            );
+        }
+
+        #[test]
+        fn damaged_records_are_damage_in_this_schema_and_ignored_in_a_newer_one() {
+            let task = task(Stage::Todo);
+            task.doc
+                .get_map("attempts")
+                .insert(A1, "not an attempt")
+                .unwrap();
+            task.doc.commit();
+            assert!(task.view().is_err());
+            task.upgrade_schema(execution::EXECUTION_TASK_SCHEMA)
+                .unwrap();
+            task.doc.commit();
+            let view = task.view().unwrap();
+            assert!(!view.writable && view.execution.is_none());
+            // A record must sit under its own identity.
+            let other = super::task(Stage::Todo);
+            other
+                .doc
+                .get_map("attempts")
+                .insert(A2, serde_json::to_string(&attempt(A1, 1)).unwrap())
+                .unwrap();
+            other.doc.commit();
+            assert!(other.view().is_err());
+            // Too many events is damage, not an unbounded read.
+            let crowded = super::task(Stage::Todo);
+            let list = crowded.doc.get_list("attempt_events");
+            for n in 0..=execution::MAX_ATTEMPT_EVENTS as u128 {
+                list.push(serde_json::to_string(&began(n + 1, A1)).unwrap())
+                    .unwrap();
+            }
+            crowded.doc.commit();
+            assert!(crowded.view().unwrap_err().to_string().contains("too many"));
+        }
     }
 }

@@ -314,7 +314,9 @@ name; arguments after it are the command's own. The value must be the
 lowercase UUID shown by `hgs ls --json`, given once. Resolution reads the
 verified index `ids/<session_id>.json` under the state directory, which names
 the session's current label. A missing or stale entry costs one scan of the
-records, which repairs it; an older hgs ignores the index. Resolution only
+records, which repairs it when the state lock is free. Hooks never repair, and
+an index this process cannot write is left alone. An older hgs ignores the
+index. Resolution only
 finds the session's name: every record the command then reads under that name, live or
 archived, must still carry the ID, so a name another session took meanwhile
 fails with "Session ID ID no longer names NAME" instead of acting on it. `kill`

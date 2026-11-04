@@ -198,17 +198,9 @@ pub(super) fn read_own_run(name: &str, run_id: &str) -> Result<Option<Value>> {
             }
         }
     }
-    let record = read_session_run(name, run_id, session.as_deref())?;
-    if let (Some(id), Some(record)) = (session.as_deref(), record.as_ref()) {
-        if string(record, "session_id") == id {
-            let found = [(
-                string(record, "name").to_owned(),
-                session_index::Kind::Record,
-            )];
-            session_index::repair(id, &found);
-        }
-    }
-    Ok(record)
+    // Hooks never repair the index: their poll loops must not take the writer
+    // lock. The record's next write notes the entry again.
+    read_session_run(name, run_id, session.as_deref())
 }
 
 /// `session` is a hint, never a requirement: an older hgs can rebuild the

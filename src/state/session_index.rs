@@ -10,10 +10,14 @@
 //! rename shadow; a miss or a stale entry falls back to one scan, and the scan
 //! repairs the entry under the state writer lock when it is free. Writers note
 //! the entry under whatever lock already guards their record; a failed note
-//! only costs the next lookup a scan.
+//! only costs the next lookup a scan. Hooks never repair: their poll loops
+//! must not take the writer lock. A process that finds `ids/` or an entry it
+//! must not write, or fails to change one, stops changing entries, so a
+//! broken index costs each lookup one scan and never the lock (#1400 review).
 use super::*;
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Entries are tiny; anything larger is not one of ours.
 const ENTRY_BYTES: u64 = 4096;
@@ -62,17 +66,49 @@ fn path(id: &str) -> PathBuf {
     directory().join(format!("{id}.json"))
 }
 
-/// The entry for `id`, when there is a well-formed one.
+/// Set once this process found `ids/` or an entry it must not write, or
+/// failed to change an entry; it then changes none.
+static UNWRITABLE: AtomicBool = AtomicBool::new(false);
+
+/// Whether this process may change `id`'s entry: nothing failed before,
+/// `ids/` is absent or a writable directory, and the entry is absent or a
+/// regular file. Two metadata reads, never the lock.
+fn writable(id: &str) -> bool {
+    if UNWRITABLE.load(Ordering::Relaxed) {
+        return false;
+    }
+    let absent = |error: io::Error| error.kind() == io::ErrorKind::NotFound;
+    let directory = fs::symlink_metadata(directory()).map_or_else(absent, |meta| {
+        meta.is_dir() && !meta.permissions().readonly()
+    });
+    let ok = directory && fs::symlink_metadata(path(id)).map_or_else(absent, |meta| meta.is_file());
+    if !ok {
+        UNWRITABLE.store(true, Ordering::Relaxed);
+    }
+    ok
+}
+
+/// Records a failed change, so this process makes no more.
+fn changed(result: Result<()>) {
+    if result.is_err() {
+        UNWRITABLE.store(true, Ordering::Relaxed);
+    }
+}
+
+/// The entry for `id`, when there is a well-formed one in a regular file.
+/// Opened without blocking, so a FIFO there is a miss, never a hang.
 fn entry(id: &str) -> Option<(String, Kind)> {
     if !session_id::canonical(id) {
         return None;
     }
-    let mut bytes = Vec::new();
-    fs::File::open(path(id))
-        .ok()?
-        .take(ENTRY_BYTES + 1)
-        .read_to_end(&mut bytes)
+    let file = crate::platform::never_block(fs::OpenOptions::new().read(true))
+        .open(path(id))
         .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(ENTRY_BYTES + 1).read_to_end(&mut bytes).ok()?;
     if bytes.len() as u64 > ENTRY_BYTES {
         return None;
     }
@@ -84,8 +120,24 @@ fn entry(id: &str) -> Option<(String, Kind)> {
 }
 
 fn write_entry(id: &str, name: &str, kind: Kind) -> Result<()> {
+    #[cfg(test)]
+    {
+        CHANGES.fetch_add(1, Ordering::SeqCst);
+        if FAIL_CHANGES.load(Ordering::SeqCst) {
+            return Err("injected failure".into());
+        }
+    }
     let value = json!({"version": 1, "name": name, "kind": kind.as_str()});
     storage::atomic(&path(id), &format!("{value}\n"))
+}
+
+fn remove_entry(id: &str) -> Result<()> {
+    #[cfg(test)]
+    CHANGES.fetch_add(1, Ordering::SeqCst);
+    match fs::remove_file(path(id)) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error.to_string()),
+        _ => Ok(()),
+    }
 }
 
 /// Notes `record`, just saved by a writer of `kind`, under its label. Only a
@@ -100,10 +152,23 @@ pub(super) fn note(record: &Value, kind: Kind) {
     {
         return;
     }
-    if entry(id).is_some_and(|(noted, noted_kind)| noted == name && noted_kind == kind) {
+    if entry(id).is_some_and(|(noted, noted_kind)| noted == name && noted_kind == kind)
+        || !writable(id)
+    {
         return;
     }
-    let _ = write_entry(id, name, kind);
+    changed(write_entry(id, name, kind));
+}
+
+/// Removes `record`'s entry while it still names that label as a record: the
+/// archive or forget that just retired the label, under the writer lock it
+/// holds, so `ids/` does not keep an entry for every session ever made.
+pub(super) fn retire(record: &Value) {
+    let (id, name) = (string(record, "session_id"), string(record, "name"));
+    if entry(id).is_some_and(|(noted, kind)| noted == name && kind == Kind::Record) && writable(id)
+    {
+        changed(remove_entry(id));
+    }
 }
 
 /// Whether `record`, read as `name`, is the live or saved session `id`.
@@ -133,7 +198,9 @@ pub(super) fn find(id: &str) -> Option<Found> {
 /// After a scan for `id` found `found` (label and kind, at most one label for
 /// a sound state): points the entry at it, or removes a stale entry when the
 /// scan found none. Under the state writer lock, only when it is free right
-/// now: a held lock, which may be this command's own, skips the repair.
+/// now: a held lock, which may be this command's own, skips the repair. Only
+/// `names_of` repairs, never a hook; an entry this process may not change
+/// ([`writable`]) is never attempted.
 pub(super) fn repair(id: &str, found: &[(String, Kind)]) {
     if !session_id::canonical(id) {
         return;
@@ -152,29 +219,33 @@ pub(super) fn repair(id: &str, found: &[(String, Kind)]) {
             .map(|kind| ((*name).to_owned(), kind)),
         _ => return,
     };
-    if current == wanted || (wanted.is_none() && !path(id).exists()) {
+    if current == wanted || (wanted.is_none() && !path(id).exists()) || !writable(id) {
         return;
     }
+    #[cfg(test)]
+    LOCKS.fetch_add(1, Ordering::SeqCst);
     let Ok(Some(_guard)) = storage::writer_until(std::time::Instant::now()) else {
         return;
     };
-    let _ = match wanted {
+    changed(match wanted {
         Some((name, kind)) => write_entry(id, &name, kind),
-        None => fs::remove_file(path(id))
-            .or_else(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    Ok(())
-                } else {
-                    Err(error)
-                }
-            })
-            .map_err(|error| error.to_string()),
-    };
+        None => remove_entry(id),
+    });
 }
 
 /// How many full scans the lookups made, for the bound tests.
 #[cfg(test)]
 pub(super) static SCANS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// How many times a repair asked for the writer lock (tests only).
+#[cfg(test)]
+static LOCKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// How many entry writes and removals were attempted (tests only).
+#[cfg(test)]
+static CHANGES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Makes every entry write fail, as a read-only mount or a full disk would,
+/// which no metadata check predicts (tests only).
+#[cfg(test)]
+static FAIL_CHANGES: AtomicBool = AtomicBool::new(false);
 
 /// Counts one full scan (tests only).
 pub(super) fn scanned() {
@@ -182,7 +253,8 @@ pub(super) fn scanned() {
     SCANS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 
-#[cfg(test)]
+/// The fixture needs Unix permissions, a FIFO and no tmux server.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
@@ -306,8 +378,20 @@ mod tests {
         assert_eq!(entry(&id), Some((b.to_owned(), Kind::Record)), "repaired");
         std::fs::remove_file(storage::legacy_record_path(a)).unwrap();
 
-        // Archive and forget: the entry goes stale, one scan finds nothing and
-        // removes it.
+        // Archive and forget retire the entry under their writer lock.
+        let (retired, retired_id) = saved("claude/example/retired", "run-retired");
+        {
+            let _guard = storage::lock(None).unwrap();
+            archive::save(&retired).unwrap();
+        }
+        assert!(!path(&retired_id).exists(), "archive retires the entry");
+        assert_eq!(lookup(&retired_id), (vec![], true));
+        let (_, forgotten_id) = saved("claude/example/forget", "run-forget");
+        crate::state::dispatch(&["forget".to_owned(), "claude/example/forget".to_owned()]).unwrap();
+        assert!(!path(&forgotten_id).exists(), "forget retires the entry");
+
+        // A record removed some other way: the entry goes stale, one scan
+        // finds nothing and removes it.
         let (mut archived, archived_id) = saved("claude/example/archived", "run-archived");
         archived["archive_id"] = json!("archive-1");
         storage::atomic_record(
@@ -382,9 +466,14 @@ mod tests {
         std::fs::remove_file(path(&reminted)).unwrap();
         {
             let _held = storage::lock(None).unwrap();
+            let started = std::time::Instant::now();
             assert_eq!(
                 lookup(&reminted),
                 (vec!["claude/example/older".to_owned()], true)
+            );
+            assert!(
+                started.elapsed() < std::time::Duration::from_millis(500),
+                "a held lock is tried once, never waited for"
             );
             assert!(
                 !path(&reminted).exists(),
@@ -450,16 +539,100 @@ mod tests {
             "another run is not this record"
         );
         std::fs::remove_file(path(&hook_id)).unwrap();
+        // A hook never repairs and never asks for the writer lock; the
+        // record's next write notes the entry again.
+        let locks = LOCKS.load(Ordering::SeqCst);
+        for _ in 0..3 {
+            assert_eq!(
+                own("run-hooked"),
+                (Some("claude/example/hooked-2".to_owned()), true)
+            );
+        }
         assert_eq!(
-            own("run-hooked"),
-            (Some("claude/example/hooked-2".to_owned()), true)
+            LOCKS.load(Ordering::SeqCst),
+            locks,
+            "a hook asks for no lock"
         );
+        assert!(!path(&hook_id).exists(), "a hook never repairs");
+        let mut hooked = storage::read("claude/example/hooked-2").unwrap();
+        storage::write(&mut hooked).unwrap();
         assert_eq!(
             own("run-hooked"),
-            (Some("claude/example/hooked-2".to_owned()), false),
-            "repaired by the hook's scan"
+            (Some("claude/example/hooked-2".to_owned()), false)
         );
         std::env::remove_var("HGS_SESSION_ID");
+
+        // A write that fails where metadata could not tell (a read-only mount,
+        // a full disk) is attempted once; this process then changes no entry.
+        let (_, failing_id) = saved("claude/example/failing", "run-failing");
+        std::fs::remove_file(path(&failing_id)).unwrap();
+        FAIL_CHANGES.store(true, Ordering::SeqCst);
+        let before = (LOCKS.load(Ordering::SeqCst), CHANGES.load(Ordering::SeqCst));
+        for _ in 0..20 {
+            assert_eq!(
+                lookup(&failing_id),
+                (vec!["claude/example/failing".to_owned()], true)
+            );
+        }
+        let after = (LOCKS.load(Ordering::SeqCst), CHANGES.load(Ordering::SeqCst));
+        assert_eq!(
+            (after.0 - before.0, after.1 - before.1),
+            (1, 1),
+            "one attempt, then none"
+        );
+        FAIL_CHANGES.store(false, Ordering::SeqCst);
+        UNWRITABLE.store(false, Ordering::SeqCst);
+
+        // #1400 review: an index this process may not write is never retried.
+        // With ids/ read-only, every lookup scans, yet none asks for the
+        // writer lock or tries to write, and a writer skips its note.
+        use std::os::unix::fs::PermissionsExt;
+        let stuck = "claude/example/stuck";
+        let (mut stuck_record, stuck_id) = saved(stuck, "run-stuck");
+        std::fs::remove_file(path(&stuck_id)).unwrap();
+        let mode = |bits| {
+            std::fs::set_permissions(directory(), std::fs::Permissions::from_mode(bits)).unwrap()
+        };
+        let counts = || (LOCKS.load(Ordering::SeqCst), CHANGES.load(Ordering::SeqCst));
+        mode(0o500);
+        let before = counts();
+        for _ in 0..20 {
+            assert_eq!(lookup(&stuck_id), (vec![stuck.to_owned()], true));
+        }
+        storage::write(&mut stuck_record).unwrap();
+        assert_eq!(
+            counts(),
+            before,
+            "no lock and no write while ids/ is read-only"
+        );
+        mode(0o700);
+        // A directory at an entry is never written over and reads as a miss.
+        UNWRITABLE.store(false, Ordering::SeqCst);
+        std::fs::create_dir(path(&stuck_id)).unwrap();
+        let before = counts();
+        storage::write(&mut stuck_record).unwrap();
+        for _ in 0..3 {
+            assert_eq!(lookup(&stuck_id), (vec![stuck.to_owned()], true));
+        }
+        assert_eq!(counts(), before, "no lock and no write over a directory");
+        std::fs::remove_dir(path(&stuck_id)).unwrap();
+        // A FIFO at an entry is a miss, never a hang, for a lookup and a write.
+        UNWRITABLE.store(false, Ordering::SeqCst);
+        let fifo = std::ffi::CString::new(path(&stuck_id).to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let id = stuck_id.clone();
+        std::thread::spawn(move || {
+            let mut record = storage::read(stuck).unwrap();
+            storage::write(&mut record).unwrap();
+            let _ = sender.send(session_id::names_of(&id).unwrap());
+        });
+        let names = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a FIFO entry never blocks");
+        assert_eq!(names, vec![stuck.to_owned()]);
+        std::fs::remove_file(path(&stuck_id)).unwrap();
+        UNWRITABLE.store(false, Ordering::SeqCst);
 
         // The bound: with 50,000 other records, a hit reads one entry and one
         // record and never scans.

@@ -41,6 +41,7 @@ pub(super) fn offer(status: &Value) -> Option<Value> {
         && status["first_choice"]["phase"] != "unknown")
         .then(|| {
             json!([
+                status["schema"],
                 status["configuration"],
                 status["task_name"],
                 status["selected_mode"],
@@ -174,6 +175,10 @@ impl Controller {
             .map_err(|_| "activation_status_unavailable")?;
         let status = route
             .status(serde_json::from_slice(&raw).map_err(|_| "activation_status_unavailable")?);
+        // The same checked decoding as every other read; no new selection.
+        if !valid_status(&status, &display.configuration) {
+            return Err("activation_status_unavailable");
+        }
         let fresh = offer(&status).ok_or("activation_scope_changed")?;
         {
             let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -271,6 +276,16 @@ impl Controller {
             owner.checked_first(&display, None)?;
             let id = uuid::Uuid::new_v4().to_string();
             owner.reserve(id.clone(), display.configuration.clone(), route.clone());
+            if let Some(intent) = owner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .intent
+                .as_mut()
+                .filter(|i| i.id == id)
+            {
+                intent.first = true;
+            }
             let veto: Veto = {
                 let owner = owner.clone();
                 let display = display.clone();

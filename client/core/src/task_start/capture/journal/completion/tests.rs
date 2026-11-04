@@ -277,6 +277,7 @@ fn serialized_marker_version_never_substitutes_for_exact_marker_bytes() {
     saved.disk = publish(
         &saved.slot,
         &saved.disk,
+        &lock,
         &record,
         || lock_current(&saved.slot, &lock),
         |f, _| f.sync_all(),
@@ -319,6 +320,7 @@ fn settlement_and_completed_phases_refuse_offer_before_any_publication_attempt()
         journal.saved.disk = publish(
             &journal.saved.slot,
             &journal.saved.disk,
+            &journal.lock,
             &record,
             || lock_current(&journal.saved.slot, &journal.lock),
             |f, _| f.sync_all(),

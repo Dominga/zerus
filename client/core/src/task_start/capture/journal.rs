@@ -4,7 +4,9 @@ use super::*;
 use std::{ffi::OsString, io::Write};
 
 mod completion;
+mod publication;
 pub use completion::Settlement;
+pub use publication::Status as PublicationStatus;
 
 pub const BYTES: usize = 96 << 10;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,10 +148,25 @@ impl Slot {
         let file = if create {
             self.create(&self.lock_name, true)
         } else {
-            open_at(&self.folder, &self.lock_name, false)
+            // Existing metadata history only; never O_CREAT on recovery.
+            let name = CString::new(self.lock_name.as_bytes()).map_err(|_| Error::Unavailable)?;
+            // SAFETY: one fixed basename under the retained private folder.
+            let fd = unsafe {
+                libc::openat(
+                    self.folder.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDWR | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                // SAFETY: successful openat returned this new owned descriptor.
+                Ok(unsafe { File::from_raw_fd(fd) })
+            }
         }
         .map_err(|_| Error::Unavailable)?;
-        if file_version(&file, 0).is_err() {
+        if file_version(&file, publication::BYTES).is_err() {
             return Err(Error::Unavailable);
         }
         // SAFETY: only this retained metadata lock, never a service/native lock.
@@ -228,6 +245,11 @@ impl Saved {
         }
         Ok(disk.map(|disk| Self { slot, disk }))
     }
+    /// Bounded metadata observation only: one original lock and one fixed
+    /// candidate. It never acquires a writer, removes data or authorizes offer.
+    pub fn publication_status(&self) -> PublicationStatus {
+        publication::status(&self.slot, &self.disk)
+    }
     pub fn phase(&self) -> Phase {
         self.disk.record.phase
     }
@@ -278,6 +300,7 @@ impl Saved {
         publish(
             &self.slot,
             &self.disk,
+            &lock,
             &next,
             || lock_current(&self.slot, &lock),
             |file, _| file.sync_all(),
@@ -350,6 +373,7 @@ impl Journal {
                 publish(
                     &slot,
                     &disk,
+                    &lock,
                     &next,
                     || {
                         source.recheck()?;
@@ -449,6 +473,7 @@ impl Journal {
         self.saved.disk = publish(
             &self.saved.slot,
             &self.saved.disk,
+            &self.lock,
             &next,
             || {
                 self.source.recheck()?;
@@ -463,7 +488,7 @@ impl Journal {
 }
 fn lock_current(slot: &Slot, lock: &File) -> io::Result<()> {
     let opened = open_at(&slot.folder, &slot.lock_name, false)?;
-    if file_version(&opened, 0)? != file_version(lock, 0)? {
+    if file_version(&opened, publication::BYTES)? != file_version(lock, publication::BYTES)? {
         return Err(refused());
     }
     Ok(())
@@ -471,6 +496,7 @@ fn lock_current(slot: &Slot, lock: &File) -> io::Result<()> {
 fn publish(
     slot: &Slot,
     old: &Disk,
+    lock: &File,
     next: &Record,
     mut check: impl FnMut() -> io::Result<()>,
     mut sync: impl FnMut(&File, bool) -> io::Result<()>,
@@ -482,21 +508,29 @@ fn publish(
     let bytes = encode(next)?;
     old.current(slot).map_err(|_| Error::Unavailable)?;
     check().map_err(|_| Error::Unavailable)?;
-    let temp = OsString::from(format!(
-        "{}.{}.tmp",
-        slot.name.to_string_lossy(),
-        uuid::Uuid::new_v4()
-    ));
+    publication::recover(slot, old, lock).map_err(|_| Error::PublicationUnknown)?;
+    old.current(slot).map_err(|_| Error::Unavailable)?;
+    check().map_err(|_| Error::Unavailable)?;
+    let temp = publication::name(slot);
     let mut file = slot.create(&temp, true).map_err(|_| Error::Unavailable)?;
+    let mut live_version = None;
+    let mut tracked = None;
     let written = (|| -> io::Result<()> {
         file.write_all(&bytes)?;
-        sync(&file, false)?;
-        old.current(slot)?;
-        check()?;
-        let opened = open_at(&slot.folder, &temp, false)?;
-        if file_version(&opened, BYTES)? != file_version(&file, BYTES)? {
+        let (written, version) = read(&file, BYTES)?;
+        if written != bytes {
             return Err(refused());
         }
+        live_version = Some(version);
+        sync(&file, false)?;
+        let retained = publication::track(slot, old, lock, &file, next, &bytes, &mut sync)?;
+        tracked = Some(retained);
+        let retained = tracked.as_ref().ok_or_else(refused)?;
+        old.current(slot)?;
+        check()?;
+        publication::fence(slot, lock, retained)?;
+        publication::candidate(slot, retained, &file)?;
+        publication::fence(slot, lock, retained)?;
         let from = CString::new(temp.as_bytes()).map_err(|_| refused())?;
         let to = CString::new(slot.name.as_bytes()).map_err(|_| refused())?;
         // SAFETY: native basenames in the same retained private directory.
@@ -514,17 +548,9 @@ fn publish(
         sync(&slot.folder, true)
     })();
     if written.is_err() {
-        // Cleanup only the exact still-linked original temporary object. An
-        // unknown/replaced temporary or original journal is never removed.
-        if let (Ok(opened), Ok(held)) = (
-            open_at(&slot.folder, &temp, false),
-            file_version(&file, BYTES),
-        ) {
-            if file_version(&opened, BYTES).ok() == Some(held) {
-                if let Ok(name) = CString::new(temp.as_bytes()) {
-                    // SAFETY: exact verified own temporary in the private directory.
-                    let _ = unsafe { libc::unlinkat(slot.folder.as_raw_fd(), name.as_ptr(), 0) };
-                }
+        if publication::recover(slot, old, lock).is_err() {
+            if let Some(version) = &live_version {
+                let _ = publication::discard_live(slot, old, lock, &file, version);
             }
         }
         return Err(Error::PublicationUnknown);
@@ -536,6 +562,16 @@ fn publish(
     if disk.record != *next || disk.bytes != bytes {
         return Err(Error::PublicationUnknown);
     }
+    check().map_err(|_| Error::PublicationUnknown)?;
+    // The exact new phase and directory are durable and verified before
+    // tracking is cleared or any Intent is returned.
+    publication::clear(
+        slot,
+        lock,
+        tracked.as_ref().ok_or(Error::PublicationUnknown)?,
+        &mut sync,
+    )
+    .map_err(|_| Error::PublicationUnknown)?;
     check().map_err(|_| Error::PublicationUnknown)?;
     Ok(disk)
 }

@@ -172,7 +172,7 @@ fn sync_failure_returns_no_offer_and_keeps_the_exact_before_or_after_phase() {
         assert_eq!(
             steps,
             if fail_directory {
-                vec![false, true]
+                vec![false, false, true]
             } else {
                 vec![false]
             }
@@ -422,6 +422,7 @@ fn invalid_next_record_is_refused_before_publication_and_replaced_preparation_is
     assert!(publish(
         &snapshot.slot,
         &snapshot.disk,
+        &lock,
         &invalid,
         || lock_current(&snapshot.slot, &lock),
         |f, _| f.sync_all()

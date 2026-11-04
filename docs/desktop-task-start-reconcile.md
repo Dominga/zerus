@@ -225,6 +225,41 @@ native caller owns the offer and connection checks; completion below allows a
 genuinely new delivery without clearing an unsettled original.
 
 
+## Bounded publication recovery
+
+Each new journal writer uses one fixed `.reconcile.tmp` candidate per task.
+The existing metadata lock can contain at most 4 KiB of publication tracking;
+it remains the same original flock, and its writable duplicate shares that
+open file description. No directory enumeration or growing cleanup history is
+needed. The candidate retains the existing 96 KiB journal bound; source and
+control-frame limits do not change.
+
+Before rename, the writer syncs the candidate and records its exact native file
+version, the retained directory objects, original reconciliation IDs and before/
+after journal hashes in that lock. It syncs tracking before rename and syncs the
+parent directory before returning an Intent. Tracking is cleared only after the
+exact published phase is verified. A failed publication returns no Intent.
+
+`Saved::publication_status()` is a bounded read-only observation of this one
+managed slot: `Clear`, `Recoverable` or `NeedsReview`. It never acquires execution
+permission or performs cleanup. A later explicit metadata writer may recover
+under the original metadata flock. It can unlink only the exact still-linked
+candidate named by the durable record while the original before-journal is
+unchanged. If the same candidate was already renamed into the exact after-
+journal, recovery retires tracking without unlinking or rewriting that journal.
+Its phase, source, original ID, offered/unknown history and task/outbox remain
+unchanged. Recovery itself never returns an offer or creates a replacement ID.
+
+An unrecorded candidate, missing candidate beside a before-journal, malformed or
+partial tracking, changed/replaced object, or missing original journal stays for
+manual review. Another Check cannot allocate more candidates while this fixed
+slot is uncertain. Keep the checkpoint, marker, journal and lock: deleting them
+is not a supported way to permit another offer. This includes uncertainty during
+the first preparation. Older random-name temporary files have no durable object
+record; they remain unindexed, are never claimed by this slot, and are never
+removed based on their names, age or owner. The bounded status does not claim
+those legacy files are absent.
+
 ## Explicit native receipt check and settlement
 
 In desktop-service mode on Linux and macOS, the Task Start review offers

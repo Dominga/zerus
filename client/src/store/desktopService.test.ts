@@ -78,6 +78,8 @@ describe("desktop service presentation", () => {
       { qt: { ...qt, running: true }, creations, message: "Preparing the migration report" },
       { qt: { ...qt, code: "retained_import_qt_unavailable" }, creations, message: "migration report needs review" },
       { qt, creations: { ...creations, running: true }, message: "Preparing the saved creation report" },
+      { qt: { ...qt, phase: "unknown" }, creations, message: "migration report needs review" },
+      { qt: { ...qt, code: "retained_import_source_resources_pending" }, creations: { ...creations, required: false }, message: "migration report is deferred while background work" },
     ];
     for (const item of cases) {
       const state = serviceView({ retained_source_import: { ...item.qt, local_reads_report: local, creations_report: item.creations } });
@@ -85,7 +87,7 @@ describe("desktop service presentation", () => {
       expect(retainedSourceNotice(state)).toContain(item.message);
       const details = retainedSourceDetails(state)!;
       expect(details.localReadsReport?.reason).toContain("not sent because local preparation failed");
-      expect(details.creations?.code).toBe(item.creations.code);
+      expect(details.creations?.code).toBe(item.creations.required ? item.creations.code : undefined);
       if (item.qt.required) expect(details.settings?.code).toBe(item.qt.code);
       expect(state).toEqual(before);
     }

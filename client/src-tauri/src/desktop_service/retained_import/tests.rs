@@ -763,6 +763,7 @@ fn report_completion_wakes_the_next_group_without_watch_frames() {
         let report = service.shared.retained_import.as_ref().unwrap().clone();
         eventually("silent connected service after Qt drains", || {
             service.snapshot().connected
+                && service.shared.report_frame_finished.load(Ordering::Acquire) == 1
                 && report.status()["complete"] == true
                 && report.work.snapshot().unwrap().count(Role::Operations) == 0
         })
@@ -830,6 +831,7 @@ fn report_qt_retry_waiting_for_a_group_completes_without_watch_or_reconnect() {
         let report = service.shared.retained_import.as_ref().unwrap().clone();
         eventually("original Qt negative and connected silent service", || {
             service.snapshot().connected
+                && service.shared.report_frame_finished.load(Ordering::Acquire) == 1
                 && report.status()["phase"] == "not_committed"
                 && report.work.snapshot().unwrap().count(Role::Operations) == 0
         })
@@ -912,6 +914,7 @@ fn report_slot_wakes_only_after_the_last_original_resource_and_never_after_stop(
             let report = service.shared.retained_import.as_ref().unwrap().clone();
             eventually("initial Qt report physically drained", || {
                 service.snapshot().connected
+                    && service.shared.report_frame_finished.load(Ordering::Acquire) == 1
                     && report.status()["complete"] == true
                     && report.work.snapshot().unwrap().count(Role::Operations) == 0
             })

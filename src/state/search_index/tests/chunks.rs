@@ -73,8 +73,7 @@ fn all_large_snapshot_shapes_complete_in_single_record_slices_live_and_archived(
             }
             fs::write(&fixture.binding, fixture.record.to_string()).unwrap();
             let mut store = fixture.store();
-            let first = fixture.step(&mut store, 1);
-            assert_eq!(first.records, 1);
+            fixture.consume_exactly(&mut store, 1);
             assert!(!complete(&fixture, &store));
             assert!(
                 hits(&store, "tailneedle").is_empty(),
@@ -132,8 +131,7 @@ fn transcript_cursor_stays_before_partial_message_and_preserves_provider_id() {
     let line = Fixture::event(1, &text, "final");
     fixture.append(&line);
     let mut store = fixture.store();
-    let first = fixture.step(&mut store, 1);
-    assert_eq!(first.records, 1);
+    fixture.consume_exactly(&mut store, 1);
     assert_eq!(fixture.cursor(&store).offset, 0);
     assert!(hits(&store, "headneedle").is_empty());
     assert!(finish(&fixture, &mut store, 1) > 1);
@@ -163,7 +161,7 @@ fn journal_sequence_stays_before_a_partial_message() {
     )
     .unwrap();
     let mut store = fixture.store();
-    assert_eq!(fixture.step(&mut store, 1).records, 1);
+    fixture.consume_exactly(&mut store, 1);
     assert_eq!(fixture.cursor(&store).seq, 0);
     finish(&fixture, &mut store, 1);
     assert_eq!(fixture.cursor(&store).seq, 1);
@@ -204,7 +202,10 @@ fn replacing_a_partially_indexed_binding_retires_and_purges_every_window() {
     fixture.record["prompt"] = json!("x".repeat(RECORD_BYTES) + " tailneedle");
     fs::write(&fixture.binding, fixture.record.to_string()).unwrap();
     let mut store = fixture.store();
-    assert_eq!(fixture.step(&mut store, 40).records, 40);
+    // zerus-0dmh: under parallel load a slice can meet its deadline before
+    // its 40 records; the preparation continues over bounded slices.
+    fixture.expired_slices.set(1);
+    fixture.consume_exactly(&mut store, 40);
     assert!(!complete(&fixture, &store));
     fixture.record["conversation_id"] = json!(uuid::Uuid::new_v4().to_string());
     fs::write(&fixture.binding, fixture.record.to_string()).unwrap();

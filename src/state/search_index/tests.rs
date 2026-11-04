@@ -114,6 +114,35 @@ impl Fixture {
         }
         panic!("fixture record checkpoint did not finish within 32 bounded slices");
     }
+    /// Exactly `expected` records over bounded slices, each asking for no
+    /// more than the remainder, so the preparation never crosses its
+    /// checkpoint. A slice that yields early must have met its deadline or
+    /// stop flag, the legal reasons under parallel load (zerus-0dmh).
+    fn consume_exactly(&self, store: &mut Store, expected: usize) -> Progress {
+        let mut consumed = 0;
+        for _ in 0..32 {
+            let budget = self.budget(expected - consumed);
+            let progress = store
+                .step(
+                    &self.state,
+                    std::slice::from_ref(&self.identity),
+                    &budget,
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            assert!(progress.errors.is_empty(), "{:?}", progress.errors);
+            assert!(progress.records <= expected - consumed);
+            consumed += progress.records;
+            if consumed == expected {
+                return progress;
+            }
+            assert!(
+                progress.stopped || Instant::now() >= budget.deadline,
+                "completed fixture slice consumed {consumed} records, expected {expected}"
+            );
+        }
+        panic!("fixture record checkpoint did not finish within 32 bounded slices");
+    }
     fn cursor(&self, store: &Store) -> Cursor {
         let raw: String = store
             .index

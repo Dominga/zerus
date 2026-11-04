@@ -545,6 +545,9 @@ impl Drop for Permit {
 }
 
 fn serve(config: &Config, location: Location, background_mode: bool) -> Result<()> {
+    // A logon-task start on Windows before 24H2 gets a console window of its own.
+    #[cfg(windows)]
+    platform::release_private_console();
     let mut upgrade = upgrade::Upgrade::new();
     #[cfg(all(test, target_os = "linux"))]
     upgrade::actor_tests::configure(&mut upgrade);

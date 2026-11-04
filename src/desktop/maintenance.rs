@@ -777,7 +777,12 @@ fn spawn(command: &mut std::process::Command) -> std::io::Result<std::process::C
     {
         platform::spawn_in_turn(command)
     }
-    #[cfg(not(unix))]
+    // The service has no console: its children must not open windows.
+    #[cfg(windows)]
+    {
+        crate::platform::spawn_windowless(command)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         command.spawn()
     }

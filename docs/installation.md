@@ -541,6 +541,15 @@ stops an idle session host without disabling anything.
   These commands never start or stop a running service or native agent. The
   task uses `InteractiveToken` and least privilege, never SYSTEM or Session 0;
   it runs the passive service with the selected configuration/state paths.
+  The service runs without a console window: `hgs.exe` declares a detached
+  console allocation policy, so Windows 11 24H2 and later give it none, and on
+  earlier releases it releases the console created only for it at startup (a
+  window may flash briefly at logon). Its helpers and its connections to other
+  computers in background mode start without windows too, so no terminal window
+  belongs to the service and closing one never stops it. On 24H2 and later the
+  same policy means `start hgs …`, a shortcut or another program that starts
+  `hgs.exe` without a console of its own (CREATE_NEW_CONSOLE or ShellExecute)
+  gets no console window either; run `hgs` from a terminal to see its output.
   Registration does not grant background writer ownership or enable automatic
   approvals. An explicit `HGS_EXECUTABLE` is preserved; otherwise installation
   stages only the stable `%USERPROFILE%\.local\bin\hgs.exe`, without enabling

@@ -51,7 +51,12 @@ fn spawn(command: &mut Command) -> std::io::Result<Child> {
     {
         platform::spawn_in_turn(command)
     }
-    #[cfg(not(unix))]
+    // The service has no console: its children must not open windows.
+    #[cfg(windows)]
+    {
+        platform::spawn_windowless(command)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         command.spawn()
     }

@@ -415,7 +415,7 @@ fn malformed_source_or_causal_keys_never_look_like_missing_fields() {
 
 #[test]
 fn qts_local_completion_list_is_read_without_importing_its_values() {
-    use crate::settings::{QtSnapshot, qt::QtValue};
+    use crate::settings::{qt::QtValue, QtSnapshot};
     let mut local = fixture().0["organization"].clone();
     local["imported_machines"] = json!(["fixture", "fixture-peer", "fixture"]);
     let mut snapshot = QtSnapshot {

@@ -3,14 +3,14 @@
 use super::*;
 use std::{
     fs,
-    os::unix::fs::PermissionsExt,
+    os::unix::{fs::PermissionsExt, net::UnixListener},
     path::PathBuf,
-    process::{Child, Command},
+    process::{Child, Command, Stdio},
 };
 use zerus_client_core::{desktop::ui_requests::Request, operation_recovery::task_start as policy};
 
 const HELPER: &str = r#"#!/usr/bin/env python3
-import json,os,pathlib,sqlite3,sys,time
+import json,os,pathlib,socket,sqlite3,sys,time
 p=pathlib.Path(os.environ['HOME'])
 assert 'HGS_SESSION' not in os.environ and 'HGS_RUN_ID' not in os.environ
 body=sys.stdin.buffer.read()
@@ -42,11 +42,19 @@ if mode in ('pipe','pipe-no-lock','lock-only'):
     if fd>2:
      try: os.close(fd)
      except OSError: pass
-  (p/'survivor').write_text(str(os.getpid()))
-  end=time.monotonic()+12
-  while not (p/'release').exists():
-   if time.monotonic()>=end: os._exit(72)
-   time.sleep(.002)
+  if os.environ.get('TASK_FIXTURE_DESCENDANT_CONTROL')=='1':
+   # The original test owns the other endpoint. EOF also releases this child
+   # after a panic/crash; scheduling alone must never retire its pipe custody.
+   control=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+   control.connect(str(p/'c'))
+   (p/'survivor').write_text(str(os.getpid()))
+   assert control.recv(1)==b'', 'unexpected fixture release input'
+  else:
+   (p/'survivor').write_text(str(os.getpid()))
+   end=time.monotonic()+12
+   while not (p/'release').exists():
+    if time.monotonic()>=end: os._exit(72)
+    time.sleep(.002)
   os._exit(0)
 sys.stdout.buffer.write((p/'reply').read_bytes());sys.stdout.buffer.flush()
 "#;
@@ -90,8 +98,14 @@ impl Fixture {
         let run = uuid::Uuid::new_v4().to_string();
         let conversation = uuid::Uuid::new_v4().to_string();
         let name = "codex/private-task-start";
-        let mut agent = Command::new("/bin/sleep");
-        agent.arg("20").env("HGS_RUN_ID", &run);
+        // The stand-in is owned until Fixture::drop, not until an unrelated
+        // wall-clock timeout expires while other tests occupy the scheduler.
+        let mut agent = Command::new("/bin/cat");
+        agent
+            .env("HGS_RUN_ID", &run)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         #[cfg(target_os = "linux")]
         {
             use std::os::unix::process::CommandExt;
@@ -254,13 +268,17 @@ impl Fixture {
         assert!(send.send(Ok(prepared)).is_ok());
         pending.ready = ready;
     }
+    #[track_caller]
     fn until(&mut self, done: impl Fn(&Self) -> bool) {
         let end = Instant::now() + Duration::from_secs(8);
         while !done(self) {
             assert!(
                 Instant::now() < end,
-                "actor timed out: {}",
-                self.runtime.status()
+                "actor timed out: {}; counts={:?}; entered={}; survivor={}",
+                self.runtime.status(),
+                self.counts(),
+                self.path("entered").exists(),
+                self.path("survivor").exists()
             );
             self.poll();
             thread::sleep(Duration::from_millis(2));
@@ -396,8 +414,30 @@ fn revoked_worker_retains_same_ticket_and_finishes_unknown_without_another_child
 fn descendant_pipe_keeps_original_serve_and_handoff_custody_after_outcome() {
     for mode in ["pipe", "pipe-no-lock"] {
         let mut f = Fixture::new(mode);
-        f.request();
-        f.until(|f| f.path("survivor").exists());
+        // Controlled scheduling witness: a wall-clock backstop is already
+        // expired. Only the explicitly owned EOF may release this descendant.
+        let helper = HELPER.replace("end=time.monotonic()+12", "end=time.monotonic()-1");
+        assert_ne!(helper, HELPER);
+        fs::write(f.runtime.image.as_ref().unwrap(), helper).unwrap();
+        // An original socket endpoint, rather than a timed descendant, pins
+        // the arrange phase until all physical-custody assertions are made.
+        let listener = UnixListener::bind(f.path("c")).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        f.runtime
+            .environment
+            .push(("TASK_FIXTURE_DESCENDANT_CONTROL".into(), "1".into()));
+        let reply = f.request();
+        f.until(|f| {
+            assert!(
+                f.runtime.work.is_some(),
+                "original request refused before descendant startup: {:?}",
+                reply.take()
+            );
+            f.path("survivor").exists()
+        });
+        // The marker follows connect(), so accept cannot need another actor
+        // turn. Keep the SAME accepted endpoint through the logical outcome.
+        let (release, _) = listener.accept().unwrap();
         f.until(|f| matches!(f.runtime.work, Some(Work::Draining { .. })));
         assert_eq!(f.state(), "unknown");
         assert_eq!(ledger::totals(&f.store.db).unwrap().undrained, 1);
@@ -417,8 +457,16 @@ fn descendant_pipe_keeps_original_serve_and_handoff_custody_after_outcome() {
             custody::probe(&f.runtime.location, &record),
             custody::Observation::Held
         ));
-        fs::write(f.path("release"), b"original descendant release").unwrap();
-        f.until(|f| f.runtime.drained());
+        drop(release); // EOF is the one explicit release of this descendant.
+        f.until(|f| {
+            f.runtime.drained()
+                && matches!(
+                    custody::probe(&f.runtime.location, &record),
+                    custody::Observation::Released { .. }
+                )
+        });
+        assert_eq!(ledger::totals(&f.store.db).unwrap().undrained, 0);
+        assert!(f.runtime.work.is_none());
     }
 }
 #[test]

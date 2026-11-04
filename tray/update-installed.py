@@ -76,6 +76,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from typing import NamedTuple
 import uuid
 
 MAC = sys.platform == 'darwin'
@@ -496,31 +497,56 @@ def snapshot(destination, roots):
     return count
 
 
+class KeptDrafts(NamedTuple):
+    """What the drafts saved when the old GUI quit held, once verified.
+
+    `total` counts every verified draft. Each counts once as `unsent` (text
+    or files) or `forms` (saved form state only, such as an answered or
+    submitted question form), and `held` counts the drafts holding a delivery
+    identity (`deferred_input`, zerus-5wmh.66.4.4), with or without content.
+    """
+    total: int = 0
+    unsent: int = 0
+    forms: int = 0
+    held: int = 0
+
+
 def changed_drafts(saved, roots):
-    """Nonempty drafts saved when the old GUI quit that are missing or different now."""
-    problems, preserved = [], 0
+    """Drafts saved when the old GUI quit that are missing or different now.
+
+    Every draft holding unsent input, saved form state or a held delivery
+    identity is compared, and the counts tell those apart (zerus-8iwj).
+    """
+    problems, total, unsent, forms, held = [], 0, 0, 0, 0
     for label, current in roots:
         prefix = '' if label == 'qt' else f'{label} '
         kept = saved / label
         for before in sorted(kept.rglob('draft.json')):
             relative = before.relative_to(kept).parent
             original = json.loads(before.read_text())
-            if not (original.get('text') or original.get('attachments') or original.get('form_state')):
+            content = bool(original.get('text') or original.get('attachments'))
+            form = bool(original.get('form_state'))
+            identity = 'deferred_input' in original
+            if not (content or form or identity):
                 continue
             after = current / relative / 'draft.json'
             if not after.exists():
                 problems.append(f'{prefix}{relative}: missing')
                 continue
             restored = json.loads(after.read_text())
-            if any(original.get(key) != restored.get(key) for key in ('key', 'text', 'attachments', 'form_state')):
+            keys = ('key', 'text', 'attachments', 'form_state', 'deferred_input')
+            if any(original.get(key) != restored.get(key) for key in keys):
                 problems.append(f'{prefix}{relative}: changed')
                 continue
             for attachment in original.get('attachments') or []:
                 blob = after.parent / (attachment['sha256'] + '.bin')
                 if not blob.exists() or digest(blob) != attachment['sha256']:
                     problems.append(f'{prefix}{relative}: attachment changed')
-            preserved += 1
-    return preserved, problems
+            total += 1
+            unsent += content
+            forms += form and not content
+            held += identity
+    return KeptDrafts(total, unsent, forms, held), problems
 
 
 def running_image_matches(pid, installed):
@@ -552,11 +578,13 @@ def build_info(path):
     return info
 
 
-def provenance(installed, info, installed_at, preserved, retained):
+def provenance(installed, info, installed_at, kept, retained):
     record = {'schema': 1, 'sourceCommit': info.get('sourceCommit') or None, 'sourceDirty': info.get('sourceDirty'),
               'guiVersion': info.get('version'), 'guiVersionName': info.get('versionName'),
               'guiSha256': digest(executable(installed)), 'installedAt': installed_at, 'verifiedAt': now(),
-              'preservedDrafts': preserved, 'nativeRetained': retained}
+              'preservedDrafts': kept.total,
+              'keptDrafts': {'unsentInput': kept.unsent, 'formState': kept.forms, 'heldIdentities': kept.held},
+              'nativeRetained': retained}
     if CLI.exists():
         record['cliSha256'] = digest(CLI)
         try:
@@ -1335,7 +1363,7 @@ def update(built, installed, rollback=False):
             raise UpdateError('the new GUI runs, but ' + '; '.join(problems) + '; the replaced GUI was kept')
         settled = settle(aside if aside.exists() else None, keep, progress)
         done = True
-        preserved, draft_problems = changed_drafts(saved, roots)
+        kept, draft_problems = changed_drafts(saved, roots)
         problems += draft_problems
         if to_client:
             late, notes = settings_report()
@@ -1349,11 +1377,12 @@ def update(built, installed, rollback=False):
         if problems:
             raise UpdateError('the new GUI runs, but ' + '; '.join(problems))
         retained = sum(after.get(p) == value for p, value in before.items())
-        provenance(installed, info, installed_at, preserved, retained)
+        provenance(installed, info, installed_at, kept, retained)
         shutil.rmtree(saved)
         saved = None
         sweep(installed.parent, folder)
-        say(f'Zerus {name} runs as pid {new}; {preserved} nonempty drafts kept, '
+        say(f'Zerus {name} runs as pid {new}; drafts kept: {kept.unsent} with unsent input, '
+            f'{kept.forms} with saved form state only, {kept.held} with a held delivery identity; '
             f'{retained} native processes untouched; {settled}')
         return 0
     except UpdateError:

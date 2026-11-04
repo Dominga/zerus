@@ -541,7 +541,26 @@ print("custody: inherited" if f"{seen.st_dev}:{seen.st_ino}" == want else "custo
             ),
             Ended::Unknown("task_message_input_unwritten")
         );
-        // A reply larger than the retained bound.
+        // A reply of exactly the retained bound is whole; one byte more is
+        // Unknown.
+        assert_eq!(
+            child::run(
+                Path::new("/usr/bin/env"),
+                &python(&format!(
+                    "import sys\nsys.stdout.buffer.write(b'x' * {})",
+                    child::STDOUT_BYTES
+                )),
+                b"",
+                &held,
+                &guard(),
+                soon(),
+                |_| Ok(())
+            ),
+            Ended::Exited {
+                code: 0,
+                stdout: vec![b'x'; child::STDOUT_BYTES]
+            }
+        );
         assert_eq!(
             child::run(
                 Path::new("/usr/bin/env"),

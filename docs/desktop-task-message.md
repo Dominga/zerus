@@ -167,8 +167,29 @@ the form like every original.
 - **Removal.** An input is removed, and its storage charge released, only
   after its original drained physically and nothing in this process holds it.
   A restart does not change that: a retired but undrained original keeps its
-  input. A failed removal stays visible and charged. Lookups never read an
-  input, so a legitimately removed one changes no receipt.
+  input. The removal needs all of the following:
+  - the original object itself: a duplicate of the input's own open file
+    description that this process kept from admission (or from the refused
+    admission) until the removal, so its inode cannot have been reused, and
+    which never reads an original pipe or delays a drain. A file merely
+    reopened by name is never that witness. Without the original (after a
+    restart, say), the input is marked `failed` and stays charged for
+    explicit review; its execution outcome, drain and receipt are untouched;
+  - that object's recorded identity, as a private regular file of this user
+    with one link;
+  - the record's size and SHA-256, read through it, with its exact version
+    (identity, size, mode, links, modification and status times) unchanged
+    across that read;
+  - the held folder and the canonical name, never followed, still denoting
+    that same unchanged object, and a deadline that is never renewed,
+    checked once more right before the unlink.
+
+  The worker keeps the service's own exclusion until it finished, its folder
+  sync included. A failed removal stays visible and charged. Staged copies stay
+  open from the moment they were created (client) or read (service) until
+  their removal, so a file recreated under a copy's name never shares its
+  inode. Lookups never read an input, so a legitimately removed one changes
+  no receipt.
 - **Restart.** A reservation that nothing in this process holds, after a
   restart or a failed preparation, is classified off the actor. If its input
   exists, it was published but never admitted: it is kept, charged and

@@ -126,7 +126,12 @@ pub(in crate::desktop) struct Runtime {
     /// The one custody-input removal or restart recovery off the actor.
     removal: Option<reference::Removal>,
     /// Published inputs whose admission was refused, for exact removal.
-    refused: Vec<(String, staging::Identity)>,
+    refused: Vec<(String, staging::Expected, Option<std::fs::File>)>,
+    /// The original custody inputs this process still holds for their exact
+    /// removal: duplicates of their open file descriptions, so their inodes
+    /// cannot be reused. Never a reader of any original pipe, so they never
+    /// keep an original from draining. At most one per charged record.
+    retained: BTreeMap<String, std::fs::File>,
 }
 impl Runtime {
     pub fn new(config: &Config, epoch: &str, owner: Arc<platform::FileLock>) -> Result<Self> {
@@ -159,6 +164,7 @@ impl Runtime {
             admitting: None,
             removal: None,
             refused: Vec::new(),
+            retained: BTreeMap::new(),
         })
     }
     pub fn observe(&mut self, event: &fleet::FleetEvent) {

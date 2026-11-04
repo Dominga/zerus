@@ -1018,6 +1018,92 @@ class SessionIdentity(Harness):
     """zerus-ucck P1: the durable session ID. A class of its own keeps the
     pinned Lifecycle bodies unchanged (test_pause_signal_trace_source)."""
 
+    # zerus-ucck P2b: a new session keeps its history under its durable ID
+    # and the label it was launched with. Rename, pause and resume, a fresh
+    # start, an older writer's re-minted ID, archive and restore all keep that
+    # one journal, and no event is ever keyed by a label.
+    def test_a_new_session_keeps_its_history_under_its_id(self):
+        name = self.start(tag="journal")
+        first = self.binding(name)
+        journal = "session:" + first["session_id"]
+        self.assertEqual((first["journal_name"], first["launch_label"]), (journal, name))
+
+        def keys():
+            db = sqlite3.connect(self.root / "state/events.sqlite3")
+            try:
+                return {row[0] for row in db.execute("SELECT DISTINCT name FROM events")}
+            finally:
+                db.close()
+
+        def seqs(label):
+            return {event["seq"] for event in json.loads(self.hgs("inspect", label))["events"]}
+
+        def kept(label):
+            record = self.binding(label)
+            self.assertEqual((record["journal_name"], record["launch_label"]), (journal, name), label)
+            self.assertLessEqual(before, seqs(label), label)
+
+        self.wait(lambda: journal in keys())
+        before = seqs(name)
+        self.assertTrue(before)
+        renamed = "claude/p/journal-renamed"
+        self.hgs("rename", name, renamed)
+        kept(renamed)
+        self.hgs("pause", renamed)
+        self.resume(renamed)
+        kept(renamed)
+        self.hgs("pause", renamed)
+        conversation, run = self.binding(renamed)["conversation_id"], self.binding(renamed)["run_id"]
+        self.hgs("resume", renamed, "--fresh", "--expected-run-id", run, "-d")
+        self.wait(lambda: self.binding(renamed).get("conversation_id") not in (None, conversation))
+        kept(renamed)
+        # An older writer drops the ID; the re-minted one keeps the journal.
+        path = self.root / "state" / (hashlib.sha256(renamed.encode()).hexdigest() + ".json")
+        older = json.loads(path.read_text()); older.pop("session_id"); path.write_text(json.dumps(older) + "\n")
+        self.hgs("pause", renamed)
+        self.assertNotEqual(self.binding(renamed)["session_id"], first["session_id"])
+        kept(renamed)
+        self.hgs("archive", renamed)
+        archived = next(json.loads(p.read_text()) for p in (self.root / "state" / "archives").glob("*.json")
+                        if json.loads(p.read_text())["name"] == renamed)
+        self.assertEqual((archived["journal_name"], archived["launch_label"]), (journal, name))
+        self.hgs("resume", renamed, "--archive", archived["archive_id"], "-d")
+        self.wait(lambda: self.binding(renamed).get("activity") == "idle")
+        kept(renamed)
+        self.assertNotIn(name, keys())
+        self.assertNotIn(renamed, keys())
+
+    # #1408 review: `--fresh` over a saved, confirmed conversation is a new
+    # session with its own ID journal and launch label, and a name-only task
+    # for the replaced session's launch label never routes to it.
+    def test_a_fresh_launch_over_a_confirmed_session_is_a_new_session(self):
+        first = self.start(tag="w")
+        launched = self.binding(first)
+        self.hgs("rename", first, "claude/p/one")
+        self.hgs("pause", "claude/p/one")
+        old = self.binding("claude/p/one")
+        self.assertEqual((old["journal_name"], old["launch_label"]), ("session:" + launched["session_id"], first))
+        self.hgs("claude", "p", "-n", "one", "-d", "--fresh")
+        self.wait(lambda: self.binding("claude/p/one").get("conversation_id") not in (None, old["conversation_id"]))
+        fresh = self.binding("claude/p/one")
+        self.assertNotEqual(fresh["session_id"], old["session_id"])
+        self.assertEqual((fresh["journal_name"], fresh["launch_label"]),
+                         ("session:" + fresh["session_id"], "claude/p/one"))
+        catalog = {"projects": [{"id": "project-1", "name": "orchard", "color": "#123456",
+                                 "folders": [], "sessions": []}]}
+        initialized = subprocess.run([str(HGS), "swarm", "initialize"], input=json.dumps(catalog), env=self.env,
+                                     text=True, capture_output=True, timeout=30)
+        self.assertEqual(initialized.returncode, 0, initialized.stderr)
+
+        def target(label):
+            added = subprocess.run([str(HGS), "task", "add", "--project", "orchard", "--target", label],
+                                   input="Route me", env=self.env, text=True, capture_output=True, timeout=30)
+            self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+            return json.loads(added.stdout)["task"]["target"]["session"]
+
+        self.assertEqual(target(first), first, "the replaced session's launch label routes nowhere new")
+        self.assertEqual(target("claude/p/one"), "claude/p/one")
+
     # zerus-ucck P1: one durable session ID across pause and resume, a fresh
     # conversation, rename, archive and restore (a fork gets its own: see
     # test_fork); a record an older CLI wrote gains one when next written.

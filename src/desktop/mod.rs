@@ -55,6 +55,8 @@ mod startup_stdio;
 mod store;
 #[cfg(windows)]
 mod swarm_windows;
+/// The deferred send leaf (zerus-5wmh.66.4.4, slice 3).
+pub(crate) mod deferred_send;
 pub(crate) mod task_message;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod task_start_reconcile;
@@ -1186,6 +1188,12 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         } else if hello
                             .request
                             .as_ref()
+                            .is_some_and(|v| v["op"] == "deferred_send_result")
+                        {
+                            deferred_send::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
                             .is_some_and(|v| v["op"] == "task_message_staging")
                         {
                             task_message::staging_route(
@@ -1243,6 +1251,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                         | "creation_launch"
                                         | "task_message"
                                         | "task_message_input_release"
+                                        | "deferred_send"
                                         | "task_start_reconcile"
                                 )
                             )

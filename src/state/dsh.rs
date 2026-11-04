@@ -54,7 +54,9 @@ pub(super) fn binding(name: &str) -> Result<Value> {
 /// Saves the binding, keeping its durable session ID on the caller's record.
 pub(super) fn save(value: &mut Value) -> Result<()> {
     ensure_session_id(value);
-    atomic(&binding_path(string(value, "name")), &value.to_string())
+    atomic(&binding_path(string(value, "name")), &value.to_string())?;
+    session_index::note(value, session_index::Kind::DeepSeek);
+    Ok(())
 }
 fn native_home() -> PathBuf {
     nonempty_env("DSH_HOME")

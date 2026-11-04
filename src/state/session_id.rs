@@ -110,20 +110,39 @@ pub(crate) fn canonical(id: &str) -> bool {
 }
 
 /// The current names of the live or saved sessions whose durable ID is `id`:
-/// one, or none. One scan of the bindings, as `hgs ls` reads them, for one
-/// explicit CLI call; P2's `sessions/<id>` layout makes it a lookup. Never put
-/// it on a polling, status or watch path before that.
+/// one, or none. A verified hit of the ID index (P2a) is one read; a miss or
+/// a stale entry scans the bindings once, as `hgs ls` reads them, and repairs
+/// the entry. Duplicate IDs, which no writer of this hgs makes, are therefore
+/// reported only by that scan.
 pub(crate) fn names_of(id: &str) -> Result<Vec<String>> {
     if !canonical(id) {
         return Err("A session ID is a lowercase UUID; copy it from hgs ls --json".into());
     }
-    let mut names: Vec<String> = records()?
+    if let Some(found) = session_index::find(id) {
+        return Ok(vec![found.name]);
+    }
+    session_index::scanned();
+    use session_index::Kind;
+    let found: Vec<(String, Kind)> = records()?
         .into_iter()
-        .chain(dsh::binding_records())
-        .chain(opencode::binding_records())
-        .filter(|record| string(record, "session_id") == id && string(record, "archive_id").is_empty())
-        .map(|record| string(&record, "name").to_owned())
+        .map(|record| (record, Kind::Record))
+        .chain(
+            dsh::binding_records()
+                .into_iter()
+                .map(|record| (record, Kind::DeepSeek)),
+        )
+        .chain(
+            opencode::binding_records()
+                .into_iter()
+                .map(|record| (record, Kind::OpenCode)),
+        )
+        .filter(|(record, _)| {
+            string(record, "session_id") == id && string(record, "archive_id").is_empty()
+        })
+        .map(|(record, kind)| (string(&record, "name").to_owned(), kind))
         .collect();
+    session_index::repair(id, &found);
+    let mut names: Vec<String> = found.into_iter().map(|(name, _)| name).collect();
     names.sort();
     names.dedup();
     Ok(names)

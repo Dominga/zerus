@@ -114,7 +114,9 @@ pub(super) fn native_id(id: &str, prefix: &str) -> bool {
 /// Saves the binding, keeping its durable session ID on the caller's record.
 pub(super) fn save(record: &mut Value) -> Result<()> {
     ensure_session_id(record);
-    atomic(&binding_path(string(record, "name")), &record.to_string())
+    atomic(&binding_path(string(record, "name")), &record.to_string())?;
+    session_index::note(record, session_index::Kind::OpenCode);
+    Ok(())
 }
 pub(crate) fn config_home() -> PathBuf {
     nonempty_env("OPENCODE_CONFIG_DIR")

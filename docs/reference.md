@@ -301,16 +301,34 @@ Consumers therefore treat `session_id` as a hint and fall back to the run and
 conversation identities.
 The agent's environment carries it as `HGS_SESSION_ID`, beside `HGS_SESSION`
 (the name at launch) and `HGS_RUN_ID`, and `hgs ls --json` rows and
-inspections include it. A hook prefers the record that carries the agent's
-`HGS_SESSION_ID`; when none does, for example after an older hgs rewrote the
-record, the run identity alone decides, as before.
+inspections include it. A hook first resolves the agent's `HGS_SESSION_ID`
+through the ID index, under whatever label the session carries now. Failing
+that, it prefers the record that carries the ID; when none does, for example
+after an older hgs rewrote the record, the run identity alone decides, as
+before.
+
+A session this hgs creates keeps its history under its durable ID. Its
+Activity, read marks and notification preferences are keyed by
+`journal_name`, which is `session:<session_id>`, and `launch_label` keeps the
+label it was launched with. Rename, resume, Clear, Start fresh and restore
+keep both. A later write here can give the session a new ID after an older hgs
+dropped it; the journal stays where it is. A `--fresh` launch over a saved,
+confirmed conversation of the label is a new session with its own journal; only
+a retry of an unconfirmed attempt continues that attempt's journal. A session created
+before keeps the history of its label, pinned at its first rename. hgs v0.47.0
+and later read `journal_name` and keep it on every one of those paths.
 
 A command whose first argument is a session also accepts `--session-id ID`
 instead, for example `hgs inspect --session-id ID` or `hgs rename --session-id
 ID NEW-NAME`. A name given before the flag must be that session's current
 name; arguments after it are the command's own. The value must be the
-lowercase UUID shown by `hgs ls --json`, given once. Resolution only finds the
-session's name: every record the command then reads under that name, live or
+lowercase UUID shown by `hgs ls --json`, given once. Resolution reads the
+verified index `ids/<session_id>.json` under the state directory, which names
+the session's current label. A missing or stale entry costs one scan of the
+records, which repairs it when the state lock is free. Hooks never repair, and
+an index this process cannot write is left alone. An older hgs ignores the
+index. Resolution only
+finds the session's name: every record the command then reads under that name, live or
 archived, must still carry the ID, so a name another session took meanwhile
 fails with "Session ID ID no longer names NAME" instead of acting on it. `kill`
 and `a` bind the terminal before their first effect: the name's immutable
@@ -3077,13 +3095,22 @@ same computer, before any change; the task keeps it until its next send or
 start. Only that run is then the executor: a name alone never names one, so
 another run that holds the name is not, and a holder an older build bound
 without recording it reads as a conflict. When merged replicas leave the latest boundary with another session
-than the one holding the task, `conflict` is set. No start,
-child or result is invented. A resume settles only the pauses it observed, so a
+than the one holding the task, `conflict` is set. Each attempt freezes the history
+entries of the task's executions so far (`sent`, `resumed`); a send or reopen
+it settles names its request. An execution entry neither frozen nor named, such
+as a send an older build recorded concurrently, is listed in `unexplained`, sets
+`conflict` and holds any new delivery until the person reviews that exact entry.
+No start, child or result is invented. A resume settles only the pauses it observed, so a
 pause that no resume observed keeps the attempt paused. A session's
 Stop, idle time, pause or elapsed time is never an attempt event and never
 moves a task. Attempts are kept beside the history under task schema 6, which a
-reader that does not know them shows read-only. This version reads attempts and
-guards reports against the current execution; recording attempts comes later.
+reader that does not know them shows read-only. The stored schema is one merged
+value, so an older replica's concurrent upgrade can leave a lower one; this
+version raises it again for a task with attempts in every write and every live
+import, and before a task is read for an inventory, so the raised value is what
+other replicas receive. That repair is a new change, not proof that an older
+replica did nothing before it. This version reads attempts and guards reports
+against the current execution; recording attempts comes later.
 
 Plain `task list` still returns every task for existing clients. With `--stage`
 and `--limit` (1–200) it returns one page of that stage in the same order and
@@ -3323,6 +3350,16 @@ what `send` and `cancel` do and answer only the task's stage (a refusal says
 `hgs task mobile-done --json` answers a page of at most 50 Done tasks, newest
 first, with how many there are and how many from the last 7 days. See
 `services/mobile/relay/README.md`.
+
+The phone apps edit only tasks at schema 2 or below, and none of their edits
+changes the stored schema. The exchange imports a phone's changes and raises a
+task that records attempts back to the execution schema before it answers, so
+a phone that receives a task's attempts receives that schema with them and
+shows the task read-only from then on. Its earlier offline edits merge as
+ordinary concurrent edits; they add no attempt fact and never stand for a
+delivery, a refusal or a cancellation. Send now and Cancel from a phone run the
+same checks as `send` and `cancel`, including the hold of an attempt whose
+delivery is unknown.
 
 Agents use the same `hgs task` commands in their own shell. A command run inside
 an agent session acts as that session when it proves it as `hgs self` does (the

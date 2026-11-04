@@ -169,6 +169,10 @@ fn anchor(record: &mut Value) {
     if string(record, "journal_name").is_empty() {
         record["journal_name"] = record["name"].clone();
     }
+    // A record an older hgs rebuilt without it keeps the label it leaves.
+    if string(record, "launch_label").is_empty() {
+        record["launch_label"] = record["name"].clone();
+    }
 }
 
 fn source_path(transaction: &Value) -> PathBuf {
@@ -384,6 +388,26 @@ pub(super) fn remove_legacy(record: &Value) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// A rename pins the history it leaves: the label as the journal of a
+    /// record that had none, and the label it leaves as `launch_label` when an
+    /// older hgs rebuilt the record without one. Existing values are kept.
+    #[test]
+    fn a_rename_anchors_the_journal_and_the_launch_label_once() {
+        const JOURNAL: &str = "session:3f2a9c1d-0b4e-4d6a-9c1d-2e3f4a5b6c7d";
+        let mut old_style = json!({"name":"codex/p/one"});
+        super::anchor(&mut old_style);
+        assert_eq!(old_style["journal_name"], "codex/p/one");
+        assert_eq!(old_style["launch_label"], "codex/p/one");
+        let mut new_style =
+            json!({"name":"codex/p/renamed","journal_name":JOURNAL,"launch_label":"codex/p/one"});
+        super::anchor(&mut new_style);
+        assert_eq!(new_style["journal_name"], JOURNAL);
+        assert_eq!(new_style["launch_label"], "codex/p/one");
+        let mut rebuilt = json!({"name":"codex/p/renamed","journal_name":JOURNAL});
+        super::anchor(&mut rebuilt);
+        assert_eq!(rebuilt["launch_label"], "codex/p/renamed");
+    }
+
     use super::*;
 
     #[test]

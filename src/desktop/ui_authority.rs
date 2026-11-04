@@ -343,6 +343,7 @@ impl Validated {
                     | Request::CreationLaunch { .. }
                     | Request::TaskMessage { .. }
                     | Request::TaskMessageInputRelease { .. }
+                    | Request::DeferredSend { .. }
                     | Request::TaskStartReconcile { .. }
                     | Request::TerminationOutcome { .. }
             ),
@@ -367,6 +368,17 @@ impl Validated {
         self.check()?;
         let Request::CreationLaunch { intent } = self.0 else {
             anyhow::bail!("not a creation launch");
+        };
+        Ok(*intent)
+    }
+    /// Only the deferred send actor calls this, after BEGIN IMMEDIATE.
+    /// Cached native Service mode was bound to this exact original request
+    /// during admission.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn deferred_send(self) -> Result<zerus_client_core::desktop::deferred_send::Intent> {
+        self.check()?;
+        let Request::DeferredSend { intent } = self.0 else {
+            anyhow::bail!("not a deferred send");
         };
         Ok(*intent)
     }
@@ -1023,6 +1035,14 @@ fn validate(
             "task message input release does not match the native service frontend"
         );
     }
+    if let Request::DeferredSend { intent } = &envelope.request {
+        ensure!(
+            reply.request.ownership_mode
+                == Some(zerus_client_core::desktop::ownership::Mode::Service)
+                && intent.scope.configuration == configuration,
+            "deferred send does not match the native service frontend"
+        );
+    }
     if let Request::TaskStartReconcile { intent } = &envelope.request {
         ensure!(
             reply.request.ownership_mode
@@ -1105,6 +1125,7 @@ enum OrderedOperation {
     CreationLaunch,
     TaskMessage,
     TaskMessageInputRelease,
+    DeferredSend,
     TaskStartReconcile,
     ActivationWait,
     AutomaticApprovals,
@@ -1126,6 +1147,7 @@ impl From<&Request> for OrderedOperation {
             Request::CreationLaunch { .. } => Self::CreationLaunch,
             Request::TaskMessage { .. } => Self::TaskMessage,
             Request::TaskMessageInputRelease { .. } => Self::TaskMessageInputRelease,
+            Request::DeferredSend { .. } => Self::DeferredSend,
             Request::TaskStartReconcile { .. } => Self::TaskStartReconcile,
             Request::ActivationWait { .. } => Self::ActivationWait,
             Request::AutomaticApprovals { .. } => Self::AutomaticApprovals,
@@ -1751,6 +1773,71 @@ mod tests {
             .is_err());
         if let Request::TaskMessageInputRelease { release } = &mut envelope.request {
             release.scope.configuration = "b".repeat(64);
+        }
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+    }
+    #[test]
+    fn deferred_send_has_its_own_lane_and_never_passes_the_generic_boundary() {
+        use zerus_client_core::{
+            desktop::{
+                deferred_send::{Intent, Scope},
+                ownership::Mode,
+            },
+            operation_recovery::deferred_input as checkpoint,
+        };
+        let (mut envelope, caller, frontend, mut reply) = fixture();
+        let reserved = checkpoint::Checkpoint::reserve(checkpoint::Intent {
+            kind: checkpoint::Kind::Send,
+            draft_revision: 1,
+            message_sha256: checkpoint::message_sha256("hello", std::iter::empty()),
+            run_id: "run-1".into(),
+            conversation_id: "conversation-1".into(),
+            question: None,
+            start: None,
+            retry_of: None,
+            consent: true,
+        });
+        let original = serde_json::json!({"request_id": reserved.request_id, "text": "hello",
+            "attachments": [], "expected_run_id": "run-1",
+            "expected_conversation_id": "conversation-1"});
+        envelope.request = Request::DeferredSend {
+            intent: Box::new(Intent {
+                scope: Scope {
+                    configuration: "a".repeat(64),
+                    service_epoch: id(91),
+                },
+                session: "claude/private-send".into(),
+                request_id: reserved.request_id.clone(),
+                checkpoint: serde_json::to_string(&reserved).unwrap(),
+                original: original.to_string(),
+            }),
+        };
+        assert_eq!(
+            OrderedOperation::from(&envelope.request),
+            OrderedOperation::DeferredSend
+        );
+        for other in [
+            OrderedOperation::TaskMessage,
+            OrderedOperation::TaskMessageInputRelease,
+            OrderedOperation::CreationLaunch,
+        ] {
+            assert_ne!(OrderedOperation::DeferredSend, other);
+        }
+        assert_eq!(envelope.request.id(), reserved.request_id);
+        reply.request.request_id = reserved.request_id.clone();
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Native);
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Service);
+        validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).unwrap();
+        // Only a future typed actor accessor may consume it.
+        assert!(Validated::fixture(&serde_json::json!(envelope.request))
+            .into_request()
+            .is_err());
+        if let Request::DeferredSend { intent } = &mut envelope.request {
+            intent.scope.configuration = "b".repeat(64);
         }
         reply.request.fingerprint = envelope.request.fingerprint();
         assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());

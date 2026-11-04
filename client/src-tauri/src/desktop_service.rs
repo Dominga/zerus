@@ -737,6 +737,62 @@ impl Service {
             .await;
         view
     }
+    /// The FIRST explicit background choice (zerus-yfbd.1). Consumes only the
+    /// opaque continuation of its own native confirmation. A missing current
+    /// Grant is never made up here (no Rearm or NewOrigin): it keeps its own
+    /// explicit recovery action, and the native helper checks it again.
+    async fn apply_first_choice(
+        self: &Arc<Self>,
+        prepared: Option<mode_transition::FirstPrepared>,
+    ) -> Result<Value, String> {
+        let Some(prepared) = prepared else {
+            return Ok(Value::Null);
+        };
+        let transition = &self.shared.mode_transition;
+        transition
+            .validate_first(&prepared)
+            .await
+            .map_err(str::to_owned)?;
+        if self.shared.read_checks_only() {
+            return Err("manual_refresh_required".into());
+        }
+        // Consent is for the displayed scope, not a later CLI upgrade or a
+        // replacement endpoint discovered while the dialog was open.
+        match preflight(&self.shared, Arc::new(AtomicBool::new(false))).await {
+            Ok(configuration) if configuration != prepared.configuration() => {
+                return Err("activation_scope_changed".into())
+            }
+            Ok(_) => (),
+            Err(code) => return Err(code.into()),
+        }
+        if self.shared.read_checks_only() {
+            return Err("manual_refresh_required".into());
+        }
+        // Preflight can wait; revalidate the SAME opaque continuation.
+        transition
+            .validate_first(&prepared)
+            .await
+            .map_err(str::to_owned)?;
+        if self.shared.read_checks_only() {
+            return Err("manual_refresh_required".into());
+        }
+        if !self.shared.ownership.granted() || !self.shared.ownership.view().code.is_empty() {
+            return Err("ownership_rearm_required".into());
+        }
+        let offered = transition
+            .apply_first(prepared)
+            .await
+            .map_err(str::to_owned)?;
+        self.shared
+            .publish_ownership(crate::desktop_ownership::Phase::Result)
+            .await;
+        if transition.first_settled(&offered) {
+            // Read-only: the reconnect observes the background service; it is
+            // not a trigger for Grant, import or manager work.
+            self.wake_connection(true);
+        }
+        Ok(json!({ "request_id": offered }))
+    }
     /// Consumes only the opaque continuation returned by the native-confirmation
     /// controller. Review and a later mode choice remain separate operations.
     async fn apply_mode_action(
@@ -2349,6 +2405,51 @@ pub async fn desktop_service_mode_action(
             .blocking_show()
     }).await.map_err(str::to_owned)?;
     service.apply_mode_action(prepared).await
+}
+
+/// One native confirmation for the FIRST explicit background choice on a
+/// plain passive Windows registration. The renderer selects only the
+/// displayed offer; it cannot supply consent, a native caller or a PID.
+#[tauri::command]
+pub async fn desktop_service_first_choice(
+    app: tauri::AppHandle,
+    source: tauri::State<'_, crate::commands::AppState>,
+    display: mode_transition::FirstView,
+) -> Result<Value, String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    if crate::actions::blocked() {
+        return Err("replay_transport_unavailable".into());
+    }
+    let service = source
+        .desktop_service()
+        .ok_or("ownership_service_mode_required")?;
+    if service.shared.read_checks_only() {
+        return Err("manual_refresh_required".into());
+    }
+    if !service.shared.ownership.granted() || !service.shared.ownership.view().code.is_empty() {
+        return Err("ownership_rearm_required".into());
+    }
+    let window = crate::main_window(&app).ok_or("The main window is unavailable.")?;
+    let prepared = service
+        .shared
+        .mode_transition
+        .confirm_first(display, move |_display| {
+            let text = |message: zerus_client_core::text::Text| crate::native_text::render(&message);
+            let title = text(zerus_client_core::text!("Use background mode"));
+            app.dialog()
+                .message(text(zerus_client_core::text!("Zerus turns on background work on this computer and runs your sessions through the background service. Nothing else changes until the service confirms it.")))
+                .title(title.clone())
+                .parent(&window)
+                .kind(MessageDialogKind::Info)
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    title,
+                    text(zerus_client_core::text!("Cancel")),
+                ))
+                .blocking_show()
+        })
+        .await
+        .map_err(str::to_owned)?;
+    service.apply_first_choice(prepared).await
 }
 
 #[tauri::command]

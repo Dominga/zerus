@@ -231,7 +231,7 @@ impl Controller {
             previous.check()?;
         }
         let mut current = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        current.view.automatic_blocked |= status["activation_automatic_blocked"] == true;
+        super::latch(&mut current, status);
         let Some(frame) = frame else {
             if current.view.automatic_blocked {
                 return Err("activation_review_unavailable");

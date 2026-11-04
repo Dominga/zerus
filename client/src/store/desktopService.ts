@@ -1,6 +1,6 @@
 import { createSignal } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
-import type { DesktopService, NotificationOwnership, ModeReview } from "../types";
+import type { DesktopService, NotificationOwnership, ModeReview, FirstChoiceOffer } from "../types";
 import { tr } from "../i18n";
 
 /** Presence of this projection is the startup mode. It never grants writer authority. */
@@ -415,6 +415,27 @@ export function createModeReviewActions(
 export const modeReviewActions = createModeReviewActions(
   (display, action) => invoke("desktop_service_mode_action", { display, action }),
 );
+/** The first explicit background choice (Windows). Only a click invokes it; the
+ * native confirmation and every check happen in Rust. The returned original ID
+ * is kept only to show this choice's own pending or not-started outcome. */
+export function createFirstChoiceActions(
+  run: (display: FirstChoiceOffer) => Promise<{ request_id?: string } | null>,
+) {
+  const [busy, setBusy] = createSignal(false);
+  const [request, setRequest] = createSignal<string>();
+  return { busy, request, async submit(display: FirstChoiceOffer) {
+    if (busy()) return;
+    setBusy(true);
+    try {
+      const result = await run({ ...display });
+      if (result?.request_id) setRequest(result.request_id);
+      return result;
+    } finally { setBusy(false); }
+  } };
+}
+export const firstChoiceActions = createFirstChoiceActions(
+  (display) => invoke("desktop_service_first_choice", { display }),
+);
 const HELPER_UNAVAILABLE = ["activation_helper_unavailable", "activation_helper_update_required", "activation_helper_changed"];
 const COMPONENTS = ["fleet", "presence", "reads", "attention", "approvals"];
 export function ownershipNotice(view: NotificationOwnership | undefined): string {
@@ -466,9 +487,40 @@ export function servicePaused(state: DesktopService | undefined): PausedAction |
   return activation.code === "activation_platform_manual" && !ownershipNotice(ownership) ? "settings" : undefined;
 }
 
+/** THIS first background choice is unconfirmed: its own original ID is
+ * pending and no review or manual refresh has taken over. Presentation only. */
+export function firstChoicePending(state: DesktopService | undefined, request = firstChoiceActions.request()): boolean {
+  const activation = state?.notification_ownership?.activation;
+  return !!request && !!activation?.pending && activation.request_id === request && !activation.review
+    && state?.executable_upgrade?.state !== "manual_refresh_required";
+}
+
+/** The Windows paused body: it promises turning background mode on in
+ * Settings only while that first choice is actually offered. */
+export function pausedSettingsBody(state: DesktopService | undefined): string {
+  if (firstChoicePending(state)) return tr("Zerus is turning on background mode on this computer. Settings shows its progress.");
+  return state?.notification_ownership?.activation?.first
+    ? tr("Zerus runs your sessions through a background service, which stays paused until you turn it on in Settings.")
+    : tr("Zerus runs your sessions through a background service, which is paused on this computer. Settings shows its current state.");
+}
+
 /** Compact footer presentation; full reasons stay in its accessible tooltip. */
 export function serviceStatus(state: DesktopService | undefined) {
   if (!state) return;
+  // An explicit mode change in flight stays the headline with only its
+  // original-ID Check, never a reconnect Retry, even while the service
+  // restarts. Independent reasons keep their own text and review links.
+  if (firstChoicePending(state)) {
+    const ownership = state.notification_ownership;
+    const reads = pendingReadNotice(state), retained = retainedSourceNotice(state), inputs = heldInputsNotice(state);
+    const access = ownership?.pending ? ownershipNotice(ownership) : "";
+    // The same readiness rule as below: no held-copy Review while not ready.
+    const inputsReview = !!inputs && state.connected && !state.code && COMPONENTS.every((name) => state.background[name]?.ready);
+    return { label: tr("Turning on background mode"),
+      details: [tr("The new mode choice is unconfirmed. Check its original result; do not make another choice."), reads, retained, inputs, access]
+        .filter(Boolean).join("\n"),
+      healthy: false, retry: false, review: !!retained, inputsReview, ownership: "check" as const, manualRefresh: false, modeReview: false };
+  }
   const manualRefresh = state.executable_upgrade?.state === "manual_refresh_required";
   const paused = servicePaused(state);
   let notice = "", label = tr("Background service");
@@ -517,7 +569,7 @@ export function serviceStatus(state: DesktopService | undefined) {
   }
   // A reason without Retry or Resume: no in-app action turns background mode on
   // here yet (zerus-5wmh.66.8.1.15); Settings shows the current state.
-  const settings = paused === "settings" ? tr("Zerus runs your sessions through a background service, which is paused on this computer. Settings shows its current state.") : "";
+  const settings = paused === "settings" ? pausedSettingsBody(state) : "";
   const reasons = [notice, pending, retained, inputs, manualRefresh ? "" : owner, settings].filter(Boolean);
   return { label, details: reasons.join("\n") || tr("Background service connected"), healthy: !reasons.length,
     retry: !manualRefresh && !!(notice || pending || retained || (owner && !ownership)), review: !!retained, inputsReview: reviewable, ownership, manualRefresh, modeReview };

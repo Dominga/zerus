@@ -50,6 +50,7 @@ mod recovery;
 mod service_worker;
 mod session_limits;
 pub(crate) mod session_id;
+mod session_index;
 mod provider_messages;
 mod processes;
 mod prompt_suggestion;
@@ -764,7 +765,8 @@ pub(crate) fn task_bindings() -> Result<Vec<Value>> {
 }
 
 /// The record fields task routing reads (`tasks::sessions`).
-const TASK_BINDING_FIELDS: [&str; 6] = ["name", "run_id", "launch_id", "journal_name", "legacy_shadow", "rename_shadow"];
+const TASK_BINDING_FIELDS: [&str; 7] =
+    ["name", "run_id", "launch_id", "journal_name", "launch_label", "legacy_shadow", "rename_shadow"];
 
 /// A saved record reduced to [`TASK_BINDING_FIELDS`]. Every other field, such
 /// as up to 128 shell jobs with their full command texts, is skipped while
@@ -1041,13 +1043,17 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
                 return Ok(0);
             }
             let _guard = lock(None)?;
-            if record_path(&args[0]).exists() {
-                rename::remove_legacy(&read(&args[0])?)?;
+            let forgotten = record_path(&args[0]).exists().then(|| read(&args[0])).transpose()?;
+            if let Some(record) = &forgotten {
+                rename::remove_legacy(record)?;
             }
             match std::fs::remove_file(record_path(args.first().ok_or("missing session name")?)) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.to_string()),
+            }
+            if let Some(record) = &forgotten {
+                session_index::retire(record);
             }
         }
         _ => return Err(format!("unknown state operation: {command}")),

@@ -32,9 +32,9 @@ service
     lookup-only. The consent is process-local, never persisted or supplied
     by the renderer, and binds the creation and the Resume's revision. It
     authorizes only a request reserved after that Resume. The first service
-    admission after the Resume consumes it, whatever its kind; clone and
-    launch do not honour it yet. A restart, recovery or replayed Continue
-    grants nothing.
+    admission after the Resume consumes it, whatever its kind; clone does
+    not honour it yet. A restart, recovery or replayed Continue grants
+    nothing.
 - **Never sent.** The reducer emits a create only for a request it reserved
   and persisted in this process. A create without fresh consent, or one that
   stops before its admission request is written, was never sent: it fails as

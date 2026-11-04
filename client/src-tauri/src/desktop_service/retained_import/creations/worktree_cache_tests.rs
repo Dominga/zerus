@@ -11,7 +11,7 @@ fn source(f: &Fixture) {
     assert!(f.report.inputs.worktree_cache.prepare().is_ok());
 }
 fn run_on(f: &Fixture, report: &Arc<Report>, explicit: bool) -> Result<(), &'static str> {
-    let charge = report.work.admit(Role::Operations).unwrap();
+    let charge = super::super::tests::admit_drained(report);
     report.run_group(
         GROUP,
         f.relay.clone(),
@@ -235,7 +235,7 @@ fn worktree_cache_configuration_and_same_byte_snapshot_replacement_refuse_withou
     source(&f);
     assert!(run(&f, false).is_err());
     let before = fs::read(f.root.join("worktree-cache-retained-import-v1.json")).unwrap();
-    let charge = f.report.work.admit(Role::Operations).unwrap();
+    let charge = super::super::tests::admit_drained(&f.report);
     assert_eq!(
         f.report.run_group(
             GROUP,

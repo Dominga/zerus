@@ -5,6 +5,23 @@ use std::{
     path::Path,
 };
 
+/// zerus-obif: a run's Operations charge is released only once its child's
+/// pipe readers finish, which can trail the run's return. A fixture that
+/// admits again waits, bounded, for that role to drain instead of racing it;
+/// production retention and the Gate are unchanged.
+pub(super) fn admit_drained(report: &Report) -> zerus_client_core::desktop::drain::Charge {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while report
+        .work
+        .snapshot()
+        .is_ok_and(|snapshot| snapshot.count(Role::Operations) > 0)
+        && std::time::Instant::now() < until
+    {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    report.work.admit(Role::Operations).unwrap()
+}
+
 pub(super) struct Fixture {
     pub(super) root: PathBuf,
     /// The download folder the report resolves, switchable like the setting.
@@ -67,7 +84,7 @@ impl Fixture {
         }
     }
     pub(super) fn run(&self, explicit: bool) -> Result<(), &'static str> {
-        let charge = self.report.work.admit(Role::Operations).unwrap();
+        let charge = admit_drained(&self.report);
         self.report.run(
             self.relay.clone(),
             "a".repeat(64),

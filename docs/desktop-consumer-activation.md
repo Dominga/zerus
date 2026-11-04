@@ -4,8 +4,9 @@ On Linux and macOS, Zerus Next uses the Service consumer when
 `ZERUS_CLIENT_DESKTOP_SERVICE` is absent only after the maintained helper's
 read-only status confirms an owned registration. A missing, obsolete or
 unconfirmed registration keeps the existing guarded Native startup. Merely
-installing an AUR package, app or cask never registers a user service; run its
-explicit `zerus-setup --desktop-service` setup first. `=1` explicitly selects Service;
+installing an AUR package, app or cask never registers a user service. Run
+`zerus-setup --desktop-service` on Linux, or plain `zerus-setup` on macOS,
+first. `=1` explicitly selects Service;
 `=0` requests the guarded Native/rollback path. Other explicit values do not
 enable the consumer. A Native request still needs its existing takeover and
 drain checks; the flag supplies no writer authority and never forces a handoff.

@@ -103,9 +103,9 @@ On Linux and macOS, Zerus Next defaults to the Service consumer when
 `ZERUS_CLIENT_DESKTOP_SERVICE` is absent and the maintained helper's read-only
 status confirms an owned registration. An unregistered or unconfirmed host
 keeps guarded Native startup. AUR packages and macOS app/cask installation do
-not register a user service: run the explicit `zerus-setup --desktop-service`
-route before expecting this default. An existing background installation
-keeps its mode. The paired backend is prepared before the GUI; a fresh native
+not register a user service: run `zerus-setup --desktop-service` on Linux,
+or plain `zerus-setup` on macOS, before expecting this default. An existing
+background installation keeps its mode. The paired backend is prepared before the GUI; a fresh native
 Service Grant admits activation of a newly installed implicit passive service.
 An explicit passive choice or retained revoke instead offers **Resume background
 work**. One explicit Resume performs the required Rearm and maintained background

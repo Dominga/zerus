@@ -641,11 +641,16 @@ fn a_damaged_copy_the_phone_cannot_cover_is_kept_for_review() {
         .parent()
         .unwrap()
         .to_owned();
-    fs::rename(
-        task_file(b.path(), task.uuid()),
-        tasks.join("reviewed-snapshot"),
-    )
-    .unwrap();
+    for (file, aside) in [
+        ("loro", "reviewed-snapshot"),
+        ("updates", "reviewed-updates"),
+    ] {
+        fs::rename(
+            tasks.join(format!("{}.{file}", task.uuid())),
+            tasks.join(aside),
+        )
+        .unwrap();
+    }
     settled(run(&phone, &computer, Budget::default()));
     assert!(computer.load(task.uuid()).is_err());
     fs::remove_file(tasks.join(format!("{}.managed", task.uuid()))).unwrap();

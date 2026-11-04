@@ -252,6 +252,19 @@ impl TaskDoc {
         self.doc.oplog_vv()
     }
 
+    /// The operations at the document's frontiers, as updates every copy
+    /// that holds this version already has: they import as nothing, add no
+    /// change, and differ whenever the version does.
+    pub(crate) fn export_frontier(&self) -> Result<Vec<u8>> {
+        let spans: Vec<loro::IdSpan> = self
+            .doc
+            .oplog_frontiers()
+            .iter()
+            .map(|id| loro::IdSpan::new(id.peer, id.counter, id.counter + 1))
+            .collect();
+        Ok(self.doc.export(ExportMode::updates_in_range(spans))?)
+    }
+
     /// Applies stored updates; false when they cannot be applied completely.
     pub(crate) fn import_block(&mut self, bytes: &[u8]) -> bool {
         self.doc

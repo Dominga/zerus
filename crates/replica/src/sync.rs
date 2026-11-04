@@ -1232,6 +1232,109 @@ mod tests {
         kept(&store, &uuid, &peer);
     }
 
+    /// review-n on #1415 (R3): every fold opens the updates file with a
+    /// block of its own, so a mark restored from before any later fold no
+    /// longer describes the files, while the current mark still rebuilds a
+    /// copy a peer covers.
+    #[test]
+    fn a_mark_restored_from_before_a_later_fold_never_accepts_another_copy() {
+        let (_dir, store, uuid, _) = damaged_beside_a_pre_attempt_peer();
+        let second = "22222222-2222-4222-8222-222222222222";
+        let (mut marks, mut copies, mut openings) = (Vec::new(), Vec::new(), Vec::new());
+        for fold in 0..6 {
+            let mut task = store.load(&uuid).unwrap();
+            match fold {
+                0 => task
+                    .cancel_attempt(ID, "Settled before the backup", &Actor::Person, 11)
+                    .unwrap(),
+                1 => {
+                    let executor = SessionKey {
+                        machine: "m1".into(),
+                        session: "codex/api".into(),
+                        session_id: "launch_id:api".into(),
+                    };
+                    let native = NativeRequest {
+                        machine: "m1".into(),
+                        name: "codex/api".into(),
+                        run_id: "run-api".into(),
+                        conversation_id: "conversation-api".into(),
+                        digest: "cd".repeat(32),
+                    };
+                    task.reserve_attempt(
+                        second,
+                        Origin::Send,
+                        &executor,
+                        native,
+                        &Actor::Person,
+                        12,
+                    )
+                    .unwrap();
+                }
+                n => task
+                    .comment(&format!("Fold {n}"), &Actor::Person, 12 + n)
+                    .unwrap(),
+            }
+            task.needs_fold = true;
+            store.save(&mut task).unwrap();
+            only_the_opening_block(&store, &uuid);
+            marks.push(fs::read(store.managed_path(&uuid)).unwrap());
+            copies.push(store.load(&uuid).unwrap().snapshot().unwrap());
+            openings.push(fs::read(store.updates_path(&uuid)).unwrap());
+        }
+        // review-n's case among them: the second Unknown came after mark 0.
+        let distinct: std::collections::BTreeSet<_> = openings.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            openings.len(),
+            "each fold opens with its own block"
+        );
+        let held = store.load(&uuid).unwrap();
+        assert_eq!(held.held().unwrap().map(|a| a.id), Some(second.to_owned()));
+        damage(&store, &uuid);
+        for (earlier, copy) in marks.iter().zip(&copies).take(marks.len() - 1) {
+            fs::write(store.managed_path(&uuid), earlier).unwrap();
+            assert!(store.fresh_snapshot(&uuid).is_none());
+            kept(&store, &uuid, copy);
+        }
+        // The current mark is fresh: an earlier copy is refused by the
+        // version, the latest rebuilds the copy with the second Unknown.
+        fs::write(store.managed_path(&uuid), marks.last().unwrap()).unwrap();
+        kept(&store, &uuid, &copies[0]);
+        assert!(refused(&store, &uuid, copies.last().unwrap().clone()).is_empty());
+        let rebuilt = store.load(&uuid).unwrap();
+        assert_eq!(
+            rebuilt.held().unwrap().map(|a| a.id),
+            Some(second.to_owned())
+        );
+        // The mark names the whole first block: another digest, or none, no
+        // longer describes it.
+        let mut forged = store.mark(&uuid).unwrap();
+        assert!(store.fresh_snapshot(&uuid).is_some());
+        forged.opening = Some("00".repeat(32));
+        store.write_mark(&uuid, &forged).unwrap();
+        assert!(store.fresh_snapshot(&uuid).is_none());
+        forged.opening = None;
+        store.write_mark(&uuid, &forged).unwrap();
+        assert!(store.fresh_snapshot(&uuid).is_none());
+        let mut task = store.load(&uuid).unwrap();
+        task.comment("The next save corrects the mark", &Actor::Person, 30)
+            .unwrap();
+        store.save(&mut task).unwrap();
+        assert!(store.fresh_snapshot(&uuid).is_some());
+        // A fold with no change since the last one opens with the same block
+        // and writes the same mark: the two describe the same version.
+        let mut folded = store.load(&uuid).unwrap();
+        folded.needs_fold = true;
+        store.save(&mut folded).unwrap();
+        let mark = fs::read(store.managed_path(&uuid)).unwrap();
+        let opening = fs::read(store.updates_path(&uuid)).unwrap();
+        let mut again = store.load(&uuid).unwrap();
+        again.needs_fold = true;
+        store.save(&mut again).unwrap();
+        assert_eq!(fs::read(store.updates_path(&uuid)).unwrap(), opening);
+        assert_eq!(fs::read(store.managed_path(&uuid)).unwrap(), mark);
+    }
+
     /// review-n on #1415 (R2): without a mark, the valid prefix of the local
     /// blocks is read before anything is decided; attempts or a floor in it
     /// keep the copy, and so does a block that cannot be read or applied.

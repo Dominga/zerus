@@ -217,19 +217,23 @@ fn block(payload: &[u8]) -> Vec<u8> {
 
 /// The managed mark: what this store last saved of a task cut over to the
 /// execution schema. `snapshot` is the version vector its snapshot holds, by
-/// decimal peer; `updates` is the header of the first block of the updates
-/// file that follows that snapshot, in hex. Every fold of such a task leaves
-/// that file opening with a block of no changes, so a writer that folds or
-/// rewrites the files without this mark (an older build) leaves them apart
-/// from it.
+/// decimal peer; `opening` is the SHA-256 of the first block of the updates
+/// file that follows that snapshot, header and payload. Every fold of such a task opens that file with the
+/// operations at the document's frontiers: a block every copy already
+/// holds, so it imports as nothing in this build and older ones, and one
+/// that differs whenever the version does. A writer that folds or rewrites
+/// the files without this mark (an older build), or a mark restored from
+/// before a later fold, leaves the mark apart from the files.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Mark {
     pub(crate) snapshot: Option<BTreeMap<String, i32>>,
     #[serde(default)]
-    pub(crate) updates: Option<String>,
+    pub(crate) opening: Option<String>,
 }
 
 impl Mark {
+    /// The mark for a snapshot at `snapshot` and the updates file whose
+    /// first block is `first` (header and payload).
     pub(crate) fn new(snapshot: &VersionVector, first: &[u8]) -> Self {
         Self {
             snapshot: Some(
@@ -238,7 +242,7 @@ impl Mark {
                     .map(|(peer, counter)| (peer.to_string(), *counter))
                     .collect(),
             ),
-            updates: head(first),
+            opening: Some(digest(first)),
         }
     }
 
@@ -252,26 +256,40 @@ impl Mark {
             .map(|(peer, counter)| Some((peer.parse().ok()?, (*counter > 0).then_some(*counter)?)))
             .collect()
     }
-}
 
-/// A block's header in hex: its length and checksum.
-fn head(bytes: &[u8]) -> Option<String> {
-    let header = bytes.get(..HEADER)?;
-    Some(header.iter().map(|b| format!("{b:02x}")).collect())
-}
-
-/// The header of the first block of an updates file; none when it has none.
-fn first_head(path: &Path) -> Result<Option<String>> {
-    let mut header = [0u8; HEADER];
-    match File::open(path) {
-        Ok(mut file) => match std::io::Read::read_exact(&mut file, &mut header) {
-            Ok(()) => Ok(head(&header)),
-            Err(error) if error.kind() == ErrorKind::UnexpectedEof => Ok(None),
-            Err(error) => Err(error.into()),
-        },
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
+    /// Whether it names `first` as the first block of the updates file.
+    fn opens_with(&self, first: &[u8]) -> bool {
+        self.opening.as_deref() == Some(digest(first).as_str())
     }
+}
+
+fn digest(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// The first block of an updates file, header and payload; none when the
+/// file is missing or its first block is cut short.
+fn first_block(path: &Path) -> Result<Option<Vec<u8>>> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let size = file.metadata()?.len();
+    let mut block = vec![0u8; HEADER];
+    match std::io::Read::read_exact(&mut file, &mut block) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    let length = u32::from_le_bytes(block[..4].try_into().expect("four bytes")) as u64;
+    // A length past the file is a cut block, never an allocation.
+    if length == 0 || HEADER as u64 + length > size {
+        return Ok(None);
+    }
+    block.resize(HEADER + length as usize, 0);
+    std::io::Read::read_exact(&mut file, &mut block[HEADER..])?;
+    Ok(Some(block))
 }
 
 /// The intact blocks with their end offsets, and whether the whole input was
@@ -509,14 +527,13 @@ impl ProjectStore {
     }
 
     /// The snapshot version the mark records, only while the updates file
-    /// still opens with the block the mark names: no other writer folded or
-    /// rewrote the files since this store last saved them.
+    /// still opens with the exact block the mark names: no other writer
+    /// folded or rewrote the files, and no later fold of this store
+    /// replaced them, since the mark was written.
     pub(crate) fn fresh_snapshot(&self, uuid: &str) -> Option<VersionVector> {
         let mark = self.mark(uuid)?;
-        let first = first_head(&self.updates_path(uuid)).ok()??;
-        (mark.updates.as_ref() == Some(&first))
-            .then(|| mark.version())
-            .flatten()
+        let first = first_block(&self.updates_path(uuid)).ok()??;
+        mark.opens_with(&first).then(|| mark.version()).flatten()
     }
 
     pub fn uuids(&self) -> Result<Vec<String>> {
@@ -587,11 +604,11 @@ impl ProjectStore {
             return Ok(());
         }
         let managed = task.execution_managed();
-        // A fold of a cut-over task leaves its updates file opening with a
-        // block of no changes; any other save appends the changes.
+        // A fold of a cut-over task opens its updates file with the
+        // operations at the frontiers; any other save appends the changes.
         let next = if fold {
             managed
-                .then(|| task.export_since_vv(&current).map(|bytes| block(&bytes)))
+                .then(|| task.export_frontier().map(|bytes| block(&bytes)))
                 .transpose()?
         } else {
             let saved = task.saved.as_ref().expect("checked above");
@@ -601,17 +618,15 @@ impl ProjectStore {
         // them it names a version or a block they do not hold, which only
         // keeps a later recovery from going ahead.
         if managed {
-            let first = next.as_deref().expect("a cut-over save writes a block");
+            let ours = next.as_deref().expect("a cut-over save writes a block");
             let mark = if fold {
-                Mark::new(&current, first)
+                Mark::new(&current, ours)
             } else {
-                let first = match first_head(&updates)? {
-                    Some(head) => head,
-                    None => head(first).expect("a block has its header"),
-                };
-                let mut mark = Mark::new(task.folded.as_ref().expect("checked above"), &[]);
-                mark.updates = Some(first);
-                mark
+                let existing = first_block(&updates)?;
+                Mark::new(
+                    task.folded.as_ref().expect("checked above"),
+                    existing.as_deref().unwrap_or(ours),
+                )
             };
             if self.mark(task.uuid()).as_ref() != Some(&mark) {
                 self.write_mark(task.uuid(), &mark)?;

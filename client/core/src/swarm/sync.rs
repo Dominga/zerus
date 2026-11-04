@@ -994,9 +994,15 @@ mod tests {
         let mut sync = ready();
         sync.edit(&to("beta"), 0).unwrap();
         let _ = input(sync.due(120));
-        sync.finish(reply(with_ids(state("d3", "beta", &["op-2"]), "beta"), &["op-2"]), 300);
+        sync.finish(
+            reply(with_ids(state("d3", "beta", &["op-2"]), "beta"), &["op-2"]),
+            300,
+        );
         assert_eq!(place(&sync), "beta");
-        assert!(sync.observe(observation(with_ids(state("d4", "beta", &["op-2"]), "beta")), 301));
+        assert!(sync.observe(
+            observation(with_ids(state("d4", "beta", &["op-2"]), "beta")),
+            301
+        ));
         assert_eq!(sync.digest(), "d4");
     }
 

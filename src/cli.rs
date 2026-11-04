@@ -81,6 +81,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        Desktop logon registration ABI: desktop-logon-task-v1
        Desktop registration mode ABI: desktop-registration-mode-v1
        Desktop registration mode review ABI: desktop-registration-mode-review-v1
+       Desktop service mode choice scope ABI: desktop-service-mode-choice-scope-v1
        Desktop Toast registration ABI: desktop-notification-registration-v1
         Desktop revoke ABI: desktop-revoke-v1
         Desktop revoke hold ABI: desktop-revoke-hold-v1
@@ -774,6 +775,11 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
         }
         let reference = crate::session_reference::Reference::parse(&args[0])?;
         let local_id = crate::swarm::local_node_id(&config).map_err(|e| Error::new(1,e.to_string()))?;
+        // Like every other session command, a guarded inspect reads only the
+        // computer it verified (#1376 review).
+        if guarded && local_id != reference.machine {
+            return Err(Error::new(1, "Session reference belongs to another computer; a guarded call acts only on this computer"));
+        }
         if local_only && local_id != reference.machine {
             return Err(Error::new(1,"Session reference belongs to another computer; the selected SSH alias does not match"));
         }

@@ -6,7 +6,8 @@ use crate::attachment::{
     TASK_SCHEMA,
 };
 use crate::execution::{
-    self, check_attempt, check_event, Attempt, AttemptEvent, MAX_ATTEMPTS, MAX_ATTEMPT_EVENTS,
+    self, check_attempt, check_event, Attempt, AttemptEvent, ReportDecision, ReportKind, Stale,
+    MAX_ATTEMPTS, MAX_ATTEMPT_EVENTS,
 };
 use crate::schema::{
     check_text, Actor, LogEntry, SessionKey, Stage, Target, TaskView, TaskWorker, MAX_DOCUMENT,
@@ -328,6 +329,14 @@ impl TaskDoc {
         string(&self.fields(), "session").and_then(|s| serde_json::from_str(&s).ok())
     }
 
+    /// How `session` was bound from a name-only key to its verified run,
+    /// kept as the current execution's evidence until its next boundary.
+    fn binding(&self) -> Option<execution::SessionBinding> {
+        string(&self.fields(), "session_binding")
+            .and_then(|s| serde_json::from_str::<execution::SessionBinding>(&s).ok())
+            .filter(execution::SessionBinding::valid)
+    }
+
     /// The requirement revision: 1 until an edit of the requirement counts one.
     pub fn requirement(&self) -> u64 {
         integer(&self.fields(), "requirement")
@@ -424,6 +433,8 @@ impl TaskDoc {
                         },
                         None => Vec::new(),
                     },
+                    stale: string(&entry, "stale").and_then(|s| Stale::parse(&s)),
+                    considered: integer(&entry, "considered").and_then(|n| u64::try_from(n).ok()),
                 },
             ));
         }
@@ -507,6 +518,7 @@ impl TaskDoc {
             Ok((attempts, events)) => execution::project(
                 stage,
                 session.as_ref(),
+                self.binding().as_ref(),
                 &log,
                 &attempts,
                 &events,
@@ -672,6 +684,16 @@ impl TaskDoc {
         if self.session().as_ref() == Some(old) {
             self.fields()
                 .insert("session", serde_json::to_string(current)?)?;
+            // The history keeps the name-only boundary; the execution reads
+            // this binding, to this verified run alone, as the same executor.
+            if old.session_id.is_empty() {
+                let binding = execution::SessionBinding {
+                    from: old.clone(),
+                    to: current.clone(),
+                };
+                self.fields()
+                    .insert("session_binding", serde_json::to_string(&binding)?)?;
+            }
         }
         self.doc.commit();
         Ok(())
@@ -813,6 +835,7 @@ impl TaskDoc {
         fields.insert("stage", Stage::Active.as_str())?;
         fields.insert("stage_at", now)?;
         fields.insert("session", serde_json::to_string(session)?)?;
+        fields.delete("session_binding")?;
         fields.delete("worker")?;
         fields.delete("cancelled_at")?;
         fields.delete("cancel_reason")?;
@@ -866,6 +889,7 @@ impl TaskDoc {
         )?;
         self.fields()
             .insert("session", serde_json::to_string(session)?)?;
+        self.fields().delete("session_binding")?;
         self.fields().insert("stage_at", now)?;
         self.fields().insert("summary", "")?;
         self.fields().delete("worker")?;
@@ -875,11 +899,33 @@ impl TaskDoc {
         Ok(())
     }
 
-    /// Returns whether the report moved the task to In review; otherwise it
-    /// is only added to the history.
+    /// A result report, as `report` with `ReportKind::Ready`: returns whether
+    /// it moved the task to In review.
     pub fn record_report(&mut self, summary: &str, actor: &Actor, now: i64) -> Result<bool> {
+        Ok(self
+            .report(summary, ReportKind::Ready, None, actor, now)?
+            .moves)
+    }
+
+    /// Records a report. The reducer decides it (`execution::decide_report`):
+    /// only the current execution's executor moves its task to In review with
+    /// a result, a person's result is an explicit human action, and progress
+    /// never moves the task. A report that cannot move it is still recorded,
+    /// with the reason.
+    pub fn report(
+        &mut self,
+        summary: &str,
+        kind: ReportKind,
+        considered: Option<u64>,
+        actor: &Actor,
+        now: i64,
+    ) -> Result<ReportDecision> {
         self.writable()?;
         check_text(summary, "report")?;
+        let considered = considered
+            .map(|n| i64::try_from(n).ok().filter(|n| *n > 0))
+            .map(|n| n.ok_or_else(|| Error::new("the considered revision counts from 1")))
+            .transpose()?;
         // A report by the exact pinned agent is explicit work evidence even
         // when it filed the task during an already-running turn.
         if matches!(self.stage()?, Stage::Todo | Stage::Backlog)
@@ -887,16 +933,28 @@ impl TaskDoc {
         {
             self.record_start(actor, now)?;
         }
-        let moved = self.stage()? == Stage::Active;
-        if moved {
+        let view = self.view()?;
+        let decision =
+            execution::decide_report(view.stage, view.execution.as_ref(), actor, kind, None);
+        if decision.moves {
             let fields = self.fields();
             fields.insert("stage", Stage::Review.as_str())?;
             fields.insert("stage_at", now)?;
             fields.insert("summary", summary)?;
         }
-        self.log("report", actor, now, summary, None)?;
+        let entry_kind = match kind {
+            ReportKind::Progress => "progress",
+            ReportKind::Ready => "report",
+        };
+        let entry = self.log(entry_kind, actor, now, summary, None)?;
+        if let Some(stale) = decision.stale {
+            entry.insert("stale", stale.as_str())?;
+        }
+        if let Some(considered) = considered {
+            entry.insert("considered", considered)?;
+        }
         self.doc.commit();
-        Ok(moved)
+        Ok(decision)
     }
 
     /// The calling agent explicitly takes an existing task without pasting a
@@ -951,6 +1009,7 @@ impl TaskDoc {
         fields.insert("stage", Stage::Active.as_str())?;
         fields.insert("stage_at", now)?;
         fields.insert("session", serde_json::to_string(own)?)?;
+        fields.delete("session_binding")?;
         fields.delete("worker")?;
         fields.delete("cancelled_at")?;
         fields.delete("cancel_reason")?;
@@ -2031,6 +2090,253 @@ mod tests {
         let view = t.view().unwrap();
         assert!(!view.writable);
         assert_eq!((view.author, view.target), (Actor::Person, Target::Any));
+    }
+
+    mod report_guard {
+        use super::*;
+        use crate::execution::{ReportKind, Stale};
+
+        fn web() -> SessionKey {
+            SessionKey {
+                session: "codex/web".into(),
+                ..api()
+            }
+        }
+
+        fn last(task: &TaskDoc) -> LogEntry {
+            task.view().unwrap().log.pop().unwrap()
+        }
+
+        #[test]
+        fn after_a_handoff_only_the_new_executor_reports_a_result() {
+            let mut task = task(Stage::Todo);
+            task.record_send(&api(), "first", &Actor::Person, 2)
+                .unwrap();
+            task.record_handoff(&web(), "second", &Actor::Agent(api()), 3)
+                .unwrap();
+            // The previous executor's late result is history, not a move.
+            let late = task
+                .report(
+                    "Finished earlier",
+                    ReportKind::Ready,
+                    None,
+                    &Actor::Agent(api()),
+                    4,
+                )
+                .unwrap();
+            assert_eq!(
+                (late.moves, late.stale),
+                (false, Some(Stale::OtherExecutor))
+            );
+            assert_eq!(task.stage().unwrap(), Stage::Active);
+            let entry = last(&task);
+            assert_eq!(
+                (entry.kind.as_str(), entry.stale),
+                ("report", Some(Stale::OtherExecutor))
+            );
+            assert!(!task
+                .record_report("Same again", &Actor::Agent(api()), 5)
+                .unwrap());
+            // An unrelated session is stale as well.
+            let other = Actor::Agent(SessionKey {
+                session: "codex/ops".into(),
+                ..api()
+            });
+            assert!(!task.record_report("Not mine", &other, 6).unwrap());
+            assert_eq!(task.stage().unwrap(), Stage::Active);
+            // The current executor's result moves it, with its summary.
+            assert!(task
+                .record_report("Done; 3 tests", &Actor::Agent(web()), 7)
+                .unwrap());
+            let view = task.view().unwrap();
+            assert_eq!(
+                (view.stage, view.summary.as_str()),
+                (Stage::Review, "Done; 3 tests")
+            );
+            assert_eq!(last(&task).stale, None);
+        }
+
+        #[test]
+        fn progress_is_recorded_and_never_moves_the_task() {
+            let mut task = task(Stage::Todo);
+            task.record_send(&api(), "first", &Actor::Person, 2)
+                .unwrap();
+            let progress = task
+                .report(
+                    "Half way",
+                    ReportKind::Progress,
+                    Some(1),
+                    &Actor::Agent(api()),
+                    3,
+                )
+                .unwrap();
+            assert_eq!((progress.moves, progress.stale), (false, None));
+            let view = task.view().unwrap();
+            assert_eq!((view.stage, view.summary.as_str()), (Stage::Active, ""));
+            let entry = last(&task);
+            assert_eq!(
+                (entry.kind.as_str(), entry.text.as_str(), entry.considered),
+                ("progress", "Half way", Some(1))
+            );
+            // A person's progress is history too; a person's result is an explicit move.
+            assert!(
+                !task
+                    .report("Note", ReportKind::Progress, None, &Actor::Person, 4)
+                    .unwrap()
+                    .moves
+            );
+            assert!(
+                task.report("Accepting it", ReportKind::Ready, None, &Actor::Person, 5)
+                    .unwrap()
+                    .moves
+            );
+            assert_eq!(task.stage().unwrap(), Stage::Review);
+            // Outside In progress a report only adds to the history, with no reason.
+            let after = task
+                .report("More", ReportKind::Ready, None, &Actor::Agent(api()), 6)
+                .unwrap();
+            assert_eq!((after.moves, after.stale), (false, None));
+            assert!(task
+                .report("Bad", ReportKind::Ready, Some(0), &Actor::Person, 7)
+                .is_err());
+        }
+
+        #[test]
+        fn the_pinned_agent_s_report_still_starts_and_finishes_its_own_task() {
+            let mut task = task(Stage::Todo);
+            task.set_target(&Target::Session(api()), &Actor::Person, 2)
+                .unwrap();
+            // Progress from the pinned agent starts the task and keeps it In progress.
+            assert!(
+                !task
+                    .report(
+                        "Started",
+                        ReportKind::Progress,
+                        None,
+                        &Actor::Agent(api()),
+                        3
+                    )
+                    .unwrap()
+                    .moves
+            );
+            assert_eq!(task.stage().unwrap(), Stage::Active);
+            assert!(task.record_report("Done", &Actor::Agent(api()), 4).unwrap());
+            assert_eq!(task.stage().unwrap(), Stage::Review);
+            // Another agent's report does not start a task pinned elsewhere.
+            let mut pinned = super::task(Stage::Todo);
+            pinned
+                .set_target(&Target::Session(api()), &Actor::Person, 2)
+                .unwrap();
+            assert!(!pinned
+                .record_report("Mine?", &Actor::Agent(web()), 3)
+                .unwrap());
+            assert_eq!(pinned.stage().unwrap(), Stage::Todo);
+        }
+
+        fn run(session: &str, id: &str) -> SessionKey {
+            SessionKey {
+                session: session.into(),
+                session_id: format!("launch_id:{id}"),
+                ..api()
+            }
+        }
+
+        #[test]
+        fn a_legacy_name_only_executor_bound_to_its_verified_run_reports_its_result() {
+            // review-n on #1389: a send to a name-only executor, later bound to
+            // its verified run (as every change does before it is made).
+            let sent = || {
+                let mut task = task(Stage::Todo);
+                task.record_send(&api(), "first", &Actor::Person, 2)
+                    .unwrap();
+                task
+            };
+            let mut task = sent();
+            task.bind_session_identity(&api(), &run("codex/api", "x"))
+                .unwrap();
+            let view = task.view().unwrap();
+            let execution = view.execution.as_ref().unwrap();
+            assert!(!execution.conflict);
+            assert_eq!(
+                execution.current.as_ref().unwrap().executor,
+                Some(run("codex/api", "x"))
+            );
+            // Another run that holds the same name later is not that executor.
+            let other = task
+                .report(
+                    "Not mine",
+                    ReportKind::Ready,
+                    None,
+                    &Actor::Agent(run("codex/api", "y")),
+                    3,
+                )
+                .unwrap();
+            assert_eq!(
+                (other.moves, other.stale),
+                (false, Some(Stale::OtherExecutor))
+            );
+            assert!(task
+                .record_report("Done", &Actor::Agent(run("codex/api", "x")), 4)
+                .unwrap());
+            assert_eq!(task.stage().unwrap(), Stage::Review);
+            // A binding that followed a rename (a retained original label)
+            // names the same executor, and a later rename keeps it.
+            let mut renamed = sent();
+            renamed
+                .bind_session_identity(&api(), &run("codex/renamed", "x"))
+                .unwrap();
+            renamed
+                .bind_session_identity(&run("codex/renamed", "x"), &run("codex/later", "x"))
+                .unwrap();
+            let view = renamed.view().unwrap();
+            assert!(!view.execution.as_ref().unwrap().conflict);
+            assert!(!renamed
+                .record_report("Not mine", &Actor::Agent(run("codex/api", "y")), 3)
+                .unwrap());
+            assert!(renamed
+                .record_report("Done", &Actor::Agent(run("codex/later", "x")), 4)
+                .unwrap());
+            // A holder an older build enriched without recording the binding is
+            // not proven to be that run: a conflict only the person resolves.
+            let mut older = sent();
+            older
+                .fields()
+                .insert(
+                    "session",
+                    serde_json::to_string(&run("codex/api", "x")).unwrap(),
+                )
+                .unwrap();
+            older.doc.commit();
+            assert!(older.view().unwrap().execution.unwrap().conflict);
+            let refused = older
+                .report(
+                    "Done",
+                    ReportKind::Ready,
+                    None,
+                    &Actor::Agent(run("codex/api", "x")),
+                    3,
+                )
+                .unwrap();
+            assert_eq!(refused.stale, Some(Stale::Conflict));
+            assert!(older.record_report("Accepted", &Actor::Person, 4).unwrap());
+            // The next execution's own boundary replaces the binding.
+            renamed.set_stage(Stage::Todo, &Actor::Person, 5).unwrap();
+            renamed
+                .record_send(&run("codex/later", "x"), "second", &Actor::Person, 6)
+                .unwrap();
+            assert_eq!(renamed.binding(), None);
+        }
+
+        #[test]
+        fn a_stored_reason_this_build_does_not_know_reads_as_none() {
+            let task = task(Stage::Todo);
+            let entry = task
+                .log("report", &Actor::Person, 2, "From a newer writer", None)
+                .unwrap();
+            entry.insert("stale", "a_future_reason").unwrap();
+            task.doc.commit();
+            assert_eq!(last(&task).stale, None);
+        }
     }
 
     mod execution_records {

@@ -188,6 +188,7 @@ pub(super) fn command(config: &Config, location: &Location, operation: &str) -> 
         checked["completed_request_id"] = record["completed_request_id"].clone();
         checked["reviewed_transition"] = record["reviewed_transition"].clone();
         checked["activation_automatic_blocked"] = record["activation_automatic_blocked"].clone();
+        checked["mode_choice"] = record["mode_choice"].clone();
         let status = super::status(location)?;
         let lifecycle = &status["lifecycle"];
         checked["running_mode"] = if lifecycle["configuration"] == location.configuration
@@ -197,6 +198,10 @@ pub(super) fn command(config: &Config, location: &Location, operation: &str) -> 
         } else {
             Value::Null
         };
+        if lifecycle["configuration"] == location.configuration && lifecycle["ipc_ready"] == true {
+            checked["service_epoch"] = lifecycle["epoch"].clone();
+            checked["service_generation"] = lifecycle["generation"].clone();
+        }
         checked["pending_restart"] = (checked["registered"] == true
             && (checked["pending_transition"].is_object()
                 || checked["selected_mode"] != checked["running_mode"]))

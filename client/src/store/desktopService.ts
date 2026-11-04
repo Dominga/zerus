@@ -1,6 +1,6 @@
 import { createSignal } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
-import type { DesktopService, NotificationOwnership } from "../types";
+import type { DesktopService, NotificationOwnership, ModeReview } from "../types";
 import { tr } from "../i18n";
 
 /** Presence of this projection is the startup mode. It never grants writer authority. */
@@ -398,11 +398,34 @@ export const ownershipActions = createOwnershipActions(
   () => invoke("desktop_service_ownership_rearm"),
   () => invoke("desktop_service_ownership_result"),
 );
+export type ModeReviewAction = "review" | "background" | "passive";
+/** Only a click invokes this command. Native confirmation and stale-selection
+ * checks happen in Rust; neither the view nor these arguments supply consent. */
+export function createModeReviewActions(
+  run: (display: ModeReview, action: ModeReviewAction) => Promise<unknown>,
+) {
+  const [busy, setBusy] = createSignal(false);
+  return { busy, async submit(display: ModeReview, action: ModeReviewAction) {
+    if (busy()) return;
+    const selected = { ...display };
+    setBusy(true);
+    try { return await run(selected, action); } finally { setBusy(false); }
+  } };
+}
+export const modeReviewActions = createModeReviewActions(
+  (display, action) => invoke("desktop_service_mode_action", { display, action }),
+);
 const HELPER_UNAVAILABLE = ["activation_helper_unavailable", "activation_helper_update_required", "activation_helper_changed"];
 const COMPONENTS = ["fleet", "presence", "reads", "attention", "approvals"];
 export function ownershipNotice(view: NotificationOwnership | undefined): string {
   if (!view) return "";
   if (view.pending) return tr("Background access is unconfirmed. Check the result before making another change.");
+  if (view.activation?.review) {
+    if (view.activation.review.disposition !== "reviewed_unknown")
+      return tr("An earlier change of the background service mode needs review in Settings > About.");
+    if (!view.activation.business_ready || !view.activation.active || view.activation.pending || view.status?.state !== "service" || !view.status.identity_current || view.status.rearm_required)
+      return tr("The earlier mode change was reviewed. Choose how the service should work in Settings > About.");
+  }
   if (view.activation?.pending) return tr("Background activation is unconfirmed. Check the original result before making another change.");
   if (view.activation?.needs_resume) {
     if (HELPER_UNAVAILABLE.includes(view.activation.code))
@@ -437,7 +460,8 @@ export function servicePaused(state: DesktopService | undefined): PausedAction |
   const ownership = state?.notification_ownership, activation = ownership?.activation;
   if (!state?.connected || state.executable_upgrade?.state === "manual_refresh_required"
     || !COMPONENTS.every((name) => state.background[name]?.code === "not_started")
-    || !activation || ownership?.pending || activation.pending) return undefined;
+    || !activation || ownership?.pending || activation.pending
+    || activation.review || activation.automatic_blocked) return undefined;
   if (activation.needs_resume) return HELPER_UNAVAILABLE.includes(activation.code) ? undefined : "resume";
   return activation.code === "activation_platform_manual" && !ownershipNotice(ownership) ? "settings" : undefined;
 }
@@ -475,8 +499,14 @@ export function serviceStatus(state: DesktopService | undefined) {
   // The notice still tells the user that copies are held.
   const reviewable = !!inputs && !manualRefresh && !paused && state.connected && !state.code
     && COMPONENTS.every((name) => state.background[name]?.ready);
-  const ownership = state.notification_ownership?.pending || state.notification_ownership?.activation?.pending ? "check"
-    : !manualRefresh && (state.notification_ownership?.native_recovery || state.notification_ownership?.status?.rearm_required
+  const mode = state.notification_ownership?.activation, access = state.notification_ownership?.status;
+  const modeReview = !!mode?.review && !(mode.review.disposition === "reviewed_unknown" && mode.business_ready && mode.active
+    && !mode.pending && !state.notification_ownership?.pending && !state.notification_ownership?.native_recovery
+    && access?.state === "service" && access.identity_current && !access.rearm_required);
+  const modeBlocked = !!mode?.review || mode?.automatic_blocked;
+  const ownership = state.notification_ownership?.pending ? "check"
+    : !modeBlocked && state.notification_ownership?.activation?.pending ? "check"
+    : !manualRefresh && !modeBlocked && (state.notification_ownership?.native_recovery || state.notification_ownership?.status?.rearm_required
       || state.notification_ownership?.activation?.needs_resume) ? "rearm" : undefined;
   if (!notice) {
     if (pending) label = state.pending_read_import?.running ? tr("Transferring read marks") : tr("Read marks need attention");
@@ -490,5 +520,5 @@ export function serviceStatus(state: DesktopService | undefined) {
   const settings = paused === "settings" ? tr("Zerus runs your sessions through a background service, which is paused on this computer. Settings shows its current state.") : "";
   const reasons = [notice, pending, retained, inputs, manualRefresh ? "" : owner, settings].filter(Boolean);
   return { label, details: reasons.join("\n") || tr("Background service connected"), healthy: !reasons.length,
-    retry: !manualRefresh && !!(notice || pending || retained || (owner && !ownership)), review: !!retained, inputsReview: reviewable, ownership, manualRefresh };
+    retry: !manualRefresh && !!(notice || pending || retained || (owner && !ownership)), review: !!retained, inputsReview: reviewable, ownership, manualRefresh, modeReview };
 }

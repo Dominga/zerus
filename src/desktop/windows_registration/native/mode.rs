@@ -204,6 +204,7 @@ pub(in crate::desktop::windows_registration) fn pending_status(
     Ok(
         json!({"pending_transition":record.pending,"cancelled_request_id":record.cancelled,"completed_request_id":record.completed,
             "reviewed_transition":record.reviewed.last(),
+            "mode_choice":record.choices.last(),
             "activation_automatic_blocked":!record.reviewed.is_empty() || record.pending.as_ref().is_some_and(|p|p.review.is_some())}),
     )
 }
@@ -248,6 +249,7 @@ struct Fence<'a> {
     admission: &'a Admission,
     location: &'a Location,
     background: bool,
+    grant: Option<ownership::RegistrationGrant>,
     exclusion: Option<Exclusion>,
     until: Instant,
     source: std::fs::File,
@@ -264,6 +266,7 @@ impl Fence<'_> {
             "Mode transition deadline reached; retain its original UUID."
         );
         self.admission.check()?;
+        if let Some(grant) = &self.grant { grant.check(self.location)?; }
         let held = platform::FileIdentity::of(&self.source)?;
         let (_, current) = instances::selected_image(self.image)?;
         ensure!(
@@ -412,6 +415,9 @@ fn effect(runtime: Runtime<'_>, desired: Mode, choice: Option<&policy::mode::rev
         admission,
         location,
         background: desired == Mode::Background,
+        grant: if desired == Mode::Background && choice.is_some() {
+            Some(ownership::RegistrationGrant::capture(location)?.context("Current Service Grant/Rearm required.")?)
+        } else { None },
         exclusion: None,
         until,
         source,
@@ -440,7 +446,8 @@ fn effect(runtime: Runtime<'_>, desired: Mode, choice: Option<&policy::mode::rev
     if resuming.is_none() && from == desired && original.is_some() {
         if let Some(choice) = choice {
             record.reserve_choice(choice, desired)?;
-            record.complete(&choice.request)?;
+            finish_choice(&mut record, &choice.request, desired,
+                original.as_ref().context("Original instance absent.")?, &fence)?;
             save(location, passive, &record, &mut || {
                 fence.check()?;
                 original.as_ref().context("Original instance absent.")?.check()?;
@@ -616,11 +623,25 @@ fn effect(runtime: Runtime<'_>, desired: Mode, choice: Option<&policy::mode::rev
     }
     admission.check()?;
     ready.check()?;
-    record.complete(&id)?;
-    save(location, passive, &record, &mut || admission.check())?;
+    finish_choice(&mut record, &id, desired, &ready, &fence)?;
+    save(location, passive, &record, &mut || {
+        admission.check()?; ready.check()?;
+        if let Some(grant) = &fence.grant { grant.check(location)?; }
+        Ok(())
+    })?;
     Ok(
         json!({"abi":MODE_ABI,"schema":1,"configuration":location.configuration,"task_name":passive.name,"selected_mode":desired.name(),"running_mode":desired.name(),"pending":null,"request_id":id,"changed":true,"instance":ready.observation()}),
     )
+}
+
+fn finish_choice(record: &mut Record, id: &str, desired: Mode, ready: &instances::Running, fence: &Fence<'_>) -> Result<()> {
+    if desired == Mode::Background && record.choices.iter().any(|r|r.request == id) {
+        let grant = fence.grant.as_ref().context("Original background Grant unavailable.")?;
+        grant.check(fence.location)?;
+        let (journal, owner_epoch) = grant.incarnation();
+        let (service_epoch, generation) = ready.scope();
+        record.complete_in_scope(id, policy::mode::review::ChoiceScope { journal, owner_epoch, service_epoch, generation })
+    } else { record.complete(id) }
 }
 
 fn operation(args: &[String]) -> Result<Value> {

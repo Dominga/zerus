@@ -68,13 +68,14 @@ describe("passive service", () => {
 
 describe("Windows passive service (the actual native projection)", () => {
   it("has no native activation route and offers no Resume", () => {
-    expect(windows().notification_ownership?.activation).toEqual({ pending: false, running: false, needs_resume: false, code: "activation_platform_manual" });
+    expect(windows().notification_ownership?.activation).toEqual({ pending: false, running: false, needs_resume: false, code: "activation_platform_manual",
+      review: null, automatic_blocked: false, request_id: null, active: false, business_ready: true });
     expect(windows().code).toBe("background_unready");
   });
   it("is paused with the Settings action, and the footer offers neither Retry nor Resume", () => {
     expect(servicePaused(windows())).toBe("settings");
     expect(serviceStatus(windows())).toEqual({ label: "Background access paused", details: SETTINGS_BODY, healthy: false,
-      retry: false, review: false, inputsReview: false, ownership: undefined, manualRefresh: false });
+      retry: false, review: false, inputsReview: false, ownership: undefined, manualRefresh: false, modeReview: false });
   });
   it.each<[string, DesktopService]>([
     ["disconnected", windows({ connected: false })],

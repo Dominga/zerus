@@ -65,15 +65,16 @@ function TaskFiles(props: { files: Fetched[]; project: string; task: string }) {
 }
 
 function JournalEntry(props: { entry: TaskEntry; discussion?: boolean; worker: string; project: string; task: string }) {
-  const message = () => ["comment", "message", "report"].includes(props.entry.kind);
-  const label = () => props.entry.kind === "report" ? tr("Report") : !message() ? "" : !props.discussion ? tr("Comment") : props.entry.kind === "message" ? tr("Message") : tr("Note");
+  const message = () => ["comment", "message", "report", "progress"].includes(props.entry.kind);
+  const label = () => props.entry.kind === "report" ? tr("Report") : props.entry.kind === "progress" ? tr("Progress") : !message() ? "" : !props.discussion ? tr("Comment") : props.entry.kind === "message" ? tr("Message") : tr("Note");
   const date = () => { const d = new Date(props.entry.at); return props.entry.at > 0 && Number.isFinite(d.getTime()) ? d : undefined; };
-  if (!["message", "comment", "report"].includes(props.entry.kind)) return <div class="tv-event"><i aria-hidden="true" /><span><b>{props.entry.actor}</b> <time>{date() && messageTimeOf(date()!)}</time> {historyAction(props.entry)}</span></div>;
+  if (!message()) return <div class="tv-event"><i aria-hidden="true" /><span><b>{props.entry.actor}</b> <time>{date() && messageTimeOf(date()!)}</time> {historyAction(props.entry)}</span></div>;
   return <article class="act-msg tv-entry" classList={{ "k-user": props.entry.actor === "You", "k-agent": props.entry.actor !== "You" }}>
     <header><b>{props.entry.actor}</b><Show when={date()}>{(d) => <time datetime={d().toISOString()}>{messageTimeOf(d())}</time>}</Show>
       <span class="chip">{label()}</span></header>
     <div class="act-body"><Body text={message() ? props.entry.text : historyAction(props.entry)} /></div>
     <TaskFiles files={props.entry.files} project={props.project} task={props.task} />
+    <Show when={props.entry.stale}><p class="notice">{tr("Report from another execution. It did not move the task.")}</p></Show>
     <Show when={props.discussion}><span class="tv-delivery">{deliveryText(props.entry, props.worker)}</span><Show when={deliveryError(props.entry)}><p class="notice">{deliveryError(props.entry)}</p></Show></Show>
   </article>;
 }

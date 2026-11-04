@@ -205,5 +205,46 @@ class ActivationReceipts(unittest.TestCase):
         self.assertEqual(result["disposition"]["state"], "reviewed_unknown")
 
 
+    def test_new_choices_keep_native_scope_linkage_and_reserve_future_review_bytes(self):
+        first = str(uuid.uuid4())
+        self.journal.reserve(first,self.bound)
+        self.journal.review(first,self.native())
+        after = dict(self.native(),boot=str(uuid.uuid4()))
+        self.journal.review(first,after)
+        # An outer registration close to its bound, with real retained entries.
+        self.record["padding"] = "x" * 48000
+        accepted = 0
+        while accepted < activation.RECORDS:
+            request = str(uuid.uuid4())
+            before = json.dumps(self.record,indent=2) + "\n"
+            try:
+                original = self.journal.reserve(request,self.bound,after,after_review=first)
+            except activation.Refusal as error:
+                self.assertIn("history_full",str(error))
+                self.assertEqual(json.dumps(self.record,indent=2) + "\n",before)
+                break
+            retained = copy.deepcopy(self.record)
+            # Every admitted original has enough space even if it interrupts.
+            reviewed = self.reopen().review(request,dict(after,boot=str(uuid.uuid4())))
+            self.assertEqual(reviewed["disposition"]["state"],"reviewed_unknown")
+            self.record = retained
+            lifecycle = dict(configuration="a"*64,mode="background",ipc_ready=True,
+                             epoch=str(uuid.uuid4()),generation=2**53-1)
+            self.journal.finish(original,ready=True,lifecycle=lifecycle)
+            result = self.journal.lookup(request,"a"*64)
+            self.assertEqual(result["after_review"],first)
+            self.assertEqual(result["scope"]["owner_epoch"],self.grant["owner_epoch"])
+            self.assertEqual(activation.choice_status(self.record)["request"],request)
+            accepted += 1
+        self.assertGreater(accepted,0)
+        self.assertLess(accepted,activation.RECORDS)
+        # Scope is observation only, and forged current-Grant linkage refuses.
+        broken = copy.deepcopy(self.record)
+        last = list(broken["activations"])[-1]
+        broken["activations"][last]["scope"]["owner_epoch"] = str(uuid.uuid4())
+        with self.assertRaisesRegex(activation.Refusal,"choice_scope_unavailable"):
+            activation.checked_entries(broken)
+
+
 if __name__ == "__main__":
     unittest.main()

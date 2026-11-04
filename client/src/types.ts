@@ -19,6 +19,12 @@ export interface ViewRow {
   local_read_attention?: boolean;
   name: string;
   launch_id?: string | null;
+  /**
+   * The listing's durable session ID, when canonical. The Rust dispatcher
+   * reads it from its own copy of the row for explicit actions; the webview
+   * never passes it.
+   */
+  session_id?: string;
   title?: string;
   agent?: string;
   status?: string;
@@ -159,11 +165,19 @@ export type EditOutcome = (
   | { outcome: "refused"; detail: string }) & { project?: string; folder?: string };
 
 /** Native ownership presentation only; this can never authorize a writer. */
+export interface ModeReview {
+  request_id: string;
+  configuration: string;
+  selection: string;
+  disposition: "required" | "reboot_required" | "reviewed_unknown";
+  passive_available: boolean;
+}
 export interface NotificationOwnership {
   /** Local startup recovery presentation; never a service grant. */
   native_recovery?: boolean;
   /** Native helper observation only; never permission to start a writer. */
-  activation?: { pending: boolean; running: boolean; needs_resume: boolean; code: string };
+  activation?: { pending: boolean; running: boolean; needs_resume: boolean; code: string;
+    review?: ModeReview | null; automatic_blocked?: boolean; request_id?: string | null; active?: boolean; business_ready?: boolean };
   status: null | { abi: string; configuration: string; journal: string | null; revision: number;
     state: "passive" | "preparing" | "service" | "draining" | "revoked" | "native" | "identity_changed" | "unavailable";
     rearm_required: boolean; request_id: string | null; owner_epoch: string | null; identity_current: boolean };

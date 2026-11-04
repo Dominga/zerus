@@ -312,6 +312,7 @@ pub fn present(
                 "request_id",
                 "delivery",
                 "attachments",
+                "stale",
             ]
             .contains(&key.as_str())
         });
@@ -389,11 +390,13 @@ mod tests {
     fn presentation_keeps_file_references_and_receipt_text_without_bytes_or_prompts() {
         let raw = json!({"uuid":ID,"attachments":[{"data_base64":"secret"}],"unknown":"discard",
             "log":[{"kind":"message","text":"Comment","attachments":[{"data_base64":"other"}],
-                "delivery":{"mode":"send","state":"uncertain","error":"Check receipt","prompt":"native prompt"}}]});
+                "delivery":{"mode":"send","state":"uncertain","error":"Check receipt","prompt":"native prompt"}},
+                {"kind":"report","text":"Late","stale":"other_executor","considered":2}]});
         let mut entries = Vec::new();
         let raw = {
             let mut raw = raw;
             raw["log"][0]["id"] = json!("scope:entry-1");
+            raw["log"][1]["id"] = json!("scope:entry-2");
             raw
         };
         let view = present(raw, |_, entry| {
@@ -401,8 +404,18 @@ mod tests {
             Ok(json!([{"path":"cache/digest/example.txt"}]))
         })
         .unwrap();
-        assert_eq!(entries, [None, Some("scope:entry-1".to_owned())]);
+        assert_eq!(
+            entries,
+            [
+                None,
+                Some("scope:entry-1".to_owned()),
+                Some("scope:entry-2".to_owned())
+            ]
+        );
         assert_eq!(view["log"][0]["id"], "scope:entry-1");
+        // A stale report keeps its reason; the considered revision is not shown.
+        assert_eq!(view["log"][1]["stale"], "other_executor");
+        assert!(view["log"][1].get("considered").is_none());
         assert_eq!(
             view["log"][0]["delivery"],
             json!({"mode":"send","state":"uncertain","error":"Check receipt"})

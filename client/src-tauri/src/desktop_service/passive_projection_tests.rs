@@ -51,7 +51,8 @@ fn the_platform_manual_route_keeps_its_code_and_offers_no_resume() {
     let view = serde_json::to_value(platform_activation()).unwrap();
     assert_eq!(
         view,
-        json!({"pending":false,"running":false,"needs_resume":false,"code":"activation_platform_manual"})
+        json!({"pending":false,"running":false,"needs_resume":false,"code":"activation_platform_manual",
+            "review":null,"automatic_blocked":false,"request_id":null,"active":false})
     );
 }
 
@@ -69,7 +70,8 @@ fn the_windows_passive_projection_is_the_client_fixture() {
     let mut state = service::State::new(status["configuration"].as_str().unwrap().into()).unwrap();
     state.status(status).unwrap();
     let mut snapshot = state.snapshot().clone();
-    snapshot.notification_ownership = ownership_display(granted(), platform_activation());
+    // An unreviewed passive selection has no reviewed-choice business gate.
+    snapshot.notification_ownership = ownership_display(granted(), platform_activation(), true);
     let mut produced = serde_json::to_value(&snapshot).unwrap();
     // native_recovery is a process-wide startup flag that other tests in this
     // binary toggle; a fresh GUI start without recovery shows false.

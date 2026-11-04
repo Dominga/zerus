@@ -434,3 +434,24 @@ agents or sessions.
 Microsoft API contracts: [RunEx](https://learn.microsoft.com/en-us/windows/win32/api/taskschd/nf-taskschd-iregisteredtask-runex),
 [instance Stop](https://learn.microsoft.com/en-us/windows/win32/api/taskschd/nf-taskschd-irunningtask-stop)
 and [EnginePID](https://learn.microsoft.com/en-us/windows/win32/api/taskschd/nf-taskschd-irunningtask-get_enginepid).
+
+
+### Service Settings review
+
+The Service consumer exposes **Settings > About > Review interrupted mode
+change** for the displayed original UUID and configuration. Its native dialog
+confirms metadata review only. A reboot barrier requires a real **Restart** and
+another explicit Review. Once reviewed, background or passive selection needs
+a SECOND native confirmation and one new retained choice UUID linked to that
+review. Lost replies remain original-ID lookup only. Retry and ordinary Resume
+cannot offer a mode choice after review.
+
+A background choice records its retained actual registration Grant incarnation
+and authenticated ready service epoch/generation. Only a fresh matching latest
+original result plus this frontend's current native Grant can make existing
+business work eligible. The permanent manager/default latch remains; current
+readiness alone never settles the old Unknown. Older choice receipts without
+this scope remain read-only and require another separately confirmed choice
+with the updated maintained CLI. None of these observations authorize refresh,
+Rearm, cleanup, or adoption of another task/process. Native dialogs, installed
+Settings and Fast Startup/Restart behavior still require PC qualification.

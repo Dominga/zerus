@@ -92,6 +92,26 @@ pub(in crate::desktop) struct Receipt {
     pub request: String,
     pub desired: Mode,
     pub phase: ChoicePhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ChoiceScope>,
+}
+
+/// Read-only history linkage, never a Grant or original-cleanup witness.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::desktop) struct ChoiceScope {
+    pub journal: String,
+    pub owner_epoch: String,
+    pub service_epoch: String,
+    pub generation: u64,
+}
+impl ChoiceScope {
+    fn valid(&self) -> bool {
+        [&self.journal, &self.owner_epoch, &self.service_epoch]
+            .iter()
+            .all(|s| canonical_id(s))
+            && self.generation <= 9_007_199_254_740_991
+    }
 }
 
 impl Record {
@@ -124,6 +144,7 @@ impl Record {
             request: choice.request.clone(),
             desired,
             phase: ChoicePhase::Unknown,
+            scope: None,
         });
         next.ensure_review_capacity(&Pending::prepared(choice.request.clone(), desired, None))?;
         self.choices = next.choices;
@@ -152,6 +173,20 @@ impl Record {
         self.completed = Some(request.into());
         self.pending = None;
         Ok(())
+    }
+    pub fn complete_in_scope(&mut self, request: &str, scope: ChoiceScope) -> Result<()> {
+        ensure!(
+            scope.valid(),
+            "Current background choice scope unavailable."
+        );
+        if let Some(receipt) = self.choices.iter_mut().find(|c| c.request == request) {
+            ensure!(
+                receipt.desired == Mode::Background && receipt.phase == ChoicePhase::Unknown,
+                "Current background choice identity changed."
+            );
+            receipt.scope = Some(scope);
+        }
+        self.complete(request)
     }
     pub(super) fn ensure_review_slot(&self) -> Result<()> {
         ensure!(
@@ -201,7 +236,25 @@ impl Record {
             original: largest,
             outcome: Outcome::Unknown,
         });
-        Ok(barrier.max(serde_json::to_vec(&model)?.len()))
+        let reviewed = serde_json::to_vec(&model)?.len();
+        // Completion removes pending intent but may append a fixed background
+        // scope. Reserve that reachable layout too, before any manager effect.
+        model.reviewed = self.reviewed.clone();
+        model.completed = Some(pending.request_id.clone());
+        if let Some(receipt) = model
+            .choices
+            .iter_mut()
+            .find(|c| c.request == pending.request_id && c.desired == Mode::Background)
+        {
+            receipt.phase = ChoicePhase::Settled;
+            receipt.scope = Some(ChoiceScope {
+                journal: uuid.into(),
+                owner_epoch: uuid.into(),
+                service_epoch: uuid.into(),
+                generation: u64::MAX,
+            });
+        }
+        Ok(barrier.max(reviewed).max(serde_json::to_vec(&model)?.len()))
     }
     pub(super) fn ensure_review_capacity(&self, pending: &Pending) -> Result<()> {
         ensure!(self.review_capacity(pending)? <= RECORD_BYTES,
@@ -222,6 +275,9 @@ impl Record {
         ensure!(
             self.choices.len() <= CHOICES
                 && self.choices.iter().all(|c| canonical_id(&c.request)
+                    && c.scope.as_ref().is_none_or(|s| s.valid()
+                        && c.desired == Mode::Background
+                        && c.phase == ChoicePhase::Settled)
                     && canonical_id(&c.reviewed)
                     && choices.insert(&c.request)
                     && self
@@ -408,6 +464,38 @@ mod tests {
             machine: "11111111-1111-4111-8111-111111111111".into(),
             boot: "22222222-2222-4222-8222-222222222222".into(),
         }
+    }
+
+    #[test]
+    fn a_background_choice_keeps_its_original_review_and_current_incarnation() {
+        let (mut record, reviewed) = original(Phase::StopOffered);
+        record.review_original(&reviewed, &boot(), true).unwrap();
+        let request = uuid::Uuid::new_v4().to_string();
+        record
+            .reserve_choice(
+                &Choice {
+                    reviewed: reviewed.clone(),
+                    request: request.clone(),
+                },
+                Mode::Background,
+            )
+            .unwrap();
+        let scope = ChoiceScope {
+            journal: uuid::Uuid::new_v4().to_string(),
+            owner_epoch: uuid::Uuid::new_v4().to_string(),
+            service_epoch: uuid::Uuid::new_v4().to_string(),
+            generation: 9_007_199_254_740_991,
+        };
+        record.complete_in_scope(&request, scope.clone()).unwrap();
+        let reopened = Record::decode(&record.encode(&plan()).unwrap(), &plan()).unwrap();
+        let receipt = reopened.choices.last().unwrap();
+        assert_eq!(receipt.reviewed, reviewed);
+        assert_eq!(receipt.request, request);
+        assert_eq!(receipt.phase, ChoicePhase::Settled);
+        assert_eq!(receipt.scope, Some(scope));
+        let mut wrong = record.clone();
+        wrong.choices.last_mut().unwrap().desired = Mode::Passive;
+        assert!(wrong.encode(&plan()).is_err());
     }
 
     #[test]

@@ -106,6 +106,11 @@ pub struct ViewRow {
     pub launch_id: Option<String>,
     pub run_id: Option<String>,
     pub conversation_id: Option<String>,
+    /// The durable session ID the listing reports, when canonical
+    /// (zerus-ucck P1). Explicit desktop actions on this row's run select the
+    /// session by it as well (`session_selector`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     /// The raw `state` (`running`, `paused`, `stopped`, `archived`, ...);
     /// `running` when the row lists none (a live session).
     pub state: String,
@@ -1247,6 +1252,8 @@ pub fn row(value: &Value) -> ViewRow {
         launch_id: some(text(value, "launch_id")),
         run_id: some(session.run_id),
         conversation_id: some(session.conversation_id),
+        session_id: some(text(value, "session_id"))
+            .filter(|id| crate::creation::canonical_uuid(id)),
         // A live row lists no state; Qt reads it as running (`HgsClient.cpp`).
         state: session.state.to_owned(),
         tracked: session.tracked,
@@ -1319,6 +1326,31 @@ mod tests {
             assert!(!row.local_read_reply);
             assert!(!row.local_read_attention);
         }
+    }
+
+    /// zerus-ucck P1c: a row keeps the listing's durable session ID only in
+    /// its canonical form, and a row without one serializes as before.
+    #[test]
+    fn a_row_keeps_only_a_canonical_session_id() {
+        let id = "3f2a9c1d-0b4e-4d6a-9c1d-2e3f4a5b6c7d";
+        let listed = row(&json!({"name":"codex/example/one","session_id":id}));
+        assert_eq!(listed.session_id.as_deref(), Some(id));
+        assert_eq!(serde_json::to_value(&listed).unwrap()["session_id"], id);
+        for other in [
+            json!(""),
+            json!(id.to_uppercase()),
+            json!("not-an-id"),
+            json!(7),
+        ] {
+            let view = row(&json!({"name":"codex/example/one","session_id":other}));
+            assert_eq!(view.session_id, None, "{other}");
+        }
+        let plain = row(&json!({"name":"codex/example/one"}));
+        assert_eq!(plain.session_id, None);
+        assert!(serde_json::to_value(&plain)
+            .unwrap()
+            .get("session_id")
+            .is_none());
     }
 
     #[test]

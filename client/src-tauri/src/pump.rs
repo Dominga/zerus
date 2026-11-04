@@ -809,6 +809,24 @@ impl Pump {
             .cloned()
     }
 
+    /// The listed durable session ID of the computer's row for `run`, its
+    /// catalog key `run:<id>`, without copying the row (zerus-ucck P1c).
+    pub fn run_session_id(&self, computer: &str, run: &str) -> Option<String> {
+        if run.is_empty() {
+            return None;
+        }
+        let inner = self.lock();
+        let row = inner
+            .mirror
+            .computers
+            .get(computer)?
+            .rows
+            .get(&zerus_watch_protocol::key_for(Some(run), ""))?;
+        (row.run_id.as_deref() == Some(run))
+            .then(|| row.session_id.clone())
+            .flatten()
+    }
+
     /// The computer's live row of that name (a session that started a new
     /// run has a new catalog key). A scan of one computer's rows, only when
     /// the key is gone.

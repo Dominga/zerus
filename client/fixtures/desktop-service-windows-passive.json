@@ -35,9 +35,14 @@
   "generation": 1,
   "notification_ownership": {
     "activation": {
+      "active": false,
+      "automatic_blocked": false,
+      "business_ready": true,
       "code": "activation_platform_manual",
       "needs_resume": false,
       "pending": false,
+      "request_id": null,
+      "review": null,
       "running": false
     },
     "code": "",

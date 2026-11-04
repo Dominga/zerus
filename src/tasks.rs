@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::time::{SystemTime, UNIX_EPOCH};
 use zerus_replica::{
-    cancel_message, task_dispatch_content, Actor, Position, ProjectStore, SessionKey, Settings,
-    Stage, Target, TaskAttachment, TaskDoc, Tools, MAX_TEXT,
+    cancel_message, execution::ReportKind, task_dispatch_content, Actor, Position, ProjectStore,
+    SessionKey, Settings, Stage, Target, TaskAttachment, TaskDoc, Tools, MAX_TEXT,
 };
 
 mod answers;
@@ -38,7 +38,7 @@ fn paste_uncertain(message: &str) -> bool {
     message.starts_with(SENT_UNRECORDED) || message.starts_with("delivery uncertain")
 }
 
-const USAGE: &str = "usage: hgs task list --project P [--stage S] | list --project P --stage S --limit 1..200 [--after CURSOR|--before CURSOR] [--if-revision R] | get REF [--history-limit 1..80 [--history-before CURSOR] [--attachments metadata]] | attachment REF --file N [--entry ID] | add --project P [--backlog] [--start] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | start-plan REF --json | start-deliver REF --json [--recover-only] | cancel REF [--reason TEXT] | cancel-execution REF --json (guard JSON on stdin) | handoff REF --session SESSION [--host ALIAS] | start REF | report REF | comment REF [--content-json] | message REF --request-id UUID --mode queue|send|reopen|note [--expect-dispatch ID] [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
+const USAGE: &str = "usage: hgs task list --project P [--stage S] | list --project P --stage S --limit 1..200 [--after CURSOR|--before CURSOR] [--if-revision R] | get REF [--history-limit 1..80 [--history-before CURSOR] [--attachments metadata]] | attachment REF --file N [--entry ID] | add --project P [--backlog] [--start] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | start-plan REF --json | start-deliver REF --json [--recover-only] | cancel REF [--reason TEXT] | cancel-execution REF --json (guard JSON on stdin) | handoff REF --session SESSION [--host ALIAS] | start REF | report REF [--progress|--ready] [--considered REV] | comment REF [--content-json] | message REF --request-id UUID --mode queue|send|reopen|note [--expect-dispatch ID] [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
   REF is T-xxxxxx with --project P, or PROJECT/T-xxxxxx; texts and --set settings are read from stdin;
   a change an agent makes prints one line, and --json prints the task";
 
@@ -47,7 +47,7 @@ const USAGE: &str = "usage: hgs task list --project P [--stage S] | list --proje
 const AGENT_INSTRUCTIONS: &str = concat!(
     "Zerus tasks are this project's shared task list. Run `hgs task` in your shell: it acts as your session, on your session's project; `hgs guide tasks` lists the commands. Texts go on stdin, for example hgs task report <ref> <<'EOF' ... EOF.\n\n",
     "Filing. When the person says \"поставь таск\", \"добавь задачу\", \"запиши задачу\", \"в очередь\", \"на потом\", \"file a task\", \"add to the queue\" or \"for later\", file it with `hgs task add`. Never put these into TodoWrite or your own plan. For work you are already doing, use `hgs task add --start` or `hgs task start <ref>`; this records In progress without sending a duplicate message. Plain add only queues later work. New tasks go to the end of To do unless the person names a place (--backlog, --position N).\n\n",
-    "Working. A message starting \"[Zerus task <ref>]\" is a task for you; do it like any request from the person. When the prompt says the task was sent before, read its history with `hgs task get <ref>` before you start. Acknowledge a dispatched task with `hgs task start <ref>` before working; this does not send it again. For a subagent plan, register the native worker first. If you need the person, ask in this conversation as usual. When the work is done, or you find that it cannot be done, report with `hgs task report <ref>`: what you changed, how you checked it, and what is left undone or why it cannot be done.\n\n",
+    "Working. A message starting \"[Zerus task <ref>]\" is a task for you; do it like any request from the person. When the prompt says the task was sent before, read its history with `hgs task get <ref>` before you start. Acknowledge a dispatched task with `hgs task start <ref>` before working; this does not send it again. For a subagent plan, register the native worker first. If you need the person, ask in this conversation as usual. When the work is done, or you find that it cannot be done, report with `hgs task report <ref>`: what you changed, how you checked it, and what is left undone or why it cannot be done. An update while the work continues is `hgs task report <ref> --progress`; it keeps the task In progress.\n\n",
     "Cancelled. \"[Zerus task <ref> cancelled]\" means stop that task now and follow the message.\n\n",
     "Managing. `hgs task list` and `hgs task get` show tasks and their history; move, stage, target, edit, send and cancel change them as the person can. Accept a task (`hgs task stage <ref> done`) only when the person asks you to.\n\n",
     "Comments. `hgs task comment <ref>` adds a note for people and agents; it is never pasted into a session."
@@ -930,15 +930,7 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
     let mut task = find(&store, &r.task)?;
     if let Some(guard) = guard { guard.check(&task)?; }
     if action == "edit" && text.as_deref() == Some("") && task.title().is_empty() { agent_text("", action, &who)?; }
-    if task.view().map_err(fail)?.writable {
-        let view = task.view().map_err(fail)?;
-        let target = match view.target { Target::Session(target) | Target::NewSession { parent: target } | Target::Subagent { parent: target } => Some(target), Target::Any => None };
-        for key in target.into_iter().chain(view.session) {
-            if let Some(current) = machines.resolve(&key).filter(|current| !current.session_id.is_empty()) {
-                task.bind_session_identity(&key, &current).map_err(fail)?;
-            }
-        }
-    }
+    enrich(&mut task, &machines)?;
     if let Some(expected) = option(args, "--expect-new-session-parent")? {
         if action != "send" || !matches!(task.view().map_err(fail)?.target, Target::NewSession { parent } if format!("{}/{}", parent.machine, parent.session_id) == expected) {
             return Err(fail("task assignment changed while the new executor was starting; nothing was sent"));
@@ -998,8 +990,18 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         }
         "comment" => task.comment_with_attachments(&text, &content.and_then(|content| content.attachments).unwrap_or_default(), &who, now()).map_err(fail)?,
         "report" => {
-            let moved = task.record_report(&text, &who, now()).map_err(fail)?;
-            extra = json!({"moved_to_review": moved});
+            let progress = flag(args, "--progress");
+            if progress && flag(args, "--ready") {
+                return Err(fail("choose --progress or --ready"));
+            }
+            let considered = option(args, "--considered")?
+                .map(|value| value.parse::<u64>().ok().filter(|n| *n >= 1)
+                    .ok_or_else(|| fail("--considered is a requirement revision from 1")))
+                .transpose()?;
+            let kind = if progress { ReportKind::Progress } else { ReportKind::Ready };
+            let decision = task.report(&text, kind, considered, &who, now()).map_err(fail)?;
+            extra = json!({"moved_to_review": decision.moves, "report": if progress { "progress" } else { "ready" }});
+            if let Some(stale) = decision.stale { extra["stale"] = json!(stale); }
         }
         "move" => {
             let position = if flag(args, "--top") {
@@ -1058,6 +1060,23 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         out[key] = value.clone();
     }
     Ok(with_answer(&who, action, out, at, &destination))
+}
+
+/// Binds the task's target and holder to the verified runs this computer
+/// resolves for them before any change. A name-only holder keeps that binding
+/// as its execution's evidence (`TaskDoc::bind_session_identity`).
+fn enrich(task: &mut TaskDoc, machines: &Machines) -> Result<()> {
+    let view = task.view().map_err(fail)?;
+    if !view.writable {
+        return Ok(());
+    }
+    let target = match view.target { Target::Session(target) | Target::NewSession { parent: target } | Target::Subagent { parent: target } => Some(target), Target::Any => None };
+    for key in target.into_iter().chain(view.session) {
+        if let Some(current) = machines.resolve(&key).filter(|current| !current.session_id.is_empty()) {
+            task.bind_session_identity(&key, &current).map_err(fail)?;
+        }
+    }
+    Ok(())
 }
 
 /// The session a send goes to, and whether it pins the task there: --session
@@ -1405,6 +1424,41 @@ mod tests {
         let path = root.join(file);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn enrichment_keeps_a_legacy_executor_s_report_authority_for_its_verified_run_alone() {
+        // review-n on #1389: a task an older hgs sent to a name-only session,
+        // then the enrichment every change makes before reporting.
+        use zerus_replica::{execution::{ReportKind, Stale}, NewTask};
+        let state = tempfile::tempdir().unwrap();
+        let root = state.path();
+        let file = |n: u8| format!("{n:064x}.json");
+        saved(root, &file(1), json!({"name":"codex/api","run_id":"run-api","launch_id":"launch-api"}));
+        saved(root, &format!("bindings/{}", file(2)), json!({"name":"codex/renamed","run_id":"run-renamed","legacy_shadow":{"name":"codex/older","run_id":"run-renamed"}}));
+        let machines = Machines { here: "node-here".into(), selves: vec![], peers: BTreeMap::new(), bindings: crate::state::task_bindings_in(root).unwrap() };
+        let legacy = |name: &str| {
+            let mut task = TaskDoc::create(NewTask { project: "example", id: "T-abcdef", text: "Description", stage: Stage::Todo, target: Target::Any, author: Actor::Person, rank: "U", now: 1 }).unwrap();
+            let key = SessionKey { machine: "node-here".into(), session: name.into(), session_id: String::new() };
+            task.record_send(&key, "legacy-send", &Actor::Person, 2).unwrap();
+            task
+        };
+        let agent = |name: &str, id: &str| Actor::Agent(SessionKey { machine: "node-here".into(), session: name.into(), session_id: id.into() });
+        for (name, current) in [("codex/api", agent("codex/api", "launch_id:launch-api")), ("codex/older", agent("codex/renamed", "run_id:run-renamed"))] {
+            let mut task = legacy(name);
+            enrich(&mut task, &machines).unwrap();
+            let execution = task.view().unwrap().execution.unwrap();
+            assert!(!execution.conflict, "{name}");
+            // Another run that holds the name or label is refused.
+            let other = agent(name, "launch_id:another-run");
+            let refused = task.report("Not mine", ReportKind::Ready, None, &other, 3).unwrap();
+            assert_eq!((refused.moves, refused.stale), (false, Some(Stale::OtherExecutor)), "{name}");
+            // Enrichment again (the next change) keeps the binding.
+            enrich(&mut task, &machines).unwrap();
+            let done = task.report("Done", ReportKind::Ready, None, &current, 4).unwrap();
+            assert_eq!((done.moves, done.stale), (true, None), "{name}");
+            assert_eq!(task.stage().unwrap(), Stage::Review);
+        }
     }
 
     #[test]

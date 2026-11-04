@@ -37,6 +37,7 @@ use zerus_client_core::details::{
 use zerus_client_core::marks::{AttentionMarks, Mark};
 use zerus_client_core::readmarks::{ReadMark, ReadMarks};
 use zerus_client_core::reads::{self, ArchivePage};
+use zerus_client_core::session_selector::{self, selected_invocation};
 use zerus_client_core::shell::{current_shell, open_command};
 use zerus_client_core::{default_hgs, run, Action, Batch, ComputerId, Outcome, Target, ViewRow};
 
@@ -250,8 +251,12 @@ pub struct Actions {
     /// Computer, session name and the run each succeeded termination ended,
     /// oldest first.
     terminated: Arc<Mutex<VecDeque<(String, String, String)>>>,
-    /// The archive placement capture, set once before the source starts.
+    /// The change pump, set once before the source starts: the archive
+    /// placement capture, and the listed rows explicit actions read their
+    /// session ID from.
     termination_pump: Arc<OnceLock<crate::pump::WeakPump>>,
+    /// Which computers' `hgs` selects a session by ID (zerus-ucck P1c).
+    selectors: Arc<Mutex<session_selector::Answers>>,
     /// Hears every change of the pending marks.
     pub(crate) listener: MarksListener,
 }
@@ -286,8 +291,22 @@ impl Actions {
             hook: Arc::default(),
             terminated: Arc::default(),
             termination_pump: Arc::default(),
+            selectors: Arc::default(),
             listener: MarksListener::default(),
         }
+    }
+
+    /// The durable session ID of the row the target names by its exact run
+    /// (catalog key `run:<id>`), when the listing reports one (zerus-ucck
+    /// P1c). The row's current name is not compared: a session renamed since
+    /// the action was chosen keeps its run, so the CLI refuses the old name.
+    /// A target without a run, or a run the listing no longer shows, has none
+    /// and keeps its name and run form.
+    fn listed_session_id(&self, target: &Target) -> Option<String> {
+        self.termination_pump
+            .get()?
+            .upgrade()?
+            .run_session_id(&target.computer, &target.run_id)
     }
 
     /// Sets, once, what runs whenever a write mark appears or goes: the
@@ -1403,6 +1422,23 @@ async fn dispatch_reserved_plan(
     .await
 }
 
+/// Whether `computer`'s `hgs` selects a session by ID: a kept answer, else
+/// its help read now through `read` and kept (zerus-ucck P1c). The lock is
+/// never held while the help is read.
+fn selector_confirmed(
+    selectors: &Mutex<session_selector::Answers>,
+    hgs: &std::path::Path,
+    computer: &str,
+    read: impl FnOnce(&zerus_client_core::Invocation) -> zerus_client_core::Exit,
+) -> bool {
+    let lock = || selectors.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(answer) = lock().get(hgs, computer, std::time::Instant::now()) {
+        return answer;
+    }
+    let exit = read(&session_selector::probe(computer));
+    lock().record(hgs, computer, &exit, std::time::Instant::now())
+}
+
 struct CleanupPlan {
     capture: Option<zerus_client_core::termination_cleanup::Capture>,
     native: Option<crate::desktop_service::termination_outcome::Confirmation>,
@@ -1506,6 +1542,16 @@ async fn dispatch_reserved_original(
     // workers with the call itself.
     let ordinary_hgs = native.is_none().then(default_hgs);
     let (call_target, call_action) = (target.clone(), action.clone());
+    // An explicit action also selects its session by the acted-on row's ID.
+    // Delayed, cleanup and service confirmations keep their frozen scoped
+    // envelope, which already names the exact run and conversation.
+    let session_id = (native.is_none()
+        && cleanup.is_none()
+        && delayed.is_none()
+        && session_selector::selects(&action))
+    .then(|| state.listed_session_id(&target))
+    .flatten();
+    let selectors = Arc::clone(&state.selectors);
     let termination: Option<crate::pump::Termination> = (WriteKind::of(&action)
         == WriteKind::Terminate
         && !matches!(action, Action::TerminateShell { .. }))
@@ -1563,7 +1609,12 @@ async fn dispatch_reserved_original(
             } else if let Some((captured, _)) = &delayed {
                 captured.invocation(&request_id)?
             } else {
-                invocation(&call_target, &call_action, &request_id)?
+                let id = session_id.as_deref().filter(|_| {
+                    selector_confirmed(&selectors, &hgs, &call_target.computer, |probe| {
+                        runner(&hgs, probe, None)
+                    })
+                });
+                selected_invocation(&call_target, &call_action, &request_id, id)?
             }
         };
         if native.is_none() {
@@ -1592,6 +1643,12 @@ async fn dispatch_reserved_original(
         } else {
             runner(&hgs, &inv, native_read.as_ref())
         };
+        if session_selector::unsupported(&call_target, &inv, &exit) {
+            selectors
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .forget(&hgs, &call_target.computer);
+        }
         drop(native_read);
         Ok::<_, String>((inv, exit))
     })
@@ -2952,6 +3009,277 @@ mod tests {
         let weak = pump.downgrade();
         actions.set_termination_pump(pump);
         assert!(weak.upgrade().is_none());
+    }
+
+    /// zerus-ucck P1c fixture: a live computer listing `target`'s run under
+    /// `name`, with `session_id`, and the calls a stand-in `hgs` received.
+    fn selector_fixture(
+        target: &Target,
+        name: &str,
+        session_id: Option<&str>,
+    ) -> (Actions, crate::pump::Pump) {
+        use zerus_client_core::{Change, ComputerStatus};
+        let actions = Actions::new(std::env::temp_dir().join("zerus-selector-test-marks.json"));
+        let pump = crate::pump::Pump::default();
+        let computer = ComputerId::from(target.computer.as_str());
+        pump.push(Change::Computer {
+            computer: computer.clone(),
+            status: ComputerStatus::Live,
+        });
+        pump.push(Change::Upsert {
+            computer,
+            key: format!("run:{}", target.run_id),
+            row: ViewRow {
+                name: name.into(),
+                run_id: Some(target.run_id.clone()),
+                session_id: session_id.map(str::to_owned),
+                state: "running".into(),
+                ..Default::default()
+            },
+        });
+        actions.set_termination_pump(pump.clone());
+        (actions, pump)
+    }
+
+    /// One dispatch through a stand-in `hgs` that answers `--help` with
+    /// `help` and every other call with `answer`; the calls it received.
+    fn selector_dispatch(
+        actions: &Actions,
+        target: &Target,
+        action: Action,
+        help: zerus_client_core::Exit,
+        answer: zerus_client_core::Exit,
+    ) -> (Outcome, Vec<Vec<String>>) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&calls);
+        let outcome = tauri::async_runtime::block_on(dispatch_with(
+            actions,
+            target.clone(),
+            action,
+            uuid::Uuid::new_v4().to_string(),
+            move |_, inv| {
+                seen.lock().unwrap().push(inv.args.clone());
+                if inv.args.last().is_some_and(|arg| arg == "--help") {
+                    help.clone()
+                } else {
+                    answer.clone()
+                }
+            },
+        ))
+        .unwrap();
+        let calls = calls.lock().unwrap().clone();
+        (outcome, calls)
+    }
+
+    const SELECTED: &str = "3f2a9c1d-0b4e-4d6a-9c1d-2e3f4a5b6c7d";
+
+    fn exit(code: i32, stdout: &str, stderr: &str) -> zerus_client_core::Exit {
+        zerus_client_core::Exit::Code {
+            code,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.into(),
+        }
+    }
+
+    /// An explicit action selects the listed session by ID after the name,
+    /// here and on a peer, once that computer's help confirms the selector.
+    /// The answer is kept, so the next action reads no help.
+    #[test]
+    fn an_explicit_action_selects_the_listed_session_by_id_once_confirmed() {
+        let marker = exit(0, "usage\n       session-id-selector-v1\n", "");
+        for computer in ["studio", ""] {
+            let target = Target {
+                computer: computer.into(),
+                ..review()
+            };
+            // Renamed since the action was chosen: the run still names it,
+            // and the CLI refuses the old name.
+            let (actions, _pump) =
+                selector_fixture(&target, "claude/sample-project/renamed", Some(SELECTED));
+            let alias: Vec<String> = (!computer.is_empty())
+                .then(|| format!("@{computer}"))
+                .into_iter()
+                .collect();
+            let with = |rest: &[&str]| -> Vec<String> {
+                alias
+                    .iter()
+                    .cloned()
+                    .chain(rest.iter().map(|s| s.to_string()))
+                    .collect()
+            };
+            let paused = with(&["pause", &target.name, "--session-id", SELECTED]);
+            let (outcome, calls) = selector_dispatch(
+                &actions,
+                &target,
+                Action::Pause,
+                marker.clone(),
+                exit(0, "", ""),
+            );
+            assert!(matches!(outcome, Outcome::Done { .. }), "{outcome:?}");
+            assert_eq!(calls, [with(&["--help"]), paused.clone()]);
+            let (_, calls) = selector_dispatch(
+                &actions,
+                &target,
+                Action::Pause,
+                marker.clone(),
+                exit(0, "", ""),
+            );
+            assert_eq!(calls, [paused], "the confirmed answer is kept");
+            // A non-selecting action, and another run, keep the name form.
+            let stop = Action::StopProcess {
+                process_id: "p-1".into(),
+                archive_id: None,
+                generation: None,
+            };
+            let (_, calls) =
+                selector_dispatch(&actions, &target, stop, marker.clone(), exit(1, "", "x"));
+            assert!(
+                calls
+                    .iter()
+                    .all(|call| !call.contains(&"--session-id".to_owned())),
+                "{calls:?}"
+            );
+            let resumed = Target {
+                run_id: "run-2".into(),
+                ..target.clone()
+            };
+            let (_, calls) = selector_dispatch(
+                &actions,
+                &resumed,
+                Action::Pause,
+                marker.clone(),
+                exit(0, "", ""),
+            );
+            assert_eq!(calls, [with(&["pause", &target.name])]);
+        }
+    }
+
+    /// Without a listed ID, on an older computer, or when its help cannot be
+    /// read, the action keeps its name form. Only a finished answer is kept.
+    #[test]
+    fn an_older_or_unreachable_computer_keeps_the_name_form() {
+        let target = review();
+        let paused = vec!["@studio".to_owned(), "pause".into(), target.name.clone()];
+        let help = vec!["@studio".to_owned(), "--help".into()];
+        let (actions, _pump) = selector_fixture(&target, &target.name, None);
+        let (_, calls) = selector_dispatch(
+            &actions,
+            &target,
+            Action::Pause,
+            exit(0, "session-id-selector-v1\n", ""),
+            exit(0, "", ""),
+        );
+        assert_eq!(
+            calls,
+            std::slice::from_ref(&paused),
+            "no listed ID: no probe"
+        );
+
+        let (actions, _pump) = selector_fixture(&target, &target.name, Some(SELECTED));
+        for _ in 0..2 {
+            let (_, calls) = selector_dispatch(
+                &actions,
+                &target,
+                Action::Pause,
+                exit(255, "", "ssh: unreachable"),
+                exit(0, "", ""),
+            );
+            assert_eq!(
+                calls,
+                [help.clone(), paused.clone()],
+                "an unread help is asked again"
+            );
+        }
+        let older = exit(0, "usage\n  session-id-selector-v10\n", "");
+        let (_, calls) = selector_dispatch(
+            &actions,
+            &target,
+            Action::Pause,
+            older.clone(),
+            exit(0, "", ""),
+        );
+        assert_eq!(calls, [help.clone(), paused.clone()]);
+        let (_, calls) =
+            selector_dispatch(&actions, &target, Action::Pause, older, exit(0, "", ""));
+        assert_eq!(calls, [paused], "the older answer is kept");
+    }
+
+    /// A refused ID is a stale target: the one call fails as a changed
+    /// session and nothing retries it. A peer that lost the selector drops
+    /// its kept answer, so the next action reads its help again.
+    #[test]
+    fn a_refused_session_id_is_a_stale_target_and_is_never_retried() {
+        let target = review();
+        let marker = exit(0, "session-id-selector-v1\n", "");
+        let (actions, _pump) = selector_fixture(&target, &target.name, Some(SELECTED));
+        let send = Action::Send {
+            text: "hello".into(),
+            attachments: Vec::new(),
+            agent_id: None,
+            expected_compaction_id: None,
+        };
+        for (action, code, stderr) in [
+            (
+                Action::Pause,
+                1,
+                format!(
+                    "hgs: Session ID {SELECTED} is claude/sample-project/renamed, not {}\n",
+                    target.name
+                ),
+            ),
+            (
+                send.clone(),
+                1,
+                format!("hgs: No live or saved session has ID {SELECTED}\n"),
+            ),
+            (
+                send,
+                5,
+                format!("hgs: Several sessions carry ID {SELECTED}: a, b\n"),
+            ),
+        ] {
+            let (outcome, calls) = selector_dispatch(
+                &actions,
+                &target,
+                action,
+                marker.clone(),
+                exit(code, "", &stderr),
+            );
+            assert_eq!(
+                outcome,
+                Outcome::Failed {
+                    detail: zerus_client_core::termination_cleanup::STATE_CHANGED.into()
+                }
+            );
+            let effects = calls
+                .iter()
+                .filter(|call| call.last() != Some(&"--help".to_owned()));
+            assert_eq!(effects.count(), 1, "{calls:?}");
+        }
+        let gate = exit(
+            1,
+            "",
+            "hgs: update the selected computer to select sessions by ID\n",
+        );
+        let (outcome, calls) =
+            selector_dispatch(&actions, &target, Action::Pause, marker.clone(), gate);
+        assert!(matches!(outcome, Outcome::Failed { .. }));
+        assert_eq!(calls.len(), 1, "the kept answer was used: {calls:?}");
+        let (_, calls) = selector_dispatch(
+            &actions,
+            &target,
+            Action::Pause,
+            exit(0, "usage\n", ""),
+            exit(0, "", ""),
+        );
+        assert_eq!(
+            calls,
+            [
+                vec!["@studio".to_owned(), "--help".into()],
+                vec!["@studio".to_owned(), "pause".into(), target.name.clone()],
+            ],
+            "the dropped answer is read again"
+        );
     }
 
     #[test]

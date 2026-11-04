@@ -635,6 +635,9 @@ elif args == ['desktop', 'frontend-request', '--json']:
             os._exit(0)
         print(json.dumps(receipt))
 elif args == ['desktop', 'status', '--json']:
+    if (root / 'mode-preflight-hold').exists():
+        (root / 'mode-preflight-entered').touch()
+        wait(root / 'mode-preflight-release')
     print(json.dumps(status()))
 elif args == ['desktop', 'watch', '--json']:
     cycle = counter('watch-cycle') if config.get('restart_watch') else 0

@@ -1,6 +1,7 @@
 import { headerAttention, isWorking, visibleUnreadReply } from "../../store/attention";
 import type { CreationCard, GroupingOut } from "../../types";
 import type { Session, Subagent } from "./types";
+import { currentChildren } from "./subagents";
 
 export type Row =
   /** `project` is the project's id; `name` and the colour come from the organization's header. */
@@ -34,7 +35,7 @@ export function groupRows(input: ListInput): Row[] {
   const out: Row[] = [];
   const cards = (list: readonly Session[]) => {
     for (const s of list) {
-      const current = input.online(s) && !["paused", "stopped", "archived"].includes(s.state) && s.processState !== "exited";
+      const current = currentChildren(s, input.online(s));
       const roster = input.children === false ? [] : (input.roster?.(s) ?? s.subagents ?? []);
       const kids = roster.filter((child) =>
         input.includeCompleted

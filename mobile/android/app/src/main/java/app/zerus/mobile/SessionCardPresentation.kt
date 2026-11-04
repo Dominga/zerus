@@ -125,7 +125,7 @@ object SessionCardPresentation {
     /** The expanded rows. Finished, idle, ready and failed turns are hidden unless completed children are included. */
     fun children(session: Session, online: Boolean, includeCompleted: Boolean = false,
         drafted: Set<String> = emptySet()): List<SessionCardChild> {
-        val current = SessionFilters.currentActivity(session, online)
+        val current = !SessionFilters.archived(session) && SessionFilters.currentActivity(session, online)
         val complete = flag(session.raw, "subagent_counts_complete")
         return roster(session.raw).filter { (id, child) ->
             includeCompleted || !flag(child, "group") && id in drafted || !inactiveChild(child, complete)
@@ -147,7 +147,7 @@ object SessionCardPresentation {
     fun childCount(session: Session, online: Boolean, expanded: Boolean = false, includeCompleted: Boolean = false): String {
         val raw = session.raw
         val source = text(raw, "subagent_source")
-        if (!SessionFilters.currentActivity(session, online) || source == "unavailable") return ""
+        if (SessionFilters.archived(session) || !SessionFilters.currentActivity(session, online) || source == "unavailable") return ""
         val count = integer(raw, "subagent_count", 0)
         val active = maxOf(integer(raw, "subagent_active_count", count), count)
         val total = integer(raw, "subagent_total_count", -1)

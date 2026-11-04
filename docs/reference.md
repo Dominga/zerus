@@ -834,6 +834,11 @@ additive `process_work` summary uses current owned OS trees (one process-table
 sample per fleet listing) or the native DeepSeek job registry; it does not scan
 native transcripts on each fleet poll.
 
+Subagent rows and the Inspector use **Recorded** for offline, archived, paused,
+stopped or unverifiable parent sessions. Recorded children contribute no current
+work to the displayed counts; their saved states are retained. A current child's
+explicit input or approval request still takes precedence over Working.
+
 Working and compacting timers use native start evidence and update locally without extra
 host requests. An idle agent with pending jobs it scheduled for itself (Kimi
 `CronCreate`) is **Scheduled**: its badge and detail show the next run time

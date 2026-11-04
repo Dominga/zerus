@@ -29,7 +29,8 @@ parser.add_argument("--paint-column", type=int, metavar="X",
                          "a magenta collapsing card must never grow again, row-collapse-smoke), `landings` (a magenta "
                          "reading anchor must keep its top while an older page lands, activity-older-smoke) or `opens` "
                          "(the magenta loading heading and the cyan placed heading never in one frame, activity-open-smoke) "
-                         "or `shows` (a magenta card, once fully painted, is never drawn dimmer again, task-view-flicker-smoke)")
+                         "or `shows` (a magenta card, once fully painted, is never drawn dimmer again, task-view-flicker-smoke "
+                         "and entrance-survey-smoke)")
 parser.add_argument("--paint-row", type=int, metavar="Y",
                     help="check the presented frames of a page that reports `slides`: the right edge of a "
                          "magenta panel on a 4 px row at Y must only move with each slide (panel-slide-smoke)")
@@ -232,7 +233,7 @@ def painted_once(frames, opens, height):
 
 
 def painted_steady(frames, shows, ends, height):
-    """Once an opened task's magenta result card is fully painted, no later
+    """Once an opened magenta card (a Task View result, an entrance) is fully painted, no later
     presented frame of that open draws it dimmer: no blink after it appeared."""
     def level(data):
         stride = len(data) // height
@@ -254,9 +255,9 @@ def painted_steady(frames, shows, ends, height):
         cases.append({"open": index, "painted_frames": len(seen), "first_card": first,
                       "full_at": seen[full][0] if full is not None else None, "dimmer": dimmer[:5]})
         if full is None:
-            failures.append(f"open {index}: the result card was never fully painted")
+            failures.append(f"open {index}: the magenta card was never fully painted")
         elif dimmer:
-            failures.append(f"open {index}: {len(dimmer)} painted frames dimmed the result card after it was fully shown "
+            failures.append(f"open {index}: {len(dimmer)} painted frames dimmed the magenta card after it was fully shown "
                             f"(ms after the open, level: {dimmer[:5]})")
     return {"paint": cases, "paint_failures": failures}
 
@@ -388,6 +389,9 @@ with tempfile.TemporaryDirectory(prefix="zerus-menu-") as scratch, ExitStack() a
     if args.paint_row is not None:
         result = {**result, **painted_slide(painted, result.get("slides", []), PAINT_WIDTH, surface.get_stride())}
         result["failures"] = result.get("failures", []) + result.pop("paint_failures")
+    if args.paint_column is None and "shows" in result:
+        # Its pass is the painted check; without the column it would pass unseen.
+        result["failures"] = result.get("failures", []) + ["this page reports `shows`: run it with --paint-column"]
     print(json.dumps({**result, **display_info, "real_display": args.real_display,
                       "webkit": f"{WebKit2.get_major_version()}.{WebKit2.get_minor_version()}.{WebKit2.get_micro_version()}"}, indent=2))
     raise SystemExit(1 if result.get("failures") else 0)

@@ -174,10 +174,14 @@ class Switch(Fixture):
         manifest('empty-form', form_state={})
         manifest('held-only', deferred_input=held)
         manifest('held-text', text='maybe sent', deferred_input=held)
+        # Text with a form's fields is unsent input, counted once.
+        manifest('text-and-form', text='typed', form_state={'title': 'a form'})
+        # A present but null identity is compared, yet holds no identity.
+        manifest('null-identity', deferred_input=None)
         saved = self.root / 'saved'
         updater.snapshot(saved, roots)
         self.assertEqual(updater.changed_drafts(saved, roots),
-                         (updater.KeptDrafts(total=6, unsent=3, forms=2, held=2), []))
+                         (updater.KeptDrafts(total=8, unsent=4, forms=2, held=2), []))
         # A changed answered form, a changed held identity and a lost
         # identity-only draft each block, as any changed draft does.
         rewrite('answered', lambda body: body['form_state'].update(answered=False))
@@ -188,7 +192,7 @@ class Switch(Fixture):
         self.assertEqual(problems, [f'client-{TEST_ID} answered: changed',
                                     f'client-{TEST_ID} held-only: missing',
                                     f'client-{TEST_ID} held-text: changed'])
-        self.assertEqual(kept, updater.KeptDrafts(total=3, unsent=2, forms=1, held=0))
+        self.assertEqual(kept, updater.KeptDrafts(total=5, unsent=3, forms=1, held=0))
 
     def test_a_half_deleted_bundle_has_no_kind(self):
         half = self.bundle('half', 'qt')

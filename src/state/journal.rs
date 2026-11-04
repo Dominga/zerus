@@ -438,6 +438,9 @@ fn observed_summary(record: &Value, live_pane: bool) -> Value {
     if !string(record, "launch_id").is_empty() {
         output["launch_id"] = record["launch_id"].clone();
     }
+    if !string(record, "session_id").is_empty() {
+        output["session_id"] = record["session_id"].clone();
+    }
     let last_tool = record["active_tools"]
         .as_object()
         .filter(|_| live_pane && output["activity"] == "busy")

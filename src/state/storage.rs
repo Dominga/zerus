@@ -130,7 +130,18 @@ pub(super) fn read(name: &str) -> Result<Value> {
     Ok(record)
 }
 
+/// A session's durable identity (zerus-ucck P1): assigned when the session is
+/// first created and kept across resume, clear, rename, pause, archive and
+/// restore; a fork gets its own. A record an older CLI wrote gains one the
+/// next time this CLI writes it.
+pub(super) fn ensure_session_id(record: &mut Value) {
+    if string(record, "session_id").is_empty() {
+        record["session_id"] = json!(uuid::Uuid::new_v4().to_string());
+    }
+}
+
 pub(super) fn write(record: &mut Value) -> Result<()> {
+    ensure_session_id(record);
     record["updated"] = json!(now());
     atomic_record(&record_path(string(record, "name")), record)?;
     rename::mirror_legacy(record)

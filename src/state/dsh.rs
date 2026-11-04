@@ -51,7 +51,9 @@ pub(super) fn binding(name: &str) -> Result<Value> {
     Ok(value)
 }
 fn save(value: &Value) -> Result<()> {
-    atomic(&binding_path(string(value, "name")), &value.to_string())
+    let mut value = value.clone();
+    ensure_session_id(&mut value);
+    atomic(&binding_path(string(&value, "name")), &value.to_string())
 }
 fn native_home() -> PathBuf {
     nonempty_env("DSH_HOME")
@@ -668,6 +670,9 @@ fn normalize(record: &Value, row: &Value, inspected: &Value) -> Value {
         "prompt":outline.map(|v|v["prompt"].clone()),"activity_detail":outline.map(|v|v["response"].clone()),
         "reply_id":reply.map(|v|format!("dsh-turn-{}",v["seq"].as_u64().unwrap_or(0))),"reply_at":if reply.is_some(){row["updatedAt"].as_f64().unwrap_or(0.0)/1000.0}else{0.0},
         "native_ui_available":true,"settings_change_supported":alive,"send_available":alive && !auth_required && record["permissions_pending"] != true});
+    if !string(record, "session_id").is_empty() {
+        value["session_id"] = record["session_id"].clone();
+    }
     if pending {
         // Native question IDs distinguish one request from the next for read
         // marks and notifications; their generation-bound hashes do not.

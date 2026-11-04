@@ -173,7 +173,7 @@ impl OwnedFrontend {
         let admission = Admission;
         let entry = text(selected.image())?;
         let mut environment = host::Environment::current()?;
-        for name in ["HGS_SESSION", "HGS_RUN_ID", wire::NAVIGATION_ENV] {
+        for name in ["HGS_SESSION", "HGS_SESSION_ID", "HGS_RUN_ID", wire::NAVIGATION_ENV] {
             environment.remove(name)?;
         }
         selected.revalidate_for_launch(&launch)?;

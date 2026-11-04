@@ -71,7 +71,8 @@ if agent == "kimi" and sys.argv[1:3] == ["session", "list"]:
     print(json.dumps([{"id": p.stem} for p in (home / "history").glob("*.jsonl")]))
     sys.exit(0)
 with open(home / "argv.jsonl", "a") as f:
-    f.write(json.dumps({"agent": agent, "argv": sys.argv[1:], "codex_home": os.environ.get("CODEX_HOME")}) + "\n")
+    f.write(json.dumps({"agent": agent, "argv": sys.argv[1:], "codex_home": os.environ.get("CODEX_HOME"),
+                        "hgs_session_id": os.environ.get("HGS_SESSION_ID")}) + "\n")
 args = sys.argv[1:]
 sid = str(uuid.uuid4())
 for flag in ("--resume", "--session", "resume"):
@@ -1669,6 +1670,47 @@ exit $status
         self.hgs("pause", name)
         self.hgs("claude", "p", "-n", "one", "-d", "--fresh")
         self.wait(lambda: self.binding(name).get("conversation_id") not in (None, sid))
+
+    # zerus-ucck P1: one durable session ID across pause and resume, a fresh
+    # conversation, rename, archive and restore (a fork gets its own: see
+    # test_fork); a record an older CLI wrote gains one when next written.
+    def test_a_session_keeps_one_durable_id(self):
+        name = self.start()
+        session = self.binding(name)["session_id"]
+        self.assertEqual(str(uuid.UUID(session)), session)
+        launched = lambda: json.loads((self.root / "argv.jsonl").read_text().splitlines()[-1])
+        self.assertEqual(launched()["hgs_session_id"], session)
+        row = next(s for s in json.loads(self.hgs("ls", "--local", "--json"))["sessions"] if s["name"] == name)
+        self.assertEqual(row["session_id"], session)
+        self.assertEqual(json.loads(self.hgs("inspect", name))["session_id"], session)
+        self.hgs("pause", name)
+        self.resume(name)
+        self.assertEqual(self.binding(name)["session_id"], session)
+        self.assertEqual(launched()["hgs_session_id"], session)
+        self.hgs("pause", name)
+        conversation, run = self.binding(name)["conversation_id"], self.binding(name)["run_id"]
+        self.hgs("resume", name, "--fresh", "--expected-run-id", run, "-d")
+        self.wait(lambda: self.binding(name).get("conversation_id") not in (None, conversation))
+        self.assertEqual(self.binding(name)["session_id"], session)
+        renamed = "claude/p/renamed"
+        self.hgs("rename", name, renamed)
+        self.assertEqual(self.binding(renamed)["session_id"], session)
+        self.hgs("pause", renamed)
+        self.hgs("archive", renamed)
+        archived = json.loads(next((self.root / "state" / "archives").glob("*.json")).read_text())
+        self.assertEqual(archived["session_id"], session)
+        archive_id = archived["archive_id"]
+        self.hgs("resume", renamed, "--archive", archive_id, "-d")
+        self.wait(lambda: self.binding(renamed).get("activity") == "idle")
+        self.assertEqual(self.binding(renamed)["session_id"], session)
+        legacy, _ = self.saved_v1()
+        self.assertNotIn("session_id", legacy)
+        self.resume(legacy["name"])
+        gained = self.binding(legacy["name"])["session_id"]
+        self.assertEqual(str(uuid.UUID(gained)), gained)
+        self.hgs("pause", legacy["name"])
+        self.resume(legacy["name"])
+        self.assertEqual(self.binding(legacy["name"])["session_id"], gained)
 
     def test_resume_fresh_keeps_launch_settings_and_earlier_activity(self):
         name = self.start("claude", "one", "--", "--effort", "high", "initial prompt")

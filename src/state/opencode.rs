@@ -103,7 +103,9 @@ pub(super) fn native_id(id: &str, prefix: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
 }
 fn save(record: &Value) -> Result<()> {
-    atomic(&binding_path(string(record, "name")), &record.to_string())
+    let mut record = record.clone();
+    ensure_session_id(&mut record);
+    atomic(&binding_path(string(&record, "name")), &record.to_string())
 }
 pub(crate) fn config_home() -> PathBuf {
     nonempty_env("OPENCODE_CONFIG_DIR")
@@ -640,6 +642,9 @@ fn normalize(record: &Value, observed: Option<&Observed>) -> Value {
         "activity_detail":reply.map(|r|r["detail"].clone()),"prompt":prompt.map(|r|r["detail"].clone()),"reply_id":reply.map(|r|r["reply_id"].clone()),"reply_at":reply.map(|r|r["at"].clone()),
         "last_event_at":session["time"]["updated"].as_f64().unwrap_or(0.0)/1000.0,"turn_started":turn_started,"account_id":"native-opencode","account_home":record["agent_home"],
         "model":model["id"],"model_provider":model["providerID"],"settings_model":settings_model,"effort":effort});
+    if !string(record, "session_id").is_empty() {
+        value["session_id"] = record["session_id"].clone();
+    }
     let controls = json!({"send_available":idle,"send_supported":idle,"settings_change_supported":idle && !active,"interrupt_supported":available && active,
         "terminal_supported":false,"terminal_reason":backend::OPENCODE_TERMINAL_REASON.text(),
         "terminal_attach_supported":cfg!(unix) && available && record["service"] == "opencode2",

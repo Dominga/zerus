@@ -376,12 +376,11 @@ fn assign(store: &mut Store, request: &Request, _conversation: &str) -> Result<S
         },
         json!(request.project_id),
     )?;
-    super::session_ids::twin(
-        &mut catalog,
+    super::session_ids::write(
+        &catalog,
+        &mut store.twins,
         &store.node_id,
-        &local,
-        &request.name,
-        &json!(request.project_id),
+        &[(local, request.name.clone())],
     )?;
     store.catalog = catalog;
     Ok(folder)
@@ -399,6 +398,7 @@ mod tests {
             imported: true,
             bindings: BTreeMap::new(),
             peers: BTreeMap::new(),
+            twins: Default::default(),
         };
         store
             .catalog

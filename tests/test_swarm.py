@@ -47,16 +47,18 @@ if (root / ('preference-' + alias)).exists():
     if 'kinds' in output: output['kinds'] = [kind for kind in output['kinds'] if kind != 'order']
     print(json.dumps(output)); sys.exit(0)
 if (root / ('nosessionid-' + alias)).exists():
-    # A member from before session membership by ID: it lists the kinds it
-    # accepts, without "session_id", and rejects that kind.
+    # A member from before session membership by ID (v0.47.0): it lists its
+    # kinds without "session_id", shows no twins and, as its exchange denies
+    # unknown fields, refuses a request that carries them.
     request = sys.stdin.read()
-    if args[1:] == ['exchange'] and any(op['key']['kind'] == 'session_id' for op in json.loads(request)['operations']):
-        print('unknown variant from a newer member', file=sys.stderr); sys.exit(1)
+    if args[1:] == ['exchange'] and {'twins', 'known_twins'} & set(json.loads(request)):
+        print('unknown field from a newer member', file=sys.stderr); sys.exit(1)
     result = subprocess.run([os.environ['SWARM_TEST_HGS'], *args], input=request, env=env, text=True, capture_output=True)
     sys.stderr.write(result.stderr)
     if result.returncode: sys.exit(result.returncode)
     output = json.loads(result.stdout)
     if 'kinds' in output: output['kinds'] = [kind for kind in output['kinds'] if kind != 'session_id']
+    for field in ('twins', 'known_twins'): output.pop(field, None)
     print(json.dumps(output)); sys.exit(0)
 if not (root / ('old-' + alias)).exists():
     os.execve(os.environ['SWARM_TEST_HGS'], [os.environ['SWARM_TEST_HGS'], *args], env)
@@ -535,6 +537,35 @@ class Swarm(unittest.TestCase):
         (self.root / 'nosessionid-c').unlink()
         self.assertTrue(self.call('b', 'sync')['c']['ok'])
         self.assertEqual(gate(), {'ready': True, 'missing': []})
+
+    def test_twins_travel_only_between_members_that_list_the_kind(self):
+        # zerus-ucck P2c-1 (#1413 review): session ID memberships live beside
+        # the catalog and reach only members that list the kind.
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        (self.root / 'nosessionid-c').touch()
+        a = self.call('a', 'get')
+        session = str(uuid.uuid4())
+        twin = {'id': str(uuid.uuid4()), 'actor': a['node_id'], 'clock': 1, 'machine': a['node_id'], 'session_id': session,
+                'label': 'codex/work/one', 'op': str(uuid.uuid4()), 'project': None}
+        twins = lambda node: self.root / node / 'swarm' / 'session-id-twins.json'
+        twins('a').write_text(json.dumps({'swarm_id': a['swarm_id'], 'entries': {a['node_id'] + '\n' + session: twin}}))
+        self.assertTrue(self.call('b', 'sync')['a']['ok'])
+        self.assertEqual(json.loads(twins('b').read_text())['entries'][a['node_id'] + '\n' + session], twin)
+        self.assertTrue(self.call('b', 'sync')['c']['ok'], 'a member without the kind is never sent one')
+        self.assertFalse(twins('c').exists())
+        for node in 'abc':
+            catalog = (self.root / node / 'swarm' / 'catalog.json').read_text()
+            self.assertNotIn('session_id', catalog)
+        # A requester that names its kinds gets only those; one that names none
+        # (v0.47.0 and older) gets only the kinds v0.47.0 parses.
+        env = dict(self.env, HGS_CONFIG_DIR=str(self.root / 'b'), HGS_STATE_DIR=str(self.root / 'b' / 'state'))
+        exported = subprocess.run([str(HGS), 'swarm', 'export', '--kinds'], input=json.dumps({'kinds': ['project', 'session']}),
+                                  env=env, text=True, capture_output=True, timeout=40)
+        self.assertEqual(exported.returncode, 0, exported.stderr)
+        kinds = {op['key']['kind'] for op in json.loads(exported.stdout)['catalog']['operations'].values()}
+        self.assertLessEqual(kinds, {'project', 'session'})
+        self.assertIn('project', kinds)
 
     def test_the_worker_sends_a_new_task_within_seconds(self):
         self.join('a', 'b'); self.join('b', 'a')

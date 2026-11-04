@@ -395,7 +395,8 @@ fn assign(store: &mut Store, request: &Request, snapshot: &Snapshot) -> Result<(
     store
         .catalog
         .set(&store.node_id, snapshot.key.clone(), json!(id))?;
-    super::session_ids::twin(&mut store.catalog, &store.node_id, &store.node_id, &request.name, &json!(id))?;
+    let local = [(store.node_id.clone(), request.name.clone())];
+    super::session_ids::write(&store.catalog, &mut store.twins, &store.node_id, &local)?;
     store.catalog.validate()
 }
 #[cfg(unix)]
@@ -516,6 +517,7 @@ mod tests {
             imported: true,
             bindings: BTreeMap::new(),
             peers: BTreeMap::new(),
+            twins: Default::default(),
         };
         for (id, name) in [
             ("ungrouped", "Inbox"),

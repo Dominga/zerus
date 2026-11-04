@@ -45,6 +45,11 @@ pub struct Store {
     pub bindings: BTreeMap<String, Binding>,
     #[serde(default)]
     pub peers: BTreeMap<String, Peer>,
+    /// Session memberships by ID, kept in their own file
+    /// ([`super::session_ids::FILE`]): `catalog.json` stays what hgs v0.47.0
+    /// parses (zerus-ucck P2c-1).
+    #[serde(skip)]
+    pub twins: super::session_ids::Twins,
 }
 
 /// Keeps the members still enrolled with the same node and writes the list
@@ -121,6 +126,7 @@ pub fn snapshot_files(config: &Config) -> Vec<PathBuf> {
         dir.join(OUTDATED),
         dir.join(REPLICA_OUTDATED),
         dir.join(SESSION_IDS),
+        dir.join(super::session_ids::FILE),
     ]
 }
 
@@ -147,11 +153,13 @@ pub fn read_snapshot(config: &Config) -> Result<Value> {
             imported: false,
             bindings: BTreeMap::new(),
             peers: BTreeMap::new(),
+            twins: Default::default(),
         }
     } else {
         serde_json::from_slice(&bytes).context("read swarm catalog")?
     };
     data.catalog.validate()?;
+    data.twins = super::session_ids::read(&dir, &data.catalog.swarm_id);
     // As the loader binds this computer's own aliases, in memory only.
     for alias in &config.selves {
         data.bindings.insert(alias.clone(), Binding { id: data.node_id.clone(), verified: true });
@@ -175,6 +183,7 @@ pub struct LockedStore {
     /// Alias -> node of members whose last sync listed the `session_id` kind.
     pub session_ids: BTreeMap<String, String>,
     pub path: PathBuf,
+    twins_original: Vec<u8>,
     _lock: platform::FileLock,
     original: Vec<u8>,
     outdated_original: Vec<u8>,
@@ -256,12 +265,16 @@ impl LockedStore {
                 imported: false,
                 bindings: BTreeMap::new(),
                 peers: BTreeMap::new(),
+                twins: Default::default(),
             }
         } else {
             serde_json::from_slice(&original)
                 .context("read swarm catalog; the original file was left untouched")?
         };
         data.catalog.validate()?;
+        let (twins, twins_original) = super::session_ids::Twins::load(&dir, &data.catalog.swarm_id);
+        let mut data = data;
+        data.twins = twins;
         let outdated_original = if scoped {
             vec![]
         } else {
@@ -279,6 +292,7 @@ impl LockedStore {
         };
         let mut loaded = Self {
             data,
+            twins_original,
             outdated: serde_json::from_slice(&outdated_original).unwrap_or_default(),
             replica_outdated: serde_json::from_slice(&replica_outdated_original).unwrap_or_default(),
             session_ids: serde_json::from_slice(&session_ids_original).unwrap_or_default(),
@@ -324,13 +338,31 @@ impl LockedStore {
             &mut self.session_ids_original,
         )
     }
-    /// Persist only the catalog. Scoped assignment must not prune peer metadata.
+    /// Persist only the catalog and its session ID memberships. Scoped
+    /// assignment must not prune peer metadata.
     pub fn save_catalog_only(&mut self) -> Result<()> {
         self.data.catalog.validate()?;
         let bytes = serde_json::to_vec(&self.data)?;
         if bytes != self.original {
             replace(&self.path, &bytes)?;
             self.original = bytes;
+        }
+        // Twins name operations of one swarm: a join starts with none.
+        if self.data.twins.swarm_id != self.data.catalog.swarm_id {
+            self.data.twins = super::session_ids::Twins::new(&self.data.catalog.swarm_id);
+        }
+        let twins = self.data.twins.bytes()?;
+        if twins != self.twins_original {
+            let path = self.path.with_file_name(super::session_ids::FILE);
+            if twins.is_empty() {
+                match fs::remove_file(&path) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                    _ => {}
+                }
+            } else {
+                replace(&path, &twins)?;
+            }
+            self.twins_original = twins;
         }
         Ok(())
     }
@@ -439,6 +471,62 @@ mod tests {
         assert_eq!(flagged(json!([local, new]), &stale), json!({"ready": false, "missing": ["node-new"]}));
         assert_eq!(flagged(json!([local]), &BTreeMap::new()), json!({"ready": true, "missing": []}));
     }
+    /// #1413 review, finding 2: hgs v0.47.0 on this computer parses
+    /// `catalog.json` with a closed key enum. Twins live in their own file, so
+    /// the catalog it reads holds only the kinds it parses, while `swarm get`
+    /// still lists the session by ID. A catalog of another swarm drops them.
+    #[test]
+    fn the_persisted_catalog_holds_no_twin() {
+        use super::super::catalog::FLOOR_KINDS;
+        use super::super::model::Patch;
+        use super::super::session_ids::{Twins, FILE, SESSIONS};
+        const ID: &str = "3f2a9c1d-0b4e-4d6a-9c1d-2e3f4a5b6c7d";
+        const LABEL: &str = "codex/work/persisted";
+        SESSIONS.with(|sessions| sessions.borrow_mut().insert(LABEL.into(), ID.into()));
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            home: dir.path().to_str().unwrap().into(),
+            dir: dir.path().join("config"),
+            state: dir.path().join("state"),
+            selves: vec!["local".into()],
+            peers: vec![],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: BTreeMap::new(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        let organization = |work: &[&str]| {
+            json!({"projects": [{"id": "work", "name": "Work", "color": "#123456", "folders": [], "sessions": work}]})
+        };
+        let member = format!("local\n{LABEL}");
+        let path = {
+            let mut store = LockedStore::load(&config).unwrap();
+            store.data.initialize(&organization(&[])).unwrap();
+            let versions = store.data.catalog.versions();
+            store
+                .data
+                .apply(Patch { base: organization(&[]), desired: organization(&[&member]), versions })
+                .unwrap();
+            store.save().unwrap();
+            store.path.clone()
+        };
+        let bytes = fs::read(&path).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("session_id"));
+        let persisted: Store = serde_json::from_slice(&bytes).unwrap();
+        assert!(persisted.catalog.operations.values().all(|op| FLOOR_KINDS.contains(&op.key.kind())));
+        let twins: Twins = serde_json::from_slice(&fs::read(path.with_file_name(FILE)).unwrap()).unwrap();
+        assert_eq!(twins.entries.len(), 1);
+        let shown = read_snapshot(&config).unwrap();
+        assert_eq!(shown["organization"]["projects"][0]["session_ids"], json!([format!("local\n{ID}")]));
+        // A catalog of another swarm, as after a join, starts with no twins.
+        let mut store = LockedStore::load(&config).unwrap();
+        assert_eq!(store.data.twins.entries.len(), 1);
+        store.data.catalog = Catalog::default();
+        store.save().unwrap();
+        assert!(!path.with_file_name(FILE).exists());
+    }
+
     #[test]
     fn scoped_session_edit_preserves_other_catalog_and_local_peer_metadata() {
         let dir = tempfile::tempdir().unwrap();

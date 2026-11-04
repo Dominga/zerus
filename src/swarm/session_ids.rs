@@ -1,14 +1,171 @@
-//! Session membership by durable ID (zerus-ucck P2c-1). Every writer of a
-//! session's membership by label ([`Key::Session`]) also writes its ID twin
-//! ([`Key::SessionId`], valued `{project, label}`) for this computer's own
-//! sessions, whose ID it can read. The name form stays the one readers use
-//! until P3. A desktop reads the ID form only once every machine of the
-//! swarm lists the `session_id` kind (`membership_by_id`), and only where the
-//! twin is at least as new as the name membership for its recorded label, so
-//! an older writer's later name-only move still wins.
+//! Session membership by durable ID (zerus-ucck P2c-1).
+//!
+//! Every writer of a session's membership by label ([`Key::Session`]) on the
+//! session's own computer also writes its ID twin: the session ID that label
+//! names, and the exact name operation the twin mirrors. Twins live beside the
+//! catalog in [`FILE`], never in it, so hgs v0.47.0 on this computer, and any
+//! member that does not list the `session_id` kind, never parses one (#1413
+//! review). Only members that list it exchange twins.
+//!
+//! A twin is read only while the name operation it mirrors is still the
+//! selected membership of its label. A later move by any writer, including a
+//! member that never sees twins and so keeps Lamport clocks without them,
+//! hides it, and a desktop falls back to the name form. Desktops read the ID
+//! form only once every machine of the swarm lists the kind
+//! (`membership_by_id`).
 use super::catalog::{Catalog, Key, Operation};
-use anyhow::Result;
-use serde_json::{json, Value};
+use anyhow::{ensure, Result};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
+use std::path::Path;
+
+/// The twins' file, beside `catalog.json`.
+pub const FILE: &str = "session-id-twins.json";
+/// A twins file larger than this is ignored, as an unreadable one is.
+const MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// One session's membership by ID: the newest write per machine and ID.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Twin {
+    /// This write's own ID.
+    pub id: String,
+    pub actor: String,
+    /// Orders writes of the same session ID; never compared with the
+    /// catalog's clocks.
+    pub clock: u64,
+    pub machine: String,
+    pub session_id: String,
+    /// The label whose [`Key::Session`] membership this twin mirrors.
+    pub label: String,
+    /// The ID of that name operation.
+    pub op: String,
+    /// Its project; None when it unassigned the label.
+    pub project: Option<String>,
+}
+
+fn uuid(text: &str) -> bool {
+    uuid::Uuid::parse_str(text).is_ok_and(|id| id.to_string() == text)
+}
+
+impl Twin {
+    fn valid(&self) -> bool {
+        uuid(&self.id)
+            && uuid(&self.actor)
+            && self.clock > 0
+            && self.clock < u64::MAX
+            && uuid(&self.machine)
+            && uuid::Uuid::parse_str(&self.session_id)
+                .is_ok_and(|id| !id.is_nil() && id.to_string() == self.session_id)
+            && !self.label.is_empty()
+            && self.label.len() <= 2048
+            && !self.label.contains('\0')
+            && uuid(&self.op)
+            && self
+                .project
+                .as_ref()
+                .is_none_or(|p| !p.is_empty() && p.len() <= 128 && !p.chars().any(char::is_control))
+    }
+
+    fn order(&self) -> (u64, &str, &str) {
+        (self.clock, self.actor.as_str(), self.id.as_str())
+    }
+}
+
+/// The twins of one swarm, a last-writer-wins register per session ID.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Twins {
+    pub swarm_id: String,
+    /// `machine\nsession ID` -> its newest twin.
+    pub entries: BTreeMap<String, Twin>,
+}
+
+fn entry_key(machine: &str, session_id: &str) -> String {
+    format!("{machine}\n{session_id}")
+}
+
+impl Twins {
+    pub fn new(swarm_id: &str) -> Self {
+        Self {
+            swarm_id: swarm_id.to_owned(),
+            entries: BTreeMap::new(),
+        }
+    }
+
+    /// The twins of `swarm_id` in `dir`. A missing, unreadable, foreign or
+    /// invalid file gives none: twins are derived, and the next membership
+    /// write makes them again, so they never stop the catalog.
+    pub fn load(dir: &Path, swarm_id: &str) -> (Self, Vec<u8>) {
+        let mut bytes = Vec::new();
+        let read = std::fs::File::open(dir.join(FILE))
+            .and_then(|file| file.take(MAX_BYTES + 1).read_to_end(&mut bytes));
+        let parsed = read
+            .ok()
+            .filter(|_| bytes.len() as u64 <= MAX_BYTES)
+            .and_then(|_| serde_json::from_slice::<Self>(&bytes).ok())
+            .filter(|twins| {
+                twins.swarm_id == swarm_id
+                    && twins.entries.iter().all(|(key, twin)| {
+                        twin.valid() && *key == entry_key(&twin.machine, &twin.session_id)
+                    })
+            });
+        (parsed.unwrap_or_else(|| Self::new(swarm_id)), bytes)
+    }
+
+    /// The file's bytes: none while there are no twins.
+    pub fn bytes(&self) -> Result<Vec<u8>> {
+        Ok(if self.entries.is_empty() {
+            Vec::new()
+        } else {
+            serde_json::to_vec(self)?
+        })
+    }
+
+    /// Takes each newer valid twin of the same swarm; invalid ones are
+    /// skipped, as derived data.
+    pub fn merge(&mut self, swarm_id: &str, twins: Vec<Twin>) -> Result<()> {
+        ensure!(
+            swarm_id == self.swarm_id,
+            "session ID memberships belong to another swarm"
+        );
+        for twin in twins.into_iter().filter(Twin::valid) {
+            let key = entry_key(&twin.machine, &twin.session_id);
+            if self
+                .entries
+                .get(&key)
+                .is_none_or(|old| old.order() < twin.order())
+            {
+                self.entries.insert(key, twin);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn known(&self) -> BTreeSet<String> {
+        self.entries.values().map(|twin| twin.id.clone()).collect()
+    }
+
+    /// The twins a member that knows `known` lacks.
+    pub fn missing(&self, known: &BTreeSet<String>) -> Vec<Twin> {
+        self.entries
+            .values()
+            .filter(|twin| !known.contains(&twin.id))
+            .cloned()
+            .collect()
+    }
+
+    pub fn digest(&self) -> String {
+        let mut hash = Sha256::new();
+        hash.update(self.swarm_id.as_bytes());
+        for twin in self.entries.values() {
+            hash.update(twin.id.as_bytes());
+        }
+        format!("{:x}", hash.finalize())
+    }
+}
 
 /// The durable session ID of this computer's live or saved session `label`.
 #[cfg(not(test))]
@@ -19,7 +176,7 @@ fn session_id_of(label: &str) -> Option<String> {
 #[cfg(test)]
 thread_local! {
     /// Labels and IDs the tests' sessions have; never the real state.
-    pub(super) static SESSIONS: std::cell::RefCell<std::collections::BTreeMap<String, String>> =
+    pub(super) static SESSIONS: std::cell::RefCell<BTreeMap<String, String>> =
         std::cell::RefCell::default();
 }
 
@@ -28,110 +185,109 @@ fn session_id_of(label: &str) -> Option<String> {
     SESSIONS.with(|sessions| sessions.borrow().get(label).cloned())
 }
 
-/// The order of operations the clock rule compares.
-fn order(op: &Operation) -> (u64, &str, &str) {
-    (op.clock, op.actor.as_str(), op.id.as_str())
+/// The selected name operation per label, as the name form reads it.
+fn selected_names(catalog: &Catalog) -> BTreeMap<Key, Operation> {
+    catalog
+        .effective_heads()
+        .into_iter()
+        .filter(|(key, _)| matches!(key, Key::Session { .. }))
+        .filter_map(|(key, heads)| Catalog::selected(&key, &heads).map(|op| (key, op.clone())))
+        .collect()
 }
 
-/// After `machine`'s session `label` was given `project` (a project ID, or
-/// null to unassign) by name, writes its ID twin when this computer's record
-/// of that label carries a session ID. An unchanged twin at least as new as
-/// that name membership is not written again.
-pub(super) fn twin(
-    catalog: &mut Catalog,
+/// After name writes of `labels` (`(machine, label)`), writes the twin of
+/// each that is this computer's session with a durable ID: bound to the name
+/// operation now selected for its label. An unchanged twin is not written
+/// again. Call it once after a command's name writes.
+pub(super) fn write(
+    catalog: &Catalog,
+    twins: &mut Twins,
     actor: &str,
-    machine: &str,
-    label: &str,
-    project: &Value,
+    labels: &[(String, String)],
 ) -> Result<()> {
-    if catalog.machine(machine) != catalog.machine(actor) {
-        return Ok(());
+    let local = catalog.machine(actor);
+    let mut named = None;
+    for (machine, label) in labels {
+        let machine = catalog.machine(machine);
+        if machine != local {
+            continue;
+        }
+        let Some(session_id) = session_id_of(label) else {
+            continue;
+        };
+        let named = named.get_or_insert_with(|| selected_names(catalog));
+        let Some(op) = named.get(&Key::Session {
+            machine: machine.clone(),
+            session: label.clone(),
+        }) else {
+            continue;
+        };
+        let key = entry_key(&machine, &session_id);
+        let old = twins.entries.get(&key);
+        let project = op.value.as_str().map(str::to_owned);
+        if old.is_some_and(|old| old.op == op.id && old.label == *label && old.project == project) {
+            continue;
+        }
+        let twin = Twin {
+            id: super::catalog::new_id(),
+            actor: actor.to_owned(),
+            clock: old.map_or(0, |old| old.clock) + 1,
+            machine,
+            session_id,
+            label: label.clone(),
+            op: op.id.clone(),
+            project,
+        };
+        ensure!(twin.valid(), "invalid session ID membership");
+        twins.entries.insert(key, twin);
     }
-    let Some(session_id) = session_id_of(label) else {
-        return Ok(());
-    };
-    let key = Key::SessionId {
-        machine: machine.to_owned(),
-        session_id,
-    };
-    let value = match project {
-        Value::Null => Value::Null,
-        project => json!({"project": project, "label": label}),
-    };
-    let heads = catalog.heads();
-    let name = Key::Session {
-        machine: machine.to_owned(),
-        session: label.to_owned(),
-    };
-    let named = heads
-        .get(&catalog.canonical_key(&name))
-        .and_then(|heads| Catalog::selected(&name, heads));
-    let current = heads.get(&catalog.canonical_key(&key));
-    let fresh = current
-        .and_then(|heads| Catalog::selected(&key, heads))
-        .is_some_and(|op| op.value == value && named.is_none_or(|named| order(op) >= order(named)));
-    if fresh {
-        return Ok(());
-    }
-    let parents = current
-        .map(|heads| heads.iter().map(|op| op.id.clone()).collect())
-        .unwrap_or_default();
-    catalog.write(actor, key, value, parents)
+    Ok(())
 }
 
 /// The ID memberships a desktop may read: `(machine, session ID, project)`
-/// for each twin whose selected operation is at least as new as the name
-/// membership for its recorded label, or whose label has no name membership.
-pub(super) fn readable(
-    catalog: &Catalog,
-    heads: &std::collections::BTreeMap<Key, Vec<&Operation>>,
-) -> Vec<(String, String, String)> {
-    let mut result = Vec::new();
-    for (key, versions) in heads {
-        let Key::SessionId {
-            machine,
-            session_id,
-        } = key
-        else {
-            continue;
-        };
-        let Some(op) = Catalog::selected(key, versions) else {
-            continue;
-        };
-        let (Some(project), Some(label)) =
-            (op.value["project"].as_str(), op.value["label"].as_str())
-        else {
-            continue;
-        };
-        let name = catalog.canonical_key(&Key::Session {
-            machine: machine.clone(),
-            session: label.to_owned(),
-        });
-        let newer_name = heads
-            .get(&name)
-            .and_then(|heads| Catalog::selected(&name, heads))
-            .is_some_and(|named| order(named) > order(op));
-        if !newer_name {
-            result.push((machine.clone(), session_id.clone(), project.to_owned()));
-        }
+/// for each twin whose name operation is still the selected membership of
+/// its label, with the same project.
+pub(super) fn readable(catalog: &Catalog, twins: &Twins) -> Vec<(String, String, String)> {
+    if twins.entries.is_empty() {
+        return Vec::new();
     }
-    result
+    let named = selected_names(catalog);
+    twins
+        .entries
+        .values()
+        .filter_map(|twin| {
+            let machine = catalog.machine(&twin.machine);
+            let op = named.get(&Key::Session {
+                machine: machine.clone(),
+                session: twin.label.clone(),
+            })?;
+            let project = twin.project.clone()?;
+            (op.id == twin.op && op.value.as_str() == Some(project.as_str()))
+                .then(|| (machine, twin.session_id.clone(), project))
+        })
+        .collect()
+}
+
+/// A twins file on disk, for a reader without the lock.
+pub(super) fn read(dir: &Path, swarm_id: &str) -> Twins {
+    Twins::load(dir, swarm_id).0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::swarm::catalog::{accepted, kinds, new_id, LEGACY_KINDS};
+    use crate::swarm::catalog::{
+        advertised, exported, kinds, new_id, FLOOR_KINDS, SESSION_ID_KIND,
+    };
     use crate::swarm::model::Patch;
     use crate::swarm::store::{Binding, Store};
-    use std::collections::{BTreeMap, BTreeSet};
+    use serde_json::{json, Value};
 
     const ID: &str = "3f2a9c1d-0b4e-4d6a-9c1d-2e3f4a5b6c7d";
     const LABEL: &str = "codex/work/one";
 
-    fn store() -> Store {
-        let node_id = new_id();
+    fn store_as(node_id: String) -> Store {
         Store {
             node_id: node_id.clone(),
             catalog: Catalog::default(),
@@ -144,6 +300,7 @@ mod tests {
                 },
             )]),
             peers: BTreeMap::new(),
+            twins: Twins::default(),
         }
     }
 
@@ -197,104 +354,87 @@ mod tests {
             .collect()
     }
 
-    fn named(store: &Store, project: &str) -> Vec<String> {
+    /// The project the name form lists `LABEL` in, if any.
+    fn named(store: &Store) -> Option<String> {
         let snapshot = store.snapshot(&config());
-        let projects = snapshot["organization"]["projects"]
-            .as_array()
-            .unwrap()
-            .clone();
-        let found = projects.into_iter().find(|p| p["id"] == project).unwrap();
-        found["sessions"]
+        snapshot["organization"]["projects"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|s| s.as_str().unwrap().to_owned())
-            .collect()
+            .find_map(|p| {
+                p["sessions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|s| s.as_str().unwrap().ends_with(&format!("\n{LABEL}")))
+                    .then(|| p["id"].as_str().unwrap().to_owned())
+            })
     }
 
-    fn twin_heads(store: &Store) -> usize {
+    /// Where a desktop reading by ID finds the session.
+    fn by_id_project(store: &Store) -> Option<String> {
+        let found: Vec<_> = by_id(store)
+            .into_iter()
+            .filter(|(_, ids)| ids.iter().any(|id| id == ID))
+            .collect();
+        assert!(found.len() <= 1, "{found:?}");
+        found.into_iter().next().map(|(project, _)| project)
+    }
+
+    /// A desktop's patch from `base` to `desired`.
+    fn moved(store: &mut Store, base: Value, desired: Value) {
+        let versions = store.catalog.versions();
         store
-            .catalog
-            .heads()
-            .keys()
-            .filter(|key| matches!(key, Key::SessionId { .. }))
-            .count()
-    }
-
-    /// A desktop's move of this computer's session also moves it by ID; the
-    /// ID twin never reaches the versions a desktop parses.
-    #[test]
-    fn a_local_move_writes_the_id_twin() {
-        known(LABEL, ID);
-        let mut a = store();
-        a.initialize(&organization(&[], &[])).unwrap();
-        let member = format!("local\n{LABEL}");
-        let moves = [
-            (
-                organization(&[], &[]),
-                organization(std::slice::from_ref(&member), &[]),
-            ),
-            (
-                organization(std::slice::from_ref(&member), &[]),
-                organization(&[], std::slice::from_ref(&member)),
-            ),
-        ];
-        for (expected, (base, desired)) in [("work", &moves[0]), ("play", &moves[1])] {
-            let versions = a.catalog.versions();
-            a.apply(Patch {
-                base: base.clone(),
-                desired: desired.clone(),
+            .apply(Patch {
+                base,
+                desired,
                 versions,
             })
             .unwrap();
-            let shown = by_id(&a);
-            assert_eq!(shown[expected], [ID], "{expected}");
-            assert!(shown
-                .iter()
-                .filter(|(p, _)| *p != expected)
-                .all(|(_, ids)| ids.is_empty()));
-            let value = &a.catalog.values()[&Key::SessionId {
-                machine: a.node_id.clone(),
-                session_id: ID.into(),
-            }];
-            assert_eq!(value, &json!({"project": expected, "label": LABEL}));
-        }
-        let snapshot = a.snapshot(&config());
-        let tokens = snapshot["versions"].as_object().unwrap();
-        assert!(tokens.keys().all(|token| !token.contains("session_id")));
-        assert!(a
-            .catalog
-            .versions()
-            .keys()
-            .any(|token| token.contains("session_id")));
-        // Unassigning by name unassigns by ID.
-        let versions = a.catalog.versions();
-        a.apply(Patch {
-            base: moves[1].1.clone(),
-            desired: organization(&[], &[]),
-            versions,
-        })
-        .unwrap();
-        assert!(by_id(&a).values().all(Vec::is_empty));
-        assert_eq!(twin_heads(&a), 1);
     }
 
-    /// The coordinator's case: a peer's session moved by ID on its own
-    /// computer, then moved by name only from another computer (a Qt or older
-    /// desktop, whose CLI cannot know a peer's IDs). The newer name move wins,
-    /// so a desktop reading by ID falls back to it and shows the new project.
-    #[test]
-    fn a_later_name_only_move_of_a_peers_session_wins() {
-        known(LABEL, ID);
-        let mut owner = store();
-        owner.initialize(&organization(&[], &[])).unwrap();
+    /// The catalog operations a member without the kind receives: all of
+    /// them, and never a twin, which is not one (what transport sends).
+    fn catalog_sync(to: &mut Store, from: &Store) {
+        to.catalog
+            .merge(
+                &from.catalog.swarm_id,
+                from.catalog.operations.values().cloned().collect(),
+            )
+            .unwrap();
+    }
+
+    /// A member that lists the kind also receives the twins.
+    fn full_sync(to: &mut Store, from: &Store) {
+        catalog_sync(to, from);
+        if to.twins.swarm_id.is_empty() {
+            to.twins = Twins::new(&to.catalog.swarm_id);
+        }
+        to.twins
+            .merge(
+                &from.catalog.swarm_id,
+                from.twins.entries.values().cloned().collect(),
+            )
+            .unwrap();
+    }
+
+    fn initialized(node: String) -> Store {
+        let mut s = store_as(node);
+        s.initialize(&organization(&[], &[])).unwrap();
+        s.twins = Twins::new(&s.catalog.swarm_id);
+        s
+    }
+
+    /// A second member of `owner`'s swarm, holding its catalog; `twins`
+    /// whether it takes twins.
+    fn member(owner: &Store, node: String, twins: bool) -> Store {
         let mut other = owner.clone();
-        other.node_id = new_id();
+        other.node_id = node.clone();
         other.bindings = BTreeMap::from([
             (
                 "local".into(),
                 Binding {
-                    id: other.node_id.clone(),
+                    id: node,
                     verified: true,
                 },
             ),
@@ -306,154 +446,370 @@ mod tests {
                 },
             ),
         ]);
-        // On its own computer the session moves to `work`, by name and by ID.
-        let mine = format!("local\n{LABEL}");
-        let versions = owner.catalog.versions();
-        owner
-            .apply(Patch {
-                base: organization(&[], &[]),
-                desired: organization(std::slice::from_ref(&mine), &[]),
-                versions,
-            })
-            .unwrap();
-        assert_eq!(by_id(&owner)["work"], [ID]);
-        let sync = |to: &mut Store, from: &Store| {
-            to.catalog
-                .merge(
-                    &from.catalog.swarm_id,
-                    from.catalog.operations.values().cloned().collect(),
-                )
-                .unwrap();
+        other.twins = if twins {
+            owner.twins.clone()
+        } else {
+            Twins::new(&owner.catalog.swarm_id)
         };
-        sync(&mut other, &owner);
-        assert_eq!(by_id(&other)["work"], [ID]);
-        // The other computer moves it to `play` by name only.
-        let theirs = format!("peer\n{LABEL}");
-        let versions = other.catalog.versions();
         other
-            .apply(Patch {
-                base: organization(std::slice::from_ref(&theirs), &[]),
-                desired: organization(&[], std::slice::from_ref(&theirs)),
-                versions,
-            })
-            .unwrap();
-        sync(&mut owner, &other);
-        for store in [&owner, &other] {
-            assert!(
-                by_id(store).values().all(Vec::is_empty),
-                "the older ID twin is not read"
-            );
-        }
-        assert_eq!(
-            named(&owner, "play"),
-            [format!("{}\n{LABEL}", config().host())]
-        );
-        assert_eq!(named(&other, "play"), [theirs]);
-        // The owner's next move writes both forms again, and the ID is read.
-        let versions = owner.catalog.versions();
-        owner
-            .apply(Patch {
-                base: organization(&[], std::slice::from_ref(&mine)),
-                desired: organization(std::slice::from_ref(&mine), &[]),
-                versions,
-            })
-            .unwrap();
-        assert_eq!(by_id(&owner)["work"], [ID]);
     }
 
-    /// An older hgs on this computer moves the session by name only: the ID
-    /// twin is no longer read until a writer of both forms moves it again.
+    /// A desktop's move of this computer's session also moves it by ID,
+    /// beside the catalog: `versions` and the catalog never carry a twin.
     #[test]
-    fn an_older_writer_s_name_only_move_hides_the_twin() {
+    fn a_local_move_writes_a_twin_bound_to_its_name_operation() {
         known(LABEL, ID);
-        let mut a = store();
-        a.initialize(&organization(&[], &[])).unwrap();
-        let node = a.node_id.clone();
-        let name = Key::Session {
-            machine: node.clone(),
-            session: LABEL.into(),
-        };
-        a.catalog.set(&node, name.clone(), json!("work")).unwrap();
-        twin(&mut a.catalog, &node, &node, LABEL, &json!("work")).unwrap();
-        assert_eq!(by_id(&a)["work"], [ID]);
-        a.catalog.set(&node, name, json!("play")).unwrap();
-        assert!(by_id(&a).values().all(Vec::is_empty));
-        // Writing the same twin again only when it is not fresh.
-        twin(&mut a.catalog, &node, &node, LABEL, &json!("play")).unwrap();
-        let operations = a.catalog.operations.len();
-        twin(&mut a.catalog, &node, &node, LABEL, &json!("play")).unwrap();
-        assert_eq!(
-            a.catalog.operations.len(),
-            operations,
-            "a fresh twin is not written again"
+        let mut a = initialized(new_id());
+        let me = format!("local\n{LABEL}");
+        let previous: BTreeSet<String> = a.catalog.operations.keys().cloned().collect();
+        moved(
+            &mut a,
+            organization(&[], &[]),
+            organization(std::slice::from_ref(&me), &[]),
         );
-        assert_eq!(by_id(&a)["play"], [ID]);
-        // A session without a known ID, or on another computer, gets no twin.
-        twin(
-            &mut a.catalog,
-            &node,
-            &node,
-            "codex/work/unknown",
-            &json!("play"),
+        assert_eq!(by_id_project(&a).as_deref(), Some("work"));
+        // #1413 review, finding 3: what `swarm apply` reports as written
+        // (`mod.rs`) is in the versions a desktop reads, so its sync guard
+        // adopts the next state at once.
+        let versions = a.snapshot(&config())["versions"].clone();
+        for op in a
+            .catalog
+            .operations
+            .values()
+            .filter(|op| !previous.contains(&op.id))
+        {
+            let token = a.catalog.canonical_key(&op.key).token();
+            assert!(
+                versions[&token].as_array().unwrap().contains(&json!(op.id)),
+                "{token}"
+            );
+        }
+        let twin = a.twins.entries.values().next().unwrap().clone();
+        let name = a.catalog.canonical_key(&Key::Session {
+            machine: a.node_id.clone(),
+            session: LABEL.into(),
+        });
+        let heads = a.catalog.effective_heads();
+        assert_eq!(twin.op, Catalog::selected(&name, &heads[&name]).unwrap().id);
+        assert_eq!(
+            (
+                twin.project.as_deref(),
+                twin.label.as_str(),
+                twin.session_id.as_str()
+            ),
+            (Some("work"), LABEL, ID)
+        );
+        moved(
+            &mut a,
+            organization(std::slice::from_ref(&me), &[]),
+            organization(&[], std::slice::from_ref(&me)),
+        );
+        assert_eq!(by_id_project(&a).as_deref(), Some("play"));
+        assert_eq!(a.twins.entries.len(), 1, "one register per session ID");
+        assert_eq!(
+            a.twins.entries.values().next().unwrap().clock,
+            twin.clock + 1
+        );
+        assert!(serde_json::to_string(&a.catalog)
+            .unwrap()
+            .find("session_id")
+            .is_none());
+        // Unassigning by name unassigns by ID.
+        moved(
+            &mut a,
+            organization(&[], std::slice::from_ref(&me)),
+            organization(&[], &[]),
+        );
+        assert_eq!(by_id_project(&a), None);
+        assert_eq!(a.twins.entries.values().next().unwrap().project, None);
+        // Writing again changes nothing while the name operation stands.
+        let before = a.twins.clone();
+        write(
+            &a.catalog,
+            &mut a.twins,
+            &a.node_id.clone(),
+            &[(a.node_id.clone(), LABEL.into())],
         )
         .unwrap();
-        twin(&mut a.catalog, &node, &new_id(), LABEL, &json!("play")).unwrap();
-        assert_eq!(a.catalog.operations.len(), operations);
+        assert_eq!(a.twins, before);
+    }
+
+    /// #1413 review, finding 1: a member that never receives twins keeps
+    /// Lamport clocks without them. Whether its name-only move supersedes the
+    /// owner's or is concurrent with it, and whichever actor sorts first, a
+    /// desktop reading by ID never shows a project the name form does not.
+    #[test]
+    fn a_name_move_by_a_member_without_twins_is_never_contradicted() {
+        known(LABEL, ID);
+        let low = "00000000-0000-4000-8000-000000000000".to_owned();
+        let high = "ffffffff-ffff-4fff-bfff-ffffffffffff".to_owned();
+        for (owner_node, legacy_node) in [(high.clone(), low.clone()), (low.clone(), high.clone())]
+        {
+            for concurrent in [false, true] {
+                let case = format!("owner {owner_node}, concurrent {concurrent}");
+                let mut owner = initialized(owner_node.clone());
+                let me = format!("local\n{LABEL}");
+                // The legacy member's catalog before the owner's move, for the
+                // concurrent case; after it, for the superseding one.
+                let mut legacy = member(&owner, legacy_node.clone(), false);
+                moved(
+                    &mut owner,
+                    organization(&[], &[]),
+                    organization(std::slice::from_ref(&me), &[]),
+                );
+                if !concurrent {
+                    catalog_sync(&mut legacy, &owner);
+                }
+                // v0.47.0 moves it by name, with Catalog::set.
+                let name = Key::Session {
+                    machine: owner_node.clone(),
+                    session: LABEL.into(),
+                };
+                legacy
+                    .catalog
+                    .set(&legacy_node, name, json!("play"))
+                    .unwrap();
+                catalog_sync(&mut owner, &legacy);
+                let shown = named(&owner);
+                match by_id_project(&owner) {
+                    Some(project) => assert_eq!(Some(project), shown, "{case}"),
+                    None => assert!(!concurrent || shown.is_some(), "{case}"),
+                }
+                if !concurrent {
+                    assert_eq!(
+                        (shown.as_deref(), by_id_project(&owner)),
+                        (Some("play"), None),
+                        "{case}"
+                    );
+                }
+                // The member updates and takes the twins: still never contradicted.
+                let mut upgraded = member(&owner, legacy_node.clone(), true);
+                catalog_sync(&mut upgraded, &legacy);
+                full_sync(&mut upgraded, &owner);
+                if let Some(project) = by_id_project(&upgraded) {
+                    assert_eq!(Some(project), named(&upgraded), "{case}");
+                }
+            }
+        }
+    }
+
+    /// The review's trailing case: a dual writer writes the twin after a
+    /// legacy name move reached it. The twin follows the name operation now
+    /// selected, never the project the writer last knew.
+    #[test]
+    fn a_twin_written_after_a_legacy_move_follows_it() {
+        known(LABEL, ID);
+        let mut owner = initialized(new_id());
+        let me = format!("local\n{LABEL}");
+        moved(
+            &mut owner,
+            organization(&[], &[]),
+            organization(std::slice::from_ref(&me), &[]),
+        );
+        let mut legacy = member(&owner, new_id(), false);
+        let name = Key::Session {
+            machine: owner.node_id.clone(),
+            session: LABEL.into(),
+        };
+        legacy
+            .catalog
+            .set(&legacy.node_id.clone(), name, json!("play"))
+            .unwrap();
+        catalog_sync(&mut owner, &legacy);
+        assert_eq!(by_id_project(&owner), None);
+        write(
+            &owner.catalog,
+            &mut owner.twins,
+            &owner.node_id.clone(),
+            &[(owner.node_id.clone(), LABEL.into())],
+        )
+        .unwrap();
+        assert_eq!(
+            (named(&owner).as_deref(), by_id_project(&owner).as_deref()),
+            (Some("play"), Some("play"))
+        );
+    }
+
+    /// A label moved away and back by a member without twins may now name
+    /// another session (a label reused in P3): the same project is not
+    /// enough, only the exact name operation the twin mirrors.
+    #[test]
+    fn a_twin_is_read_only_for_the_exact_name_operation() {
+        known(LABEL, ID);
+        let mut owner = initialized(new_id());
+        let me = format!("local\n{LABEL}");
+        moved(
+            &mut owner,
+            organization(&[], &[]),
+            organization(std::slice::from_ref(&me), &[]),
+        );
+        let mut legacy = member(&owner, new_id(), false);
+        let name = Key::Session {
+            machine: owner.node_id.clone(),
+            session: LABEL.into(),
+        };
+        let actor = legacy.node_id.clone();
+        legacy
+            .catalog
+            .set(&actor, name.clone(), json!("play"))
+            .unwrap();
+        legacy.catalog.set(&actor, name, json!("work")).unwrap();
+        catalog_sync(&mut owner, &legacy);
+        assert_eq!(
+            (named(&owner).as_deref(), by_id_project(&owner)),
+            (Some("work"), None)
+        );
+    }
+
+    /// The coordinator's case: a peer's session moved by ID on its own
+    /// computer, then by name only from a computer that cannot know its ID.
+    #[test]
+    fn a_later_name_only_move_of_a_peers_session_wins() {
+        known(LABEL, ID);
+        let mut owner = initialized(new_id());
+        let mine = format!("local\n{LABEL}");
+        moved(
+            &mut owner,
+            organization(&[], &[]),
+            organization(std::slice::from_ref(&mine), &[]),
+        );
+        let mut other = member(&owner, new_id(), true);
+        full_sync(&mut other, &owner);
+        assert_eq!(by_id_project(&other).as_deref(), Some("work"));
+        let theirs = format!("peer\n{LABEL}");
+        moved(
+            &mut other,
+            organization(std::slice::from_ref(&theirs), &[]),
+            organization(&[], std::slice::from_ref(&theirs)),
+        );
+        full_sync(&mut owner, &other);
+        for store in [&owner, &other] {
+            assert_eq!(
+                (named(store).as_deref(), by_id_project(store)),
+                (Some("play"), None)
+            );
+        }
+        // The owner's next move writes both forms again, and the ID is read.
+        moved(
+            &mut owner,
+            organization(&[], std::slice::from_ref(&mine)),
+            organization(std::slice::from_ref(&mine), &[]),
+        );
+        assert_eq!(by_id_project(&owner).as_deref(), Some("work"));
+        full_sync(&mut other, &owner);
+        assert_eq!(by_id_project(&other).as_deref(), Some("work"));
     }
 
     #[test]
-    fn only_members_that_list_the_kind_receive_a_twin() {
-        let key = Key::SessionId {
-            machine: new_id(),
-            session_id: ID.into(),
-        };
-        assert!(accepted(Some(&kinds()), &key));
-        assert!(!accepted(None, &key), "a legacy member never receives one");
-        let older: BTreeSet<String> = kinds()
-            .into_iter()
-            .filter(|kind| kind != "session_id")
-            .collect();
-        assert!(!accepted(Some(&older), &key));
-        assert!(!LEGACY_KINDS.contains(&"session_id"));
-        let mut catalog = Catalog::default();
-        let actor = new_id();
-        let write = |catalog: &mut Catalog, key: Key, value: Value| {
-            catalog.write(&actor, key, value, vec![])
-        };
-        assert!(write(
-            &mut catalog,
-            key.clone(),
-            json!({"project": "work", "label": LABEL})
-        )
-        .is_ok());
-        assert!(write(&mut catalog, key.clone(), Value::Null).is_ok());
-        for value in [
-            json!("work"),
-            json!({"project": "work"}),
-            json!({"project": "work", "label": ""}),
-            json!({"project": "work", "label": LABEL, "extra": 1}),
-            json!({"project": "", "label": LABEL}),
-        ] {
-            assert!(
-                write(&mut catalog, key.clone(), value.clone()).is_err(),
-                "{value}"
-            );
-        }
-        for session_id in [
-            ID.to_uppercase(),
-            "not-an-id".into(),
-            "00000000-0000-0000-0000-000000000000".into(),
-        ] {
-            let bad = Key::SessionId {
-                machine: new_id(),
-                session_id,
+    fn only_this_computer_s_sessions_with_an_id_get_a_twin() {
+        known(LABEL, ID);
+        let mut a = initialized(new_id());
+        let node = a.node_id.clone();
+        for (machine, label) in [(node.clone(), "codex/work/unknown"), (new_id(), LABEL)] {
+            let key = Key::Session {
+                machine: machine.clone(),
+                session: label.into(),
             };
-            assert!(write(
-                &mut catalog,
-                bad,
-                json!({"project": "work", "label": LABEL})
-            )
-            .is_err());
+            a.catalog.set(&node, key, json!("work")).unwrap();
+            write(&a.catalog, &mut a.twins, &node, &[(machine, label.into())]).unwrap();
         }
+        assert!(a.twins.entries.is_empty());
+    }
+
+    /// Twins travel only between members that list the kind, never inside
+    /// the catalog, and a merge keeps the newest valid write per session ID.
+    #[test]
+    fn twins_merge_newest_first_and_stay_out_of_the_catalog_kinds() {
+        assert!(advertised().contains(SESSION_ID_KIND));
+        assert!(
+            !kinds().contains(SESSION_ID_KIND),
+            "no catalog key has the kind"
+        );
+        assert_eq!(
+            kinds(),
+            FLOOR_KINDS
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<BTreeSet<_>>()
+        );
+        let swarm = new_id();
+        let twin = |clock: u64, project: &str| Twin {
+            id: new_id(),
+            actor: new_id(),
+            clock,
+            machine: "6b1f3a2e-1c4d-4e5f-8a9b-0c1d2e3f4a5b".into(),
+            session_id: ID.into(),
+            label: LABEL.into(),
+            op: new_id(),
+            project: Some(project.into()),
+        };
+        let mut twins = Twins::new(&swarm);
+        let (old, new) = (twin(1, "work"), twin(2, "play"));
+        twins.merge(&swarm, vec![new.clone(), old.clone()]).unwrap();
+        assert_eq!(twins.entries.values().collect::<Vec<_>>(), [&new]);
+        assert_eq!(twins.missing(&BTreeSet::from([new.id.clone()])), []);
+        assert_eq!(twins.missing(&BTreeSet::new()), std::slice::from_ref(&new));
+        assert!(
+            twins.merge(&new_id(), vec![twin(3, "x")]).is_err(),
+            "another swarm"
+        );
+        let invalid = [
+            Twin {
+                session_id: ID.to_uppercase(),
+                ..twin(9, "work")
+            },
+            Twin {
+                session_id: "00000000-0000-0000-0000-000000000000".into(),
+                ..twin(9, "work")
+            },
+            Twin {
+                label: String::new(),
+                ..twin(9, "work")
+            },
+            Twin {
+                op: "not-an-op".into(),
+                ..twin(9, "work")
+            },
+            Twin {
+                project: Some(String::new()),
+                ..twin(9, "work")
+            },
+            Twin {
+                clock: 0,
+                ..twin(9, "work")
+            },
+        ];
+        twins.merge(&swarm, invalid.to_vec()).unwrap();
+        assert_eq!(
+            twins.entries.values().collect::<Vec<_>>(),
+            [&new],
+            "invalid twins are skipped"
+        );
+        let digest = twins.digest();
+        twins.merge(&swarm, vec![twin(3, "play")]).unwrap();
+        assert_ne!(twins.digest(), digest);
+    }
+
+    /// `swarm export` gives a requester only the kinds it lists, and one that
+    /// lists none (v0.47.0 and older) only the kinds v0.47.0 parses.
+    #[test]
+    fn export_keeps_the_kinds_its_requester_parses() {
+        let mut a = initialized(new_id());
+        let node = a.node_id.clone();
+        a.catalog
+            .set(&node, Key::preference("mobile_delivery"), json!("away"))
+            .unwrap();
+        let all = exported(&a.catalog, &Value::Null);
+        assert_eq!(all.operations.len(), a.catalog.operations.len());
+        let legacy = exported(
+            &a.catalog,
+            &json!(["project", "folder", "session", "machine"]),
+        );
+        assert!(legacy
+            .operations
+            .values()
+            .all(|op| op.key.kind() != "preference"));
+        assert!(legacy.operations.len() < a.catalog.operations.len());
+        legacy.validate().unwrap();
     }
 }

@@ -13,11 +13,6 @@ pub enum Key {
     Project { id: String, field: String },
     Folder { id: String },
     Session { machine: String, session: String },
-    /// A session's membership by its durable ID (zerus-ucck P2c): the twin of
-    /// [`Key::Session`] its writers add, valued `{project, label}` with the
-    /// label the session had then. Members that do not list the
-    /// `session_id` kind never receive it.
-    SessionId { machine: String, session_id: String },
     Machine { id: String, field: String },
     Preference { field: String },
     Order { field: String },
@@ -56,7 +51,6 @@ impl Key {
             Self::Project { .. } => "project",
             Self::Folder { .. } => "folder",
             Self::Session { .. } => "session",
-            Self::SessionId { .. } => "session_id",
             Self::Machine { .. } => "machine",
             Self::Preference { .. } => "preference",
             Self::Order { .. } => "order",
@@ -103,23 +97,6 @@ impl Key {
                 );
                 ensure!(
                     value.is_null() || string(value, 128),
-                    "invalid session project"
-                );
-            }
-            Self::SessionId { machine, session_id } => {
-                ensure!(
-                    uuid(machine)
-                        && Uuid::parse_str(session_id)
-                            .is_ok_and(|id| !id.is_nil() && id.to_string() == *session_id),
-                    "invalid session identity"
-                );
-                ensure!(
-                    value.is_null()
-                        || value.as_object().is_some_and(|o| o.len() == 2)
-                            && string(&value["project"], 128)
-                            && value["label"].as_str().is_some_and(|label| {
-                                !label.is_empty() && label.len() <= 2048 && !label.contains('\0')
-                            }),
                     "invalid session project"
                 );
             }
@@ -187,6 +164,31 @@ pub fn default_preferences() -> Value {
 /// any other kind, so exchanges with them omit newer kinds; members that list
 /// kinds receive only the kinds they list (`order` came after `preference`).
 pub const LEGACY_KINDS: [&str; 4] = ["project", "folder", "session", "machine"];
+/// The kinds hgs v0.47.0 parses, the rollback floor of zerus-ucck P2. A
+/// requester that names no kinds (`swarm export` from v0.47.0 or older)
+/// receives only these, so a kind added later never reaches it.
+pub const FLOOR_KINDS: [&str; 6] = ["project", "folder", "session", "machine", "preference", "order"];
+/// What `swarm hello` advertises: the catalog kinds, and `session_id` for the
+/// session ID memberships kept beside the catalog (zerus-ucck P2c-1), which
+/// only members that list it receive.
+pub fn advertised() -> BTreeSet<String> {
+    let mut kinds = kinds();
+    kinds.insert(SESSION_ID_KIND.to_owned());
+    kinds
+}
+pub const SESSION_ID_KIND: &str = "session_id";
+/// The catalog `swarm export` gives a requester: only the kinds it lists, or
+/// [`FLOOR_KINDS`] when it lists none (zerus-ucck P2c-1). Every key's
+/// operations go or stay together, so their parents stay consistent.
+pub fn exported(catalog: &Catalog, kinds: &Value) -> Catalog {
+    let kinds: BTreeSet<String> = serde_json::from_value(kinds.clone())
+        .unwrap_or_else(|_| FLOOR_KINDS.into_iter().map(str::to_owned).collect());
+    let mut exported = catalog.clone();
+    exported
+        .operations
+        .retain(|_, op| kinds.contains(op.key.kind()));
+    exported
+}
 pub fn kinds() -> BTreeSet<String> {
     [
         "project",
@@ -195,7 +197,6 @@ pub fn kinds() -> BTreeSet<String> {
         "machine",
         "preference",
         "order",
-        "session_id",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -317,10 +318,6 @@ impl Catalog {
                 machine: ids.get(machine).unwrap_or(machine).clone(),
                 session: session.clone(),
             },
-            Key::SessionId { machine, session_id } => Key::SessionId {
-                machine: ids.get(machine).unwrap_or(machine).clone(),
-                session_id: session_id.clone(),
-            },
             _ => key.clone(),
         }
     }
@@ -362,10 +359,6 @@ impl Catalog {
                 machine: self.machine(machine),
                 session: session.clone(),
             },
-            Key::SessionId { machine, session_id } => Key::SessionId {
-                machine: self.machine(machine),
-                session_id: session_id.clone(),
-            },
             _ => key.clone(),
         }
     }
@@ -393,7 +386,7 @@ impl Catalog {
         // older replicas bring back fields/folders that existed before removal.
         let deleted = heads.iter().find(|o| match key {
             Key::Project { field, .. } if field == "alive" => o.value == false,
-            Key::Folder { .. } | Key::Session { .. } | Key::SessionId { .. } => o.value.is_null(),
+            Key::Folder { .. } | Key::Session { .. } => o.value.is_null(),
             _ => false,
         });
         deleted.copied().or_else(|| heads.last().copied())
@@ -409,24 +402,16 @@ impl Catalog {
                 .then_some(id.clone())
         }).collect();
         for (key, versions) in &mut heads {
-            // A session's project: the value, or for its ID twin the value's `project`.
-            let project = |op: &Operation| -> Option<String> {
-                match key {
-                    Key::Session { .. } => op.value.as_str().map(str::to_owned),
-                    Key::SessionId { .. } => op.value["project"].as_str().map(str::to_owned),
-                    _ => None,
-                }
-            };
-            if !matches!(key, Key::Session { .. } | Key::SessionId { .. }) { continue; }
-            let concrete: BTreeSet<_> = versions.iter().filter_map(|op| project(op))
-                .filter(|id| *id != "ungrouped").collect();
+            if !matches!(key, Key::Session { .. }) { continue; }
+            let concrete: BTreeSet<_> = versions.iter().filter_map(|op| op.value.as_str())
+                .filter(|id| *id != "ungrouped").map(str::to_owned).collect();
             // Unknown/deleted projects and two different real projects need a
             // review. Never make their apparent clock order an assignment rule.
             if concrete.len() > 1 || concrete.iter().any(|id| !live.contains(id)) { continue; }
             let preferred = concrete.first().cloned().or_else(||
-                versions.iter().any(|op| project(op).as_deref() == Some("ungrouped")).then_some("ungrouped".into()));
-            if let Some(preferred) = preferred {
-                versions.retain(|op| project(op).as_deref() == Some(preferred.as_str()));
+                versions.iter().any(|op| op.value == "ungrouped").then_some("ungrouped".into()));
+            if let Some(project) = preferred {
+                versions.retain(|op| op.value == project);
             }
         }
         heads
@@ -452,16 +437,6 @@ impl Catalog {
     pub fn versions(&self) -> BTreeMap<String, Vec<String>> {
         self.heads()
             .into_iter()
-            .map(|(k, h)| (k.token(), h.iter().map(|o| o.id.clone()).collect()))
-            .collect()
-    }
-    /// [`Catalog::versions`] without the ID twins, which no desktop edits:
-    /// the CLI writes them after their name membership (zerus-ucck P2c-1),
-    /// and a desktop that parses every key it is shown never sees one.
-    pub fn desktop_versions(&self) -> BTreeMap<String, Vec<String>> {
-        self.heads()
-            .into_iter()
-            .filter(|(key, _)| !matches!(key, Key::SessionId { .. }))
             .map(|(k, h)| (k.token(), h.iter().map(|o| o.id.clone()).collect()))
             .collect()
     }

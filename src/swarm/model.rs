@@ -140,6 +140,7 @@ impl Store {
                 result
             });
         let keys: BTreeSet<_> = before.keys().chain(after.keys()).cloned().collect();
+        let mut labels = Vec::new();
         for key in keys {
             if before.get(&key) == after.get(&key) {
                 continue;
@@ -195,19 +196,13 @@ impl Store {
                 }
             }
             let parents = observed.get(&key).cloned().unwrap_or_default();
-            let session = match &key {
-                Key::Session { machine, session } => Some((machine.clone(), session.clone())),
-                _ => None,
-            };
-            self.catalog
-                .write(&self.node_id, key, value.clone(), parents)?;
-            // This computer's sessions also move by ID (zerus-ucck P2c-1).
-            if let Some((machine, label)) = session {
-                let node = self.node_id.clone();
-                super::session_ids::twin(&mut self.catalog, &node, &machine, &label, &value)?;
+            if let Key::Session { machine, session } = &key {
+                labels.push((machine.clone(), session.clone()));
             }
+            self.catalog.write(&self.node_id, key, value, parents)?;
         }
-        Ok(())
+        // This computer's sessions also move by ID (zerus-ucck P2c-1).
+        super::session_ids::write(&self.catalog, &mut self.twins, &self.node_id, &labels)
     }
 
     pub fn initialize(&mut self, organization: &Value) -> Result<()> {
@@ -312,9 +307,8 @@ impl Store {
             }
         }
         // The same sessions by durable ID, where a desktop may read them
-        // (zerus-ucck P2c-1): only twins at least as new as the name form.
-        let heads = self.catalog.effective_heads();
-        for (machine, session_id, project) in super::session_ids::readable(&self.catalog, &heads) {
+        // (zerus-ucck P2c-1): only twins of the name operation now selected.
+        for (machine, session_id, project) in super::session_ids::readable(&self.catalog, &self.twins) {
             if let Some(p) = projects.get_mut(&project) {
                 let machine = aliases.get(&machine).cloned().unwrap_or(machine);
                 let members = p
@@ -334,13 +328,7 @@ impl Store {
             .into_iter()
             // Concurrent preference and order edits resolve to the newest head
             // and the next choice on any device supersedes them; nothing to review.
-            // An ID twin follows its name membership, which a desktop reviews.
-            .filter(|(key, _)| {
-                !matches!(
-                    key,
-                    Key::Preference { .. } | Key::Order { .. } | Key::SessionId { .. }
-                )
-            })
+            .filter(|(key, _)| !matches!(key, Key::Preference { .. } | Key::Order { .. }))
             .filter_map(|(key, heads)| {
                 let variants: BTreeSet<_> = heads.iter().map(|o| o.value.to_string()).collect();
                 if variants.len() <= 1 {
@@ -372,7 +360,7 @@ impl Store {
         }
         json!({"schema":1,"node_id":self.node_id,"swarm_id":self.catalog.swarm_id,"digest":self.catalog.digest(),"initialized":self.imported,
             "organization":organization,
-            "versions":self.catalog.desktop_versions(),"conflicts":conflicts,"preferences":self.catalog.preferences(),"machines":machines,"peers":self.peers})
+            "versions":self.catalog.versions(),"conflicts":conflicts,"preferences":self.catalog.preferences(),"machines":machines,"peers":self.peers})
     }
 }
 
@@ -394,6 +382,7 @@ mod tests {
                 },
             )]),
             peers: BTreeMap::new(),
+            twins: Default::default(),
         }
     }
     fn org(name: &str) -> Value {

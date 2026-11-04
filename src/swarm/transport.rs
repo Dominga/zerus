@@ -1,6 +1,7 @@
 use super::{
     catalog::{self, Catalog, Key, Operation},
     replica, service,
+    session_ids::Twin,
     store::{LockedStore, Peer},
 };
 use crate::{config::Config, platform};
@@ -32,10 +33,37 @@ pub struct Exchange {
     /// this field; responses to them contain only legacy kinds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kinds: Option<BTreeSet<String>>,
+    /// Session ID memberships (zerus-ucck P2c-1), exchanged only between
+    /// members that list the `session_id` kind; never sent to another.
+    /// Each is read on its own: one that does not parse is skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub twins: Option<Vec<Value>>,
+    /// The twins the requester has; present when it takes them in return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_twins: Option<BTreeSet<String>>,
 }
 
 pub fn remote(config: &Config, alias: &str, action: &str, input: Option<&Value>) -> Result<Value> {
     run(config, alias, &["swarm", action], input)
+}
+
+/// The twins among `values` that parse; the rest are skipped, as derived data.
+fn parsed(values: &[Value]) -> Vec<Twin> {
+    values
+        .iter()
+        .filter_map(|value| serde_json::from_value(value.clone()).ok())
+        .collect()
+}
+
+/// The peer's catalog with only the kinds this hgs parses. An older peer
+/// ignores `--kinds` and its input, and its catalog holds no newer kind.
+fn export(config: &Config, alias: &str) -> Result<Value> {
+    run(
+        config,
+        alias,
+        &["swarm", "export", "--kinds"],
+        Some(&json!({"kinds": catalog::kinds()})),
+    )
 }
 
 /// `hgs WORDS…` on the member behind `alias`, with `input` as JSON on its
@@ -130,9 +158,11 @@ pub fn run(config: &Config, alias: &str, words: &[&str], input: Option<&Value>) 
 pub fn hello(config: &Config, inventory: bool) -> Result<Value> {
     let mut store = LockedStore::load(config)?;
     store.save()?;
-    let mut result = json!({"schema":1,"node_id":store.data.node_id,"swarm_id":store.data.catalog.swarm_id,"digest":store.data.catalog.digest(),"initialized":store.data.imported,"kinds":catalog::kinds()});
+    let mut result = json!({"schema":1,"node_id":store.data.node_id,"swarm_id":store.data.catalog.swarm_id,"digest":store.data.catalog.digest(),"initialized":store.data.imported,"kinds":catalog::advertised(),
+        "twins":store.data.twins.digest()});
     if inventory {
         result["known"] = json!(store.data.catalog.operations.keys().collect::<Vec<_>>());
+        result["known_twins"] = json!(store.data.twins.known());
     }
     // Project stores are opened after the catalog lock is released. Tasks
     // that cannot be read never stop the catalog. Only hello reads them.
@@ -153,6 +183,13 @@ pub fn exchange(config: &Config, request: Exchange) -> Result<Value> {
         .data
         .catalog
         .merge(&request.swarm_id, request.operations)?;
+    if let Some(twins) = request.twins {
+        store.data.twins.merge(&request.swarm_id, parsed(&twins))?;
+    }
+    let twins = request
+        .known_twins
+        .as_ref()
+        .map(|known| store.data.twins.missing(known));
     let missing: Vec<_> = store
         .data
         .catalog
@@ -164,9 +201,11 @@ pub fn exchange(config: &Config, request: Exchange) -> Result<Value> {
         .cloned()
         .collect();
     store.save()?;
-    Ok(
-        json!({"schema":1,"node_id":store.data.node_id,"swarm_id":store.data.catalog.swarm_id,"operations":missing}),
-    )
+    let mut response = json!({"schema":1,"node_id":store.data.node_id,"swarm_id":store.data.catalog.swarm_id,"operations":missing});
+    if let Some(twins) = twins {
+        response["twins"] = json!(twins);
+    }
+    Ok(response)
 }
 
 pub fn sync_peer(config: &Config, alias: &str) -> Result<()> {
@@ -201,18 +240,21 @@ pub fn sync_peer(config: &Config, alias: &str) -> Result<()> {
         let node = identity["node_id"].as_str().unwrap().to_owned();
         local.outdated.insert(alias.into(), node);
     }
-    // Whether this member reads session membership by ID (zerus-ucck P2c-1).
-    if peer_kinds
+    // Whether this member reads session memberships by ID (zerus-ucck
+    // P2c-1); only such a member exchanges them.
+    let twins = peer_kinds
         .as_ref()
-        .is_some_and(|kinds| kinds.contains("session_id"))
-    {
+        .is_some_and(|kinds| kinds.contains(catalog::SESSION_ID_KIND));
+    if twins {
         let node = identity["node_id"].as_str().unwrap().to_owned();
         local.session_ids.insert(alias.into(), node);
     } else {
         local.session_ids.remove(alias);
     }
     local.save()?;
-    if identity["digest"] != local.data.catalog.digest() {
+    if identity["digest"] != local.data.catalog.digest()
+        || (twins && identity["twins"] != local.data.twins.digest())
+    {
         drop(local);
         let inventory = remote(config, alias, "inventory", None)?;
         let local = LockedStore::load(config)?;
@@ -241,6 +283,18 @@ pub fn sync_peer(config: &Config, alias: &str) -> Result<()> {
                 .cloned()
                 .collect(),
             kinds: peer_kinds.as_ref().map(|_| catalog::kinds()),
+            twins: twins.then(|| {
+                let known: BTreeSet<String> =
+                    serde_json::from_value(inventory["known_twins"].clone()).unwrap_or_default();
+                local
+                    .data
+                    .twins
+                    .missing(&known)
+                    .into_iter()
+                    .filter_map(|twin| serde_json::to_value(twin).ok())
+                    .collect()
+            }),
+            known_twins: twins.then(|| local.data.twins.known()),
         };
         let node = peer.node.clone();
         drop(local);
@@ -259,10 +313,14 @@ pub fn sync_peer(config: &Config, alias: &str) -> Result<()> {
             local.data.peers.get(alias).is_some_and(|p| p.node == node),
             "swarm connection changed during exchange"
         );
-        local.data.catalog.merge(
-            response["swarm_id"].as_str().unwrap_or_default(),
-            serde_json::from_value(response["operations"].clone())?,
-        )?;
+        let swarm = response["swarm_id"].as_str().unwrap_or_default();
+        local
+            .data
+            .catalog
+            .merge(swarm, serde_json::from_value(response["operations"].clone())?)?;
+        if let Some(received) = response["twins"].as_array().filter(|_| twins) {
+            local.data.twins.merge(swarm, parsed(received))?;
+        }
         local.save()?;
     } else {
         drop(local);
@@ -327,7 +385,7 @@ pub fn bind(config: &Config, alias: &str) -> Result<Value> {
 }
 
 pub fn preview(config: &Config, alias: &str) -> Result<Value> {
-    let remote = remote(config, alias, "export", None)?;
+    let remote = export(config, alias)?;
     let catalog: Catalog = serde_json::from_value(remote["catalog"].clone())?;
     catalog.validate()?;
     let mut local = LockedStore::load(config)?;
@@ -348,7 +406,7 @@ pub fn preview(config: &Config, alias: &str) -> Result<Value> {
 }
 
 pub fn join(config: &Config, alias: &str, request: Join) -> Result<Value> {
-    let remote = remote(config, alias, "export", None)?;
+    let remote = export(config, alias)?;
     ensure!(
         remote["node_id"] == request.node_id,
         "machine identity changed since preview; preview again"
@@ -393,11 +451,6 @@ pub fn join(config: &Config, alias: &str, request: Join) -> Result<Value> {
         local.data.catalog = catalog;
         let mut existing = local.data.catalog.values();
         for (mut key, mut value) in old {
-            // ID twins are derived: the next membership write here makes them
-            // again, and until then a desktop reads the name form.
-            if matches!(key, Key::SessionId { .. }) {
-                continue;
-            }
             // The swarm's delivery choice and project order win over the
             // joining machine's own.
             if matches!(key, Key::Preference { .. } | Key::Order { .. })

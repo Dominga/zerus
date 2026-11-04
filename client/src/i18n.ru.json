@@ -959,6 +959,7 @@
   "Draft text": "Текст черновика",
   "Drafts": "Черновики",
   "Drafts are not being saved because their earlier versions could not be recorded. Check the Zerus data folder, then retry.": "Черновики не сохраняются: не удалось записать их прежние версии. Проверьте папку данных Zerus и повторите попытку.",
+  "Drafts are not being saved: their earlier versions could not be recorded. Check access to the Zerus data folder, then use Retry in Saved drafts.": "Черновики не сохраняются: их более ранние версии не удалось записать. Проверьте доступ к папке данных Zerus, затем нажмите «Повторить попытку» в окне «Сохраненные черновики».",
   "Drafts stay on this desktop, including those from ended or unavailable sessions. Restoring never sends a message.": "Черновики остаются на этом компьютере, в том числе из завершенных или недоступных сессий. Восстановление никогда не отправляет сообщение.",
   "Drag to reorder, or use Alt+Up / Alt+Down.": "Перетащите, чтобы изменить порядок, или используйте Alt+Up/Alt+Down.",
   "Drag to resize folders and worktrees.": "Перетащите, чтобы изменить размер папок и рабочих деревьев.",

@@ -237,7 +237,10 @@ export function SavedDraftsDialog() {
         <Show when={draftCaptureNotice(capture())}>
           {(notice) => (
             <div class="draft-capture-notice" role="status">
-              <p class="draft-message error">{tr(notice())}</p>
+              <div class="draft-capture-text">
+                <p class="draft-message error">{tr(notice().text)}</p>
+                <p class="hint">{tr(notice().hint)}</p>
+              </div>
               <button type="button" class="btn small" onClick={() => { void bridge.draftCaptureRetry().then(readCapture, readCapture); }}>{tr("Retry")}</button>
             </div>
           )}

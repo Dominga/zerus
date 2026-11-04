@@ -36,10 +36,10 @@ class Activation(unittest.TestCase):
         self.assertEqual(compiled.returncode, 0, compiled.stderr)
         self.frontend.chmod(0o700)
 
-    def begin(self, operation='activation_wait', wrong_birth=False, marked=False, task_reconcile=False, sealed=None, wrong_config=False, wrong_attempt=False, wrong_frontend=False, termination=False):
+    def begin(self, operation='activation_wait', wrong_birth=False, marked=False, task_reconcile=False, sealed=None, wrong_config=False, wrong_attempt=False, wrong_frontend=False, termination=False, missing_reference=False):
         if sealed is not None:
             # Hosted debuginfo can exceed the 256 MiB image bound. A private
-            # stripped CLI supplies BOTH actual service and relay; never raise
+            # stripped CLI normally supplies both service and relay; never raise
             # the production cap or change the installed CLI.
             self.hgs = self.root / 'native-hgs'
             shutil.copyfile(kernel.HGS, self.hgs)
@@ -47,7 +47,19 @@ class Activation(unittest.TestCase):
             stripped = subprocess.run(['strip', '--strip-debug', str(self.hgs)], capture_output=True, timeout=30)
             self.assertEqual(stripped.returncode, 0, stripped.stderr)
             self.assertLess(self.hgs.stat().st_size, 256 << 20)
-        _, status = self.serve(background=True)
+        relay_hgs = getattr(self, 'hgs', kernel.HGS)
+        if missing_reference:
+            self.assertIsNotNone(sealed)
+            # The ACTUAL service image exceeds the unchanged cap: no startup
+            # reference can be published. ELF permits an unused file tail;
+            # sparse padding makes this deterministic even for small CI builds.
+            self.hgs = self.root / 'unstripped-service-hgs'
+            shutil.copyfile(kernel.HGS, self.hgs)
+            self.hgs.chmod(0o700)
+            if self.hgs.stat().st_size <= 256 << 20:
+                with self.hgs.open('r+b') as image:
+                    image.truncate((256 << 20) + 1)
+        self.service, status = self.serve(background=True)
         attempt, request_id = str(uuid.uuid4()), str(uuid.uuid4())
         request = dict(op=operation, request_id=request_id)
         if task_reconcile:
@@ -79,7 +91,7 @@ class Activation(unittest.TestCase):
             selected_frontend = self.root / 'unselected-frontend'
             shutil.copyfile(self.frontend, selected_frontend)
             selected_frontend.chmod(0o700)
-        frontend = subprocess.Popen([str(selected_frontend), str(self.root / 'tmp/hgs-tray'), str(getattr(self, 'hgs', kernel.HGS))] + ([sealed] if sealed else []),
+        frontend = subprocess.Popen([str(selected_frontend), str(self.root / 'tmp/hgs-tray'), str(relay_hgs)] + ([sealed] if sealed else []),
                                     env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE, text=True)
         self.addCleanup(self.finish_child, frontend)
@@ -88,7 +100,10 @@ class Activation(unittest.TestCase):
         if sealed is not None:
             until = time.monotonic() + 5
             while True:
-                image = os.readlink(f"/proc/{native['pid']}/exe")
+                try:
+                    image = os.readlink(f"/proc/{native['pid']}/exe")
+                except FileNotFoundError:
+                    self.fail('original relay exited before its sealed image could be observed')
                 if image.startswith('/memfd:zerus-helper-image'):
                     break
                 self.assertLess(time.monotonic(), until, 'original child must really execute memfd')
@@ -186,13 +201,14 @@ class Activation(unittest.TestCase):
             self.assertEqual(json.loads(original['original'])['request_id'], request)
 
     @unittest.skipUnless(sys.platform == 'linux', 'Linux kernel sealed relay')
-    def test_wrong_sealed_relay_argv_is_refused_before_a_request_or_canonical_proof(self):
-        frontend, _, _ = self.begin(sealed='wrong-argv')
-        frontend.stdin.close()
-        frontend.stdin = None
-        output, error = frontend.communicate(timeout=10)
-        self.assertNotEqual(frontend.returncode, 0)
-        self.assertEqual(output, '')
+    def test_missing_startup_reference_refuses_a_real_sealed_relay_before_native_proof(self):
+        frontend, request, _ = self.begin(sealed='sealed', missing_reference=True)
+        self.assertGreater(Path(f'/proc/{self.service.pid}/exe').stat().st_size, 256 << 20)
+        reply, error = self.result(frontend)
+        self.assertEqual(reply, dict(request_id=request, accepted=False, durable=False,
+                                    code='frontend_authentication_refused'))
+        # This fails even under agent ancestry if the image check is skipped:
+        # canonical proof precedes the independent ancestry refusal.
         self.assertIn('proofs=0 original_reaped=1', error)
         self.assertFalse(self.cli('desktop', 'status', '--json')['activation_transport']['waiting'])
 

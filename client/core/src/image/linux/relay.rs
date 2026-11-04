@@ -1,6 +1,6 @@
 //! Immutable native image observations. No process lookup, role, consent,
 //! caller authentication, descriptor execution or user-selected reference.
-use super::{MAX_IMAGE_BYTES, Stamp, sealed, snapshot, stamp};
+use super::{sealed, snapshot, stamp, Stamp, MAX_IMAGE_BYTES};
 use std::{
     fs::File,
     io::{self, Seek},

@@ -100,7 +100,7 @@ static int sealed_image(const char *path, const char *mode) {
     else if (!strcmp(mode, "missing-shrink")) seals &= ~F_SEAL_SHRINK;
     else if (!strcmp(mode, "missing-seal")) seals &= ~F_SEAL_SEAL;
     else if (!strcmp(mode, "future-write")) seals = F_SEAL_FUTURE_WRITE;
-    else check(!strcmp(mode, "sealed") || !strcmp(mode, "wrong-argv") || !strcmp(mode, "wrong-parent"));
+    else check(!strcmp(mode, "sealed") || !strcmp(mode, "wrong-parent"));
     check(fcntl(image, F_ADD_SEALS, seals) == 0);
     return image;
 }
@@ -152,12 +152,7 @@ int main(int argc, char **argv) {
             snprintf(program, sizeof(program), "/proc/self/fd/%d", image);
             selected = program;
         }
-        if (argc == 4 && !strcmp(argv[3], "wrong-argv")) {
-            const char *config = getenv("HGS_CONFIG_DIR"); check(config != NULL);
-            execl(selected, argv[2], "--config-dir", config, "desktop", "frontend-request", "--json", (char *)NULL);
-        } else {
-            execl(selected, argv[2], "desktop", "frontend-request", "--json", (char *)NULL);
-        }
+        execl(selected, argv[2], "desktop", "frontend-request", "--json", (char *)NULL);
         _exit(127);
     }
     close(input[0]); close(output[1]);

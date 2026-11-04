@@ -146,8 +146,8 @@ lookup-only. This result contributes to #1340's actual-caller gate; source
 enablement does not flip the Service default or qualify the installed action.
 
 On Linux, the service captures its actual `/proc/self/exe` object once under
-its real owner, before publishing the listener. The retained sealed self-copy
-uses roughly 37 MiB of resident memory per shipped Linux service. An owned setup worker copies
+its real owner, before publishing the listener. The retained authentication reference
+adds roughly 37 MB of resident memory per shipped Linux service. An owned setup worker copies
 and seals that reference under the same 256 MiB/five-second bounds. Failure or
 setup timeout leaves the sealed-relay branch unavailable for that service;
 a late result is discarded only after the original copy worker joins, with
@@ -180,9 +180,10 @@ passing through the production platform gate; they cannot enable it.
 
 G1 decision: the old Service `selected:None` path is not a safe fallback.
 It reselects `default_hgs` and does not retain the selected relay/image/config
-through the original effect. Its refusal remains intact. While the new submission
-is unavailable, Terminate visibly explains that automatic folder removal is
-unavailable in background mode. The ordinary guarded Terminate remains available;
+through the original effect. Its refusal remains intact. If the selected Mac
+helper lacks a current genuine pair, its unavailable-removal notice remains
+visible; other helper/capture failures retain their exact visible error. The
+ordinary guarded Terminate remains available;
 the separate manual folder review opens its existing native guard flow without
 implying termination success, cleanup consent or replay. All offer errors are
 visible. Native caller/Terminate qualification remains a separate release gate;

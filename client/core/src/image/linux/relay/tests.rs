@@ -79,11 +79,9 @@ fn every_missing_seal_and_future_write_only_refuses_without_retaining_the_refere
         assert_eq!(handles(&retained), 1, "refused original fd must close");
         assert_eq!(Arc::strong_count(&reference), 1);
     }
-    assert!(
-        reference
-            .inspect_peer(memory(&bytes(), libc::F_SEAL_FUTURE_WRITE), until())
-            .is_err()
-    );
+    assert!(reference
+        .inspect_peer(memory(&bytes(), libc::F_SEAL_FUTURE_WRITE), until())
+        .is_err());
 }
 
 #[test]
@@ -94,11 +92,9 @@ fn differing_truncated_oversize_non_native_and_expired_peers_refuse() {
     different[last] ^= 1;
     let truncated = &bytes()[..32];
     for data in [&different[..], truncated, b"#!/bin/sh\nexit 0\n"] {
-        assert!(
-            reference
-                .inspect_peer(memory(data, SEALS), until())
-                .is_err()
-        );
+        assert!(reference
+            .inspect_peer(memory(data, SEALS), until())
+            .is_err());
     }
     let oversized = memory(b"\x7fELF", 0);
     oversized.set_len(MAX_IMAGE_BYTES + 1).unwrap();
@@ -107,11 +103,9 @@ fn differing_truncated_oversize_non_native_and_expired_peers_refuse() {
         0
     );
     assert!(reference.inspect_peer(oversized, until()).is_err());
-    assert!(
-        reference
-            .inspect_peer(memory(&bytes(), SEALS), Instant::now())
-            .is_err()
-    );
+    assert!(reference
+        .inspect_peer(memory(&bytes(), SEALS), Instant::now())
+        .is_err());
     assert_eq!(Arc::strong_count(&reference), 1);
 }
 
@@ -126,17 +120,13 @@ fn an_unsealed_or_changed_reference_can_never_validate_an_equal_peer() {
         _source_version: stamp(&file).unwrap(),
         frozen: Frozen { file, original },
     });
-    assert!(
-        reference
-            .inspect_peer(memory(&bytes(), SEALS), until())
-            .is_err()
-    );
+    assert!(reference
+        .inspect_peer(memory(&bytes(), SEALS), until())
+        .is_err());
     writer.write_all_at(b"changed", 0).unwrap();
-    assert!(
-        reference
-            .inspect_peer(memory(&bytes(), SEALS), until())
-            .is_err()
-    );
+    assert!(reference
+        .inspect_peer(memory(&bytes(), SEALS), until())
+        .is_err());
 }
 
 #[test]
@@ -150,16 +140,34 @@ fn startup_reference_is_not_refreshed_from_a_replaced_or_rewritten_installation(
     std::fs::rename(&path, root.join("original")).unwrap();
     std::fs::copy("/bin/false", &path).unwrap();
     assert!(reference.inspect_peer(old, until()).is_ok());
-    assert!(
-        reference
-            .inspect_peer(memory(&std::fs::read(path).unwrap(), SEALS), until())
-            .is_err()
-    );
+    assert!(reference
+        .inspect_peer(memory(&std::fs::read(path).unwrap(), SEALS), until())
+        .is_err());
     std::fs::copy("/bin/false", root.join("original")).unwrap();
-    assert!(
-        reference
-            .inspect_peer(memory(&bytes(), SEALS), until())
-            .is_ok()
-    );
+    assert!(reference
+        .inspect_peer(memory(&bytes(), SEALS), until())
+        .is_ok());
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn full_equality_checks_later_chunks_and_the_final_partial_chunk() {
+    let mut original = bytes();
+    original.resize(3 * (64 << 10) + 17, 0x5a);
+    let reference = Arc::new(ServiceImage::from_original(memory(&original, SEALS)).unwrap());
+    assert!(reference
+        .inspect_peer(memory(&original, SEALS), until())
+        .is_ok());
+    for changed in [(64 << 10) + 7, (128 << 10) + 7, original.len() - 1] {
+        let mut replacement = original.clone();
+        replacement[changed] ^= 1;
+        assert_eq!(&replacement[..64 << 10], &original[..64 << 10]);
+        assert_eq!(replacement.len(), original.len());
+        assert!(
+            reference
+                .inspect_peer(memory(&replacement, SEALS), until())
+                .is_err(),
+            "a difference at byte {changed} cannot pass the complete comparison"
+        );
+    }
 }

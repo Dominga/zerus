@@ -545,7 +545,8 @@ def changed_drafts(saved, roots):
             total += 1
             unsent += content
             forms += form and not content
-            held += identity
+            # A present but null field is compared, never counted as held.
+            held += original.get('deferred_input') is not None
     return KeptDrafts(total, unsent, forms, held), problems
 
 

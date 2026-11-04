@@ -383,10 +383,10 @@ impl<'a> Index<'a> {
             let mut uuids: BTreeSet<String> = self.store.uuids()?.into_iter().collect();
             uuids.extend(known.keys().cloned());
             let uuids: Vec<String> = uuids.into_iter().collect();
-            self.refresh(&uuids, Some(&known))?;
+            self.refresh(&uuids, Some(&known), changes.documents.as_ref())?;
         } else if let Some(documents) = &changes.documents {
             let uuids: Vec<String> = documents.iter().filter(|d| ids::is_uuid(d)).cloned().collect();
-            self.refresh(&uuids, None)?;
+            self.refresh(&uuids, None, Some(documents))?;
         }
         let tx = self.db.transaction()?;
         {
@@ -404,9 +404,16 @@ impl<'a> Index<'a> {
     }
 
     /// Indexes again each of `uuids` whose files changed (`known` holds the
-    /// stamps already read, for a full check), in short transactions; any
-    /// change gives the index a new revision.
-    fn refresh(&mut self, uuids: &[String], known: Option<&HashMap<String, String>>) -> Outcome<()> {
+    /// stamps already read, for a full check), and every one the journal
+    /// names (`noted`) whatever its stamps: Windows has no inode and coarse
+    /// file times, so a rewrite of the same length can keep its stamp. Short
+    /// transactions; any change gives the index a new revision.
+    fn refresh(
+        &mut self,
+        uuids: &[String],
+        known: Option<&HashMap<String, String>>,
+        noted: Option<&BTreeSet<String>>,
+    ) -> Outcome<()> {
         let dir = self.store.dir().to_owned();
         for chunk in uuids.chunks(CHUNK) {
             let mut work = Vec::new();
@@ -419,7 +426,8 @@ impl<'a> Index<'a> {
                         .query_row("SELECT files FROM tasks WHERE uuid=?1", [uuid], |r| r.get(0))
                         .optional()?,
                 };
-                if stored.as_deref() == Some(now.as_str()) || (stored.is_none() && now == "-|-") {
+                let unchanged = stored.as_deref() == Some(now.as_str()) || (stored.is_none() && now == "-|-");
+                if unchanged && !noted.is_some_and(|noted| noted.contains(uuid)) {
                     continue;
                 }
                 let derived = (now != "-|-").then(|| derive(self.store, uuid));
@@ -490,7 +498,7 @@ impl<'a> Index<'a> {
                 .map(|(uuid, ..)| uuid.clone())
                 .collect();
             if !stale.is_empty() {
-                self.refresh(&stale, None)?;
+                self.refresh(&stale, None, None)?;
                 continue;
             }
             return self.finish(stage, rows);

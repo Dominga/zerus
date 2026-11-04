@@ -266,6 +266,36 @@ fn reads_decode_only_what_changed() {
     assert_eq!(index.counts().unwrap()["todo"], 301);
 }
 
+/// Windows has no inode and coarse file times: a rewrite of the same length
+/// can keep its stamp. A task the journal names is indexed again anyway.
+#[test]
+fn a_task_the_journal_names_is_indexed_again_even_with_an_unchanged_stamp() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let mut task = new_task(&store, "T-aaaaaa", Stage::Todo, "V", "Plain");
+    store.save(&mut task).unwrap();
+    let mut other = new_task(&store, "T-bbbbbb", Stage::Todo, "W", "Other");
+    store.save(&mut other).unwrap();
+    drop(Index::open(&store).unwrap());
+    task.set_title("Retitled", &Actor::Person, 5).unwrap();
+    store.save(&mut task).unwrap();
+    // As if the rewritten files kept their stamps: the index already holds
+    // the new stamps beside the old row. No index connection is open here.
+    {
+        let db = Connection::open(store.dir().join(FILE)).unwrap();
+        db.execute(
+            "UPDATE tasks SET files=?1 WHERE uuid=?2",
+            params![files(store.dir(), task.uuid()), task.uuid()],
+        )
+        .unwrap();
+    }
+    let (mut index, decoded, _) = counted(|| Index::open(&store).unwrap());
+    assert_eq!(decoded, 1, "the journal names it");
+    let page = index.page(Stage::Todo, 10, &Anchor::Start).unwrap();
+    let row = page.rows.iter().find(|r| r["uuid"] == json!(task.uuid())).unwrap();
+    assert_eq!(row["title"], json!("Retitled"));
+}
+
 #[test]
 fn a_damaged_foreign_or_shared_index_is_built_again() {
     let temp = tempfile::tempdir().unwrap();

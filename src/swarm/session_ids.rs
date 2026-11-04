@@ -34,7 +34,12 @@ pub struct Twin {
     pub id: String,
     pub actor: String,
     /// Orders writes of the same session ID; never compared with the
-    /// catalog's clocks.
+    /// catalog's clocks. It counts from the twin this computer last had for
+    /// the ID, so after a lost or unreadable twins file it starts at 1 again.
+    /// A peer's older twin with a higher clock then wins until its owner
+    /// writes again, and is read only while its own name operation is still
+    /// selected, so the loss hides an ID membership but never shows a stale
+    /// one.
     pub clock: u64,
     pub machine: String,
     pub session_id: String,
@@ -155,6 +160,22 @@ impl Twins {
             .filter(|twin| !known.contains(&twin.id))
             .cloned()
             .collect()
+    }
+
+    /// Drops the twins whose name operation a later one superseded (#1413
+    /// review): such a twin is never read again, as a superseded operation is
+    /// never selected again. A twin of an operation not known here yet stays.
+    /// Returns whether it dropped any.
+    pub fn prune(&mut self, catalog: &Catalog) -> bool {
+        let superseded: BTreeSet<&str> = catalog
+            .operations
+            .values()
+            .flat_map(|op| op.parents.iter().map(String::as_str))
+            .collect();
+        let before = self.entries.len();
+        self.entries
+            .retain(|_, twin| !superseded.contains(twin.op.as_str()));
+        self.entries.len() != before
     }
 
     pub fn digest(&self) -> String {
@@ -596,6 +617,42 @@ mod tests {
     /// The review's trailing case: a dual writer writes the twin after a
     /// legacy name move reached it. The twin follows the name operation now
     /// selected, never the project the writer last knew.
+    /// #1413 review: a twin whose name operation a later one superseded is
+    /// pruned; a twin of the current operation, or of one not known here yet,
+    /// stays.
+    #[test]
+    fn prune_drops_only_twins_of_superseded_name_operations() {
+        known(LABEL, ID);
+        let mut owner = initialized(new_id());
+        let me = format!("local\n{LABEL}");
+        moved(
+            &mut owner,
+            organization(&[], &[]),
+            organization(std::slice::from_ref(&me), &[]),
+        );
+        assert!(
+            !owner.twins.clone().prune(&owner.catalog),
+            "its operation is the head"
+        );
+        let mut unknown = owner.twins.entries.values().next().unwrap().clone();
+        unknown.session_id = "7be01d44-0b4e-4d6a-9c1d-2e3f4a5b6c7d".into();
+        unknown.op = new_id();
+        let key = format!("{}\n{}", unknown.machine, unknown.session_id);
+        owner.twins.entries.insert(key.clone(), unknown);
+        let name = Key::Session {
+            machine: owner.node_id.clone(),
+            session: LABEL.into(),
+        };
+        let actor = owner.node_id.clone();
+        owner.catalog.set(&actor, name, json!("play")).unwrap();
+        assert!(owner.twins.prune(&owner.catalog));
+        assert_eq!(
+            owner.twins.entries.keys().collect::<Vec<_>>(),
+            [&key],
+            "an unknown operation stays"
+        );
+    }
+
     #[test]
     fn a_twin_written_after_a_legacy_move_follows_it() {
         known(LABEL, ID);

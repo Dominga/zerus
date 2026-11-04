@@ -17,7 +17,9 @@
 use super::*;
 use std::fs;
 use std::io::{self, Read};
-use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Entries are tiny; anything larger is not one of ours.
 const ENTRY_BYTES: u64 = 4096;
@@ -66,32 +68,83 @@ fn path(id: &str) -> PathBuf {
     directory().join(format!("{id}.json"))
 }
 
-/// Set once this process found `ids/` or an entry it must not write, or
-/// failed to change an entry; it then changes none.
-static UNWRITABLE: AtomicBool = AtomicBool::new(false);
+/// When this process last found `ids/` or an entry it must not write, or
+/// failed to change an entry, in milliseconds since the epoch; 0 for never.
+/// It changes no entry for [`RETRY_MS`] after that, then checks again, so a
+/// transient failure (a full disk) in a long-lived writer, such as a
+/// supervisor or the desktop service, pauses its notes instead of ending them
+/// (zerus-2sd29). A check needs no lock, so a hook never takes one.
+static TRIPPED: AtomicU64 = AtomicU64::new(0);
+/// How long a tripped latch holds.
+const RETRY_MS: u64 = 60_000;
+/// Moves the latch's clock forward (tests only).
+#[cfg(test)]
+static LATER_MS: AtomicU64 = AtomicU64::new(0);
+/// Makes `ids/` look owned by another user (tests only).
+#[cfg(all(test, unix))]
+static FOREIGN: AtomicBool = AtomicBool::new(false);
 
-/// Whether this process may change `id`'s entry: nothing failed before,
-/// `ids/` is absent or a writable directory, and the entry is absent or a
+fn now_ms() -> u64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64);
+    #[cfg(test)]
+    let now = now + LATER_MS.load(Ordering::SeqCst);
+    now.max(1)
+}
+
+fn trip() {
+    TRIPPED.store(now_ms(), Ordering::Relaxed);
+}
+
+/// Whether the latch holds: tripped less than [`RETRY_MS`] ago. A clock that
+/// moved back before the trip ends it, so it is never held longer.
+fn tripped() -> bool {
+    let at = TRIPPED.load(Ordering::Relaxed);
+    let now = now_ms();
+    at != 0 && now >= at && now - at < RETRY_MS
+}
+
+/// Whether this process can write in the directory `meta` describes: on
+/// Unix, its owner is the effective user and may write (#1400 review: mode
+/// bits alone let a foreign-owned 0755 `ids/` cost a lock and a write).
+#[cfg(unix)]
+fn may_write(meta: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    #[cfg(test)]
+    if FOREIGN.load(Ordering::SeqCst) {
+        return false;
+    }
+    // SAFETY: geteuid has no preconditions.
+    meta.uid() == unsafe { libc::geteuid() } && meta.mode() & 0o200 != 0
+}
+
+#[cfg(not(unix))]
+fn may_write(meta: &fs::Metadata) -> bool {
+    !meta.permissions().readonly()
+}
+
+/// Whether this process may change `id`'s entry: the latch does not hold,
+/// `ids/` is absent or a directory it may write, and the entry is absent or a
 /// regular file. Two metadata reads, never the lock.
 fn writable(id: &str) -> bool {
-    if UNWRITABLE.load(Ordering::Relaxed) {
+    if tripped() {
         return false;
     }
     let absent = |error: io::Error| error.kind() == io::ErrorKind::NotFound;
-    let directory = fs::symlink_metadata(directory()).map_or_else(absent, |meta| {
-        meta.is_dir() && !meta.permissions().readonly()
-    });
+    let directory = fs::symlink_metadata(directory())
+        .map_or_else(absent, |meta| meta.is_dir() && may_write(&meta));
     let ok = directory && fs::symlink_metadata(path(id)).map_or_else(absent, |meta| meta.is_file());
     if !ok {
-        UNWRITABLE.store(true, Ordering::Relaxed);
+        trip();
     }
     ok
 }
 
-/// Records a failed change, so this process makes no more.
+/// Records a failed change, so this process makes none for a while.
 fn changed(result: Result<()>) {
     if result.is_err() {
-        UNWRITABLE.store(true, Ordering::Relaxed);
+        trip();
     }
 }
 
@@ -580,8 +633,33 @@ mod tests {
             (1, 1),
             "one attempt, then none"
         );
+        // zerus-2sd29: the latch holds for RETRY_MS, then allows one more
+        // attempt per interval while writes still fail.
+        LATER_MS.fetch_add(RETRY_MS, Ordering::SeqCst);
+        for _ in 0..20 {
+            lookup(&failing_id);
+        }
+        let again = (LOCKS.load(Ordering::SeqCst), CHANGES.load(Ordering::SeqCst));
+        assert_eq!(
+            (again.0 - after.0, again.1 - after.1),
+            (1, 1),
+            "one more attempt"
+        );
+        // A transient failure heals: after the next interval the repair
+        // succeeds, and the lookup after it is a hit.
         FAIL_CHANGES.store(false, Ordering::SeqCst);
-        UNWRITABLE.store(false, Ordering::SeqCst);
+        assert!(lookup(&failing_id).1, "still held");
+        LATER_MS.fetch_add(RETRY_MS, Ordering::SeqCst);
+        assert!(lookup(&failing_id).1, "the repairing scan");
+        assert_eq!(
+            entry(&failing_id),
+            Some(("claude/example/failing".to_owned(), Kind::Record))
+        );
+        assert_eq!(
+            lookup(&failing_id),
+            (vec!["claude/example/failing".to_owned()], false)
+        );
+        TRIPPED.store(0, Ordering::SeqCst);
 
         // #1400 review: an index this process may not write is never retried.
         // With ids/ read-only, every lookup scans, yet none asks for the
@@ -606,8 +684,25 @@ mod tests {
             "no lock and no write while ids/ is read-only"
         );
         mode(0o700);
+        // zerus-2sd29: an ids/ owned by another user is refused by its
+        // metadata too, before any lock or write, also after the interval.
+        TRIPPED.store(0, Ordering::SeqCst);
+        FOREIGN.store(true, Ordering::SeqCst);
+        let before = counts();
+        for _ in 0..20 {
+            assert_eq!(lookup(&stuck_id), (vec![stuck.to_owned()], true));
+        }
+        storage::write(&mut stuck_record).unwrap();
+        LATER_MS.fetch_add(RETRY_MS, Ordering::SeqCst);
+        assert_eq!(lookup(&stuck_id), (vec![stuck.to_owned()], true));
+        assert_eq!(
+            counts(),
+            before,
+            "no lock and no write while ids/ belongs to another user"
+        );
+        FOREIGN.store(false, Ordering::SeqCst);
         // A directory at an entry is never written over and reads as a miss.
-        UNWRITABLE.store(false, Ordering::SeqCst);
+        TRIPPED.store(0, Ordering::SeqCst);
         std::fs::create_dir(path(&stuck_id)).unwrap();
         let before = counts();
         storage::write(&mut stuck_record).unwrap();
@@ -617,7 +712,7 @@ mod tests {
         assert_eq!(counts(), before, "no lock and no write over a directory");
         std::fs::remove_dir(path(&stuck_id)).unwrap();
         // A FIFO at an entry is a miss, never a hang, for a lookup and a write.
-        UNWRITABLE.store(false, Ordering::SeqCst);
+        TRIPPED.store(0, Ordering::SeqCst);
         let fifo = std::ffi::CString::new(path(&stuck_id).to_str().unwrap()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -632,7 +727,7 @@ mod tests {
             .expect("a FIFO entry never blocks");
         assert_eq!(names, vec![stuck.to_owned()]);
         std::fs::remove_file(path(&stuck_id)).unwrap();
-        UNWRITABLE.store(false, Ordering::SeqCst);
+        TRIPPED.store(0, Ordering::SeqCst);
 
         // The bound: with 50,000 other records, a hit reads one entry and one
         // record and never scans.

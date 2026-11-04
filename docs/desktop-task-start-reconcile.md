@@ -187,3 +187,39 @@ an outbox. Its Scope is data: the eventual native caller must separately retain
 and recheck the actual selected Service and the complete unchanged control-frame
 limit. A durable offered-unknown journal, native offer and exact result-to-outbox
 CAS remain separate caller work. The per-kind capability marker stays absent.
+
+## Native original-input journal
+
+`capture::journal` stores one bounded private `.reconcile` record beside the
+native task-start record, with a separate CLOEXEC metadata lock. It retains the
+exact original bytes, binding and native version plus one reconciliation UUID;
+it creates no Root operation or worker. The complete encoded journal is limited
+to 96 KiB and uses one fixed hash-derived slot per task, without discovery or
+history scans. An invalid preparation writes nothing. A missing journal beside
+an existing lock is uncertainty and cannot reserve another UUID.
+
+`Prepared` is durable before preparation returns. Before returning the fixed
+data Intent, the writer must persist `OfferedUnknown` with a file sync, atomic
+rename and parent-directory sync. A failed sync returns no Intent. The original
+native source, journal object and metadata lock are checked around publication.
+The native caller still needs its actual selected-Service/current admission;
+neither this phase nor an Intent is execution permission.
+
+After an offer, GUI exit, a missing lookup, a changed executor or service restart
+can only lead to bounded queries with the same original reconciliation UUID and
+binding. Saved data is readable without a live executor or extant outbox. It
+cannot infer no effect, change authority, replay the offer or reconstruct a task
+reply. A private-process kill control verifies the offered record survives the
+original writer's actual exit.
+
+Only a separate explicitly confirmed discard can retire a `Prepared` CHECK. It
+writes `CancelledBeforeOffer`, retains the original identity, and touches neither
+the task/outbox nor a Root receipt. `OfferedUnknown` cannot be discarded. A later
+explicit Check must match that cancellation tombstone before reserving a new
+reconciliation ID. Stale snapshots and missing metadata never authorize this
+transition; one previous cancellation ID stays in the bounded record.
+
+The actual native offer, fresh connection checks and submitted-plus-drained
+outbox CAS remain separate. Completion bookkeeping must allow a later genuinely
+new task-delivery identity without clearing an unsettled offered original.
+No capability marker or renderer operation is added by this journal.

@@ -137,3 +137,11 @@ the separate manual folder review opens its existing native guard flow without
 implying termination success, cleanup consent or replay. All offer errors are
 visible. Linux authentication `.66.4.6.9` and the qualified macOS caller under
 `.66.3.40.4` block the default-Service flip in #1340.
+
+Design coordinator sign-off: the unavailable-removal notice and “Review working
+folder…” button are the interim Terminate-dialog variant, replacing the checkbox
+only while removal is unavailable. The design/webui mockup needs a matching
+variant later; the coordinator owns that follow-up. Manual review loads only on
+its explicit action, so importing the action menus does not initialize its
+native event subscription. The original computer/path are copied before the
+asynchronous import and checked independently by the existing native review.

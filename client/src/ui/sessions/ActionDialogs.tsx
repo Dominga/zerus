@@ -17,7 +17,6 @@ import { FORK_CHECKING, FORK_HINT } from "./fork-ui";
 import { tr } from "../../i18n";
 import { readCleanupOffer } from "./termination-offer";
 import { CleanupOfferNotice } from "./CleanupOfferNotice";
-import { openWorktreeReview } from "../../store/worktreeCleanup";
 import { captureUntrackedShell, untrackedShell, UNVERIFIED_SHELL } from "../../store/untrackedShell";
 import type { Action } from "../../types";
 
@@ -240,7 +239,10 @@ export function TerminateDialog(props: { row: ActionRow; close: () => void }) {
         </Show>
         <Show when={offerError()}><CleanupOfferNotice error={offerError()} review={props.row.cwdPath ? () => {
           // Opening the existing review neither terminates nor removes anything.
-          props.close(); void openWorktreeReview(props.row.computer, props.row.cwdPath, props.row.cwdPath);
+          const { computer, cwdPath } = props.row;
+          props.close();
+          void import("../../store/worktreeCleanup").then(({ openWorktreeReview }) => openWorktreeReview(computer, cwdPath, cwdPath))
+            .catch((error) => notify("error", String(error), true));
         } : undefined} /></Show>
         <Show when={offer()}>
           <label class="check" style={{ "margin-top": "10px" }}><input type="checkbox" checked={remove()} onChange={(e) => setRemove(e.currentTarget.checked)} /> {tr("Remove the working folder after stopping")}</label>

@@ -93,11 +93,15 @@ Constraints (coordinator, 2026-11-04):
   - Resume, rename, Start fresh, Clear and restore carry both; recovery only sends input.
   - A `--fresh` launch over a saved, confirmed conversation of the label is a new session with its own journal and `launch_label`. Only a retry of an unconfirmed attempt continues that attempt's journal and label. Legacy name-only tasks also match `launch_label`.
   - Every v0.47.0 path reads and keeps `journal_name`. It drops the unknown `launch_label` on resume, and a later rename here pins the label it leaves.
-  - On v0.47.0, an explicit `-r ID` relaunch that replaces a saved P2b record would continue under the label rather than the ID journal. That is the only rollback gap.
+  - On v0.47.0, an explicit `-r ID` relaunch that replaces a saved P2b record would continue under the label rather than the ID journal. That is the only journal-continuity gap.
   - A fork's lineage keeps its three-part `[journal, conversation, sequence]` entries, which earlier builds read. The labels its sources had go in a separate `fork_lineage_labels` map, carried on resume, so inherited rows still show the source's label. Where the map is missing, the direct source falls back to the `fork_source_name` the fork recorded.
   - Fork rollback round trips:
     - A P2b fork resumed by v0.47.0 loses `fork_lineage`. If its source is later renamed or archived, the derived lineage finds nothing and saves an empty lineage for good, so the inherited view stays empty.
     - A fork resumed by an earlier lineage-era build keeps its lineage but drops the labels. Its direct source then shows its recorded label; older ancestors show their journal name.
+
+P3 checklist, besides the constraints above:
+
+- **Deferred sends** (core-cl, 2026-11-04). The deferred-send actor's pre-spawn check, `current()` in `src/desktop/deferred_send/target.rs`, reads the session record at `sha256(name).json`. When P3 keeps the record of a reused label at `sessions/<session_id>.json`, that check must read it there and pass the session ID to `hgs send`. Otherwise every deferred send settles as never started: safe, but broken.
 
 ## Owner questions
 
@@ -107,12 +111,23 @@ Constraints (coordinator, 2026-11-04):
    - From P3, `--new` adds another session with the label, so a script that relied on `--new` refusing would then get a second session.
 
    The alternative is that a launch always creates a new session.
+
+   **Owner answer, 2026-11-04:** "a name must not be an identifier; it is just a name." The resulting rule:
+   - The desktop and mobile New session always create a new session, whatever the name; duplicates are allowed. From P3 nothing anywhere refuses a name because another session has it.
+   - Every machine client and agent coordination path addresses sessions by session ID or reference, never by name.
+   - `hgs NAME` stays only as compatibility for scripts. It opens the one session with that name; with several, it refuses with the ambiguity list (exit 5) and never guesses. From P3, `hgs NAME --new` always creates a new session, even when the name exists.
 2. **Terminal names.** Should a new session keep its label as the tmux name when free, which keeps `tmux attach -t LABEL` working? The alternative is always ID-based terminal names: simpler, but a visible change for anyone attaching by hand.
 
    **Coordinator decision, 2026-11-04** (the owner asked for the release to run without these answers and may override it): keep the label as the tmux name while it is free, so `tmux attach -t LABEL` keeps working; use an ID-based terminal name only when the label is already taken.
 3. **Fork names.** Should forks keep the `-fork`/`-2` suffix once labels may repeat (proposed, for readability), or reuse the source label as-is?
+
+   **Owner answer, 2026-11-04:** "the fork dialog already asks for the name." The resulting rule:
+   - From P3, the name the person enters is used exactly as entered, even if another session has it.
+   - Until P3, the automatic `-2` stays and the dialog keeps its "in use" hint.
+   - The pre-filled suggestion stays `<name>-fork` for readability, and a CLI fork without a name keeps `-fork`.
+   - The `-2` search goes once names may repeat.
 4. **Swarm rollout.** Is one release window of dual-written catalog membership acceptable, or should P2 wait for an explicit catalog version gate?
 
    **Coordinator decision, 2026-11-04** (the owner may override it): dual-write catalog membership, both the name and `id:<session_id>`. Readers switch to ID membership, and the name form stops being written, only behind an explicit catalog version gate that every computer and the mobile connector advertise. There is no time-based release window.
 
-Questions 1 and 3 stay open for the owner. P3 does not start before they are answered.
+The owner answered questions 1 and 3 on 2026-11-04, so P3 may be planned after P2c.

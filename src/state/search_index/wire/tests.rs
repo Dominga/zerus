@@ -70,6 +70,20 @@ impl Fixture {
             )
             .unwrap()
     }
+    // Setup may yield at the production deadline. Resume committed work rather
+    // than assuming a Windows runner finishes the fixture in one pass.
+    fn prepare(&self, store: &mut Store, messages: u64, unavailable: u64) -> Progress {
+        for _ in 0..32 {
+            let progress = self.step(store, &budget());
+            let status = store.index.status().unwrap();
+            if status.messages == messages && status.unavailable_sources == unavailable
+                && status.pending_sources == unavailable {
+                return progress;
+            }
+        }
+        panic!("wire fixture did not reach {messages} messages and {unavailable} unavailable sources in 32 bounded passes: {}",
+            serde_json::to_string(&store.index.status().unwrap()).unwrap());
+    }
     fn publish(&self, store: &mut Store) -> Value {
         store
             .publish(
@@ -98,7 +112,7 @@ fn exact_kimi_public_wire_ingestion_and_publication_exclude_reasoning_and_foreig
     let fixture = Fixture::new();
     let mut store = fixture.store();
     let before = fs::read(&fixture.wire).unwrap();
-    let progress = fixture.step(&mut store, &budget());
+    let progress = fixture.prepare(&mut store, 1, 0);
     assert_eq!(progress.directory_entries, 2);
     assert_eq!(progress.locator_probes, 2);
     assert_eq!(store.index.status().unwrap().messages, 1);
@@ -129,7 +143,13 @@ fn partial_or_cancelled_workspace_discovery_never_admits_a_locator_or_message() 
     let mut store = fixture.store();
     let mut tiny = budget();
     tiny.directory_entries = 1;
-    let progress = fixture.step(&mut store, &tiny);
+    let progress = (0..32).find_map(|_| {
+        let progress = fixture.step(&mut store, &tiny);
+        assert!(progress.stopped);
+        assert_eq!(progress.locator_probes, 0);
+        assert_eq!(store.index.status().unwrap().messages, 0);
+        (progress.directory_entries == 1).then_some(progress)
+    }).expect("partial discovery reached its one-entry cap");
     assert!(progress.stopped);
     assert_eq!(progress.directory_entries, 1);
     assert_eq!(progress.locator_probes, 0);
@@ -145,7 +165,7 @@ fn partial_or_cancelled_workspace_discovery_never_admits_a_locator_or_message() 
         .unwrap();
     assert_eq!(cancelled.directory_entries, 0);
     assert_eq!(cancelled.files, 0);
-    fixture.step(&mut store, &budget());
+    fixture.prepare(&mut store, 1, 0);
     assert_eq!(
         fixture.publish(&mut store)["results"]
             .as_array()
@@ -159,7 +179,7 @@ fn partial_or_cancelled_workspace_discovery_never_admits_a_locator_or_message() 
 fn a_duplicate_under_an_existing_workspace_invalidates_the_saved_root_fingerprint() {
     let fixture = Fixture::new();
     let mut store = fixture.store();
-    fixture.step(&mut store, &budget());
+    fixture.prepare(&mut store, 1, 0);
     let root = fixture.home.join("sessions");
     let before = directory_id(&root).unwrap();
     let duplicate = root
@@ -175,7 +195,7 @@ fn a_duplicate_under_an_existing_workspace_invalidates_the_saved_root_fingerprin
     );
     let reply = fixture.publish(&mut store);
     assert!(reply["results"].as_array().unwrap().is_empty());
-    fixture.step(&mut store, &budget());
+    fixture.prepare(&mut store, 1, 1);
     assert_eq!(store.index.status().unwrap().unavailable_sources, 1);
     assert!(fixture.publish(&mut store)["results"]
         .as_array()
@@ -193,7 +213,7 @@ fn a_wire_added_below_an_existing_conversation_still_invalidates_uniqueness() {
         .join("agents/main/wire.jsonl");
     fs::create_dir_all(duplicate.parent().unwrap()).unwrap();
     let mut store = fixture.store();
-    fixture.step(&mut store, &budget());
+    fixture.prepare(&mut store, 1, 0);
     assert_eq!(
         fixture.publish(&mut store)["results"]
             .as_array()
@@ -278,7 +298,7 @@ fn appended_kimi_messages_resume_and_forgotten_bindings_stay_excluded() {
     use std::io::Write;
     let fixture = Fixture::new();
     let mut store = fixture.store();
-    fixture.step(&mut store, &budget());
+    fixture.prepare(&mut store, 1, 0);
     fs::OpenOptions::new()
         .append(true)
         .open(&fixture.wire)
@@ -289,7 +309,7 @@ fn appended_kimi_messages_resume_and_forgotten_bindings_stay_excluded() {
         .as_array()
         .unwrap()
         .is_empty());
-    fixture.step(&mut store, &budget());
+    fixture.prepare(&mut store, 2, 0);
     assert_eq!(
         fixture.publish(&mut store)["results"]
             .as_array()
@@ -313,7 +333,7 @@ fn a_linked_wire_never_copies_another_conversations_body() {
     fs::remove_file(&fixture.wire).unwrap();
     std::os::unix::fs::symlink(other, &fixture.wire).unwrap();
     let mut store = fixture.store();
-    fixture.step(&mut store, &budget());
+    fixture.prepare(&mut store, 0, 1);
     assert_eq!(store.index.status().unwrap().messages, 0);
     assert_eq!(store.index.status().unwrap().unavailable_sources, 1);
 }

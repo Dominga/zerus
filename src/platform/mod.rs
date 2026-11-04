@@ -160,21 +160,31 @@ pub fn ssh_capture(args: &[String]) -> Option<String> {
 /// while a scanner or reader briefly holds the destination; retry that for a
 /// bounded time. Unix renames at once.
 pub fn persist(
+    temporary: tempfile::NamedTempFile,
+    path: impl AsRef<Path>,
+) -> Result<File, tempfile::PersistError> {
+    persist_with_wait(temporary, path, std::time::Instant::now, std::thread::sleep)
+}
+
+// Keep the real file operations in retry tests; only scheduling is controlled.
+fn persist_with_wait(
     mut temporary: tempfile::NamedTempFile,
     path: impl AsRef<Path>,
+    now: impl Fn() -> std::time::Instant,
+    mut wait: impl FnMut(std::time::Duration),
 ) -> Result<File, tempfile::PersistError> {
     let path = path.as_ref();
     let mut delay = std::time::Duration::from_millis(10);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    let deadline = now() + std::time::Duration::from_secs(1);
     loop {
         match temporary.persist(path) {
             Ok(file) => return Ok(file),
             Err(error)
                 if transient_replace_error(&error.error)
-                    && std::time::Instant::now() < deadline =>
+                    && now() < deadline =>
             {
                 temporary = error.file;
-                std::thread::sleep(delay);
+                wait(delay);
                 delay = (delay * 2).min(std::time::Duration::from_millis(200));
             }
             Err(error) => return Err(error),

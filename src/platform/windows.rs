@@ -3059,7 +3059,9 @@ mod tests {
 
     #[test]
     fn replacement_waits_for_a_reader_without_delete_sharing() {
+        use std::cell::Cell;
         use std::io::Write;
+        use std::time::{Duration, Instant};
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("catalog.json");
         fs::write(&target, b"old").unwrap();
@@ -3069,14 +3071,17 @@ mod tests {
             .share_mode(1)
             .open(&target)
             .unwrap();
-        let release = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(150));
-            drop(reader);
-        });
+        let mut reader = Some(reader);
+        let clock = Cell::new(Instant::now());
+        let retries = Cell::new(0);
         let mut temporary = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
         temporary.write_all(b"new").unwrap();
-        super::super::persist(temporary, &target).unwrap();
-        release.join().unwrap();
+        super::super::persist_with_wait(temporary, &target, || clock.get(), |delay| {
+            retries.set(retries.get() + 1);
+            drop(reader.take());
+            clock.set(clock.get() + delay);
+        }).unwrap();
+        assert!(retries.get() > 0, "the held reader caused a retry");
         assert_eq!(fs::read(&target).unwrap(), b"new");
 
         // A holder that never lets go fails within the bounded wait.
@@ -3087,9 +3092,13 @@ mod tests {
             .unwrap();
         let mut temporary = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
         temporary.write_all(b"blocked").unwrap();
-        let started = std::time::Instant::now();
-        assert!(super::super::persist(temporary, &target).is_err());
-        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        let started = clock.get();
+        assert!(super::super::persist_with_wait(temporary, &target, || clock.get(), |delay| {
+            clock.set(clock.get() + delay);
+        }).is_err());
+        let elapsed = clock.get() - started;
+        assert!(elapsed >= Duration::from_secs(1));
+        assert!(elapsed <= Duration::from_millis(1200), "retry budget plus one backoff");
         assert_eq!(fs::read(&target).unwrap(), b"new");
     }
 

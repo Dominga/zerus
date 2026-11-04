@@ -14,7 +14,9 @@ const MARKER: &str = "Desktop service activation ABI: desktop-service-activation
 const CHOICE_MARKER: &str =
     "Desktop service mode choice scope ABI: desktop-service-mode-choice-scope-v1";
 const BYTES: usize = 64 << 10;
+mod first;
 mod review;
+pub(super) use first::{Prepared as FirstPrepared, View as FirstView};
 pub(super) use review::{Action as ReviewAction, Prepared, View as ReviewView};
 type Resources = Arc<dyn Send + Sync>;
 
@@ -28,6 +30,9 @@ pub(super) struct View {
     pub automatic_blocked: bool,
     pub request_id: Option<String>,
     pub active: bool,
+    /// A first explicit background choice offer (Windows, zerus-yfbd.1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first: Option<first::View>,
 }
 struct Intent {
     id: String,
@@ -45,6 +50,8 @@ struct State {
     review_capable: bool,
     choice_capable: bool,
     business: Option<review::Business>,
+    first: Option<first::Target>,
+    first_capable: bool,
 }
 pub(super) struct Controller {
     state: Mutex<State>,
@@ -52,6 +59,8 @@ pub(super) struct Controller {
     stop: AtomicBool,
     #[cfg(all(test, target_os = "linux"))]
     helper_directory: Mutex<Option<PathBuf>>,
+    #[cfg(all(test, target_os = "linux"))]
+    windows_fixture: Mutex<Option<PathBuf>>,
 }
 impl Controller {
     pub fn new() -> Arc<Self> {
@@ -61,13 +70,32 @@ impl Controller {
             stop: AtomicBool::new(false),
             #[cfg(all(test, target_os = "linux"))]
             helper_directory: Mutex::new(None),
+            #[cfg(all(test, target_os = "linux"))]
+            windows_fixture: Mutex::new(None),
         })
     }
     #[cfg(all(test, target_os = "linux"))]
     pub(super) fn fixture_helpers(&self, directory: Option<PathBuf>) {
         *self.helper_directory.lock().unwrap() = directory;
     }
+    /// A Windows-shaped route over a fake registration CLI, so the
+    /// first-choice controller runs on Linux CI. Test-only.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn fixture_windows(&self, cli: Option<PathBuf>) {
+        *self.windows_fixture.lock().unwrap() = cli;
+    }
     fn select_route(&self, ordinary: &std::path::Path) -> Result<Route, &'static str> {
+        #[cfg(all(test, target_os = "linux"))]
+        if let Some(cli) = self.windows_fixture.lock().unwrap().clone() {
+            let relay = Arc::new(zerus_client_core::desktop::relay::Connection::select(&cli)?);
+            return Ok(Route {
+                relay,
+                helper: cli.clone(),
+                cli,
+                windows: true,
+                files: Vec::new(),
+            });
+        }
         #[cfg(all(test, target_os = "linux"))]
         if let Some(directory) = self.helper_directory.lock().unwrap().clone() {
             let relay = Arc::new(zerus_client_core::desktop::relay::Connection::select(
@@ -211,6 +239,12 @@ impl Controller {
             .unwrap_or_else(PoisonError::into_inner)
             .choice_capable =
             std::str::from_utf8(&help).is_ok_and(|s| s.lines().any(|l| l.trim() == CHOICE_MARKER));
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .first_capable = route.windows
+            && std::str::from_utf8(&help)
+                .is_ok_and(|s| s.lines().any(|l| l.trim() == first::MARKER));
         let Some(status) = self.status(route.clone(), &configuration, resources.clone()) else {
             return;
         };
@@ -327,6 +361,9 @@ impl Controller {
             }
         }
         self.project(&status, route.windows);
+        if route.windows {
+            self.record_first(route, configuration, &status);
+        }
         Some(status)
     }
     /// The view one checked registration status leaves. Every path that reads
@@ -440,6 +477,8 @@ impl Controller {
     }
     fn failed(&self, code: &str) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        // Any failed read closes a first-choice offer until a checked status.
+        state.first = None;
         if code == "activation_platform_manual" {
             // No native activation route on this platform: nothing to resume
             // here. The code stays visible so the client can say where the
@@ -450,6 +489,7 @@ impl Controller {
             };
             return;
         }
+        state.view.first = None;
         state.business = None;
         state.view.code = code.into();
         state.view.needs_resume = true;
@@ -469,7 +509,19 @@ impl Controller {
         resources: Resources,
         id: &str,
     ) -> Option<Vec<u8>> {
-        let (result, joined) = self.exchange_bytes(route, args, resources, Duration::from_secs(30));
+        self.call_effect_checked(route, args, resources, id, None)
+    }
+    /// `veto` runs at the mutating child's spawn, after every earlier check.
+    fn call_effect_checked(
+        self: &Arc<Self>,
+        route: Arc<Route>,
+        args: Vec<String>,
+        resources: Resources,
+        id: &str,
+        veto: Option<Arc<dyn Fn() -> Result<(), &'static str> + Send + Sync>>,
+    ) -> Option<Vec<u8>> {
+        let (result, joined) =
+            self.exchange_bytes(route, args, resources, Duration::from_secs(30), veto);
         if let Some(intent) = self
             .state
             .lock()
@@ -495,7 +547,7 @@ impl Controller {
         resources: Resources,
         timeout: Duration,
     ) -> Option<Vec<u8>> {
-        match self.exchange_bytes(route, args, resources, timeout).0 {
+        match self.exchange_bytes(route, args, resources, timeout, None).0 {
             Ok(bytes) => Some(bytes),
             Err(_) => {
                 self.failed("activation_unconfirmed");
@@ -509,6 +561,7 @@ impl Controller {
         args: Vec<String>,
         resources: Resources,
         timeout: Duration,
+        veto: Option<Arc<dyn Fn() -> Result<(), &'static str> + Send + Sync>>,
     ) -> (Result<Vec<u8>, OwnedError>, bool) {
         let inv = Invocation {
             args,
@@ -533,6 +586,9 @@ impl Controller {
             &self.stop,
             move |command| {
                 selected.check().map_err(std::io::Error::other)?;
+                if let Some(veto) = &veto {
+                    veto().map_err(std::io::Error::other)?;
+                }
                 #[cfg(windows)]
                 {
                     use std::os::windows::process::CommandExt;
@@ -871,6 +927,22 @@ impl Route {
         args.extend(["--activation-id".into(), id.into(), "--json".into()]);
         args
     }
+    /// The first-choice form; offered only on the Windows route.
+    fn first_arguments(&self, id: &str) -> Vec<String> {
+        [
+            "desktop",
+            "registration",
+            "install",
+            "--mode",
+            "background",
+            "--json",
+            "--request-id",
+            id,
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    }
     fn choice_arguments(&self, reviewed: &str, id: &str, action: ReviewAction) -> Vec<String> {
         if self.windows {
             return [
@@ -949,6 +1021,8 @@ pub(super) async fn startup(shared: &Arc<Shared>, automatic: bool, configuration
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod first_tests;
 #[cfg(test)]
 mod projection_tests;
 #[cfg(all(test, target_os = "linux"))]

@@ -296,6 +296,10 @@ impl Runtime {
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"deferred_send_unsupported"});
         }
+        // Its actor has not landed: the request is recognized and refused.
+        if authority.operation() == "deferred_answer" {
+            return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"deferred_answer_unsupported"});
+        }
         // A recognized native request is still not executing-kind admission.
         if authority.operation() == "task_start_reconcile" {
             return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"task_start_reconcile_unsupported"});

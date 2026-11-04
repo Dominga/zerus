@@ -282,6 +282,79 @@ fn a_cache_stop_database_error_still_stops_every_other_component() {
     assert!(f.runtime.drained());
 }
 
+/// A valid deferred answer to a Claude folder-trust question, built as the
+/// client builds it.
+fn deferred_answer_intent(
+    configuration: String,
+    epoch: String,
+) -> zerus_client_core::desktop::deferred_answer::Intent {
+    use zerus_client_core::{
+        desktop::deferred_answer::{Intent, Scope},
+        operation_recovery::deferred_input as checkpoint,
+        questions::{consent_identity, AnswerItem},
+    };
+    let question = serde_json::json!({"question_id": "q-1", "question_hash": "ab".repeat(32),
+        "run_id": "run-1", "conversation_id": "conversation-1", "source": "claude_folder_trust",
+        "answer_transport": "claude_tui", "questions": [{"id": "q-1", "question": "Trust?",
+            "options": [{"id": "yes", "label": "Yes"}]}]});
+    let answers = vec![AnswerItem::Choice {
+        question_id: "q-1".into(),
+        selected_option_ids: vec!["yes".into()],
+        text: String::new(),
+    }];
+    let identity = consent_identity(&question);
+    let reserved = checkpoint::Checkpoint::reserve(checkpoint::Intent {
+        kind: checkpoint::Kind::Answer,
+        draft_revision: 1,
+        message_sha256: checkpoint::message_sha256(
+            &serde_json::to_string(&answers).unwrap(),
+            std::iter::empty(),
+        ),
+        run_id: "run-1".into(),
+        conversation_id: "conversation-1".into(),
+        question: Some(checkpoint::Question {
+            id: "q-1".into(),
+            identity_sha256: checkpoint::identity_sha256(&identity),
+        }),
+        start: None,
+        retry_of: None,
+        consent: false,
+    });
+    let original = serde_json::json!({"request_id": reserved.request_id, "question_id": "q-1",
+        "expected_question_hash": "ab".repeat(32), "expected_run_id": "run-1",
+        "expected_conversation_id": "conversation-1", "answers": answers});
+    Intent {
+        scope: Scope {
+            configuration,
+            service_epoch: epoch,
+        },
+        session: "claude/private-answer".into(),
+        request_id: reserved.request_id.clone(),
+        checkpoint: serde_json::to_string(&reserved).unwrap(),
+        pinned: identity.to_string(),
+        original: original.to_string(),
+    }
+}
+
+#[test]
+fn a_deferred_answer_is_refused_until_its_actor_lands() {
+    let mut f = Fixture::new();
+    let intent = deferred_answer_intent(
+        f.location.configuration.clone(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+    intent.clone().verify().unwrap();
+    let request = zerus_client_core::desktop::ui_requests::Request::DeferredAnswer {
+        intent: Box::new(intent.clone()),
+    };
+    let authority = crate::desktop::ui_authority::Validated::fixture(&serde_json::json!(request));
+    assert_eq!(
+        f.runtime.frontend_request(&mut f.store, authority),
+        serde_json::json!({"request_id": intent.request_id, "accepted": false,
+            "durable": false, "code": "deferred_answer_unsupported"})
+    );
+}
+
 #[test]
 fn a_deferred_send_reaches_its_actor_which_refuses_without_a_lease() {
     use zerus_client_core::{

@@ -58,6 +58,7 @@ mod prompt_suggestion;
 mod question_terminal;
 mod questions;
 mod codex_questions;
+mod codex_approval;
 mod codex_trust;
 mod codex_hooks_trust;
 mod codex_update;

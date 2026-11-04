@@ -113,6 +113,8 @@ const
 var
   Upgrade: Boolean;
   Payload: TStringList;
+  { The first existing folder a scan could not list; the checks fail closed on it. }
+  Unreadable: String;
 
 function Relaunch(): Boolean;
 var
@@ -243,7 +245,12 @@ var
 begin
   Result := '';
   if not FindFirst(AddBackslash(Folder) + '*', Find) then
+  begin
+    { A folder that exists but cannot be listed may hide a link: never pass it. }
+    if DirExists(Folder) and (Unreadable = '') then
+      Unreadable := Folder;
     Exit;
+  end;
   try
     repeat
       if (Find.Name <> '.') and (Find.Name <> '..') then
@@ -268,7 +275,16 @@ var
 begin
   Result := False;
   if not FindFirst(AddBackslash(Folder) + '*', Find) then
+  begin
+    { An existing folder that cannot be listed is not known to be empty. }
+    if DirExists(Folder) then
+    begin
+      if Unreadable = '' then
+        Unreadable := Folder;
+      Result := True;
+    end;
     Exit;
+  end;
   try
     repeat
       if (Find.Name <> '.') and (Find.Name <> '..') then
@@ -319,6 +335,7 @@ begin
     Exit;
   end;
   #endif
+  Unreadable := '';
   Link := LinkedPath(ExpandConstant('{app}'));
   if Link = '' then
     Link := FindLink(ExpandConstant('{app}'));
@@ -330,13 +347,20 @@ begin
     Exit;
   end;
   if not OwnedFolder() then
-    if HoldsFiles(ExpandConstant('{app}')) then
+    if HoldsFiles(ExpandConstant('{app}')) and (Unreadable = '') then
     begin
       Result := 'Setup stopped: ' + ExpandConstant('{app}') + ' is not empty and is not a Zerus installation folder,' +
         ' for example an extracted portable zip. Choose an empty folder or move its files away, then run Setup again.' +
         ' Nothing was changed.';
       Log(Result);
     end;
+  if (Result = '') and (Unreadable <> '') then
+  begin
+    Result := 'Setup stopped: ' + Unreadable + ' cannot be listed, so Setup cannot check the Zerus folder for links' +
+      ' or files it does not own. Fix its permissions or choose another location, then run Setup again.' +
+      ' Nothing was changed.';
+    Log(Result);
+  end;
 end;
 
 { Removes files in Folder (relative path Relative) that the new payload does

@@ -341,5 +341,27 @@ class Installer(windows_host.HostCase):
         self.install()
         self.assertEqual(windows_installer.problems(self.app, self.expected), [])
 
+    def test_setup_refuses_a_folder_it_cannot_list(self):
+        # A folder Setup cannot list might hide a link or foreign files: refuse,
+        # never treat it as empty.
+        locked = self.app / "locked"
+        locked.mkdir(parents=True)
+        user = subprocess.run(["whoami"], capture_output=True, text=True, timeout=LIMIT,
+                              creationflags=HIDDEN).stdout.strip()
+        icacls = str(Path(os.environ["SystemRoot"]) / "System32" / "icacls.exe")
+        deny = subprocess.run([icacls, str(locked), "/deny", f"{user}:(RD)"], stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=LIMIT, creationflags=HIDDEN)
+        self.assertEqual(deny.returncode, 0, deny.stdout + deny.stderr)
+        # Runs before the case's own clean-up removes its folder.
+        self.addCleanup(lambda: subprocess.run([icacls, str(locked), "/remove:d", user], stdin=subprocess.DEVNULL,
+                                               capture_output=True, timeout=LIMIT, creationflags=HIDDEN))
+        with self.assertRaises(PermissionError):
+            os.listdir(locked)
+        code, log = self.setup()
+        self.assertEqual(code, 7, log[-4000:])
+        self.assertIn("cannot be listed", log)
+        self.assertEqual(os.listdir(self.app), ["locked"])
+        self.assertIsNone(registered())
+
 if __name__ == "__main__":
     unittest.main()

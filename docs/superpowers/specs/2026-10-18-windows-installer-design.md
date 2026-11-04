@@ -155,7 +155,9 @@ job from the tested portable zip:
   Any other folder that holds files, such as an extracted portable zip, stops
   Setup with exit code 7 before anything changes: the sweep would never clean
   files it does not own, so they would stay mixed with the new payload
-  (owner decision 2026-11-04, `zerus-5wmh.66.8.1.11`).
+  (owner decision 2026-11-04, `zerus-5wmh.66.8.1.11`). A folder below the
+  install folder that Setup cannot list is never taken as empty or link-free:
+  Setup stops with exit code 7 and names it.
 - **Uninstall.** It removes only the installed files and the shortcut, and keeps
   the staged CLI, host images, configuration and sessions. The documentation
   points at `hgs.exe session-host uninstall` for disabling local sessions first.

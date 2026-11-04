@@ -269,8 +269,13 @@ impl Runtime {
         };
         let mut prepared = prepared;
         let staged = std::mem::take(&mut prepared.staged);
+        // The original object, kept for its exact removal later.
+        let original = prepared.input.file.try_clone().ok();
         match self.admit_reference(store, authority, verified, &lease, prepared.input) {
             Ok(value) => {
+                if let Some(original) = original {
+                    self.retained.insert(id.clone(), original);
+                }
                 self.answer(&queue, seq, value);
                 // Exactly the staged copies it read; they are disposable.
                 if let Some(roots) = self.roots.clone() {
@@ -285,7 +290,7 @@ impl Runtime {
             Err(_) => {
                 // Nothing was admitted. The exact published input is removed
                 // before the reservation is released.
-                self.refused.push((id.clone(), expected));
+                self.refused.push((id.clone(), expected, original));
                 let value = self.refusal(&id, "task_message_unavailable");
                 self.answer(&queue, seq, value);
             }
@@ -379,14 +384,32 @@ impl Runtime {
         let Some(roots) = self.roots.clone() else {
             return Ok(());
         };
-        let next = if let Some((id, expected)) = self.refused.pop() {
-            Some((id, Job::Refused, Some(expected)))
+        let next = if let Some((id, expected, original)) = self.refused.pop() {
+            match original {
+                Some(original) => Some((id, Job::Refused, Some((expected, original)))),
+                // Without its original object it is never removed: it stays
+                // reserved, and the reservation sweep keeps it as an orphan.
+                None => return Ok(()),
+            }
+        } else if let Some((id, expected)) = self.next_drained(store)? {
+            match self.retained.remove(&id) {
+                Some(original) => Some((id, Job::Drained, Some((expected, original)))),
+                None => {
+                    // Its original object is gone (a restart, or a handle
+                    // this process never kept): a reopened name could be a
+                    // replacement, so the input stays charged for explicit
+                    // review. The execution outcome is untouched.
+                    let tx = store
+                        .db
+                        .transaction_with_behavior(TransactionBehavior::Immediate)?;
+                    super::super::inputs::failed(&tx, &id)?;
+                    tx.commit()?;
+                    return Ok(());
+                }
+            }
         } else {
-            self.next_drained(store)?
-                .map(|(id, expected)| (id, Job::Drained, Some(expected)))
-                .or(self
-                    .next_reserved(store)?
-                    .map(|id| (id, Job::Reserved, None)))
+            self.next_reserved(store)?
+                .map(|id| (id, Job::Reserved, None))
         };
         let Some((id, job, expected)) = next else {
             return Ok(());
@@ -402,9 +425,10 @@ impl Runtime {
             .spawn(move || {
                 let _owner = owner;
                 let ok = match expected {
-                    Some(expected) => {
+                    Some((expected, original)) => {
                         let deadline = staging::removal_deadline(&request);
-                        staging::remove_input(&roots, &request, &expected, deadline).is_ok()
+                        staging::remove_input(&roots, &request, &expected, &original, deadline)
+                            .is_ok()
                     }
                     None => staging::input_exists(&roots, &request).unwrap_or(true),
                 };
@@ -426,7 +450,7 @@ impl Runtime {
                 .admitting
                 .as_ref()
                 .is_some_and(|a| a.verified.plan.request_id == id)
-            || self.refused.iter().any(|(refused, _)| refused == id)
+            || self.refused.iter().any(|(refused, _, _)| refused == id)
     }
 
     /// A held input whose original drained physically and that nothing here

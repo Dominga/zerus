@@ -168,18 +168,24 @@ the form like every original.
   after its original drained physically and nothing in this process holds it.
   A restart does not change that: a retired but undrained original keeps its
   input. The removal needs all of the following:
-  - the recorded identity of a private regular file of this user with one
-    link;
-  - the record's size and SHA-256, read through the opened file, whose exact
-    version (identity, size, mode, links, modification and status times) must
-    not change across that read;
-  - within one deadline that is never renewed, the held folder and the
-    canonical name, never followed, still denoting that same opened,
-    unchanged file right before the unlink.
+  - the original object itself: a duplicate of the input's own open file
+    description that this process kept from admission (or from the refused
+    admission) until the removal, so its inode cannot have been reused, and
+    which never reads an original pipe or delays a drain. A file merely
+    reopened by name is never that witness. Without the original (after a
+    restart, say), the input is marked `failed` and stays charged for
+    explicit review; its execution outcome, drain and receipt are untouched;
+  - that object's recorded identity, as a private regular file of this user
+    with one link;
+  - the record's size and SHA-256, read through it, with its exact version
+    (identity, size, mode, links, modification and status times) unchanged
+    across that read;
+  - the held folder and the canonical name, never followed, still denoting
+    that same unchanged object, and a deadline that is never renewed,
+    checked once more right before the unlink.
 
-  The identity alone, the bytes alone or another name never authorize it. The
-  worker keeps the service's own exclusion until it finished, its folder sync
-  included. A failed removal stays visible and charged. Staged copies stay
+  The worker keeps the service's own exclusion until it finished, its folder
+  sync included. A failed removal stays visible and charged. Staged copies stay
   open from the moment they were created (client) or read (service) until
   their removal, so a file recreated under a copy's name never shares its
   inode. Lookups never read an input, so a legitimately removed one changes

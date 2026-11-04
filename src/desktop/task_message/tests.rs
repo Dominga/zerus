@@ -2033,13 +2033,15 @@ mod actor {
             assert_eq!(f.state(&original), "held", "kept across the restart");
             assert!(f.input_path(&original).exists());
             drop(release);
-            f.until("drained and removed", |f| {
+            // Drained after the restart, but its original object is gone with
+            // the old process: kept, failed and charged for explicit review.
+            f.until("drained and kept for review", |f| {
                 !f.row(&original).custody.is_none()
                     && f.row(&original).receipt.drained
-                    && f.state(&original) == "removed"
+                    && f.state(&original) == "failed"
             });
-            assert!(!f.input_path(&original).exists());
-            assert_eq!(inputs::totals(&f.store.db).unwrap(), (0, 0));
+            assert!(f.input_path(&original).exists());
+            assert_eq!(inputs::totals(&f.store.db).unwrap().0, 1);
         }
 
         #[test]
@@ -2189,10 +2191,24 @@ mod staging_tests {
         );
         staging::remove_staged(&roots, &request, &prepared.staged).unwrap();
         assert!(!dir.exists(), "exactly its copies, then the empty folder");
-        staging::remove_input(&roots, &request, &expected(&prepared), soon()).unwrap();
+        staging::remove_input(
+            &roots,
+            &request,
+            &expected(&prepared),
+            &prepared.input.file,
+            soon(),
+        )
+        .unwrap();
         assert!(!input(&root, &request).exists());
-        // Removing what is already gone is not an error.
-        staging::remove_input(&roots, &request, &expected(&prepared), soon()).unwrap();
+        // Its original is no longer linked: a second removal refuses.
+        assert!(staging::remove_input(
+            &roots,
+            &request,
+            &expected(&prepared),
+            &prepared.input.file,
+            soon()
+        )
+        .is_err());
     }
 
     #[test]
@@ -2438,37 +2454,33 @@ mod staging_tests {
 
     #[test]
     fn a_custody_input_needs_its_recorded_identity_and_a_private_file() {
-        for case in [
-            "hard link",
-            "readable by others",
-            "same bytes, other object",
-        ] {
+        for case in ["hard link", "readable by others", "not the original"] {
             let (_temp, root, roots) = fresh();
             let (verified, blobs, _) = original(&[shot(23, 2048)]);
             let request = verified.plan.request_id.clone();
             stage(&root, &request, &blobs);
             let prepared = staging::prepare(&roots, &verified, soon()).unwrap();
             let wanted = expected(&prepared);
-            drop(prepared);
             let path = input(&root, &request);
+            let mut held = prepared.input.file.try_clone().unwrap();
             match case {
                 "hard link" => std::fs::hard_link(&path, path.with_extension("link")).unwrap(),
                 "readable by others" => {
                     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap()
                 }
                 _ => {
-                    // Created while the original still exists, so it is
-                    // another object whatever the filesystem, with the same
-                    // bytes.
+                    // The same bytes as another object, held as if it were the
+                    // original and named like it.
                     let other = path.with_extension("other");
                     std::fs::write(&other, std::fs::read(&path).unwrap()).unwrap();
                     std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o600))
                         .unwrap();
                     std::fs::rename(&other, &path).unwrap();
+                    held = std::fs::File::open(&path).unwrap();
                 }
             }
             assert!(
-                staging::remove_input(&roots, &request, &wanted, soon()).is_err(),
+                staging::remove_input(&roots, &request, &wanted, &held, soon()).is_err(),
                 "{case}"
             );
             assert!(path.exists(), "{case}: kept for explicit review");
@@ -2477,12 +2489,13 @@ mod staging_tests {
 
     #[test]
     fn a_removal_checks_the_name_again_after_its_read_within_its_deadline() {
-        use staging::RemovalPoint::{BeforeName, Read};
+        use staging::RemovalPoint::{BeforeName, BeforeUnlink, Read};
         let cases = [
             ("swapped before the name", BeforeName),
             ("renamed during the read", Read),
             ("rewritten during the read", Read),
             ("late", Read),
+            ("late right before the unlink", BeforeUnlink),
             ("exact", Read),
         ];
         for (case, point) in cases {
@@ -2512,7 +2525,9 @@ mod staging_tests {
                     file.write_all(&bytes).unwrap();
                     file.sync_all().unwrap();
                 }),
-                "late" => Box::new(|| std::thread::sleep(Duration::from_millis(400))),
+                "late" | "late right before the unlink" => {
+                    Box::new(|| std::thread::sleep(Duration::from_millis(400)))
+                }
                 _ => Box::new(|| {}),
             };
             staging::REMOVAL_HOOKS
@@ -2520,12 +2535,13 @@ mod staging_tests {
                 .unwrap()
                 .push((request.clone(), point, hook));
             let deadline = Instant::now()
-                + if case == "late" {
+                + if case.starts_with("late") {
                     Duration::from_millis(300)
                 } else {
                     Duration::from_secs(20)
                 };
-            let result = staging::remove_input(&roots, &request, &wanted, deadline);
+            let result =
+                staging::remove_input(&roots, &request, &wanted, &prepared.input.file, deadline);
             match case {
                 "exact" => {
                     result.unwrap();
@@ -2556,11 +2572,7 @@ mod staging_tests {
             input: custody,
             staged,
         } = prepared;
-        // Once nothing holds the input, its identity alone proves nothing: a
-        // file recreated under its name may reuse its inode number (ext4
-        // does). Rewritten in place, the same inode holds other bytes and
-        // is never removed.
-        drop(custody);
+        // Rewritten in place, the original holds other bytes: never removed.
         let path = input(&root, &request);
         let mut other = std::fs::read(&path).unwrap();
         other[0] ^= 1;
@@ -2569,13 +2581,13 @@ mod staging_tests {
             let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
             file.write_all(&other).unwrap();
         }
-        assert!(staging::remove_input(&roots, &request, &wanted, soon()).is_err());
+        assert!(staging::remove_input(&roots, &request, &wanted, &custody.file, soon()).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), other);
         // And another object of other bytes under the custody name stays.
         std::fs::remove_file(&path).unwrap();
         std::fs::write(&path, b"another").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(staging::remove_input(&roots, &request, &wanted, soon()).is_err());
+        assert!(staging::remove_input(&roots, &request, &wanted, &custody.file, soon()).is_err());
         assert!(path.exists());
         // A staged copy is still held, so a file recreated under its name
         // is another object: it stays, and so does the folder.

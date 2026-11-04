@@ -448,6 +448,9 @@ pub(super) enum RemovalPoint {
     Read,
     /// After every check of the opened file, before the name's last check.
     BeforeName,
+    /// After the name's last check, right before the deadline's last check
+    /// and the unlink.
+    BeforeUnlink,
 }
 /// Test-only removal hooks, by request ID and point, run on the removal
 /// worker.
@@ -511,55 +514,50 @@ fn file_version(file: &File) -> io::Result<FileVersion> {
     })
 }
 
-/// Removes the custody input of `request` only while its name still denotes
-/// exactly the expected object: the recorded identity, a private regular
-/// file of this user with one link, and the record's size and SHA-256. The
-/// bytes are read through the opened file, whose version must not change
-/// across that read. Right before the unlink, within `deadline`, the held
-/// folder and the canonical name (never followed) must still denote that
-/// same opened, unchanged file. Anything else refuses and leaves the input
-/// charged: the identity alone, the bytes alone or another name never
-/// authorize a removal. A missing input was already removed.
+/// Removes the custody input of `request` only through its original object,
+/// `held`: a descriptor this process kept since it created the input, so the
+/// object's inode cannot have been reused. A file merely reopened by name is
+/// never that witness: without the original, a caller keeps the input
+/// charged for explicit review instead.
+///
+/// The held object must have the recorded identity, be a private regular file
+/// of this user with one link, and hold exactly the record's size and SHA-256,
+/// read through it. Its version (identity, size, mode, links, modification
+/// and status times) must not change across that read. The held folder and
+/// the canonical name, never followed, must still denote that same unchanged
+/// object, and the deadline, never renewed, is checked once more right before
+/// the unlink. Anything else refuses and leaves the input charged.
 pub(super) fn remove_input(
     roots: &Roots,
     request: &str,
     expected: &Expected,
+    held: &File,
     deadline: Instant,
 ) -> io::Result<()> {
     let refused = || io::Error::from(io::ErrorKind::InvalidData);
     if !roots.current() {
         return Err(refused());
     }
-    let mut file = match open_at(
-        &roots.inputs.file,
-        request,
-        libc::O_RDONLY | libc::O_NOCTTY,
-        0,
-    ) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return roots.inputs.sync(),
-        Err(error) => return Err(error),
-    };
-    let before = file_version(&file)?;
+    let before = file_version(held)?;
     if before.identity != expected.identity
         || before.size != expected.bytes
-        || !platform::verify_private_file(&file)?
+        || !platform::verify_private_file(held)?
     {
         return Err(refused());
     }
-    let digest = content_digest(&mut file, expected.bytes, deadline)?;
+    let digest = content_digest(held, expected.bytes, deadline)?;
     #[cfg(test)]
     removal_hook(request, RemovalPoint::Read);
     // Its mode and links are part of the version, so it is still private.
-    if file_version(&file)? != before || digest.as_deref() != Some(expected.sha256.as_str()) {
+    if file_version(held)? != before || digest.as_deref() != Some(expected.sha256.as_str()) {
         return Err(refused());
     }
     #[cfg(test)]
     removal_hook(request, RemovalPoint::BeforeName);
-    if Instant::now() >= deadline || !roots.current() {
+    if !roots.current() {
         return Err(refused());
     }
-    // The canonical name still denotes that same held, unchanged file.
+    // The canonical name still denotes that same held, unchanged object.
     let named = open_at(
         &roots.inputs.file,
         request,
@@ -567,6 +565,11 @@ pub(super) fn remove_input(
         0,
     );
     if named.and_then(|now| file_version(&now)).ok() != Some(before) {
+        return Err(refused());
+    }
+    #[cfg(test)]
+    removal_hook(request, RemovalPoint::BeforeUnlink);
+    if Instant::now() >= deadline {
         return Err(refused());
     }
     unlink_at(&roots.inputs.file, request, 0)?;
@@ -591,9 +594,11 @@ fn remove_held(roots: &Roots, request: &str, held: &File) -> io::Result<()> {
     roots.inputs.sync()
 }
 
-/// The SHA-256 of exactly `size` bytes read through `file` before
-/// `deadline`, or `None` when it holds another amount.
-fn content_digest(file: &mut File, size: u64, deadline: Instant) -> io::Result<Option<String>> {
+/// The SHA-256 of exactly `size` bytes read through `file` from its start,
+/// by position (its offset is untouched), before `deadline`, or `None` when
+/// it holds another amount.
+fn content_digest(file: &File, size: u64, deadline: Instant) -> io::Result<Option<String>> {
+    use std::os::unix::fs::FileExt;
     let mut hasher = Sha256::new();
     let mut read = 0u64;
     let mut buffer = vec![0u8; 64 << 10];
@@ -601,7 +606,7 @@ fn content_digest(file: &mut File, size: u64, deadline: Instant) -> io::Result<O
         if Instant::now() >= deadline {
             return Err(io::ErrorKind::TimedOut.into());
         }
-        let n = file.read(&mut buffer)?;
+        let n = file.read_at(&mut buffer, read)?;
         if n == 0 {
             break;
         }

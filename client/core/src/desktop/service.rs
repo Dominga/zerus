@@ -16,9 +16,10 @@ pub const FRAME_BYTES: usize = zerus_watch_protocol::MAX_FRAME_BYTES + 4096;
 pub const CATALOG_ROWS: usize = 128;
 pub const COMPONENTS: [&str; 5] = ["fleet", "presence", "reads", "attention", "approvals"];
 
-pub fn enabled(value: Option<&str>) -> bool {
+/// The registration observation selects a source; it never grants writer authority.
+pub fn enabled(value: Option<&str>, owned_registration: bool) -> bool {
     match value {
-        None => cfg!(any(target_os = "linux", target_os = "macos")),
+        None => owned_registration && cfg!(any(target_os = "linux", target_os = "macos")),
         Some("1") => true,
         _ => false,
     }

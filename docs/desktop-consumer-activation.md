@@ -1,11 +1,21 @@
 # Native Service consumer activation
 
 On Linux and macOS, Zerus Next uses the Service consumer when
-`ZERUS_CLIENT_DESKTOP_SERVICE` is absent. `=1` explicitly selects the same path;
+`ZERUS_CLIENT_DESKTOP_SERVICE` is absent only after the maintained helper's
+read-only status confirms an owned registration. A missing, obsolete or
+unconfirmed registration keeps the existing guarded Native startup. Merely
+installing an AUR package, app or cask never registers a user service; run its
+explicit `zerus-setup --desktop-service` setup first. `=1` explicitly selects Service;
 `=0` requests the guarded Native/rollback path. Other explicit values do not
 enable the consumer. A Native request still needs its existing takeover and
 drain checks; the flag supplies no writer authority and never forces a handoff.
 Windows keeps explicit `=1` opt-in and its maintained manual task transition.
+
+The registration probe runs before the canonical responder captures its mode.
+It uses the selected helper/CLI, checks the helper's help marker before the
+status command, and retains the original children and pipes. Each read has a
+three-second response budget. The status selects a source only; a fresh native
+Grant and the existing helper checks still admit every manager effect.
 
 The paired backend is prepared before the GUI starts, through the existing
 installer/updater. The consumer selects that same backend, reads its native
@@ -56,6 +66,12 @@ within the existing 64 KiB registration-record bound.
   not repeat the activation command; an uncertain activation stays on Check.
 
 ## Qt rollback
+
+For a persistent rollback of the desktop-launched application, use the maintained
+previous-version Qt rollback below. `=0` is a startup override for a new process,
+not a saved desktop preference. `launchctl setenv` and systemd manager environment
+changes do not provide a reboot-persistent selection. Do not hand-edit the
+managed unit or plist to make that override permanent.
 
 Use the existing updater/installer rollback. Before a current desktop service
 can be replaced by Qt, the updater asks the maintained helper to select passive.

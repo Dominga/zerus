@@ -100,7 +100,11 @@ IPC readiness and background worker ownership are separate; registration alone
 does not enable background workers.
 
 On Linux and macOS, Zerus Next defaults to the Service consumer when
-`ZERUS_CLIENT_DESKTOP_SERVICE` is absent. An existing background installation
+`ZERUS_CLIENT_DESKTOP_SERVICE` is absent and the maintained helper's read-only
+status confirms an owned registration. An unregistered or unconfirmed host
+keeps guarded Native startup. AUR packages and macOS app/cask installation do
+not register a user service: run the explicit `zerus-setup --desktop-service`
+route before expecting this default. An existing background installation
 keeps its mode. The paired backend is prepared before the GUI; a fresh native
 Service Grant admits activation of a newly installed implicit passive service.
 An explicit passive choice or retained revoke instead offers **Resume background
@@ -110,6 +114,9 @@ guarded Native/rollback path; it cannot override ownership or drain checks.
 Windows stays explicit `=1` opt-in. Helper refusal, Grant timeout and service-crash
 recovery remain usable through the explicit actions in
 [Service consumer activation](desktop-consumer-activation.md).
+For a persistent desktop rollback use that page's maintained previous-version
+Qt route; an `=0` process override or `launchctl setenv` is not a reboot-persistent
+desktop selection.
 
 For a local Linux Zerus Next source build, an explicit private WebKitGTK/GTK3
 stack can be selected at installation:

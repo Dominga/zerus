@@ -9,6 +9,63 @@ const ABI: &str = "desktop-service-activation-v1";
 const MARKER: &str = "Desktop service activation ABI: desktop-service-activation-v1";
 const BYTES: usize = 64 << 10;
 
+/// Read-only source selection before canonical startup. The same maintained
+/// helper validates its registration; neither files nor CLI lifecycle alone
+/// establish one. A later Service Grant still supplies all effect authority.
+pub(super) fn registered_for_default(ordinary: &std::path::Path) -> bool {
+    let owner = Controller::new();
+    let Ok(route) = owner.select_route(ordinary).map(Arc::new) else {
+        return false;
+    };
+    let Ok(charge) = owner.gate.admit(Role::Fleet) else {
+        return false;
+    };
+    let resources = Arc::new(charge);
+    let Some(help) = owner.call_bounded(
+        route.clone(),
+        vec![route.helper.to_string_lossy().into_owned(), "--help".into()],
+        resources.clone(),
+        Duration::from_secs(3),
+    ) else {
+        return false;
+    };
+    if !std::str::from_utf8(&help).is_ok_and(|text| text.lines().any(|line| line.trim() == MARKER))
+    {
+        return false;
+    }
+    let Some(raw) = owner.call_bounded(
+        route.clone(),
+        route.arguments(None, false, false),
+        resources,
+        Duration::from_secs(3),
+    ) else {
+        return false;
+    };
+    let Ok(status) = serde_json::from_slice::<Value>(&raw) else {
+        return false;
+    };
+    let label = if cfg!(target_os = "linux") {
+        "hgs-desktop.service"
+    } else {
+        "com.hgdev.hgs-desktop"
+    };
+    route.check().is_ok()
+        && status["schema"] == 1
+        && status["operation"] == "status"
+        && status["registered"] == true
+        && status["label"] == label
+        && status["configuration"].as_str().is_some_and(|value| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        && matches!(
+            status["selected_mode"].as_str(),
+            Some("passive" | "background")
+        )
+}
+
 #[derive(Clone, Default, Serialize)]
 pub(super) struct View {
     pub pending: bool,
@@ -327,10 +384,19 @@ impl Controller {
         args: Vec<String>,
         resources: Arc<Charge>,
     ) -> Option<Vec<u8>> {
+        self.call_bounded(route, args, resources, Duration::from_secs(30))
+    }
+    fn call_bounded(
+        self: &Arc<Self>,
+        route: Arc<Route>,
+        args: Vec<String>,
+        resources: Arc<Charge>,
+        timeout: Duration,
+    ) -> Option<Vec<u8>> {
         let inv = Invocation {
             args,
             stdin: Some(Vec::new()),
-            timeout: Duration::from_secs(30),
+            timeout,
             request_id: None,
         };
         let selected = route.clone();

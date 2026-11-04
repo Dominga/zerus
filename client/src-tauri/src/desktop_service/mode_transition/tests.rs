@@ -58,6 +58,77 @@ fn maintained_cli_links_pin_the_same_original_target() {
     assert!(route.check().is_err());
 }
 
+#[test]
+fn absent_startup_environment_requires_a_read_only_owned_registration() {
+    let f = Fixture::new();
+    for mode in ["passive", "background"] {
+        for registered in [false, true] {
+            fs::write(
+                f.root.join("configuration.json"),
+                serde_json::to_vec(&json!({"selection":"explicit","mode":mode,"lose":false,"registered":registered})).unwrap(),
+            ).unwrap();
+            assert_eq!(super::super::startup_mode(None, true, &f.cli), registered);
+            assert_eq!(
+                f.effects(),
+                0,
+                "default selection never activates a manager"
+            );
+        }
+    }
+    fs::write(f.root.join("configuration.json"), b"invalid").unwrap();
+    assert!(!super::super::startup_mode(None, true, &f.cli));
+    assert!(!super::super::startup_mode(
+        Some(std::ffi::OsStr::new("0")),
+        true,
+        &f.cli
+    ));
+    assert!(super::super::startup_mode(
+        Some(std::ffi::OsStr::new("1")),
+        true,
+        &f.cli
+    ));
+    assert!(!super::super::startup_mode(None, false, &f.cli));
+}
+
+#[test]
+fn unknown_default_registration_and_old_helper_never_enable_the_consumer() {
+    let f = Fixture::new();
+    for wrong in [
+        json!({"registered": "true"}),
+        json!({"operation": "install"}),
+        json!({"schema": 2}),
+        json!({"label": "other.service"}),
+        json!({"configuration": "A".repeat(64)}),
+        json!({"selected_mode": "unknown"}),
+    ] {
+        fs::write(
+            f.root.join("configuration.json"),
+            serde_json::to_vec(&json!({
+                "selection":"explicit","mode":"passive","lose":false,"status_overrides":wrong
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(!super::super::startup_mode(None, true, &f.cli));
+        assert_eq!(f.effects(), 0);
+    }
+    f.config("explicit", "passive", false);
+    let helper = f.root.join("lib/zerus/install-linux-desktop-service.py");
+    fs::write(
+        &helper,
+        "import json,sys\nfrom pathlib import Path\np=Path(__file__).resolve().parents[2]\nwith (p/'old-calls').open('a') as f:f.write(json.dumps(sys.argv[1:])+'\\n')\nif '--help' in sys.argv:print('old helper')\nelse:print(json.dumps(dict(schema=1,operation='status',registered=True,label='hgs-desktop.service',configuration='a'*64,selected_mode='passive')))\n",
+    )
+    .unwrap();
+    assert!(!super::super::startup_mode(None, true, &f.cli));
+    assert_eq!(f.effects(), 0);
+    let calls: Vec<Value> = fs::read_to_string(f.root.join("old-calls"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(calls, [json!(["--help"])]);
+}
+
 #[tokio::test]
 async fn automatic_activation_rechecks_a_later_explicit_passive_selection() {
     let f = Fixture::new();
@@ -159,7 +230,8 @@ elif '--mode' in args:
  if config['lose']:sys.exit(1)
  config['mode']='background';(root/'configuration.json').write_text(json.dumps(config))
 else:
- result=dict(schema=1,configuration=scope,selected_mode=config['mode'],running_mode=config['mode'],ipc_ready=True,mode_selection=config['selection'],pending_restart=False,transition=None,activation_pending=stored['request_id'] if stored and stored['phase']=='unknown' else None)
+ result=dict(schema=1,operation='status',registered=config.get('registered',True),label='hgs-desktop.service',configuration=scope,selected_mode=config['mode'],running_mode=config['mode'],ipc_ready=True,mode_selection=config['selection'],pending_restart=False,transition=None,activation_pending=stored['request_id'] if stored and stored['phase']=='unknown' else None)
+ result.update(config.get('status_overrides',{}))
 print(json.dumps(result))
 "#;
 

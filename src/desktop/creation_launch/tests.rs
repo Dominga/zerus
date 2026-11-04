@@ -68,9 +68,9 @@ fn exact_previous_store_upgrade_adds_only_the_independent_launch_leaf() {
             .unwrap(),
         crate::desktop::store::SCHEMA
     );
-    // Its own two tables, then the termination outcome, task message and task
-    // message input leaves.
-    assert_eq!(tables(&store.db), before + 2 + 1 + 2 + 2);
+    // Its own two tables, then the termination outcome, task message, task
+    // message input and deferred send leaves.
+    assert_eq!(tables(&store.db), before + 2 + 1 + 2 + 2 + 2);
     assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
 }
 

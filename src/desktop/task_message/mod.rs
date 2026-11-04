@@ -37,9 +37,11 @@ pub(super) fn remove_fixture(db: &rusqlite::Connection) {
     db.execute_batch("DROP TABLE desktop_task_messages; DROP TABLE desktop_task_message_budget;")
         .unwrap();
 }
-/// Test rewind of the custody-input records alone (schema 27 to 26).
+/// Test rewind of the custody-input records (schema 27 to 26), the later
+/// deferred send leaf first.
 #[cfg(test)]
 pub(super) fn remove_inputs_fixture(db: &rusqlite::Connection) {
+    super::deferred_send::remove_fixture(db);
     db.execute_batch(
         "DROP TABLE desktop_task_message_inputs; DROP TABLE desktop_task_message_input_budget;",
     )

@@ -114,7 +114,7 @@ pub(in crate::desktop::windows_registration) fn command(
         reply["configuration"] = location.configuration.clone().into();
         reply["task_name"] = plan["task_name"].clone();
         reply["ok"] = false.into();
-        let record = pending_status(location, &plan)?;
+        let record = pending_status(config, location, &plan)?;
         reply["pending_transition"] = record["pending_transition"].clone();
         let pending = reply["pending_transition"].is_object();
         reply["changed"] = if pending && request["operation"] != "review" { Value::Null } else { false.into() };
@@ -162,6 +162,68 @@ fn plans(config: &Config, location: &Location, sid: &str) -> Result<(Plan, Plan)
 fn wanted(plan: &Plan) -> Result<Shape> {
     Ok(plan.shape(crate::host::spawn::command_line(&plan.argv[1..])?))
 }
+const FIRST_ANCHOR_BYTES: usize = 1024;
+/// The independent first-choice anchor (zerus-yfbd.1): the latest reserved
+/// first-choice original, in the config folder, outside the desktop state
+/// folder that holds this mode record and the Service Grant. A missing,
+/// emptied or replaced journal or a wiped state folder is therefore "lost",
+/// never "never written". Only wiping both trees looks like a fresh profile.
+fn anchor_path(config: &Config, location: &Location) -> std::path::PathBuf {
+    config
+        .dir
+        .join(format!("windows-first-choice-{}.json", location.configuration))
+}
+fn read_anchor(config: &Config, location: &Location, plan: &Plan) -> Result<Option<String>> {
+    match crate::desktop::handoff::read_private(&anchor_path(config, location), FIRST_ANCHOR_BYTES) {
+        Ok(bytes) => {
+            let value: Value =
+                serde_json::from_slice(&bytes).context("First-choice anchor unavailable.")?;
+            let request = value["request"].as_str().unwrap_or("");
+            ensure!(
+                value["schema"] == 1
+                    && value["configuration"] == location.configuration
+                    && value["sid"] == plan.sid
+                    && value.as_object().is_some_and(|o| o.len() == 4)
+                    && uuid::Uuid::parse_str(request)
+                        .is_ok_and(|u| !u.is_nil() && u.to_string() == request),
+                "First-choice anchor unavailable; keep it and the mode record, and inspect status."
+            );
+            Ok(Some(request.into()))
+        }
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+/// Durable before the record save that reserves this first choice.
+fn write_anchor(
+    config: &Config,
+    location: &Location,
+    plan: &Plan,
+    request: &str,
+    fence: &mut impl FnMut() -> Result<()>,
+) -> Result<()> {
+    fence()?;
+    let bytes = serde_json::to_vec(&json!({"schema":1,"configuration":location.configuration,
+        "sid":plan.sid,"request":request}))?;
+    let mut file = tempfile::NamedTempFile::new_in(&config.dir)?;
+    platform::make_private(file.as_file())?;
+    ensure!(
+        platform::verify_private_file(file.as_file())?,
+        "First-choice anchor is not private."
+    );
+    file.write_all(&bytes)?;
+    file.as_file().sync_all()?;
+    fence()?;
+    platform::persist(file, anchor_path(config, location)).map_err(|error| error.error)?;
+    platform::sync_dir(&config.dir)?;
+    fence()
+}
 fn load(location: &Location, plan: &Plan) -> Result<Record> {
     match crate::desktop::handoff::read_private(&location.root.join(RECORD), RECORD_BYTES) {
         Ok(bytes) => Record::decode(&bytes, plan),
@@ -184,6 +246,13 @@ pub(in crate::desktop::windows_registration) fn result(
     let preview = registration::windows_plan(config, location)?;
     let plan = Plan::parse(&json!({"schema":1,"operation":"status","plan":preview}), &sid)?;
     let record = load(location, &plan)?;
+    // A journal that lost its anchored first choice answers nothing settled.
+    if let Some(lost) = record.first_lost(read_anchor(config, location, &plan)?.as_deref()) {
+        return Ok(json!({"abi":MODE_ABI,"schema":1,"configuration":location.configuration,
+            "request_id":request,"read_only":true,"receipt":null,
+            "outcome":policy::mode::review::ChoicePhase::Unknown,"code":"first_choice_lost",
+            "first_choice_lost":lost,"manager_changed":false,"authority_changed":false,"changed":false}));
+    }
     // A reviewed choice or a first choice: each answers only its own original ID.
     let receipt = match record.choices.iter().find(|r|r.request == request) {
         Some(r) => Some((serde_json::to_value(r)?, r.phase)),
@@ -199,6 +268,7 @@ pub(in crate::desktop::windows_registration) fn result(
         "manager_changed":false,"authority_changed":false,"changed":false}))
 }
 pub(in crate::desktop::windows_registration) fn pending_status(
+    config: &Config,
     location: &Location,
     preview: &Value,
 ) -> Result<Value> {
@@ -208,12 +278,14 @@ pub(in crate::desktop::windows_registration) fn pending_status(
         &sid,
     )?;
     let record = load(location, &plan)?;
+    let lost = record.first_lost(read_anchor(config, location, &plan)?.as_deref());
     Ok(
         json!({"pending_transition":record.pending,"cancelled_request_id":record.cancelled,"completed_request_id":record.completed,
             "reviewed_transition":record.reviewed.last(),
             "mode_choice":record.choices.last(),
             "first_choice":record.first_choices.last(),
-            "activation_automatic_blocked":!record.reviewed.is_empty() || record.pending.as_ref().is_some_and(|p|p.review.is_some())}),
+            "first_choice_lost":lost,
+            "activation_automatic_blocked":lost.is_some() || !record.reviewed.is_empty() || record.pending.as_ref().is_some_and(|p|p.review.is_some())}),
     )
 }
 fn save(
@@ -516,7 +588,10 @@ fn effect(
         pending.request_id.clone()
     } else {
         if let Some(choice) = choice { record.reserve_choice(choice, desired)?; }
-        if let Some(first) = first { record.reserve_first(first)?; }
+        if let Some(first) = first {
+            record.reserve_first(first)?;
+            write_anchor(config, location, passive, &first.request, &mut || fence.check())?;
+        }
         let id = match requested {
             Some(id) => record.begin_id(desired, observation, id)?,
             None => record.begin(desired, observation)?,
@@ -707,6 +782,13 @@ fn operation(args: &[String]) -> Result<Value> {
     let sid = crate::host::token::user_sid()?;
     let (passive, background) = plans(&config, &location, &sid)?;
     let _lock = Lock::acquire(&sid)?;
+    // No mode operation runs while the journal and its independent
+    // first-choice anchor disagree: lost is never "never written".
+    if let Some(lost) = load(&location, &passive)?
+        .first_lost(read_anchor(&config, &location, &passive)?.as_deref())
+    {
+        anyhow::bail!("The desktop mode journal no longer shows first choice {lost}; keep both records and inspect status. No mode operation is admitted.");
+    }
     let mut offered_cancel = None;
     if op == "cancel_rollback" {
         admission.check()?;

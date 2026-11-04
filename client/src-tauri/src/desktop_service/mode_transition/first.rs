@@ -38,6 +38,7 @@ pub(super) fn offer(status: &Value) -> Option<Value> {
         && status["reviewed_transition"].is_null()
         && status["mode_choice"].is_null()
         && status["activation_automatic_blocked"] == false
+        && status["first_choice_lost"].is_null()
         && status["first_choice"]["phase"] != "unknown")
         .then(|| {
             json!([
@@ -381,6 +382,10 @@ mod tests {
             (
                 "unknown first choice",
                 json!({"first_choice":{"phase":"unknown"}}),
+            ),
+            (
+                "lost first choice, even unlatched",
+                json!({"first_choice_lost":"11111111-1111-4111-8111-111111111111"}),
             ),
         ] {
             assert!(offer(&plain(patch)).is_none(), "{case}");

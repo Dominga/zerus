@@ -502,6 +502,43 @@ class WindowsTaskMode(unittest.TestCase):
         self.refused_first_choice(str(uuid.uuid4()), 'from a passive registration only')
         return first
 
+    def lost_journal_refuses_every_mode_operation(self, first):
+        """The independent first-choice anchor (config folder) outlives the
+        mode journal (state folder): a missing or replaced journal is lost,
+        never "never written"."""
+        path = self.state / 'desktop' / 'windows-registration-mode.json'
+        configuration = self.cli('desktop', 'status', '--json')['configuration']
+        anchor = self.config / f'windows-first-choice-{configuration}.json'
+        self.assertEqual(json.loads(anchor.read_bytes())['request'], first['request_id'])
+        original = path.read_bytes()
+        record = json.loads(original)
+        empty = {key: record[key] for key in ('schema', 'configuration', 'sid', 'command')}
+        empty.update(pending=None, cancelled=None, completed=None)
+        for case in ('missing', 'replaced'):
+            if case == 'missing':
+                path.unlink()
+            else:
+                path.write_text(json.dumps(empty), encoding='utf-8')
+            registration = self.cli('desktop', 'registration', 'status', '--json')
+            self.assertEqual(registration['first_choice_lost'], first['request_id'], case)
+            self.assertTrue(registration['activation_automatic_blocked'], case)
+            self.assertIsNone(registration['first_choice'], case)
+            before = self.observe()['instances']
+            grant = self.cli('desktop', 'ownership-status', '--json')
+            refused = self.mode('passive')
+            self.assertFalse(refused['ok'], refused)
+            self.assertIn('no longer shows first choice', refused['error'])
+            again = self.first_call('background', str(uuid.uuid4()))
+            self.assertEqual(again['code'], 0, again)
+            self.assertFalse(json.loads(again['stdout'])['ok'], again)
+            result = self.cli('desktop', 'registration', 'mode-result', '--json', '--request-id', first['request_id'])
+            self.assertEqual((result['code'], result['outcome'], result['receipt']),
+                             ('first_choice_lost', 'unknown', None), case)
+            self.assertEqual(self.observe()['instances'], before, case)
+            self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), grant, case)
+            path.write_bytes(original)  # Restore the arranged journal for the rest of the round trip.
+        self.assertIsNone(self.cli('desktop', 'registration', 'status', '--json')['first_choice_lost'])
+
     def pending_first_choice_refuses_the_old_frame(self, current):
         """A reserved FIRST choice whose helper died at Prepared or Held: the
         OLD no-request-ID switch never adopts or continues it."""
@@ -1016,6 +1053,7 @@ if(@(Get-OwnInstances $s $t).Count-ne 0) {throw 'fixture instance remains'};
             # form; the ordinary form stays covered by next_background below.
             background = self.first_background_choice_from_plain_passive()
             self.assertTrue(background['ok'], background)
+            self.lost_journal_refuses_every_mode_operation(background)
             self.assertNotEqual(background['request_id'], cancelled)
             self.assertEqual(background['running_mode'], 'background')
             self.latest = background['instance']

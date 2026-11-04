@@ -27,6 +27,7 @@ const DYNAMIC_FILES: Record<string, string> = {
   "./ui/screens/tasks-ui.ts": "its own task stage table",
   "./ui/screens/Tasks.tsx": "the stage tile table and the task pause reason",
   "./ui/screens/TaskInspector.tsx": "the task pause reason",
+  "./ui/screens/TaskStartReview.tsx": "the native TaskStart present() closed stale-check and unreadable-receipt reasons",
   "./ui/screens/TaskWorkflow.tsx": "the task pause reason",
   "./ui/sessions/SavedDrafts.tsx": "the Saved drafts store's TEXTS, REASONS and SECTIONS tables and its own Show more table",
   "./ui/sessions/ArchiveBar.tsx": "the archive period table",

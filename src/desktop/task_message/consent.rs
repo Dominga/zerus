@@ -15,6 +15,9 @@ pub(super) struct Consent {
     pub original: Verified,
     pub lease: Arc<Lease>,
     pub cancel: AtomicBool,
+    /// The reference form's exact custody input, read only through this
+    /// handle; `None` for an inline original, whose stdin is in its record.
+    pub input: Option<Arc<super::staging::Input>>,
 }
 impl Consent {
     pub fn admitted(original: Verified, lease: Arc<Lease>) -> Result<Arc<Self>> {
@@ -24,10 +27,36 @@ impl Consent {
             original.intent.scope == lease.scope,
             "task message target changed"
         );
+        ensure!(
+            original.intent.form.is_inline(),
+            "task message reference form needs its input"
+        );
         Ok(Arc::new(Self {
             original,
             lease,
             cancel: AtomicBool::new(false),
+            input: None,
+        }))
+    }
+    /// Consent for a reference original whose exact input was prepared: its
+    /// size and digest must be the plan's frozen stdin.
+    pub fn referenced(
+        original: Verified,
+        lease: Arc<Lease>,
+        input: Arc<super::staging::Input>,
+    ) -> Result<Arc<Self>> {
+        ensure!(
+            original.intent.scope == lease.scope
+                && !original.intent.form.is_inline()
+                && input.sha256 == original.plan.input_sha256
+                && Some(input.bytes) == original.input_len(),
+            "task message prepared input changed"
+        );
+        Ok(Arc::new(Self {
+            original,
+            lease,
+            cancel: AtomicBool::new(false),
+            input: Some(input),
         }))
     }
     pub fn check(&self, row: &ledger::Row, ticket: Option<&Ticket>) -> Result<()> {

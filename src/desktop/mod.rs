@@ -979,6 +979,25 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                             ),
                                         }
                                     }
+                                    // The reference form prepares off the actor and
+                                    // answers later on this same connection.
+                                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                                    Ok(request)
+                                        if request.operation() == "task_message"
+                                            && request
+                                                .task_message_preview()
+                                                .is_ok_and(|intent| !intent.form.is_inline()) =>
+                                    {
+                                        runtime.task_message_request(
+                                            &mut store,
+                                            request,
+                                            queue.clone(),
+                                            seq,
+                                        );
+                                        streaming = true;
+                                        activation_waiting = true;
+                                        Value::Null
+                                    }
                                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                                     Ok(request)
                                         if request.operation() == "task_start_reconcile" =>
@@ -1104,6 +1123,16 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                             .is_some_and(|v| v["op"] == "task_message_result")
                         {
                             task_message::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "task_message_staging")
+                        {
+                            task_message::staging_route(
+                                &store,
+                                &location,
+                                hello.request.as_ref().unwrap(),
+                            )
                         } else if hello
                             .request
                             .as_ref()

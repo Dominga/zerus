@@ -81,8 +81,26 @@ fn exact_previous_store_upgrade_adds_only_the_independent_message_leaf() {
             .unwrap(),
         crate::desktop::store::SCHEMA
     );
-    assert_eq!(tables(&store.db), before + 2);
+    // Its own two tables, then the task message input leaf's two.
+    assert_eq!(tables(&store.db), before + 2 + 2);
     assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
+}
+
+#[test]
+fn the_input_upgrade_adds_only_its_two_tables_with_no_charge() {
+    assert_eq!(INPUTS_SCHEMA - 1, SCHEMA);
+    assert_eq!(INPUTS_SCHEMA, crate::desktop::store::SCHEMA);
+    let (_temp, location, store, _) = fixture();
+    remove_inputs_fixture(&store.db);
+    store
+        .db
+        .pragma_update(None, "user_version", SCHEMA)
+        .unwrap();
+    let before = tables(&store.db);
+    drop(store);
+    let store = Store::open(&location, &uuid::Uuid::new_v4().to_string()).unwrap();
+    assert_eq!(tables(&store.db), before + 2);
+    assert_eq!(inputs::totals(&store.db).unwrap(), (0, 0));
 }
 
 fn admit(store: &mut Store, verified: &Verified, writer: &str) -> ledger::Row {
@@ -1470,6 +1488,427 @@ mod actor {
         assert_eq!(f.row(&original).receipt.phase, Phase::Unknown);
         assert_eq!(f.row(&original).receipt.code, "task_message_interrupted");
     }
+
+    // The reference form (zerus-5wmh.66.4.4.2): preparation off the actor,
+    // a short admission and the custody input's lifetime.
+    mod reference {
+        use super::super::super::{inputs, staging};
+        use super::*;
+        use crate::desktop::fanout::Queue;
+        use serde_json::Value;
+        use sha2::Digest;
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::PathBuf;
+        use zerus_client_core::attachments::Attachment;
+        use zerus_client_core::tasks_write::references;
+
+        fn shot(seed: u8, size: usize) -> Vec<u8> {
+            (0..size).map(|n| (n as u8).wrapping_mul(seed)).collect()
+        }
+        impl Fixture {
+            /// A verified reference original of this service, its blobs and
+            /// its exact stdin.
+            fn referenced(&self, files: &[Vec<u8>]) -> (Verified, Vec<Vec<u8>>, String) {
+                let attachments: Vec<Attachment> = files
+                    .iter()
+                    .enumerate()
+                    .map(|(n, bytes)| Attachment {
+                        name: format!("shot-{n}.png"),
+                        mime: "image/png".into(),
+                        bytes: bytes.clone().into(),
+                        reference: format!("[shot-{n}.png]"),
+                    })
+                    .collect();
+                let intent = message_intent("see these", &attachments, "queue", "");
+                let request = uuid::Uuid::new_v4().to_string();
+                let record = json!({"id": request, "intent": intent,
+                    "input_sha256": input_digest(&message_input(&intent))});
+                let (projection, blobs) = references::project(&record).unwrap();
+                let verified = Intent {
+                    scope: wire::Scope {
+                        configuration: self.location.configuration.clone(),
+                        service_epoch: self.epoch.clone(),
+                    },
+                    project: "example".into(),
+                    task_id: TASK.into(),
+                    request_id: request,
+                    original: projection.to_string(),
+                    form: wire::Form::ReferenceV1,
+                }
+                .verify()
+                .unwrap();
+                (verified, blobs, message_input(&record["intent"]))
+            }
+            /// Stages each blob as the client does.
+            fn stage(&self, verified: &Verified, blobs: &[Vec<u8>]) -> PathBuf {
+                let dir = self
+                    .location
+                    .root
+                    .join(staging::STAGING)
+                    .join(&verified.plan.request_id);
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+                for blob in blobs {
+                    let file = dir.join(format!("{:x}", sha2::Sha256::digest(blob)));
+                    std::fs::write(&file, blob).unwrap();
+                    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))
+                        .unwrap();
+                }
+                dir
+            }
+            fn send_reference(
+                &mut self,
+                original: &Verified,
+                authority: ui_authority::Validated,
+            ) -> Arc<Queue> {
+                let _ = original;
+                let queue = Arc::new(Queue::default());
+                self.runtime.frontend_reference(
+                    &mut self.store,
+                    authority,
+                    Some(self.exclusion.clone()),
+                    queue.clone(),
+                    1,
+                );
+                queue
+            }
+            fn request(original: &Verified) -> Value {
+                json!(
+                    zerus_client_core::desktop::ui_requests::Request::TaskMessage {
+                        intent: Box::new(original.intent.clone()),
+                    }
+                )
+            }
+            fn answered(&mut self, queue: &Queue) -> Value {
+                let until = Instant::now() + Duration::from_secs(10);
+                loop {
+                    if let Some(frame) = queue.take() {
+                        let frame: Value = serde_json::from_slice(&frame).unwrap();
+                        return frame["value"].clone();
+                    }
+                    assert!(Instant::now() < until, "no answer");
+                    self.runtime
+                        .poll(&mut self.store, Some(self.exclusion.clone()));
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+            fn input(&self, original: &Verified) -> Option<inputs::Record> {
+                inputs::load(&self.store.db, &original.plan.request_id).unwrap()
+            }
+            fn input_path(&self, original: &Verified) -> PathBuf {
+                self.location
+                    .root
+                    .join(staging::INPUTS)
+                    .join(&original.plan.request_id)
+            }
+            fn state(&self, original: &Verified) -> String {
+                self.input(original).map(|r| r.state).unwrap_or_default()
+            }
+        }
+        /// A script image that records its stdin and answers with the exact
+        /// reply of the call it was given.
+        fn replying_image(dir: &std::path::Path) -> (PathBuf, PathBuf) {
+            let path = dir.join("hgs");
+            let seen = dir.join("stdin");
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/usr/bin/env python3\nimport json,pathlib,sys\npathlib.Path({:?}).write_bytes(sys.stdin.buffer.read())\na=sys.argv\nprint(json.dumps({{'task':{{'uuid':a[a.index('message')+1],'project':a[a.index('--project')+1]}},'message':{{'kind':'message','request_id':a[a.index('--request-id')+1],'session':None,'delivery':{{'mode':a[a.index('--mode')+1],'state':'queued','stage':'todo','stage_at':7}}}}}}))\n",
+                    seen.to_str().unwrap()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            (path, seen)
+        }
+
+        #[test]
+        #[cfg(target_os = "linux")]
+        fn a_reference_original_runs_from_its_exact_input_which_goes_only_after_its_drain() {
+            let dir = tempfile::tempdir().unwrap();
+            let (image, seen) = replying_image(dir.path());
+            let mut f = Fixture::unexecuted();
+            f.runtime.fixture_image(&image);
+            // Over the inline limit: only the reference form can carry it.
+            let (original, blobs, stdin) = f.referenced(&[shot(3, 100 << 10), shot(5, 4000)]);
+            let staged = f.stage(&original, &blobs);
+            let queue = f.send_reference(
+                &original,
+                ui_authority::Validated::fixture(&Fixture::request(&original)),
+            );
+            let answer = f.answered(&queue);
+            assert_eq!(answer["accepted"], true, "{answer}");
+            assert_eq!(f.state(&original), "held");
+            f.until("settled", |f| f.row(&original).receipt.drained);
+            let receipt = f.row(&original).receipt;
+            assert_eq!(
+                (receipt.phase, receipt.code.as_str()),
+                (Phase::Recorded, "")
+            );
+            assert_eq!(std::fs::read_to_string(&seen).unwrap(), stdin);
+            f.until("input removed", |f| f.state(&original) == "removed");
+            assert!(!f.input_path(&original).exists());
+            assert!(!staged.exists(), "its staged copies went at admission");
+            assert_eq!(inputs::totals(&f.store.db).unwrap(), (0, 0));
+            // A legitimately removed input never stops the bounded lookup.
+            let query =
+                wire::Query::for_plan(original.intent.scope.clone(), &original.plan).unwrap();
+            let lookup: wire::Lookup = serde_json::from_value(super::super::super::query(
+                &f.store,
+                &json!({"op": "task_message_result", "query": query}),
+            ))
+            .unwrap();
+            assert!(lookup.matches(&query));
+            assert_eq!(lookup.receipt.unwrap().phase, Phase::Recorded);
+            // The same original again only reads its receipt: never prepared
+            // again, its input never recreated.
+            let again = f.send_reference(
+                &original,
+                ui_authority::Validated::fixture(&Fixture::request(&original)),
+            );
+            let answer = f.answered(&again);
+            assert_eq!(answer["accepted"], true);
+            assert_eq!(answer["receipt"]["phase"], "recorded");
+            assert_eq!(f.state(&original), "removed");
+            assert!(!f.input_path(&original).exists());
+        }
+
+        /// A permit that expires, or a writer revoked, while preparation runs:
+        /// nothing is admitted, and the exact published input is removed
+        /// before its reservation is released.
+        #[test]
+        fn a_permit_expired_or_a_writer_revoked_during_preparation_admits_nothing() {
+            for revoke in [false, true] {
+                let mut f = Fixture::new(|_, _, _, _, _| panic!("nothing was admitted"));
+                let (original, blobs, _) = f.referenced(&[shot(7, 3000)]);
+                let staged = f.stage(&original, &blobs);
+                staging::DELAYS
+                    .lock()
+                    .unwrap()
+                    .push((original.plan.request_id.clone(), Duration::from_millis(400)));
+                let authority = if revoke {
+                    ui_authority::Validated::fixture(&Fixture::request(&original))
+                } else {
+                    ui_authority::Validated::fixture_expiring(
+                        &Fixture::request(&original),
+                        Instant::now() + Duration::from_millis(150),
+                    )
+                };
+                let queue = f.send_reference(&original, authority);
+                assert_eq!(f.state(&original), "reserved", "reserved before preparing");
+                if revoke {
+                    f.store
+                        .db
+                        .execute("UPDATE desktop_writer SET revoked=1 WHERE id=1", [])
+                        .unwrap();
+                }
+                let answer = f.answered(&queue);
+                assert_eq!(answer["accepted"], false, "{revoke}: {answer}");
+                assert!(ledger::load(&f.store.db, &original.plan.request_id)
+                    .unwrap()
+                    .is_none());
+                f.until("released", |f| f.state(&original) == "released");
+                assert!(!f.input_path(&original).exists(), "the exact input went");
+                assert!(staged.exists(), "the client's copies stay for its review");
+                assert_eq!(inputs::totals(&f.store.db).unwrap(), (0, 0));
+            }
+        }
+
+        #[test]
+        fn the_input_budget_and_a_missing_staging_refuse_before_any_input() {
+            let mut f = Fixture::new(|_, _, _, _, _| panic!("nothing was admitted"));
+            let (original, blobs, _) = f.referenced(&[shot(9, 3000)]);
+            let staged = f.stage(&original, &blobs);
+            f.store
+                .db
+                .execute(
+                    "UPDATE desktop_task_message_input_budget SET bytes=?1",
+                    [inputs::BYTES],
+                )
+                .unwrap();
+            let queue = f.send_reference(
+                &original,
+                ui_authority::Validated::fixture(&Fixture::request(&original)),
+            );
+            assert_eq!(f.answered(&queue)["accepted"], false);
+            assert!(f.input(&original).is_none(), "no reservation at all");
+            assert!(staged.exists());
+            f.store
+                .db
+                .execute("UPDATE desktop_task_message_input_budget SET bytes=0", [])
+                .unwrap();
+            // Nothing staged: refused after its reservation, released.
+            let (other, _, _) = f.referenced(&[shot(11, 3000)]);
+            let queue = f.send_reference(
+                &other,
+                ui_authority::Validated::fixture(&Fixture::request(&other)),
+            );
+            let answer = f.answered(&queue);
+            assert_eq!(answer["accepted"], false);
+            assert_eq!(answer["code"], staging::UNAVAILABLE);
+            assert_eq!(f.state(&other), "released");
+            assert!(!f.input_path(&other).exists());
+            assert_eq!(inputs::totals(&f.store.db).unwrap(), (0, 0));
+        }
+
+        #[test]
+        fn a_restart_keeps_a_published_unadmitted_input_as_an_exact_orphan() {
+            let mut f = Fixture::new(|_, _, _, _, _| panic!("nothing runs"));
+            let (published, blobs, _) = f.referenced(&[shot(13, 3000)]);
+            let (unpublished, _, _) = f.referenced(&[shot(17, 3000)]);
+            // The cut: reserved, then the input published, then the process
+            // ended before admission; and one that ended before publishing.
+            for original in [&published, &unpublished] {
+                let tx = f
+                    .store
+                    .db
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .unwrap();
+                inputs::reserve(
+                    &tx,
+                    &original.plan.request_id,
+                    original.input_len().unwrap(),
+                    &original.plan.input_sha256,
+                    1,
+                )
+                .unwrap();
+                tx.commit().unwrap();
+            }
+            f.stage(&published, &blobs);
+            let roots = staging::Roots::open(&f.location.root).unwrap();
+            let prepared =
+                staging::prepare(&roots, &published, Instant::now() + Duration::from_secs(10))
+                    .unwrap();
+            let charged = inputs::totals(&f.store.db).unwrap();
+            f.runtime = runtime::Runtime::new(&f.config, &f.epoch, f.owner.clone()).unwrap();
+            f.runtime.fixture_executor(
+                MACHINE,
+                Arc::new(|_, _, _, _, _| panic!("restart never runs it")),
+            );
+            f.runtime.fixture_mac_fence(false);
+            f.until("recovered", |f| {
+                f.state(&published) == "orphaned" && f.state(&unpublished) == "released"
+            });
+            assert!(
+                f.input_path(&published).exists(),
+                "the exact original stays"
+            );
+            let mut kept = Vec::new();
+            std::io::Read::read_to_end(
+                &mut std::fs::File::open(f.input_path(&published)).unwrap(),
+                &mut kept,
+            )
+            .unwrap();
+            assert_eq!(kept.len() as u64, prepared.input.bytes);
+            assert_eq!(
+                inputs::totals(&f.store.db).unwrap(),
+                (1, published.input_len().unwrap()),
+                "the orphan stays charged"
+            );
+            assert!(charged.0 == 2);
+        }
+
+        /// A retired original is not a drained one: its input and both
+        /// charges stay until every original pipe ended.
+        #[test]
+        fn a_retired_but_undrained_original_keeps_its_input_and_both_charges_until_eof() {
+            use super::super::message_child::{accept, RETAINING};
+            use crate::desktop::custody::{self, Observation};
+            let control = tempfile::tempdir().unwrap();
+            let socket = control.path().join("c");
+            let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let path = socket.to_str().unwrap().to_owned();
+            let mut f = Fixture::new(move |_, _, input, lock, resources| {
+                super::super::child::run(
+                    std::path::Path::new("/usr/bin/env"),
+                    &[
+                        "python3".into(),
+                        "-c".into(),
+                        RETAINING.into(),
+                        path.clone(),
+                    ],
+                    input,
+                    lock,
+                    resources,
+                    Instant::now() + Duration::from_millis(500),
+                    |_| Ok(()),
+                )
+            });
+            let (original, blobs, _) = f.referenced(&[shot(19, 200 << 10)]);
+            f.stage(&original, &blobs);
+            let queue = f.send_reference(
+                &original,
+                ui_authority::Validated::fixture(&Fixture::request(&original)),
+            );
+            assert_eq!(f.answered(&queue)["accepted"], true);
+            let release = accept(&listener, || {
+                f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+            });
+            f.until("logical Unknown", |f| {
+                f.row(&original).receipt.code == "task_message_output_retained"
+            });
+            let record = f.row(&original).custody.unwrap();
+            f.store
+                .db
+                .execute("UPDATE desktop_writer SET revoked=1 WHERE id=1", [])
+                .unwrap();
+            f.runtime.request_stop();
+            for _ in 0..40 {
+                f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(!f.runtime.drained());
+            assert_eq!(
+                ledger::undrained(&f.store.db).unwrap(),
+                1,
+                "operation charge"
+            );
+            assert_eq!(f.state(&original), "held", "storage charge");
+            assert!(f.input_path(&original).exists());
+            assert!(matches!(
+                custody::probe(&f.location, &record),
+                Observation::Held
+            ));
+            // A restart holds no consent, preparation or worker of the
+            // original: only its physical drain may remove the input.
+            f.runtime = runtime::Runtime::new(&f.config, &f.epoch, f.owner.clone()).unwrap();
+            f.runtime.fixture_executor(
+                MACHINE,
+                Arc::new(|_, _, _, _, _| panic!("a restart never runs it")),
+            );
+            f.runtime.fixture_mac_fence(false);
+            for _ in 0..40 {
+                f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(f.state(&original), "held", "kept across the restart");
+            assert!(f.input_path(&original).exists());
+            drop(release);
+            f.until("drained and removed", |f| {
+                !f.row(&original).custody.is_none()
+                    && f.row(&original).receipt.drained
+                    && f.state(&original) == "removed"
+            });
+            assert!(!f.input_path(&original).exists());
+            assert_eq!(inputs::totals(&f.store.db).unwrap(), (0, 0));
+        }
+
+        #[test]
+        fn the_macos_fence_refuses_a_reference_before_any_reservation() {
+            let mut f = Fixture::new(|_, _, _, _, _| panic!("no fenced child"));
+            f.runtime.fixture_mac_fence(true);
+            let (original, blobs, _) = f.referenced(&[shot(23, 3000)]);
+            f.stage(&original, &blobs);
+            let queue = f.send_reference(
+                &original,
+                ui_authority::Validated::fixture(&Fixture::request(&original)),
+            );
+            let answer = f.answered(&queue);
+            assert_eq!(answer["code"], runtime::MAC_UNAVAILABLE);
+            assert!(f.input(&original).is_none());
+        }
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1569,7 +2008,8 @@ mod staging_tests {
         let call =
             zerus_client_core::tasks_write::message_call("example", TASK, &record, false).unwrap();
         assert_eq!(call.input, stdin);
-        assert_eq!(prepared.args, call.invocation().args);
+        assert_eq!(prepared.input.args, call.invocation().args);
+        assert_eq!(prepared.input.timeout, call.invocation().timeout);
         let mut kept = vec![0; stdin.len()];
         std::os::unix::fs::FileExt::read_exact_at(&prepared.input.file, &mut kept, 0).unwrap();
         assert_eq!(kept, stdin.as_bytes());

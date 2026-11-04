@@ -145,6 +145,7 @@ fn retain(mut pipe: Box<dyn Pipe>, guard: &Arc<dyn Send + Sync>) {
 /// guard that every still-open original pipe keeps until its real end.
 /// `final_check` runs inside the spawn turn, last before the spawn: its
 /// refusal means that no child ever existed.
+#[cfg(test)]
 pub(super) fn run(
     program: &Path,
     args: &[String],
@@ -154,6 +155,72 @@ pub(super) fn run(
     deadline: Instant,
     final_check: impl FnOnce(&mut Command) -> std::io::Result<()>,
 ) -> Ended {
+    run_stdin(
+        program,
+        args,
+        Stdin::Bytes(input),
+        custody,
+        resources,
+        deadline,
+        final_check,
+    )
+}
+
+/// The original child's stdin: the record's frozen bytes, or the reference
+/// form's exact custody input, read only through its kept handle.
+pub(super) enum Stdin<'a> {
+    Bytes(&'a [u8]),
+    File(&'a std::fs::File, u64),
+}
+impl Stdin<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Bytes(bytes) => bytes.len(),
+            Self::File(_, bytes) => *bytes as usize,
+        }
+    }
+    /// The bytes from `at` on that the next write offers; a file is read at
+    /// that offset, never from a shared position.
+    fn from<'b>(&'b self, at: usize, buffer: &'b mut [u8]) -> std::io::Result<&'b [u8]> {
+        match self {
+            Self::Bytes(bytes) => Ok(&bytes[at..]),
+            Self::File(file, bytes) => {
+                use std::os::unix::fs::FileExt;
+                let left = (*bytes as usize).saturating_sub(at).min(buffer.len());
+                let read = file.read_at(&mut buffer[..left], at as u64)?;
+                if read == 0 && left > 0 {
+                    return Err(std::io::ErrorKind::UnexpectedEof.into());
+                }
+                Ok(&buffer[..read])
+            }
+        }
+    }
+    /// All of it, for a test executor.
+    #[cfg(test)]
+    pub(super) fn to_vec(&self) -> std::io::Result<Vec<u8>> {
+        let mut buffer = vec![0; self.len()];
+        let mut at = 0;
+        while at < self.len() {
+            let mut chunk = vec![0; 64 << 10];
+            let next = self.from(at, &mut chunk)?.to_vec();
+            buffer[at..at + next.len()].copy_from_slice(&next);
+            at += next.len();
+        }
+        Ok(buffer)
+    }
+}
+
+/// [`run`] with either kind of stdin.
+pub(super) fn run_stdin(
+    program: &Path,
+    args: &[String],
+    input: Stdin<'_>,
+    custody: &Arc<InheritedLock>,
+    resources: &Arc<dyn Send + Sync>,
+    deadline: Instant,
+    final_check: impl FnOnce(&mut Command) -> std::io::Result<()>,
+) -> Ended {
+    let mut chunk = vec![0u8; 64 << 10];
     let mut command = Command::new(program);
     command
         .args(args)
@@ -230,7 +297,12 @@ pub(super) fn run(
                     stdin = None;
                     break;
                 }
-                match pipe.write(&input[written..]) {
+                let Ok(next) = input.from(written, &mut chunk) else {
+                    // An input that cannot be read is never complete.
+                    stdin = None;
+                    break;
+                };
+                match pipe.write(next) {
                     Ok(0) => {
                         stdin = None;
                         break;

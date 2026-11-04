@@ -108,12 +108,13 @@ result are its own.
 
 ## Oversize originals
 
-Attachments travel inline in the original, base64-encoded in its content, so
-most messages with an attachment exceed the 64 KiB control frame: an inline
-original carries less than 48 KiB of attachment data in total. Such an
-original is refused before it is sent, with `task_message_original_too_large`
-from `Intent::verify`, which the service applies again. The user-visible
-outcome the client path must keep:
+Attachments travel inline in an inline original, base64-encoded in its
+content: an inline original carries less than 48 KiB of attachment data in
+total. A larger one is refused before it is sent, with
+`task_message_original_too_large` from `Intent::verify`, which the service
+applies again. The reference form below carries such messages instead, within
+the attachment limits. Above those limits, or when the service cannot take a
+reference, the user-visible outcome stays:
 
 - a clear refusal that names the size limit and the attachments, shown in the
   editor and in recovery review, never a silent drop;
@@ -121,14 +122,52 @@ outcome the client path must keep:
   message is never retried through another path on its own;
 - the outbox checkpoint, if already reserved, stays reviewable as never sent.
 
-A later slice should send attachments by reference so that such messages can
-use the service at all. The GUI would stage each attachment in a private,
-digest-named file under the configuration's desktop state. The original would
-carry only each attachment's digest and size. The service would read the
-staged files from its own fixed root (never a renderer-supplied path), rebuild
-the exact stdin and check it against the frozen `input_sha256` before
-admission. The control frame stays 64 KiB, and a staging budget bounds the
-staged bytes.
+## Reference preparation
+
+The service prepares a `reference-v1` original from staged copies of its
+attachments (zerus-5wmh.66.4.4.2). It advertises `Desktop task message
+references: desktop-task-message-reference-v1` on Linux only; macOS refuses
+the form like every original.
+
+- **Staging.** The service holds two private directories under its own
+  desktop state root from startup: `task-message-staging` and
+  `task-message-inputs`. The client learns the staging path only through the
+  read-only `task_message_staging` request, routing data for the exact current
+  scope that grants nothing. It stages each raw attachment as
+  `task-message-staging/<request_id>/<sha256>`, one directory per request, so
+  the same screenshot sent to two tasks stays two independent copies. Staged
+  copies are disposable: the draft keeps the original attachments.
+- **Anchored access.** Every service open, create and delete is anchored on a
+  held directory, with `O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC` at open. Every object
+  must be owner-only: a `0700` directory or a `0600` regular file of this
+  user with one link. A replaced directory, another mode or owner, a special
+  file or a hard link is refused.
+- **Admission.** As for task-start reconciliation, the reply follows on the
+  same connection. The exact encoded input size is reserved first, against
+  its own budget (64 MiB and 64 records, reservations and orphans included).
+  A bounded worker that holds the lease prepares the input off the actor: it
+  reads each staged copy (its exact size and digest), rebuilds the stdin with
+  the same canonical serializer, checks it against the frozen digest, and
+  creates `task-message-inputs/<request_id>` once (`O_EXCL`) and syncs it. One
+  short transaction then rechecks the native permit after `BEGIN IMMEDIATE`,
+  with the same Service, configuration and lease, admits the original and
+  holds its input. An expired permit, a revoked writer or a stop refuses:
+  nothing was admitted, the exact published input is removed and then its
+  reservation is released. The same original again only reads its receipt.
+- **Execution.** The child's stdin streams from the input through the handle
+  kept since preparation, never a reopened name. The input stays in the
+  original's resources guard with the custody lock.
+- **Removal.** An input is removed, and its storage charge released, only
+  after its original drained physically and nothing in this process holds it.
+  A restart does not change that: a retired but undrained original keeps its
+  input. A failed removal stays visible and charged. Lookups never read an
+  input, so a legitimately removed one changes no receipt.
+- **Restart.** A reservation whose input exists was published but never
+  admitted: it is kept, charged and reviewable (`orphaned`). One without an
+  input is released. There is no age-based sweep.
+- **Records.** `desktop_task_message_inputs` and its budget, added at Store
+  schema 27 by merge order, keep one record per input; status reports the
+  charged records and bytes.
 
 ## Client
 

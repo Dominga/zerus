@@ -69,6 +69,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        Desktop creation worktree ABI: desktop-creation-worktree-v1
        Desktop creation launch ABI: desktop-creation-launch-v1
        Desktop task message ABI: desktop-task-message-v1
+       Desktop task message references: desktop-task-message-reference-v1
        Desktop task start reconcile ABI: desktop-task-start-reconcile-v1
        Desktop pending read import ABI: desktop-pending-reads-v1
        Desktop activation ABI: desktop-activation-v1
@@ -430,6 +431,7 @@ fn unix_only_usage(line: &str) -> bool {
         zerus_client_core::desktop::creation_worktree::HELP_MARKER,
         zerus_client_core::desktop::creation_launch::HELP_MARKER,
         zerus_client_core::desktop::task_message::HELP_MARKER,
+        zerus_client_core::desktop::task_message::REFERENCE_HELP_MARKER,
         zerus_client_core::desktop::task_start_reconcile::HELP_MARKER,
     ]
     .contains(&line.trim())
@@ -471,6 +473,7 @@ fn advertised(usage: Cow<'static, str>, linux: bool) -> Cow<'static, str> {
     let markers = [
         zerus_client_core::desktop::creation_worktree::HELP_MARKER,
         zerus_client_core::desktop::task_message::HELP_MARKER,
+        zerus_client_core::desktop::task_message::REFERENCE_HELP_MARKER,
     ];
     usage
         .lines()
@@ -2771,6 +2774,10 @@ mod tests {
                     ""
                 )
                 .replace(
+                    "       Desktop task message references: desktop-task-message-reference-v1\n",
+                    ""
+                )
+                .replace(
                     "       Desktop task start reconcile ABI: desktop-task-start-reconcile-v1\n",
                     ""
                 )
@@ -2789,11 +2796,13 @@ mod tests {
     fn only_linux_advertises_the_creation_worktree_and_task_message_executors() {
         let marker = zerus_client_core::desktop::creation_worktree::HELP_MARKER;
         let message = zerus_client_core::desktop::task_message::HELP_MARKER;
+        let references = zerus_client_core::desktop::task_message::REFERENCE_HELP_MARKER;
         let clone = zerus_client_core::desktop::creation_clone::HELP_MARKER;
         assert_eq!(advertised(usage_text(true), true), USAGE);
         let mac = advertised(usage_text(true), false);
         assert!(!mac.lines().any(|line| line.trim() == marker));
         assert!(!mac.lines().any(|line| line.trim() == message));
+        assert!(!mac.lines().any(|line| line.trim() == references));
         assert!(mac.lines().any(|line| line.trim() == clone), "clone stays POSIX");
         assert_eq!(
             mac,
@@ -2806,8 +2815,12 @@ mod tests {
                     "       Desktop task message ABI: desktop-task-message-v1\n",
                     ""
                 )
+                .replace(
+                    "       Desktop task message references: desktop-task-message-reference-v1\n",
+                    ""
+                )
         );
-        for marker in [marker, message] {
+        for marker in [marker, message, references] {
             assert_eq!(
                 help_text().lines().any(|line| line.trim() == marker),
                 cfg!(target_os = "linux")

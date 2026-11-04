@@ -325,6 +325,19 @@ impl Validated {
         };
         Ok(*intent)
     }
+    /// A read of the original before the actor's preparation. It grants
+    /// nothing: admission still consumes this permit through `task_message`
+    /// after BEGIN IMMEDIATE, and an expired permit refuses there.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn task_message_preview(
+        &self,
+    ) -> Result<&zerus_client_core::desktop::task_message::Intent> {
+        self.check()?;
+        let Request::TaskMessage { intent } = &self.0 else {
+            anyhow::bail!("not a task message");
+        };
+        Ok(intent)
+    }
     /// Only the worktree actor calls this after BEGIN IMMEDIATE. Cached native
     /// Service mode was bound to this exact original request during admission.
     #[cfg(any(target_os = "linux", target_os = "macos"))]

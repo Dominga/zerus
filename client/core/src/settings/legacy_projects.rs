@@ -1,8 +1,8 @@
 //! Separate, bounded legacy CLI project-list completion family. No requests,
 //! names or paths are retained here; only original-scope IDs and digest proof.
-use crate::swarm::legacy_projects::{Binding, Code, Evidence, Plan, bytes};
+use crate::swarm::legacy_projects::{bytes, Binding, Code, Evidence, Plan};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
 pub(crate) const KEY: &str = "legacy_project_lists_v1";

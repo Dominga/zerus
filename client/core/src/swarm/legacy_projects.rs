@@ -1,10 +1,10 @@
 //! One legacy `project ls` list as an add-only, original catalog proposal.
 //! No reads, writes or retry authority. The native caller owns the verified
 //! source and the single external-operation fence before using a proposal.
-use super::{FOLDERS, MAX_PROJECTS, edit};
+use super::{edit, FOLDERS, MAX_PROJECTS};
 use crate::paths::{self, Style};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::io::{self, Write};

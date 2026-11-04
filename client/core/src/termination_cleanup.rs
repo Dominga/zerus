@@ -396,7 +396,8 @@ impl Cleanup {
         for entry in self.entries.iter().filter(|entry| entry.eligible()) {
             required.local_files |= local_data(&entry.row);
             required.discard_changes |= entry.discardable();
-            required.unchecked_processes |= process_reviewable(&entry.row);
+            required.unchecked_processes |=
+                process_reviewable(&entry.row) || discardable_with_processes(&entry.row);
         }
         required
     }
@@ -461,7 +462,7 @@ impl Cleanup {
                 },
                 process_fingerprint: if !automatic
                     && consents.unchecked_processes
-                    && process_reviewable(row)
+                    && (process_reviewable(row) || discardable_with_processes(row))
                 {
                     text("process_fingerprint")
                 } else {

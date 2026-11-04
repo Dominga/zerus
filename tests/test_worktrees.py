@@ -414,8 +414,15 @@ class Cleanup(Repository,unittest.TestCase):
         kept(self.remove(tree,row['fingerprint']),'Cannot remove')
         kept(self.remove(tree,row['fingerprint'],extra=both[:2]),'cannot check whether some running programs')
         kept(self.remove(tree,row['fingerprint'],extra=both[2:]),'Cannot remove')
-        kept(self.remove(tree,row['fingerprint'],extra=('--automatic',*both)),'')
+        # Automatic cleanup never uses the process acceptance (Y1).
+        kept(self.remove(tree,row['fingerprint'],extra=('--automatic',*both)),'Process confirmation is stale')
         # A known use or a saved session is still a blocker no consent overrides.
+        known=subprocess.Popen(['sleep','90'],cwd=tree)
+        self.addCleanup(lambda: known.poll() is None and (known.terminate(),known.wait(timeout=5)))
+        busy=self.row(tree);self.assertIn('processes',codes(busy['reasons']))
+        self.assertNotIn('process_fingerprint',busy);self.assertNotIn('discardable_with_process_consent',busy)
+        kept(self.remove(tree,busy['fingerprint'],extra=both),'')
+        known.terminate();known.wait(timeout=5)
         self.binding('codex/keep',tree);bound=self.row(tree)
         self.assertNotIn('process_fingerprint',bound);self.assertNotIn('discardable_with_process_consent',bound)
         kept(self.remove(tree,bound['fingerprint'],extra=('--discard-fingerprint',bound['discard_fingerprint'],'--process-fingerprint',row['process_fingerprint'])),'')

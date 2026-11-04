@@ -76,7 +76,7 @@ The `--json` form is `{"error":"ambiguous_session","name":…,"candidates":[{ses
   - A twin is readable only while the operation it mirrors is still the selected name membership of its label, with the same project. A member that never receives twins keeps Lamport clocks without them, so a comparison of clocks could let its later move tie with or trail a twin. Binding to the operation makes any later move by name, superseding or concurrent, hide the twin until its owner writes it again.
   - `membership_by_id` is ready only when every machine of the catalog is this computer or a direct peer whose last sync listed the kind. Unknown machines fail closed.
   - Desktops read the ID form only when it is ready. The name form is still written, and read everywhere else, until P3 decides the connector's capability and when to stop writing names, together with owner questions 1 and 3.
-- **Rename and restore.** Rename no longer refuses a label in use, and restore no longer needs a free name. Fork keeps its readable `-fork`, `-2`… suffixes, but a taken label stops being an error.
+- **Rename, restore and fork.** From P3, rename takes a label in use and restore no longer needs a free label. A fork uses the name the person enters exactly as entered; the dialog suggests `<name>-fork`, a CLI fork without a name uses `<tag>-fork`, and the `-2`, `-3`… search goes (owner, question 3). See the P3 plan.
 
 ## Phasing
 
@@ -85,7 +85,7 @@ The `--json` form is `{"error":"ambiguous_session","name":…,"candidates":[{ses
 | P0 (done, #1223) | Archived sessions never hold a label; a fork suffixes a taken label | unique among live and saved |
 | P1 | `session_id` in records, `HGS_SESSION_ID`, hooks and machine clients resolve by ID, `--session-id` and references on every command, the ambiguity error | still unique, so nothing visible changes |
 | P2 | The ID index (P2a), `journal_name` for new sessions (P2b), catalog membership, drafts and read marks by ID, dual-written (P2c). `terminal_name` and the `sessions/<id>` layout for a reused label moved to P3 (coordinator, 2026-11-04). | still unique |
-| P3 | Remove the uniqueness checks from launch, rename, restore and fork | labels may repeat |
+| P3 | Readers by label and session ID (P3a), terminal names (P3b), selection among sessions that share a label (P3c), the fleet gate and session emission (P3d), labels that repeat behind that gate (P3e), and the desktop and phone (P3f). See the P3 plan. | labels may repeat once the fleet gate is open |
 
 Each phase ships separately and keeps older CLIs, peers and records working.
 
@@ -105,9 +105,116 @@ Constraints (coordinator, 2026-11-04):
     - A P2b fork resumed by v0.47.0 loses `fork_lineage`. If its source is later renamed or archived, the derived lineage finds nothing and saves an empty lineage for good, so the inherited view stays empty.
     - A fork resumed by an earlier lineage-era build keeps its lineage but drops the labels. Its direct source then shows its recorded label; older ancestors show their journal name.
 
-P3 checklist, besides the constraints above:
+## P3 plan (2026-11-05)
 
-- **Deferred sends** (core-cl, 2026-11-04). The deferred-send actor's pre-spawn check, `current()` in `src/desktop/deferred_send/target.rs`, reads the session record at `sha256(name).json`. When P3 keeps the record of a reused label at `sessions/<session_id>.json`, that check must read it there and pass the session ID to `hgs send`. Otherwise every deferred send settles as never started: safe, but broken.
+The owner's answers to questions 1 and 3 and the coordinator's decision on question 2 set the target. P3 ships as six PRs. The first four change nothing visible while every label is unique, the fifth lets labels repeat once the fleet gate is open, and the sixth updates the desktop and phone.
+
+### Target behaviour
+
+- New session on the desktop and the phone always creates a new session, whatever its label. Nothing refuses a label because another live or saved session has it.
+- `hgs NAME` stays for scripts:
+  - it opens the one live or saved session with that label;
+  - with several, it refuses with the ambiguity report (exit 5, section 4) and never guesses;
+  - with none, it creates one, as today.
+
+  `hgs NAME --new` always creates a new session, even when the label is in use.
+- Rename and restore take any label. A fork uses the name the person enters, exactly as entered. The fork dialog suggests `<name>-fork`, a CLI fork without a name uses `<tag>-fork` whether or not it is taken, and the `-2`, `-3`… search goes.
+- Machine clients and agent coordination address a session by its session ID or reference, never by its label alone.
+
+### Storage: the first holder keeps the label's path
+
+- **The first holder.** A session whose label no other live or saved session holds is stored as today:
+  - `sha256(label).json`, or `bindings/` through `name_routes`;
+  - its provider binding stays in `dsh/bindings/` or `opencode/bindings/`.
+
+  Most sessions never move, and older builds keep reading them.
+- **The ID layout.** A session created, renamed, restored or forked onto a label that another live or saved session holds is stored at `sessions/<session_id>.json`. Its provider binding goes to `dsh/sessions/` or `opencode/sessions/`. It stays there for life and never moves back, even after its label becomes free.
+- **The label index.** `labels/<sha256(label)>.json` (`{version, label, ids}`) lists the sessions stored by ID under a label.
+  - Like `ids/`, it is a verified cache. Every entry is checked against its record: the same session ID and label, no archive and no rename shadow.
+  - A miss or a stale entry falls back to one scan of `sessions/`, which stays small because only sessions with a reused label live there.
+  - Writers change it under the state writer lock; readers never take that lock.
+  - `ids/<session_id>.json` (P2a) gains a record kind for the ID layout, so `--session-id` and hooks reach such a session in O(1).
+- **One resolver.** A label's candidates are its legacy holder plus the index's sessions. Every reader that resolves a label goes through this resolver, including `records()`, which also lists `sessions/`.
+- **Other files keyed by the label.** For a session in the ID layout, every other file keyed by `sha256(name)` is keyed by the session ID: recovery jobs, the native-input lock and DeepSeek fork intents, and the hash that `hook_health`, `task_reconcile`, `session_graph`, `session_project` and `launch_observation` recompute. Sessions at the legacy path keep their files.
+- **Journals.** A reused label always belongs to a new session, which has its own `session:<session_id>` journal since P2b. Journals named by a label before P2b stay with their own session.
+
+### Terminals (question 2, coordinator)
+
+- Records gain `terminal_name`. A new session uses its label when no terminal session has that name, else `label~<first 8 characters of its session ID>`.
+- Control goes through `terminal_name` or tmux's `$N`, never the label. That covers `=NAME` targets, `has-session`, `set_run_marker`, kill, titles, viewers and attach, and the live snapshot that matches records to panes.
+- A record without `terminal_name`, written by an older build, uses its label, which is then its terminal name.
+- A rename moves the terminal name to the new label only when that name is free.
+- The Windows host registry keys sessions by terminal name and still refuses a duplicate terminal name. It never sees a label.
+
+### Selection among sessions that share a label
+
+- **Resolving a label:**
+  - no candidate: not found, or for a launch, a new session;
+  - one candidate: that session;
+  - several: the expected IDs select. The `--expected-run-id` and `--expected-conversation-id` flags and the JSON `expected_run_id` and `expected_conversation_id` fields keep the candidates whose run, and conversation if given, match. Exactly one left is that session; none left is each command's stale-target refusal, as today; several left is the ambiguity report (exit 5).
+- **Older clients.** The desktop, Android, iOS and the connector send expected IDs with every write. Their builds from before `--session-id` therefore still reach the right one of several sessions. A command sent by bare label without expected IDs, such as pause or kill from an older desktop, fails closed with exit 5.
+- **Other selectors.** `--session-id` and references select as in P1. `--all` commands go through records, not labels.
+- **Listings.** `hgs ls --json` merges live, saved and archived data by session ID instead of label, so a saved session is hidden only when the same session is live. Watch rows keep their `run:` keys.
+
+### The fleet gate and session emission
+
+- **The gate.** It is open on a computer when every computer it addresses accepts labels that repeat:
+  - every machine of its swarm catalog and every configured peer lists a new `session-labels-v1` line in `hgs --help`;
+  - its mobile gateway connector reports the same.
+
+  Answers are cached like `session-id-selector-v1` (10 minutes). An unknown or unreachable computer keeps the gate closed.
+- **While it is closed,** P3 behaves as P2:
+  - a new or forked session that would reuse a label in use takes the next free `-2`, `-3`… suffix, so New session on the desktop and phone still never refuses;
+  - rename, restore and `hgs NAME --new` refuse a label in use, as today.
+- **Session emission.** `hgs reference`, `hgs self` and sender envelopes add the optional `session` field (the session ID) only while the gate is open, because a parser older than P1c-1 rejects unknown fields.
+
+### P3 checklist
+
+- **Hooks.** Hooks resolve by `HGS_SESSION_ID` through `ids/`, also for sessions in the ID layout. The remaining `read_run` callers move to session ID plus run: supervisor, lifecycle, interrupt, continuations, launches, waits, Kimi, Claude approval, the question terminal and `session_graph` sends.
+- **Deferred sends** (core-cl, 2026-11-04). `current()` in `src/desktop/deferred_send/target.rs` reads the session record at `sha256(name).json`. It must read the record through the resolver by session ID and pass `--session-id` to `hgs send`. Otherwise every deferred send to a session in the ID layout settles as never started: safe, but broken.
+- **Drafts and read marks.** They are keyed by session ID since P2c-2 (#1418, #1421). Read marks are still delivered with `hgs read NAME`, guarded by run and conversation; that delivery moves to `--session-id` where the computer supports it.
+- **The Windows host registry**, by terminal name.
+- **tmux terminal names**, per question 2.
+- **The ambiguity report.** `session_id::ambiguity` has no caller yet; every label resolution uses it.
+- **DeepSeek and OpenCode bindings** follow the ID layout for reused labels; their launch and rename refusals go behind the fleet gate.
+- **Catalog membership.** The name form stays written. Sessions that share a label share one name membership, and their ID twins tell them apart once `membership_by_id` is ready. The connector still groups phone rows by name, so on the phone such sessions show in the same project until the connector reads twins, a later step.
+
+### Rollback
+
+| Step | After a rollback of a computer, older builds see | What breaks |
+| --- | --- | --- |
+| P3a–P3c | Nothing new on disk except `terminal_name` and index entries, which they ignore. Every label is still unique and at its legacy path. | Nothing. A build older than P3b that rewrites a record drops `terminal_name`, which then equals the label anyway. |
+| P3d | References with `session` | A build older than P1c-1 cannot parse them. It also lacks the marker, so the gate stays closed until it is updated, and closes again on a rollback. |
+| P3e, labels in use more than once | Only the legacy holder of each label. Sessions in the ID layout are invisible: they are not listed as saved, and a live one shows as an untracked terminal `label~<id>`. | Hooks of a session in the ID layout update nothing: v0.47.0's `read_run` takes the label's record only when its run matches, then scans only `sha256` paths. Such a session cannot be resumed until the computer moves forward again. Nothing is deleted, because no older build writes `sessions/` or `labels/`. To use such a session on the older build, archive it first: archives are keyed by ID, and the older build restores it under a free label. |
+| P3e, other computers | — | A peer or desktop on an older build that names a label held by several sessions gets exit 5 when it sends no expected IDs: a refusal, never another session. |
+| P3f | Older desktops and phones list every session; rows sharing a label are told apart only by folder and time. | Their actions without expected IDs refuse with exit 5. |
+
+### PRs
+
+1. **P3a, readers.**
+   - The label resolver, the ID layout and the label index, read but not written.
+   - `ids/` entries for the ID layout, and `records()` over `sessions/`.
+   - Files keyed by session ID for that layout.
+   - Hooks and the `read_run` callers by session ID; the deferred-send check.
+   - The ambiguity report wired in, still unreachable.
+2. **P3b, terminal names.** `terminal_name` on new records, every tmux and host target through it, and the Windows host registry by terminal name. While labels are unique, every terminal name equals its label.
+3. **P3c, selection.** The expected IDs select among candidates, `hgs ls --json` merges by session ID, and `--all` iterates records.
+4. **P3d, the fleet gate and emission.** The `session-labels-v1` marker, the gate with its cache, and the `session` field in references, `hgs self` and sender envelopes behind it.
+5. **P3e, labels that repeat (CLI).** With the gate open:
+   - launch `--new`, rename, restore and fork write the ID layout when the label is in use;
+   - `hgs NAME` reports ambiguity;
+   - fork takes the entered name, and the `-2` search goes;
+   - DeepSeek and OpenCode follow.
+
+   With the gate closed, it behaves as P2 with the `-2` suffix for new sessions.
+6. **P3f, desktop and phone.**
+   - New session always creates.
+   - The fork dialog drops its "in use" hint and keeps the `<name>-fork` suggestion.
+   - Rows that share a label get a short folder or time suffix.
+
+   Live connector and gateway updates stay owner-gated.
+
+P3e merges only after P3a–P3d are installed on every computer of the swarm and on the gateway connector. The fleet gate then opens by itself, computer by computer.
 
 ## Owner questions
 

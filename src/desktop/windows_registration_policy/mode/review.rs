@@ -106,7 +106,7 @@ pub(in crate::desktop) struct ChoiceScope {
     pub generation: u64,
 }
 impl ChoiceScope {
-    fn valid(&self) -> bool {
+    pub(super) fn valid(&self) -> bool {
         [&self.journal, &self.owner_epoch, &self.service_epoch]
             .iter()
             .all(|s| canonical_id(s))
@@ -124,7 +124,8 @@ impl Record {
             .last()
             .context("No original review selects this choice.")?;
         let choice = choice.context("After review, confirm a NEW mode choice with --after-review UUID --request-id NEW_UUID.")?;
-        ensure!(self.choices.len() < CHOICES && !self.choices.iter().any(|c| c.request == choice.request),
+        ensure!(self.choices.len() < CHOICES && !self.choices.iter().any(|c| c.request == choice.request)
+            && !self.first_choices.iter().any(|c| c.request == choice.request),
             "Original choice was already offered or history is full; read its original mode-result, never replay it.");
         ensure!(canonical_id(&choice.request) && choice.reviewed == last.original.request_id
             && self.completed.as_deref() != Some(choice.request.as_str())
@@ -159,6 +160,13 @@ impl Record {
             );
             receipt.phase = phase;
         }
+        if let Some(receipt) = self.first_choices.iter_mut().find(|c| c.request == request) {
+            ensure!(
+                receipt.phase == ChoicePhase::Unknown || receipt.phase == phase,
+                "Original first choice already has a terminal receipt."
+            );
+            receipt.phase = phase;
+        }
         Ok(())
     }
 
@@ -184,6 +192,13 @@ impl Record {
                 receipt.desired == Mode::Background && receipt.phase == ChoicePhase::Unknown,
                 "Current background choice identity changed."
             );
+            receipt.scope = Some(scope.clone());
+        }
+        if let Some(receipt) = self.first_choices.iter_mut().find(|c| c.request == request) {
+            ensure!(
+                receipt.desired == Mode::Background && receipt.phase == ChoicePhase::Unknown,
+                "Current background choice identity changed."
+            );
             receipt.scope = Some(scope);
         }
         self.complete(request)
@@ -201,7 +216,7 @@ impl Record {
     /// any offered phase before interruption. Size-only models below use the
     /// largest accepted UUID, integer and phase encodings, never evidence or a
     /// native permission. Both the barrier and immutable archive must fit.
-    fn review_capacity(&self, pending: &Pending) -> Result<usize> {
+    pub(super) fn review_capacity(&self, pending: &Pending) -> Result<usize> {
         let uuid = "ffffffff-ffff-ffff-ffff-ffffffffffff";
         let identity = Boot {
             machine: uuid.into(),
@@ -241,18 +256,27 @@ impl Record {
         // scope. Reserve that reachable layout too, before any manager effect.
         model.reviewed = self.reviewed.clone();
         model.completed = Some(pending.request_id.clone());
+        let largest_scope = ChoiceScope {
+            journal: uuid.into(),
+            owner_epoch: uuid.into(),
+            service_epoch: uuid.into(),
+            generation: u64::MAX,
+        };
         if let Some(receipt) = model
             .choices
             .iter_mut()
             .find(|c| c.request == pending.request_id && c.desired == Mode::Background)
         {
             receipt.phase = ChoicePhase::Settled;
-            receipt.scope = Some(ChoiceScope {
-                journal: uuid.into(),
-                owner_epoch: uuid.into(),
-                service_epoch: uuid.into(),
-                generation: u64::MAX,
-            });
+            receipt.scope = Some(largest_scope.clone());
+        }
+        if let Some(receipt) = model
+            .first_choices
+            .iter_mut()
+            .find(|c| c.request == pending.request_id && c.desired == Mode::Background)
+        {
+            receipt.phase = ChoicePhase::Settled;
+            receipt.scope = Some(largest_scope);
         }
         Ok(barrier.max(reviewed).max(serde_json::to_vec(&model)?.len()))
     }

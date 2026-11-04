@@ -41,6 +41,8 @@ const START: Duration = Duration::from_secs(10);
 const IMAGE: &str = "hgs-tray.exe";
 const HELP_BYTES: usize = 64 * 1024;
 const CLEANUP_WAIT: Duration = Duration::from_secs(5);
+/// Proving the portable zip's bound app for one launch, off the actor.
+const PORTABLE_PROOF: Duration = Duration::from_secs(10);
 
 /// Non-Clone/non-serde. Only select() binds the running service image and an
 /// installed image from the SAME scope used by inbound frontend authentication.
@@ -52,14 +54,19 @@ pub(in crate::desktop) struct SelectedFrontend {
 }
 impl SelectedFrontend {
     pub fn select(scope: &crate::desktop::ui_authority::Scope, image: &Path) -> Result<Self> {
-        let installed = scope
-            .installed_frontend(image)
-            .context("frontend is not a maintained installed image")?;
-        let selected = Self::capture(
-            &std::env::current_exe()?,
-            installed,
-            scope.configuration.clone(),
-        )?;
+        let cli = std::env::current_exe()?;
+        let selected = match scope.installed_frontend(image) {
+            Some(installed) => Self::capture(&cli, installed, scope.configuration.clone())?,
+            // The portable zip's bound app: pinned and proven for this launch,
+            // and that same pin is the launch's custody until release.
+            None => Self::capture_pinned(
+                &cli,
+                scope
+                    .portable_closed(image, Instant::now() + PORTABLE_PROOF)
+                    .context("frontend is not a maintained installed image")?,
+                scope.configuration.clone(),
+            )?,
+        };
         // Bind the CLI handle to this running service too; current_exe's name
         // alone could have been replaced during an installed CLI update.
         let process = unsafe {
@@ -71,11 +78,11 @@ impl SelectedFrontend {
         Ok(selected)
     }
     fn capture(cli: &Path, image: &Path, configuration: String) -> Result<Self> {
-        ensure!(
-            cli.is_absolute() && image.is_absolute(),
-            "frontend selection must be absolute"
-        );
-        let pinned = Pinned::open(image)?;
+        ensure!(image.is_absolute(), "frontend selection must be absolute");
+        Self::capture_pinned(cli, Pinned::open(image)?, configuration)
+    }
+    fn capture_pinned(cli: &Path, pinned: Pinned, configuration: String) -> Result<Self> {
+        ensure!(cli.is_absolute(), "frontend selection must be absolute");
         let entry = pinned.path();
         ensure!(
             entry

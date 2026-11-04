@@ -382,6 +382,8 @@ struct Shared {
     #[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
     activation_backoffs: std::sync::atomic::AtomicUsize,
     #[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
+    activation_passive_waits: std::sync::atomic::AtomicUsize,
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
     activation_permanent: AtomicBool,
     allowed: bool,
     stopped: AtomicBool,
@@ -568,6 +570,8 @@ impl Service {
             activation_retry: Mutex::new(None),
             #[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
             activation_backoffs: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
+            activation_passive_waits: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
             activation_permanent: AtomicBool::new(false),
             allowed,
@@ -2072,5 +2076,7 @@ pub async fn desktop_service_automatic_approvals(
     .await
 }
 
+#[cfg(test)]
+mod passive_projection_tests;
 #[cfg(all(test, unix))]
 mod tests;

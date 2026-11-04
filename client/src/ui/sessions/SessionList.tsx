@@ -12,6 +12,7 @@ import {
   emphasis, childStatus, gitTooltip, paletteIndex, folderOf, ProviderGlyph,
 } from "./SessionCard";
 import { agentKind, catalog, computerFresh, computerOffline } from "../../store/catalog";
+import { servicePausedEmpty } from "../components/DesktopServiceStatus";
 import { visibleUnreadReply } from "../../store/attention";
 import { optionalQuestionCount } from "./optional-questions";
 import { currentChildren } from "./subagents";
@@ -819,12 +820,19 @@ function NoMatches() {
   );
 }
 
-/** Before the first rows: skeleton cards while a computer is still starting, then the empty states. */
+/** Before the first rows: skeleton cards while a computer is still starting, then the empty states;
+ * a passive service shows no skeletons, since nothing is loading until Resume. */
 function ListPlaceholder() {
   const computers = () => Object.values(catalog.computers);
   const waiting = () => !computers().length || computers().some((c) => c.status === "probing");
   const unsupported = () => computers().length > 0 && computers().every((c) => c.status === "unsupported");
   return (
+    <Show when={!servicePausedEmpty()} fallback={
+      <div class="empty sp-empty sp-paused">
+        <Icon name="pause" size={30} />
+        <p>{tr("Sessions appear here after background work resumes.")}</p>
+      </div>
+    }>
     <Show when={!waiting()} fallback={
       <div class="sp-scroll">
         <For each={[0, 1, 2, 3, 4]}>
@@ -849,6 +857,7 @@ function ListPlaceholder() {
           <p>{tr("This computer's hgs has no event stream (Event stream ABI: watch-v1). Update hgs to see its sessions here.")}</p>
         </Show>
       </div>
+    </Show>
     </Show>
   );
 }

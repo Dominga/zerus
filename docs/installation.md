@@ -448,7 +448,13 @@ Zerus then lists this computer's sessions, offers it in New session and Accounts
 and runs the stable CLI from its next start. When Zerus starts from another zip of
 the same or a newer version, it first stages that zip's `hgs.exe` again (a small
 *Starting Zerus…* note may show meanwhile); running sessions stay in the host that
-runs them, and the next host starts from the new image. **Machines** shows the
+runs them, and the next host starts from the new image. That start also binds
+the zip's app to the stable CLI, so the stable CLI accepts the app as your
+Zerus. If you move the folder or extract the same zip elsewhere, the app binds
+itself again when it next starts. The app of an older zip is not staged and
+stays refused, so start the newest zip you extracted. Running
+`.\hgs.exe session-host install` yourself removes the binding until the app
+next starts. **Machines** shows the
 session host's state for this computer, and `hgs.exe session-host status` reports
 the marker, the staged files and the host.
 

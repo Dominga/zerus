@@ -1609,6 +1609,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::tasks_follow,
         task_details::task_details,
         task_details::task_page,
+        task_details::task_attachment_read,
         task_details::task_assign,
         task_details::task_board_action,
         task_details::task_cancel_execution,

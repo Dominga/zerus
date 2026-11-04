@@ -8,6 +8,7 @@
   .drop-overlay span { color: light-dark(#167357, #8bdfc0); font-size: 16px; padding: 24px; text-align: center; }
   .detail-empty { margin: auto; text-align: center; color: var(--z-color-muted); }
   .detail-empty h2 { font-size: 21px; font-weight: 600; color: var(--z-color-text-2); margin-bottom: 8px; }
+  .detail-empty .btn.primary { margin-top: 16px; }
 
   .detail-head { padding: 8px 12px 4px; display: flex; flex-direction: column; gap: 4px; }
   .dh-row1 { display: flex; align-items: center; gap: 4px; min-width: 0; }

@@ -398,12 +398,14 @@ export const ownershipActions = createOwnershipActions(
   () => invoke("desktop_service_ownership_rearm"),
   () => invoke("desktop_service_ownership_result"),
 );
+const HELPER_UNAVAILABLE = ["activation_helper_unavailable", "activation_helper_update_required", "activation_helper_changed"];
+const COMPONENTS = ["fleet", "presence", "reads", "attention", "approvals"];
 export function ownershipNotice(view: NotificationOwnership | undefined): string {
   if (!view) return "";
   if (view.pending) return tr("Background access is unconfirmed. Check the result before making another change.");
   if (view.activation?.pending) return tr("Background activation is unconfirmed. Check the original result before making another change.");
   if (view.activation?.needs_resume) {
-    if (["activation_helper_unavailable", "activation_helper_update_required", "activation_helper_changed"].includes(view.activation.code))
+    if (HELPER_UNAVAILABLE.includes(view.activation.code))
       return tr("Background activation is unavailable. Update Zerus and its desktop service, then Resume to check again.");
     return tr("Background work is paused. Resume to activate the service explicitly.");
   }
@@ -423,10 +425,28 @@ export function heldInputsNotice(state: DesktopService | undefined): string {
     : tr("Some held task message copies need review.");
 }
 
+/**
+ * A connected service that runs passive: it reports none of its background work
+ * started. "resume": the native activation helper offers the explicit Resume
+ * (Linux, macOS). "settings": the platform has no native activation route
+ * (activation_platform_manual, Windows) and ownership needs nothing; Settings >
+ * About shows the service state. Presentation only; never authority.
+ */
+export type PausedAction = "resume" | "settings";
+export function servicePaused(state: DesktopService | undefined): PausedAction | undefined {
+  const ownership = state?.notification_ownership, activation = ownership?.activation;
+  if (!state?.connected || state.executable_upgrade?.state === "manual_refresh_required"
+    || !COMPONENTS.every((name) => state.background[name]?.code === "not_started")
+    || !activation || ownership?.pending || activation.pending) return undefined;
+  if (activation.needs_resume) return HELPER_UNAVAILABLE.includes(activation.code) ? undefined : "resume";
+  return activation.code === "activation_platform_manual" && !ownershipNotice(ownership) ? "settings" : undefined;
+}
+
 /** Compact footer presentation; full reasons stay in its accessible tooltip. */
 export function serviceStatus(state: DesktopService | undefined) {
   if (!state) return;
   const manualRefresh = state.executable_upgrade?.state === "manual_refresh_required";
+  const paused = servicePaused(state);
   let notice = "", label = tr("Background service");
   if (manualRefresh) {
     label = tr("Service refresh required");
@@ -439,7 +459,10 @@ export function serviceStatus(state: DesktopService | undefined) {
   } else if (state.code === "explicit_handoff_required") {
     label = tr("Background handoff required");
     notice = tr("Background service is waiting for an explicit handoff.");
-  } else if (state.code || !["fleet", "presence", "reads", "attention", "approvals"].every((name) => state.background[name]?.ready)) {
+  } else if (paused) {
+    // Passive by selection, not a fault. With "resume" the ownership notice
+    // explains it and offers Resume; with "settings" its own reason below.
+  } else if (state.code || !COMPONENTS.every((name) => state.background[name]?.ready)) {
     label = tr("Background service not ready");
     notice = tr("Background service is not ready. Some actions are unavailable.");
   } else if (!state.details_available) {
@@ -455,8 +478,12 @@ export function serviceStatus(state: DesktopService | undefined) {
     else if (retained) label = tr("Migration report");
     else if (inputs) label = tr("Held message copies");
     else if (owner) label = ownership === "check" ? tr("Background access unconfirmed") : ownership === "rearm" ? tr("Background access paused") : tr("Background access unavailable");
+    else if (paused === "settings") label = tr("Background access paused");
   }
-  const reasons = [notice, pending, retained, inputs, manualRefresh ? "" : owner].filter(Boolean);
+  // A reason without Retry or Resume: no in-app action turns background mode on
+  // here yet (zerus-5wmh.66.8.1.15); Settings shows the current state.
+  const settings = paused === "settings" ? tr("Zerus runs your sessions through a background service, which is paused on this computer. Settings shows its current state.") : "";
+  const reasons = [notice, pending, retained, inputs, manualRefresh ? "" : owner, settings].filter(Boolean);
   return { label, details: reasons.join("\n") || tr("Background service connected"), healthy: !reasons.length,
     retry: !manualRefresh && !!(notice || pending || retained || (owner && !ownership)), review: !!retained, inputsReview: !!inputs, ownership, manualRefresh };
 }

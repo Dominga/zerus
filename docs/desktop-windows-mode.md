@@ -33,6 +33,76 @@ Zerus Next Settings route. No console is attached, allocated or brought to
 the foreground to manufacture admission. Settings callsite integration and
 installed acceptance are separate from this native helper.
 
+On Windows the installed frontend is one of three images:
+- `%LOCALAPPDATA%\Programs\Zerus\hgs-tray.exe` from the per-user installer;
+- an `hgs-tray.exe` beside the checking CLI;
+- the portable zip's own `hgs-tray.exe`, bound to the stable CLI by that
+  app's own staging.
+
+The binding covers the documented portable route. Once local sessions are on,
+the zip's app relays through the stable CLI staged from that zip.
+- **Creation.** When the app starts `hgs session-host install` beside it, the
+  install records `frontend.json` in the host images folder. It does so only
+  when its direct parent is the app beside its own loaded image and no
+  ancestor is an agent. One deadline covers the whole proof. Under the
+  install lock, after the CLI, the image and the marker are complete, the
+  install pins the app's loaded image and the staged CLI (deny-write and
+  deny-delete, ancestors included) and reads the app's SHA-256 through that
+  pin. Immediately before publishing, it checks the same ancestry, parent and
+  pins again against that deadline. It then records both exact objects and
+  the digest.
+- **No other writer.** Every install removes the old binding first, so a
+  failure leaves none. Any other install records nothing: from a terminal,
+  from an agent, or with a copied CLI.
+- **The record.** `frontend.json` and each folder from `.local` down to the
+  images folder must be private to this user: owner, access, a single link,
+  and no link or junction. They are held while the record is published or
+  read. An unsafe record or folder is refused, never repaired.
+- **The CLI.** A process that admits frontends establishes once, from its own
+  loaded image, that it is the bound CLI. It holds no pin on it afterwards,
+  so a newer zip can still restage the stable CLI while it runs.
+- **A running app.** A frontend request or a Settings mode change from the
+  app is proven for that exact process: its own handle and birth, and its
+  loaded image pinned. The image must be the recorded object, and its digest
+  is read through that pin within the request's original deadline, followed
+  by the final process and ancestry checks. The proof travels with the
+  request and is checked again where the request takes effect. A scope keeps
+  at most four such proofs and drops each one as soon as its process exits.
+  Requests still in flight keep their own pin until they finish.
+- **A notification launch.** With the UI closed, the launch pins the
+  recorded app, reads its digest through that pin, and keeps that pin
+  through the launch and its checks until release. A proof from a running
+  app never authorizes such a launch.
+- **Refusals.** A malformed, oversized, linked, foreign or stale record
+  admits nothing. Neither does a replaced app or CLI, or an edit that keeps
+  the app's length and write time.
+- **Rebinding.** The app stages again at start when the binding does not
+  name it, no longer names the staged CLI, or names its path while that path
+  now holds another file or other bytes. `session-host status` reports these
+  facts as `cli_current` and `frontend_current`. So a moved, newly extracted
+  or same-path replaced copy binds itself again. Same or newer version only,
+  never a downgrade, and an unchanged CLI is not copied again.
+- **Where the record is read.** A process that admits frontends finds the
+  record beside the CLI it is running, never through `HOME`, `USERPROFILE`
+  or another setting. Only when its own loaded image is exactly
+  `<dir>\.local\bin\hgs.exe` does it read
+  `<dir>\.local\share\hgs\host\frontend.json`, where the binding install
+  writes it. A service started by Task Scheduler without `HOME` therefore
+  reads the same record as the app's install. A CLI anywhere else, such as
+  the installer folder or a custom path, admits no portable app.
+- **Visibility.** A process that admits frontends records its own CLI when it
+  starts. Every admitting request, with a GUI running or a notification
+  launch, reads and checks the current private record first, with a read of
+  its own; these reads run one at a time. A cached proof is reused only when
+  that record names exactly its app. A failed or unsafe read refuses the
+  request, even when a proof is cached, and never falls back to the record
+  the process read earlier. A running service
+  therefore admits a rebinding at once while the stable CLI is unchanged, for
+  example a re-extracted or same-path replaced app; proofs made against the
+  older record no longer admit anything once it has changed. A record that
+  names another CLI, as after an upgrade, is refused until the service starts
+  again on that CLI. No service or manager is restarted automatically.
+
 As with the common frontend boundary, this prevents unintended agent descent.
 Deliberate same-user parent-process spoofing is outside its scope. Caller
 identities, images, ancestry and console facts are rechecked before effects.

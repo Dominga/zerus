@@ -304,7 +304,20 @@ fn only_the_released_custody_settles_a_message_and_its_reply_never_changes() {
         assert!(ledger::drained(tx, row, observation).is_err());
         drop(held);
         let row = ledger::pending(&store.db).unwrap().unwrap();
-        let observation = custody::probe(&location, &record);
+        // A process another test forks keeps a copy of every descriptor until
+        // its exec closes it, the custody lock's open file description
+        // included: the release is observed once that window passed, as the
+        // drain itself keeps observing.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let observation = loop {
+            let observation = custody::probe(&location, &record);
+            if matches!(observation, custody::Observation::Released { .. })
+                || std::time::Instant::now() >= until
+            {
+                break observation;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
         let tx = store
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -428,6 +441,53 @@ mod message_child {
         Instant::now() + Duration::from_secs(20)
     }
 
+    /// Reports whether the descriptor named by `argv[1]` is the file `argv[2]`
+    /// (`dev:ino`), on stdout unless `argv[3]` is `stderr`.
+    const CUSTODY_SCRIPT: &str = r#"import os, sys
+var = sys.argv[1]
+want = sys.argv[2]
+out = sys.stderr if sys.argv[3:] == ["stderr"] else sys.stdout
+named = os.environ.get(var, "")
+if not named.isdigit():
+    print("custody: no variable", end="", file=out)
+    sys.exit(3)
+try:
+    seen = os.fstat(int(named))
+except OSError:
+    print("custody: not inherited", end="", file=out)
+    sys.exit(3)
+print("custody: inherited" if f"{seen.st_dev}:{seen.st_ino}" == want else "custody: another file", end="", file=out)
+"#;
+
+    /// The runner's child holds the actor's exact custody descriptor, named
+    /// by this kind's variable.
+    #[test]
+    fn the_runner_child_inherits_exactly_the_named_custody() {
+        use std::os::fd::AsRawFd;
+        let (_temp, _location, _record, held) = lock();
+        // SAFETY: fstat into a zeroed struct on a descriptor `held` owns.
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::fstat(held.as_raw_fd(), &mut stat) }, 0);
+        let mut args = python(CUSTODY_SCRIPT);
+        args.push(child::CUSTODY_FD.into());
+        args.push(format!("{}:{}", stat.st_dev, stat.st_ino));
+        assert_eq!(
+            child::run(
+                Path::new("/usr/bin/env"),
+                &args,
+                b"",
+                &held,
+                &guard(),
+                soon(),
+                |_| Ok(())
+            ),
+            Ended::Exited {
+                code: 0,
+                stdout: b"custody: inherited".to_vec()
+            }
+        );
+    }
+
     #[test]
     fn the_child_reads_exactly_its_frozen_input_and_returns_its_whole_reply() {
         let (_temp, _location, _record, held) = lock();
@@ -481,7 +541,26 @@ mod message_child {
             ),
             Ended::Unknown("task_message_input_unwritten")
         );
-        // A reply larger than the retained bound.
+        // A reply of exactly the retained bound is whole; one byte more is
+        // Unknown.
+        assert_eq!(
+            child::run(
+                Path::new("/usr/bin/env"),
+                &python(&format!(
+                    "import sys\nsys.stdout.buffer.write(b'x' * {})",
+                    child::STDOUT_BYTES
+                )),
+                b"",
+                &held,
+                &guard(),
+                soon(),
+                |_| Ok(())
+            ),
+            Ended::Exited {
+                code: 0,
+                stdout: vec![b'x'; child::STDOUT_BYTES]
+            }
+        );
         assert_eq!(
             child::run(
                 Path::new("/usr/bin/env"),
@@ -632,11 +711,18 @@ mod message_child {
             let original = original(&location.configuration, &epoch);
             let (record, held) = running(&mut store, &location, &original, &epoch);
             let finish = location.root.join("descendant-finished");
-            // The descendant keeps the original stdout for two seconds, then
-            // records its end; it never inherits the custody lock.
+            let release = location.root.join("descendant-release");
+            let spawned = location.root.join("descendant-spawned");
+            // The descendant keeps the original stdout until the test releases
+            // it, then records its end; it never inherits the custody lock.
+            // Nothing here races the clock: the deadline only needs to cover
+            // interpreter startup under load, and only the release (or, if
+            // the test failed, 30 seconds) ends it.
             let script = format!(
-                "import subprocess,sys,time\nsubprocess.Popen([sys.executable,'-c',\"import pathlib,sys,time\\ntime.sleep(2)\\npathlib.Path(sys.argv[1]).write_text('finished')\",{}],stdout=sys.stdout,stderr=subprocess.DEVNULL)\nsys.stdout.write('descendant-ready')\nsys.stdout.flush()\ntime.sleep(5)",
-                serde_json::to_string(&finish).unwrap()
+                "import subprocess,sys,time\nsubprocess.Popen([sys.executable,'-c',\"import pathlib,sys,time\\nr=pathlib.Path(sys.argv[2])\\nend=time.time()+30\\nwhile not r.exists() and time.time()<end: time.sleep(0.02)\\npathlib.Path(sys.argv[1]).write_text('finished')\",{},{}],stdout=sys.stdout,stderr=subprocess.DEVNULL)\nopen({},'w').write('spawned')\nsys.stdout.write('descendant-ready')\nsys.stdout.flush()\ntime.sleep(60)",
+                serde_json::to_string(&finish).unwrap(),
+                serde_json::to_string(&release).unwrap(),
+                serde_json::to_string(&spawned).unwrap()
             );
             child::WAIT_ERROR_AFTER_OUTPUT.with(|armed| armed.set(wait_error));
             let guard: Arc<dyn Send + Sync> = Arc::new(held.clone());
@@ -646,8 +732,14 @@ mod message_child {
                 b"frozen",
                 &held,
                 &guard,
-                Instant::now() + Duration::from_millis(200),
+                Instant::now() + Duration::from_secs(5),
                 |_| Ok(()),
+            );
+            // A child too slow to reach its descendant within the deadline
+            // reports itself here, never as a failure of the code under test.
+            assert!(
+                spawned.exists(),
+                "the original child never started its descendant within 5 s: a slow start, not this test's subject"
             );
             let expected = if wait_error {
                 "task_message_unobserved"
@@ -685,6 +777,7 @@ mod message_child {
                 crate::desktop::custody::probe(&location, &record),
                 crate::desktop::custody::Observation::Held
             ));
+            std::fs::write(&release, b"release").unwrap();
             let until = Instant::now() + Duration::from_secs(10);
             while !drained(&mut store) {
                 assert!(Instant::now() < until, "never drained after the real end");

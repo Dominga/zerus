@@ -323,8 +323,8 @@ fn label_view(mut value: Value, project_name: &str, with_log: bool, files: &[Val
         return Err(fail("a task view is not an object"));
     }
     value["ref"] = json!(format!("{project_name}/{}", value["id"].as_str().unwrap_or_default()));
-    // Every session reference names its computer: the task's target, session and
-    // author, and each history entry's session and actor.
+    // Every session reference names its computer: the task's target, session,
+    // author and current executor, and each history entry's session and actor.
     let name = |reference: &mut Value| {
         if let Some(machine) = reference["machine"].as_str().map(str::to_owned) {
             reference["host"] = machines.host(&machine);
@@ -342,6 +342,7 @@ fn label_view(mut value: Value, project_name: &str, with_log: bool, files: &[Val
     for key in ["target", "session", "author"] { name(&mut value[key]); }
     if value["target"]["parent"].is_object() { name(&mut value["target"]["parent"]); }
     if value["worker"]["parent"].is_object() { name(&mut value["worker"]["parent"]); }
+    if value["execution"]["current"]["executor"].is_object() { name(&mut value["execution"]["current"]["executor"]); }
     if let Some(log) = value["log"].as_array_mut() {
         for entry in log {
             name(&mut entry["session"]);

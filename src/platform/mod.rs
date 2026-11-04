@@ -24,6 +24,20 @@ mod windows;
 #[cfg(windows)]
 pub use windows::*;
 
+/// Start a child of the desktop service (a remote watch, a probe, maintenance).
+/// The service has no console on Windows, so its children start without a
+/// console window there; on Unix they take their turn as other children do.
+pub fn spawn_service_child(command: &mut Command) -> io::Result<Child> {
+    #[cfg(unix)]
+    {
+        spawn_in_turn(command)
+    }
+    #[cfg(windows)]
+    {
+        spawn_windowless(command)
+    }
+}
+
 /// Whether a console belongs to this process alone: it has a window and no other
 /// process, such as the user's shell, is attached. Windows creates one for a
 /// console program whose starter gave it none (a logon task, COM activation).
@@ -676,6 +690,36 @@ mod console_allocation_tests {
         // No console window, or no attached process count: nothing to release.
         assert!(!super::private_console(false, 1));
         assert!(!super::private_console(true, 0));
+    }
+
+    #[test]
+    fn desktop_service_children_start_without_console_windows() {
+        // A plain spawn from the console-less service would give every remote
+        // watch, probe or maintenance child (and its ssh.exe) a window.
+        for (name, source) in [
+            ("fleet", include_str!("../desktop/fleet.rs")),
+            ("maintenance", include_str!("../desktop/maintenance.rs")),
+        ] {
+            let body = source
+                .split("\nfn spawn(command: &mut ")
+                .nth(1)
+                .and_then(|rest| rest.split("\n}\n").next())
+                .expect(name);
+            assert!(
+                body.contains("platform::spawn_service_child(command)"),
+                "{name}"
+            );
+            assert!(!body.contains(".spawn()"), "{name} spawns directly");
+        }
+        let shared = include_str!("mod.rs")
+            .split("pub fn spawn_service_child(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("spawn_service_child");
+        assert!(shared.contains("#[cfg(windows)]") && shared.contains("spawn_windowless(command)"));
+        assert!(
+            include_str!("windows.rs").contains("command.creation_flags(CREATE_NO_WINDOW).spawn()")
+        );
     }
 
     #[test]

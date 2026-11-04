@@ -386,13 +386,29 @@ class Script(unittest.TestCase):
         self.assertLess(prepare.index("Link := FindLink(ExpandConstant('{app}'));"), refusal)
         self.assertRegex(prepare[:refusal], r"Log\(Result\);\s+Exit;\s+end;")
         self.assertRegex(prepare[refusal:],
-                         r"if not OwnedFolder\(\) then\s+if HoldsFiles\(ExpandConstant\('\{app\}'\)\) then")
+                         r"if not OwnedFolder\(\) then\s+if HoldsFiles\(ExpandConstant\('\{app\}'\)\) and \(Unreadable = ''\) then")
         self.assertIn("is not empty and is not a Zerus installation folder", prepare)
         self.assertIn("Nothing was changed.", prepare[refusal:])
         # Only files make a folder non-empty: an uninstall can leave empty folders behind.
         holds = self.procedure("HoldsFiles")
         self.assertIn("Result := HoldsFiles(AddBackslash(Folder) + Find.Name)", holds)
         self.assertNotRegex(holds, r"DeleteFile|RemoveDir|DelTree")
+
+    def test_a_folder_setup_cannot_list_refuses_instead_of_passing_as_empty(self):
+        # An unlistable folder might hide a link or foreign files: both scans fail closed.
+        for name in ("FindLink", "HoldsFiles"):
+            body = self.procedure(name)
+            failed = body.index("if not FindFirst(AddBackslash(Folder) + '*', Find) then")
+            self.assertRegex(body[failed:], r"then\s+begin\s+(\{[^}]*\}\s+)?if DirExists\(Folder\)", name)
+            self.assertIn("Unreadable := Folder;", body, name)
+        self.assertRegex(self.procedure("HoldsFiles"), r"Unreadable := Folder;\s+Result := True;")
+        prepare = self.procedure("PrepareToInstall")
+        # Reset before the scans, refused after them, with its own message, before any change.
+        self.assertLess(prepare.index("Unreadable := '';"), prepare.index("LinkedPath(ExpandConstant('{app}'))"))
+        refusal = prepare.index("if (Result = '') and (Unreadable <> '') then")
+        self.assertLess(prepare.index("if not OwnedFolder() then"), refusal)
+        self.assertIn("cannot be listed", prepare[refusal:])
+        self.assertIn("Nothing was changed.", prepare[refusal:])
 
     def test_only_a_silent_self_update_relaunches_the_app(self):
         runs = re.findall(r"(?m)^Filename: (.*)$", self.text.split("[Run]", 1)[1].split("\n[", 1)[0])

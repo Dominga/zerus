@@ -4938,6 +4938,13 @@ per-component readiness. Its epoch changes on service restart. The registration'
 `session` object describes the graphical login environment needed by platform
 installers; it is a requirement, not a claim that the environment is present.
 
+`lifecycle.console_released` is true when the Windows service was given a
+console window of its own and released it before serving, so no window stays
+open. A logon task or a COM activation gives a console program such a window.
+It is false when the service shares its console with another process, such as
+the terminal it was started from, when it had no console, and on Linux and
+macOS. It is diagnostic only; readiness never depends on it.
+
 `lifecycle.mode` reports the running command's `passive` or `background`
 selection independently of worker admission. On all three desktop platforms, `registration --json
 --background` renders the explicit background variant without installing it;

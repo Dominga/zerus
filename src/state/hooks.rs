@@ -1280,8 +1280,10 @@ fn track(name: String, token: String, mut event: Value, output: &mut StartOutput
         return Ok(0);
     }
     if let Some(scoped) = external_agents::route(&mut record, &event) {
+        if scoped["hgs_retired_external_hook"] == true { return Ok(0); }
         processes::observe(&mut record, &scoped);
         journal::update_activity(&mut record, &scoped);
+        subagent_lifecycle::reconcile(&mut record);
         if kind == "PermissionRequest" {
             let child = &mut record["subagents"][string(&scoped, "agent_id")];
             child["display_state"] = json!("approval");
@@ -1355,6 +1357,8 @@ fn track(name: String, token: String, mut event: Value, output: &mut StartOutput
                 "prompt",
                 "last_message",
                 "subagents",
+                "subagent_retirements",
+                "subagents_ended_pruned",
                 "active_tools",
                 "last_error",
                 "subagent_groups",

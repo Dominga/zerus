@@ -110,11 +110,41 @@ sealing or executable-memfd policy refuses; there is no mutable-fd fallback.
 Native ELF does not inherit the execution descriptor; a script retains only its
 own sealed source descriptor for the interpreter.
 
-The new service submission refuses on macOS with
-`termination_native_image_unavailable`, before preparation or any new child.
-Ordinary/native/replay paths are unchanged. The independent
-`zerus-5wmh.66.3.40.4` follow-up must qualify observation of the same unreaped
-helper's audit token and selected bundle requirement before this path is enabled.
+The macOS exception is confined to this service-native caller:
+`Context::new` passes through `image::prepare` to `Image::selected`, which
+requires the **same retained** `Arc<relay::Connection>` and its genuine paired
+helper route. `Image::selected` reports `termination_native_image_unavailable`
+for missing native selection or stale generation, and path-only Mac capture
+remains unsupported. A broken pair can also refuse earlier at relay/preflight;
+those existing failures remain closed. No direct or PATH fallback is admitted.
+
+Every `Context::spawn`, including help/ABI, scope reads, retention and the final
+native call, observes the same owned unreaped child with
+`Connection::observe_original_helper` before any stdin is taken or written.
+The kernel audit token, birth, selected signature/CDHash and full bundle
+generation are checked by that primitive. Immediately after observation, and
+again after the retention RPC's original-child registration, the caller checks
+its **same** Service, configuration, epoch, generation, relay and cancellation.
+Only a passing observation plus these current checks releases input. A refusal
+closes stdin, permanently latches rejection and returns that same child to the
+existing stop/reap/pipe/worker custody. It cannot become a successful receipt or
+be cleared by another probe. The original resources survive outer timeouts.
+This is a point-in-time observation, with a remaining exec window after its
+last native check; it is not a constrained-spawn proof or new effect permission.
+Ordinary/native/replay paths and the old Service fallback refusal are unchanged.
+
+Actual installed-pair qualification remains separate under
+`zerus-5wmh.66.3.40.4`: macbundle-u's next coordinated Mac window must use the
+reviewed maintained signed pair and explicitly confirm Terminate with Remove
+worktree for one approved disposable generated checkout. The exact original
+confirmation/capture/run/conversation/request identity must correlate through
+retention, original-child binding, native Terminate, verified process exit and
+the actual Removed outcome. Retention alone, a primitive test or a protocol
+fixture is not this positive. Preserve the branch/archive identity, settle the
+original child and all pipe charges, and keep unknown outcomes original-ID
+lookup-only. This result contributes to #1340's actual-caller gate; source
+enablement does not flip the Service default or qualify the installed action.
+
 The new Linux submission similarly refuses with
 `termination_native_relay_unavailable` before preparation or any new child.
 The separate `zerus-5wmh.66.4.6.9` authentication work must qualify the sealed

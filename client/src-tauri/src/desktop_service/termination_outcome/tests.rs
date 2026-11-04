@@ -25,16 +25,106 @@ thread_local! {
     // run_owned. A hook never substitutes a binding result or supplies consent.
     static AFTER_SPAWN_CHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static REFUSED_OBSERVER: std::cell::RefCell<Option<RefusedObserver>> = const { std::cell::RefCell::new(None) };
+    static AFTER_OBSERVATION: std::cell::RefCell<Option<RefusedObserver>> = const { std::cell::RefCell::new(None) };
+    static AFTER_BINDING: std::cell::RefCell<Option<RefusedObserver>> = const { std::cell::RefCell::new(None) };
+}
+pub(super) fn after_image_observation(child: &mut std::process::Child) {
+    if let Some(observer) = AFTER_OBSERVATION.with_borrow_mut(Option::take) {
+        observer(child);
+    }
+}
+pub(super) fn after_original_binding(child: &mut std::process::Child) {
+    if let Some(observer) = AFTER_BINDING.with_borrow_mut(Option::take) {
+        observer(child);
+    }
 }
 pub(super) fn after_spawn_check() {
     if let Some(observer) = AFTER_SPAWN_CHECK.with_borrow_mut(Option::take) {
         observer();
     }
 }
-pub(super) fn observe_refused_binding(child: &mut std::process::Child) {
+pub(super) fn observe_refused_child(child: &mut std::process::Child) {
     if let Some(observer) = REFUSED_OBSERVER.with_borrow_mut(Option::take) {
         observer(child);
     }
+}
+
+#[test]
+fn accounted_read_cannot_release_input_if_scope_changes_during_observation() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        for change_configuration in [false, true] {
+            let f = fixture(json!({"termination_refused_registration":true}));
+            let (service, _cache) = connected(&f).await;
+            let actions = Arc::new(actions(&f));
+            let key = crate::actions::Lane::key(&capture().target, &Action::Terminate);
+            let hold = actions.begin(key.clone(), &Action::Terminate).unwrap();
+            let context = Context::new_supported(service.clone(), Arc::new(hold)).unwrap();
+            let checked = context.clone();
+            let check_actions = actions.clone();
+            let check_key = key.clone();
+            let root = f.0.clone();
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let result = tauri::async_runtime::spawn_blocking(move || {
+                AFTER_OBSERVATION.with_borrow_mut(|hook| {
+                    *hook = Some(Box::new(move |_| {
+                        if change_configuration {
+                            *checked.service.shared.configuration.lock().unwrap() =
+                                Some("b".repeat(64));
+                        } else {
+                            checked.cancel.store(true, Ordering::Release);
+                        }
+                    }))
+                });
+                REFUSED_OBSERVER.with_borrow_mut(|hook| {
+                    *hook = Some(Box::new(move |child| {
+                        let path = root.join("termination-refused-input");
+                        let until = std::time::Instant::now() + Duration::from_secs(2);
+                        while !path.exists() && std::time::Instant::now() < until {
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        let _ = tx.send((
+                            child.id(),
+                            std::fs::read(path).is_ok_and(|raw| raw.is_empty()),
+                            child.try_wait().is_ok_and(|s| s.is_none()),
+                            child.stdout.is_some() && child.stderr.is_some(),
+                            check_actions.begin(check_key, &Action::Terminate).is_none(),
+                        ));
+                    }))
+                });
+                let exit = context.read(&Invocation {
+                    args: vec!["desktop".into(), "frontend-request".into(), "--json".into()],
+                    stdin: Some(b"private-fixture-frame\n".to_vec()),
+                    timeout: Duration::from_millis(200),
+                    request_id: None,
+                });
+                AFTER_OBSERVATION.with_borrow_mut(|hook| {
+                    hook.take();
+                });
+                REFUSED_OBSERVER.with_borrow_mut(|hook| {
+                    hook.take();
+                });
+                (exit, context)
+            })
+            .await
+            .unwrap();
+            let (exit, context) = result;
+            assert!(matches!(exit, Exit::StartFailed(ref detail) if detail == UNCONFIRMED));
+            let (pid, empty, live, pipes, claim) = rx.try_recv().unwrap();
+            assert!(empty && live && pipes && claim);
+            assert_eq!(
+                std::fs::read(f.0.join("termination-refused-input")).unwrap(),
+                b""
+            );
+            assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+            assert!(context.rejected.load(Ordering::Acquire));
+            assert!(!context.busy.load(Ordering::Acquire));
+            drop(context);
+            assert!(actions.begin(key, &Action::Terminate).is_some());
+            assert!(effects(&calls(&f)).is_empty());
+            service.join().await.unwrap();
+        }
+    });
 }
 
 fn fixture(config: Value) -> Fixture {
@@ -591,6 +681,146 @@ fn refused_or_expired_original_binding_withholds_input_and_keeps_real_custody() 
             assert!(effects(&calls(&f)).is_empty());
             drop(other);
             service.join().await.unwrap();
+        }
+    });
+}
+
+#[test]
+fn scope_drift_during_observation_or_binding_withholds_input_until_real_custody_settles() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        for after_binding in [false, true] {
+            for change_configuration in [false, true] {
+                let f = fixture(json!({"termination_refused_registration":true}));
+                let (service, _cache) = connected(&f).await;
+                let actions = Arc::new(actions(&f));
+                let key = crate::actions::Lane::key(&capture().target, &Action::Terminate);
+                let hold = actions.begin(key.clone(), &Action::Terminate).unwrap();
+                let controller = confirm(service.clone(), Arc::new(Pending::default()))
+                    .bind(Arc::new(hold))
+                    .unwrap();
+                let registration = service
+                    .shared
+                    .responder
+                    .as_ref()
+                    .unwrap()
+                    .prepare_ui_request(
+                        uuid::Uuid::new_v4().to_string(),
+                        Request::TerminationOutcome {
+                            intent: Box::new(controller.intent.clone()),
+                        },
+                    )
+                    .unwrap();
+                let slot = registration.resources();
+                let original_slot = Arc::downgrade(&slot);
+                drop(slot);
+                let input = serde_json::to_vec(registration.envelope()).unwrap();
+                let context = controller.context.clone();
+                drop(controller);
+                let checked = context.clone();
+                let check_service = service.clone();
+                let check_actions = actions.clone();
+                let check_key = key.clone();
+                let check_slot = original_slot.clone();
+                let root = f.0.clone();
+                let (changed_tx, changed_rx) = std::sync::mpsc::sync_channel(1);
+                let (observed_tx, observed_rx) = std::sync::mpsc::sync_channel(1);
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    let change: RefusedObserver = Box::new(move |child| {
+                        let live = child.try_wait().is_ok_and(|s| s.is_none());
+                        if change_configuration {
+                            *checked.service.shared.configuration.lock().unwrap() =
+                                Some("b".repeat(64));
+                        } else {
+                            checked.cancel.store(true, Ordering::Release);
+                        }
+                        let _ = changed_tx.send((child.id(), live));
+                    });
+                    if after_binding {
+                        AFTER_BINDING.with_borrow_mut(|hook| *hook = Some(change));
+                    } else {
+                        AFTER_OBSERVATION.with_borrow_mut(|hook| *hook = Some(change));
+                    }
+                    REFUSED_OBSERVER.with_borrow_mut(|hook| {
+                        *hook = Some(Box::new(move |child| {
+                            let path = root.join("termination-refused-input");
+                            let until = std::time::Instant::now() + Duration::from_secs(2);
+                            while !path.exists() && std::time::Instant::now() < until {
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
+                            // All assertions are outside the spawn hook. Even a
+                            // failing mutation returns THIS child to the runner.
+                            let checks = (
+                                std::fs::read(path).is_ok_and(|raw| raw.is_empty()),
+                                child.try_wait().is_ok_and(|s| s.is_none()),
+                                check_actions.begin(check_key, &Action::Terminate).is_none(),
+                                check_slot.upgrade().is_some(),
+                                check_service
+                                    .shared
+                                    .rpc
+                                    .snapshot()
+                                    .is_ok_and(|v| v.count(Role::Fleet) > 0),
+                            );
+                            let _ = observed_tx.send(checks);
+                        }))
+                    });
+                    let result = context.rpc(
+                        vec!["desktop".into(), "frontend-request".into(), "--json".into()],
+                        Some(input),
+                        Some(registration),
+                    );
+                    AFTER_OBSERVATION.with_borrow_mut(|hook| {
+                        hook.take();
+                    });
+                    AFTER_BINDING.with_borrow_mut(|hook| {
+                        hook.take();
+                    });
+                    REFUSED_OBSERVER.with_borrow_mut(|hook| {
+                        hook.take();
+                    });
+                    (result, context)
+                })
+                .await
+                .unwrap();
+                let (result, context) = result;
+                assert_eq!(result, Err(UNCONFIRMED.into()));
+                let (pid, live) = changed_rx.try_recv().unwrap();
+                assert!(live, "barrier must run on the actual live original child");
+                assert_eq!(
+                    observed_rx.try_recv().unwrap(),
+                    (true, true, true, true, true)
+                );
+                assert_eq!(
+                    std::fs::read(f.0.join("termination-refused-input")).unwrap(),
+                    b""
+                );
+                let mut status = 0;
+                assert_eq!(
+                    unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) },
+                    -1
+                );
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::ECHILD)
+                );
+                assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+                assert!(
+                    original_slot.upgrade().is_none(),
+                    "original registration survives until pipe/child settlement"
+                );
+                // A later current scope or ABI probe cannot clear rejection.
+                context.cancel.store(false, Ordering::Release);
+                *service.shared.configuration.lock().unwrap() =
+                    Some(context.scope.configuration.clone());
+                assert!(context.rejected.load(Ordering::Acquire));
+                assert_eq!(context.probe_abi(), Err(UNCONFIRMED.into()));
+                assert!(requests(&calls(&f), "termination_outcome").is_empty());
+                assert!(effects(&calls(&f)).is_empty());
+                assert!(!context.busy.load(Ordering::Acquire));
+                drop(context);
+                assert!(actions.begin(key, &Action::Terminate).is_some());
+                service.join().await.unwrap();
+            }
         }
     });
 }

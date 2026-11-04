@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createRoot } from "solid-js";
-import { createComposer, draftKey, EDIT_MS, flushWhenHidden, MAX_TEXT_BYTES, statusLine, TOO_LONG, type ComposerPort, type Images, type Notices } from "./composer";
+import { createComposer, draftKey, EDIT_MS, flushWhenHidden, MAX_TEXT_BYTES, reportVisibility, statusLine, TOO_LONG, type ComposerPort, type Images, type Notices } from "./composer";
 import { isEmptyBatch, type ComposerView, type SendReply, type SessionRef } from "../types";
 import { normalize } from "../bridge";
 import type { Timers } from "./terminal";
@@ -828,6 +828,30 @@ describe("composer store", () => {
       await tick();
       expect(f.calls).toEqual(["edit 1 a", "edit 2 ab"]);
     });
+  });
+
+  // zerus-5wmh.66.4.4: a send the desktop service holds is checked only while the window shows.
+  it("reports the combined visibility now and on every change", () => {
+    const reports: boolean[] = [];
+    let page = false, win = false;
+    const listeners: (() => void)[] = [];
+    const source = (hidden: () => boolean) => ({ hidden, onChange: (l: () => void) => { listeners.push(l); return () => {}; } });
+    reportVisibility((hidden) => reports.push(hidden), [source(() => page), source(() => win)]);
+    expect(reports).toEqual([false]);
+    win = true;
+    for (const l of listeners) l();
+    page = true;
+    for (const l of listeners) l();
+    win = false;
+    page = false;
+    for (const l of listeners) l();
+    expect(reports).toEqual([false, true, false]);
+  });
+
+  it("a send the desktop service still holds shows as a normal status, never an error", () => {
+    const still = "The desktop service is still sending this message. Its result appears here when it finishes.";
+    expect(statusLine(view({ uncertain: true, delivery_pending: true, status: still, status_error: false }), undefined, false))
+      .toEqual({ text: still, error: false });
   });
 
   // M3: the length is measured once per text, with Qt's UTF-8 rule at the edge.

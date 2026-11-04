@@ -3,7 +3,7 @@ import { batch, createMemo, createRoot, createSignal } from "solid-js";
 import * as bridge from "../bridge";
 import { notify } from "./actions";
 import { suggestions } from "./suggestions";
-import { documentVisibility, type PageVisibility } from "./visibility";
+import { anyHidden, documentVisibility, type PageVisibility } from "./visibility";
 import type { Timers } from "./terminal";
 import type { Answer, ClearControl, ColdPrompt, ComposerView, Inspect, SendReply, SessionRef, StartQuestion } from "../types";
 import { trNoop, tr } from "../i18n";
@@ -623,3 +623,15 @@ export function flushWhenHidden(flush: () => void, visibilities: PageVisibility[
 }
 
 flushWhenHidden(() => { void composer.flush(); }, [documentVisibility, bridge.windowVisibility], typeof window === "undefined" ? undefined : window);
+
+/**
+ * Rust checks a send the desktop service still holds only while the window
+ * shows: `visibilities` combined, reported now and on every change.
+ */
+export function reportVisibility(report: (hidden: boolean) => void, visibilities: PageVisibility[]) {
+  const visibility = anyHidden(...visibilities);
+  report(visibility.hidden());
+  visibility.onChange(() => report(visibility.hidden()));
+}
+
+reportVisibility((hidden) => { void bridge.composerVisibility(hidden).catch(() => {}); }, [documentVisibility, bridge.windowVisibility]);

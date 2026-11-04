@@ -1874,6 +1874,8 @@
   "Reasoning (in output)": "Рассуждения (в выводе)",
   "Reasoning effort": "Глубина рассуждений",
   "Receipt checking is unavailable. Review the original task history before allowing another start.": "Проверка подтверждения недоступна. Проверьте исходную историю задачи, прежде чем разрешить новый запуск.",
+  "Receipt-check recovery data needs manual review. Keep the files and follow the Task Start recovery runbook.": "Данные восстановления проверки доставки требуют ручной проверки. Сохраните файлы и следуйте инструкции по восстановлению запуска задачи.",
+  "Receipt-check recovery tracking exceeds its size limit. Keep the files and follow the Task Start recovery runbook.": "Запись восстановления проверки доставки превышает допустимый размер. Сохраните файлы и следуйте инструкции по восстановлению запуска задачи.",
   "Recognition providers": "Провайдеры распознавания",
   "Recognizing…": "Распознавание…",
   "Reconnect %1 to start a session in this folder.": "Переподключите %1, чтобы начать сессию в этой папке.",

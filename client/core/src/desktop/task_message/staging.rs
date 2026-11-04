@@ -285,6 +285,30 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_stage_removes_exactly_the_copies_it_created() {
+        let (_temp, root) = fresh();
+        let (first, second) = (vec![1u8; 300], vec![2u8; 300]);
+        let planted = root
+            .join(REQUEST)
+            .join(format!("{:x}", Sha256::digest(&second)));
+        let plant = planted.clone();
+        AFTER_FOLDER.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::write(&plant, b"planted").unwrap();
+            }))
+        });
+        assert_eq!(
+            stage(&root, REQUEST, &[&first, &second]).err(),
+            Some(UNAVAILABLE)
+        );
+        let copy = root
+            .join(REQUEST)
+            .join(format!("{:x}", Sha256::digest(&first)));
+        assert!(!copy.exists(), "its own first copy went");
+        assert_eq!(std::fs::read(&planted).unwrap(), b"planted");
+    }
+
+    #[test]
     fn removal_never_touches_an_object_it_did_not_create() {
         let (_temp, root) = fresh();
         let staged = stage(&root, REQUEST, &[b"note"]).unwrap();

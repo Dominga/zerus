@@ -40,6 +40,9 @@ elif sys.argv[1:3] in [['desktop', 'frontend-request'], ['desktop', 'request']]:
         if request['op'] == 'task_message':
             sys.exit(1)
         query = request['query']
+        c = json.loads((Path(__file__).parent / 'fixture.json').read_text())
+        receipt = c.get('message_receipt')
         print(json.dumps(dict(abi='desktop-task-message-v1', request_id=query['request_id'],
-                              scope=query['scope'], read_only=True, found=False, receipt=None)))
+                              scope=query['scope'], read_only=True, found=receipt is not None,
+                              receipt=receipt)))
         sys.exit(0)

@@ -295,6 +295,58 @@ fn an_oversize_original_that_cannot_be_staged_is_never_sent_and_leaves_no_copy()
 }
 
 #[test]
+fn an_offered_original_that_never_started_keeps_its_copies_for_the_service() {
+    if !private_case("desktop_service::task_message::fixture_tests::an_offered_original_that_never_started_keeps_its_copies_for_the_service") {
+        return;
+    }
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({"message_references": true, "message_staging": true}));
+        staging(&f.0);
+        let (service, _cache) = connected(&f).await;
+        let record = with_attachment(70 << 10);
+        // The service's drained not-started receipt for exactly this
+        // original, offered by reference.
+        let receipt = {
+            let (service, record) = (service.clone(), record.clone());
+            tauri::async_runtime::spawn_blocking(move || {
+                let read = Read::new(Some(service)).unwrap();
+                let (projection, _) = references::project(&record).unwrap();
+                let verified = wire::Intent {
+                    original: projection.to_string(),
+                    form: wire::Form::ReferenceV1,
+                    ..intent(&read.scope, "example", TASK, &record)
+                }
+                .verify()
+                .unwrap();
+                wire::Receipt {
+                    binding: verified.binding,
+                    admission_epoch: read.scope.service_epoch.clone(),
+                    revision: 2,
+                    phase: wire::Phase::Failed,
+                    drained: true,
+                    code: wire::NOT_STARTED.into(),
+                    outcome: None,
+                }
+            })
+            .await
+            .unwrap()
+        };
+        let path = f.0.join("fixture.json");
+        let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        config["message_receipt"] = serde_json::to_value(&receipt).unwrap();
+        std::fs::write(&path, config.to_string()).unwrap();
+        let sent = send(service.clone(), &f.0, record.clone(), true, true).await;
+        // Never ran, so it is released; but it was offered, so its copies
+        // are the service's to remove, never this client's.
+        assert_eq!(sent.answer, MessageAnswer::Unsent(NOT_STARTED.into()));
+        assert_eq!((sent.handoff, sent.released), (Some(0), 1));
+        assert_eq!(copies(&f.0, &record), 1);
+        assert_eq!(count(&f.0, "task_message"), 1);
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
 fn a_service_without_the_kind_takes_the_direct_path_without_a_handoff() {
     if !private_case("desktop_service::task_message::fixture_tests::a_service_without_the_kind_takes_the_direct_path_without_a_handoff") {
         return;

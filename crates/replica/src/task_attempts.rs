@@ -355,7 +355,11 @@ impl TaskDoc {
             && self.requirement() == attempt.requirement
             // The exact requirement the request was rendered from: a revision
             // count alone does not identify it across replicas.
-            && self.requirement_digest()? == delivery.requirement_digest;
+            && self.requirement_digest()? == delivery.requirement_digest
+            // An execution entry no attempt explains is a conflict the person
+            // reviews; a receipt never advances past it, even when every
+            // other field returned to what the reservation saw.
+            && self.unexplained_entries()?.is_empty();
         self.push_event(id, EventKind::Submitted, actor, now)?;
         if unchanged {
             self.advance(&attempt, &delivery, actor, now)?;
@@ -1925,6 +1929,92 @@ mod tests {
             assert!(execution.unexplained.is_empty());
             assert!(merged.review_entry(&sent, &Actor::Person, 61).is_err());
         }
+    }
+
+    #[test]
+    fn an_unreviewed_execution_entry_bars_settlement_even_when_fields_return() {
+        // desktop-u on #1405: a concurrent legacy execution whose replica
+        // brought the stage, its time and the holder back to what the
+        // reservation saw. Field equality never disposes of that entry.
+        let mut baseline = task();
+        baseline
+            .record_send(&run("api"), "legacy-before", &Actor::Person, 2)
+            .unwrap();
+        baseline.record_report("Done", &agent("api"), 3).unwrap();
+        baseline.set_stage(Stage::Todo, &Actor::Person, 4).unwrap();
+        let queued = crate::TaskDelivery {
+            mode: "queue".into(),
+            state: "queued".into(),
+            stage: "todo".into(),
+            stage_at: 4,
+            dispatch_id: String::new(),
+            submitted_id: String::new(),
+            run_id: String::new(),
+            conversation_id: String::new(),
+            prompt: String::new(),
+            error: String::new(),
+        };
+        let message = uuid::Uuid::new_v4().to_string();
+        baseline
+            .reserve_message(
+                &message,
+                "Use Redis",
+                &[],
+                &queued,
+                None,
+                (&Actor::Person, 4),
+            )
+            .unwrap();
+        let bytes = baseline.snapshot().unwrap();
+        let mut newer = TaskDoc::from_bytes(&bytes).unwrap();
+        send(&mut newer, ONE, "api");
+        let mut older = TaskDoc::from_bytes(&bytes).unwrap();
+        older
+            .record_send(&run("api"), "legacy-concurrent", &Actor::Person, 5)
+            .unwrap();
+        older
+            .record_report("Legacy done", &agent("api"), 6)
+            .unwrap();
+        older.set_stage(Stage::Todo, &Actor::Person, 4).unwrap();
+        newer.import(&older.snapshot().unwrap()).unwrap();
+        let unexplained = newer.unexplained_entries().unwrap();
+        assert_eq!(unexplained.len(), 1);
+        let sent_before = newer
+            .view()
+            .unwrap()
+            .log
+            .iter()
+            .filter(|e| e.kind == "sent")
+            .count();
+        // The receipt is attached as that attempt's evidence, and nothing advances.
+        assert!(!settle(&mut newer, ONE).advanced);
+        let view = newer.view().unwrap();
+        assert_eq!(view.stage, Stage::Todo);
+        assert_eq!(
+            view.log.iter().filter(|e| e.kind == "sent").count(),
+            sent_before
+        );
+        let state = |task: &TaskDoc| {
+            task.view()
+                .unwrap()
+                .log
+                .into_iter()
+                .find(|e| e.kind == "message" && e.request_id.as_deref() == Some(&message))
+                .unwrap()
+                .delivery
+                .unwrap()
+                .state
+        };
+        assert_eq!(state(&newer), "queued");
+        assert_eq!(current(&newer).phase, Phase::Submitted);
+        // The person's review ends the hold; it never reconstructs the
+        // advance or replays the delivery.
+        newer
+            .review_entry(&unexplained[0], &Actor::Person, 30)
+            .unwrap();
+        assert!(!settle(&mut newer, ONE).advanced);
+        assert_eq!(newer.stage().unwrap(), Stage::Todo);
+        assert_eq!(state(&newer), "queued");
     }
 
     #[test]

@@ -465,11 +465,90 @@ class WindowsTaskMode(unittest.TestCase):
         self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), grant)
         return value
 
+    def overlapping_layout_refuses_the_first_choice(self):
+        """zerus-yfbd.1 R4: a config folder inside the state loss domain
+        (nested, in other case, or through a junction) never takes a first
+        choice. Refused before any anchor, record reservation, UUID or
+        manager effect; nothing repairs or moves the layout."""
+        path = self.state / 'desktop' / 'windows-registration-mode.json'
+        record_before = path.read_bytes()
+        before = self.observe()['instances']
+        grant = self.cli('desktop', 'ownership-status', '--json')
+        junction = self.root / 'state-alias'
+        made = subprocess.run(['cmd', '/d', '/c', 'mklink', '/J', str(junction), str(self.state)],
+                              capture_output=True, text=True, timeout=20)
+        self.assertEqual(made.returncode, 0, made)
+        separate, requests = self.env['HGS_CONFIG_DIR'], []
+        try:
+            for case, folder in (('nested', self.state / 'desktop' / 'config'),
+                                 ('other case', Path(str(self.state).upper()) / 'cfg'),
+                                 ('junction', junction / 'cfg')):
+                self.env['HGS_CONFIG_DIR'] = str(folder)
+                request = str(uuid.uuid4())
+                requests.append(request)
+                result = self.first_call('background', request)
+                self.assertNotEqual(result['code'], 0, (case, result))
+                self.assertIn('config folder outside the desktop state folder', result['stderr'], case)
+                self.assertEqual(list(self.state.rglob('windows-first-choice-*.json')), [], case)
+        finally:
+            self.env['HGS_CONFIG_DIR'] = separate
+            os.rmdir(junction)  # The junction only, never its target.
+        self.assertEqual(path.read_bytes(), record_before)
+        self.assertEqual(self.observe()['instances'], before)
+        self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), grant)
+        self.assertEqual(list(self.config.glob('windows-first-choice-*.json')), [])
+        for request in requests:
+            result = self.cli('desktop', 'registration', 'mode-result', '--json', '--request-id', request)
+            self.assertEqual((result['receipt'], result['code']), (None, 'original_choice_unavailable'))
+
+    def writer_commit_window_is_unavailable_never_lost(self, first):
+        """A writer publishes its anchor, then saves its record, under the
+        registration lock. A reader in that window waits out the bounded lock
+        and refuses; it never reports the window as a lost journal."""
+        status = self.cli('desktop', 'registration', 'status', '--json')
+        sid = status['task_name'].removeprefix('hgs-desktop-')
+        anchor = self.config / f"windows-first-choice-{status['configuration']}.json"
+        original = anchor.read_bytes()
+        published = json.loads(original)
+        published['request'] = str(uuid.uuid4())
+        import ctypes as c
+        from ctypes import wintypes as w
+        dll = c.WinDLL('kernel32', use_last_error=True)
+        dll.CreateMutexW.argtypes = (c.c_void_p, w.BOOL, w.LPCWSTR)
+        dll.CreateMutexW.restype = w.HANDLE
+        dll.WaitForSingleObject.argtypes = (w.HANDLE, w.DWORD)
+        dll.WaitForSingleObject.restype = w.DWORD
+        dll.ReleaseMutex.argtypes = (w.HANDLE,)
+        dll.CloseHandle.argtypes = (w.HANDLE,)
+        handle = dll.CreateMutexW(None, False, 'Global\\hgs-desktop-registration-' + sid)
+        self.assertTrue(handle, c.get_last_error())
+        try:
+            self.assertEqual(dll.WaitForSingleObject(handle, 10000), 0)
+            try:
+                anchor.write_bytes(json.dumps(published).encode('utf-8'))
+                for args in (('mode-result', '--json', '--request-id', first['request_id']),
+                             ('status', '--json')):
+                    result = subprocess.run([str(self.cli_image), 'desktop', 'registration', *args],
+                                            env=self.env, capture_output=True, text=True,
+                                            encoding='utf-8', timeout=20)
+                    self.assertNotEqual(result.returncode, 0, (args, result.stdout))
+                    self.assertNotIn('first_choice_lost', result.stdout, args)
+                    if args[0] == 'mode-result':  # Status also waits in its generic exchange.
+                        self.assertIn('Registration lock not confirmed', result.stderr, args)
+            finally:
+                anchor.write_bytes(original)
+                dll.ReleaseMutex(handle)
+        finally:
+            dll.CloseHandle(handle)
+        self.assertIsNone(self.cli('desktop', 'registration', 'status', '--json')['first_choice_lost'])
+
     def first_background_choice_from_plain_passive(self):
         """zerus-yfbd.1: the first explicit background choice, with the
         caller's retained UUID, through the actual installed-frontend caller."""
         path = self.state / 'desktop' / 'windows-registration-mode.json'
         status = self.cli('desktop', 'registration', 'status', '--json')
+        self.assertIn('first_choice_unavailable', status)
+        self.assertIsNone(status['first_choice_unavailable'], 'separate trees keep the anchor')
         self.assertIsNone(status['pending_transition'])
         self.assertIsNone(status['reviewed_transition'])
         self.assertFalse(status['activation_automatic_blocked'])
@@ -501,6 +580,43 @@ class WindowsTaskMode(unittest.TestCase):
         # From background the form refuses before any effect.
         self.refused_first_choice(str(uuid.uuid4()), 'from a passive registration only')
         return first
+
+    def lost_journal_refuses_every_mode_operation(self, first):
+        """The independent first-choice anchor (config folder) outlives the
+        mode journal (state folder): a missing or replaced journal is lost,
+        never "never written"."""
+        path = self.state / 'desktop' / 'windows-registration-mode.json'
+        configuration = self.cli('desktop', 'status', '--json')['configuration']
+        anchor = self.config / f'windows-first-choice-{configuration}.json'
+        self.assertEqual(json.loads(anchor.read_bytes())['request'], first['request_id'])
+        original = path.read_bytes()
+        record = json.loads(original)
+        empty = {key: record[key] for key in ('schema', 'configuration', 'sid', 'command')}
+        empty.update(pending=None, cancelled=None, completed=None)
+        for case in ('missing', 'replaced'):
+            if case == 'missing':
+                path.unlink()
+            else:
+                path.write_text(json.dumps(empty), encoding='utf-8')
+            registration = self.cli('desktop', 'registration', 'status', '--json')
+            self.assertEqual(registration['first_choice_lost'], first['request_id'], case)
+            self.assertTrue(registration['activation_automatic_blocked'], case)
+            self.assertIsNone(registration['first_choice'], case)
+            before = self.observe()['instances']
+            grant = self.cli('desktop', 'ownership-status', '--json')
+            refused = self.mode('passive')
+            self.assertFalse(refused['ok'], refused)
+            self.assertIn('no longer shows first choice', refused['error'])
+            again = self.first_call('background', str(uuid.uuid4()))
+            self.assertEqual(again['code'], 0, again)
+            self.assertFalse(json.loads(again['stdout'])['ok'], again)
+            result = self.cli('desktop', 'registration', 'mode-result', '--json', '--request-id', first['request_id'])
+            self.assertEqual((result['code'], result['outcome'], result['receipt']),
+                             ('first_choice_lost', 'unknown', None), case)
+            self.assertEqual(self.observe()['instances'], before, case)
+            self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), grant, case)
+            path.write_bytes(original)  # Restore the arranged journal for the rest of the round trip.
+        self.assertIsNone(self.cli('desktop', 'registration', 'status', '--json')['first_choice_lost'])
 
     def pending_first_choice_refuses_the_old_frame(self, current):
         """A reserved FIRST choice whose helper died at Prepared or Held: the
@@ -1014,8 +1130,11 @@ if(@(Get-OwnInstances $s $t).Count-ne 0) {throw 'fixture instance remains'};
             cancelled = self.cancel_unsent_private_rollback(passive)
             # The first passive-to-background switch uses the first-choice
             # form; the ordinary form stays covered by next_background below.
+            self.overlapping_layout_refuses_the_first_choice()
             background = self.first_background_choice_from_plain_passive()
             self.assertTrue(background['ok'], background)
+            self.lost_journal_refuses_every_mode_operation(background)
+            self.writer_commit_window_is_unavailable_never_lost(background)
             self.assertNotEqual(background['request_id'], cancelled)
             self.assertEqual(background['running_mode'], 'background')
             self.latest = background['instance']

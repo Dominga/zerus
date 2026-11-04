@@ -59,6 +59,8 @@ pub(super) fn mode_after_review(config: &Config, location: &Location, mode: &str
 pub(super) fn first_choice(config: &Config, location: &Location, request: &str) -> Result<Value> {
     ensure!(uuid::Uuid::parse_str(request).is_ok_and(|u| !u.is_nil() && u.to_string() == request),
         "Select a NEW canonical request UUID.");
+    // Before caller capture and the helper spawn; the helper fences it again.
+    native::mode::ensure_first_layout(config, location)?;
     native::mode::command(config, location,
         json!({"schema":1,"operation":"switch","mode":"background","request_id":request}))
 }
@@ -192,7 +194,7 @@ pub(super) fn command(config: &Config, location: &Location, operation: &str) -> 
         &plan,
     )?;
     if operation == "status" {
-        let record = native::mode::pending_status(location, &plan)?;
+        let record = native::mode::pending_status(config, location, &plan)?;
         checked["pending_transition"] = record["pending_transition"].clone();
         checked["cancelled_request_id"] = record["cancelled_request_id"].clone();
         checked["completed_request_id"] = record["completed_request_id"].clone();
@@ -200,6 +202,8 @@ pub(super) fn command(config: &Config, location: &Location, operation: &str) -> 
         checked["activation_automatic_blocked"] = record["activation_automatic_blocked"].clone();
         checked["mode_choice"] = record["mode_choice"].clone();
         checked["first_choice"] = record["first_choice"].clone();
+        checked["first_choice_lost"] = record["first_choice_lost"].clone();
+        checked["first_choice_unavailable"] = record["first_choice_unavailable"].clone();
         let status = super::status(location)?;
         let lifecycle = &status["lifecycle"];
         checked["running_mode"] = if lifecycle["configuration"] == location.configuration

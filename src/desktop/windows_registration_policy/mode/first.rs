@@ -9,6 +9,46 @@ use std::collections::BTreeSet;
 
 const FIRST: usize = 48; // Bytes, including reserved review growth, can refuse sooner.
 
+/// Windows path containment by components on paths the native side has
+/// already canonicalized (junctions, symlinks, short names and drive aliases
+/// of existing folders resolved). The comparison only ever widens equality:
+/// `\\?\` and `\\?\UNC\` forms compare like their plain forms, components
+/// fold case both ways and ignore trailing dots and spaces, and a remaining
+/// `..` counts as contained. True when `inner` is `outer` or below it; never
+/// a string prefix.
+pub(in crate::desktop) fn within(inner: &str, outer: &str) -> bool {
+    let parts = |path: &str| -> Vec<String> {
+        let path = match path.strip_prefix(r"\\?\UNC\") {
+            Some(rest) => format!(r"\\{rest}"),
+            None => path.strip_prefix(r"\\?\").unwrap_or(path).to_owned(),
+        };
+        path.split(['\\', '/'])
+            .filter(|part| !part.is_empty() && *part != ".")
+            .map(str::to_owned)
+            .collect()
+    };
+    let same = |a: &String, b: &String| {
+        let (a, b) = (
+            a.trim_end_matches(['.', ' ']),
+            b.trim_end_matches(['.', ' ']),
+        );
+        a.to_lowercase() == b.to_lowercase() || a.to_uppercase() == b.to_uppercase()
+    };
+    let (inner, outer) = (parts(inner), parts(outer));
+    if inner.iter().chain(&outer).any(|part| part == "..") {
+        return true;
+    }
+    !outer.is_empty()
+        && inner.len() >= outer.len()
+        && inner.iter().zip(&outer).all(|(a, b)| same(a, b))
+}
+
+/// The first-choice anchor folder must lie outside the desktop state tree
+/// and its mode folder, whose loss the anchor detects.
+pub(in crate::desktop) fn anchor_separate(anchor: &str, state: &str, root: &str) -> bool {
+    !within(anchor, state) && !within(anchor, root)
+}
+
 /// Routing only: the caller's NEW original UUID. Never consent or authority.
 pub(in crate::desktop) struct First {
     pub request: String,
@@ -63,6 +103,22 @@ impl Record {
         ))?;
         self.first_choices = next.first_choices;
         Ok(())
+    }
+
+    /// The record against its independent first-choice anchor (the latest
+    /// reserved first choice, kept outside the desktop state folder). Returns
+    /// the lost original ID when either side has a first choice the other
+    /// does not show: a missing, emptied or replaced journal, a wiped state
+    /// folder, a missing anchor, or a different latest choice. Lost is never
+    /// treated as never written.
+    pub fn first_lost(&self, anchor: Option<&str>) -> Option<String> {
+        let latest = self.first_choices.last().map(|r| r.request.as_str());
+        match (anchor, latest) {
+            (None, None) => None,
+            (Some(anchor), Some(latest)) if anchor == latest => None,
+            (Some(anchor), _) => Some(anchor.into()),
+            (None, Some(latest)) => Some(latest.into()),
+        }
     }
 
     /// The pending original is a first choice: only its own UUID reads it.
@@ -308,6 +364,91 @@ mod tests {
                 Mode::Background
             )
             .is_err());
+    }
+
+    #[test]
+    fn the_anchor_folder_must_lie_outside_the_state_tree_by_windows_components() {
+        let state = r"C:\Users\Example\.local\state\hgs";
+        let root = r"C:\Users\Example\.local\state\hgs\desktop";
+        // The maintained default layout: separate config and state trees.
+        assert!(anchor_separate(
+            r"C:\Users\Example\.config\hgs",
+            state,
+            root
+        ));
+        // A sibling that only shares a string prefix is still separate.
+        assert!(anchor_separate(
+            r"C:\Users\Example\.local\state\hgs2",
+            state,
+            root
+        ));
+        for (case, anchor) in [
+            (
+                "inside the mode folder",
+                r"C:\Users\Example\.local\state\hgs\desktop\config",
+            ),
+            ("the state tree itself", state),
+            ("other case", r"c:\USERS\example\.LOCAL\State\HGS\cfg"),
+            (
+                "verbatim prefix",
+                r"\\?\C:\Users\Example\.local\state\hgs\cfg",
+            ),
+            ("forward slashes", "C:/Users/example/.local/state/hgs/cfg"),
+        ] {
+            assert!(!anchor_separate(anchor, state, root), "{case}");
+        }
+        assert!(within(
+            r"\\?\UNC\server\share\state\cfg",
+            r"\\server\share\state"
+        ));
+        assert!(!within(r"\\server\share\state2", r"\\server\share\state"));
+        // A root outside the state tree is checked on its own.
+        assert!(!anchor_separate(r"D:\desktop\cfg", state, r"D:\desktop"));
+        // Equality only widens: trailing dots, both case folds, `..`.
+        assert!(within(r"C:\state.\cfg", r"C:\state"));
+        assert!(within(r"C:\STRASSE\cfg", "C:\\stra\u{17f}\u{17f}e"));
+        assert!(within(r"C:\x\..\other", r"C:\x"));
+        assert!(!within(r"C:\", ""), "an empty outer contains nothing");
+    }
+
+    #[test]
+    fn the_record_and_its_independent_anchor_must_agree_on_the_latest_first_choice() {
+        let empty = Record::empty(&plan()).unwrap();
+        assert_eq!(empty.first_lost(None), None, "never offered: nothing lost");
+        let reserve = |record: &mut Record, choice: &First| {
+            record.reserve_first(choice).unwrap();
+            record
+                .begin_id(Mode::Background, None, choice.request.clone())
+                .unwrap();
+        };
+        let mut record = Record::empty(&plan()).unwrap();
+        let choice = first();
+        reserve(&mut record, &choice);
+        let reserved = reopen(&record);
+        assert_eq!(reserved.first_lost(Some(&choice.request)), None);
+        // A missing, emptied or replaced journal, or a wiped state folder,
+        // while the anchor survives: lost, never "never written".
+        assert_eq!(
+            empty.first_lost(Some(&choice.request)),
+            Some(choice.request.clone())
+        );
+        // History without its anchor, or a different latest choice: lost.
+        assert_eq!(reserved.first_lost(None), Some(choice.request.clone()));
+        let other = first();
+        assert_eq!(
+            reserved.first_lost(Some(&other.request)),
+            Some(other.request.clone())
+        );
+        // The anchor follows the latest reserved choice.
+        let mut later = reserved.clone();
+        later.cancel(&choice.request).unwrap();
+        reserve(&mut later, &other);
+        let later = reopen(&later);
+        assert_eq!(later.first_lost(Some(&other.request)), None);
+        assert_eq!(
+            later.first_lost(Some(&choice.request)),
+            Some(choice.request.clone())
+        );
     }
 
     #[test]

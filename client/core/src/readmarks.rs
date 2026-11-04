@@ -109,7 +109,14 @@ impl ReadMarks {
 
     /// Merges the mark into what is pending for its session, then saves.
     pub fn add(&mut self, mark: ReadMark) {
-        self.merge(mark, None);
+        self.add_with_id(mark, None);
+    }
+
+    /// [`ReadMarks::add`] with the durable session ID of its row, when the
+    /// listing reports one: saved at once, as the explicit Mark read saves its
+    /// mark before its call.
+    pub fn add_with_id(&mut self, mark: ReadMark, session_id: Option<String>) {
+        self.merge(mark, session_id);
         self.save();
     }
 
@@ -159,7 +166,9 @@ impl ReadMarks {
     }
 
     /// The key of `row`'s pending mark: its session ID's, or a mark its
-    /// session left under the name before the ID was known.
+    /// session left under the name before the ID was known. A row that lists
+    /// no ID (a peer whose hgs was downgraded) also finds a mark queued under
+    /// an ID for the same name, run and conversation.
     fn found(&self, computer: &str, row: &ViewRow) -> Option<Key> {
         let id = row.session_id.as_deref();
         let by_id = id.map(|id| key(computer, &row.name, Some(id)));
@@ -167,10 +176,22 @@ impl ReadMarks {
             return Some(by_id);
         }
         let named = key(computer, &row.name, None);
+        if self.marks.contains_key(&named) {
+            return Some(named);
+        }
+        if id.is_some() {
+            return None;
+        }
         self.marks
-            .get(&named)
-            .is_some_and(|queued| queued.session_id.is_none())
-            .then_some(named)
+            .iter()
+            .find(|((owner, _), queued)| {
+                owner == computer
+                    && queued.session_id.is_some()
+                    && queued.mark.name == row.name
+                    && row.run_id.as_deref() == Some(queued.mark.run_id.as_str())
+                    && row.conversation_id.as_deref() == Some(queued.mark.conversation_id.as_str())
+            })
+            .map(|(key, _)| key.clone())
     }
 
     /// Indexed, read-only display lookup. Never saves, settles or delivers a
@@ -210,7 +231,9 @@ impl ReadMarks {
     /// `ids`: its marks for sessions it no longer lists can never apply and
     /// are dropped (`updateUnread` in `tray/src/FleetState.cpp`). A mark
     /// queued under a session ID stays while that ID is listed, whatever its
-    /// label is now. Returns true when it dropped any (then saves).
+    /// label is now, or, when the listing reports no IDs at all (a peer whose
+    /// hgs was downgraded), while its name is listed. Returns true when it
+    /// dropped any (then saves).
     pub fn drop_unlisted(
         &mut self,
         computer: &str,
@@ -219,11 +242,12 @@ impl ReadMarks {
     ) -> bool {
         let before = self.marks.len();
         self.marks.retain(|(owner, _), queued| {
+            let named = names.contains(queued.mark.name.as_str());
             owner != computer
-                || queued.session_id.as_deref().map_or_else(
-                    || names.contains(queued.mark.name.as_str()),
-                    |id| ids.contains(id),
-                )
+                || queued
+                    .session_id
+                    .as_deref()
+                    .map_or(named, |id| ids.contains(id) || (ids.is_empty() && named))
         });
         let dropped = self.marks.len() != before;
         if dropped {
@@ -251,9 +275,24 @@ impl ReadMarks {
     /// the row names another run or conversation (or none), or every part is
     /// either empty, no longer the row's current value, or already shown as
     /// read by the host. Returns true when it changed anything (then saves).
+    ///
+    /// A mark found by its session ID under another label takes the row's
+    /// current label first (#1421 review): it is delivered as `hgs read
+    /// NAME`, still guarded by run and conversation, and the old label is no
+    /// longer the session's.
     pub fn settle(&mut self, computer: &str, row: &ViewRow) -> bool {
         let Some(key) = self.found(computer, row) else {
             return false;
+        };
+        let relabelled = {
+            let queued = self.marks.get_mut(&key).expect("found above");
+            let renamed = queued.session_id.is_some()
+                && row.session_id.is_some()
+                && queued.mark.name != row.name;
+            if renamed {
+                queued.mark.name.clone_from(&row.name);
+            }
+            renamed
         };
         let mark = &self.marks[&key].mark;
         let settled = mark.settled(
@@ -266,9 +305,11 @@ impl ReadMarks {
         );
         if settled {
             self.marks.remove(&key);
+        }
+        if settled || relabelled {
             self.save();
         }
-        settled
+        settled || relabelled
     }
 
     /// Replaces the file through a temporary one ([`write_private_atomic`]),
@@ -558,6 +599,59 @@ mod tests {
         row_a.read_reply_id = Some("r1".into());
         assert!(marks.settle("mac", &row_a));
         assert!(marks.is_empty());
+    }
+
+    /// #1421 review: a session renamed while its mark waits keeps the mark,
+    /// which takes the new label it will be delivered under; a peer whose hgs
+    /// was downgraded (its rows list no ID) still finds, keeps and settles a
+    /// mark queued under an ID by its name, run and conversation.
+    #[test]
+    fn a_renamed_or_downgraded_session_keeps_its_mark() {
+        let temp = Temp::new("renamed-downgraded");
+        let mut marks = ReadMarks::load(temp.0.clone());
+        marks.add_with_id(mark("run-1", Some("r1"), None), Some(ID_A.into()));
+        let mut renamed = row("run-1", None, None);
+        renamed.name = "claude/sample-project/renamed".into();
+        renamed.session_id = Some(ID_A.into());
+        assert!(marks.settle("mac", &renamed), "relabelled");
+        assert_eq!(marks.pending()[0].name, "claude/sample-project/renamed");
+        assert_eq!(
+            ReadMarks::load(temp.0.clone()).pending()[0].name,
+            "claude/sample-project/renamed"
+        );
+        assert!(!marks.settle("mac", &renamed), "once");
+        // The peer's hgs is downgraded: its rows list no ID.
+        let mut older = renamed.clone();
+        older.session_id = None;
+        older.shared_read = true;
+        assert_eq!(marks.local_overlay("mac", &older), (true, false));
+        let names: HashSet<&str> = ["claude/sample-project/renamed"].into();
+        assert!(
+            !marks.drop_unlisted("mac", &names, &HashSet::new()),
+            "its name is listed"
+        );
+        assert!(
+            marks.drop_unlisted("mac", &names, &[ID_B].into()),
+            "a listing with IDs keeps marks by ID only"
+        );
+        assert!(marks.is_empty());
+        marks.add_with_id(mark("run-1", Some("r1"), None), Some(ID_A.into()));
+        let mut other_run = older.clone();
+        other_run.run_id = Some("run-2".into());
+        assert_eq!(
+            marks.local_overlay("mac", &other_run),
+            (false, false),
+            "another run"
+        );
+        older.read_reply_id = Some("r1".into());
+        older.name = "claude/sample-project/review".into();
+        assert!(marks.settle("mac", &older));
+        assert!(marks.is_empty());
+        marks.add_with_id(mark("run-1", Some("r1"), None), Some(ID_A.into()));
+        assert!(
+            marks.drop_unlisted("mac", &HashSet::new(), &HashSet::new()),
+            "neither listed"
+        );
     }
 
     /// A mark queued before its row's ID was known (an older file) is found

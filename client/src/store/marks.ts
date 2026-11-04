@@ -247,7 +247,7 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
       unreadReply = current && (!replies.size || replies.get(replyKeyOf(s)) !== reply);
       ack = localAck;
     } else {
-      const queued = pending.size ? queuedFor(s.computer, s.name, s.sessionId) : undefined;
+      const queued = pending.size ? queuedFor(s.computer, s.name, s.sessionId, s.runId, s.conversationId) : undefined;
       const sameRun = !!queued?.run_id && queued.run_id === (s.runId ?? "") && queued.conversation_id === (s.conversationId ?? "");
       unreadReply = current && !(s.localReadReply || (s.readReplyId ?? "") === reply || (sameRun && (queued!.reply_id ?? "") === reply));
       const signature = s.attentionSignature ?? "";
@@ -374,14 +374,22 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
    * The pending mark of a row: under its session ID, or one its session left
    * under the name before the ID was known (core `ReadMarks::found`).
    */
-  function queuedKey(computer: string, name: string, sessionId?: string | null): string | undefined {
+  function queuedKey(computer: string, name: string, sessionId?: string | null, run?: string | null, conversation?: string | null): string | undefined {
     const byId = sessionId ? pendingKey(computer, name, sessionId) : undefined;
     if (byId && pending.has(byId)) return byId;
     const named = pendingKey(computer, name);
-    return pending.has(named) ? named : undefined;
+    if (pending.has(named)) return named;
+    if (sessionId) return undefined;
+    // A row that lists no ID (a peer whose hgs was downgraded) also finds a
+    // mark queued under an ID for the same name, run and conversation.
+    for (const [key, m] of pending) {
+      if (m.computer === computer && m.name === name && m.run_id === (run ?? "") && m.conversation_id === (conversation ?? "")
+        && (JSON.parse(key) as string[])[1]?.startsWith("id:")) return key;
+    }
+    return undefined;
   }
-  const queuedFor = (computer: string, name: string, sessionId?: string | null) => {
-    const key = queuedKey(computer, name, sessionId);
+  const queuedFor = (computer: string, name: string, sessionId?: string | null, run?: string | null, conversation?: string | null) => {
+    const key = queuedKey(computer, name, sessionId, run, conversation);
     return key === undefined ? undefined : pending.get(key);
   };
 
@@ -394,8 +402,11 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     const key = pendingKey(mark.computer, mark.name, sessionId);
     // A mark with the ID takes along the one its session left under the name.
     const named = sessionId ? pendingKey(mark.computer, mark.name) : key;
-    const old = pending.get(key) ?? pending.get(named);
-    if (named !== key) pending.delete(named);
+    // As the Rust queue: a mark under the ID merges there, and only without
+    // one does the name's mark move to the ID.
+    const byId = pending.get(key);
+    const old = byId ?? pending.get(named);
+    if (!byId && named !== key) pending.delete(named);
     const next = merged(old, mark);
     pending.set(key, next);
     fresh.push(next);
@@ -640,8 +651,16 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     const fresh: ReadMark[] = [];
     if (pending.size) {
       for (const u of b.replaces.length ? [...b.upserts, ...b.replaces.flatMap((r) => r.rows)] : b.upserts) {
-        const key = queuedKey(u.computer, u.row.name, u.row.session_id);
-        const mark = key === undefined ? undefined : pending.get(key);
+        const key = queuedKey(u.computer, u.row.name, u.row.session_id, u.row.run_id, u.row.conversation_id);
+        let mark = key === undefined ? undefined : pending.get(key);
+        // A mark found by its session ID under another label takes the row's
+        // label, which Rust's queue then delivers (core ReadMarks::settle).
+        if (mark && u.row.session_id && mark.name !== u.row.name && (JSON.parse(key!) as string[])[1]?.startsWith("id:")) {
+          c.names.add(pair(u.computer, mark.name));
+          mark = { ...mark, name: u.row.name };
+          pending.set(key!, mark);
+          c.names.add(pair(u.computer, u.row.name));
+        }
         if (mark && settled(mark, u.row)) { pending.delete(key!); c.names.add(pair(u.computer, u.row.name)); }
       }
       // An empty replace is not a listing: a stopped stream sends one.
@@ -652,7 +671,8 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
         // A mark queued under a session ID stays while that ID is listed, whatever its label is now.
         const listedMark = (key: string, m: ReadMark) => {
           const part = (JSON.parse(key) as string[])[1] ?? "";
-          return part.startsWith("id:") ? ids.has(part.slice(3)) : names.has(m.name);
+          // A listing without IDs (a downgraded peer) keeps an ID mark by its name.
+          return part.startsWith("id:") ? ids.has(part.slice(3)) || (!ids.size && names.has(m.name)) : names.has(m.name);
         };
         for (const [key, mark] of pending) if (mark.computer === r.computer && !listedMark(key, mark)) { pending.delete(key); c.names.add(pair(r.computer, mark.name)); }
       }

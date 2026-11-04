@@ -117,13 +117,26 @@ impl DeviceMarks {
     }
 
     /// `row`'s pending mark: under its session ID, or one its session left
-    /// under the name before the ID was known.
+    /// under the name before the ID was known (`ReadMarks::found`). A row
+    /// that lists no ID (a peer whose hgs was downgraded) also finds one
+    /// queued under an ID for the same name, run and conversation.
     fn queued(&self, computer: &str, row: &ViewRow) -> Option<&ReadMark> {
         let by = self.pending.get(computer)?;
-        row.session_id
-            .as_deref()
-            .and_then(|id| by.get(&format!("id:{id}")))
+        let id = row.session_id.as_deref();
+        id.and_then(|id| by.get(&format!("id:{id}")))
             .or_else(|| by.get(&row.name))
+            .or_else(|| {
+                id.is_none().then(|| {
+                    by.iter().find_map(|(part, mark)| {
+                        (part.starts_with("id:")
+                            && mark.name == row.name
+                            && row.run_id.as_deref() == Some(mark.run_id.as_str())
+                            && row.conversation_id.as_deref()
+                                == Some(mark.conversation_id.as_str()))
+                        .then_some(mark)
+                    })
+                })?
+            })
     }
 }
 
@@ -1683,5 +1696,14 @@ mod tests {
             "queued by name"
         );
         assert!(read_state(&local, &row, &queued(Some(other))).unread_reply);
+        // #1421 review: a row that lists no ID (a downgraded peer) finds the
+        // mark queued under an ID for the same name, run and conversation.
+        row.session_id = None;
+        assert!(!read_state(&local, &row, &queued(Some(id))).unread_reply);
+        row.run_id = Some("run-2".into());
+        assert!(
+            read_state(&local, &row, &queued(Some(id))).unread_reply,
+            "another run"
+        );
     }
 }

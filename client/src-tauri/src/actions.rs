@@ -1553,19 +1553,25 @@ async fn dispatch_reserved_original(
     {
         // Admission precedes both persistence and the native read effect.
         let _admission = state.admit_marks()?;
+        // Queued under the session ID the listing reports for the run, as
+        // queue_read_marks does (#1421 review), read before the queue lock.
+        let session_id = state.run_session_id(&target.computer, &target.run_id);
         // Saved before the call, so the mark survives a crash during it.
         state
             .marks
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .add(ReadMark {
-                computer: target.computer.clone(),
-                name: target.name.clone(),
-                run_id: target.run_id.clone(),
-                conversation_id: target.conversation_id.clone(),
-                reply_id: reply_id.clone(),
-                attention_signature: attention_signature.clone(),
-            });
+            .add_with_id(
+                ReadMark {
+                    computer: target.computer.clone(),
+                    name: target.name.clone(),
+                    run_id: target.run_id.clone(),
+                    conversation_id: target.conversation_id.clone(),
+                    reply_id: reply_id.clone(),
+                    attention_signature: attention_signature.clone(),
+                },
+                session_id,
+            );
     }
     // Building the call may read dropped files, so it runs off the async
     // workers with the call itself.
@@ -3102,6 +3108,56 @@ mod tests {
                 ("run-gone", None)
             ]
         );
+        let _ = std::fs::remove_file(&path);
+        drop(pump);
+    }
+
+    /// #1421 review (1): an explicit Mark read is queued, and saved before
+    /// its call, under the session ID the listing reports for its run.
+    #[test]
+    fn an_explicit_mark_read_is_queued_by_the_listed_session_id() {
+        use zerus_client_core::{Change, ComputerStatus};
+        let target = Target {
+            computer: "studio".into(),
+            ..review()
+        };
+        let path =
+            std::env::temp_dir().join(format!("zerus-markread-by-id-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let actions = Actions::new(path.clone());
+        let pump = crate::pump::Pump::default();
+        let computer = ComputerId::from("studio");
+        pump.push(Change::Computer {
+            computer: computer.clone(),
+            status: ComputerStatus::Live,
+        });
+        pump.push(Change::Upsert {
+            computer,
+            key: format!("run:{}", target.run_id),
+            row: ViewRow {
+                name: target.name.clone(),
+                run_id: Some(target.run_id.clone()),
+                session_id: Some(SELECTED.into()),
+                state: "running".into(),
+                ..Default::default()
+            },
+        });
+        actions.set_termination_pump(pump.clone());
+        // The host cannot be reached: the saved mark stays to be retried.
+        let (outcome, _) = selector_dispatch(
+            &actions,
+            &target,
+            Action::MarkRead {
+                reply_id: Some("r1".into()),
+                attention_signature: None,
+            },
+            exit(0, "usage\n", ""),
+            exit(255, "", "ssh: connect to host studio: Connection refused"),
+        );
+        let queued = ReadMarks::load(path.clone()).queued();
+        assert_eq!(queued.len(), 1, "{outcome:?}");
+        assert_eq!(queued[0].session_id.as_deref(), Some(SELECTED));
+        assert_eq!(queued[0].mark.name, target.name);
         let _ = std::fs::remove_file(&path);
         drop(pump);
     }

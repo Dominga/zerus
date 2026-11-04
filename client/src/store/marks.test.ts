@@ -621,6 +621,42 @@ describe("persistence", () => {
     expect(a.row("run:b").unreadReply).toBe(false);
   });
 
+  // #1421 review: a renamed session's mark takes its new label in the mirror,
+  // as Rust's queue delivers it, and a downgraded peer's listing (no IDs)
+  // keeps it by that name.
+  it("relabels a renamed session's pending mark and keeps it for a listing without IDs", async () => {
+    const sid = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+    const port = fakePort();
+    port.pendingReadMarks.mockResolvedValue([mark({ session_id: sid })]);
+    const a = await setup([rowOut({ session_id: sid })], port);
+    expect(a.row().unreadReply).toBe(false);
+    const renamed = "claude/sample-project/renamed";
+    a.receive(batchOf({ upserts: [rowOut({ name: renamed, session_id: sid })] }));
+    expect(a.row().unreadReply).toBe(false);
+    // The peer's hgs is downgraded: its listing reports no IDs.
+    const older = rowOut({ name: renamed, session_id: undefined });
+    a.receive(batchOf({ replaces: [{ computer: "", rows: [older] }] }));
+    a.receive(batchOf({ upserts: [older] }));
+    expect(a.row().unreadReply).toBe(false);
+  });
+
+  it("keeps another session's name-keyed mark when a mark merges under an existing ID", async () => {
+    const sid = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+    const port = fakePort();
+    port.pendingReadMarks.mockResolvedValue([
+      mark({ session_id: sid, reply_id: "r0" }),
+      mark({ run_id: "run-0", conversation_id: "conv-0", reply_id: "r9" }),
+    ]);
+    const a = await setup([
+      { computer: "", key: "run:a", row: asking({ session_id: sid }) },
+      rowOut({ run_id: "run-0", conversation_id: "conv-0", reply_id: "r9" }, "run:old"),
+    ], port);
+    expect(a.row("run:old").unreadReply).toBe(false);
+    a.marks.markRead(snapshotOf(a.row()));
+    a.receive(batchOf({ upserts: [rowOut({ run_id: "run-0", conversation_id: "conv-0", reply_id: "r9" }, "run:old")] }));
+    expect(a.row("run:old").unreadReply).toBe(false);
+  });
+
   it(`keeps the ${CAP} newest written entries of each map`, async () => {
     expect(CAP).toBe(20_000);
     const legacy = { shared_read: false, attention_signature: undefined };

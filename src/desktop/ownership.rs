@@ -20,6 +20,8 @@ use zerus_client_core::desktop::{
 const RECEIPTS: i64 = 4096;
 const RECORD_BYTES: usize = 8192;
 
+pub(super) mod observation;
+
 /// Captured from the authenticated canonical process and cached native Build,
 /// never decoded from a request. Serialization is private store data only.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

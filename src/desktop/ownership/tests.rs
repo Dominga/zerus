@@ -7,6 +7,8 @@ use std::{
 };
 use zerus_desktop_ledger::operations::cache as cache_ledger;
 
+mod observation;
+
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[test]
 fn held_original_rollback_excludes_a_real_rearm_and_refuses_when_rearm_already_won() {

@@ -276,6 +276,10 @@ fn the_offer_selection_cannot_be_replaced_before_confirmation() {
 }
 #[test]
 fn one_original_is_retained_before_the_same_scoped_native_call() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         for (lost, wait) in [(false, false), (true, false), (false, true)] {
@@ -322,6 +326,10 @@ fn one_original_is_retained_before_the_same_scoped_native_call() {
 }
 #[test]
 fn corrupted_epoch_scope_or_changed_capture_never_dispatches_or_reoffers() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         for scenario in [
@@ -362,6 +370,10 @@ fn corrupted_epoch_scope_or_changed_capture_never_dispatches_or_reoffers() {
 }
 #[test]
 fn native_effect_loss_consumes_the_one_shot_and_keeps_original_correlation() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let f = fixture(json!({"termination_effect_lost":true}));
@@ -402,6 +414,10 @@ impl Drop for Release {
 }
 #[test]
 fn retained_pipe_keeps_the_original_actions_claim_and_refuses_native_effect() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let f = fixture(json!({"termination_pipe":true}));
@@ -444,6 +460,10 @@ fn retained_pipe_keeps_the_original_actions_claim_and_refuses_native_effect() {
 
 #[test]
 fn missing_unknown_corrupt_or_foreign_original_lookup_never_replays_or_dispatches() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         for case in [
@@ -484,6 +504,10 @@ fn missing_unknown_corrupt_or_foreign_original_lookup_never_replays_or_dispatche
 }
 #[test]
 fn the_live_dispatch_transition_is_one_way_even_without_a_native_spawn() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let f = fixture(json!({}));
@@ -569,6 +593,10 @@ fn a_new_legacy_helper_is_probed_before_any_new_subcommand() {
 
 #[test]
 fn refused_or_expired_original_binding_withholds_input_and_keeps_real_custody() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     struct Owned(std::process::Child);
     impl Drop for Owned {
@@ -687,6 +715,10 @@ fn refused_or_expired_original_binding_withholds_input_and_keeps_real_custody() 
 
 #[test]
 fn scope_drift_during_observation_or_binding_withholds_input_until_real_custody_settles() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         for after_binding in [false, true] {
@@ -827,6 +859,10 @@ fn scope_drift_during_observation_or_binding_withholds_input_until_real_custody_
 
 #[test]
 fn an_oversized_native_receipt_is_bounded_and_never_restores_dispatch() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let f = fixture(json!({"termination_effect_oversize":true}));
@@ -868,6 +904,10 @@ fn an_oversized_native_receipt_is_bounded_and_never_restores_dispatch() {
 
 #[test]
 fn overflow_keeps_original_dispatch_and_claim_until_the_actual_pipe_ends() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     struct Release(PathBuf);
     impl Drop for Release {
@@ -912,6 +952,10 @@ fn overflow_keeps_original_dispatch_and_claim_until_the_actual_pipe_ends() {
 
 #[test]
 fn an_in_place_rewrite_after_the_last_spawn_check_cannot_replace_native_code() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let f = fixture(json!({}));

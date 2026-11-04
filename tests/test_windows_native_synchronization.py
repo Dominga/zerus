@@ -69,6 +69,37 @@ class CodexStopSynchronization(unittest.TestCase):
         self.assertIs(self.case.turn_ended(self.NAME, self.SINCE), idle)
         self.assertEqual(self.case.inspect.call_count, 2)
 
+    def test_the_original_journal_admits_stop_after_the_label_changes(self):
+        database = self.database()
+        stop = dict(type="Stop", at=self.SINCE)
+        idle = dict(events=[stop], activity="idle", phase="idle")
+        for journal in ("session:11111111-1111-4111-8111-111111111111", "codex/project/original-label"):
+            with self.subTest(journal=journal):
+                self.case.record.return_value["journal_name"] = journal
+                database.execute("DELETE FROM events")
+                self.stop(database, name=journal, agent_id="main")
+                database.commit()
+                self.case.inspect = Mock(return_value=idle)
+                self.assertIs(self.case.turn_ended(self.NAME, self.SINCE), idle)
+                self.case.inspect.assert_called_once_with(self.NAME)
+                # Journal readiness is still only a gate to the public check.
+                self.case.inspect.return_value = dict(events=[], activity="idle", phase="idle")
+                self.assertIsNone(self.case.turn_ended(self.NAME, self.SINCE))
+                self.case.inspect.return_value = dict(events=[stop], activity="busy", phase="working")
+                self.assertIsNone(self.case.turn_ended(self.NAME, self.SINCE))
+
+    def test_an_id_journal_rejects_a_label_stop_and_other_originals(self):
+        database = self.database()
+        journal = "session:11111111-1111-4111-8111-111111111111"
+        self.case.record.return_value["journal_name"] = journal
+        self.stop(database)  # A matching event under the label is NOT this journal.
+        for fields in (dict(at=self.SINCE - 1), dict(agent_id="child"), dict(run_id="replacement"),
+                       dict(conversation="replacement"), dict(type="AgentMessage")):
+            self.stop(database, name=journal, **fields)
+        database.commit()
+        self.assertIsNone(self.case.turn_ended(self.NAME, self.SINCE))
+        self.case.inspect.assert_not_called()
+
     def test_journal_stop_does_not_replace_the_public_stop_check(self):
         database = self.database()
         self.stop(database, agent_id="main")

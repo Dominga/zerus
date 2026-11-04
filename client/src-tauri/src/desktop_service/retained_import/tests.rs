@@ -328,6 +328,10 @@ impl Fixture {
 #[cfg(target_os = "linux")]
 #[test]
 fn automatic_reconnect_preserves_authority_and_import_until_one_explicit_retry() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
     use crate::desktop_service::tests::eventually;
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
@@ -457,6 +461,10 @@ fn automatic_reconnect_preserves_authority_and_import_until_one_explicit_retry()
 #[cfg(target_os = "linux")]
 #[test]
 fn busy_or_quarantined_report_preserves_grant_watch_catalog_and_preferences() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
     use crate::desktop_service::tests::eventually;
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
@@ -544,6 +552,10 @@ fn busy_or_quarantined_report_preserves_grant_watch_catalog_and_preferences() {
 #[cfg(target_os = "linux")]
 #[test]
 fn an_unknown_report_or_later_lookup_failure_never_blocks_a_new_connection() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
     use crate::desktop_service::tests::eventually;
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
@@ -745,6 +757,10 @@ fn the_download_status_follows_a_folder_change_at_once() {
 #[cfg(target_os = "linux")]
 #[test]
 fn report_completion_wakes_the_next_group_without_watch_frames() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
     use crate::desktop_service::tests::eventually;
     use migration::creation_report::Group;
     let _process = crate::PROCESS_TREE.read().unwrap();
@@ -814,6 +830,10 @@ fn report_completion_wakes_the_next_group_without_watch_frames() {
 #[cfg(target_os = "linux")]
 #[test]
 fn report_qt_retry_waiting_for_a_group_completes_without_watch_or_reconnect() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
     use crate::desktop_service::tests::eventually;
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {

@@ -981,7 +981,9 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
 
     def turn_ended(self, name, since):
         # inspect takes the writer lock also needed by the native five-second
-        # Stop hook. Do not repeatedly launch inspectors ahead of that hook on
+        # Stop hook. New sessions journal by durable ID, and a renamed legacy
+        # session retains its original journal; neither key is its current label.
+        # Do not repeatedly launch inspectors ahead of that hook on
         # a busy runner. Observe its journal read-only, then retain the public
         # Stop/idle assertions; a missing or timed-out hook still fails the test.
         record = self.record(name)
@@ -997,7 +999,7 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
                     "AND json_extract(payload, '$.type')='Stop' "
                     "AND COALESCE(json_extract(payload, '$.agent_id'), '') IN ('', 'main') "
                     "AND json_extract(payload, '$.at')>=? ORDER BY seq DESC LIMIT 1",
-                    (name, conversation, run, since)).fetchone()
+                    (record.get("journal_name") or name, conversation, run, since)).fetchone()
         except sqlite3.OperationalError:
             return None  # Not created yet or momentarily busy; the original end still applies.
         return super().turn_ended(name, since) if stopped else None

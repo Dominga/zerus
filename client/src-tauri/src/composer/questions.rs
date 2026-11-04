@@ -405,8 +405,27 @@ impl Composers {
         hub.answers.next_load += 1;
         let ticket = hub.answers.next_load;
         hub.answers.loads.insert(key.to_owned(), ticket);
-        if let Some(legacy) = legacy.filter(|legacy| !hub.answers.drafts.contains_key(legacy)) {
-            self.0.store.adopt(&legacy, key, session, |_| {});
+        if let Some(legacy) = legacy {
+            // A name-key answer still held here moves too when nothing is
+            // under way for it (#1418 review): its stored copy is then
+            // current, so it leaves memory and moves on disk before the ID
+            // key loads. One that is loading, saving, failed or sending
+            // stays, and moves once it is evicted.
+            let answers = &mut hub.answers;
+            let settled = answers.drafts.get(&legacy).is_some_and(|d| !d.sending)
+                && !answers.loading.contains(&legacy)
+                && !answers.unsaved.contains(&legacy)
+                && !answers.failed.contains(&legacy)
+                && !answers.in_flight.values().any(|card| *card == legacy);
+            if settled {
+                answers.drafts.remove(&legacy);
+                answers.order.retain(|k| *k != legacy);
+                answers.saves.remove(&legacy);
+                answers.loads.remove(&legacy);
+            }
+            if !hub.answers.drafts.contains_key(&legacy) {
+                self.0.store.adopt(&legacy, key, session, |_| {});
+            }
         }
         let me = self.clone();
         let (owned, label, session) = (key.to_owned(), label.to_owned(), session.to_owned());
@@ -1529,6 +1548,56 @@ pub(crate) mod tests {
                 "studio / claude/sample-project/review (question answer)",
                 "claude/sample-project/review"
             )
+        );
+    }
+
+    /// #1418 review: an answer chosen while its row had no ID, still held in
+    /// memory, moves to the ID key when the row gains one.
+    #[test]
+    fn a_held_answer_moves_when_its_row_gains_an_id() {
+        let root = dir("q-held");
+        let store = drafts(&root);
+        let (c, _) = send_hub_on(&store);
+        c.open(Some(session()));
+        c.observe(&state(asking(vec![card_json("tool:t1")])));
+        let (card, epoch) = shown(&c);
+        assert_eq!(card, store_key("tool:t1"));
+        c.question_edit(
+            &card,
+            epoch,
+            Edit::Option {
+                item: "q_0".into(),
+                option: "opt_0_1".into(),
+                checked: true,
+            },
+        );
+        until(&c, |v| checked(v) == [false, true]);
+        store.flush();
+        until(&c, |_| c.lock().answers.unsaved.is_empty());
+        assert!(
+            c.lock().answers.drafts.contains_key(&card),
+            "held in memory"
+        );
+        let id = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+        c.open(Some(SessionRef {
+            session_id: Some(id.into()),
+            ..session()
+        }));
+        let id_key = store_key("tool:t1").replace(
+            "studio\\nclaude/sample-project/review",
+            &format!("studio\\nid:{id}"),
+        );
+        let view = until(&c, |v| {
+            v.question.as_ref().is_some_and(|q| q.card == id_key) && checked(v) == [false, true]
+        });
+        assert_eq!(view.question.unwrap().card, id_key);
+        assert!(!c.lock().answers.drafts.contains_key(&card));
+        store.flush();
+        let saved = root.join("drafts");
+        assert!(read_draft(&saved, &card).draft.form_state.is_empty());
+        assert_eq!(
+            read_draft(&saved, &id_key).draft.session_label,
+            "claude/sample-project/review"
         );
     }
 

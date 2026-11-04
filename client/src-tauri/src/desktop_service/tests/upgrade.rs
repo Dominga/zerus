@@ -175,7 +175,12 @@ fn watch_refusal_retains_the_original_manual_notice_and_stale_catalog() {
             .await;
             let original_epoch = service.snapshot().epoch;
             fs::write(fixture.0.join("manual-upgrade"), []).unwrap();
-            eventually("manual state after refused watch", || manual(&service)).await;
+            // The unavailable snapshot precedes the queued offline event.
+            // Observe both completions before asserting the retained catalog.
+            eventually("manual state and stale catalog after refused watch", || {
+                manual(&service) && !pump.online("")
+            })
+            .await;
             assert_eq!(service.snapshot().epoch, original_epoch);
             assert!(pump.row("", "row").is_some());
             assert!(!pump.online(""), "the retained catalog is stale, not live");

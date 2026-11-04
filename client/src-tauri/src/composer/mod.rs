@@ -25,10 +25,13 @@
 
 pub mod fetch;
 pub mod files;
+pub mod handed;
 pub mod questions;
 pub mod queue;
 pub mod saved;
 pub mod send;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use handed::DeferredRoute;
 #[cfg(feature = "media")]
 mod voice;
 
@@ -309,6 +312,9 @@ pub struct ComposerView {
     pub recording: bool,
     pub waiting: Option<String>,
     pub uncertain: bool,
+    /// The desktop service still sends this draft's message: no Allow
+    /// retry, and the status is not an error.
+    pub delivery_pending: bool,
     pub status: String,
     pub status_error: bool,
     pub can_send: bool,
@@ -413,6 +419,11 @@ pub(crate) struct Composer {
     /// compaction. Kept while its outcome is uncertain and loaded back as
     /// data; nothing sends from it.
     pub(crate) checkpoint: Option<Checkpoint>,
+    /// The desktop service still reported this draft's send in progress:
+    /// it is checked again, read-only (zerus-5wmh.66.4.4).
+    pub(crate) handed: Option<handed::Handed>,
+    /// A reload's one lookup of the held identity ran.
+    pub(crate) probed: bool,
 }
 
 impl Composer {
@@ -448,6 +459,8 @@ impl Composer {
             delivering: None,
             digests: None,
             checkpoint: None,
+            handed: None,
+            probed: false,
         }
     }
 
@@ -608,6 +621,8 @@ pub(crate) struct Hub {
     pub(crate) queue: queue::Queue,
     /// Events for the next batch (`composer_events`), at most 16.
     pub(crate) events: VecDeque<ComposerEvent>,
+    /// The window is hidden: a handed-over send is not checked.
+    pub(crate) hidden: bool,
 }
 
 impl Hub {
@@ -639,6 +654,8 @@ pub(crate) struct Shared {
     changes: AtomicU64,
     /// Wakes the ticker, which sleeps while no composer is open.
     opened: Condvar,
+    /// The selected desktop service's deferred send route, if any.
+    pub(crate) deferred: Mutex<Option<Arc<handed::DeferredRoute>>>,
     /// The ticker sleeps (tests wait for it).
     #[cfg(test)]
     parked: std::sync::atomic::AtomicBool,
@@ -692,6 +709,7 @@ impl Composers {
             deps,
             changes: AtomicU64::new(0),
             opened: Condvar::new(),
+            deferred: Mutex::new(None),
             #[cfg(test)]
             parked: Default::default(),
         }));
@@ -807,6 +825,8 @@ impl Composers {
         let name = session.name.clone();
         hub.open = Some(session);
         hub.open_key = Some(key.clone());
+        // A held send of this session is checked again at once.
+        Self::restart_checks(&mut hub, self.now());
         self.0.opened.notify_all();
         if let Some(old) = renamed {
             self.rename(&mut hub, &old, &key);
@@ -844,8 +864,13 @@ impl Composers {
                 return;
             }
             let mut hub = me.lock();
-            for stored in hub.stored_keys.iter_mut().filter(|k| **k == from) {
-                stored.clone_from(&to);
+            // A finished move may find the ID key listed already.
+            if hub.stored_keys.contains(&to) {
+                hub.stored_keys.retain(|k| *k != from);
+            } else {
+                for stored in hub.stored_keys.iter_mut().filter(|k| **k == from) {
+                    stored.clone_from(&to);
+                }
             }
             hub.local.rename(&from, &to);
             drop(hub);
@@ -1387,6 +1412,7 @@ impl Composers {
         composer.error = false;
         composer.notice.clear();
         composer.checkpoint = None;
+        composer.handed = None;
         self.save(composer);
         // Its late answers resolve nothing now: their tracking goes.
         let key = composer.key.clone();
@@ -1705,6 +1731,7 @@ impl Composers {
             recording: composer.recording_owner.is_some(),
             waiting: composer.waiting.clone(),
             uncertain: composer.uncertain,
+            delivery_pending: composer.handed.is_some(),
             status,
             status_error,
             can_send: composer.loaded
@@ -1755,6 +1782,13 @@ pub fn composer_open(
     session: Option<SessionRef>,
 ) -> Option<ComposerView> {
     state.open(session)
+}
+
+/// The webview's page visibility: a hidden window checks no handed-over
+/// send (zerus-5wmh.66.4.4).
+#[tauri::command]
+pub fn composer_visibility(state: State<'_, Composers>, hidden: bool) {
+    state.set_hidden(hidden);
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -2442,6 +2476,48 @@ pub(crate) mod tests {
             read_draft(&saved, KEY).draft.draft.text,
             "typed on the older GUI"
         );
+    }
+
+    /// #1418 review (X8): a name-key composer still held in memory but no
+    /// longer the open row moves when its row is opened with its ID.
+    #[test]
+    fn a_held_name_key_composer_moves_when_its_row_reopens_with_an_id() {
+        let root = dir("adopt-held");
+        let store = drafts(&root);
+        let (c, _) = hub_on(&store);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.edit(
+            view.handle,
+            1,
+            view.text_epoch,
+            "held in memory".into(),
+            0,
+            0,
+        );
+        until(&c, |v| v.text == "held in memory");
+        let other = SessionRef {
+            key: "run:run-2".into(),
+            name: "codex/sample-project/other".into(),
+            ..session()
+        };
+        c.open(Some(other));
+        until(&c, |v| {
+            v.key == "studio\ncodex/sample-project/other" && v.loaded
+        });
+        assert!(c.lock().composers.contains_key(KEY), "still held");
+        c.open(Some(with_id()));
+        let view = until(&c, |v| v.key == ID_KEY && v.loaded && !v.text.is_empty());
+        assert_eq!(view.text, "held in memory");
+        assert!(!c.lock().composers.contains_key(KEY));
+        c.flush();
+        store.flush();
+        let saved = root.join("drafts");
+        assert_eq!(
+            read_draft(&saved, ID_KEY).draft.draft.text,
+            "held in memory"
+        );
+        assert_eq!(read_draft(&saved, KEY).draft.draft.text, "");
     }
 
     #[test]

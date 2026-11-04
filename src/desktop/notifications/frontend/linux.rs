@@ -205,4 +205,4 @@ fn command(selected: &SelectedFrontend, launch: &Launch) -> Result<Command> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::desktop::notifications) mod tests;

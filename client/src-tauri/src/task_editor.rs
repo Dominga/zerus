@@ -1548,6 +1548,78 @@ mod tests {
             .unwrap()
             .is_none());
     }
+    fn file(byte: u8) -> zerus_client_core::attachments::Attachment {
+        zerus_client_core::attachments::Attachment {
+            name: "note.bin".into(),
+            mime: "application/octet-stream".into(),
+            bytes: std::sync::Arc::from(vec![byte; 4096]),
+            reference: String::new(),
+        }
+    }
+    /// Submits "Original" with one file through the service (Unconfirmed),
+    /// applies `edit` to the draft, then recovers with a not-started answer.
+    fn not_started_after(name: &str, edit: impl Fn(&mut Slot)) -> (Result<bool, String>, bool) {
+        use crate::desktop_service::task_message::NOT_STARTED;
+        let root = crate::composer::tests::dir(name);
+        let store = crate::composer::tests::drafts(&root);
+        let (hub, _) = crate::composer::tests::hub_on(&store);
+        let mut slot = slot(Mode::Note);
+        slot.stored.draft.attachments = vec![file(7)];
+        checkpoint(&mut slot, &store).unwrap();
+        let not_started = |_: &Value| Some(MessageAnswer::Unsent(NOT_STARTED.into()));
+        let route = Route {
+            send: &unconfirmed,
+            check: &not_started,
+        };
+        assert!(submitted_with_delivery(
+            &mut slot,
+            &hub,
+            detail(""),
+            false,
+            None,
+            Some(&route),
+            &no_direct
+        )
+        .is_err());
+        edit(&mut slot);
+        checkpoint(&mut slot, &store).unwrap();
+        let result = submitted_with_delivery(
+            &mut slot,
+            &hub,
+            detail(""),
+            true,
+            None,
+            Some(&route),
+            &no_direct,
+        );
+        (
+            result,
+            outbox::pending(store.root(), "example", ID)
+                .unwrap()
+                .is_some(),
+        )
+    }
+    #[test]
+    fn a_not_started_original_compares_its_attachments_too() {
+        use crate::desktop_service::task_message::NOT_STARTED;
+        assert_eq!(
+            not_started_after("task-note-file-same", |_| {}),
+            (Err(NOT_STARTED.into()), false)
+        );
+        assert_eq!(
+            not_started_after("task-note-file-removed", |s| s
+                .stored
+                .draft
+                .attachments
+                .clear()),
+            (Err(NOT_STARTED_KEPT.into()), true)
+        );
+        assert_eq!(
+            not_started_after("task-note-file-bytes", |s| s.stored.draft.attachments =
+                vec![file(8)]),
+            (Err(NOT_STARTED_KEPT.into()), true)
+        );
+    }
     #[test]
     fn routed_unsent_saves_the_draft_before_the_release() {
         use crate::desktop_service::task_message::NOT_SENT;

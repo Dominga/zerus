@@ -154,13 +154,17 @@ impl TaskDoc {
         Ok(())
     }
 
-    fn events_of(&self, attempt: &str) -> Result<Vec<EventKind>> {
+    /// The facts about `attempt`: those bound to this exact record, and those
+    /// about another record written under its ID (`AttemptEvent::of`).
+    fn facts_of(&self, attempt: &Attempt) -> Result<(Vec<EventKind>, Vec<EventKind>)> {
+        let fingerprint = attempt.fingerprint();
         let (_, events) = self.execution_records()?;
-        Ok(events
+        let (own, foreign): (Vec<AttemptEvent>, Vec<AttemptEvent>) = events
             .into_iter()
-            .filter(|event| event.attempt == attempt)
-            .map(|event| event.kind)
-            .collect())
+            .filter(|event| event.attempt == attempt.id)
+            .partition(|event| event.of.is_empty() || event.of == fingerprint);
+        let kinds = |events: Vec<AttemptEvent>| events.into_iter().map(|e| e.kind).collect();
+        Ok((kinds(own), kinds(foreign)))
     }
 
     /// Reserves the next attempt of a send, handoff or reopen before any
@@ -285,11 +289,13 @@ impl TaskDoc {
             .delivery
             .clone()
             .ok_or_else(|| Error::new("the attempt reserved no native input"))?;
-        let kinds = self.events_of(id)?;
+        let (kinds, foreign) = self.facts_of(&attempt)?;
         let settled = Settled { advanced: false };
         let receipt = match outcome {
             Settlement::NotAdmitted => {
-                if kinds.iter().any(|kind| {
+                // Any delivery fact, about this record or another one under
+                // its ID, bars recording its input as never admitted.
+                if kinds.iter().chain(&foreign).any(|kind| {
                     matches!(
                         kind,
                         EventKind::Submitted
@@ -1261,7 +1267,7 @@ mod tests {
         // review-n and desktop-u on #1391: a changed target, holder or
         // requirement is a different execution; a comment is not.
         type Drift = (&'static str, fn(&mut TaskDoc));
-        let drifts: [Drift; 4] = [
+        let drifts: [Drift; 6] = [
             ("comment", |t| {
                 t.comment("Unrelated note", &Actor::Person, 11).unwrap()
             }),
@@ -1275,6 +1281,20 @@ mod tests {
             ("requirement", |t| {
                 t.fields().insert("requirement", 2).unwrap();
                 t.doc.commit();
+            }),
+            // review-n on #1391 R2: the public edits of the requirement.
+            ("edited prompt", |t| {
+                t.edit_text("Different requirement", &Actor::Person, 11)
+                    .unwrap()
+            }),
+            ("edited media", |t| {
+                let file = crate::TaskAttachment {
+                    name: "spec.txt".into(),
+                    mime: "text/plain".into(),
+                    data_base64: "c3BlYw==".into(),
+                    reference: "[File #1]".into(),
+                };
+                t.set_attachments(&[file], &Actor::Person, 11).unwrap()
             }),
         ];
         for (name, drift) in drifts {
@@ -1332,20 +1352,25 @@ mod tests {
             (delivery.state, delivery.submitted_id)
         };
         let mut task = task();
+        // review-n on #1391: several included originals, and later ones.
         let included = queue(&mut task, "Use Redis", 2);
+        let second = queue(&mut task, "Limit per API key", 3);
         let attempt = send(&mut task, ONE, "api");
         let frozen = &attempt.delivery.as_ref().unwrap().queued;
-        assert_eq!(
-            frozen
-                .iter()
-                .map(|m| m.request_id.as_str())
-                .collect::<Vec<_>>(),
-            [included.as_str()]
-        );
+        let mut ids: Vec<&str> = frozen.iter().map(|m| m.request_id.as_str()).collect();
+        ids.sort();
+        let mut expected = [included.as_str(), second.as_str()];
+        expected.sort();
+        assert_eq!(ids, expected);
         let later = queue(&mut task, "Added after the request was frozen", 11);
+        let also_later = queue(&mut task, "And another", 12);
         settle(&mut task, ONE);
-        assert_eq!(state(&task, &included), ("submitted".into(), ONE.into()));
-        assert_eq!(state(&task, &later), ("queued".into(), String::new()));
+        for original in [&included, &second] {
+            assert_eq!(state(&task, original), ("submitted".into(), ONE.into()));
+        }
+        for added in [&later, &also_later] {
+            assert_eq!(state(&task, added), ("queued".into(), String::new()));
+        }
         // An included message another dispatch delivered meanwhile keeps that receipt.
         let bytes = super::tests::task().snapshot().unwrap();
         let mut one = TaskDoc::from_bytes(&bytes).unwrap();
@@ -1625,6 +1650,85 @@ mod tests {
             )
             .unwrap();
         assert_eq!(next.generation, 2);
+    }
+
+    #[test]
+    fn an_edit_of_the_requirement_counts_its_next_revision() {
+        let mut task = task();
+        assert_eq!(task.requirement(), 1);
+        task.edit_text("Add rate limiting", &Actor::Person, 2)
+            .unwrap();
+        assert_eq!(task.requirement(), 1, "the same text is no edit");
+        task.edit_text("Add strict rate limiting", &Actor::Person, 3)
+            .unwrap();
+        assert_eq!(task.requirement(), 2);
+        task.set_title("Rate limits", &Actor::Person, 4).unwrap();
+        task.comment("A note", &Actor::Person, 5).unwrap();
+        assert_eq!(
+            task.requirement(),
+            2,
+            "a title or comment is not the requirement"
+        );
+        // An attempt executes the revision it was reserved under.
+        assert_eq!(send(&mut task, ONE, "api").requirement, 2);
+    }
+
+    #[test]
+    fn a_non_selected_unknown_delivery_holds_worker_binding() {
+        // review-n on #1391 R2.
+        let bytes = task().snapshot().unwrap();
+        let mut selected = TaskDoc::from_bytes(&bytes).unwrap();
+        let mut peer = TaskDoc::from_bytes(&bytes).unwrap();
+        send(&mut selected, ONE, "api");
+        settle(&mut selected, ONE);
+        send(&mut peer, TWO, "web");
+        selected.import(&peer.snapshot().unwrap()).unwrap();
+        let worker = crate::TaskWorker {
+            parent: run("api"),
+            id: "child".into(),
+            name: "child".into(),
+            provider: "codex".into(),
+            conversation_id: "child-conversation".into(),
+            request_id: ONE.into(),
+        };
+        let refused = selected
+            .record_worker(&worker, &agent("api"), 30)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains(TWO), "{refused}");
+        selected
+            .cancel_attempt(TWO, "", &Actor::Person, 31)
+            .unwrap();
+        // With that exact delivery disposed of, nothing holds the binding; the
+        // two claims of one generation remain a conflict for the person.
+        selected.record_worker(&worker, &agent("api"), 32).unwrap();
+        assert!(selected.view().unwrap().execution.unwrap().conflict);
+    }
+
+    #[test]
+    fn a_receipt_for_its_own_record_is_kept_beside_another_original_s_fact() {
+        // review-n on #1391 R2: a Submitted fact about another original under
+        // the same ID never stands in for this record's own receipt.
+        let bytes = task().snapshot().unwrap();
+        let mut left = TaskDoc::from_bytes(&bytes).unwrap();
+        let mut right = TaskDoc::from_bytes(&bytes).unwrap();
+        left.doc.set_peer_id(10).unwrap();
+        right.doc.set_peer_id(20).unwrap();
+        send(&mut left, ONE, "api");
+        send(&mut right, ONE, "web");
+        settle(&mut left, ONE);
+        right.import(&left.snapshot().unwrap()).unwrap();
+        let original = right.attempt(ONE).unwrap().unwrap();
+        assert_eq!(original.executor, run("web"));
+        assert!(!settle(&mut right, ONE).advanced);
+        let (_, events) = right.execution_records().unwrap();
+        assert!(events.iter().any(|e| {
+            e.attempt == ONE && e.kind == EventKind::Submitted && e.of == original.fingerprint()
+        }));
+        // Both originals' receipts are facts; the conflict stays for the person.
+        let execution = right.view().unwrap().execution.unwrap();
+        assert!(execution.conflict);
+        assert_eq!(execution.unknown, [ONE]);
     }
 
     #[test]

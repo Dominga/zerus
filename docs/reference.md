@@ -3043,7 +3043,7 @@ selected inspector without transferring the journal or adding a polling loop.
 
 Task views (`task get`, history pages and list rows) include an `execution`
 object for a task that is In progress or recorded execution attempts:
-`requirement` (the task's requirement revision, from 1), `attempts`, `current`
+`requirement` (the task's requirement revision, from 1; each edit of its prompt or attachments counts the next one, a rename or comment does not), `attempts`, `current`
 and, when two attempts claim the same generation, `conflict: true`, which
 nothing resolves automatically. `current` is the attempt the task's execution is
 about: its `id` and `generation`, `origin` (`send`, `start`, `handoff` or

@@ -357,6 +357,16 @@ impl TaskDoc {
             .filter(execution::SessionBinding::valid)
     }
 
+    /// An edit of the requirement, its description or its attachments,
+    /// counts the next revision. A receipt for input reserved under an
+    /// earlier revision never advances the edited task.
+    fn count_requirement(&self) -> Result<()> {
+        let next = self.requirement().saturating_add(1);
+        self.fields()
+            .insert("requirement", i64::try_from(next).unwrap_or(i64::MAX))?;
+        Ok(())
+    }
+
     /// The requirement revision: 1 until an edit of the requirement counts one.
     pub fn requirement(&self) -> u64 {
         integer(&self.fields(), "requirement")
@@ -674,6 +684,7 @@ impl TaskDoc {
         self.upgrade_schema(BASE_TASK_SCHEMA)?;
         self.fields()
             .insert("attachments", serde_json::to_string(files)?)?;
+        self.count_requirement()?;
         self.log("attachments", actor, now, "Updated attachments", None)?;
         self.doc.commit();
         Ok(())
@@ -746,9 +757,13 @@ impl TaskDoc {
         };
         // A character diff merges best; a rewrite too large to diff in time is
         // replaced as a whole, with the same result.
+        let changed = current.to_string() != text;
         if current.update(text, quick).is_err() {
             current.delete(0, current.len_unicode())?;
             current.insert(0, text)?;
+        }
+        if changed {
+            self.count_requirement()?;
         }
         self.log("edited", actor, now, "", None)?;
         self.doc.commit();
@@ -1109,13 +1124,15 @@ impl TaskDoc {
                 "only the task's current coordinator can bind its subagent",
             ));
         }
+        // Any attempt whose delivery is unknown holds worker binding too,
+        // whichever claim the projection selected.
+        self.not_held()?;
         let sent = view.log.iter().rev().find(|entry| entry.kind == "sent");
         let attempt = self.current_attempt()?;
         if sent.and_then(|entry| entry.request_id.as_deref()) != Some(worker.request_id.as_str())
-            || attempt.as_ref().is_some_and(|current| {
-                current.request_id != worker.request_id
-                    || current.phase == execution::Phase::Unknown
-            })
+            || attempt
+                .as_ref()
+                .is_some_and(|current| current.request_id != worker.request_id)
         {
             return Err(Error::new(
                 "task dispatch changed; read the current request_id",

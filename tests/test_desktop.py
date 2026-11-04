@@ -993,18 +993,24 @@ finally:
     @unittest.skipUnless(os.name == 'posix', 'SQLite POSIX record locks')
     def test_live_actor_retains_sqlite_lock_until_original_exit(self):
         import fcntl
-        process, _ = self.serve(background=True)
+        self.env['HGS_PEERS'] = ''
         database = self.desktop / 'state.sqlite3'
         # SQLite's shared database lock occupies this byte range even in WAL
         # mode. A raw descriptor closed after SQLite opened would drop it and
         # let another connection mistake itself for the last WAL user.
-        with database.open('r+b') as file:
-            with self.assertRaises(BlockingIOError,
-                                   msg='live actor lost its SQLite shared lock'):
-                fcntl.lockf(file, fcntl.LOCK_EX | fcntl.LOCK_NB, 512, 0x40000000)
-        self.stop(process)
-        with database.open('r+b') as file:
-            fcntl.lockf(file, fcntl.LOCK_EX | fcntl.LOCK_NB, 512, 0x40000000)
+        previous_epoch = None
+        for restart in range(2):
+            with self.subTest(restart=restart):
+                process, status = self.serve(background=True)
+                self.assertNotEqual(status['epoch'], previous_epoch)
+                previous_epoch = status['epoch']
+                with database.open('r+b') as file:
+                    with self.assertRaises(BlockingIOError,
+                                           msg='live actor lost its SQLite shared lock'):
+                        fcntl.lockf(file, fcntl.LOCK_EX | fcntl.LOCK_NB, 512, 0x40000000)
+                self.stop(process)
+                with database.open('r+b') as file:
+                    fcntl.lockf(file, fcntl.LOCK_EX | fcntl.LOCK_NB, 512, 0x40000000)
 
     def test_background_fleet_lifetime_revoke_and_stale_epoch(self):
         self.env['HGS_PEERS'] = ''

@@ -4,6 +4,76 @@ struct Fixture {
     _temp: tempfile::TempDir,
     reader: Reader,
 }
+
+#[cfg(unix)]
+#[test]
+fn reader_drop_keeps_the_live_writer_lock_on_fresh_open_and_restart() {
+    let mut f = Fixture::new();
+    drop(f.rows(1));
+    let path = f.reader.root.join("journal.sqlite3");
+    for _ in 0..2 {
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .query_row("SELECT count(*) FROM attempts", [], |r| r.get::<_, i64>(0))
+            .unwrap();
+        crate::approval_log::lock_tests::assert_lock(&path, true);
+        assert_eq!(f.send(&f.query())["accepted"], true);
+        crate::approval_log::lock_tests::assert_lock(&path, true);
+        drop(f.reader.journal.take());
+        crate::approval_log::lock_tests::assert_lock(&path, true);
+        drop(writer);
+        crate::approval_log::lock_tests::assert_lock(&path, false);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_reader_check_keeps_the_live_writer_lock_after_restart() {
+    let mut f = Fixture::new();
+    drop(f.rows(1));
+    let path = f.reader.root.join("journal.sqlite3");
+    for _ in 0..2 {
+        let writer = Connection::open(&path).unwrap();
+        let first = f.send(&f.query());
+        assert_eq!(first["accepted"], true);
+        writer.pragma_update(None, "user_version", 0).unwrap();
+        let mut stale = f.query();
+        stale["journal"] = first["journal"].clone();
+        stale["through"] = first["result"]["through"].clone();
+        assert!(serde_json::from_value::<Request>(stale.clone())
+            .unwrap()
+            .valid());
+        let refused = f.send(&stale);
+        assert_eq!(refused["accepted"], false);
+        assert_eq!(refused["code"], "approval_audit_unavailable");
+        assert!(
+            f.reader.journal.is_none(),
+            "failed check must drop the original reader"
+        );
+        crate::approval_log::lock_tests::assert_lock(&path, true);
+        writer.pragma_update(None, "user_version", 1).unwrap();
+        drop(writer);
+        crate::approval_log::lock_tests::assert_lock(&path, false);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn opening_the_writer_preserves_an_already_cached_reader_lock() {
+    let mut f = Fixture::new();
+    drop(f.rows(1));
+    let path = f.reader.root.join("journal.sqlite3");
+    for _ in 0..2 {
+        assert_eq!(f.send(&f.query())["accepted"], true);
+        crate::approval_log::lock_tests::assert_lock(&path, true);
+        let writer = crate::approval_log::open(&f.reader.root).unwrap();
+        crate::approval_log::lock_tests::assert_lock(&path, true);
+        drop(writer);
+        crate::approval_log::lock_tests::assert_lock(&path, true);
+        drop(f.reader.journal.take());
+        crate::approval_log::lock_tests::assert_lock(&path, false);
+    }
+}
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();

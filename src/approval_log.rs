@@ -5,11 +5,12 @@ use crate::{
     config::Config,
     platform,
 };
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+#[cfg(all(test, unix))]
+use std::fs;
 use std::{
-    fs,
     io::{self, Read},
     path::Path,
     time::Duration,
@@ -107,18 +108,32 @@ pub(crate) fn open(root: &Path) -> Result<Connection> {
         return Err(bad("The approval journal folder must be private"));
     }
     let path = root.join("journal.sqlite3");
-    let file = platform::refuse_link(platform::private_open(
-        fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true),
-    ))
-    .open(&path)?;
-    if !platform::verify_private_file(&file)? {
+    // Never close a raw fd on an existing SQLite inode: another connection
+    // (including the actor's audit reader) may already hold POSIX locks.
+    if !path.try_exists()? {
+        let file = tempfile::NamedTempFile::new_in(root)?;
+        platform::make_private(file.as_file())?;
+        if !platform::verify_private_file(file.as_file())? {
+            return Err(bad("The approval journal must be a private regular file"));
+        }
+        // Close before publishing, so even a concurrent first opener cannot
+        // acquire SQLite locks before our unrelated descriptor is gone.
+        match file.into_temp_path().persist_noclobber(&path) {
+            Ok(()) => (),
+            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => (),
+            Err(error) => return Err(error.error.into()),
+        }
+    }
+    if !platform::verify_private(&path, platform::Private::File)? {
         return Err(bad("The approval journal must be a private regular file"));
     }
-    let db = Connection::open(path).map_err(bad)?;
+    let db = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(bad)?;
     db.busy_timeout(Duration::from_secs(5)).map_err(bad)?;
     let version: i64 = db
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -348,6 +363,9 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> Re
     Ok(0)
 }
 
+#[cfg(all(test, unix))]
+pub(crate) mod lock_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,6 +511,44 @@ mod tests {
         let mut next = payload();
         next["question"]["question_hash"] = json!("b".repeat(64));
         assert_eq!(begin(&mut db, &next).unwrap()["fresh"], true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writer_lock_survives_fresh_open_and_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("audit");
+        let path = root.join("journal.sqlite3");
+        for restart in 0..2 {
+            println!("approval writer restart={restart}");
+            let mut db = open(&root).unwrap();
+            db.query_row("SELECT count(*) FROM attempts", [], |r| r.get::<_, i64>(0))
+                .unwrap();
+            lock_tests::assert_lock(&path, true);
+            let mut request = payload();
+            request["question"]["question_id"] = json!(format!("restart-{restart}"));
+            let reserved = begin(&mut db, &request).unwrap();
+            assert_eq!(reserved["fresh"], true);
+            finish(
+                &db,
+                &json!({"id":reserved["id"],"request_id":reserved["request_id"],
+                "status":"unknown","detail":"no native input in this control"}),
+            )
+            .unwrap();
+            lock_tests::assert_lock(&path, true);
+            drop(db);
+            lock_tests::assert_lock(&path, false);
+            let db = Connection::open(&path).unwrap();
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM attempts WHERE status='unknown'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                restart + 1
+            );
+        }
     }
 
     #[test]

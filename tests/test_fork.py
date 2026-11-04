@@ -260,15 +260,20 @@ class Forks(Base):
         # Indexed as an older CLI did, with a provider copy of the source history.
         late_transcript=Path(self.binding(late)['transcript'])
         with late_transcript.open('a') as out:
-            out.write(json.dumps({"type":"assistant","uuid":"late-copy","timestamp":"2001-01-01T00:00:00Z",
-                "sessionId":self.binding(late)['conversation_id'],
-                "message":{"role":"assistant","content":[{"type":"text","text":"late copied line"}]}})+"\n")
+            for uuid_,at,text in (('late-copy','2001-01-01T00:00:00Z','late copied line'),
+                                  ('late-own',time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime(time.time()+5)),'late own line')):
+                out.write(json.dumps({"type":"assistant","uuid":uuid_,"timestamp":at,"sessionId":self.binding(late)['conversation_id'],
+                    "message":{"role":"assistant","content":[{"type":"text","text":text}]}})+"\n")
         first=history(late)
-        self.assertEqual(talk(first),[('late copied line',None),('late request',None)])
+        self.assertEqual(talk(first),[('late copied line',None),('late request',None),('late own line',None)])
+        self.assertEqual(first['head']['total_incoming'],2)
         record=json.loads(path.read_text());record.update(kept);path.write_text(json.dumps(record))
         second=history(late)
+        # Only the copy dated before the fork goes; the fork's own later line
+        # stays, and incoming rows are numbered again (#1248 N8).
         self.assertEqual(talk(second),[('source request',source),('source reply',source),('source after the fork',source),
-                                       ('source later reply',source),('late request',None)])
+                                       ('source later reply',source),('late request',None),('late own line',None)])
+        self.assertEqual(second['head']['total_incoming'],1)
         self.assertNotEqual(second['history_epoch'],first['history_epoch'])
         self.assertEqual(second['source_status']['canonical_order_reset'],'inherited_backfill')
         # A long source loads over several bounded calls, reported as indexing.

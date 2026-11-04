@@ -200,6 +200,16 @@ fn key(parent: &Value, r: &Request) -> String {
 fn index(parent: &Value, r: &Request) -> Result<(Connection, Guard)> {
     index_in(&absolute_root()?.join("public_history"), parent, r)
 }
+/// The history index tables and indexes.
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY,at REAL NOT NULL,role TEXT NOT NULL,stream TEXT NOT NULL,kind TEXT NOT NULL,ordinal TEXT NOT NULL,body TEXT NOT NULL,incoming INTEGER);
+ CREATE INDEX IF NOT EXISTS message_order ON messages(at,ordinal,id); CREATE INDEX IF NOT EXISTS incoming_order ON messages(incoming) WHERE incoming IS NOT NULL;
+ CREATE INDEX IF NOT EXISTS message_candidates ON messages(role,at);
+ CREATE TABLE IF NOT EXISTS aliases(original TEXT PRIMARY KEY,id TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS receipt_seen(name TEXT PRIMARY KEY,stamp TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS reconcile_work(id TEXT PRIMARY KEY);
+ CREATE TABLE IF NOT EXISTS projection_changes(generation INTEGER PRIMARY KEY AUTOINCREMENT,epoch TEXT NOT NULL,id TEXT NOT NULL,change TEXT NOT NULL CHECK(change IN ('retired','refreshed')));
+ CREATE INDEX IF NOT EXISTS attachment_candidates ON messages(role,json_extract(body,'$.native_match_hash'));";
 /// Opens, creating or migrating, the private history index of `parent` in `directory`.
 fn index_in(directory: &Path, parent: &Value, r: &Request) -> Result<(Connection, Guard)> {
     private_dir(directory)?;
@@ -223,16 +233,9 @@ fn index_in(directory: &Path, parent: &Value, r: &Request) -> Result<(Connection
     let db = Connection::open(path).map_err(|e| e.to_string())?;
     db.busy_timeout(std::time::Duration::from_secs(2))
         .map_err(|e| e.to_string())?;
-    db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;
- CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
- CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY,at REAL NOT NULL,role TEXT NOT NULL,stream TEXT NOT NULL,kind TEXT NOT NULL,ordinal TEXT NOT NULL,body TEXT NOT NULL,incoming INTEGER);
- CREATE INDEX IF NOT EXISTS message_order ON messages(at,ordinal,id); CREATE INDEX IF NOT EXISTS incoming_order ON messages(incoming) WHERE incoming IS NOT NULL;
- CREATE INDEX IF NOT EXISTS message_candidates ON messages(role,at);
- CREATE TABLE IF NOT EXISTS aliases(original TEXT PRIMARY KEY,id TEXT NOT NULL);
- CREATE TABLE IF NOT EXISTS receipt_seen(name TEXT PRIMARY KEY,stamp TEXT NOT NULL);
- CREATE TABLE IF NOT EXISTS reconcile_work(id TEXT PRIMARY KEY);
- CREATE TABLE IF NOT EXISTS projection_changes(generation INTEGER PRIMARY KEY AUTOINCREMENT,epoch TEXT NOT NULL,id TEXT NOT NULL,change TEXT NOT NULL CHECK(change IN ('retired','refreshed')));
- CREATE INDEX IF NOT EXISTS attachment_candidates ON messages(role,json_extract(body,'$.native_match_hash'));").map_err(|e|e.to_string())?;
+    db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;")
+        .map_err(|e| e.to_string())?;
+    db.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
     if get(&db, "schema")?.as_deref() != Some("2") {
         let has = db
             .prepare("PRAGMA table_info(messages)")
@@ -853,6 +856,22 @@ fn inherited(db: &Connection, parent: &Value, r: &Request, existed: bool) -> Res
 fn backfill(db: &Connection, parent: &Value) -> Result<()> {
     let created = parent["created"].as_f64().unwrap_or(0.0);
     if created > 0.0 {
+        // The deleted rows no longer count against the index budget: each was
+        // charged its body, its original identity and 256 bytes when added.
+        let freed: i64 = db
+            .query_row(
+                "SELECT COALESCE((SELECT sum(length(CAST(body AS BLOB))+256) FROM messages WHERE stream='provider' AND at>0 AND at<?1),0)
+                  +COALESCE((SELECT sum(length(CAST(original AS BLOB))) FROM aliases WHERE id IN
+                    (SELECT id FROM messages WHERE stream='provider' AND at>0 AND at<?1)),0)",
+                [created],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let used = get(db, "bytes")?
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0);
+        let freed = usize::try_from(freed).unwrap_or(0);
+        set(db, "bytes", &used.saturating_sub(freed).to_string())?;
         for table in ["aliases", "reconcile_work"] {
             db.execute(
                 &format!("DELETE FROM {table} WHERE id IN (SELECT id FROM messages WHERE stream='provider' AND at>0 AND at<?)"),
@@ -983,7 +1002,18 @@ fn incoming(db: &Connection, complete: bool) -> Result<Option<i64>> {
     if !complete {
         return Ok(None);
     }
-    let historical:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM messages m WHERE m.role='incoming' AND m.incoming IS NULL AND EXISTS(SELECT 1 FROM messages old WHERE old.incoming IS NOT NULL AND (m.at,m.ordinal,m.id)<(old.at,old.ordinal,old.id)))",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    // An unnumbered incoming row before the newest numbered row means history
+    // arrived late. One uncorrelated comparison: a correlated search for any
+    // later numbered row is quadratic, about 20 s for 10k unnumbered rows (R3).
+    let historical: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM messages m WHERE m.role='incoming' AND m.incoming IS NULL
+              AND (m.at,m.ordinal,m.id)<(SELECT at,ordinal,id FROM messages WHERE incoming IS NOT NULL
+                ORDER BY at DESC,ordinal DESC,id DESC LIMIT 1))",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
     if historical {
         db.execute("UPDATE messages SET incoming=NULL", [])
             .map_err(|e| e.to_string())?;
@@ -2619,6 +2649,80 @@ mod tests {
         .unwrap();
         assert_eq!(incoming(&db, true).unwrap(), Some(2));
         assert_ne!(get(&db, "epoch").unwrap().unwrap(), "test-epoch");
+    }
+    /// #1248 R3: numbering 10k unnumbered incoming rows, as after a fork's
+    /// backfill or a long session's first build, stays linear in every call.
+    /// The correlated check took about 20 s per call, its SQLite steps growing
+    /// with the square of the rows, and the connector stops a call at 2 s.
+    #[test]
+    fn numbering_many_unnumbered_rows_stays_within_a_linear_step_budget() {
+        use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+        // About 0.7M steps per call measured; the quadratic check needs hundreds of millions.
+        const BUDGET: usize = 2_000_000;
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        set(&db, "epoch", "test-epoch").unwrap();
+        let insert = |id: &str, at: f64, role: &str| {
+            db.execute(
+                "INSERT INTO messages(id,at,role,stream,kind,ordinal,body) VALUES(?,?,?,'provider','Stop',?,'{}')",
+                params![id, at, role, format!("1:{id}")],
+            )
+            .unwrap();
+        };
+        db.execute_batch("BEGIN").unwrap();
+        for n in 0..10_000 {
+            insert(&format!("out{n:05}"), n as f64 * 5., "outgoing");
+            insert(&format!("in{n:05}"), n as f64 * 5. + 1., "incoming");
+        }
+        db.execute_batch("COMMIT").unwrap();
+        let steps = std::sync::Arc::new(AtomicUsize::new(0));
+        let counted = steps.clone();
+        db.progress_handler(1, Some(move || counted.fetch_add(1, Relaxed) >= BUDGET));
+        let number = |db: &Connection| {
+            for calls in 1..=20 {
+                steps.store(0, Relaxed);
+                let total = incoming(db, true).expect("numbering stays within its step budget");
+                if let Some(total) = total {
+                    return (total, calls);
+                }
+            }
+            panic!("numbering never completed");
+        };
+        assert_eq!(number(&db), (10_000, 11));
+        assert_eq!(get(&db, "order_reset").unwrap(), None);
+        // A row dated before the numbered ones still resets the numbering.
+        insert("early", 0.5, "incoming");
+        assert_eq!(number(&db), (10_001, 11));
+        assert_eq!(get(&db, "order_reset").unwrap().as_deref(), Some("historical_backfill"));
+        db.progress_handler(0, None::<fn() -> bool>);
+    }
+    /// #1248 N8/N9: an inherited backfill drops only the fork's provider rows
+    /// dated before its creation, returns their bytes to the budget and numbers
+    /// incoming rows again.
+    #[test]
+    fn inherited_backfill_drops_only_earlier_provider_copies_and_renumbers() {
+        let db = database();
+        let bytes = |db: &Connection| get(db, "bytes").unwrap().unwrap().parse::<usize>().unwrap();
+        let mut journal = row("UserPromptSubmit", "asked", "Asked", 50.);
+        journal["seq"] = json!(1);
+        add(&db, "scope", journal, "journal").unwrap();
+        add(&db, "scope", row("AgentMessage", "own", "Own reply", 150.), "provider").unwrap();
+        let kept = bytes(&db);
+        add(&db, "scope", row("AgentMessage", "copy", "Copied reply", 10.), "provider").unwrap();
+        assert!(bytes(&db) > kept);
+        assert_eq!(incoming(&db, true).unwrap(), Some(2));
+        backfill(&db, &json!({"created": 100.})).unwrap();
+        let details = db
+            .prepare("SELECT json_extract(body,'$.detail') FROM messages ORDER BY at,ordinal,id")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(details, ["Asked", "Own reply"]);
+        assert_eq!(bytes(&db), kept);
+        assert_eq!(incoming(&db, true).unwrap(), Some(1));
+        assert_eq!(get(&db, "order_reset").unwrap().as_deref(), Some("inherited_backfill"));
     }
     #[test]
     fn unicode_pages_fit_and_cursors_do_not_skip_rows() {

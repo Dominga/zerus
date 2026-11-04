@@ -154,6 +154,13 @@ the form like every original.
   holds its input. An expired permit, a revoked writer or a stop refuses:
   nothing was admitted, the exact published input is removed and then its
   reservation is released. The same original again only reads its receipt.
+  A preparation that fails after it published the input (an unreadable
+  identity, a failed removal, a lost worker) leaves its reservation in place:
+  it is classified like a restart's below. A second request while the same
+  original is being prepared is refused as `task_message_preparing`, and one
+  whose request already has an input record as `task_message_input_exists`.
+  Neither refusal is definite: the client keeps the original in review and
+  only the read-only lookup decides.
 - **Execution.** The child's stdin streams from the input through the handle
   kept since preparation, never a reopened name. The input stays in the
   original's resources guard with the custody lock.
@@ -162,9 +169,18 @@ the form like every original.
   A restart does not change that: a retired but undrained original keeps its
   input. A failed removal stays visible and charged. Lookups never read an
   input, so a legitimately removed one changes no receipt.
-- **Restart.** A reservation whose input exists was published but never
-  admitted: it is kept, charged and reviewable (`orphaned`). One without an
-  input is released. There is no age-based sweep.
+- **Restart.** A reservation that nothing in this process holds, after a
+  restart or a failed preparation, is classified off the actor. If its input
+  exists, it was published but never admitted: it is kept, charged and
+  reviewable (`orphaned`). One without an input is released. There is no
+  age-based sweep.
+- **Charged records.** In v1, `orphaned` and `failed` records stay charged:
+  there is no release path for them yet, and 64 of them, or 64 MiB, refuse
+  every further reference original. Each such record names its exact input,
+  `task-message-inputs/<request_id>` with the recorded device and inode;
+  neither a person nor a later process may remove or release one by name or
+  age. Removing such an input by hand does not release its charge. An
+  explicit, exact review and release path is zerus-pi2k9.
 - **Records.** `desktop_task_message_inputs` and its budget, added at Store
   schema 27 by merge order, keep one record per input; status reports the
   charged records and bytes.

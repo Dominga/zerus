@@ -8,15 +8,15 @@ use std::{
     time::Duration,
 };
 
-struct Fixture {
-    base: PathBuf,
-    store: PathBuf,
-    file: PathBuf,
-    marker: PathBuf,
-    intent: wire::Intent,
+pub(super) struct Fixture {
+    pub(super) base: PathBuf,
+    pub(super) store: PathBuf,
+    pub(super) file: PathBuf,
+    pub(super) marker: PathBuf,
+    pub(super) intent: wire::Intent,
 }
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let base = std::env::temp_dir().join(format!("hgs-task-capture-{}", uuid::Uuid::new_v4()));
         fs::DirBuilder::new().mode(0o700).create(&base).unwrap();
         let store = base.join("data");
@@ -44,7 +44,7 @@ impl Fixture {
         fixture.write();
         fixture
     }
-    fn write(&self) {
+    pub(super) fn write(&self) {
         crate::fsx::write_private_atomic(&self.file, self.intent.original.as_bytes(), true)
             .unwrap();
         crate::fsx::write_private_atomic(
@@ -54,7 +54,7 @@ impl Fixture {
         )
         .unwrap();
     }
-    fn change(&mut self, change: impl FnOnce(&mut Value)) {
+    pub(super) fn change(&mut self, change: impl FnOnce(&mut Value)) {
         let mut value: Value = serde_json::from_str(&self.intent.original).unwrap();
         change(&mut value);
         // Keep noncanonical whitespace as part of the actual native source.
@@ -63,7 +63,7 @@ impl Fixture {
         self.intent.binding.source_record_sha256 = sha256(self.intent.original.as_bytes());
         self.write();
     }
-    fn capture(&self) -> Result<Captured, &'static str> {
+    pub(super) fn capture(&self) -> Result<Captured, &'static str> {
         Captured::read(
             &self.store,
             &self.intent.binding.key.project,

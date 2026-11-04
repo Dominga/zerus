@@ -13,6 +13,8 @@ use policy::mode::{Budget, Mode, Phase, Record, RECORD_BYTES};
 mod recovery;
 mod boot;
 mod review;
+#[cfg(debug_assertions)]
+mod held_pause;
 use std::{
     path::Path,
     sync::{atomic::AtomicBool, Arc},
@@ -61,6 +63,8 @@ fn environment(config: &Config, binary: &str) -> Result<Vec<(String, String)>> {
     if let Ok(path) = std::env::var("LOCALAPPDATA") {
         values.push(("LOCALAPPDATA".into(), path));
     }
+    #[cfg(debug_assertions)]
+    held_pause::forward(&mut values);
     Ok(values)
 }
 
@@ -703,6 +707,12 @@ fn effect(
         }
     }
     save(location, passive, &record, &mut || fence.check())?;
+    // Debug builds only: the hosted fixture's bounded hold of an exact first
+    // choice at Held. The next code is the same production fence and stop.
+    #[cfg(debug_assertions)]
+    if first.is_some() {
+        held_pause::wait(config, &id);
+    }
     fence.phase(Budget::Stop);
     if let Some(original) = &mut original {
         record.advance(Phase::Held, Phase::StopOffered)?;

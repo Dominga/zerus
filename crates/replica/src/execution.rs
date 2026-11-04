@@ -162,6 +162,36 @@ pub struct Execution {
     pub conflict: bool,
 }
 
+/// A name-only session key bound to its verified run: `from` is the key
+/// as older history recorded it, `to` the identity Zerus verified for it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionBinding {
+    pub from: SessionKey,
+    pub to: SessionKey,
+}
+
+impl SessionBinding {
+    /// Whether it is a binding at all: a name-only key on one computer, and
+    /// a verified identity on the same computer.
+    pub(crate) fn valid(&self) -> bool {
+        self.from.session_id.is_empty()
+            && !self.to.session_id.is_empty()
+            && !self.from.machine.is_empty()
+            && self.from.machine == self.to.machine
+    }
+
+    /// Whether `key`, written in a boundary, names `holder`: `key` is the
+    /// exact name-only key this binding is from, and `holder` its verified run.
+    fn names(&self, key: &SessionKey, holder: &SessionKey) -> bool {
+        self.valid()
+            && key.session_id.is_empty()
+            && key.machine == self.from.machine
+            && key.session == self.from.session
+            && holder.session_id == self.to.session_id
+            && holder.machine == self.to.machine
+    }
+}
+
 pub(crate) fn canonical_uuid(id: &str) -> bool {
     uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == id)
 }
@@ -245,10 +275,12 @@ fn phase_of(attempt: &Attempt, events: &[&AttemptEvent]) -> (Phase, Option<i64>,
 
 /// Projects a task's execution from its attempts, or for a task In progress
 /// without any, from its history's last send or start. `log` is the history
-/// in reading order.
+/// in reading order. `binding` is how `session` was bound from a name-only
+/// key to its verified run (`TaskDoc::bind_session_identity`).
 pub(crate) fn project(
     stage: Stage,
     session: Option<&SessionKey>,
+    binding: Option<&SessionBinding>,
     log: &[LogEntry],
     attempts: &[Attempt],
     events: &[AttemptEvent],
@@ -256,9 +288,10 @@ pub(crate) fn project(
 ) -> Option<Execution> {
     let Some(top) = attempts.iter().map(|a| a.generation).max() else {
         return (stage == Stage::Active).then(|| {
-            let current = legacy(session, log, requirement);
+            let current = legacy(session, binding, log, requirement);
             // Every write records its boundary and the session holding the task
-            // together, so they differ only after concurrent replicas merged two
+            // together, and `legacy` reads a verified binding of a name-only
+            // holder, so they differ only after concurrent replicas merged two
             // executions: a conflict, never resolved by picking one.
             let conflict = current.executor.is_some() && current.executor.as_ref() != session;
             Execution {
@@ -299,7 +332,17 @@ pub(crate) fn project(
 /// field taken from that boundary alone. A start by the boundary's own session
 /// before the execution ends (a result report that moved it, a cancellation
 /// or a stage move) acknowledges it; any other start is a boundary of its own.
-fn legacy(session: Option<&SessionKey>, log: &[LogEntry], requirement: u64) -> CurrentAttempt {
+///
+/// A boundary written for a name-only session names the session holding the
+/// task only through the binding recorded when that exact key was bound to
+/// the holder's verified run. A name alone never does, so a name-only key
+/// never authorizes another run that holds that name.
+fn legacy<'a>(
+    session: Option<&'a SessionKey>,
+    binding: Option<&SessionBinding>,
+    log: &'a [LogEntry],
+    requirement: u64,
+) -> CurrentAttempt {
     struct Boundary<'a> {
         origin: Origin,
         at: i64,
@@ -308,16 +351,20 @@ fn legacy(session: Option<&SessionKey>, log: &[LogEntry], requirement: u64) -> C
         began_at: Option<i64>,
         open: bool,
     }
-    fn begin<'a>(entry: &'a LogEntry, origin: Origin, request_id: &'a str) -> Boundary<'a> {
-        Boundary {
-            origin,
-            at: entry.at,
-            request_id,
-            executor: entry.session.as_ref(),
-            began_at: None,
-            open: true,
+    let who = |key: Option<&'a SessionKey>| -> Option<&'a SessionKey> {
+        match (key, session, binding) {
+            (Some(key), Some(holder), Some(binding)) if binding.names(key, holder) => Some(holder),
+            _ => key,
         }
-    }
+    };
+    let begin = |entry: &'a LogEntry, origin: Origin, request_id: &'a str| Boundary {
+        origin,
+        at: entry.at,
+        request_id,
+        executor: who(entry.session.as_ref()),
+        began_at: None,
+        open: true,
+    };
     let mut latest: Option<Boundary> = None;
     for entry in log {
         match entry.kind.as_str() {
@@ -338,7 +385,7 @@ fn legacy(session: Option<&SessionKey>, log: &[LogEntry], requirement: u64) -> C
                 Some(open)
                     if open.open
                         && open.executor.is_some()
-                        && open.executor == entry.session.as_ref() =>
+                        && open.executor == who(entry.session.as_ref()) =>
                 {
                     open.began_at.get_or_insert(entry.at);
                 }
@@ -585,6 +632,7 @@ mod tests {
         let execution = project(
             Stage::Active,
             Some(&session("second")),
+            None,
             &[],
             &attempts,
             &events,
@@ -612,7 +660,7 @@ mod tests {
             event(5, A1, EventKind::Paused, 50),
             event(6, A1, EventKind::Progress, 60),
         ];
-        let expected = project(Stage::Active, None, &[], &attempts, &events, 1);
+        let expected = project(Stage::Active, None, None, &[], &attempts, &events, 1);
         assert_eq!(current(&expected).phase, Phase::Paused);
         // Every order of the same facts, and a fact merged twice, agree.
         let mut order: Vec<AttemptEvent> = events.to_vec();
@@ -621,18 +669,18 @@ mod tests {
             let mut twice = order.clone();
             twice.push(order[shift].clone());
             assert_eq!(
-                project(Stage::Active, None, &[], &attempts, &order, 1),
+                project(Stage::Active, None, None, &[], &attempts, &order, 1),
                 expected
             );
             assert_eq!(
-                project(Stage::Active, None, &[], &attempts, &twice, 1),
+                project(Stage::Active, None, None, &[], &attempts, &twice, 1),
                 expected
             );
         }
         let mut reversed = events.to_vec();
         reversed.reverse();
         assert_eq!(
-            project(Stage::Active, None, &[], &attempts, &reversed, 1),
+            project(Stage::Active, None, None, &[], &attempts, &reversed, 1),
             expected
         );
     }
@@ -641,7 +689,7 @@ mod tests {
     fn phases_follow_delivery_start_pause_and_finish_evidence() {
         let send = [attempt(A1, 1, Origin::Send, "worker")];
         let phase = |events: &[AttemptEvent]| {
-            current(&project(Stage::Active, None, &[], &send, events, 1)).phase
+            current(&project(Stage::Active, None, None, &[], &send, events, 1)).phase
         };
         assert_eq!(phase(&[]), Phase::Submitted);
         assert_eq!(
@@ -700,7 +748,7 @@ mod tests {
             Phase::Submitted
         );
         let start = [attempt(A1, 1, Origin::Start, "worker")];
-        let started = current(&project(Stage::Active, None, &[], &start, &[], 1)).clone();
+        let started = current(&project(Stage::Active, None, None, &[], &start, &[], 1)).clone();
         assert_eq!(
             (started.phase, started.began_at),
             (Phase::Running, Some(100))
@@ -711,7 +759,7 @@ mod tests {
     fn a_resume_settles_only_the_pauses_it_observed() {
         let send = [attempt(A1, 1, Origin::Send, "worker")];
         let phase = |events: &[AttemptEvent]| {
-            current(&project(Stage::Active, None, &[], &send, events, 1)).phase
+            current(&project(Stage::Active, None, None, &[], &send, events, 1)).phase
         };
         let began = event(1, A1, EventKind::Began, 1);
         // review-n's sequence: two replicas fork the same one-pause state and
@@ -754,7 +802,7 @@ mod tests {
     #[test]
     fn generations_never_wrap() {
         let last = [attempt(A1, u64::MAX, Origin::Send, "worker")];
-        let execution = project(Stage::Active, None, &[], &last, &[], 1);
+        let execution = project(Stage::Active, None, None, &[], &last, &[], 1);
         assert_eq!(current(&execution).generation, u64::MAX);
         assert!(next_generation(execution.as_ref()).is_err());
     }
@@ -766,8 +814,11 @@ mod tests {
             attempt(A1, 1, Origin::Send, "first"),
         ];
         let other = [one[1].clone(), one[0].clone()];
-        let first = project(Stage::Active, None, &[], &one, &[], 1);
-        assert_eq!(first, project(Stage::Active, None, &[], &other, &[], 1));
+        let first = project(Stage::Active, None, None, &[], &one, &[], 1);
+        assert_eq!(
+            first,
+            project(Stage::Active, None, None, &[], &other, &[], 1)
+        );
         assert!(first.as_ref().unwrap().conflict);
         assert_eq!(current(&first).id, A1);
         let agent = Actor::Agent(session("first"));
@@ -796,7 +847,7 @@ mod tests {
             entry("started", 15, Some("old"), None),
             entry("sent", 20, Some("worker"), Some("second-send")),
         ];
-        let sent = project(Stage::Active, worker.as_ref(), &log, &[], &[], 1);
+        let sent = project(Stage::Active, worker.as_ref(), None, &log, &[], &[], 1);
         let now = current(&sent);
         assert!(now.legacy && now.id.is_empty() && now.generation == 0);
         assert_eq!(
@@ -808,7 +859,15 @@ mod tests {
         // merged replicas: the latest boundary is shown, as a conflict.
         let mut elsewhere = log.to_vec();
         elsewhere.push(entry("started", 22, Some("other"), None));
-        let merged = project(Stage::Active, worker.as_ref(), &elsewhere, &[], &[], 1);
+        let merged = project(
+            Stage::Active,
+            worker.as_ref(),
+            None,
+            &elsewhere,
+            &[],
+            &[],
+            1,
+        );
         let now = current(&merged).clone();
         assert_eq!(
             (now.origin, now.at, now.request_id.as_str(), now.executor),
@@ -821,6 +880,7 @@ mod tests {
         let now = current(&project(
             Stage::Active,
             worker.as_ref(),
+            None,
             &began,
             &[],
             &[],
@@ -833,6 +893,7 @@ mod tests {
         let now = current(&project(
             Stage::Active,
             worker.as_ref(),
+            None,
             &direct,
             &[],
             &[],
@@ -840,7 +901,7 @@ mod tests {
         ))
         .clone();
         assert_eq!((now.origin, now.phase), (Origin::Start, Phase::Running));
-        let none = current(&project(Stage::Active, None, &[], &[], &[], 1)).clone();
+        let none = current(&project(Stage::Active, None, None, &[], &[], &[], 1)).clone();
         assert_eq!((none.phase, none.executor), (Phase::Unconfirmed, None));
         let handoff = [LogEntry {
             text: "handoff".into(),
@@ -850,6 +911,7 @@ mod tests {
             current(&project(
                 Stage::Active,
                 worker.as_ref(),
+                None,
                 &handoff,
                 &[],
                 &[],
@@ -861,7 +923,7 @@ mod tests {
         // Only a task In progress has a current execution without attempts.
         for stage in [Stage::Backlog, Stage::Todo, Stage::Review, Stage::Done] {
             assert_eq!(
-                project(stage, worker.as_ref(), &log, &[], &[], 1),
+                project(stage, worker.as_ref(), None, &log, &[], &[], 1),
                 None,
                 "{stage:?}"
             );
@@ -873,8 +935,16 @@ mod tests {
     #[test]
     fn a_legacy_execution_is_its_latest_boundary_alone() {
         let legacy = |log: &[LogEntry], holder: &str| {
-            let execution =
-                project(Stage::Active, Some(&session(holder)), log, &[], &[], 1).unwrap();
+            let execution = project(
+                Stage::Active,
+                Some(&session(holder)),
+                None,
+                log,
+                &[],
+                &[],
+                1,
+            )
+            .unwrap();
             assert!(!execution.conflict, "{log:?}");
             execution.current.unwrap()
         };
@@ -968,6 +1038,90 @@ mod tests {
     }
 
     #[test]
+    fn a_name_only_boundary_names_only_the_verified_run_it_was_bound_to() {
+        let named = |name: &str| SessionKey {
+            session_id: String::new(),
+            ..session(name)
+        };
+        let bound = |from: &str, to: SessionKey| SessionBinding {
+            from: named(from),
+            to,
+        };
+        let to = |kind: &str, at: i64, key: SessionKey, request: Option<&str>| LogEntry {
+            session: Some(key),
+            ..entry(kind, at, None, request)
+        };
+        let sent = [to("sent", 10, named("one"), Some("first"))];
+        let project_as = |log: &[LogEntry], holder: SessionKey, binding: Option<SessionBinding>| {
+            project(
+                Stage::Active,
+                Some(&holder),
+                binding.as_ref(),
+                log,
+                &[],
+                &[],
+                1,
+            )
+            .unwrap()
+        };
+        let report = |execution: &Execution, actor: SessionKey| {
+            decide_report(
+                Stage::Active,
+                Some(execution),
+                &Actor::Agent(actor),
+                ReportKind::Ready,
+                None,
+            )
+        };
+        // review-n on #1389: the holder bound by its verified run.
+        let verified = project_as(&sent, session("one"), Some(bound("one", session("one"))));
+        assert!(!verified.conflict);
+        let now = verified.current.as_ref().unwrap();
+        assert_eq!(
+            (now.origin, now.request_id.as_str(), now.executor.clone()),
+            (Origin::Send, "first", Some(session("one")))
+        );
+        assert!(report(&verified, session("one")).moves);
+        // Another run under that name never inherits the name-only boundary.
+        let other = SessionKey {
+            session_id: "launch_id:another-run".into(),
+            ..session("one")
+        };
+        assert_eq!(
+            report(&verified, other.clone()).stale,
+            Some(Stale::OtherExecutor)
+        );
+        // A name alone binds nothing: without the recorded binding, or with one
+        // to another run or from another name, the two disagree as a conflict.
+        assert!(project_as(&sent, session("one"), None).conflict);
+        assert!(project_as(&sent, other.clone(), Some(bound("one", session("one")))).conflict);
+        assert!(project_as(&sent, session("one"), Some(bound("two", session("one")))).conflict);
+        // The verified run keeps the binding across renames.
+        let renamed = SessionKey {
+            session: "codex/example/renamed".into(),
+            ..session("one")
+        };
+        let kept = project_as(&sent, renamed.clone(), Some(bound("one", session("one"))));
+        assert!(!kept.conflict);
+        assert!(report(&kept, renamed).moves);
+        // A binding across computers is not a binding.
+        let elsewhere = SessionKey {
+            machine: "other-computer".into(),
+            ..session("one")
+        };
+        assert!(project_as(&sent, elsewhere.clone(), Some(bound("one", elsewhere))).conflict);
+        // The verified run's start acknowledges the name-only send.
+        let acknowledged = [sent[0].clone(), entry("started", 12, Some("one"), None)];
+        let now = project_as(
+            &acknowledged,
+            session("one"),
+            Some(bound("one", session("one"))),
+        );
+        let now = now.current.as_ref().unwrap();
+        assert_eq!((now.origin, now.began_at), (Origin::Send, Some(12)));
+    }
+
+    #[test]
     fn only_the_current_executor_s_open_attempt_reports_a_result() {
         let attempts = [
             attempt(A1, 1, Origin::Send, "old"),
@@ -975,6 +1129,7 @@ mod tests {
         ];
         let running = project(
             Stage::Active,
+            None,
             None,
             &[],
             &attempts,
@@ -1025,6 +1180,7 @@ mod tests {
             let done = project(
                 Stage::Active,
                 None,
+                None,
                 &[],
                 &attempts,
                 &[event(9, A2, finish, 9)],
@@ -1055,6 +1211,7 @@ mod tests {
         let legacy = project(
             Stage::Active,
             Some(&session("worker")),
+            None,
             &[entry("sent", 1, Some("worker"), Some("r"))],
             &[],
             &[],

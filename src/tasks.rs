@@ -930,15 +930,7 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
     let mut task = find(&store, &r.task)?;
     if let Some(guard) = guard { guard.check(&task)?; }
     if action == "edit" && text.as_deref() == Some("") && task.title().is_empty() { agent_text("", action, &who)?; }
-    if task.view().map_err(fail)?.writable {
-        let view = task.view().map_err(fail)?;
-        let target = match view.target { Target::Session(target) | Target::NewSession { parent: target } | Target::Subagent { parent: target } => Some(target), Target::Any => None };
-        for key in target.into_iter().chain(view.session) {
-            if let Some(current) = machines.resolve(&key).filter(|current| !current.session_id.is_empty()) {
-                task.bind_session_identity(&key, &current).map_err(fail)?;
-            }
-        }
-    }
+    enrich(&mut task, &machines)?;
     if let Some(expected) = option(args, "--expect-new-session-parent")? {
         if action != "send" || !matches!(task.view().map_err(fail)?.target, Target::NewSession { parent } if format!("{}/{}", parent.machine, parent.session_id) == expected) {
             return Err(fail("task assignment changed while the new executor was starting; nothing was sent"));
@@ -1068,6 +1060,23 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         out[key] = value.clone();
     }
     Ok(with_answer(&who, action, out, at, &destination))
+}
+
+/// Binds the task's target and holder to the verified runs this computer
+/// resolves for them before any change. A name-only holder keeps that binding
+/// as its execution's evidence (`TaskDoc::bind_session_identity`).
+fn enrich(task: &mut TaskDoc, machines: &Machines) -> Result<()> {
+    let view = task.view().map_err(fail)?;
+    if !view.writable {
+        return Ok(());
+    }
+    let target = match view.target { Target::Session(target) | Target::NewSession { parent: target } | Target::Subagent { parent: target } => Some(target), Target::Any => None };
+    for key in target.into_iter().chain(view.session) {
+        if let Some(current) = machines.resolve(&key).filter(|current| !current.session_id.is_empty()) {
+            task.bind_session_identity(&key, &current).map_err(fail)?;
+        }
+    }
+    Ok(())
 }
 
 /// The session a send goes to, and whether it pins the task there: --session
@@ -1415,6 +1424,41 @@ mod tests {
         let path = root.join(file);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn enrichment_keeps_a_legacy_executor_s_report_authority_for_its_verified_run_alone() {
+        // review-n on #1389: a task an older hgs sent to a name-only session,
+        // then the enrichment every change makes before reporting.
+        use zerus_replica::{execution::{ReportKind, Stale}, NewTask};
+        let state = tempfile::tempdir().unwrap();
+        let root = state.path();
+        let file = |n: u8| format!("{n:064x}.json");
+        saved(root, &file(1), json!({"name":"codex/api","run_id":"run-api","launch_id":"launch-api"}));
+        saved(root, &format!("bindings/{}", file(2)), json!({"name":"codex/renamed","run_id":"run-renamed","legacy_shadow":{"name":"codex/older","run_id":"run-renamed"}}));
+        let machines = Machines { here: "node-here".into(), selves: vec![], peers: BTreeMap::new(), bindings: crate::state::task_bindings_in(root).unwrap() };
+        let legacy = |name: &str| {
+            let mut task = TaskDoc::create(NewTask { project: "example", id: "T-abcdef", text: "Description", stage: Stage::Todo, target: Target::Any, author: Actor::Person, rank: "U", now: 1 }).unwrap();
+            let key = SessionKey { machine: "node-here".into(), session: name.into(), session_id: String::new() };
+            task.record_send(&key, "legacy-send", &Actor::Person, 2).unwrap();
+            task
+        };
+        let agent = |name: &str, id: &str| Actor::Agent(SessionKey { machine: "node-here".into(), session: name.into(), session_id: id.into() });
+        for (name, current) in [("codex/api", agent("codex/api", "launch_id:launch-api")), ("codex/older", agent("codex/renamed", "run_id:run-renamed"))] {
+            let mut task = legacy(name);
+            enrich(&mut task, &machines).unwrap();
+            let execution = task.view().unwrap().execution.unwrap();
+            assert!(!execution.conflict, "{name}");
+            // Another run that holds the name or label is refused.
+            let other = agent(name, "launch_id:another-run");
+            let refused = task.report("Not mine", ReportKind::Ready, None, &other, 3).unwrap();
+            assert_eq!((refused.moves, refused.stale), (false, Some(Stale::OtherExecutor)), "{name}");
+            // Enrichment again (the next change) keeps the binding.
+            enrich(&mut task, &machines).unwrap();
+            let done = task.report("Done", ReportKind::Ready, None, &current, 4).unwrap();
+            assert_eq!((done.moves, done.stale), (true, None), "{name}");
+            assert_eq!(task.stage().unwrap(), Stage::Review);
+        }
     }
 
     #[test]

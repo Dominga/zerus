@@ -3056,8 +3056,14 @@ handoff, reopen or direct start. A start by that boundary's session before the
 execution ends (a result report that moved it, a cancellation or a stage move)
 acknowledges it; a stale report or progress ends nothing. Any other start is a
 boundary of its own, and an earlier execution never lends its origin,
-time or receipt to a later one. When merged replicas leave the latest boundary
-with another session than the one holding the task, `conflict` is set. No start,
+time or receipt to a later one. A boundary written for a name-only session
+(older history) names the session holding the task only through the binding
+Zerus records when it binds that exact key to the holder's verified run, on the
+same computer, before any change; the task keeps it until its next send or
+start. Only that run is then the executor: a name alone never names one, so
+another run that holds the name is not, and a holder an older build bound
+without recording it reads as a conflict. When merged replicas leave the latest boundary with another session
+than the one holding the task, `conflict` is set. No start,
 child or result is invented. A resume settles only the pauses it observed, so a
 pause that no resume observed keeps the attempt paused. A session's
 Stop, idle time, pause or elapsed time is never an attempt event and never

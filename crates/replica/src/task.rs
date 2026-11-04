@@ -329,6 +329,14 @@ impl TaskDoc {
         string(&self.fields(), "session").and_then(|s| serde_json::from_str(&s).ok())
     }
 
+    /// How `session` was bound from a name-only key to its verified run,
+    /// kept as the current execution's evidence until its next boundary.
+    fn binding(&self) -> Option<execution::SessionBinding> {
+        string(&self.fields(), "session_binding")
+            .and_then(|s| serde_json::from_str::<execution::SessionBinding>(&s).ok())
+            .filter(execution::SessionBinding::valid)
+    }
+
     /// The requirement revision: 1 until an edit of the requirement counts one.
     pub fn requirement(&self) -> u64 {
         integer(&self.fields(), "requirement")
@@ -510,6 +518,7 @@ impl TaskDoc {
             Ok((attempts, events)) => execution::project(
                 stage,
                 session.as_ref(),
+                self.binding().as_ref(),
                 &log,
                 &attempts,
                 &events,
@@ -675,6 +684,16 @@ impl TaskDoc {
         if self.session().as_ref() == Some(old) {
             self.fields()
                 .insert("session", serde_json::to_string(current)?)?;
+            // The history keeps the name-only boundary; the execution reads
+            // this binding, to this verified run alone, as the same executor.
+            if old.session_id.is_empty() {
+                let binding = execution::SessionBinding {
+                    from: old.clone(),
+                    to: current.clone(),
+                };
+                self.fields()
+                    .insert("session_binding", serde_json::to_string(&binding)?)?;
+            }
         }
         self.doc.commit();
         Ok(())
@@ -816,6 +835,7 @@ impl TaskDoc {
         fields.insert("stage", Stage::Active.as_str())?;
         fields.insert("stage_at", now)?;
         fields.insert("session", serde_json::to_string(session)?)?;
+        fields.delete("session_binding")?;
         fields.delete("worker")?;
         fields.delete("cancelled_at")?;
         fields.delete("cancel_reason")?;
@@ -869,6 +889,7 @@ impl TaskDoc {
         )?;
         self.fields()
             .insert("session", serde_json::to_string(session)?)?;
+        self.fields().delete("session_binding")?;
         self.fields().insert("stage_at", now)?;
         self.fields().insert("summary", "")?;
         self.fields().delete("worker")?;
@@ -988,6 +1009,7 @@ impl TaskDoc {
         fields.insert("stage", Stage::Active.as_str())?;
         fields.insert("stage_at", now)?;
         fields.insert("session", serde_json::to_string(own)?)?;
+        fields.delete("session_binding")?;
         fields.delete("worker")?;
         fields.delete("cancelled_at")?;
         fields.delete("cancel_reason")?;
@@ -2209,6 +2231,100 @@ mod tests {
                 .record_report("Mine?", &Actor::Agent(web()), 3)
                 .unwrap());
             assert_eq!(pinned.stage().unwrap(), Stage::Todo);
+        }
+
+        fn run(session: &str, id: &str) -> SessionKey {
+            SessionKey {
+                session: session.into(),
+                session_id: format!("launch_id:{id}"),
+                ..api()
+            }
+        }
+
+        #[test]
+        fn a_legacy_name_only_executor_bound_to_its_verified_run_reports_its_result() {
+            // review-n on #1389: a send to a name-only executor, later bound to
+            // its verified run (as every change does before it is made).
+            let sent = || {
+                let mut task = task(Stage::Todo);
+                task.record_send(&api(), "first", &Actor::Person, 2)
+                    .unwrap();
+                task
+            };
+            let mut task = sent();
+            task.bind_session_identity(&api(), &run("codex/api", "x"))
+                .unwrap();
+            let view = task.view().unwrap();
+            let execution = view.execution.as_ref().unwrap();
+            assert!(!execution.conflict);
+            assert_eq!(
+                execution.current.as_ref().unwrap().executor,
+                Some(run("codex/api", "x"))
+            );
+            // Another run that holds the same name later is not that executor.
+            let other = task
+                .report(
+                    "Not mine",
+                    ReportKind::Ready,
+                    None,
+                    &Actor::Agent(run("codex/api", "y")),
+                    3,
+                )
+                .unwrap();
+            assert_eq!(
+                (other.moves, other.stale),
+                (false, Some(Stale::OtherExecutor))
+            );
+            assert!(task
+                .record_report("Done", &Actor::Agent(run("codex/api", "x")), 4)
+                .unwrap());
+            assert_eq!(task.stage().unwrap(), Stage::Review);
+            // A binding that followed a rename (a retained original label)
+            // names the same executor, and a later rename keeps it.
+            let mut renamed = sent();
+            renamed
+                .bind_session_identity(&api(), &run("codex/renamed", "x"))
+                .unwrap();
+            renamed
+                .bind_session_identity(&run("codex/renamed", "x"), &run("codex/later", "x"))
+                .unwrap();
+            let view = renamed.view().unwrap();
+            assert!(!view.execution.as_ref().unwrap().conflict);
+            assert!(!renamed
+                .record_report("Not mine", &Actor::Agent(run("codex/api", "y")), 3)
+                .unwrap());
+            assert!(renamed
+                .record_report("Done", &Actor::Agent(run("codex/later", "x")), 4)
+                .unwrap());
+            // A holder an older build enriched without recording the binding is
+            // not proven to be that run: a conflict only the person resolves.
+            let mut older = sent();
+            older
+                .fields()
+                .insert(
+                    "session",
+                    serde_json::to_string(&run("codex/api", "x")).unwrap(),
+                )
+                .unwrap();
+            older.doc.commit();
+            assert!(older.view().unwrap().execution.unwrap().conflict);
+            let refused = older
+                .report(
+                    "Done",
+                    ReportKind::Ready,
+                    None,
+                    &Actor::Agent(run("codex/api", "x")),
+                    3,
+                )
+                .unwrap();
+            assert_eq!(refused.stale, Some(Stale::Conflict));
+            assert!(older.record_report("Accepted", &Actor::Person, 4).unwrap());
+            // The next execution's own boundary replaces the binding.
+            renamed.set_stage(Stage::Todo, &Actor::Person, 5).unwrap();
+            renamed
+                .record_send(&run("codex/later", "x"), "second", &Actor::Person, 6)
+                .unwrap();
+            assert_eq!(renamed.binding(), None);
         }
 
         #[test]

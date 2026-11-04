@@ -1103,6 +1103,39 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
         (folder / "config.toml").write_text(
             config.replace('env_key = "OPENAI_API_KEY"', 'env_key = "FIXTURE_API_KEY"'), encoding="utf-8")
 
+    def test_native_subagent_keeps_the_parent_transcript_and_accepts_more_input(self):
+        name = self.launch("child", self.NO_HOOK_REVIEW, "--enable", "multi_agent")
+        self.deliver(name, "Parent fixture before spawning.")
+        parent = self.record(name)
+        self.assertTrue(parent.get("conversation_id"), self.describe())
+        self.assertTrue(parent.get("transcript"), self.describe())
+        self.deliver(name, api.CODEX_SUBAGENT)
+        outputs = [result for entry in api.requests(self.api_root) if entry.get("prompt") == api.CODEX_SUBAGENT
+                   for result in entry.get("results") or []]
+        self.assertFalse(any(isinstance(result, str) and result.startswith(
+            ("unsupported call:", "failed to parse function arguments:")) for result in outputs), outputs)
+
+        def child_finished():
+            record = self.record(name)
+            for key in ("conversation_id", "transcript", "run_id", "pid"):
+                self.assertEqual(record.get(key), parent[key], key)
+            children = record.get("subagents") or {}
+            return next(((sid, child) for sid, child in children.items()
+                         if child.get("state") == "finished" and not child.get("external")), None)
+
+        sid, child = self.until("the native child's separate result", child_finished)
+        self.assertEqual(child["detail"], api.REPLY)
+        paths = list((self.agent_home / "sessions").rglob(f"*{sid}.jsonl"))
+        self.assertEqual(len(paths), 1)
+        with paths[0].open(encoding="utf-8") as transcript:
+            meta = json.loads(transcript.readline())["payload"]
+        self.assertIn("subagent", meta["source"])
+        self.assertEqual(meta["parent_thread_id"], parent["conversation_id"])
+        self.deliver(name, "Parent fixture after spawning.")
+        self.assertEqual(self.record(name)["conversation_id"], parent["conversation_id"])
+        for text in ("Parent fixture before spawning.", api.CODEX_SUBAGENT, "Parent fixture after spawning."):
+            self.assertEqual(self.accepted(name, text, parent["conversation_id"]), 1)
+
     def test_permission_combinations_match_the_native_argument_parser(self):
         # Completion parses the real installed CLI arguments and exits without
         # starting an agent, requesting a model or setting up a Windows sandbox.

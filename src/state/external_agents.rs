@@ -1,4 +1,4 @@
-//! Agent CLIs invoked by another provider inherit the HGS run token. Their
+//! Nested agent CLIs and native Codex children inherit the HGS run token. Their
 //! SessionStart must never rebind the parent conversation.
 use super::*;
 use std::io::{BufRead, BufReader};
@@ -58,15 +58,27 @@ fn caller(record: &Value) -> Option<Caller> {
 // An inherited HGS token is not proof that a new same-provider conversation
 // belongs to the interactive parent. Codex records its headless entry point in
 // the rollout header; /new and /clear still use the interactive source.
-fn codex_exec(event: &Value) -> bool {
+fn codex_metadata(event: &Value) -> Option<Value> {
     let path = Path::new(string(event, "transcript_path"));
-    if !path.is_absolute() { return false; }
-    let Ok(file) = std::fs::File::open(path) else { return false; };
+    if !path.is_absolute() { return None; }
+    let file = std::fs::File::open(path).ok()?;
     let mut line = String::new();
-    if BufReader::new(file.take(256 * 1024)).read_line(&mut line).is_err() { return false; }
-    let Ok(meta) = serde_json::from_str::<Value>(&line) else { return false; };
-    meta["type"] == "session_meta" && meta["payload"]["id"] == event["session_id"]
-        && meta["payload"]["source"] == "exec"
+    BufReader::new(file.take(256 * 1024)).read_line(&mut line).ok()?;
+    if !line.ends_with('\n') { return None; }
+    let meta: Value = serde_json::from_str(&line).ok()?;
+    (meta["type"] == "session_meta")
+        .then(|| meta["payload"].clone())
+}
+
+fn codex_subagent(meta: &Value) -> bool {
+    meta["source"].get("subagent").is_some()
+}
+
+fn codex_parent(meta: &Value, parent: &str) -> bool {
+    let parents: Vec<_> = [meta.get("parent_thread_id"),
+        meta["source"]["subagent"]["thread_spawn"].get("parent_thread_id")]
+        .into_iter().flatten().collect();
+    !parent.is_empty() && !parents.is_empty() && parents.iter().all(|id| id.as_str() == Some(parent))
 }
 
 fn provider(event: &Value) -> Option<&'static str> {
@@ -96,6 +108,11 @@ fn provider(event: &Value) -> Option<&'static str> {
 /// An unidentified inherited SessionStart cannot replace an established parent.
 /// Keep legacy startup hooks and verified interactive /new and /clear events.
 pub(super) fn main_start(record: &Value, event: &Value) -> bool {
+    if codex_metadata(event).as_ref().is_some_and(|meta| meta["id"] != event["session_id"] || codex_subagent(meta))
+        || (record["agent"] == "codex" && record["subagents"].get(string(event, "session_id"))
+            .is_some_and(|child| child.is_object() && child["external"] != true)) {
+        return false;
+    }
     if event["session_id"] == record["conversation_id"] { return true; }
     match provider(event).or_else(|| caller(record).map(|source| source.provider)) {
         Some(provider) => provider == string(record, "agent"),
@@ -116,13 +133,30 @@ pub(super) fn route(record: &mut Value, event: &Value) -> Option<Value> {
     {
         return None;
     }
+    let metadata = codex_metadata(event);
+    if metadata.as_ref().is_some_and(|meta| meta["id"] != event["session_id"]) { return None; }
+    if metadata.as_ref().is_some_and(|meta| codex_subagent(meta)
+        && !codex_parent(meta, string(record, "conversation_id"))) { return None; }
+    let native = record["agent"] == "codex" && (
+        metadata.as_ref().is_some_and(|meta| codex_subagent(meta)
+            && codex_parent(meta, string(record, "conversation_id")))
+        || record["subagents"].get(sid).is_some_and(|child| child.is_object() && child["external"] != true));
+    // A native child's mismatched or missing parent is never a new root or an
+    // external review. Its native ID also keeps SubagentStart/Stop in one row.
+    if metadata.as_ref().is_some_and(codex_subagent) && !native { return None; }
     let known = record["subagents"].as_object().and_then(|children| {
         children
             .iter()
             .find(|(_, child)| child["external"] == true && child["conversation_id"] == sid)
             .map(|(id, _)| id.clone())
     });
-    let id = if let Some(id) = known {
+    let id = if native {
+        if !record["subagents"].is_object() { record["subagents"] = json!({}); }
+        if !record["subagents"][sid].is_object() {
+            record["subagents"][sid] = json!({"name":format!("codex {}", sid.chars().take(8).collect::<String>()), "started":now()});
+        }
+        sid.to_owned()
+    } else if let Some(id) = known {
         id
     } else {
         if string(event, "hook_event_name") != "SessionStart" {
@@ -130,7 +164,7 @@ pub(super) fn route(record: &mut Value, event: &Value) -> Option<Value> {
         }
         let source = caller(record);
         let agent = provider(event).or_else(|| source.map(|source| source.provider))?;
-        let headless = agent == "codex" && (codex_exec(event)
+        let headless = agent == "codex" && (metadata.as_ref().is_some_and(|meta| meta["source"] == "exec")
             || source.is_some_and(|source| source.provider == "codex" && source.headless));
         if agent == string(record, "agent") && !headless {
             return None;
@@ -262,6 +296,98 @@ mod tests {
         std::fs::write(&path,meta.to_string()+"\n").unwrap();
         let mut fresh=parent.clone();fresh["conversation_id"]=Value::Null;
         assert!(route(&mut fresh,&event).is_none());
+    }
+
+    #[test]
+    fn native_codex_children_keep_the_parent_and_their_native_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let sid = uuid::Uuid::new_v4().to_string();
+        let parent_id = uuid::Uuid::new_v4().to_string();
+        let path = dir.path().join(format!("rollout-{sid}.jsonl"));
+        for (source, announced) in [
+            (json!({"subagent":{"thread_spawn":{"parent_thread_id":parent_id,"depth":1}}}), true),
+            (json!({"subagent":{"other":"guardian"}}), false),
+            (json!({"subagent":"review"}), false),
+        ] {
+            let meta = json!({"type":"session_meta","payload":{"id":sid,"parent_thread_id":parent_id,"source":source}});
+            std::fs::write(&path, meta.to_string()+"\n").unwrap();
+            let mut parent = json!({"agent":"codex","conversation_id":parent_id,"transcript":"parent-rollout",
+                "cwd":"parent-folder","model":"parent-model","effort":"high","prompt":"Parent task",
+                "last_message":"Parent reply","main_done":false,"active_tools":{"parent-tool":{}},
+                "subagents":{}});
+            if announced { parent["subagents"][&sid] = json!({"name":"Reviewer","started":1.0}); }
+            let event = json!({"hook_event_name":"SessionStart","session_id":sid,"transcript_path":path,
+                "cwd":"child-folder","model":"child-model","reasoning_effort":"low"});
+            assert!(!main_start(&parent, &event));
+            let mut record = parent.clone();
+            let scoped = route(&mut record, &event).unwrap();
+            assert_eq!(scoped["agent_id"], sid);
+            if announced { assert_eq!(record["subagents"][&sid]["name"], "Reviewer"); }
+            assert_eq!(record["subagents"][&sid]["model"], "child-model");
+            assert_ne!(record["subagents"][&sid]["external"], true);
+            journal::update_activity(&mut record, &scoped);
+            // Later hooks can omit both agent_id and transcript_path. Keep the
+            // same roster entry that the parent's SubagentStart/Stop uses.
+            for event in [
+                json!({"hook_event_name":"PreToolUse","session_id":sid,"tool_name":"shell","tool_use_id":"child-tool"}),
+                json!({"hook_event_name":"Stop","session_id":sid,"last_assistant_message":"Child result"}),
+            ] {
+                let scoped = route(&mut record, &event).unwrap();
+                assert_eq!(scoped["agent_id"], sid);
+                journal::update_activity(&mut record, &scoped);
+            }
+            assert_eq!(record["subagents"].as_object().unwrap().len(), 1);
+            assert_eq!(record["subagents"][&sid]["state"], "finished");
+            assert_eq!(record["subagents"][&sid]["detail"], "Child result");
+            for key in ["conversation_id","transcript","cwd","model","effort","prompt","last_message","main_done","active_tools"] {
+                assert_eq!(record[key], parent[key], "{key}");
+            }
+            // The parent's next event is still its own work.
+            let event = json!({"hook_event_name":"Stop","session_id":parent_id,"last_assistant_message":"Parent result"});
+            assert!(route(&mut record, &event).is_none());
+            journal::update_activity(&mut record, &event);
+            assert_eq!(record["last_message"], "Parent result");
+        }
+    }
+
+    #[test]
+    fn native_codex_starts_require_parent_proof_and_never_bootstrap_a_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let sid = uuid::Uuid::new_v4().to_string();
+        let path = dir.path().join(format!("rollout-{sid}.jsonl"));
+        let parent = json!({"agent":"codex","conversation_id":"parent","subagents":{}});
+        for payload in [
+            json!({"id":sid,"source":{"subagent":{"other":"guardian"}}}),
+            json!({"id":sid,"parent_thread_id":"unrelated","source":{"subagent":{"other":"guardian"}}}),
+            json!({"id":sid,"parent_thread_id":null,"source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent"}}}}),
+            json!({"id":sid,"parent_thread_id":"parent","source":{"subagent":{"thread_spawn":{"parent_thread_id":"unrelated"}}}}),
+            json!({"id":"wrong","parent_thread_id":"parent","source":{"subagent":{"other":"guardian"}}}),
+        ] {
+            std::fs::write(&path, json!({"type":"session_meta","payload":payload}).to_string()+"\n").unwrap();
+            let event = json!({"hook_event_name":"SessionStart","session_id":sid,"transcript_path":path});
+            let mut record = parent.clone();
+            assert!(route(&mut record, &event).is_none());
+            assert_eq!(record, parent);
+            assert!(!main_start(&record, &event));
+            record["subagents"][&sid] = json!({"name":"Reviewer"});
+            assert!(route(&mut record, &event).is_none());
+            record["conversation_id"] = Value::Null;
+            assert!(route(&mut record, &event).is_none());
+            assert!(!main_start(&record, &event));
+        }
+        // A known child's start stays child-scoped even without its rollout.
+        let mut record = parent.clone();
+        record["subagents"][&sid] = json!({"name":"Reviewer"});
+        assert!(!main_start(&record, &json!({"session_id":sid})));
+        assert_eq!(route(&mut record, &json!({"hook_event_name":"SessionStart","session_id":sid})).unwrap()["agent_id"], sid);
+        // A user fork is an interactive root, despite its parent/fork metadata.
+        for source in ["cli", "vscode"] {
+            let meta = json!({"type":"session_meta","payload":{"id":sid,"parent_thread_id":"parent","forked_from_id":"parent","source":source}});
+            std::fs::write(&path, meta.to_string()+"\n").unwrap();
+            let event = json!({"hook_event_name":"SessionStart","session_id":sid,"transcript_path":path});
+            assert!(route(&mut parent.clone(), &event).is_none());
+            assert!(main_start(&parent, &event));
+        }
     }
     #[test]
     fn mixed_children_keep_parent_binding_model_and_history() {

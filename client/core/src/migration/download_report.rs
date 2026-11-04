@@ -64,7 +64,8 @@ impl Binding {
 pub struct Snapshot {
     /// The configured folder as given: its evidence is checked again here.
     root: PathBuf,
-    /// Its canonical path when read: the decoder's folder identity.
+    /// Its canonical path when read, as the computer names it
+    /// ([`computer_folder`]): the decoder's folder identity.
     folder: String,
     receipt: Original,
     binding: Binding,
@@ -99,6 +100,29 @@ impl Snapshot {
     }
 }
 
+/// A canonical folder as its computer names it, the form the download-index
+/// decoder takes. Windows canonicalizes to verbatim paths: a drive's
+/// `\\?\C:\x` is `C:\x` and a share's `\\?\UNC\server\share\x` is
+/// `\\server\share\x`. Any other verbatim or device path (a volume GUID,
+/// `\\.\`) names no folder of a computer: `None`. Other paths are unchanged.
+fn computer_folder(path: &str) -> Option<String> {
+    if let Some(share) = path.strip_prefix(r"\\?\UNC\") {
+        return Some(format!(r"\\{share}"));
+    }
+    if let Some(rest) = path.strip_prefix(r"\\?\") {
+        let drive = rest.as_bytes();
+        let local = drive.len() >= 3
+            && drive[0].is_ascii_alphabetic()
+            && drive[1] == b':'
+            && drive[2] == b'\\';
+        return local.then(|| rest.to_owned());
+    }
+    if path.starts_with(r"\\.\") {
+        return None;
+    }
+    Some(path.to_owned())
+}
+
 /// The configured folder's committed original. `Ok(None)`: nothing to
 /// publish (no receipt, or Next's first change found no index). An
 /// unsupported location or an unreadable record is an error, never a
@@ -117,8 +141,8 @@ pub fn retained(root: &Path) -> SourceResult<Option<Arc<Snapshot>>> {
     let folder = captured
         .folder
         .to_str()
-        .ok_or(SourceError::UnsupportedSource)?
-        .to_owned();
+        .and_then(computer_folder)
+        .ok_or(SourceError::UnsupportedSource)?;
     let binding = Binding {
         boundary: receipt.boundary.clone(),
         capture_id: receipt.capture_id.clone(),

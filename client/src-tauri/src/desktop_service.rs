@@ -50,6 +50,10 @@ mod catalog_relay;
 pub(crate) mod creation_clone;
 pub(crate) mod creation_launch;
 pub(crate) mod creation_worktree;
+// Its one caller, the task editor's Service-mode routing, lands together with
+// attachments by reference (zerus-5wmh.66.4.4.2); until then it is unused.
+#[allow(dead_code)]
+pub(crate) mod task_message;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod task_start_reconcile;
 use catalog::catalog_loop;

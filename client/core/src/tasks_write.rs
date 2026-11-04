@@ -503,6 +503,70 @@ pub mod outbox {
         file.with_extension("marker")
     }
 
+    /// Evidence that the record was handed to the desktop service, never
+    /// permission: written and synced before the admission request.
+    fn handoff(file: &Path) -> PathBuf {
+        file.with_extension("service")
+    }
+
+    /// The handoff marker's exact content: the record's ID and snapshot.
+    fn handoff_bytes(record: &Value) -> Vec<u8> {
+        json!({"id": record["id"], "snapshot": snapshot(record)})
+            .to_string()
+            .into_bytes()
+    }
+
+    /// Removes a file that may already be gone.
+    fn remove(path: &Path) -> std::io::Result<()> {
+        match fs::remove_file(path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
+    }
+
+    /// Durably marks the exact pending `record` as handed to the desktop
+    /// service, before its admission request is written. The marker is
+    /// evidence only: a marked record recovers only through the service's
+    /// read-only lookup, never through the direct `--recover-only` check.
+    pub fn hand_off(root: &Path, project: &str, task: &str, record: &Value) -> Result<(), String> {
+        let file = path(root, project, task);
+        let Some(_turn) = Turn::take(&file) else {
+            return Err("The message recovery record is busy.".into());
+        };
+        if pending(root, project, task)?.as_ref() != Some(record) {
+            return Err("The pending message changed; refresh this task.".into());
+        }
+        write(&handoff(&file), &handoff_bytes(record))
+            .map_err(|_| "Could not record the message handoff. Nothing was submitted.".to_owned())
+    }
+
+    /// Whether the exact `record` was handed to the desktop service. A marker
+    /// that is unreadable or names another record is never taken as absent.
+    pub fn handed_off(
+        root: &Path,
+        project: &str,
+        task: &str,
+        record: &Value,
+    ) -> Result<bool, String> {
+        let unavailable = || {
+            "The message handoff record could not be verified. Nothing was submitted.".to_owned()
+        };
+        let marker = handoff(&path(root, project, task));
+        match fs::symlink_metadata(&marker) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Ok(meta) if meta.is_file() => {}
+            _ => return Err(unavailable()),
+        }
+        let mut bytes = Vec::new();
+        fs::File::open(&marker)
+            .and_then(|f| f.take(257).read_to_end(&mut bytes))
+            .map_err(|_| unavailable())?;
+        if bytes != handoff_bytes(record) {
+            return Err(unavailable());
+        }
+        Ok(true)
+    }
+
     /// One message operation per task at a time, within this client.
     static BUSY: Mutex<Option<HashSet<PathBuf>>> = Mutex::new(None);
 
@@ -657,6 +721,10 @@ pub mod outbox {
         if pending(root, project, task)?.as_ref() != Some(expected) {
             return Ok(false);
         }
+        // A record handed to the desktop service is evidence for its review.
+        if fs::symlink_metadata(handoff(&file)).is_ok() {
+            return Err("The task recovery record is under review.".into());
+        }
         let bytes = next.to_string();
         decode(bytes.as_bytes())?;
         write(&file, bytes.as_bytes())
@@ -750,6 +818,11 @@ pub mod outbox {
                 different_intent,
             }
         } else {
+            // Without a record or reservation marker, a handoff marker is
+            // what a completed release left: its record is already gone.
+            remove(&handoff(&file)).map_err(|_| {
+                "Could not update message recovery state. Nothing was submitted.".to_owned()
+            })?;
             let mut record = json!({"id": new_id, "intent": intent});
             if let Some(input) = input {
                 if input == super::message_input(intent) {
@@ -804,11 +877,10 @@ pub mod outbox {
         }
         fs::remove_file(&file)
             .map_err(|_| "Could not release the local message recovery record.".to_owned())?;
-        match fs::remove_file(marker(&file)) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err("Could not update message recovery state.".into()),
-        }
+        // The handoff marker goes last: a record never outlives its marker.
+        remove(&marker(&file))
+            .and_then(|()| remove(&handoff(&file)))
+            .map_err(|_| "Could not update message recovery state.".to_owned())?;
         #[cfg(unix)]
         fs::File::open(file.parent().expect("outbox parent"))
             .and_then(|f| f.sync_all())
@@ -830,11 +902,15 @@ pub mod outbox {
             fs::remove_file(&file)
                 .map_err(|_| "Could not release the local message recovery record.".to_owned())?;
         }
-        match fs::remove_file(marker(&file)) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(_) => Err("Could not update message recovery state.".into()),
-        }
+        // The handoff marker goes last: a record never outlives its marker.
+        remove(&marker(&file))
+            .and_then(|()| remove(&handoff(&file)))
+            .map_err(|_| "Could not update message recovery state.".to_owned())?;
+        #[cfg(unix)]
+        fs::File::open(file.parent().expect("outbox parent"))
+            .and_then(|f| f.sync_all())
+            .map_err(|_| "Could not update message recovery state.".to_owned())?;
+        Ok(())
     }
 }
 
@@ -1331,6 +1407,117 @@ mod outbox_tests {
                 .unwrap()
                 .input,
             message_input(&intent)
+        );
+    }
+
+    #[test]
+    fn a_handoff_marks_only_the_exact_pending_record_and_fails_closed() {
+        let root = scratch("handoff");
+        let intent = message_intent("hello", &[], "queue", "");
+        let frozen = message_input(&intent);
+        let record = outbox::reserve_message(&root.0, "alpha", "t-1", &intent, &frozen, ID)
+            .unwrap()
+            .record;
+        assert_eq!(
+            outbox::handed_off(&root.0, "alpha", "t-1", &record),
+            Ok(false)
+        );
+        // Only the exact pending record can be marked.
+        let mut other = record.clone();
+        other["opaque"] = json!(1);
+        assert!(outbox::hand_off(&root.0, "alpha", "t-1", &other).is_err());
+        assert_eq!(
+            outbox::handed_off(&root.0, "alpha", "t-1", &record),
+            Ok(false)
+        );
+        outbox::hand_off(&root.0, "alpha", "t-1", &record).unwrap();
+        assert_eq!(
+            outbox::handed_off(&root.0, "alpha", "t-1", &record),
+            Ok(true)
+        );
+        // Evidence about another record, or unreadable evidence, is never
+        // taken as an unmarked record.
+        assert!(outbox::handed_off(&root.0, "alpha", "t-1", &other).is_err());
+        let marker = outbox::path(&root.0, "alpha", "t-1").with_extension("service");
+        std::fs::write(&marker, b"{}").unwrap();
+        assert!(outbox::handed_off(&root.0, "alpha", "t-1", &record).is_err());
+        std::fs::remove_file(&marker).unwrap();
+        std::fs::create_dir(&marker).unwrap();
+        assert!(outbox::handed_off(&root.0, "alpha", "t-1", &record).is_err());
+        std::fs::remove_dir(&marker).unwrap();
+        // The marker is evidence for review, never something TaskStart may
+        // rewrite underneath.
+        outbox::hand_off(&root.0, "alpha", "t-1", &record).unwrap();
+        assert!(outbox::replace_if_unchanged(&root.0, "alpha", "t-1", &record, &other).is_err());
+        assert_eq!(
+            outbox::pending(&root.0, "alpha", "t-1").unwrap().as_ref(),
+            Some(&record)
+        );
+    }
+
+    #[test]
+    fn a_crash_between_the_marker_and_the_request_stays_in_review_until_released() {
+        let root = scratch("handoff-crash");
+        let intent = message_intent("hello", &[], "queue", "");
+        let frozen = message_input(&intent);
+        let record = outbox::reserve_message(&root.0, "alpha", "t-1", &intent, &frozen, ID)
+            .unwrap()
+            .record;
+        // The marker is durable before the request; the client then stopped.
+        outbox::hand_off(&root.0, "alpha", "t-1", &record).unwrap();
+        // A new Submit reopens the same original, still marked: review only.
+        let again =
+            outbox::reserve_message(&root.0, "alpha", "t-1", &intent, &frozen, OTHER).unwrap();
+        assert!(again.recovering);
+        assert_eq!(again.record, record);
+        assert_eq!(
+            outbox::handed_off(&root.0, "alpha", "t-1", &record),
+            Ok(true)
+        );
+        // An explicit discard releases the record and its marker together.
+        assert_eq!(
+            outbox::release_if_unchanged(&root.0, "alpha", "t-1", &record),
+            Ok(true)
+        );
+        let file = outbox::path(&root.0, "alpha", "t-1");
+        for evidence in ["json", "marker", "service"] {
+            assert!(!file.with_extension(evidence).exists(), "{evidence}");
+        }
+        // Sending again is a NEW record, unmarked.
+        let fresh =
+            outbox::reserve_message(&root.0, "alpha", "t-1", &intent, &frozen, OTHER).unwrap();
+        assert!(!fresh.recovering);
+        assert_eq!(fresh.record["id"], OTHER);
+        assert_eq!(
+            outbox::handed_off(&root.0, "alpha", "t-1", &fresh.record),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn a_settled_release_removes_the_marker_last_and_a_leftover_never_marks_a_new_record() {
+        let root = scratch("handoff-release");
+        let intent = message_intent("hello", &[], "queue", "");
+        let frozen = message_input(&intent);
+        let record = outbox::reserve_message(&root.0, "alpha", "t-1", &intent, &frozen, ID)
+            .unwrap()
+            .record;
+        outbox::hand_off(&root.0, "alpha", "t-1", &record).unwrap();
+        outbox::release(&root.0, "alpha", "t-1", ID).unwrap();
+        let file = outbox::path(&root.0, "alpha", "t-1");
+        assert!(!file.with_extension("service").exists());
+        assert_eq!(outbox::pending(&root.0, "alpha", "t-1").unwrap(), None);
+        // A release interrupted after the record went leaves only the marker.
+        // The record is gone, so the next reservation clears that leftover.
+        let marker = file.with_extension("service");
+        std::fs::write(&marker, b"left by an interrupted release").unwrap();
+        assert_eq!(outbox::pending(&root.0, "alpha", "t-1").unwrap(), None);
+        let fresh =
+            outbox::reserve_message(&root.0, "alpha", "t-1", &intent, &frozen, OTHER).unwrap();
+        assert!(!fresh.recovering && !marker.exists());
+        assert_eq!(
+            outbox::handed_off(&root.0, "alpha", "t-1", &fresh.record),
+            Ok(false)
         );
     }
 

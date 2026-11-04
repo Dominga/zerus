@@ -606,6 +606,7 @@
   "Submitted to coordinator — child receipt unavailable": "Передано координатору — подтверждение от дочерней сессии недоступно",
   "Synthetic data from the replay fixture; no hgs is running": "Синтетические данные из демо-записи; hgs не запущен",
   "System: Arch-based Linux": "Система: Linux на базе Arch",
+  "Task %1 was not found in this project.": "Задача %1 не найдена в этом проекте.",
   "Task assigned to %1": "Задача назначена: %1",
   "Task assigned to Any session": "Задача назначена любой сессии",
   "Task cancelled.": "Задача отменена.",

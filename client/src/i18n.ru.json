@@ -2519,6 +2519,7 @@
   "Target": "Назначение",
   "Targeted stop is unavailable for this recorded command. Select its running process in Live shells / processes, or a supported native job.": "Целенаправленный останов недоступен для этой записанной команды. Выберите запущенный процесс в разделе «Терминалы и процессы» или поддерживаемое собственное задание.",
   "Task": "Задача",
+  "Task %1 was not found in this project.": "Задача %1 не найдена в этом проекте.",
   "Task (Send now)": "Задача («Отправить сейчас»)",
   "Task View": "Задача",
   "Task actions": "Действия с задачей",

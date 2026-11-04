@@ -438,6 +438,30 @@ print("custody: inherited" if f"{seen.st_dev}:{seen.st_ino}" == want else "custo
         );
     }
 
+    /// A launch child's input is closed: `/dev/null`, at its end at once.
+    #[test]
+    fn the_launch_child_reads_a_closed_input() {
+        let (_temp, _location, _record, held) = lock();
+        let mut args = vec!["python3".to_string()];
+        // Read to the end, then name the input by its identity, which works
+        // on macOS (no /proc) as on Linux.
+        args.extend(python(
+            "import os, sys\nd = sys.stdin.buffer.read()\ns, n = os.fstat(0), os.stat('/dev/null')\nname = '/dev/null' if (s.st_dev, s.st_ino) == (n.st_dev, n.st_ino) else 'other'\nsys.stderr.write(f'{name} eof:{len(d)}')",
+        ));
+        assert_eq!(
+            child::run(
+                std::path::Path::new("/usr/bin/env"),
+                &args,
+                &held,
+                Instant::now() + Duration::from_secs(20)
+            ),
+            Ended::Exited {
+                code: 0,
+                stderr: "/dev/null eof:0".into()
+            }
+        );
+    }
+
     #[test]
     fn only_a_child_that_never_existed_is_not_started() {
         let (_temp, _location, _record, held) = lock();

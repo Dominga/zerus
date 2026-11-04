@@ -14,6 +14,7 @@ import stat
 import uuid
 
 ABI = "desktop-service-activation-v1"
+CHOICE_MARKER = "Desktop service mode choice scope ABI: desktop-service-mode-choice-scope-v1"
 RECORDS = 64
 BYTES = 56 * 1024
 RECORD_BYTES = 64 * 1024
@@ -61,6 +62,36 @@ def review_status(record):
                   "disposition": copy.deepcopy(entry["disposition"])}
                  for request, entry in reversed(list(checked_entries(record).items()))
                  if "disposition" in entry), None)
+
+
+def choice_after_review(record, request):
+    """Routing fence under the host's registration lock, never authority.
+
+    A missing original activation is new work only after a second explicit
+    choice bound to the displayed reviewed UUID. Existing IDs remain lookup
+    only and do not pass through this function.
+    """
+    require(request is None or canonical_uuid(request), "activation_review_unavailable")
+    if not automatic_blocked(record):
+        require(request is None, "activation_review_changed")
+        return
+    original = review_status(record)
+    require(original is not None and original["request_id"] == request
+            and original["disposition"]["state"] == "reviewed_unknown"
+            and pending(record) is None,
+            "After review, confirm a NEW mode choice with --after-review ORIGINAL_UUID and --activation-id NEW_UUID.")
+
+
+def choice_status(record):
+    """Latest applicable native choice, not permission or a cleanup receipt."""
+    entries = checked_entries(record)
+    if not entries:
+        return None
+    request, entry = next(reversed(entries.items()))
+    if "after_review" not in entry:
+        return None
+    return {"request": request, "reviewed": entry["after_review"], "desired": "background",
+            "phase": entry["phase"], "scope": copy.deepcopy(entry.get("scope"))}
 
 
 class Image:
@@ -120,7 +151,7 @@ def checked_entries(record):
     for request, entry in entries.items():
         require(canonical_uuid(request) and isinstance(entry, dict)
                 and {"binding", "phase", "result"} <= set(entry)
-                and set(entry) <= {"binding", "phase", "result", "consumer", "disposition"}
+                and set(entry) <= {"binding", "phase", "result", "consumer", "disposition", "after_review", "scope"}
                 and entry["phase"] in ("unknown", "settled", "refused"),
                 "activation_history_unavailable")
         bound = entry["binding"]
@@ -133,6 +164,17 @@ def checked_entries(record):
                 "activation_history_unavailable")
         if "consumer" in entry:
             consumer(entry["consumer"])
+        if "after_review" in entry:
+            require(canonical_uuid(entry["after_review"]) and entry["after_review"] != request,
+                    "activation_review_changed")
+        if "scope" in entry:
+            scope = entry["scope"]
+            require("after_review" in entry and entry["phase"] == "settled"
+                    and isinstance(scope, dict) and set(scope) == {"journal", "owner_epoch", "service_epoch", "generation"}
+                    and all(canonical_uuid(scope[key]) for key in ("journal", "owner_epoch", "service_epoch"))
+                    and type(scope["generation"]) is int and 0 <= scope["generation"] < 2 ** 53
+                    and all(scope[key] == bound["grant"][key] for key in ("journal", "owner_epoch")),
+                    "activation_choice_scope_unavailable")
         if "disposition" in entry:
             review = entry["disposition"]
             require(entry["phase"] == "unknown" and isinstance(review, dict)
@@ -151,6 +193,10 @@ def checked_entries(record):
                     and entry["result"]["code"] == ("ready" if entry["phase"] == "settled"
                                                     else "activation_not_started"),
                     "activation_history_unavailable")
+    for entry in entries.values():
+        if "after_review" in entry:
+            require(entry["after_review"] in entries and reviewed(entries[entry["after_review"]]),
+                    "activation_review_changed")
     require(len(json.dumps(entries, indent=2).encode()) <= BYTES, "activation_history_unavailable")
     return entries
 
@@ -196,27 +242,52 @@ class Journal:
         result = {"abi": ABI, "request_id": request, "configuration": configuration,
                 "read_only": True, "phase": entry["phase"] if entry else "missing",
                 "result": copy.deepcopy(entry["result"]) if entry else None}
-        if entry and "disposition" in entry:
-            result["disposition"] = copy.deepcopy(entry["disposition"])
+        if entry:
+            for key in ("disposition", "after_review", "scope"):
+                if key in entry:
+                    result[key] = copy.deepcopy(entry[key])
         return result
 
-    def reserve(self, request, bound, origin=None):
+    def reserve(self, request, bound, origin=None, after_review=None):
         require(canonical_uuid(request), "activation_request_unavailable")
-        # Validate the complete binding before touching the retained record.
-        probe = {"configuration": self.record["configuration"],
-                 "activations": {request: {"binding": bound, "phase": "unknown", "result": None}}}
-        if origin is not None:
-            probe["activations"][request]["consumer"] = consumer(origin)
-        checked_entries(probe)
         entries = checked_entries(self.record)
         if request in entries:
             require(entries[request]["binding"] == bound, "activation_original_changed")
             return None  # Exact original-ID lookup only, including after restart.
         require(len(entries) < RECORDS, "activation_history_full")
+        # Validate the complete binding before touching the retained record.
+        probe = copy.deepcopy(self.record)
+        probe.setdefault("activations", {})[request] = {"binding": bound, "phase": "unknown", "result": None}
+        if origin is not None:
+            probe["activations"][request]["consumer"] = consumer(origin)
+        if after_review is not None:
+            choice_after_review(self.record, after_review)
+            probe["activations"][request]["after_review"] = after_review
+        checked_entries(probe)
         require(not any(entry["phase"] == "unknown"
                         and not reviewed(entry)
                         and entry["binding"]["grant"]["owner_epoch"] == bound["grant"]["owner_epoch"]
                         for entry in entries.values()), "activation_original_pending")
+        # Count/byte limits must leave room for the original's later review,
+        # not strand an admitted Unknown just below the record cap.
+        for outcome in ("settled", "refused", "reviewed_unknown"):
+            future = copy.deepcopy(probe)
+            entry = future["activations"][request]
+            if outcome == "reviewed_unknown":
+                entry["disposition"] = dict(state="reviewed_unknown", request_id=request,
+                    binding=copy.deepcopy(bound), machine=entry.get("consumer", {}).get("machine", "ffffffff-ffff-ffff-ffff-ffffffffffff"),
+                    boot="ffffffff-ffff-ffff-ffff-ffffffffffff")
+            else:
+                entry.update(phase=outcome, result={"ok": outcome == "settled",
+                    "code": "ready" if outcome == "settled" else "activation_not_started"})
+                if after_review is not None and outcome == "settled":
+                    entry["scope"] = dict(journal=bound["grant"]["journal"], owner_epoch=bound["grant"]["owner_epoch"],
+                        service_epoch="ffffffff-ffff-ffff-ffff-ffffffffffff", generation=2 ** 53 - 1)
+            require(len(json.dumps(future["activations"], indent=2).encode()) <= BYTES,
+                    "activation_history_full: no byte headroom for original review")
+            checked_entries(future)
+            require(len((json.dumps(future, indent=2) + "\n").encode()) <= RECORD_BYTES,
+                    "activation_history_full: no byte headroom for original review")
         next_record = copy.deepcopy(self.record)
         next_record.setdefault("activations", {})[request] = probe["activations"][request]
         checked_entries(next_record)
@@ -282,7 +353,7 @@ class Journal:
         require(not original.effect_started, "activation_effect_already_entered")
         original.effect_started = True
 
-    def finish(self, original, *, ready):
+    def finish(self, original, *, ready, lifecycle=None):
         self.original(original)
         require(type(ready) is bool and (ready or not original.effect_started),
                 "activation_effect_uncertain")
@@ -290,5 +361,16 @@ class Journal:
         next_record["activations"][original.request].update(
             phase="settled" if ready else "refused",
             result={"ok": bool(ready), "code": "ready" if ready else "activation_not_started"})
+        entry = next_record["activations"][original.request]
+        if ready and "after_review" in entry:
+            require(isinstance(lifecycle, dict) and lifecycle.get("configuration") == next_record["configuration"]
+                    and lifecycle.get("mode") == "background" and lifecycle.get("ipc_ready") is True
+                    and canonical_uuid(lifecycle.get("epoch")) and type(lifecycle.get("generation")) is int
+                    and 0 <= lifecycle["generation"] < 2 ** 53,
+                    "activation_choice_scope_unavailable")
+            entry["scope"] = dict(journal=entry["binding"]["grant"]["journal"],
+                owner_epoch=entry["binding"]["grant"]["owner_epoch"],
+                service_epoch=lifecycle["epoch"], generation=lifecycle["generation"])
+        checked_entries(next_record)
         self.save(next_record)
         original.completed = True

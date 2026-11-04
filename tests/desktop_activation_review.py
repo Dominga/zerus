@@ -109,19 +109,34 @@ class ReviewControls:
         self.assert_review_has_no_effects(allow_reads=True)
         with self.assertRaisesRegex(Exception, "NEW --activation-id"):
             self.review_install(mode="background")
+        before = path.read_bytes()
+        for reviewed in (None, str(uuid.uuid4())):
+            manager.calls.clear()
+            with self.assertRaisesRegex(Exception, "after-review"):
+                self.review_install(mode="background", activation_id=str(uuid.uuid4()), after_review=reviewed)
+            self.assertEqual(path.read_bytes(), before)
+            self.assert_review_has_no_effects(allow_reads=True)
         # Review never lends the old Grant to a later request. A fresh native
         # preflight refuses a revoked incarnation without reserving a new ID.
         manager.grant.update(state="revoked", rearm_required=True)
         with self.assertRaisesRegex(Exception, "Grant|Rearm"):
-            self.review_install(mode="background", activation_id=str(uuid.uuid4()))
+            self.review_install(mode="background", activation_id=str(uuid.uuid4()), after_review=request)
         self.assert_review_has_no_effects(allow_reads=True, allow_grant_read=True)
         self.assertEqual(len(json.loads(path.read_bytes())["activations"]), 1)
         manager.grant = grant  # Native Grant model, not a production Rearm call.
         fresh = str(uuid.uuid4())
-        result = self.review_install(mode="background", activation_id=fresh)
+        result = self.review_install(mode="background", activation_id=fresh, after_review=request)
         self.assertEqual(result["phase"], "settled")
         self.assertNotEqual(fresh, request)
         self.assertEqual(self.review_original(request)["phase"], "unknown")
+        receipt = self.review_original(fresh)
+        self.assertEqual(receipt["after_review"], request)
+        self.assertEqual(receipt["scope"]["owner_epoch"], grant["owner_epoch"])
+        native = manager.lifecycle if hasattr(manager, "lifecycle") else manager.status["lifecycle"]
+        self.assertEqual((receipt["scope"]["service_epoch"],receipt["scope"]["generation"]),
+                         (native["epoch"],native["generation"]))
+        status = self.instance().status() if hasattr(self,"manager") else self.install(status_only=True)
+        self.assertEqual(status["mode_choice"]["request"], fresh)
 
     @unittest.skipUnless(os.name == "posix", "Unix installer lock")
     def test_review_refuses_unavailable_boot_and_changed_native_caller_without_writes(self):

@@ -214,6 +214,12 @@ pub(super) struct RegistrationGrant {
 }
 #[cfg(any(windows, test))]
 impl RegistrationGrant {
+    /// Routing observation from this retained actual database incarnation.
+    /// Copying it cannot reconstruct this guard or authorize any operation.
+    #[cfg(windows)]
+    pub(super) fn incarnation(&self) -> (String, String) {
+        (self.original.journal.clone(), self.original.owner_epoch.clone())
+    }
     pub(super) fn capture(location: &Location) -> Result<Option<Self>> {
         let (row, database) = registration_row(location)?;
         if row.status.state != State::Service

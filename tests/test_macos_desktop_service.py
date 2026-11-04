@@ -41,7 +41,7 @@ class Commands:
                      "generation_field": "lifecycle.generation"}}
         self.status = {"lifecycle": {"abi": installer.ABI, "configuration": self.config, "ipc_ready": True,
                         "mode": "passive",
-                        "pid": self.pid, "epoch": "fixture-epoch", "generation": 1,
+                        "pid": self.pid, "epoch": "33333333-3333-4333-8333-333333333333", "generation": 1,
                         "background": {"attention": {"ready": False, "code": "not_started"}}}}
         self.printed_path, self.printed_argv = str(self.destination), list(self.argv)
         self.grant = {"abi": "desktop-ownership-v1", "configuration": self.config, "state": "service",

@@ -116,6 +116,7 @@ struct Service {
     image: crate::platform::FileIdentity,
     selected: PathBuf,
     epoch: String,
+    generation: u64,
 }
 impl Service {
     fn observe(
@@ -157,6 +158,8 @@ impl Service {
             uuid::Uuid::parse_str(epoch).is_ok_and(|id| id.to_string() == epoch),
             "Desktop epoch unavailable."
         );
+        let generation = lifecycle["generation"].as_u64().filter(|n|*n <= 9_007_199_254_740_991)
+            .context("Desktop generation unavailable.")?;
         let wanted_mode = if plan.argv.last().is_some_and(|v| v == "--background") {
             "background"
         } else {
@@ -189,6 +192,7 @@ impl Service {
             image: identity,
             selected,
             epoch: epoch.into(),
+            generation,
         };
         value.check()?;
         value.exchange(location, plan, until)?;
@@ -221,6 +225,7 @@ impl Service {
             reply["abi"] == crate::desktop::ABI
                 && life["configuration"] == location.configuration
                 && life["epoch"] == self.epoch
+                && life["generation"].as_u64() == Some(self.generation)
                 && life["pid"].as_u64() == Some(self.process.pid as u64)
                 && life["mode"] == mode
                 && life["ipc_ready"] == true
@@ -256,6 +261,9 @@ pub(super) struct Running {
     stopped: bool,
 }
 impl Running {
+    pub(super) fn scope(&self) -> (String, u64) {
+        (self.service.epoch.clone(), self.service.generation)
+    }
     pub(super) fn readiness(&self, location: &Location, plan: &Plan, until: Instant) -> Result<()> {
         self.check()?;
         self.service.exchange(location, plan, until)?;

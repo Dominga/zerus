@@ -33,7 +33,7 @@ class Manager:
         self.state_override = None
         self.lifecycle = {"abi": installer.ABI, "configuration": "a" * 64, "ipc_ready": True,
                           "mode": "passive",
-                          "phase": "serving", "pid": 4321, "epoch": "original-epoch", "generation": 1,
+                          "phase": "serving", "pid": 4321, "epoch": "33333333-3333-4333-8333-333333333333", "generation": 1,
                           "background": {"attention": {"ready": False, "code": "not_started"}}}
         self.grant = {"abi": "desktop-ownership-v1", "configuration": "a" * 64, "state": "service",
                       "identity_current": True, "rearm_required": False, "revision": 1,

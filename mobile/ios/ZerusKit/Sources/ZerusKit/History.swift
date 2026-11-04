@@ -132,9 +132,11 @@ public enum ConversationMerge {
             if match == nil, ["submitted", "recorded"].contains(message.status), message.submittedAt > 0 {
                 let text = (message.submittedText.isEmpty ? message.text : message.submittedText).trimmingCharacters(in: .whitespacesAndNewlines)
                 if !text.isEmpty {
+                    // A fork's inherited row was never sent from this session: it is
+                    // no candidate, so it neither takes the send nor makes it ambiguous.
                     let candidates = result.indices.filter { index in
                         let event = result[index]
-                        return !used.contains(index) && event.role == "You" && event.requestId.isEmpty &&
+                        return !used.contains(index) && event.role == "You" && (event.inheritedFrom ?? "").isEmpty && event.requestId.isEmpty &&
                             event.text.trimmingCharacters(in: .whitespacesAndNewlines) == text && abs(event.at - message.submittedAt) <= 10
                     }
                     if candidates.count == 1 {

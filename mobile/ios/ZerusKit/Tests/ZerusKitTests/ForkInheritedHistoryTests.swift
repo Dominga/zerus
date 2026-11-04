@@ -64,6 +64,37 @@ final class ForkInheritedHistoryTests: XCTestCase {
         XCTAssertTrue(inherited.allSatisfy { $0.role == "You" && $0.requestId.isEmpty && $0.deliveryState == nil && $0.voice == nil })
     }
 
+    func testALocalSendIsNeverAdoptedByAnInheritedRowOfEqualText() {
+        // #1283 R1: a short source turn, a fork within seconds, and the same
+        // text sent from the fork within 10 s of the source's prompt.
+        let sent = OutgoingMessage(requestId: "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f", target: target, text: "yes", attachments: [],
+                                   createdAt: 104, status: "recorded", submittedAt: 105)
+        let source = NativeEvents.events(page(inherited(100, "UserPromptSubmit", "yes")))[0]
+        let alone = ConversationMerge.merge(target: target, native: [source], outgoing: [sent])
+        XCTAssertEqual(alone.events.first, source)
+        XCTAssertEqual(alone.events.dropFirst().map(\.source), ["mobile_outbox"])
+        XCTAssertTrue(alone.recordedRequestIds.isEmpty)
+        // The fork's own row arrives: it is the only candidate and records the send.
+        let own = NativeEvents.events(page(row(106, "UserPromptSubmit", "yes")))[0]
+        let both = ConversationMerge.merge(target: target, native: [source, own], outgoing: [sent])
+        XCTAssertEqual(both.events.map(\.id), [source.id, "outgoing:\(sent.requestId)"])
+        XCTAssertEqual(both.events.first, source)
+        XCTAssertEqual(both.recordedRequestIds, [sent.requestId])
+        XCTAssertEqual(both.events.last?.delivery, "recorded")
+    }
+
+    func testAnAttachmentReceiptNeverStandsForAnInheritedRow() {
+        // #1283 N1: a receipt of this session with the same text, within 10 s.
+        let delivery = "6f1c2a0e-3b4d-4c5e-8f60-7a8b9c0d1e2f"
+        let receipt: JSON = ["type": "UserPromptSubmit", "source": "hgs_delivery", "message_id": .string(delivery), "detail": "yes",
+                             "submitted_text": "yes", "at": 101, "agent_id": ""]
+        var raw = page(inherited(100, "UserPromptSubmit", "yes"))
+        raw["attachment_messages"] = [receipt]
+        let events = NativeEvents.events(raw)
+        XCTAssertEqual(events.map { $0.inheritedFrom ?? "" }, ["codex/project/root", ""])
+        XCTAssertEqual(events.map(\.requestId), ["", delivery])
+    }
+
     func testAnInheritedRowWithoutASourceOrWithAnUnknownTypeIsDropped() {
         let events = NativeEvents.events(page(
             row(1, "Inherited", "no source", ["inherited_type": "Stop"]),

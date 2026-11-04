@@ -373,6 +373,8 @@ public enum AttachmentReceiptMatch {
     static let instruction = try! NSRegularExpression(pattern: #"(?:Inspect the attached image at|Read the attached file at) ("(?:[^"\\]|\\.)+")"#)
 
     public static func matches(_ receipt: Event, _ native: Event) -> Bool {
+        // A receipt of this session never stands for a fork's inherited row.
+        if !(native.inheritedFrom ?? "").isEmpty { return false }
         let submitted = receipt.submittedText.trimmingCharacters(in: .whitespacesAndNewlines)
         if submitted.isEmpty || native.text.trimmingCharacters(in: .whitespacesAndNewlines) != submitted { return false }
         if abs(native.at - receipt.at) <= 10 { return true }

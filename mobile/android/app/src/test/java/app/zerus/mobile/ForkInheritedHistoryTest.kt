@@ -17,6 +17,7 @@ class ForkInheritedHistoryTest {
         const val DELIVERY = "6f1c2a0e-3b4d-4c5e-8f60-7a8b9c0d1e2f"
         const val OPENCODE = "0a1b2c3d-4e5f-4061-8728-394a5b6c7d8e"
         const val VOICE = "9e8d7c6b-5a49-4382-9170-6f5e4d3c2b1a"
+        const val SENT = "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f"
     }
     private fun page(vararg rows: JSONObject) = JSONObject().put("history_epoch", "epoch").put("events", JSONArray(rows.toList()))
 
@@ -57,6 +58,32 @@ class ForkInheritedHistoryTest {
         assertEquals(listOf("queued", "", ""), own.map { it.delivery })
         assertEquals(VOICE, own.last().voice?.id)
         assertTrue(inherited.all { it.role == "You" && it.requestId.isEmpty() && it.delivery.isEmpty() && it.voice == null })
+    }
+
+    @Test fun aLocalSendIsNeverAdoptedByAnInheritedRowOfEqualText() {
+        // #1283 R1: a short source turn, a fork within seconds, and the same
+        // text sent from the fork within 10 s of the source's prompt.
+        val sent = OutgoingMessage(SENT, target, "yes", emptyList(), 104.0, status = "recorded", submittedAt = 105.0)
+        val source = NativeParser.events(page(inherited(100, "UserPromptSubmit", "yes"))).single()
+        val alone = ConversationMerge.merge(target, listOf(source), listOf(sent))
+        assertEquals(source, alone.events.first())
+        assertEquals(listOf("mobile_outbox"), alone.events.drop(1).map { it.source })
+        assertTrue(alone.recordedRequestIds.isEmpty())
+        // The fork's own row arrives: it is the only candidate and records the send.
+        val own = NativeParser.events(page(row(106, "UserPromptSubmit", "yes"))).single()
+        val both = ConversationMerge.merge(target, listOf(source, own), listOf(sent))
+        assertEquals(listOf(source.id, "outgoing:$SENT"), both.events.map { it.id })
+        assertEquals(source, both.events.first())
+        assertEquals(setOf(SENT), both.recordedRequestIds)
+        assertEquals("recorded", both.events.last().delivery)
+    }
+
+    @Test fun anAttachmentReceiptNeverStandsForAnInheritedRow() {
+        // #1283 N1: a receipt of this session with the same text, within 10 s.
+        val receipt = JSONObject(mapOf("type" to "UserPromptSubmit", "source" to "hgs_delivery", "message_id" to DELIVERY,
+            "detail" to "yes", "submitted_text" to "yes", "at" to 101.0, "agent_id" to ""))
+        val events = NativeParser.events(page(inherited(100, "UserPromptSubmit", "yes")).put("attachment_messages", JSONArray(listOf(receipt))))
+        assertEquals(listOf("codex/project/root" to "", "" to DELIVERY), events.map { it.inheritedFrom to it.requestId })
     }
 
     @Test fun anInheritedRowWithoutASourceOrWithAnUnknownTypeIsDropped() {

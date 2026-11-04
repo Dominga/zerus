@@ -3,7 +3,9 @@
 //! separate.
 #[cfg(target_os = "linux")]
 use super::child;
-use super::{child::Ended, consent::Consent, ledger};
+use super::{child::Ended, consent::Consent, ledger, staging};
+
+mod reference;
 use crate::desktop::creation_clone::lease::{Lease, Machine};
 use crate::{
     config::Config,
@@ -117,10 +119,20 @@ pub(in crate::desktop) struct Runtime {
     /// gone) no child starts.
     #[cfg(target_os = "linux")]
     image: Option<Arc<Pin>>,
+    /// The held staging and custody-input directories; without them the
+    /// reference form is refused.
+    roots: Option<Arc<staging::Roots>>,
+    /// The one reference original being prepared off the actor.
+    admitting: Option<Box<reference::Admitting>>,
+    /// The one custody-input removal or restart recovery off the actor.
+    removal: Option<reference::Removal>,
+    /// Published inputs whose admission was refused, for exact removal.
+    refused: Vec<(String, staging::Identity)>,
 }
 impl Runtime {
     pub fn new(config: &Config, epoch: &str, owner: Arc<platform::FileLock>) -> Result<Self> {
         let location = Location::new(config)?;
+        let location_root = location.root.clone();
         Ok(Self {
             #[cfg(test)]
             executor: None,
@@ -144,6 +156,10 @@ impl Runtime {
                 .and_then(|()| Pin::open(std::path::Path::new("/proc/self/exe")))
                 .ok()
                 .map(Arc::new),
+            roots: staging::Roots::open(&location_root).ok().map(Arc::new),
+            admitting: None,
+            removal: None,
+            refused: Vec::new(),
         })
     }
     pub fn observe(&mut self, event: &fleet::FleetEvent) {
@@ -345,7 +361,7 @@ impl Runtime {
         // takeover must not depend on returning to the outer serve loop.
         store.recover_operation_custody(&self.location);
         self.refresh(store, exclusion);
-        if self.poll_inner(store).is_err() {
+        if self.poll_inner(store).is_err() || self.poll_reference(store).is_err() {
             self.failed = true;
             self.invalidate();
         }
@@ -447,7 +463,7 @@ impl Runtime {
                                 let value = match before(Step::Message) {
                                     Err(_) => Ended::Unknown("task_message_step_refused"),
                                     Ok(()) => message(
-                                        &selected.original,
+                                        &selected,
                                         &lock,
                                         &guard,
                                         #[cfg(target_os = "linux")]
@@ -661,7 +677,13 @@ impl Runtime {
             .all(|id| self.admitted.contains_key(id)))
     }
     pub fn drained(&self) -> bool {
-        self.stopping && self.work.is_none() && self.admitted.is_empty() && self.charges == Some(0)
+        self.stopping
+            && self.work.is_none()
+            && self.admitting.is_none()
+            && self.removal.is_none()
+            && self.refused.is_empty()
+            && self.admitted.is_empty()
+            && self.charges == Some(0)
     }
     pub fn status(&self) -> Value {
         json!({"profile":wire::PROFILE,"ready":!self.stopping&&!self.failed&&self.lease.is_some(),
@@ -692,40 +714,64 @@ impl Runtime {
         self.machine = Some(Machine::fixture(machine));
     }
 }
-/// The one original child: the exact call with the record's frozen stdin.
-/// Nothing exists before `child::run`, so every refusal here never started.
+/// The one original child: the exact call with its frozen stdin, the record's
+/// own or, for the reference form, the exact custody input through its kept
+/// handle. Nothing exists before `child::run`, so every refusal here never
+/// started.
 fn message(
-    original: &wire::Verified,
+    consent: &Consent,
     lock: &Arc<InheritedLock>,
     resources: &Arc<dyn Send + Sync>,
     #[cfg(target_os = "linux")] image: Option<Arc<Pin>>,
     #[cfg(test)] executor: Option<Executor>,
 ) -> Ended {
-    let Some(call) = original.call(false) else {
-        return Ended::NotStarted;
+    let original = &consent.original;
+    let call = match consent.input {
+        Some(_) => None,
+        None => match original.call(false) {
+            Some(call) => Some(call),
+            None => return Ended::NotStarted,
+        },
     };
-    let invocation = call.invocation();
+    let (args, input, timeout) = match (&consent.input, &call) {
+        (Some(input), _) => (
+            input.args.clone(),
+            child::Stdin::File(&input.file, input.bytes),
+            input.timeout,
+        ),
+        (None, Some(call)) => {
+            let invocation = call.invocation();
+            (
+                invocation.args,
+                child::Stdin::Bytes(call.input.as_bytes()),
+                invocation.timeout,
+            )
+        }
+        (None, None) => return Ended::NotStarted,
+    };
     // The test executor receives exactly what the child would.
-    let (args, input) = (&invocation.args, call.input.as_bytes());
     #[cfg(test)]
     if let Some(executor) = executor {
-        return executor(&original.plan, args, input, lock, resources);
+        let Ok(bytes) = input.to_vec() else {
+            return Ended::NotStarted;
+        };
+        return executor(&original.plan, &args, &bytes, lock, resources);
     }
     #[cfg(target_os = "linux")]
     if let Some(image) = image {
-        let deadline = Instant::now() + invocation.timeout;
-        return pinned(&image, args, input, lock, resources, deadline);
+        let deadline = Instant::now() + timeout;
+        return pinned_stdin(&image, &args, input, lock, resources, deadline);
     }
     // No pinned image (a unit-test image, or one already gone), and macOS,
     // whose admission refuses first: nothing starts.
-    let _ = (args, input, lock, resources, invocation.timeout);
+    let _ = (args, input, lock, resources, timeout);
     Ended::NotStarted
 }
 /// One original child of the pinned image. The final check, last before the
 /// spawn, requires the image still at its path; the child then executes the
 /// retained descriptor, so a replacement after that check never runs and
 /// never receives the input. A refused check means no child ever existed.
-#[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 pub(super) fn pinned(
     image: &Pin,
     args: &[String],
@@ -734,7 +780,26 @@ pub(super) fn pinned(
     resources: &Arc<dyn Send + Sync>,
     deadline: Instant,
 ) -> Ended {
-    child::run(
+    pinned_stdin(
+        image,
+        args,
+        child::Stdin::Bytes(input),
+        lock,
+        resources,
+        deadline,
+    )
+}
+/// [`pinned`] with either kind of stdin.
+#[cfg(target_os = "linux")]
+fn pinned_stdin(
+    image: &Pin,
+    args: &[String],
+    input: child::Stdin<'_>,
+    lock: &Arc<InheritedLock>,
+    resources: &Arc<dyn Send + Sync>,
+    deadline: Instant,
+) -> Ended {
+    child::run_stdin(
         image.executable(),
         args,
         input,

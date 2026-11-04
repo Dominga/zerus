@@ -24,22 +24,31 @@ HGS = Path(os.environ.get('HGS_TEST_BIN', Path(__file__).resolve().parents[1] / 
 
 
 def current_store_schema():
-    """Read the selected Rust constant, including its standalone leaf alias."""
+    """Read the selected Rust constant, following its leaf alias: a leaf's
+    constant, or one more alias into that leaf's own child module."""
     desktop = Path(__file__).resolve().parents[1] / 'src/desktop'
 
-    def expression(path):
-        match = re.search(r'\bconst\s+SCHEMA\s*:\s*i64\s*=\s*([^;]+);', path.read_text(encoding='utf-8'))
+    def expression(path, name='SCHEMA'):
+        match = re.search(rf'\bconst\s+{name}\s*:\s*i64\s*=\s*([^;]+);', path.read_text(encoding='utf-8'))
         if match is None:
             raise ValueError(f'No Store schema constant in {path.name}')
         return match[1].strip()
 
+    def module(base, name):
+        file = base / (name + '.rs')
+        return file if file.exists() else base / name / 'mod.rs'
+
     selected = expression(desktop / 'store.rs')
     if not selected.isdecimal():
-        leaf = re.fullmatch(r'super::([a-z][a-z_0-9]*)::SCHEMA', selected)
+        leaf = re.fullmatch(r'super::([a-z][a-z_0-9]*)::([A-Z][A-Z_]*)', selected)
         if leaf is None:
             raise ValueError('Unsupported Store schema expression; update the fixture reader')
-        module = desktop / (leaf[1] + '.rs')
-        selected = expression(module if module.exists() else desktop / leaf[1] / 'mod.rs')
+        selected = expression(module(desktop, leaf[1]), leaf[2])
+        if not selected.isdecimal():
+            child = re.fullmatch(r'([a-z][a-z_0-9]*)::SCHEMA', selected)
+            if child is None:
+                raise ValueError('Unsupported Store schema expression; update the fixture reader')
+            selected = expression(module(desktop / leaf[1], child[1]))
     return int(selected)
 
 
@@ -275,8 +284,24 @@ finally:
         # macOS refuses every original until a qualified child seam exists.
         if sys.platform.startswith('linux'):
             self.assertIn('Desktop task message ABI: desktop-task-message-v1', help_text)
+            self.assertIn('Desktop task message references: desktop-task-message-reference-v1', help_text)
         else:
             self.assertNotIn('desktop-task-message', help_text)
+        # The staging path is read-only routing data for the exact scope.
+        staging = self.cli('desktop', 'request', '--json', data=dict(op='task_message_staging', scope=scope))
+        # Only an existing private directory, which the actor creates when it
+        # starts, is ever named.
+        held = self.desktop / 'task-message-staging'
+        if (sys.platform.startswith('linux') or sys.platform == 'darwin') and held.is_dir():
+            self.assertEqual(staging['scope'], scope)
+            self.assertTrue(staging['read_only'])
+            self.assertEqual(Path(staging['staging']), held)
+            self.assertEqual(held.stat().st_mode & 0o777, 0o700)
+        else:
+            self.assertEqual(staging['code'], 'task_message_staging_unavailable')
+        moved = dict(scope, service_epoch=str(uuid.uuid4()))
+        self.assertEqual(self.cli('desktop', 'request', '--json', data=dict(op='task_message_staging', scope=moved))['code'],
+                         'task_message_staging_unavailable')
 
     def test_creation_launch_is_a_closed_native_intent_with_scoped_read_only_lookup(self):
         self.serve()
@@ -1489,8 +1514,11 @@ finally:
     @staticmethod
     def remove_catalog_reason_schema(db):
         # Rewind the later leaves too, never leaving one labelled older: the
-        # schema-26 task message, schema-25 termination retention, creation
-        # launch/worktree, then the schema-22 catalog approval.
+        # schema-27 task message inputs, schema-26 task message, schema-25
+        # termination retention, creation launch/worktree, then the schema-22
+        # catalog approval.
+        db.execute('DROP TABLE desktop_task_message_inputs')
+        db.execute('DROP TABLE desktop_task_message_input_budget')
         db.execute('DROP TABLE desktop_task_messages')
         db.execute('DROP TABLE desktop_task_message_budget')
         db.execute('DROP TABLE desktop_termination_outcomes')

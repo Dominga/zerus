@@ -272,13 +272,18 @@ from a private index under the state directory (`session_ids/`), which older
 versions never touch.
 - Each file covers one provider and original name (the name a rename pins),
   with at most 16 sessions. Each session lists the conversations its record
-  still names: current, expected, replaced and cleared.
-- A record without an ID takes the ID of the one entry sharing a
-  conversation with it.
-- If the index is unreadable, linked, malformed or ambiguous, the record is
-  written without an ID instead of with a guess. A mapping held by another
-  session is never overwritten.
-- Forgetting a session retires its entry.
+  still names (current, expected, replaced and cleared) and its creation
+  time.
+- A record without an ID takes the ID of the one entry that shares a
+  conversation with it and has the same creation time, the evidence that it
+  is the same incarnation. Resume, restore and rename keep that time.
+- In every other case the ID stays unset rather than guessed. That covers a
+  fresh start by an older hgs, a reused name, a reopened conversation, an
+  evicted entry, a conflicting claim (which contests both entries) and an
+  unreadable, linked or malformed index. An unset ID is safe while nothing
+  resolves sessions by ID.
+- Forgetting a session retires its entry before the binding is removed. If
+  that fails, nothing is forgotten.
 The agent's environment carries it as `HGS_SESSION_ID`, beside `HGS_SESSION`
 (the name at launch) and `HGS_RUN_ID`, and `hgs ls --json` rows and
 inspections include it. Nothing resolves sessions by it yet, and names stay

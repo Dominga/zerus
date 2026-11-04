@@ -1077,11 +1077,21 @@ class SessionIdentity(Harness):
         self.hgs("pause", legacy["name"])
         self.resume(legacy["name"])
         self.assertEqual(self.binding(legacy["name"])["session_id"], gained)
-        # Forgetting the session retires its private index entry (#1317 R3).
+        # Forgetting the session retires its private index entry first; when
+        # that cannot be done the binding stays (#1317 R3, R4).
         index = self.root / "state" / "session_ids" / (hashlib.sha256(f"claude\n{legacy['name']}".encode()).hexdigest() + ".json")
         self.assertEqual(json.loads(index.read_text())["sessions"][0]["session_id"], gained)
+        self.hgs("pause", legacy["name"])
+        index.parent.chmod(0o500)
+        try:
+            self.hgs("kill", legacy["name"], rc=1)
+        finally:
+            index.parent.chmod(0o700)
+        self.assertEqual(self.binding(legacy["name"])["session_id"], gained)
+        self.assertTrue(index.exists())
         self.hgs("kill", legacy["name"])
         self.assertFalse(index.exists())
+        self.assertFalse(self.binding(legacy["name"]))
 
 
 class Lifecycle(Harness):

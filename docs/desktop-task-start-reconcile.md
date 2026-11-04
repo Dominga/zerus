@@ -227,38 +227,51 @@ genuinely new delivery without clearing an unsettled original.
 
 ## Bounded publication recovery
 
-Each new journal writer uses one fixed `.reconcile.tmp` candidate per task.
-The existing metadata lock can contain at most 4 KiB of publication tracking;
-it remains the same original flock, and its writable duplicate shares that
-open file description. No directory enumeration or growing cleanup history is
-needed. The candidate retains the existing 96 KiB journal bound; source and
-control-frame limits do not change.
+Each new journal writer uses one fixed `.reconcile.tmp` candidate per task and
+at most 4 KiB of append-only tracking in the existing metadata lock. Writable
+duplicates share that same open file description. No directory enumeration or
+growing cleanup history is needed; the candidate keeps the 96 KiB journal bound.
+Source and control-frame limits do not change.
 
-Before rename, the writer syncs the candidate and records its exact native file
-version, the retained directory objects, original reconciliation IDs and before/
-after journal hashes in that lock. It syncs tracking before rename and syncs the
-parent directory before returning an Intent. Tracking is cleared only after the
-exact published phase is verified. A failed publication returns no Intent.
+There are three ordered, closed frames, each ending with a newline and synced
+before its next filesystem step:
 
-`Saved::publication_status()` is a bounded read-only observation of this one
-managed slot: `Clear`, `Recoverable` or `NeedsReview`. It never acquires execution
-permission or performs cleanup. A later explicit metadata writer may recover
-under the original metadata flock. It can unlink only the exact still-linked
-candidate named by the durable record while the original before-journal is
-unchanged. If the same candidate was already renamed into the exact after-
-journal, recovery retires tracking without unlinking or rewriting that journal.
-Its phase, source, original ID, offered/unknown history and task/outbox remain
-unchanged. Recovery itself never returns an offer or creates a replacement ID.
+1. Allocation records the retained directories, exact before-journal identity,
+   original reconciliation IDs, before/after hashes and a fresh allocation nonce
+   **before** the exclusive candidate create.
+2. Created records the original candidate's native object (and native birth time
+   where available) **before any body write**. Without this complete frame the
+   reservation may own only an empty staging file, never nonempty unknown data.
+3. Ready records the exact final file version after its body sync. Full object,
+   bytes, hash and ID checks precede rename, directory sync and Intent return.
 
-An unrecorded candidate, missing candidate beside a before-journal, malformed or
-partial tracking, changed/replaced object, or missing original journal stays for
-manual review. Another Check cannot allocate more candidates while this fixed
-slot is uncertain. Keep the checkpoint, marker, journal and lock: deleting them
-is not a supported way to permit another offer. This includes uncertainty during
-the first preparation. Older random-name temporary files have no durable object
-record; they remain unindexed, are never claimed by this slot, and are never
-removed based on their names, age or owner. The bounded status does not claim
-those legacy files are absent.
+An incomplete final frame never grants the next filesystem step. Recovery keeps
+the same observed file and tracking snapshots under the original metadata flock.
+An allocation with no candidate can retire its metadata; an empty allocated file
+or an original created file with an incomplete body can be removed. A ready file
+requires its exact recorded version and bytes. The before-journal must remain
+unchanged in every such case. If rename already published the same final object,
+recovery retires tracking without unlinking or rewriting the journal. **Both**
+branches sync the namespace before clearing tracking, including a rename seen
+only in the page cache and a removal interrupted before directory sync.
+
+`Saved::publication_status()` is a bounded read-only observation of this managed
+slot: `Clear`, `Recoverable` or `NeedsReview`. It supplies no permission. A later
+explicit Check, confirmed unsent discard or exact submitted/drained completion
+can recover publication metadata. This does not rotate the original ID or offer
+again; the saved phase and all existing admission/CAS guards remain decisive.
+Original-process abort controls cover allocation, create, body, ready, rename,
+unlink and tracking-clear cuts. Sync-order controls separately pin the namespace
+barrier; process-kill tests are not hardware power-loss qualification.
+
+Complete malformed frames, unknown nonempty data without a Created receipt,
+changed/replaced objects and missing original history remain for manual review.
+Another Check cannot allocate more candidates while this fixed slot is uncertain.
+Keep the checkpoint, marker, journal and lock: deleting them is not a supported
+way to permit another offer. Initial preparation with missing/corrupt history
+still refuses. Older random-name temporary files have no durable object record;
+they stay unindexed and are never removed by name, age or owner. The bounded slot
+status makes no claim that those legacy files are absent.
 
 ## Explicit native receipt check and settlement
 

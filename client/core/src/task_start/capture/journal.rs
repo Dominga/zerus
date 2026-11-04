@@ -511,26 +511,22 @@ fn publish(
     publication::recover(slot, old, lock).map_err(|_| Error::PublicationUnknown)?;
     old.current(slot).map_err(|_| Error::Unavailable)?;
     check().map_err(|_| Error::Unavailable)?;
+    let mut tracked = publication::allocate(slot, old, lock, next, &bytes, &mut sync)
+        .map_err(|_| Error::PublicationUnknown)?;
     let temp = publication::name(slot);
-    let mut file = slot.create(&temp, true).map_err(|_| Error::Unavailable)?;
-    let mut live_version = None;
-    let mut tracked = None;
+    let file = slot.create(&temp, true).map_err(|_| Error::Unavailable)?;
     let written = (|| -> io::Result<()> {
-        file.write_all(&bytes)?;
-        let (written, version) = read(&file, BYTES)?;
+        tracked = publication::created(slot, lock, &tracked, &file, &mut sync)?;
+        file.write_all_at(&bytes, 0)?;
+        let (written, _) = read(&file, BYTES)?;
         if written != bytes {
             return Err(refused());
         }
-        live_version = Some(version);
         sync(&file, false)?;
-        let retained = publication::track(slot, old, lock, &file, next, &bytes, &mut sync)?;
-        tracked = Some(retained);
-        let retained = tracked.as_ref().ok_or_else(refused)?;
+        tracked = publication::ready(slot, lock, &tracked, &file, &mut sync)?;
         old.current(slot)?;
         check()?;
-        publication::fence(slot, lock, retained)?;
-        publication::candidate(slot, retained, &file)?;
-        publication::fence(slot, lock, retained)?;
+        publication::verify_candidate(slot, lock, &tracked, &file)?;
         let from = CString::new(temp.as_bytes()).map_err(|_| refused())?;
         let to = CString::new(slot.name.as_bytes()).map_err(|_| refused())?;
         // SAFETY: native basenames in the same retained private directory.
@@ -548,11 +544,7 @@ fn publish(
         sync(&slot.folder, true)
     })();
     if written.is_err() {
-        if publication::recover(slot, old, lock).is_err() {
-            if let Some(version) = &live_version {
-                let _ = publication::discard_live(slot, old, lock, &file, version);
-            }
-        }
+        let _ = publication::recover(slot, old, lock);
         return Err(Error::PublicationUnknown);
     }
     let key = &next.intent.binding.key;
@@ -565,13 +557,7 @@ fn publish(
     check().map_err(|_| Error::PublicationUnknown)?;
     // The exact new phase and directory are durable and verified before
     // tracking is cleared or any Intent is returned.
-    publication::clear(
-        slot,
-        lock,
-        tracked.as_ref().ok_or(Error::PublicationUnknown)?,
-        &mut sync,
-    )
-    .map_err(|_| Error::PublicationUnknown)?;
+    publication::clear(slot, lock, &tracked, &mut sync).map_err(|_| Error::PublicationUnknown)?;
     check().map_err(|_| Error::PublicationUnknown)?;
     Ok(disk)
 }

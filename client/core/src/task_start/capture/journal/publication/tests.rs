@@ -2,8 +2,21 @@ use super::*;
 use crate::task_start::capture::tests::Fixture;
 use std::{fs, os::unix::fs::symlink};
 
+#[track_caller]
 fn prepared(f: &Fixture) -> Journal {
-    Journal::prepare(f.capture().unwrap(), &f.intent.reconcile_id).unwrap()
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    loop {
+        match Journal::prepare(f.capture().unwrap(), &f.intent.reconcile_id) {
+            Ok(journal) => return journal,
+            // Another parallel fixture's fork may briefly retain the same
+            // CLOEXEC description until exec. Busy is a no-write refusal;
+            // wait for the actual flock, never retry an offer/publication.
+            Err(Error::Busy) if std::time::Instant::now() < until => {
+                std::thread::sleep(std::time::Duration::from_millis(1))
+            }
+            Err(error) => panic!("original metadata turn unavailable: {error:?}"),
+        }
+    }
 }
 fn saved(f: &Fixture) -> Saved {
     Saved::read(
@@ -27,43 +40,73 @@ fn stage(journal: &Journal, cut: &str) -> File {
     let mut next = journal.saved.disk.record.clone();
     next.phase = Phase::OfferedUnknown;
     let bytes = encode(&next).unwrap();
-    let mut file = slot.create(&name(slot), true).unwrap();
-    file.write_all(&bytes).unwrap();
-    file.sync_all().unwrap();
-    slot.folder.sync_all().unwrap();
     if cut == "unrecorded" {
+        // Adverse external/legacy scratch: deliberately NOT a writer cut.
+        let file = slot.create(&name(slot), true).unwrap();
+        file.write_all_at(&bytes, 0).unwrap();
+        file.sync_all().unwrap();
         return file;
     }
-    track(
+    let allocated = allocate(
         slot,
         &journal.saved.disk,
         &journal.lock,
-        &file,
         &next,
         &bytes,
         &mut |f, _| f.sync_all(),
     )
     .unwrap();
+    let file = slot.create(&name(slot), true).unwrap();
+    let object = created(slot, &journal.lock, &allocated, &file, &mut |f, _| {
+        f.sync_all()
+    })
+    .unwrap();
+    file.write_all_at(&bytes, 0).unwrap();
+    file.sync_all().unwrap();
+    ready(slot, &journal.lock, &object, &file, &mut |f, _| {
+        f.sync_all()
+    })
+    .unwrap();
     if cut == "renamed" {
-        let from = CString::new(name(slot).as_bytes()).unwrap();
-        let to = CString::new(slot.name.as_bytes()).unwrap();
-        // SAFETY: the exact staged original in its retained private directory.
-        assert_eq!(
-            unsafe {
-                libc::renameat(
-                    slot.folder.as_raw_fd(),
-                    from.as_ptr(),
-                    slot.folder.as_raw_fd(),
-                    to.as_ptr(),
-                )
-            },
-            0
-        );
+        rename_candidate(slot);
         slot.folder.sync_all().unwrap();
     } else {
         assert_eq!(cut, "recorded");
     }
     file
+}
+fn rename_candidate(slot: &Slot) {
+    let from = CString::new(name(slot).as_bytes()).unwrap();
+    let to = CString::new(slot.name.as_bytes()).unwrap();
+    // SAFETY: the original staged file in the retained private directory.
+    assert_eq!(
+        unsafe {
+            libc::renameat(
+                slot.folder.as_raw_fd(),
+                from.as_ptr(),
+                slot.folder.as_raw_fd(),
+                to.as_ptr(),
+            )
+        },
+        0
+    );
+}
+fn frames(bytes: &[u8]) -> Vec<serde_json::Value> {
+    bytes
+        .split(|b| *b == b'\n')
+        .filter(|v| !v.is_empty())
+        .map(|v| serde_json::from_slice(v).unwrap())
+        .collect()
+}
+fn encode_frames(values: &[serde_json::Value]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|v| {
+            let mut b = v.to_string().into_bytes();
+            b.push(b'\n');
+            b
+        })
+        .collect()
 }
 
 #[test]
@@ -180,7 +223,6 @@ fn replaced_changed_and_unsafe_candidates_remain_for_review_even_with_identical_
         "duplicate",
         "tracking-oversize",
         "tracking-partial",
-        "missing",
     ] {
         let f = Fixture::new();
         let journal = prepared(&f);
@@ -217,10 +259,9 @@ fn replaced_changed_and_unsafe_candidates_remain_for_review_even_with_identical_
                 fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
             }
             "oversize" => original.set_len(super::super::BYTES as u64 + 1).unwrap(),
-            "missing" => fs::remove_file(&path).unwrap(),
             _ => {
-                let mut header: serde_json::Value =
-                    serde_json::from_slice(&fs::read(&lock_path).unwrap()).unwrap();
+                let mut log = frames(&fs::read(&lock_path).unwrap());
+                let header = &mut log[0]["allocation"];
                 match change {
                     "before-id" => {
                         header["before_id"] =
@@ -237,17 +278,21 @@ fn replaced_changed_and_unsafe_candidates_remain_for_review_even_with_identical_
                     _ => unreachable!(),
                 }
                 let bytes = if change == "duplicate" {
-                    format!("{{\"abi\":\"{ABI}\",{}", &header.to_string()[1..]).into_bytes()
+                    let mut bytes =
+                        format!("{{\"stage\":\"allocated\",{}\n", &log[0].to_string()[1..])
+                            .into_bytes();
+                    bytes.extend(encode_frames(&log[1..]));
+                    bytes
                 } else if change == "tracking-oversize" {
-                    let mut bytes = header.to_string().into_bytes();
+                    let mut bytes = encode_frames(&log);
                     bytes.resize(BYTES + 1, b' ');
                     bytes
                 } else if change == "tracking-partial" {
-                    let mut bytes = header.to_string().into_bytes();
+                    let mut bytes = encode_frames(&log);
                     bytes.truncate(bytes.len() / 2);
                     bytes
                 } else {
-                    header.to_string().into_bytes()
+                    encode_frames(&log)
                 };
                 fs::write(&lock_path, bytes).unwrap();
             }
@@ -269,20 +314,29 @@ fn replaced_changed_and_unsafe_candidates_remain_for_review_even_with_identical_
             journal_bytes,
             "{change}"
         );
-        assert_eq!(
-            path.symlink_metadata().is_ok(),
-            change != "missing",
-            "{change}"
-        );
+        assert!(path.symlink_metadata().is_ok(), "{change}");
     }
 }
 
 #[test]
 fn copied_before_or_published_journal_cannot_authorize_orphan_cleanup() {
-    for cut in ["recorded", "renamed"] {
+    for (cut, birth_available) in [
+        ("recorded", true),
+        ("recorded", false),
+        ("renamed", true),
+        ("renamed", false),
+    ] {
         let f = Fixture::new();
         let journal = prepared(&f);
         let held = stage(&journal, cut);
+        if !birth_available {
+            // Some filesystems expose no creation time. The recorded native
+            // object must independently reject an identical-byte replacement.
+            let path = f.file.with_extension("reconcile-lock");
+            let mut log = frames(&fs::read(&path).unwrap());
+            log[1]["object"]["born"] = serde_json::Value::Null;
+            fs::write(path, encode_frames(&log)).unwrap();
+        }
         drop(journal);
         let path = f.file.with_extension("reconcile");
         let bytes = fs::read(&path).unwrap();
@@ -301,17 +355,157 @@ fn copied_before_or_published_journal_cannot_authorize_orphan_cleanup() {
     }
 }
 
-#[test]
-fn real_writer_death_keeps_one_slot_and_recovers_only_the_recorded_original() {
+const CUTS: &[&str] = &[
+    "allocation-write",
+    "allocated",
+    "created-empty",
+    "created-write",
+    "created",
+    "body-partial",
+    "body-synced",
+    "ready-write",
+    "ready",
+    "renamed-unsynced",
+    "renamed",
+    "unlinked-unsynced",
+    "unlinked",
+    "clear-unsynced",
+];
+fn reached(root: &Path, cut: &str) -> ! {
+    use std::io::Read;
+    crate::fsx::write_private_durable(&root.join("publication-ready"), cut.as_bytes()).unwrap();
+    let _ = std::io::stdin().read(&mut [0; 1]);
+    // Only the marked one-shot leaf owns this pipe. EOF cannot enter a parent
+    // branch or continue another filesystem step after the original dies.
+    std::process::exit(0)
+}
+fn crash_cut(journal: &Journal, root: &Path, cut: &str) {
+    let slot = &journal.saved.slot;
+    let mut next = journal.saved.disk.record.clone();
+    next.phase = Phase::OfferedUnknown;
+    let bytes = encode(&next).unwrap();
+    let allocated = allocate(
+        slot,
+        &journal.saved.disk,
+        &journal.lock,
+        &next,
+        &bytes,
+        &mut |f, _| {
+            if cut == "allocation-write" {
+                reached(root, cut);
+            }
+            f.sync_all()
+        },
+    )
+    .unwrap();
+    if cut == "allocated" {
+        reached(root, cut);
+    }
+    let file = slot.create(&name(slot), true).unwrap();
+    if cut == "created-empty" {
+        reached(root, cut);
+    }
+    let object = created(slot, &journal.lock, &allocated, &file, &mut |f, _| {
+        if cut == "created-write" {
+            reached(root, cut);
+        }
+        f.sync_all()
+    })
+    .unwrap();
+    if cut == "created" {
+        reached(root, cut);
+    }
+    file.write_all_at(&bytes[..bytes.len() / 2], 0).unwrap();
+    if cut == "body-partial" {
+        file.sync_all().unwrap();
+        reached(root, cut);
+    }
+    file.write_all_at(&bytes, 0).unwrap();
+    file.sync_all().unwrap();
+    if cut == "body-synced" {
+        reached(root, cut);
+    }
+    ready(slot, &journal.lock, &object, &file, &mut |f, _| {
+        if cut == "ready-write" {
+            reached(root, cut);
+        }
+        f.sync_all()
+    })
+    .unwrap();
+    if cut == "ready" {
+        reached(root, cut);
+    }
+    if ["unlinked-unsynced", "unlinked", "clear-unsynced"].contains(&cut) {
+        let observed = inspect(slot, &journal.saved.disk, &journal.lock).unwrap();
+        reconcile_with_sync(
+            slot,
+            &journal.saved.disk,
+            &journal.lock,
+            observed,
+            &mut |f, directory| {
+                if directory && cut == "unlinked-unsynced" || !directory && cut == "clear-unsynced"
+                {
+                    reached(root, cut);
+                }
+                f.sync_all()?;
+                if directory && cut == "unlinked" {
+                    reached(root, cut);
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        unreachable!();
+    }
+    rename_candidate(slot);
+    if cut == "renamed-unsynced" {
+        reached(root, cut);
+    }
+    slot.folder.sync_all().unwrap();
+    assert_eq!(cut, "renamed");
+    reached(root, cut);
+}
+fn abort_original_at(f: &Fixture, cut: &str) {
     use std::{
-        io::Read,
         process::{Child, Command, Stdio},
         time::{Duration, Instant},
     };
-    const LEAF: &str = "ZERUS_TEST_TASK_PUBLICATION_LEAF";
-    if let Some(root) = std::env::var_os(LEAF) {
+    struct Owned(Child);
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = Owned(Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "task_start::capture::journal::publication::tests::real_writer_death_keeps_one_slot_and_recovers_only_the_recorded_original", "--nocapture"])
+        .env("ZERUS_TEST_TASK_PUBLICATION_LEAF", &f.store).env("ZERUS_TEST_TASK_PUBLICATION_CUT", cut)
+        .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap());
+    let until = Instant::now() + Duration::from_secs(8);
+    while !f.store.join("publication-ready").exists() {
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "original leaf exited before {cut}"
+        );
+        assert!(
+            Instant::now() < until,
+            "original leaf did not reach bounded {cut}"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        fs::read(f.store.join("publication-ready")).unwrap(),
+        cut.as_bytes()
+    );
+    child.0.kill().unwrap();
+    assert!(!child.0.wait().unwrap().success());
+    drop(child.0.stdin.take());
+}
+#[test]
+fn real_writer_death_keeps_one_slot_and_recovers_only_the_recorded_original() {
+    if let Some(root) = std::env::var_os("ZERUS_TEST_TASK_PUBLICATION_LEAF") {
         let cut = std::env::var("ZERUS_TEST_TASK_PUBLICATION_CUT").unwrap();
-        assert!(["unrecorded", "recorded", "renamed"].contains(&cut.as_str()));
+        assert!(CUTS.contains(&cut.as_str()));
         let intent = wire::test_intent();
         let source = Captured::read(
             Path::new(&root),
@@ -323,72 +517,38 @@ fn real_writer_death_keeps_one_slot_and_recovers_only_the_recorded_original() {
         )
         .unwrap();
         let journal = Journal::prepare(source, &intent.reconcile_id).unwrap();
-        let _held = stage(&journal, &cut);
-        crate::fsx::write_private_durable(
-            &Path::new(&root).join("publication-ready"),
-            cut.as_bytes(),
-        )
-        .unwrap();
-        // Exactly this original parent's pipe; this leaf cannot spawn again.
-        let _ = std::io::stdin().read(&mut [0; 1]);
-        return;
+        crash_cut(&journal, Path::new(&root), &cut);
+        unreachable!();
     }
-    struct Owned(Child);
-    impl Drop for Owned {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-    for cut in ["unrecorded", "recorded", "renamed"] {
+    for cut in CUTS {
         let f = Fixture::new();
         drop(prepared(&f));
         let outbox = fs::read(&f.file).unwrap();
         let marker = fs::read(&f.marker).unwrap();
-        let mut child = Owned(Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "task_start::capture::journal::publication::tests::real_writer_death_keeps_one_slot_and_recovers_only_the_recorded_original", "--nocapture"])
-            .env(LEAF, &f.store).env("ZERUS_TEST_TASK_PUBLICATION_CUT", cut)
-            .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap());
-        let until = Instant::now() + Duration::from_secs(8);
-        while !f.store.join("publication-ready").exists() {
-            assert!(
-                child.0.try_wait().unwrap().is_none(),
-                "original leaf exited before the durable cut"
-            );
-            assert!(
-                Instant::now() < until,
-                "original leaf did not reach the bounded durable cut"
-            );
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        assert_eq!(
-            fs::read(f.store.join("publication-ready")).unwrap(),
-            cut.as_bytes()
-        );
-        child.0.kill().unwrap();
-        assert!(!child.0.wait().unwrap().success());
-        drop(child.0.stdin.take());
+        abort_original_at(&f, cut);
         let observed = saved(&f);
         let before = observed.disk.bytes.clone();
         let lock = observed.slot.lock(false).unwrap();
         assert_eq!(observed.reconcile_id(), f.intent.reconcile_id);
-        if cut == "unrecorded" {
-            assert_eq!(observed.publication_status(), Status::NeedsReview);
-            assert!(recover(&observed.slot, &observed.disk, &lock).is_err());
-            assert!(f.file.with_extension("reconcile.tmp").exists());
-        } else {
-            assert_eq!(observed.publication_status(), Status::Recoverable);
-            recover(&observed.slot, &observed.disk, &lock).unwrap();
-            assert_eq!(observed.publication_status(), Status::Clear);
-            assert!(!f.file.with_extension("reconcile.tmp").exists());
-        }
+        assert_ne!(observed.publication_status(), Status::NeedsReview, "{cut}");
+        recover(&observed.slot, &observed.disk, &lock).unwrap();
+        assert_eq!(observed.publication_status(), Status::Clear, "{cut}");
+        assert!(!f.file.with_extension("reconcile.tmp").exists());
         assert_eq!(observed.disk.bytes, before);
         assert_eq!(fs::read(&f.file).unwrap(), outbox);
         assert_eq!(fs::read(&f.marker).unwrap(), marker);
-        if cut == "renamed" {
-            assert_eq!(observed.phase(), Phase::OfferedUnknown);
+        drop(lock);
+        let mut explicit = prepared(&f);
+        if cut.starts_with("renamed") {
+            assert_eq!(explicit.saved().phase(), Phase::OfferedUnknown);
+            assert_eq!(explicit.offer().err(), Some(Error::OfferedUnknown));
         } else {
-            assert_eq!(observed.phase(), Phase::Prepared);
+            assert_eq!(explicit.saved().phase(), Phase::Prepared);
+            assert_eq!(
+                explicit.offer().unwrap().reconcile_id,
+                f.intent.reconcile_id,
+                "{cut}"
+            );
         }
     }
 }
@@ -450,29 +610,53 @@ fn publication_sync_order_precedes_return_and_final_clear_rechecks_its_snapshot(
                     assert_eq!(saved(&f).phase(), Phase::OfferedUnknown);
                     assert!(!f.file.with_extension("reconcile.tmp").exists());
                 } else {
-                    let value: serde_json::Value =
-                        serde_json::from_slice(&bytes).map_err(|_| refused())?;
-                    if value.get("abi").is_some() {
-                        steps.push("tracking");
-                        assert_eq!(saved(&f).phase(), Phase::Prepared);
+                    if bytes.last() == Some(&b'\n') {
+                        let values = frames(&bytes);
+                        steps.push(match values.last().unwrap()["stage"].as_str().unwrap() {
+                            "allocated" => {
+                                assert!(!f.file.with_extension("reconcile.tmp").exists());
+                                "allocated"
+                            }
+                            "created" => {
+                                assert!(
+                                    fs::read(f.file.with_extension("reconcile.tmp"))?.is_empty()
+                                );
+                                "created"
+                            }
+                            "ready" => {
+                                let bytes = fs::read(f.file.with_extension("reconcile.tmp"))?;
+                                assert!(!bytes.is_empty());
+                                assert_eq!(values.last().unwrap()["file"]["length"], bytes.len());
+                                "ready"
+                            }
+                            _ => unreachable!(),
+                        });
                     } else {
                         steps.push("candidate");
-                        assert_eq!(saved(&f).phase(), Phase::Prepared);
                     }
+                    assert_eq!(saved(&f).phase(), Phase::Prepared);
                 }
             }
             file.sync_all()
         })
         .unwrap();
-    assert_eq!(steps, ["candidate", "tracking", "directory", "clear"]);
+    assert_eq!(
+        steps,
+        [
+            "allocated",
+            "created",
+            "candidate",
+            "ready",
+            "directory",
+            "clear"
+        ]
+    );
     assert_eq!(journal.saved().publication_status(), Status::Clear);
 
     let f = Fixture::new();
     let journal = prepared(&f);
     let _held = stage(&journal, "renamed");
-    let pending = tracking(&journal.saved.slot, &journal.lock)
-        .unwrap()
-        .unwrap();
+    let pending = tracking(&journal.saved.slot, &journal.lock).unwrap();
     let path = f.file.with_extension("reconcile-lock");
     let bytes = fs::read(&path).unwrap();
     fs::write(&path, b"intervening edit").unwrap();
@@ -490,4 +674,136 @@ fn publication_sync_order_precedes_return_and_final_clear_rechecks_its_snapshot(
     .is_err());
     assert_eq!(fs::read(path).unwrap(), bytes);
     assert_eq!(saved(&f).phase(), Phase::OfferedUnknown);
+}
+
+#[test]
+fn abort_after_candidate_fsync_no_longer_blocks_any_metadata_publisher() {
+    for action in ["offer", "discard", "complete"] {
+        let f = Fixture::new();
+        drop(prepared(&f));
+        abort_original_at(&f, "body-synced");
+        assert_eq!(saved(&f).publication_status(), Status::Recoverable);
+        if action == "discard" {
+            saved(&f).discard_prepared(&f.intent.reconcile_id).unwrap();
+            let mut explicit = Journal::prepare_after_discard(
+                f.capture().unwrap(),
+                "00000009-1111-4111-8111-111111111111",
+                &f.intent.reconcile_id,
+            )
+            .unwrap();
+            assert_eq!(explicit.saved().phase(), Phase::Prepared);
+            explicit.offer().unwrap();
+        } else {
+            let mut explicit = prepared(&f);
+            assert_eq!(
+                explicit.offer().unwrap().reconcile_id,
+                f.intent.reconcile_id
+            );
+            drop(explicit);
+            if action == "complete" {
+                // Existing exact Submitted/drained DTO; no task call is made.
+                let mut observed = saved(&f);
+                let (query, lookup) = super::super::completion::tests::submitted(&f, &observed);
+                assert_eq!(
+                    observed.settle_submitted(&query, &lookup, || true).unwrap(),
+                    Settlement::Applied
+                );
+                assert_eq!(observed.phase(), Phase::Completed);
+            }
+        }
+        assert_eq!(saved(&f).publication_status(), Status::Clear);
+    }
+}
+
+#[test]
+fn recovery_syncs_the_namespace_before_retiring_published_tracking() {
+    let f = Fixture::new();
+    let journal = prepared(&f);
+    let _held = stage(&journal, "recorded");
+    rename_candidate(&journal.saved.slot); // Deliberately NO directory sync.
+    drop(journal);
+    let observed = saved(&f);
+    let lock = observed.slot.lock(false).unwrap();
+    let inspection = inspect(&observed.slot, &observed.disk, &lock).unwrap();
+    let mut order = Vec::new();
+    reconcile_with_sync(
+        &observed.slot,
+        &observed.disk,
+        &lock,
+        inspection,
+        &mut |file, directory| {
+            if directory {
+                assert!(
+                    !read(&lock, BYTES)?.0.is_empty(),
+                    "tracking retired before namespace sync"
+                );
+                order.push("namespace");
+            } else {
+                assert_eq!(order, ["namespace"]);
+                assert!(read(file, BYTES)?.0.is_empty());
+                order.push("tracking");
+            }
+            file.sync_all()
+        },
+    )
+    .unwrap();
+    assert_eq!(order, ["namespace", "tracking"]);
+    assert_eq!(observed.phase(), Phase::OfferedUnknown);
+    assert_eq!(observed.publication_status(), Status::Clear);
+}
+
+#[test]
+fn torn_wal_tails_cannot_start_the_next_step_or_leave_a_known_allocation_wedged() {
+    for cut in ["allocation", "created", "ready"] {
+        let f = Fixture::new();
+        let journal = prepared(&f);
+        let _held = stage(&journal, "recorded");
+        let path = f.file.with_extension("reconcile-lock");
+        let log = frames(&fs::read(&path).unwrap());
+        let count = match cut {
+            "allocation" => 0,
+            "created" => 1,
+            _ => 2,
+        };
+        let mut bytes = encode_frames(&log[..count]);
+        let tail = serde_json::to_vec(&log[count]).unwrap();
+        // Use the actual encoder's stage-first order for the interrupted write.
+        let expected = match count {
+            0 => b"{\"stage\":\"allocated\"".as_slice(),
+            1 => b"{\"stage\":\"created\"",
+            _ => b"{\"stage\":\"ready\"",
+        };
+        bytes.extend_from_slice(&expected[..expected.len() - 1]);
+        assert!(!tail.is_empty());
+        if count < 2 {
+            let candidate = f.file.with_extension("reconcile.tmp");
+            fs::remove_file(&candidate).unwrap();
+            if count == 1 {
+                journal
+                    .saved
+                    .slot
+                    .create(&name(&journal.saved.slot), true)
+                    .unwrap();
+            }
+        }
+        fs::write(&path, bytes).unwrap();
+        assert_eq!(
+            journal.saved().publication_status(),
+            Status::Recoverable,
+            "{cut}"
+        );
+        recover(&journal.saved.slot, &journal.saved.disk, &journal.lock).unwrap();
+        assert_eq!(journal.saved().publication_status(), Status::Clear, "{cut}");
+        assert_eq!(journal.saved().phase(), Phase::Prepared);
+    }
+    // Complete unknown frames are corruption, not an uncommitted tail.
+    let f = Fixture::new();
+    let journal = prepared(&f);
+    fs::write(
+        f.file.with_extension("reconcile-lock"),
+        b"{\"stage\":\"unrecognized\"}\n",
+    )
+    .unwrap();
+    assert_eq!(journal.saved().publication_status(), Status::NeedsReview);
+    assert!(recover(&journal.saved.slot, &journal.saved.disk, &journal.lock).is_err());
 }

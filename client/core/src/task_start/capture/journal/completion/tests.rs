@@ -19,7 +19,10 @@ fn saved(f: &Fixture) -> Saved {
     .unwrap()
     .unwrap()
 }
-fn submitted(f: &Fixture, saved: &Saved) -> (wire::Query, wire::Lookup) {
+pub(in crate::task_start::capture::journal) fn submitted(
+    f: &Fixture,
+    saved: &Saved,
+) -> (wire::Query, wire::Lookup) {
     let query = saved.query(f.intent.scope.clone(), READ).unwrap();
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../../../../fixtures/desktop-operation-port-v1.json"

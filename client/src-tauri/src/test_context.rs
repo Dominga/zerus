@@ -1,0 +1,282 @@
+//! Context for component fixtures, never native caller authentication.
+//! Re-execute the exact test before any fixture/cached mode is constructed;
+//! changing this shared process's environment would invalidate live snapshots.
+use std::{
+    process::Command,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Condvar, Mutex, Weak,
+    },
+    time::{Duration, Instant},
+};
+use zerus_client_core::{run, Exit, Invocation};
+
+const AGENT: [&str; 3] = ["HGS_SESSION", "HGS_SESSION_ID", "HGS_RUN_ID"];
+const LIMIT: usize = 2;
+const REENTRY: &str = "ZERUS_TEST_CONTEXT_ORIGINAL_CASE";
+static SPAWNS: AtomicUsize = AtomicUsize::new(0);
+struct State {
+    active: usize,
+    failed: bool,
+}
+static CHILDREN: (Mutex<State>, Condvar) = (
+    Mutex::new(State {
+        active: 0,
+        failed: false,
+    }),
+    Condvar::new(),
+);
+struct Permit;
+impl Permit {
+    fn acquire() -> Arc<Self> {
+        let mut state = CHILDREN.0.lock().unwrap();
+        loop {
+            if state.failed {
+                drop(state);
+                panic!("an isolated fixture failed; further fixture launches are fenced");
+            }
+            if state.active < LIMIT {
+                state.active += 1;
+                return Arc::new(Self);
+            }
+            state = CHILDREN.1.wait(state).unwrap();
+        }
+    }
+}
+impl Drop for Permit {
+    fn drop(&mut self) {
+        let mut state = CHILDREN.0.lock().unwrap_or_else(|e| e.into_inner());
+        state.active -= 1;
+        CHILDREN.1.notify_all();
+    }
+}
+
+pub(crate) fn non_agent() -> bool {
+    isolate(false, Duration::from_secs(90))
+}
+pub(crate) fn native() -> bool {
+    isolate(true, Duration::from_secs(30))
+}
+fn isolate(native: bool, timeout: Duration) -> bool {
+    let thread = std::thread::current();
+    let case = thread.name().expect("named libtest fixture");
+    let clean = AGENT.iter().all(|key| std::env::var_os(key).is_none())
+        && (!native
+            || std::env::var(zerus_client_core::desktop::service::MODE_ENV).as_deref() == Ok("0"));
+    if let Some(original) = std::env::var_os(REENTRY) {
+        assert_eq!(original.as_os_str(), std::ffi::OsStr::new(case));
+        assert!(clean, "isolated original still has inherited context");
+        return false;
+    }
+    if clean {
+        return false;
+    }
+    let original = case.to_owned();
+    run_case(case, timeout, move |command| {
+        for key in AGENT {
+            command.env_remove(key);
+        }
+        // Select Native explicitly. Absence alone would depend on the
+        // application's current default.
+        if native {
+            command.env(zerus_client_core::desktop::service::MODE_ENV, "0");
+        }
+        // A broken cleanup must fail in this original child, never recurse
+        // into another chain of test programs with the same dirty context.
+        command.env(REENTRY, original);
+    });
+    true
+}
+fn run_case(case: &str, timeout: Duration, configure: impl FnOnce(&mut Command) + Send + 'static) {
+    // Acquire before PROCESS_TREE: a sampler may hold its exclusive side while
+    // other isolated tests queue. Keep that lock order everywhere in this file.
+    let permit = Permit::acquire();
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    let resources = Arc::downgrade(&permit);
+    let environment = run::FrozenEnvironment::capture().unwrap();
+    let until = Instant::now() + timeout;
+    let invocation = Invocation {
+        args: ["--exact", case, "--test-threads=1", "--nocapture"]
+            .map(String::from)
+            .into(),
+        stdin: Some(Vec::new()),
+        // Native barriers keep their 30s watchdog. The new non-agent fixtures
+        // include a maintained 31s native effect, with original 45/60s limits;
+        // their outer watchdog cannot use run_owned's 30s exchange cap.
+        timeout,
+        request_id: None,
+    };
+    let result = run::run_accounted_frozen(
+        &std::env::current_exe().unwrap(),
+        &invocation,
+        &environment,
+        1 << 20,
+        &AtomicBool::new(false),
+        permit,
+        move |command| {
+            configure(command);
+            SPAWNS.fetch_add(1, Ordering::Relaxed);
+            command.spawn()
+        },
+    );
+    let (valid, diagnostic) = match result {
+        Ok(Exit::Code {
+            code,
+            stdout,
+            stderr,
+        }) => (
+            code == 0 && String::from_utf8_lossy(&stdout).contains("1 passed; 0 failed"),
+            format!(
+                "exit {code}: {}",
+                stderr.chars().take(4096).collect::<String>()
+            ),
+        ),
+        _ => (false, "bounded fixture exchange incomplete".into()),
+    };
+    if valid && settled(&resources, until) {
+        return;
+    }
+    // An error can return before physical pipe drain. Its Permit stays in the
+    // original runner's resources; never free it or keep queued fixtures
+    // waiting forever on that uncertain original.
+    CHILDREN.0.lock().unwrap().failed = true;
+    CHILDREN.1.notify_all();
+    panic!("isolated fixture {case} did not settle successfully: {diagnostic}");
+}
+fn settled(resources: &Weak<Permit>, until: Instant) -> bool {
+    let mut state = CHILDREN.0.lock().unwrap();
+    loop {
+        if resources.strong_count() == 0 {
+            return Instant::now() < until;
+        }
+        let now = Instant::now();
+        if now >= until {
+            return false;
+        }
+        state = CHILDREN.1.wait_timeout(state, until - now).unwrap().0;
+    }
+}
+
+#[test]
+fn a_fresh_context_preserves_service_mode_raw_values_and_the_parent_environment() {
+    use std::os::unix::ffi::OsStringExt;
+    const STAGE: &str = "ZERUS_TEST_CONTEXT_STAGE";
+    const RAW: &str = "ZERUS_TEST_CONTEXT_RAW";
+    fn cache_admission() -> bool {
+        use zerus_client_core::desktop::{
+            ownership::{Action, Mode},
+            ui_requests::Request,
+            Build, Responder,
+        };
+        let responder = Responder::new(
+            "com.hgdev.hgs-tray".into(),
+            Build {
+                version: "1.0.0".into(),
+                source_commit: "a".repeat(40),
+                source_dirty: Some(false),
+            },
+            uuid::Uuid::new_v4().to_string(),
+            true,
+            false,
+        );
+        assert!(responder.configure_ownership_mode_once(Mode::Service));
+        assert!(responder.configure_once("a".repeat(64)));
+        responder
+            .prepare_ui_request(
+                uuid::Uuid::new_v4().to_string(),
+                Request::DesktopOwnership {
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    action: Action::Rearm,
+                    journal: None,
+                    revision: 0,
+                },
+            )
+            .is_ok()
+    }
+    if std::env::var_os(STAGE).is_some() {
+        // Cache admission is DATA only. Check the unchanged component refusal
+        // before cleaning each marker, not a Root-native-authentication claim.
+        let dirty = AGENT.iter().any(|key| std::env::var_os(key).is_some());
+        assert_eq!(cache_admission(), !dirty);
+        if non_agent() {
+            return;
+        }
+        assert!(AGENT.iter().all(|key| std::env::var_os(key).is_none()));
+        assert_eq!(
+            std::env::var(zerus_client_core::desktop::service::MODE_ENV).unwrap(),
+            "1"
+        );
+        assert_eq!(
+            std::env::var_os(RAW).unwrap(),
+            std::ffi::OsString::from_vec(vec![b'x', 0xff])
+        );
+        return;
+    }
+    let before = run::FrozenEnvironment::capture().unwrap();
+    let before_agent = AGENT.map(std::env::var_os);
+    let thread = std::thread::current();
+    for source in AGENT {
+        run_case(
+            thread.name().unwrap(),
+            Duration::from_secs(90),
+            move |command| {
+                for key in AGENT {
+                    command.env_remove(key);
+                }
+                command
+                    .env(source, "synthetic-agent-context")
+                    .env(STAGE, "dirty")
+                    .env(zerus_client_core::desktop::service::MODE_ENV, "1")
+                    .env(RAW, std::ffi::OsString::from_vec(vec![b'x', 0xff]));
+            },
+        );
+    }
+    assert!(before.current(), "fixture changed its parent's environment");
+    assert!(
+        AGENT.map(std::env::var_os) == before_agent,
+        "fixture changed its parent's agent context"
+    );
+}
+
+#[test]
+fn a_marked_dirty_child_refuses_before_any_successor_spawn() {
+    const CHILD: &str = "ZERUS_TEST_CONTEXT_REFUSAL_CONTROL";
+    if std::env::var_os(CHILD).is_some() {
+        let before = SPAWNS.load(Ordering::Relaxed);
+        assert!(std::panic::catch_unwind(non_agent).is_err());
+        assert_eq!(SPAWNS.load(Ordering::Relaxed), before);
+        return;
+    }
+    let thread = std::thread::current();
+    let case = thread.name().unwrap();
+    let original = case.to_owned();
+    run_case(case, Duration::from_secs(90), move |command| {
+        command
+            .env(CHILD, "1")
+            .env(REENTRY, original)
+            .env("HGS_SESSION_ID", "synthetic-agent-context");
+    });
+}
+
+#[test]
+fn native_fixtures_select_explicit_mode_before_the_process_cache() {
+    const CHILD: &str = "ZERUS_TEST_CONTEXT_NATIVE_CONTROL";
+    if std::env::var_os(CHILD).is_some() {
+        if native() {
+            return;
+        }
+        assert_eq!(
+            std::env::var(zerus_client_core::desktop::service::MODE_ENV).unwrap(),
+            "0"
+        );
+        assert!(!crate::desktop_service::mode());
+        return;
+    }
+    let thread = std::thread::current();
+    run_case(thread.name().unwrap(), Duration::from_secs(30), |command| {
+        command
+            .env(CHILD, "1")
+            .env(zerus_client_core::desktop::service::MODE_ENV, "1")
+            .env("HGS_SESSION_ID", "synthetic-agent-context");
+    });
+}

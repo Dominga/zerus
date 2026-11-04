@@ -184,6 +184,9 @@ fn drafts_root(data_dir: &std::path::Path, replay: bool) -> std::path::PathBuf {
 #[cfg(all(test, unix))]
 pub(crate) static PROCESS_TREE: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
+#[cfg(all(test, unix, feature = "live"))]
+mod test_context;
+
 /// Writes an executable test fixture without this process ever holding it
 /// open for writing. A test thread that forks while such a descriptor is open
 /// passes it to a child that has not exec'd yet, and running the file then

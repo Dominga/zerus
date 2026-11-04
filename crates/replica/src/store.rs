@@ -243,6 +243,11 @@ pub(crate) struct Mark {
     pub(crate) opening: Option<String>,
 }
 
+/// The format of the mark and its seal. Every cache that remembers whether
+/// a task loads (the inventory cache, the task index) names it, so a change
+/// to what makes a mark readable makes them read every task again.
+pub const MARK_FORMAT: i64 = 1;
+
 /// The mark as written: its fields and their seal.
 #[derive(Serialize, Deserialize)]
 struct SealedMark {
@@ -258,7 +263,7 @@ impl Mark {
     /// the peers sorted).
     fn seal(&self) -> Result<String> {
         let mut hasher = Sha256::new();
-        hasher.update(b"zerus-task-mark-1\n");
+        hasher.update(format!("zerus-task-mark-{MARK_FORMAT}\n").as_bytes());
         hasher.update(serde_json::to_vec(self)?);
         Ok(format!("{:x}", hasher.finalize()))
     }

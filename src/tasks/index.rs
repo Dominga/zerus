@@ -26,7 +26,11 @@ const FILE: &str = "task-index-v1.sqlite3";
 /// 2: the histories of recently read tasks as well (slice B). 3: rows and
 /// history headers carry the task's execution (zerus-cg5h.4), so rows cached
 /// without it are built again rather than mixed with rows that have it.
-const SCHEMA: i64 = 3;
+const ROWS: i64 = 3;
+/// The index's version: its rows' shape and the replica's mark format, since
+/// a row remembers whether its task loaded, which the mark decides. An index
+/// made under another mark rule (before the seal, for one) is built again.
+const SCHEMA: i64 = ROWS * 1000 + zerus_replica::MARK_FORMAT;
 /// The histories kept: the most recently read tasks.
 const HISTORIES: i64 = 16;
 /// The one-task history cache this index replaces.

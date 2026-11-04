@@ -92,9 +92,14 @@ const CACHE_MARK: &str = "inventory.repaired";
 /// What the mark holds for the cache `bytes`.
 fn cache_mark(bytes: &[u8]) -> String {
     // 2: a cut-over task's entry follows its mark, which a load raises
-    // before its version is acknowledged; a cache of an earlier build is
-    // never trusted.
-    format!("schema-repair-2 {:x}\n", Sha256::digest(bytes))
+    // before its version is acknowledged. The mark's format joins it: a
+    // cache made under another rule for a readable mark (before the seal,
+    // for one) is never trusted, so every task is read again.
+    format!(
+        "schema-repair-2 mark-{} {:x}\n",
+        crate::store::MARK_FORMAT,
+        Sha256::digest(bytes)
+    )
 }
 
 /// What tells a file changed without reading it: its length, modification
@@ -777,6 +782,69 @@ mod tests {
             .bytes;
         peer.import_unrepaired_for_test(&bytes);
         assert_eq!(peer.stored_schema(), EXECUTION_TASK_SCHEMA);
+    }
+
+    /// desktop-u G1 on #1415 (R7): an inventory cache made before the seal
+    /// rule (marked `schema-repair-2`, as R5 wrote it) remembers a task with
+    /// an unsealed mark as healthy. This build never trusts it: the task is
+    /// read, kept as damaged, and its unsealed mark stays exactly as it was.
+    #[test]
+    fn a_cache_from_before_the_seal_never_serves_an_unsealed_mark_as_healthy() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(dir.path(), "project-1").unwrap();
+        let mut task = created();
+        assert!(task.floor().unwrap());
+        store.save(&mut task).unwrap();
+        let uuid = task.uuid().to_owned();
+        // The mark as R5 wrote it: its fields, no seal.
+        let sealed = store.mark(&uuid).unwrap();
+        let unsealed = serde_json::to_vec(&sealed).unwrap();
+        fs::write(store.managed_path(&uuid), &unsealed).unwrap();
+        let old_time = SystemTime::now() - Duration::from_secs(60);
+        for path in [
+            store.snapshot_path(&uuid),
+            store.updates_path(&uuid),
+            store.managed_path(&uuid),
+        ] {
+            fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(old_time))
+                .unwrap();
+        }
+        assert!(store.load(&uuid).is_err());
+        // R5's warm cache: the task healthy, under the stamps it has now.
+        let cache = Cache {
+            project: None,
+            tasks: BTreeMap::from([(
+                uuid.clone(),
+                Cached {
+                    files: store.stamps(&uuid),
+                    version: version(&task.current_vv()),
+                    error: None,
+                    stage: Some(task.stage().unwrap()),
+                    stage_at: Some(task.stage_at()),
+                    sent: Some(Sent { session: None }),
+                },
+            )]),
+        };
+        let bytes = serde_json::to_vec(&cache).unwrap();
+        let write_cache = |marker: String| {
+            fs::write(store.dir().join(CACHE), &bytes).unwrap();
+            fs::write(store.dir().join(CACHE_MARK), marker).unwrap();
+        };
+        write_cache(format!("schema-repair-2 {:x}\n", Sha256::digest(&bytes)));
+        let (inventory, damaged) = store.inventory().unwrap();
+        assert!(!inventory.tasks.contains_key(&uuid));
+        assert!(damaged.iter().any(|d| d.uuid == uuid));
+        assert_eq!(fs::read(store.managed_path(&uuid)).unwrap(), unsealed);
+        // The marker is what decides: the same bytes under this build's
+        // marker would be trusted, which this build never writes for such a
+        // task, since its own reading keeps it damaged.
+        write_cache(cache_mark(&bytes));
+        assert!(store.inventory().unwrap().0.tasks.contains_key(&uuid));
+        assert_eq!(fs::read(store.managed_path(&uuid)).unwrap(), unsealed);
     }
 
     /// review-n on #1415 (R5): a save that fails after its mark leaves the

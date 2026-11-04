@@ -1056,3 +1056,38 @@ fn a_removed_task_drops_its_cache_row_and_a_mark_alone_stays_damaged() {
     let page = index.page(Stage::Todo, 10, &Anchor::Start).unwrap();
     assert!(page.rows.is_empty(), "{:?}", page.rows);
 }
+
+/// desktop-u G1 on #1415 (R7): an index made under the rule before the
+/// mark's seal remembers a task with an unsealed mark as a healthy row. This
+/// build's index version names the mark format, so that index is built again
+/// and the task is listed as damaged; the unsealed mark is left as it was.
+#[test]
+fn an_index_from_before_the_seal_is_built_again() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let mut task = new_task(&store, "T-aaaaaa", Stage::Todo, "V", "Floored");
+    assert!(task.floor().unwrap());
+    aged_save(&store, &mut task);
+    let uuid = task.uuid().to_owned();
+    drop(Index::open(&store).unwrap());
+    // The mark as R5 wrote it, and the index as R5 left it: a healthy row
+    // under the files' current stamps, at the version before the seal.
+    let path = store.dir().join("tasks").join(format!("{uuid}.managed"));
+    let mut mark: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    mark.as_object_mut().unwrap().remove("seal");
+    let unsealed = serde_json::to_vec(&mark).unwrap();
+    fs::write(&path, &unsealed).unwrap();
+    age(&store, &uuid);
+    assert!(store.load(&uuid).is_err());
+    {
+        let db = Connection::open(store.dir().join(FILE)).unwrap();
+        db.execute("UPDATE tasks SET files=?1 WHERE uuid=?2", params![files(store.dir(), &uuid), uuid])
+            .unwrap();
+        db.execute_batch(&format!("PRAGMA user_version={ROWS};")).unwrap();
+    }
+    let mut index = Index::open(&store).unwrap();
+    let page = index.page(Stage::Todo, 10, &Anchor::Start).unwrap();
+    assert!(page.rows.iter().all(|r| r["uuid"] != json!(uuid)), "{:?}", page.rows);
+    assert_eq!(index.damaged().unwrap().1, 1);
+    assert_eq!(fs::read(&path).unwrap(), unsealed);
+}

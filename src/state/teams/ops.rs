@@ -512,7 +512,17 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
 /// Replaces the plan: members besides the lead, tasks and dependencies, the
 /// roadmap of later phases, and optionally settings. Only while Planning.
 fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
-    ensure!(team.status == TeamStatus::Planning, "Only a team in Planning can change its plan");
+    // Owner report 2026-11-04: a lead that ran plan on a draft got no hint.
+    match team.status {
+        TeamStatus::Planning => {}
+        TeamStatus::Draft => bail!(
+            "This team is still a draft, so it has no plan yet: change it with hgs team draft --json (\"action\":\"update\"; hgs guide team-draft); the owner's Create team makes it a team you plan"
+        ),
+        TeamStatus::Running | TeamStatus::Paused => bail!(
+            "This team already runs: add work with hgs team extend --json (a new phase) or propose a change (hgs guide team-lead)"
+        ),
+        _ => bail!("Only a team in Planning can change its plan"),
+    }
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you can change the plan");
     // U59: at the start of planning the lead proposes standard or free with a
     // one-line reason; the owner's approval chooses one of the two.

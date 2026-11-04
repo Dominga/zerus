@@ -70,7 +70,6 @@ pub(in crate::desktop) fn started(location: &Location, owner: &Arc<platform::Fil
             let root = control.root.clone();
             control.worker = Some(thread::spawn(move || {
                 let _ = std::io::stdin().read(&mut [0]).unwrap();
-                original.stop();
                 release.send(()).unwrap();
                 let end = Instant::now() + Duration::from_secs(3);
                 loop {
@@ -82,6 +81,10 @@ pub(in crate::desktop) fn started(location: &Location, owner: &Arc<platform::Fil
                     thread::sleep(Duration::from_millis(2));
                 }
                 assert!(original.drained());
+                // A stopped poll can release the owner itself. Keep the loan
+                // through the marker so serve's return is ordered after it.
+                original.stop();
+                mark(&root, "loan-releasing");
                 drop(original);
                 mark(&root, "loan-released");
             }));
@@ -193,6 +196,12 @@ fn original_actor_child() {
         })
     });
     let result = desktop::serve(&config, Location::new(&config).unwrap(), false);
+    if case == Case::OwnerLoan {
+        assert!(
+            root.join("loan-releasing").is_file(),
+            "serve returned before its original loan joined"
+        );
+    }
     let control = CONTROL.with(|selected| selected.borrow_mut().take().unwrap());
     if let Some(worker) = control.worker {
         worker.join().unwrap();

@@ -53,6 +53,7 @@ model's requests. Each case stops what it started, its sessions, the host and th
 model, and waits for every agent and supervisor through handles opened while they ran,
 and until nothing holds its executables, before its folders go.
 """
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -973,6 +974,29 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
     def accepted(self, name, text, conversation_id=None):
         conversation_id = conversation_id or self.row(name).get("conversation_id")
         return self.user_messages(conversation_id).count(text) if conversation_id else 0
+
+    def turn_ended(self, name, since):
+        # inspect takes the writer lock also needed by the native five-second
+        # Stop hook. Do not repeatedly launch inspectors ahead of that hook on
+        # a busy runner. Observe its journal read-only, then retain the public
+        # Stop/idle assertions; a missing or timed-out hook still fails the test.
+        record = self.record(name)
+        run, conversation = record.get("run_id"), record.get("conversation_id")
+        if not run or not conversation:
+            return None
+        path = self.state / "events.sqlite3"
+        try:
+            with closing(sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=0)) as database:
+                stopped = database.execute(
+                    "SELECT 1 FROM events WHERE name=? AND conversation=? "
+                    "AND json_extract(payload, '$.run_id')=? "
+                    "AND json_extract(payload, '$.type')='Stop' "
+                    "AND COALESCE(json_extract(payload, '$.agent_id'), '') IN ('', 'main') "
+                    "AND json_extract(payload, '$.at')>=? ORDER BY seq DESC LIMIT 1",
+                    (name, conversation, run, since)).fetchone()
+        except sqlite3.OperationalError:
+            return None  # Not created yet or momentarily busy; the original end still applies.
+        return super().turn_ended(name, since) if stopped else None
 
     def test_a_tracked_launch_reports_its_hooks_and_send_delivers_exact_messages(self):
         name = self.launch("messages", self.NO_HOOK_REVIEW)

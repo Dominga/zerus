@@ -98,7 +98,7 @@ impl ServiceSelection {
 }
 
 #[derive(PartialEq, Eq)]
-struct Birth {
+pub(super) struct Birth {
     pid: u32,
     parent: u32,
     uid: u32,
@@ -106,7 +106,7 @@ struct Birth {
     seconds: u64,
     microseconds: u64,
 }
-fn birth(child: &mut Child) -> Result<Birth, Refusal> {
+pub(super) fn birth(child: &mut Child) -> Result<Birth, Refusal> {
     if child.try_wait().map_err(|_| Refusal::Child)?.is_some() {
         return Err(Refusal::Child);
     }

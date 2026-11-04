@@ -54,12 +54,10 @@ fn mixed_ansible_invalid_and_valid_rows_never_complete_a_partial_import() {
         2
     );
     assert_eq!(plan.evidence().problem(), Some(Code::InvalidFolders));
-    assert!(
-        !plan
-            .evidence()
-            .observed(&binding, &observed(&snapshot, &plan))
-            .unwrap()
-    );
+    assert!(!plan
+        .evidence()
+        .observed(&binding, &observed(&snapshot, &plan))
+        .unwrap());
 }
 
 #[test]

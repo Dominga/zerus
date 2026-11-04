@@ -382,6 +382,11 @@ pub struct StartSend {
 }
 
 impl StartSend {
+    /// How this continuation starts its session.
+    pub fn choice(&self) -> StartChoice {
+        self.choice
+    }
+
     /// The answer to the start question. `current` is the session again and
     /// `draft_now` the composer's draft; the waiting text comes back with the
     /// continuation, or a notice when nothing starts.

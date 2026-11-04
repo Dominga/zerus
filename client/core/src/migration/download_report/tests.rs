@@ -171,8 +171,8 @@ fn a_verbatim_windows_folder_is_reported_as_its_computer_names_it() {
     use crate::paths::{absolute, Style};
     for (canonical, expected) in [
         (
-            r"\\?\C:\Users\sample\Downloads",
-            r"C:\Users\sample\Downloads",
+            r"\\?\C:\Users\example\Downloads",
+            r"C:\Users\example\Downloads",
         ),
         (r"\\?\d:\dl", r"d:\dl"),
         (
@@ -194,8 +194,8 @@ fn a_verbatim_windows_folder_is_reported_as_its_computer_names_it() {
     }
     // Paths already in a computer's form are unchanged.
     for plain in [
-        "/home/sample/Downloads",
-        r"C:\Users\sample\Downloads",
+        "/home/example/Downloads",
+        r"C:\Users\example\Downloads",
         r"\\files.example\share\dl",
     ] {
         assert_eq!(computer_folder(plain).as_deref(), Some(plain));

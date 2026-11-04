@@ -1,5 +1,6 @@
+import { createRoot } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
-import { createTaskFiles } from "./taskFiles";
+import { createTaskFiles, taskFileCard, type TaskFileCardPort } from "./taskFiles";
 import type { Fetched, TaskFileSource } from "../types";
 
 const source = (file: number, sha = "a".repeat(64)): TaskFileSource => ({
@@ -43,5 +44,55 @@ describe("task files read on their own", () => {
     const files = createTaskFiles(read);
     await expect(files.preview("p1", "t1", source(1, "1".repeat(64)), () => true)).rejects.toThrow("changed");
     expect(await files.preview("p1", "t1", source(2, "2".repeat(64)), () => true)).toEqual(copy("f2.png"));
+  });
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((yes) => { resolve = yes; });
+  return { promise, resolve };
+}
+/** A card's file as its page names it: not read yet. */
+const listed = (mime: string): Fetched => ({ path: "", name: "f1.png", mime, bytes: 3, thumbnail: false, source: source(1) });
+function card(mime: string, removedDuringRead: boolean) {
+  const pending = deferred<Fetched>(), read = vi.fn(() => pending.promise), opened: string[] = [], notices: string[] = [];
+  const port: TaskFileCardPort = {
+    files: createTaskFiles(read), open: async (path) => { opened.push(path); return null; },
+    notify: (tone, text) => { notices.push(`${tone} ${text}`); },
+  };
+  let dispose!: () => void;
+  const shown = createRoot((done) => { dispose = done; return taskFileCard(listed(mime), "p1", "t1", port); });
+  return { shown, read, opened, notices, dispose, finish: () => { if (removedDuringRead) dispose(); pending.resolve(copy("f1.png")); } };
+}
+
+describe("a task file card (zerus-cg5h.28)", () => {
+  it("applies its preview only while it is still shown", async () => {
+    for (const removed of [false, true]) {
+      const c = card("image/png", removed);
+      await tick();
+      expect(c.read).toHaveBeenCalledOnce();
+      c.finish();
+      await tick();
+      expect(c.shown.copy()).toEqual(removed ? undefined : copy("f1.png"));
+      c.dispose();
+    }
+  });
+  it("an open whose read ends after the card was removed neither keeps the copy nor opens the file", async () => {
+    for (const removed of [false, true]) {
+      const c = card("text/plain", removed);
+      await tick();
+      expect(c.read).not.toHaveBeenCalled();
+      const opening = c.shown.open();
+      void c.shown.open();
+      await tick();
+      expect(c.read).toHaveBeenCalledOnce();
+      expect(c.shown.reading()).toBe(true);
+      c.finish();
+      await opening;
+      expect(c.opened).toEqual(removed ? [] : ["cache/x/f1.png"]);
+      expect(c.shown.copy()).toEqual(removed ? undefined : copy("f1.png"));
+      expect([c.shown.reading(), c.notices]).toEqual([false, []]);
+      c.dispose();
+    }
   });
 });

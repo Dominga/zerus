@@ -55,6 +55,44 @@ def windows_process_metadata(pid, handle=None):
             dll.CloseHandle(handle)
 
 
+def same_replacement(arranged, observed):
+    """The drift arrangement's replacement engine as the worker proved it
+    before the release (GUID, PID and native birth), never a process adopted
+    afterwards: a complete identity that matches exactly."""
+    keys = ('guid', 'pid', 'birth')
+    return all(arranged.get(key) for key in keys) and {key: observed.get(key) for key in keys} == {
+        key: arranged[key] for key in keys}
+
+
+def windows_process_parents():
+    """Read-only pid -> parent pid from one Toolhelp snapshot."""
+    import ctypes as c
+    from ctypes import wintypes as w
+
+    class Entry(c.Structure):
+        _fields_ = [('size', w.DWORD), ('usage', w.DWORD), ('pid', w.DWORD), ('heap', c.c_size_t),
+                    ('module', w.DWORD), ('threads', w.DWORD), ('parent', w.DWORD), ('priority', w.LONG),
+                    ('flags', w.DWORD), ('exe', w.WCHAR * 260)]
+
+    dll = c.WinDLL('kernel32', use_last_error=True)
+    dll.CreateToolhelp32Snapshot.argtypes = (w.DWORD, w.DWORD)
+    dll.CreateToolhelp32Snapshot.restype = w.HANDLE
+    dll.Process32FirstW.argtypes = dll.Process32NextW.argtypes = (w.HANDLE, c.POINTER(Entry))
+    dll.CloseHandle.argtypes = (w.HANDLE,)
+    snapshot = dll.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+    assert snapshot and snapshot != c.c_void_p(-1).value, c.get_last_error()
+    try:
+        entry, parents = Entry(), {}
+        entry.size = c.sizeof(Entry)
+        more = dll.Process32FirstW(snapshot, c.byref(entry))
+        while more:
+            parents[entry.pid] = (entry.parent, entry.exe)
+            more = dll.Process32NextW(snapshot, c.byref(entry))
+        return parents
+    finally:
+        dll.CloseHandle(snapshot)
+
+
 def windows_file_users(path):
     """Bounded Restart Manager observation of ONE private image; no shutdown API."""
     import ctypes as c
@@ -340,6 +378,19 @@ class WindowsFrontend(unittest.TestCase):
                 os.environ[key] = previous
 
 
+class DriftReplacementIdentity(unittest.TestCase):
+    """Pure control for the hosted drift arrangement; no Windows API."""
+
+    def test_only_the_engine_proven_before_the_release_counts(self):
+        arranged = dict(guid='{4B27B893-B923-49A9-B9E0-3C8C90DCFA73}', pid=2, birth=222)
+        self.assertTrue(same_replacement(arranged, dict(arranged)))
+        for observed in (dict(arranged, pid=3, birth=333), dict(arranged, birth=333), dict(arranged, pid=3),
+                         dict(arranged, guid='{85CE29DB-DBE8-4634-8E4B-E5CB3A107FD6}'), {}):
+            self.assertFalse(same_replacement(arranged, observed), observed)
+        for partial in ({}, dict(arranged, pid=0), dict(arranged, guid=''), dict(guid=arranged['guid'], pid=2)):
+            self.assertFalse(same_replacement(partial, dict(partial)), partial)
+
+
 @unittest.skipUnless(os.name == 'nt' and os.environ.get('GITHUB_ACTIONS') == 'true'
                      and os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted',
                      'Task-mode fixture requires a disposable hosted Windows runner')
@@ -398,9 +449,9 @@ class WindowsTaskMode(unittest.TestCase):
         self.assertLessEqual(len(result.stdout.encode('utf-8')), 65536)
         return json.loads(result.stdout)
 
-    def frontend_call(self, control, prefix):
+    def frontend_call(self, control, prefix, *, frontend=None):
         self.control.write_text(json.dumps(dict(control, cli=str(self.cli_image))), encoding='utf-8')
-        result = subprocess.run([str(self.frontend), '--exact',
+        result = subprocess.run([str(frontend or self.frontend), '--exact',
                                  'instance::tests::evidence::native_frontend_request_fixture', '--nocapture'],
                                 env=dict(self.env, HGS_FRONTEND_TEST_CONTROL=str(self.control)),
                                 capture_output=True, text=True, timeout=40,
@@ -425,6 +476,70 @@ class WindowsTaskMode(unittest.TestCase):
         self.assertTrue(result['accepted'], result)
         self.assertTrue(result['durable'], result)
         self.assertEqual(result['outcome']['state'], 'granted', result)
+
+    def requester_bound_ownership_is_a_native_read(self):
+        """Real current requester + existing actor row; no synthetic auth positive."""
+        lifecycle = self.cli('desktop', 'status', '--json')['lifecycle']
+        ownership = self.cli('desktop', 'ownership-status', '--json')
+        self.assertEqual(ownership['state'], 'service')
+        self.assertTrue(ownership['identity_current'])
+        self.assertFalse(ownership['rearm_required'])
+        path = self.state / 'desktop' / 'windows-registration-mode.json'
+        record = path.read_bytes()
+        instances = self.observe()['instances']
+        def rows():
+            with closing(sqlite3.connect(self.state / 'desktop' / 'state.sqlite3')) as db:
+                return tuple(db.execute('SELECT * FROM desktop_ownership')), tuple(db.execute(
+                    'SELECT request_id,revision,fingerprint,origin,receipt,final FROM desktop_ownership_requests ORDER BY revision'))
+        before = rows()
+        query = dict(request_id=str(uuid.uuid4()), configuration=ownership['configuration'],
+                     journal=ownership['journal'], owner_epoch=ownership['owner_epoch'],
+                     service_epoch=lifecycle['epoch'], generation=lifecycle['generation'])
+        control = dict(case='ownership_observe', configuration=ownership['configuration'], query=query)
+        positive = self.frontend_call(control, 'OWNERSHIP_OBSERVATION ')
+        self.assertTrue(positive['checked'], positive)
+        self.assertEqual(positive['current'], ownership)
+        # A second natively selected image, with identical bytes, is not the
+        # granted Origin. cli_image now names the staged CLI: its sibling is
+        # self.frontend itself, so copying there would not change the requester.
+        # This class runs ONLY on a disposable hosted runner. Use the other
+        # maintained installed-app path, refuse any existing file, and remove
+        # only our exact file and the empty directories we created.
+        other = Path(self.env['LOCALAPPDATA']) / 'Programs' / 'Zerus' / 'hgs-tray.exe'
+        self.assertFalse(other.exists(), 'disposable runner already has a Zerus frontend')
+        created = []
+        parent = other.parent
+        while not parent.exists():
+            created.append(parent)
+            parent = parent.parent
+        original = self.frontend.stat()
+        owned = False
+        try:
+            other.parent.mkdir(parents=True, exist_ok=True)
+            with other.open('xb') as target:
+                owned = True
+                with self.frontend_source.open('rb') as source:
+                    shutil.copyfileobj(source, target)
+            self.assertFalse(os.path.samefile(other, self.frontend))
+            refused = self.frontend_call(control, 'OWNERSHIP_OBSERVATION ', frontend=other)
+            self.assertFalse(refused['checked'], refused)
+            current = self.frontend.stat()
+            self.assertEqual((current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns),
+                             (original.st_dev, original.st_ino, original.st_size, original.st_mtime_ns))
+        finally:
+            if owned:
+                other.unlink()
+            for directory in created:
+                directory.rmdir()
+        for key, value in [('service_epoch', str(uuid.uuid4())),
+                           ('generation', lifecycle['generation'] + 1),
+                           ('owner_epoch', str(uuid.uuid4())), ('journal', str(uuid.uuid4()))]:
+            stale = dict(control, query=dict(query, **{key: value}))
+            self.assertFalse(self.frontend_call(stale, 'OWNERSHIP_OBSERVATION ')['checked'], key)
+        self.assertEqual(rows(), before)
+        self.assertEqual(path.read_bytes(), record)
+        self.assertEqual(self.observe()['instances'], instances)
+        self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), ownership)
 
     def cancel(self, request_id):
         result = self.frontend_call(dict(case='mode_cancel', request_id=request_id), 'MODE_CALLER_RESULT ')
@@ -541,6 +656,179 @@ class WindowsTaskMode(unittest.TestCase):
         finally:
             dll.CloseHandle(handle)
         self.assertIsNone(self.cli('desktop', 'registration', 'status', '--json')['first_choice_lost'])
+
+    def first_call_started(self, request_id):
+        """The first-choice form through the installed-frontend caller, not
+        awaited. Debug builds hold exactly this UUID at Held (zerus-yfbd.1)."""
+        self.control.write_text(json.dumps(dict(case='mode_switch', desired='background', request_id=request_id,
+                                                cli=str(self.cli_image))), encoding='utf-8')
+        return subprocess.Popen([str(self.frontend), '--exact',
+                                 'instance::tests::evidence::native_frontend_request_fixture', '--nocapture'],
+                                env=dict(self.env, HGS_FRONTEND_TEST_CONTROL=str(self.control),
+                                         HGS_TEST_MODE_HELD_PAUSE=request_id),
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                creationflags=subprocess.CREATE_NO_WINDOW)
+
+    def first_call_finished(self, child):
+        out, err = child.communicate(timeout=90)
+        values = [json.loads(line.removeprefix('MODE_CALLER_RESULT ')) for line in out.splitlines()
+                  if line.startswith('MODE_CALLER_RESULT ')]
+        self.assertEqual(len(values), 1, (out + err)[-8192:])
+        return values[0]
+
+    def held_helper(self, request_id, child):
+        """The helper's own private marker names its PID. It counts only as
+        the helper of THIS call: the selected CLI image, a child of the CLI
+        that the frontend fixture child started, with no other owned work."""
+        marker = self.config / f'held-pause-{request_id}.json'
+        value, deadline = None, time.monotonic() + 30
+        while value is None and time.monotonic() < deadline:
+            self.assertIsNone(child.poll(), 'the first choice ended before Held')
+            try:
+                value = json.loads(marker.read_text(encoding='utf-8'))
+            except (FileNotFoundError, PermissionError, json.JSONDecodeError):
+                time.sleep(0.05)
+        self.assertIsNotNone(value, 'the debug helper never reached Held')
+        self.assertEqual(value['request'], request_id)
+        helper = windows_process_metadata(value['pid'])
+        self.assertFalse(helper['exited'], helper)
+        parents = windows_process_parents()
+        cli = parents[value['pid']][0]
+        self.assertEqual(parents[cli][0], child.pid, parents.get(cli))
+        for pid in (value['pid'], cli):
+            self.assertEqual(Path(windows_process_metadata(pid)['image']).resolve(strict=True), self.cli_image)
+        owned = [pid for pid, (parent, exe) in parents.items() if parent == value['pid']
+                 and windows_process_metadata(pid).get('birth', 0) >= helper['birth']]
+        # A console host is the only child a hidden console helper may own.
+        self.assertTrue(all(parents[pid][1].lower() == 'conhost.exe' for pid in owned), owned)
+        return dict(pid=value['pid'], birth=helper['birth'], cli=cli, owned=owned, marker=marker)
+
+    def kill_held_helper(self, helper):
+        """Terminate only the captured helper (same PID AND birth through one
+        handle), then wait for its own console host to leave by itself."""
+        import ctypes as c
+        from ctypes import wintypes as w
+        dll = c.WinDLL('kernel32', use_last_error=True)
+        dll.OpenProcess.argtypes = (w.DWORD, w.BOOL, w.DWORD)
+        dll.OpenProcess.restype = w.HANDLE
+        dll.TerminateProcess.argtypes = (w.HANDLE, w.UINT)
+        dll.WaitForSingleObject.argtypes = (w.HANDLE, w.DWORD)
+        dll.WaitForSingleObject.restype = w.DWORD
+        dll.CloseHandle.argtypes = (w.HANDLE,)
+        handle = dll.OpenProcess(0x0001 | 0x00100000 | 0x1000, False, helper['pid'])
+        self.assertTrue(handle, c.get_last_error())
+        try:
+            current = windows_process_metadata(helper['pid'], handle)
+            self.assertEqual((current['birth'], current['exited']), (helper['birth'], False), current)
+            self.assertTrue(dll.TerminateProcess(handle, 1), c.get_last_error())
+            self.assertEqual(dll.WaitForSingleObject(handle, 10000), 0)
+        finally:
+            dll.CloseHandle(handle)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and any(not windows_process_metadata(pid).get('exited', True)
+                                                  and 'error' not in windows_process_metadata(pid)
+                                                  for pid in helper['owned']):
+            time.sleep(0.1)
+
+    def lost_reply_at_held_keeps_its_original(self):
+        """Debug held seam (zerus-yfbd.1). While a first choice is held after
+        its durable reservation, an ownership change is refused: the Grant
+        cannot drift inside a transition (the helper holds the handoff lock
+        every Grant/revoke takes). Then a true helper death: the original stays
+        Unknown and pending, a duplicate only reads, the old frame refuses, and
+        only the supported pre-manager cancellation closes it."""
+        path = self.state / 'desktop' / 'windows-registration-mode.json'
+        configuration = self.cli('desktop', 'status', '--json')['configuration']
+        before = self.observe()['instances']
+        service = self.cli('desktop', 'status', '--json')['lifecycle']['pid']
+        # "Unchanged" below compares exactly this one running passive engine.
+        self.assertEqual([item['engine_pid'] for item in before], [service], before)
+        granted = self.cli('desktop', 'ownership-status', '--json')
+        database = (self.state / 'desktop' / 'state.sqlite3').as_uri() + '?mode=ro'
+        with closing(sqlite3.connect(database, uri=True)) as db:
+            commands = db.execute('SELECT count(*) FROM desktop_commands').fetchone()[0]
+        request = str(uuid.uuid4())
+        child = self.first_call_started(request)
+        helper = self.held_helper(request, child)
+        record = json.loads(path.read_text(encoding='utf-8'))
+        self.assertEqual((record['pending']['request_id'], record['pending']['phase']), (request, 'held'), record)
+        revoke = subprocess.run([str(self.cli_image), 'desktop', 'revoke', '--json', '--request-id',
+                                 str(uuid.uuid4()), '--reason', 'manual'], env=self.env, capture_output=True,
+                                text=True, encoding='utf-8', timeout=30)
+        self.assertNotEqual(revoke.returncode, 0, revoke.stdout)
+        self.assertIn('handoff', revoke.stdout + revoke.stderr)
+        self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), granted)
+        with closing(sqlite3.connect(database, uri=True)) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_commands').fetchone()[0], commands)
+        self.kill_held_helper(helper)
+        lost = self.first_call_finished(child)
+        self.assertNotEqual(lost['code'], 0, lost)
+        self.assertIn('retain the original pending UUID', lost['stderr'], lost)
+        helper['marker'].unlink()
+        status = self.cli('desktop', 'registration', 'status', '--json')
+        self.assertEqual((status['pending_transition']['request_id'], status['pending_transition']['phase']),
+                         (request, 'held'), status)
+        self.assertEqual((status['first_choice']['request'], status['first_choice']['phase']),
+                         (request, 'unknown'), status)
+        self.assertIsNone(status['first_choice_lost'])
+        anchor = self.config / f'windows-first-choice-{configuration}.json'
+        self.assertEqual(json.loads(anchor.read_bytes())['request'], request)
+        result = self.cli('desktop', 'registration', 'mode-result', '--json', '--request-id', request)
+        self.assertEqual((result['outcome'], result['receipt']['phase']), ('unknown', 'unknown'), result)
+        self.assertEqual(self.observe()['instances'], before)
+        self.assertEqual(self.cli('desktop', 'status', '--json')['lifecycle']['pid'], service)
+        arranged = path.read_bytes()
+        duplicate = self.first_call('background', request)
+        self.assertEqual(duplicate['code'], 0, duplicate)
+        self.assertFalse(json.loads(duplicate['stdout'])['ok'], duplicate)
+        refused = self.mode('background')
+        self.assertFalse(refused['ok'], refused)
+        self.assertIn('first mode choice is pending', refused['error'])
+        self.assertEqual(path.read_bytes(), arranged)
+        self.assertEqual(self.observe()['instances'], before)
+        cancelled = self.cancel(request)
+        self.assertEqual(cancelled['cancelled_request_id'], request, cancelled)
+        self.assertFalse(cancelled['manager_changed'], cancelled)
+        result = self.cli('desktop', 'registration', 'mode-result', '--json', '--request-id', request)
+        self.assertEqual(result['receipt']['phase'], 'refused', result)
+        self.assertEqual(self.observe()['instances'], before)
+        self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), granted)
+
+    def expired_hold_refuses_at_held(self):
+        """The hold consumes the Stop deadline it started in. Held past it (here
+        to the seam's own bound, with no release), the unchanged StopOffered
+        save's fence refuses the expired deadline before any manager effect:
+        the same original stays pending at Held, and only the supported
+        pre-manager cancellation closes it."""
+        path = self.state / 'desktop' / 'windows-registration-mode.json'
+        before = self.observe()['instances']
+        service = self.cli('desktop', 'status', '--json')['lifecycle']['pid']
+        self.assertEqual([item['engine_pid'] for item in before], [service], before)
+        granted = self.cli('desktop', 'ownership-status', '--json')
+        request = str(uuid.uuid4())
+        child = self.first_call_started(request)
+        helper = self.held_helper(request, child)
+        expired = self.first_call_finished(child)
+        self.assertEqual(expired['code'], 0, expired)
+        refused = json.loads(expired['stdout'])
+        self.assertFalse(refused['ok'], refused)
+        self.assertIn('deadline reached', refused['error'])
+        helper['marker'].unlink()
+        record = json.loads(path.read_text(encoding='utf-8'))
+        self.assertEqual((record['pending']['request_id'], record['pending']['phase']), (request, 'held'), record)
+        status = self.cli('desktop', 'registration', 'status', '--json')
+        self.assertEqual(status['selected_mode'], 'passive')
+        self.assertEqual((status['first_choice']['request'], status['first_choice']['phase']),
+                         (request, 'unknown'), status)
+        result = self.cli('desktop', 'registration', 'mode-result', '--json', '--request-id', request)
+        self.assertEqual((result['outcome'], result['receipt']['phase']), ('unknown', 'unknown'), result)
+        self.assertEqual(self.observe()['instances'], before)
+        self.assertEqual(self.cli('desktop', 'status', '--json')['lifecycle']['pid'], service)
+        self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), granted)
+        cancelled = self.cancel(request)
+        self.assertEqual(cancelled['cancelled_request_id'], request, cancelled)
+        self.assertFalse(cancelled['manager_changed'], cancelled)
+        self.assertEqual(self.observe()['instances'], before)
 
     def first_background_choice_from_plain_passive(self):
         """zerus-yfbd.1: the first explicit background choice, with the
@@ -931,6 +1219,15 @@ class WindowsTaskMode(unittest.TestCase):
         self.assertEqual(self.cli('desktop', 'status', '--json')['lifecycle']['pid'], rollback['instance']['pid'])
 
     def powershell(self, script, data):
+        result = subprocess.run(self.powershell_command(script, data), env=self.env, capture_output=True,
+                                text=True, encoding='utf-8', timeout=12)
+        self.assertEqual(result.returncode, 0,
+                         'fixture PowerShell stdout: ' + result.stdout[-8192:]
+                         + '\nstderr: ' + result.stderr[-1024:])
+        self.assertLessEqual(len(result.stdout.encode('utf-8')), 8192)
+        return json.loads(result.stdout)
+
+    def powershell_command(self, script, data):
         # Fixture-only native COM observation/cleanup. No task-name-wide Stop,
         # schtasks /End, PID kill or executable-pattern cleanup is used.
         request = self.root / ('sdk-' + str(uuid.uuid4()) + '.json')
@@ -969,16 +1266,9 @@ function Get-OwnInstances($scheduler,$registered) {
  exit 1
 }
 ''')
-        command = [str(Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'),
-                   '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
-                   base64.b64encode(body.encode('utf-16le')).decode('ascii')]
-        result = subprocess.run(command, env=self.env, capture_output=True, text=True,
-                                encoding='utf-8', timeout=12)
-        self.assertEqual(result.returncode, 0,
-                         'fixture PowerShell stdout: ' + result.stdout[-8192:]
-                         + '\nstderr: ' + result.stderr[-1024:])
-        self.assertLessEqual(len(result.stdout.encode('utf-8')), 8192)
-        return json.loads(result.stdout)
+        return [str(Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'),
+                '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
+                base64.b64encode(body.encode('utf-16le')).decode('ascii')]
 
     def observe(self):
         return self.powershell(r'''
@@ -1085,6 +1375,165 @@ if(@(Get-OwnInstances $s $t).Count-ne 0) {throw 'fixture instance remains'};
 ''', dict(task=self.task, task_image=task_image, image=str(self.cli_image), sid=self.sid, guid=expected['guid'],
           pid=expected['pid'], birth=expected['birth'] + (1 if wrong_birth else 0)))
 
+    def armed_instance_restart(self, request_id, original):
+        """A COM worker armed BEFORE the call: it pins the exact original
+        instance, waits for the helper's own held marker, stops exactly that
+        instance, starts the task once, proves the replacement engine (GUID,
+        PID, native birth, selected image) and only then releases the hold,
+        all within the Stop deadline the hold consumes. Never retried."""
+        plan = self.cli('desktop', 'registration', '--json')
+        armed = self.root / f'armed-{request_id}'
+        worker = subprocess.Popen(self.powershell_command(r"""
+$s=New-Object -ComObject Schedule.Service;$s.Connect();$t=$s.GetFolder('\').GetTask($x.task);
+$d=$t.Definition;
+if($d.Actions.Count-ne 1 -or $d.Actions.Item(1).Path-cne $x.task_image) {throw 'fixture task action changed'};
+$values=@(Get-OwnInstances $s $t);if($values.Count-ne 1) {throw 'fixture task instance count changed'};
+$i=$values[0];$i.Refresh();if($i.InstanceGuid-cne $x.guid -or $i.EnginePID-ne $x.pid) {throw 'fixture original instance changed'};
+$p=[Diagnostics.Process]::GetProcessById($i.EnginePID);$handle=$p.Handle;
+if($p.HasExited -or $p.StartTime.ToFileTimeUtc()-ne [int64]$x.birth -or $p.MainModule.FileName-cne $x.image) {throw 'fixture original identity changed'};
+[IO.File]::WriteAllText($x.armed,'armed');
+$clock=[Diagnostics.Stopwatch]::StartNew();
+while(-not [IO.File]::Exists($x.marker)) {if($clock.ElapsedMilliseconds-ge 60000) {throw 'held marker never appeared'};Start-Sleep -Milliseconds 5};
+$seen=$clock.ElapsedMilliseconds;
+$i.Refresh();if($i.InstanceGuid-cne $x.guid -or $i.EnginePID-ne $p.Id) {throw 'fixture instance changed before stop'};
+$i.Stop();if(-not $p.WaitForExit(5000)) {throw 'fixture original process exit unconfirmed'};
+if(@(Get-OwnInstances $s $t).Count-ne 0) {throw 'fixture instance remains'};
+$r=$t.Run($null);$guid=[string]$r.InstanceGuid;
+# The replacement engine, proven BEFORE the release and inside the Stop
+# budget the hold consumes; otherwise the arrangement fails unreleased.
+$limit=$clock.ElapsedMilliseconds+1000;$q=$null;
+while($null-eq $q) {
+ if($clock.ElapsedMilliseconds-ge $limit) {throw 'replacement engine not proven within the Stop budget'};
+ $values=@(Get-OwnInstances $s $t);
+ if($values.Count-eq 1 -and [string]$values[0].InstanceGuid-ceq $guid -and $values[0].EnginePID-gt 0) {
+  $q=[Diagnostics.Process]::GetProcessById($values[0].EnginePID)
+ } else {Start-Sleep -Milliseconds 10}
+};
+$qh=$q.Handle;
+if($q.HasExited -or $q.MainModule.FileName-cne $x.image) {throw 'replacement engine is not the selected CLI'};
+$later=@{guid=$guid;pid=$q.Id;birth=$q.StartTime.ToFileTimeUtc()};
+[IO.File]::WriteAllText($x.release,$x.request,[Text.ASCIIEncoding]::new());
+@{stopped=$true;later=$later;restart_ms=$clock.ElapsedMilliseconds-$seen}|ConvertTo-Json -Compress
+""", dict(task=self.task, task_image=plan['argv'][0], guid=original['guid'], pid=original['pid'],
+          birth=original['birth'], image=str(self.cli_image), armed=str(armed),
+          marker=str(self.config / f'held-pause-{request_id}.json'),
+          release=str(self.config / f'held-release-{request_id}'), request=request_id)),
+            env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8',
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        deadline = time.monotonic() + 30
+        while not armed.exists() and worker.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(armed.exists(), worker.communicate(timeout=30) if worker.poll() is not None else 'not armed')
+        return worker
+
+    def armed_instance_restarted(self, worker):
+        out, err = worker.communicate(timeout=60)
+        self.assertEqual(worker.returncode, 0, 'fixture PowerShell stdout: ' + out[-8192:] + '\nstderr: ' + err[-1024:])
+        return json.loads(out)
+
+    def exact_later_instance(self, guid, wait=8):
+        """Exactly one running instance of the fixture task, the given GUID, on
+        a live engine of the selected CLI image. Unobservable fails the
+        control: an empty or different set is never success."""
+        deadline, instances = time.monotonic() + wait, []
+        while True:
+            instances = self.observe()['instances']
+            if (len(instances) == 1 and instances[0]['guid'] == guid) or time.monotonic() >= deadline:
+                break
+            time.sleep(0.25)
+        self.assertEqual([item['guid'] for item in instances], [guid], instances)
+        metadata = windows_process_metadata(instances[0]['engine_pid'])
+        self.assertFalse(metadata.get('exited', True), metadata)
+        self.assertEqual(Path(metadata['image']).resolve(strict=True), self.cli_image)
+        return dict(guid=guid, pid=instances[0]['engine_pid'], birth=metadata['birth'])
+
+    def test_first_choice_instance_drift_stays_unknown_at_stop_offered_with_no_stop(self):
+        """Debug held seam (zerus-yfbd.1), in its own fixture because it ends
+        at a reboot-gated Review. The passive instance changes while a first
+        choice is held after its durable reservation: an armed worker restarts
+        it and releases the hold within the Stop deadline the hold consumes,
+        so expiry cannot mask the instance check (expired_hold_refuses_at_held
+        covers expiry). Production order: the StopOffered save passes its fence
+        (caller, Grant, image, handoff, deadline), then stop_original refuses
+        the changed task selection before any stop. The same original stays
+        Unknown at StopOffered with zero Stop/Update/Start, and its same-boot
+        Review is reboot-gated."""
+        initial = self.cli('desktop', 'registration', 'status', '--json')
+        self.assertFalse(initial['registered'], 'Task-mode fixture requires an unused disposable runner')
+        self.task = initial['task_name']
+        self.sid = self.task.removeprefix('hgs-desktop-')
+        clean = False
+        try:
+            installed = self.cli('desktop', 'registration', 'install', '--json')
+            self.installed = True
+            self.cli_image = Path(installed['cli']['path']).resolve(strict=True)
+            shutil.copy2(self.frontend_source, self.frontend)
+            passive = self.mode('passive')
+            self.assertTrue(passive['ok'], passive)
+            self.latest = passive['instance']
+            self.grant()
+            granted = self.cli('desktop', 'ownership-status', '--json')
+            path = self.state / 'desktop' / 'windows-registration-mode.json'
+            request = str(uuid.uuid4())
+            worker = self.armed_instance_restart(request, self.latest)
+            child = self.first_call_started(request)
+            drift = self.first_call_finished(child)
+            later = self.armed_instance_restarted(worker)
+            print('MODE_TASK_DRIFT_RESTART ' + json.dumps(later), file=sys.stderr)
+            marker = self.config / f'held-pause-{request}.json'
+            self.assertEqual(json.loads(marker.read_text(encoding='utf-8'))['request'], request)
+            self.assertEqual(drift['code'], 0, drift)
+            refused = json.loads(drift['stdout'])
+            self.assertFalse(refused['ok'], refused)
+            # The instance check refused, not the deadline the hold consumed.
+            self.assertIn('Original task selection changed before stop', refused['error'])
+            arranged = later['later']
+            self.assertTrue(same_replacement(arranged, self.exact_later_instance(arranged['guid'])),
+                            (arranged, self.observe()))
+            (self.config / f'held-release-{request}').unlink()
+            marker.unlink()
+            record = json.loads(path.read_text(encoding='utf-8'))
+            self.assertEqual((record['pending']['request_id'], record['pending']['phase']),
+                             (request, 'stop_offered'), record)
+            status = self.cli('desktop', 'registration', 'status', '--json')
+            self.assertEqual(status['selected_mode'], 'passive', 'no update was sent')
+            self.assertEqual((status['first_choice']['request'], status['first_choice']['phase']),
+                             (request, 'unknown'), status)
+            self.assertEqual(self.cli('desktop', 'ownership-status', '--json'), granted)
+            # The one replacement the worker proved before the release was
+            # neither stopped nor replaced: same GUID, PID and birth, still live.
+            self.assertTrue(same_replacement(arranged, self.exact_later_instance(arranged['guid'], wait=0)))
+            result = self.cli('desktop', 'registration', 'mode-result', '--json', '--request-id', request)
+            self.assertEqual((result['outcome'], result['receipt']['phase']), ('unknown', 'unknown'), result)
+            # The arranged later instance is live on the same boot: Review
+            # needs a reboot barrier and changes nothing.
+            reviewed = self.review_mode(request)
+            self.assertEqual(reviewed['code'], 'reboot_required', reviewed)
+            self.assertEqual(reviewed['outcome'], 'unknown', reviewed)
+            self.assertFalse(reviewed['manager_changed'], reviewed)
+            self.assertFalse(reviewed['authority_changed'], reviewed)
+            self.assertTrue(same_replacement(arranged, self.exact_later_instance(arranged['guid'], wait=0)))
+            # Teardown: stop exactly the proven replacement, then remove.
+            stopped = self.stop_exact_passive(dict(guid=arranged['guid'], pid=arranged['pid'],
+                                                   birth=arranged['birth']))
+            self.assertTrue(stopped['stopped'], stopped)
+            # Evidence for zerus-aucth: Review once nothing of the task runs.
+            again = self.review_mode(request)
+            self.assertFalse(again['manager_changed'], again)
+            print('MODE_TASK_DRIFT_REVIEW ' + json.dumps({key: again.get(key) for key in
+                  ('code', 'outcome', 'manager_changed', 'authority_changed')}), file=sys.stderr)
+            self.assertFalse(self.cli('desktop', 'status', '--json')['running'])
+            self.assertFalse(self.cli('desktop', 'registration', 'remove', '--json')['registered'])
+            self.installed = False
+            clean = True
+        finally:
+            if clean:
+                shutil.rmtree(self.root)
+            elif self.installed:
+                # An uncertain instance is never killed or adopted here; the
+                # disposable runner is the final boundary.
+                print('MODE_TASK_DRIFT_OBSERVATION ' + json.dumps(self.observe()), file=sys.stderr)
+
     def test_explicit_mode_round_trip_uses_the_own_task_and_preserves_unrelated_processes(self):
         # A deliberate fixture failure must retain its structured error on
         # stdout, without a task, process mutation or CLIXML progress prefix.
@@ -1128,6 +1577,7 @@ if(@(Get-OwnInstances $s $t).Count-ne 0) {throw 'fixture instance remains'};
             self.assertIsNone(shell.poll())
             passive = self.recover_initial_start_and_cancel_background_before_a_grant(passive)
             self.grant()
+            self.requester_bound_ownership_is_a_native_read()
             granted = self.cli('desktop', 'ownership-status', '--json')
             no_op = self.mode('passive')
             self.assertTrue(no_op['ok'], no_op)
@@ -1140,6 +1590,8 @@ if(@(Get-OwnInstances $s $t).Count-ne 0) {throw 'fixture instance remains'};
             # The first passive-to-background switch uses the first-choice
             # form; the ordinary form stays covered by next_background below.
             self.overlapping_layout_refuses_the_first_choice()
+            self.lost_reply_at_held_keeps_its_original()
+            self.expired_hold_refuses_at_held()
             background = self.first_background_choice_from_plain_passive()
             self.assertTrue(background['ok'], background)
             self.lost_journal_refuses_every_mode_operation(background)

@@ -184,6 +184,9 @@ fn drafts_root(data_dir: &std::path::Path, replay: bool) -> std::path::PathBuf {
 #[cfg(all(test, unix))]
 pub(crate) static PROCESS_TREE: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
+#[cfg(all(test, unix, feature = "live"))]
+mod test_context;
+
 /// Writes an executable test fixture without this process ever holding it
 /// open for writing. A test thread that forks while such a descriptor is open
 /// passes it to a child that has not exec'd yet, and running the file then
@@ -994,6 +997,28 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(task_executor::TaskExecutors::start(app.handle()));
                 let composers = app.state::<composer::Composers>();
                 app.state::<actions::Actions>().on_writes(composers.changed_hook());
+                // Sends the desktop service takes (deferred_send) on Linux and
+                // macOS in desktop-service mode; every other Send stays direct.
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                if desktop_service::mode() {
+                    let (sending, checking) = (app.handle().clone(), app.handle().clone());
+                    composers.set_deferred(composer::DeferredRoute {
+                        send: std::sync::Arc::new(move |session, checkpoint, stdin| {
+                            let service = sending.state::<commands::AppState>().desktop_service();
+                            desktop_service::deferred_send::call(
+                                service,
+                                session,
+                                checkpoint,
+                                stdin,
+                                &std::sync::atomic::AtomicBool::new(false),
+                            )
+                        }),
+                        check: std::sync::Arc::new(move |plan| {
+                            let service = checking.state::<commands::AppState>().desktop_service();
+                            desktop_service::deferred_send::check(service, plan)
+                        }),
+                    });
+                }
                 // The composer's session part once a second (the cache chip)
                 // and the inspect fallback; it sleeps while no composer is open.
                 composers.start_ticker();
@@ -1610,6 +1635,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::inspect_subagent_activity,
         commands::tasks_follow,
         task_details::task_details,
+        task_details::task_reference,
         task_details::task_page,
         task_details::task_attachment_read,
         task_details::task_assign,
@@ -1745,6 +1771,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         terminal::terminal_drop,
         terminal::terminal_shown,
         composer::composer_open,
+        composer::composer_visibility,
         composer::composer_edit,
         composer::composer_pick,
         composer::composer_attach,

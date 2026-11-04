@@ -2291,6 +2291,23 @@ local transport bindings. `hgs swarm export` exports only shared fields. Origina
 Zerus settings stay in `workspace/organizationBeforeSwarm`; import/merge backups
 use `~/.config/hgs/swarm/backup-*.json`.
 
+A session's project is shared by its label and, since zerus-ucck P2c, also by
+its durable session ID. Every writer of a membership on the session's own
+computer, `swarm apply` included, adds an ID twin: the session ID and the
+exact label membership operation it mirrors. Twins live beside the catalog in
+`swarm/session-id-twins.json`, never in `catalog.json`, so an older hgs on the
+same computer, and every peer that does not list the `session_id` kind, never
+reads one; only members that list the kind exchange them. `swarm get` lists
+the ID form as `projects[].session_ids` ("machine\nsession ID") only while the
+operation a twin mirrors is still the selected label membership, so any later
+move by label, from any hgs or desktop, hides it. `swarm get` also reports
+`membership_by_id {ready, missing}`. It is ready when every machine of the
+catalog is this computer or a peer whose last sync listed the kind; any other
+machine fails closed. A desktop reads the ID form only when it is ready. The
+label form is still written and read everywhere else. `swarm export --kinds`
+takes the kinds its requester parses on stdin; without them it exports only
+the kinds hgs v0.47.0 parses.
+
 On a computer without a Qt settings store, the first `hgs swarm get` or initial
 `organization` watch subscription may initialize an empty catalog. It derives
 no projects, folder links or session assignments from names. The client still

@@ -842,6 +842,10 @@ fn creation_config_or_snapshot_mismatch_refuses_and_unsupported_is_private_quara
 #[cfg(target_os = "linux")]
 #[test]
 fn creation_capture_waits_for_shared_report_admission_without_gating_grant_or_catalog() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
     use crate::desktop_service::tests::eventually;
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {

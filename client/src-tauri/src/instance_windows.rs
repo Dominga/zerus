@@ -848,7 +848,15 @@ mod tests {
             } else {
                 configuration.into()
             }));
-            let request = if matches!(mode.as_str(), "ownership_grant" | "ownership_rearm") {
+            let request = if mode == "ownership_observe" {
+                use zerus_client_core::desktop::ownership::{observation::Query, Mode};
+                assert!(responder.configure_ownership_mode_once(Mode::Service));
+                Request::DesktopOwnershipObserve {
+                    query: Box::new(
+                        serde_json::from_value::<Query>(control["query"].clone()).unwrap(),
+                    ),
+                }
+            } else if matches!(mode.as_str(), "ownership_grant" | "ownership_rearm") {
                 use zerus_client_core::desktop::ownership::{Action, Mode};
                 assert!(responder.configure_ownership_mode_once(Mode::Service));
                 Request::DesktopOwnership {
@@ -905,6 +913,32 @@ mod tests {
                 panic!("private canonical fixture claim")
             };
             report_chain(std::process::id());
+            if let Request::DesktopOwnershipObserve { query } = &envelope.request {
+                let controller = crate::desktop_ownership::Controller::new(
+                    control["cli"].as_str().unwrap().into(),
+                    Some(responder.clone()),
+                    zerus_client_core::desktop::ownership::Mode::Service,
+                );
+                let result = controller.observe_current(
+                    (**query).clone(),
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(()),
+                );
+                let result = match result {
+                    Ok(current) => serde_json::json!({"checked":true,"current":current.status()}),
+                    Err(code) => serde_json::json!({"checked":false,"code":code}),
+                };
+                assert!(
+                    !controller.granted(),
+                    "a read cannot reconstruct an issued receipt"
+                );
+                assert!(controller.view().request_id.is_none());
+                println!("\nOWNERSHIP_OBSERVATION {}", result);
+                assert!(claimed.activations.try_recv().is_err());
+                drop(claimed);
+                drop(responder);
+                return;
+            }
             let inv = zerus_client_core::Invocation {
                 args: vec!["desktop".into(), "frontend-request".into(), "--json".into()],
                 stdin: Some(serde_json::to_vec(&envelope).unwrap()),

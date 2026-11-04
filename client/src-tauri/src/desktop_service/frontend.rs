@@ -39,6 +39,8 @@ pub enum Operation {
     NotificationControl,
     #[serde(skip)] // Separate native ownership controller, never a generic policy request.
     DesktopOwnership,
+    #[serde(skip)] // Closed native observation, never a policy operation or Grant receipt.
+    DesktopOwnershipObserve,
     #[serde(skip)] // Fixed native startup producer only, never JS row/path input.
     ImportPendingReads,
     #[serde(skip)] // The ephemeral consumer is separate from durable policy requests.
@@ -60,6 +62,7 @@ impl Operation {
             Request::TaskStartReconcile { .. } => Self::TaskStartReconcile,
             Request::NotificationControl { .. } => Self::NotificationControl,
             Request::DesktopOwnership { .. } => Self::DesktopOwnership,
+            Request::DesktopOwnershipObserve { .. } => Self::DesktopOwnershipObserve,
             Request::ImportPendingReads { .. } => Self::ImportPendingReads,
             Request::ActivationWait { .. } => Self::ActivationWait,
             Request::AutomaticApprovals { .. } => Self::AutomaticApprovals,
@@ -79,6 +82,7 @@ impl Operation {
             Self::TaskStartReconcile => "task_start_reconcile",
             Self::NotificationControl => "notification_controls",
             Self::DesktopOwnership => "desktop_ownership",
+            Self::DesktopOwnershipObserve => "desktop_ownership_observe",
             Self::ImportPendingReads => "import_pending_reads",
             Self::ActivationWait => "activation_wait",
             Self::AutomaticApprovals => "automatic_approvals",
@@ -121,6 +125,9 @@ enum Receipt {
 }
 impl Frontend {
     fn begin(&self, operation: Operation, requested: Option<Request>) -> Begin {
+        if let Some(request @ Request::DesktopOwnershipObserve { .. }) = &requested {
+            return Begin::Immediate(refused(request, "native_observation_required"));
+        }
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(old) = state.operations.get_mut(&operation) {
             if let Some(request) = &requested {
@@ -573,6 +580,7 @@ fn submission_ready(snapshot: &Snapshot, request: &Request) -> bool {
     if matches!(
         request,
         Request::NotificationControl { .. }
+            | Request::DesktopOwnershipObserve { .. }
             | Request::CreationClone { .. }
             | Request::CreationWorktree { .. }
             | Request::CreationLaunch { .. }
@@ -895,6 +903,7 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
             true
         }
         Request::DesktopOwnership { .. }
+        | Request::DesktopOwnershipObserve { .. }
         | Request::ActivationWait { .. }
         | Request::CacheMaintenance { .. }
         | Request::NotificationControl { .. }

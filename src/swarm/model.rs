@@ -140,6 +140,7 @@ impl Store {
                 result
             });
         let keys: BTreeSet<_> = before.keys().chain(after.keys()).cloned().collect();
+        let mut labels = Vec::new();
         for key in keys {
             if before.get(&key) == after.get(&key) {
                 continue;
@@ -195,9 +196,13 @@ impl Store {
                 }
             }
             let parents = observed.get(&key).cloned().unwrap_or_default();
+            if let Key::Session { machine, session } = &key {
+                labels.push((machine.clone(), session.clone()));
+            }
             self.catalog.write(&self.node_id, key, value, parents)?;
         }
-        Ok(())
+        // This computer's sessions also move by ID (zerus-ucck P2c-1).
+        super::session_ids::write(&self.catalog, &mut self.twins, &self.node_id, &labels)
     }
 
     pub fn initialize(&mut self, organization: &Value) -> Result<()> {
@@ -301,6 +306,22 @@ impl Store {
                 p["accessible"] = json!(true);
             }
         }
+        // The same sessions by durable ID, where a desktop may read them
+        // (zerus-ucck P2c-1): only twins of the name operation now selected.
+        for (machine, session_id, project) in super::session_ids::readable(&self.catalog, &self.twins) {
+            if let Some(p) = projects.get_mut(&project) {
+                let machine = aliases.get(&machine).cloned().unwrap_or(machine);
+                let members = p
+                    .as_object_mut()
+                    .unwrap()
+                    .entry("session_ids")
+                    .or_insert_with(|| json!([]));
+                members
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!(format!("{machine}\n{session_id}")));
+            }
+        }
         let conflicts: Vec<_> = self
             .catalog
             .effective_heads()
@@ -361,6 +382,7 @@ mod tests {
                 },
             )]),
             peers: BTreeMap::new(),
+            twins: Default::default(),
         }
     }
     fn org(name: &str) -> Value {
@@ -501,6 +523,71 @@ mod tests {
             .map(|op| op.value.as_str().unwrap())
             .collect();
         assert_eq!(values, BTreeSet::from(["project", "another-project"]));
+    }
+    /// Each Session key's heads, by operation: a write adds or replaces one.
+    fn assignment_heads(store: &Store) -> BTreeMap<Key, Vec<String>> {
+        store
+            .catalog
+            .heads()
+            .into_iter()
+            .filter(|(key, _)| matches!(key, Key::Session { .. }))
+            .map(|(key, heads)| (key, heads.iter().map(|op| op.id.clone()).collect()))
+            .collect()
+    }
+    #[test]
+    fn a_legacy_project_import_proposal_keeps_every_session_assignment() {
+        // zerus-5wmh.25.7.3: the desktop's actual legacy-project planner omits
+        // session assignments from both sides of its one proposal, so Root
+        // writes no Session key: every assignment, also one this desktop never
+        // saw, keeps its exact heads while the import adds its project and folders.
+        use zerus_client_core::paths::Style;
+        use zerus_client_core::swarm::legacy_projects::{plan, Binding as Scope};
+        let mut a = store();
+        let mut organization = org("Initial");
+        organization["projects"][0]["sessions"] = json!((0..300)
+            .map(|n| format!("local\ncodex/test/{n:04}"))
+            .collect::<Vec<_>>());
+        organization["projects"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":"other","name":"Other",
+            "color":"#654321","folders":[],"sessions":["local\ncodex/test/other"]}));
+        a.initialize(&organization).unwrap();
+        let unseen = Key::Session {
+            machine: a.node_id.clone(),
+            session: "codex/test/unseen".into(),
+        };
+        let snapshot = a.snapshot(&config());
+        a.catalog
+            .set(&new_id(), unseen.clone(), json!("other"))
+            .unwrap();
+        let before = assignment_heads(&a);
+        assert_eq!(before.len(), 302);
+        let scope = Scope {
+            machine: a.node_id.clone(),
+            node: a.node_id.clone(),
+            swarm: snapshot["swarm_id"].as_str().unwrap().into(),
+            source: "a".repeat(64),
+        };
+        let rows = json!([{"name":"Legacy","dir":"/srv/legacy","src":"local"},
+            {"name":"Initial","dir":"/srv/initial","src":"local"}]);
+        let proposal = plan(&snapshot, scope, "local", &rows, Style::Posix).unwrap();
+        let input = proposal.input();
+        a.apply(Patch {
+            base: input["base"].clone(),
+            desired: input["desired"].clone(),
+            versions: serde_json::from_value(input["versions"].clone()).unwrap(),
+        })
+        .unwrap();
+        assert_eq!(assignment_heads(&a), before);
+        assert_eq!(a.catalog.values()[&unseen], "other");
+        let after = a.snapshot(&config());
+        let projects = after["organization"]["projects"].as_array().unwrap();
+        let named = |name: &str| projects.iter().find(|p| p["name"] == name).unwrap();
+        assert_eq!(named("Initial")["sessions"].as_array().unwrap().len(), 300);
+        assert_eq!(named("Initial")["folders"][0]["path"], "/srv/initial");
+        assert_eq!(named("Legacy")["folders"][0]["path"], "/srv/legacy");
+        assert_eq!(named("Other")["sessions"].as_array().unwrap().len(), 2);
     }
     #[test]
     fn windows_folder_paths_are_drive_or_unc() {

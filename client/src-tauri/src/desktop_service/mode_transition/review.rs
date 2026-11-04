@@ -281,7 +281,10 @@ impl Controller {
 
     pub(in crate::desktop_service) fn blocks_resume(&self) -> bool {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.view.automatic_blocked || state.view.review.is_some() || state.view.pending
+        (state.classification_required && state.selection.is_none())
+            || state.view.automatic_blocked
+            || state.view.review.is_some()
+            || state.view.pending
     }
 
     fn checked_target(&self, display: &View, action: Action) -> Result<Arc<Route>, &'static str> {
@@ -483,15 +486,7 @@ struct Choice {
     scope: Scope,
 }
 impl Choice {
-    fn current(
-        status: &Value,
-        reviewed: &str,
-        configuration: &str,
-        ownership: &zerus_client_core::desktop::ownership::Status,
-        epoch: &str,
-        generation: u64,
-    ) -> Option<Self> {
-        use zerus_client_core::desktop::ownership::State;
+    fn historical(status: &Value, reviewed: &str, configuration: &str) -> Option<Self> {
         let choice: Self = serde_json::from_value(status["mode_choice"].clone()).ok()?;
         let valid_id = |s: &str| id(&Value::String(s.into())).is_ok();
         (status["configuration"] == configuration
@@ -508,21 +503,55 @@ impl Choice {
             && valid_id(&choice.request)
             && choice.desired == "background"
             && choice.phase == "settled"
-            && ownership.matches(configuration)
-            && ownership.state == State::Service
-            && ownership.identity_current
-            && !ownership.rearm_required
-            && ownership.journal.as_deref() == Some(choice.scope.journal.as_str())
-            && ownership.owner_epoch.as_deref() == Some(choice.scope.owner_epoch.as_str())
             && valid_id(&choice.scope.journal)
             && valid_id(&choice.scope.owner_epoch)
-            && valid_id(epoch)
-            && choice.scope.service_epoch == epoch
-            && choice.scope.generation == generation
-            && generation < (1u64 << 53)
-            && status["service_epoch"] == epoch
-            && status["service_generation"] == generation)
+            && valid_id(&choice.scope.service_epoch)
+            && choice.scope.generation > 0
+            && choice.scope.generation < (1u64 << 53))
             .then_some(choice)
+    }
+    fn applicable(
+        status: &Value,
+        reviewed: &str,
+        configuration: &str,
+        ownership: &zerus_client_core::desktop::ownership::Status,
+        epoch: &str,
+        generation: u64,
+    ) -> Option<Self> {
+        use zerus_client_core::desktop::ownership::State;
+        Self::historical(status, reviewed, configuration).filter(|choice| {
+            ownership.matches(configuration)
+                && ownership.state == State::Service
+                && ownership.identity_current
+                && !ownership.rearm_required
+                && ownership.journal.as_deref() == Some(choice.scope.journal.as_str())
+                && ownership.owner_epoch.as_deref() == Some(choice.scope.owner_epoch.as_str())
+                && id(&Value::String(epoch.into())).is_ok()
+                && generation > 0
+                && generation < (1u64 << 53)
+                && status["service_epoch"] == epoch
+                && status["service_generation"] == generation
+        })
+    }
+    fn current(
+        status: &Value,
+        reviewed: &str,
+        configuration: &str,
+        ownership: &zerus_client_core::desktop::ownership::Status,
+        epoch: &str,
+        generation: u64,
+    ) -> Option<Self> {
+        Self::applicable(
+            status,
+            reviewed,
+            configuration,
+            ownership,
+            epoch,
+            generation,
+        )
+        .filter(|choice| {
+            choice.scope.service_epoch == epoch && choice.scope.generation == generation
+        })
     }
     fn original(&self, result: &Value, windows: bool, configuration: &str) -> bool {
         if windows {
@@ -552,12 +581,17 @@ impl Choice {
 pub(super) struct Business {
     choice: Choice,
     configuration: String,
+    epoch: String,
+    generation: u64,
+    observed: Option<crate::desktop_ownership::NativeCurrent>,
 }
+mod recovery;
 impl Controller {
     pub(in crate::desktop_service) fn business_permitted(
         &self,
         snapshot: &service::Snapshot,
         ownership: Option<&zerus_client_core::desktop::ownership::Status>,
+        own_grant: bool,
     ) -> bool {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(business) = &state.business else {
@@ -572,15 +606,18 @@ impl Controller {
         !state.view.pending
             && !state.view.running
             && snapshot.connected
-            && snapshot.epoch.as_deref() == Some(business.choice.scope.service_epoch.as_str())
-            && snapshot.generation == Some(business.choice.scope.generation)
-            && Choice::current(
+            && snapshot.epoch.as_deref() == Some(business.epoch.as_str())
+            && snapshot.generation == Some(business.generation)
+            && business.observed.as_ref().map_or(own_grant, |observed| {
+                observed.matches(ownership, &business.epoch, business.generation)
+            })
+            && Choice::applicable(
                 status,
                 &business.choice.reviewed,
                 &business.configuration,
                 ownership,
-                &business.choice.scope.service_epoch,
-                business.choice.scope.generation,
+                &business.epoch,
+                business.generation,
             )
             .as_ref()
                 == Some(&business.choice)
@@ -664,6 +701,9 @@ impl Controller {
                 .business = Some(Business {
                 choice,
                 configuration: display.configuration,
+                epoch,
+                generation,
+                observed: None,
             });
             Some(())
         })

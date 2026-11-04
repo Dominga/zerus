@@ -83,11 +83,21 @@ fn an_existing_next_choice_and_order_survive_and_duplicate_paths_keep_the_id() {
     assert!(plan.input()["base"].get("project_order").is_none());
     assert_eq!(desired["unknown"], "keep");
     let next = &desired["projects"][0];
-    for key in ["id", "name", "color", "sessions", "custom"] {
+    for key in ["id", "name", "color", "custom"] {
         assert_eq!(
             next[key], snapshot["organization"]["projects"][0][key],
             "{key}"
         );
+    }
+    // Assignments are never part of an import proposal, on either side.
+    for side in ["base", "desired"] {
+        let side = &plan.input()[side];
+        assert!(side.get("session_assignments_explicit").is_none());
+        assert!(side["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p.get("sessions").is_none()));
     }
     assert_eq!(next["folders"][0], folder);
     assert_eq!(next["folders"].as_array().unwrap().len(), 2);
@@ -303,30 +313,93 @@ fn the_history_key_bound_refuses_the_whole_history() {
     );
 }
 
-#[test]
-fn a_large_session_catalog_refuses_with_capacity_instead_of_a_partial_plan() {
-    let (mut snapshot, binding) = fixture();
+/// A catalog of `count` retained assignments, each with its causal key.
+fn with_assignments(snapshot: &mut Value, machine: &str, count: usize) {
     let mut sessions = Vec::new();
-    for n in 0..12_000 {
+    for n in 0..count {
         let session = format!("work-{n:08}");
-        sessions.push(json!(format!("{}\n{session}", binding.machine)));
+        sessions.push(json!(format!("{machine}\n{session}")));
         snapshot["versions"]
-            [json!({"kind":"session","machine":binding.machine,"session":session}).to_string()] =
+            [json!({"kind":"session","machine":machine,"session":session}).to_string()] =
             json!(["f".repeat(64)]);
     }
     snapshot["organization"]["projects"][0]["sessions"] = json!(sessions);
+}
+
+#[test]
+fn a_large_session_catalog_imports_with_one_proposal_without_its_assignments() {
+    // zerus-5wmh.25.7.3: about 9k retained assignments filled the 2 MiB cap,
+    // so a 2-8 MiB catalog could never import. They are not part of the
+    // proposal; one original proposal still covers the whole list.
+    let (mut snapshot, binding) = fixture();
+    with_assignments(&mut snapshot, &binding.machine, 12_000);
     assert!(serde_json::to_vec(&snapshot).unwrap().len() > MAX_BYTES);
+    let plan = plan(
+        &snapshot,
+        binding,
+        "fixture",
+        &json!([{"name":"Legacy","dir":"/srv/legacy"}]),
+        Style::Posix,
+    )
+    .unwrap();
+    assert!(plan.changed());
+    let input = serde_json::to_vec(plan.input()).unwrap();
+    assert!(input.len() < 64 * 1024, "{}", input.len());
+    assert!(!String::from_utf8(input).unwrap().contains("work-0"));
+    assert_eq!(plan.evidence.witnesses.len(), 2);
+}
+
+#[test]
+fn a_proposal_past_its_cap_or_a_catalog_past_its_read_still_refuses() {
+    // The projected proposal keeps its own 2 MiB cap: here folders alone pass it.
+    let (mut snapshot, binding) = fixture();
+    let folders: Vec<Value> = (0..40)
+        .map(|n| {
+            json!({"id":format!("folder-{n}"),"machine":"fixture","machine_id":binding.machine,
+            "path":format!("/srv/{n}/{}", "p".repeat(30_000)),"name":""})
+        })
+        .collect();
+    snapshot["organization"]["projects"][0]["folders"] = json!(folders);
+    assert!(serde_json::to_vec(&snapshot).unwrap().len() < SNAPSHOT_BYTES);
+    let rows = json!([{"name":"Legacy","dir":"/srv/legacy"}]);
     assert!(matches!(
-        plan(
-            &snapshot,
-            binding,
-            "fixture",
-            &json!([{"name":"Legacy","dir":"/srv/legacy"}]),
-            Style::Posix
-        ),
+        plan(&snapshot, binding.clone(), "fixture", &rows, Style::Posix),
+        Err(Code::Capacity)
+    ));
+    // A catalog larger than the bounded `swarm get` read is never planned.
+    let (mut snapshot, binding) = fixture();
+    with_assignments(&mut snapshot, &binding.machine, 40_000);
+    assert!(serde_json::to_vec(&snapshot).unwrap().len() > SNAPSHOT_BYTES);
+    assert!(matches!(
+        plan(&snapshot, binding, "fixture", &rows, Style::Posix),
         Err(Code::Capacity)
     ));
     assert_eq!(Code::Capacity.as_str(), "legacy_projects_capacity");
+}
+
+#[test]
+fn only_project_and_folder_heads_go_with_the_proposal() {
+    let (mut snapshot, binding) = fixture();
+    let keep = [
+        json!({"kind":"project","id":"next","field":"name"}),
+        json!({"kind":"folder","id":"next-folder"}),
+    ];
+    let drop = [
+        json!({"kind":"session","machine":binding.machine,"session":"one"}),
+        json!({"kind":"machine","id":binding.machine,"field":"name"}),
+        json!({"kind":"preference","field":"theme"}),
+        json!({"kind":"order","field":"projects"}),
+    ];
+    for key in keep.iter().chain(&drop) {
+        snapshot["versions"][key.to_string()] = json!(["a".repeat(64)]);
+    }
+    let plan = one(&snapshot, binding);
+    let versions = plan.input()["versions"].as_object().unwrap();
+    let kept: BTreeSet<_> = versions.keys().cloned().collect();
+    assert_eq!(kept, keep.iter().map(Value::to_string).collect());
+    for key in &keep {
+        assert_eq!(versions[&key.to_string()], json!(["a".repeat(64)]));
+    }
 }
 
 #[test]

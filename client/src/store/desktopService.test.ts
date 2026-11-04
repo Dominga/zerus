@@ -67,6 +67,34 @@ describe("desktop service presentation", () => {
     expect(view().connected).toBe(true);
   });
 
+  it("prioritizes review and preparation over deferred sibling reports while keeping every detail", () => {
+    const settled = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
+    const local = { required: true, complete: false, running: false, code: "local_reads_import_before_record", phase: "before_record" };
+    const creations = { ...local, code: "creations_import_waiting", phase: null };
+    const qt = { ...local, code: "retained_import_handoff_busy", phase: "not_committed" };
+    const cases = [
+      { qt: settled, creations: { ...creations, running: true }, message: "Preparing the saved creation report" },
+      { qt: settled, creations: { ...creations, code: "creations_import_original_result_unconfirmed", phase: "unknown" }, message: "saved creation report needs review" },
+      { qt: { ...qt, running: true }, creations, message: "Preparing the migration report" },
+      { qt: { ...qt, code: "retained_import_qt_unavailable" }, creations, message: "migration report needs review" },
+      { qt, creations: { ...creations, running: true }, message: "Preparing the saved creation report" },
+    ];
+    for (const item of cases) {
+      const state = serviceView({ retained_source_import: { ...item.qt, local_reads_report: local, creations_report: item.creations } });
+      const before = structuredClone(state);
+      expect(retainedSourceNotice(state)).toContain(item.message);
+      const details = retainedSourceDetails(state)!;
+      expect(details.localReadsReport?.reason).toContain("not sent because local preparation failed");
+      expect(details.creations?.code).toBe(item.creations.code);
+      if (item.qt.required) expect(details.settings?.code).toBe(item.qt.code);
+      expect(state).toEqual(before);
+    }
+    // Even a stale deferred code cannot hide an uncertain original result.
+    const unknown = serviceView({ retained_source_import: { ...settled, creations_report: creations, local_reads_report: { ...local, phase: "unknown" } } });
+    expect(retainedSourceNotice(unknown)).toContain("local read-mark report needs review");
+    expect(retainedSourceDetails(unknown)!.localReadsReport?.next).toContain("checks the original report");
+  });
+
   it("keeps a paused folder-cache write separate from draft/read capture, publication and service readiness", () => {
     const base = { required: false, complete: true, running: false, code: "retained_import_staged", phase: "published" };
     const state = serviceView({ retained_source_import: { ...base,
@@ -144,7 +172,7 @@ describe("desktop service presentation", () => {
     expect(unsent.creations?.reason).toContain("not sent because local preparation failed");
     expect(unsent.creations?.next).toContain("then use Retry");
     expect(unsent.creations?.phase).toBe("before_record");
-    expect(retainedSourceNotice(view("before_record"))).toContain("deferred");
+    expect(retainedSourceNotice(view("before_record"))).toContain("migration report needs review");
     // A code alone cannot turn an unknown publication into a safe resend.
     const unknown = retainedSourceDetails(view("unknown"))!.creations!;
     expect(unknown.reason).toContain("unconfirmed");

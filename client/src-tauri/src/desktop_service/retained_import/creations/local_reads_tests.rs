@@ -137,41 +137,69 @@ fn local_read_exact_negative_needs_explicit_retry_and_preserves_original_record(
 #[test]
 fn local_read_preframe_recovery_is_explicit_and_recorded_attempt_never_replays() {
     let _process = crate::PROCESS_TREE.read().unwrap();
-    for gated in [false, true] {
-        let f = Fixture::new("success");
-        source(&f);
-        let Prepared::Snapshot(snapshot) = f.report.inputs.local_reads.retained().unwrap() else {
-            panic!("missing")
-        };
-        let j = journal(&f);
-        let r = CreationRecord::new_group(GROUP, "a".repeat(64), snapshot.reference().unwrap(), 1)
-            .unwrap();
-        let first = j.save(r, None).unwrap();
-        let mut r = first.record;
-        r.phase = Phase::Attempted;
-        r.attempt = 1;
-        let attempt = j.save(r, Some(&first.sha256)).unwrap();
-        if gated {
-            let receipt = super::tests::receipt_for(&attempt.record);
-            j.save(
-                attempt.record.with_expected(&receipt).unwrap(),
-                Some(&attempt.sha256),
-            )
-            .unwrap();
+    for phase in [Phase::Attempted, Phase::Unknown] {
+        for gated in [false, true] {
+            let f = Fixture::new("success");
+            source(&f);
+            let Prepared::Snapshot(snapshot) = f.report.inputs.local_reads.retained().unwrap()
+            else {
+                panic!("missing")
+            };
+            let j = journal(&f);
+            let r =
+                CreationRecord::new_group(GROUP, "a".repeat(64), snapshot.reference().unwrap(), 1)
+                    .unwrap();
+            let original_id = r.import_id.clone();
+            let first = j.save(r, None).unwrap();
+            let mut r = first.record;
+            r.phase = Phase::Attempted;
+            r.attempt = 1;
+            let attempt = j.save(r, Some(&first.sha256)).unwrap();
+            if gated {
+                let receipt = super::tests::receipt_for(&attempt.record);
+                j.save(
+                    attempt.record.with_expected(&receipt).unwrap(),
+                    Some(&attempt.sha256),
+                )
+                .unwrap();
+            }
+            if phase == Phase::Unknown {
+                let current = j.load().unwrap().unwrap();
+                let mut r = current.record;
+                r.phase = Phase::Unknown;
+                j.save(r, Some(&current.sha256)).unwrap();
+            }
+            let before = fs::read(f.root.join("local-read-retained-import-v1.json")).unwrap();
+            assert_eq!(
+                run(&f, false),
+                Err("local_reads_import_original_result_unconfirmed")
+            );
+            assert_eq!(
+                fs::read(f.root.join("local-read-retained-import-v1.json")).unwrap(),
+                before
+            );
+            assert_eq!(f.attempts(), 0);
+            let recoverable = phase == Phase::Attempted && !gated;
+            assert_eq!(
+                run(&f, true),
+                if recoverable {
+                    Ok(())
+                } else {
+                    Err("local_reads_import_original_result_unconfirmed")
+                }
+            );
+            assert_eq!(f.attempts(), usize::from(recoverable));
+            let final_record = j.load().unwrap().unwrap().record;
+            assert_eq!(final_record.import_id, original_id);
+            assert_eq!(f.report.group_status(GROUP)["import_id"], original_id);
+            assert_eq!(final_record.attempt, if recoverable { 2 } else { 1 });
+            if !recoverable {
+                assert_eq!(
+                    fs::read(f.root.join("local-read-retained-import-v1.json")).unwrap(),
+                    before
+                );
+            }
         }
-        assert!(run(&f, false).is_err());
-        assert_eq!(f.attempts(), 0);
-        let result = run(&f, true);
-        assert_eq!(result.is_ok(), !gated);
-        assert_eq!(f.attempts(), usize::from(!gated));
-        assert_eq!(
-            f.report.group_status(GROUP)["import_id"],
-            snapshot.reference().unwrap().capture_id()
-        );
-        assert_eq!(
-            j.load().unwrap().unwrap().record.attempt,
-            if gated { 1 } else { 2 }
-        );
     }
 }
 #[test]

@@ -575,10 +575,12 @@ pub(in crate::desktop_service) fn schedule_current(shared: &Arc<Shared>) {
     let Some(report) = &shared.retained_import else {
         return;
     };
-    if !GROUPS.into_iter().any(|group| {
-        let state = report.group_state(group);
-        state.pending && !state.running
-    }) {
+    if !report.state().pending
+        && !GROUPS.into_iter().any(|group| {
+            let state = report.group_state(group);
+            state.pending && !state.running
+        })
+    {
         return;
     }
     let relay = shared
@@ -618,6 +620,9 @@ fn schedule(
             return;
         }
     }
+    if super::schedule_pending(shared, relay.clone(), configuration.clone(), stop.clone()) {
+        return;
+    }
     for group in GROUPS {
         // Waiting/unavailable capture is visible already; do not spin helpers or
         // let this reporter initialize/recover the mutable source.
@@ -641,16 +646,11 @@ fn schedule(
         };
         shared.publish_retained_import();
         let weak = Arc::downgrade(shared);
+        let completion = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let resources = super::work_resources(shared, charge, completion.clone());
         tauri::async_runtime::spawn_blocking(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                report.run_group(
-                    group,
-                    relay,
-                    configuration,
-                    stop,
-                    explicit,
-                    Arc::new(charge),
-                )
+                report.run_group(group, relay, configuration, stop, explicit, resources)
             }))
             .unwrap_or(Err(Code::WorkerUnavailable.for_group(group)));
             {
@@ -664,7 +664,9 @@ fn schedule(
             }
             if let Some(shared) = weak.upgrade() {
                 shared.publish_retained_import();
-                schedule_current(&shared);
+                if completion.fetch_or(super::FINISHED, Ordering::AcqRel) & super::RELEASED != 0 {
+                    schedule_current(&shared);
+                }
             }
         });
         return;

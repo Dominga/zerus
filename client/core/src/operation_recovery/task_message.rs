@@ -233,14 +233,24 @@ impl Original {
         if sha256(input) != binding.input_sha256 {
             return Err(Review::InputChanged);
         }
-        let fields = raw_fields(raw, &["id", "intent", "input", "schema", "version"])
-            .map_err(|_| Review::InvalidRecord)?;
-        // A record that froze its stdin before its checkpoint must carry
-        // exactly the retained input.
+        let fields = raw_fields(
+            raw,
+            &["id", "intent", "input", "input_sha256", "schema", "version"],
+        )
+        .map_err(|_| Review::InvalidRecord)?;
+        // A record that froze its stdin before its checkpoint must name
+        // exactly the retained input: its bytes, or their digest.
         if let Some(frozen) = fields.get("input") {
             let frozen: String =
                 serde_json::from_str(frozen.get()).map_err(|_| Review::InvalidRecord)?;
             if frozen.as_bytes() != input {
+                return Err(Review::InputChanged);
+            }
+        }
+        if let Some(frozen) = fields.get("input_sha256") {
+            let frozen: String =
+                serde_json::from_str(frozen.get()).map_err(|_| Review::InvalidRecord)?;
+            if frozen != binding.input_sha256 {
                 return Err(Review::InputChanged);
             }
         }
@@ -276,7 +286,8 @@ impl Original {
         // Only the existing builder selects arguments. Its generated content
         // is replaced BEFORE invocation with the exact retained stdin, never
         // used as a reconstructed original. Missing retained input refused above.
-        let mut call = tasks_write::message_call(&binding.project, &binding.task_id, &record, true);
+        let mut call = tasks_write::message_call(&binding.project, &binding.task_id, &record, true)
+            .map_err(|_| Review::InputChanged)?;
         call.input = std::str::from_utf8(input)
             .map_err(|_| Review::InvalidRecord)?
             .to_owned();
@@ -581,6 +592,25 @@ mod tests {
         other.input_sha256 = sha256(&changed);
         assert!(matches!(
             Original::verify(other, &raw, &changed, b.marker_id.as_bytes()),
+            Err(Review::InputChanged)
+        ));
+    }
+    #[test]
+    fn a_record_with_a_frozen_digest_must_name_exactly_the_retained_input() {
+        // A digest freezes the canonical serialization of the content.
+        let mut value = record("queue", "");
+        let canonical = value["intent"]["content"].to_string().into_bytes();
+        value["input_sha256"] = json!(sha256(&canonical));
+        let (mut b, raw, _) = fixture(value.clone());
+        b.input_sha256 = sha256(&canonical);
+        assert_eq!(original(b, &raw, &canonical)._input, canonical);
+        // A record freezing the canonical bytes, retained as another
+        // serialization of the same content, is refused: those are not the
+        // bytes it froze.
+        let (b, raw, pretty) = fixture(value);
+        assert_ne!(pretty, canonical);
+        assert!(matches!(
+            Original::verify(b.clone(), &raw, &pretty, b.marker_id.as_bytes()),
             Err(Review::InputChanged)
         ));
     }

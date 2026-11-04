@@ -227,13 +227,18 @@ timeout, exact original marker and frozen stdin. It never reconstructs missing
 input. Send/reopen and deferred native input remain review-only.
 
 A new task message freezes its one actual `hgs task message` stdin before its
-outbox checkpoint: `outbox::reserve_message` saves it as the record's `input`
-in the same write, and the editor sends that same call. `message_call` sends a
-record's frozen `input` byte for byte, recovery included, and the policy
-requires it to equal the retained input. A legacy record without `input` never
-qualifies for an admitted actor; only the direct path still serializes its
-content. A reservation, reopened or new, is durable data about the original,
-never consent to execute it.
+outbox checkpoint, and the editor sends that same call.
+`outbox::reserve_message` saves the stdin in the same write: a canonical stdin
+(the content's serialization) as its digest `input_sha256`, so the record holds
+one copy of the content; any other as its exact `input` bytes. The complete
+record must fit the 32 MiB record limit, or nothing is written or sent. Reading
+a record (`outbox::decode`) refuses a present but malformed or mismatched
+`input` or `input_sha256`, or both at once, so such a record is never treated
+as legacy and no call is made. `message_call` sends the frozen bytes, recovery
+included, and the policy requires them to equal the retained input. A legacy
+record without either never qualifies for an admitted actor; only the direct
+path still serializes its content. A reservation, reopened or new, is durable
+data about the original, never consent to execute it.
 
 Configuration/project/task are independently retained expected data, not fields
 observed in an outbox record. Raw record and input each stay at most 1 MiB;

@@ -635,7 +635,7 @@ fn submitted_with_delivery(
                 expected.text = content["text"].as_str().unwrap_or("").into();
                 expected.attachments = tasks_write::decode_files(&content["attachments"]);
                 let message =
-                    tasks_write::message_call(&slot.project, &slot.task, &record, recover);
+                    tasks_write::message_call(&slot.project, &slot.task, &record, recover)?;
                 (record, message)
             } else {
                 let intent = tasks_write::message_intent(
@@ -652,7 +652,7 @@ fn submitted_with_delivery(
                     &slot.task,
                     &serde_json::json!({"id": id, "intent": intent}),
                     recover,
-                );
+                )?;
                 let reservation = outbox::reserve_message(
                     store.root(),
                     &slot.project,
@@ -938,7 +938,10 @@ mod tests {
                     assert_eq!(record["intent"]["mode"], mode);
                     assert_eq!(record["intent"]["dispatch"], "original-dispatch");
                     // The stdin was frozen into the checkpoint before this call.
-                    assert_eq!(record["input"], call.input.as_str());
+                    assert_eq!(
+                        record["input_sha256"],
+                        tasks_write::input_digest(&call.input).as_str()
+                    );
                     assert!(call.args.windows(2).any(|p| p == ["--mode", mode]));
                     assert!(!call.args.iter().any(|s| s == "--recover-only"));
                     Err("reply lost".into())
@@ -969,7 +972,11 @@ mod tests {
                         .windows(2)
                         .any(|p| p == ["--expect-dispatch", "original-dispatch"]));
                     assert!(call.args.iter().any(|s| s == "--recover-only"));
-                    assert_eq!(original["input"], call.input.as_str(), "the same bytes");
+                    assert_eq!(
+                        original["input_sha256"],
+                        tasks_write::input_digest(&call.input).as_str(),
+                        "the same bytes"
+                    );
                     Ok(receipt(original["id"].as_str().unwrap()))
                 }
             )
@@ -978,6 +985,98 @@ mod tests {
                 .unwrap()
                 .is_none());
         }
+    }
+    // Adapted from review-n's #1292 probes, through the actual editor flow.
+    #[test]
+    fn a_large_frozen_message_is_readable_before_the_editor_calls_hgs() {
+        let root = crate::composer::tests::dir("frozen-large-editor");
+        let store = crate::composer::tests::drafts(&root);
+        let (hub, _) = crate::composer::tests::hub_on(&store);
+        let mut slot = slot(Mode::Note);
+        slot.stored.draft.attachments = (0..2)
+            .map(|n| zerus_client_core::attachments::Attachment {
+                name: format!("allowed-{n}.bin"),
+                mime: "application/octet-stream".into(),
+                bytes: std::sync::Arc::from(vec![42; 7 * 1024 * 1024]),
+                reference: String::new(),
+            })
+            .collect();
+        let calls = Cell::new(0);
+        let result = submitted(&mut slot, &hub, detail(""), false, &|call| {
+            calls.set(calls.get() + 1);
+            let saved = outbox::pending(store.root(), "example", ID);
+            assert!(saved.is_ok(), "unreadable checkpoint: {saved:?}");
+            assert_eq!(
+                saved.unwrap().unwrap()["input_sha256"],
+                tasks_write::input_digest(&call.input).as_str()
+            );
+            Err("reply lost".into())
+        });
+        assert!(result.is_err());
+        assert_eq!(calls.get(), 1);
+        assert_eq!(slot.stored.draft.attachments.len(), 2);
+    }
+    #[test]
+    fn a_malformed_frozen_input_never_reaches_the_editor_call() {
+        let root = crate::composer::tests::dir("frozen-malformed-editor");
+        let store = crate::composer::tests::drafts(&root);
+        let (hub, _) = crate::composer::tests::hub_on(&store);
+        let mut slot = slot(Mode::Note);
+        let record = outbox::reserve_message(
+            store.root(),
+            "example",
+            ID,
+            &tasks_write::message_intent("Original", &[], "note", ""),
+            "{ \"text\":\"Original\", \"attachments\":[] }",
+            ID,
+        )
+        .unwrap()
+        .record;
+        let mut damaged = record;
+        damaged["input"] = json!(42);
+        std::fs::write(
+            outbox::path(store.root(), "example", ID),
+            damaged.to_string(),
+        )
+        .unwrap();
+        let calls = Cell::new(0);
+        let result = submitted(&mut slot, &hub, detail(""), true, &|_| {
+            calls.set(calls.get() + 1);
+            Err("must stay review-only".into())
+        });
+        assert!(result.is_err());
+        assert_eq!(calls.get(), 0, "a malformed frozen stdin is never rebuilt");
+    }
+    #[test]
+    fn recovery_after_a_generic_reopen_sends_the_noncanonical_frozen_bytes() {
+        let root = crate::composer::tests::dir("frozen-pretty-editor");
+        let store = crate::composer::tests::drafts(&root);
+        let (hub, _) = crate::composer::tests::hub_on(&store);
+        let mut slot = slot(Mode::Note);
+        let intent = tasks_write::message_intent("Original", &[], "note", "");
+        let frozen = "{ \"attachments\":[], \"text\":\"Original\" }\n";
+        outbox::reserve_message(store.root(), "example", ID, &intent, frozen, ID).unwrap();
+        let reopened = outbox::reserve(
+            store.root(),
+            "example",
+            ID,
+            &intent,
+            "22222222-2222-4222-8222-222222222222",
+        )
+        .unwrap();
+        assert!(reopened.recovering);
+        let calls = Cell::new(0);
+        assert!(submitted(&mut slot, &hub, detail(""), true, &|call| {
+            calls.set(calls.get() + 1);
+            assert_eq!(call.input.as_bytes(), frozen.as_bytes());
+            assert!(call.args.iter().any(|arg| arg == "--recover-only"));
+            Ok(receipt(ID))
+        })
+        .unwrap());
+        assert_eq!(calls.get(), 1);
+        assert!(outbox::pending(store.root(), "example", ID)
+            .unwrap()
+            .is_none());
     }
     #[test]
     fn a_changed_feedback_snapshot_keeps_the_draft_before_reservation() {

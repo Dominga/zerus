@@ -175,12 +175,16 @@ pub(super) fn route(record: &mut Value, event: &Value) -> Option<Value> {
     };
     let provider = string(&record["subagents"][&id], "provider").to_owned();
     let starting = event["hook_event_name"] == "SessionStart";
-    let original = if starting || record["subagents"][&id].get("original_process").is_none() {
+    let ended = record["subagents"][&id]["state"] == "ended";
+    let previous = record["subagents"][&id].get("original_process");
+    let original = if starting || ended || previous.is_none() {
         caller(record).filter(|source| source.provider == provider).and_then(|source| original_process(record,source))
     } else {None};
-    let ended = record["subagents"][&id]["state"] == "ended";
+    // A fresh native observation can recover mistaken legacy retirement. A
+    // different original still requires SessionStart; never adopt a reused PID.
+    let verified = original.as_ref().is_some_and(|original| starting || previous.is_none() || previous == Some(original));
     let terminal = ["Stop", "SubagentStop", "SessionEnd", "StopFailure"].contains(&string(event,"hook_event_name"));
-    let ignored = ended && !terminal && !(starting && original.is_some());
+    let ignored = ended && !terminal && !verified;
     let child = &mut record["subagents"][&id];
     if !ignored && (starting || child.get("original_process").is_none()) {
         if let Some(original) = original { child["original_process"] = original; }

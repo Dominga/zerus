@@ -1929,6 +1929,9 @@ the selected manifest read is capped at 16 MiB, the writer-lock admission waits
 at most two seconds, and the parent keeps at most 64 immutable retirement
 receipts. Repeating the same UUID and payload reads its original receipt; it
 never retires a later start. A fresh verified SessionStart may resume that child.
+An intermediate hook can also recover a mistaken retirement when its native
+caller verifies the same original process, or binds a previously unbound legacy
+record. A different recorded birth still requires a fresh SessionStart.
 Process checking admits at most 64 external identities per read; excess or
 unverifiable entries remain unknown. Older peers require the
 `subagent-retire-v1` help capability and refuse this command until updated.

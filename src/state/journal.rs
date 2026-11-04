@@ -1201,6 +1201,7 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
         }
         // Any newer child event ends its pending request (hooks.rs sets a new one).
         info.as_object_mut().unwrap().remove("process_unknown");
+        info.as_object_mut().unwrap().remove("process_display_state");
         info.as_object_mut().unwrap().remove("attention_id");
         if kind == "PreToolUse" {
             info["current_tool"] = json!(clipped(&event["tool_name"], 120));

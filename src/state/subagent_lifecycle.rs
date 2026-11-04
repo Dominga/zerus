@@ -129,17 +129,30 @@ pub(super) fn reconcile(record: &mut Value) {
             child["completion_source"] = json!("original_process_exit");
             child["current_tool"] = json!("");
         } else if status == "unknown" && child["display_state"] != "unknown" {
+            child["process_display_state"] = child["display_state"].clone();
             child["display_state"] = json!("unknown");
             child["process_unknown"] = json!(true);
         } else if status == "live" && child["display_state"] == "unknown" {
             // Only our own temporary process-availability projection is cleared.
             // Provider Interrupt/StopFailure unknown evidence remains unknown.
             if child["process_unknown"] == true {
-                child.as_object_mut().unwrap().remove("display_state");
+                let previous = child
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("process_display_state");
+                if let Some(previous) = previous.filter(Value::is_string) {
+                    child["display_state"] = previous;
+                } else {
+                    child.as_object_mut().unwrap().remove("display_state");
+                }
             }
         }
         if status != "unknown" {
             child["process_unknown"] = json!(false);
+            child
+                .as_object_mut()
+                .unwrap()
+                .remove("process_display_state");
         }
     }
     journal::settle_children(record);

@@ -261,6 +261,31 @@ fn process_availability_recovery_preserves_a_provider_unknown_and_only_clears_ou
 }
 
 #[test]
+#[cfg(unix)]
+fn process_availability_recovery_restores_pending_input_and_approval_without_a_new_event() {
+    let child = sleeper();
+    for display in ["input", "approval"] {
+        let mut record = record();
+        record["subagents"][ID]["original_process"] = capture(&record, child.0.id()).unwrap();
+        record["subagents"][ID]["display_state"] = json!(display);
+        let start = record["process_start"].clone();
+        record["process_start"] = json!("temporarily unverifiable parent");
+        reconcile(&mut record);
+        assert_eq!(record["subagents"][ID]["display_state"], "unknown");
+        reconcile(&mut record);
+        assert_eq!(record["subagents"][ID]["display_state"], "unknown");
+        record["process_start"] = start;
+        reconcile(&mut record);
+        assert_eq!(record["subagents"][ID]["display_state"], display);
+        assert_eq!(
+            record["subagents"][ID]["attention_id"],
+            "original-attention"
+        );
+        assert!(record["subagents"][ID]["process_display_state"].is_null());
+    }
+}
+
+#[test]
 fn native_current_work_refuses_retirement_but_unknown_stale_individual_records_allow_it() {
     let mut record = record();
     record["subagents"][ID]["external"] = json!(false);
